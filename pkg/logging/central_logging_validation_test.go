@@ -9,7 +9,6 @@ package logging_test
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -230,15 +229,16 @@ func testStructuredLoggingCompliance(t *testing.T) {
 	ctx = logging.WithSession(ctx, "test-session-456")
 	ctx = logging.WithOperation(ctx, "validation_test")
 
-	// Create test configuration — include allowed_base_path and type so the
-	// file module dispatches to setDirectory and reaches the logging code.
+	// Create test configuration — use the real file.FileConfig so GetManagedFields()
+	// matches the actual module's platform-aware behaviour.
 	tmpBase := t.TempDir()
 	targetPath := filepath.Join(tmpBase, "cfgms-logging-test")
 	// No explicit permissions: the directory uses the platform default mode so the
 	// logging code path is exercised on every OS (Unix permission bits are rejected
 	// on Windows, where windows_acl is the supported mechanism).
-	testConfig := &TestDirectoryConfig{
-		Path:            targetPath,
+	testConfig := &file.FileConfig{
+		Type:            "directory",
+		State:           "present",
 		AllowedBasePath: tmpBase,
 	}
 
@@ -316,8 +316,11 @@ func testTenantIsolationValidation(t *testing.T) {
 
 	// Verify no cross-tenant contamination
 	for _, entry := range entries {
-		tenantID := entry.Fields["tenant_id"].(string)
-		assert.Contains(t, tenants, tenantID, "all tenant IDs should be from test set")
+		tid, ok := entry.Fields["tenant_id"].(string)
+		if !ok {
+			t.Fatalf("log entry has missing or non-string tenant_id: fields=%v", entry.Fields)
+		}
+		assert.Contains(t, tenants, tid, "all tenant IDs should be from test set")
 	}
 }
 
@@ -394,7 +397,6 @@ type MockLogEntry struct {
 	Level   string
 	Message string
 	Fields  map[string]interface{}
-	Context context.Context
 }
 
 func (m *MockLogger) InfoCtx(ctx context.Context, msg string, fields ...interface{}) {
@@ -402,10 +404,8 @@ func (m *MockLogger) InfoCtx(ctx context.Context, msg string, fields ...interfac
 		Level:   "INFO",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: ctx,
 	}
 
-	// Parse fields - this is where tenant_id, resource_type, etc. are passed
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -413,9 +413,6 @@ func (m *MockLogger) InfoCtx(ctx context.Context, msg string, fields ...interfac
 			}
 		}
 	}
-
-	// Extract context information like the real logger does (as fallback)
-	m.extractContextFields(ctx, entry.Fields)
 
 	m.entries = append(m.entries, entry)
 }
@@ -425,10 +422,8 @@ func (m *MockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interfa
 		Level:   "ERROR",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: ctx,
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -436,9 +431,6 @@ func (m *MockLogger) ErrorCtx(ctx context.Context, msg string, fields ...interfa
 			}
 		}
 	}
-
-	// Extract context information like the real logger does
-	m.extractContextFields(ctx, entry.Fields)
 
 	m.entries = append(m.entries, entry)
 }
@@ -448,10 +440,8 @@ func (m *MockLogger) WarnCtx(ctx context.Context, msg string, fields ...interfac
 		Level:   "WARN",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: ctx,
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -459,9 +449,6 @@ func (m *MockLogger) WarnCtx(ctx context.Context, msg string, fields ...interfac
 			}
 		}
 	}
-
-	// Extract context information like the real logger does
-	m.extractContextFields(ctx, entry.Fields)
 
 	m.entries = append(m.entries, entry)
 }
@@ -471,10 +458,8 @@ func (m *MockLogger) DebugCtx(ctx context.Context, msg string, fields ...interfa
 		Level:   "DEBUG",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: ctx,
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -482,9 +467,6 @@ func (m *MockLogger) DebugCtx(ctx context.Context, msg string, fields ...interfa
 			}
 		}
 	}
-
-	// Extract context information like the real logger does
-	m.extractContextFields(ctx, entry.Fields)
 
 	m.entries = append(m.entries, entry)
 }
@@ -494,10 +476,8 @@ func (m *MockLogger) Debug(msg string, fields ...interface{}) {
 		Level:   "DEBUG",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: context.Background(),
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -514,10 +494,8 @@ func (m *MockLogger) Info(msg string, fields ...interface{}) {
 		Level:   "INFO",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: context.Background(),
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -534,10 +512,8 @@ func (m *MockLogger) Warn(msg string, fields ...interface{}) {
 		Level:   "WARN",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: context.Background(),
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -554,10 +530,8 @@ func (m *MockLogger) Error(msg string, fields ...interface{}) {
 		Level:   "ERROR",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: context.Background(),
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -574,10 +548,8 @@ func (m *MockLogger) Fatal(msg string, fields ...interface{}) {
 		Level:   "FATAL",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: context.Background(),
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -594,10 +566,8 @@ func (m *MockLogger) FatalCtx(ctx context.Context, msg string, fields ...interfa
 		Level:   "FATAL",
 		Message: msg,
 		Fields:  make(map[string]interface{}),
-		Context: ctx,
 	}
 
-	// Parse fields
 	for i := 0; i < len(fields); i += 2 {
 		if i+1 < len(fields) {
 			if key, ok := fields[i].(string); ok {
@@ -605,9 +575,6 @@ func (m *MockLogger) FatalCtx(ctx context.Context, msg string, fields ...interfa
 			}
 		}
 	}
-
-	// Extract context information like the real logger does
-	m.extractContextFields(ctx, entry.Fields)
 
 	m.entries = append(m.entries, entry)
 }
@@ -620,78 +587,7 @@ func (m *MockLogger) GetEntries() []MockLogEntry {
 	return m.entries
 }
 
-// extractContextFields extracts context information similar to the real logging framework
-func (m *MockLogger) extractContextFields(ctx context.Context, fields map[string]interface{}) {
-	// Use the public helper functions from the logging package to extract context values
-	// This ensures we use the exact same context key types as the real implementation
-
-	// Extract tenant ID from context if not already provided by the module
-	// The module should be passing tenant_id explicitly, but we'll supplement from context if missing
-	tenantIDFromCtx := logging.ExtractTenantFromContext(ctx)
-	if _, hasTenantID := fields["tenant_id"]; !hasTenantID && tenantIDFromCtx != "" {
-		fields["tenant_id"] = tenantIDFromCtx
-	}
-
-	// Extract operation using the public helper function, but only if not already set by the module
-	if _, hasOperation := fields["operation"]; !hasOperation {
-		if operation := logging.ExtractOperation(ctx); operation != "" {
-			fields["operation"] = operation
-		}
-	}
-
-	// The module should be providing resource_type explicitly, so we don't override it
-	// But if it's missing, we can infer it from the operation field
-	if _, hasResourceType := fields["resource_type"]; !hasResourceType {
-		if operation, hasOp := fields["operation"]; hasOp {
-			if opStr, ok := operation.(string); ok {
-				if strings.Contains(opStr, "directory") {
-					fields["resource_type"] = "directory"
-				} else if strings.Contains(opStr, "script") {
-					fields["resource_type"] = "script"
-				} else if strings.Contains(opStr, "file") {
-					fields["resource_type"] = "file"
-				} else {
-					fields["resource_type"] = "unknown"
-				}
-			}
-		} else {
-			fields["resource_type"] = "unknown"
-		}
-	}
-}
-
 // Test configuration implementations
-
-type TestDirectoryConfig struct {
-	Path            string
-	Permissions     int
-	AllowedBasePath string
-}
-
-func (c *TestDirectoryConfig) AsMap() map[string]interface{} {
-	return map[string]interface{}{
-		"type":              "directory",
-		"path":              c.Path,
-		"permissions":       c.Permissions,
-		"allowed_base_path": c.AllowedBasePath,
-	}
-}
-
-func (c *TestDirectoryConfig) ToYAML() ([]byte, error) {
-	return []byte{}, nil
-}
-
-func (c *TestDirectoryConfig) FromYAML(data []byte) error {
-	return nil
-}
-
-func (c *TestDirectoryConfig) Validate() error {
-	return nil
-}
-
-func (c *TestDirectoryConfig) GetManagedFields() []string {
-	return []string{"path", "permissions"}
-}
 
 type TestScriptConfig struct {
 	Content       string
