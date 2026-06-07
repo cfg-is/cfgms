@@ -303,10 +303,25 @@ func (o *Orchestrator) Upgrade(ctx context.Context, candidateBinary string) erro
 	if err := o.beginUpgrade(); err != nil {
 		return err
 	}
-	// On any error path, the orchestrator must end up in StateIdle with
-	// the original canonical still serving (no quarantine slot set).
-	// rollbackToIdle handles that.
-	if err := o.runUpgrade(ctx, candidateBinary); err != nil {
+	// The defer + recover guarantees the orchestrator never stays stuck
+	// in a non-idle state even if runUpgrade panics — without this, a
+	// panic in spawn / Start / Probe / Swap would leave the state
+	// machine wedged in StatePreparing / StateSmoketesting / StateSwapping
+	// forever and every subsequent Upgrade attempt would return
+	// ErrUpgradeInProgress. Re-panic after restoring state so the caller
+	// still sees the original crash; we just refuse to leave the
+	// orchestrator broken.
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.rollbackToIdle()
+				panic(r)
+			}
+		}()
+		err = o.runUpgrade(ctx, candidateBinary)
+	}()
+	if err != nil {
 		o.rollbackToIdle()
 		return err
 	}
@@ -355,15 +370,28 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 		}
 	}
 
-	o.transitionTo(StateSwapping)
+	// Read the current canonical handle and transition to StateSwapping
+	// in ONE locked section. The previous version released the lock
+	// between transitionTo() and the prevCanonical read, opening a window
+	// where Rollback / FinalizeQuarantine could mutate o.canonical
+	// concurrently (review feedback from #1920).
 	o.mu.Lock()
+	o.state = StateSwapping
 	prevCanonical := o.canonical
 	o.mu.Unlock()
+
 	if o.swap == nil {
 		stopCandidate()
 		return errors.New("cutover: no SwapTarget configured")
 	}
 	if err := o.swap.Swap(ctx, prevCanonical, candidate, o.cfg.CanonicalAPIAddr, o.cfg.CanonicalTransportAddr); err != nil {
+		// Swap failed. The original canonical MAY have been drained by
+		// the swap implementation before it returned the error, so its
+		// "still serving" status is uncertain. The orchestrator surfaces
+		// the failure to the operator and returns to idle; recovering the
+		// original canonical's listener (if it was drained) is the swap
+		// implementation's responsibility. Documented at the Swap
+		// interface contract.
 		stopCandidate()
 		return fmt.Errorf("cutover: swap canonical ownership: %w", err)
 	}
@@ -385,6 +413,13 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 // regrets a recent upgrade. Only valid while the orchestrator is in
 // StateQuarantined; outside that window the previous backend has already
 // been stopped and ErrNoQuarantinedBinary is returned.
+//
+// Locking discipline (matters for the Rollback/FinalizeQuarantine race
+// surfaced in review): on entry we atomically claim the quarantined
+// handle by CLEARING o.quarantined while still under the lock, so any
+// concurrent FinalizeQuarantine call observes a nil quarantined slot
+// and returns immediately. The handle is owned by THIS Rollback for the
+// remainder of the call. Double-Stop is no longer possible.
 func (o *Orchestrator) Rollback(ctx context.Context) error {
 	o.mu.Lock()
 	if o.state != StateQuarantined || o.quarantined == nil {
@@ -393,12 +428,18 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 	}
 	currentCanonical := o.canonical
 	quarantined := o.quarantined
+	// Claim the quarantined slot. Any concurrent FinalizeQuarantine will
+	// see o.quarantined == nil and bail. The currentCanonical pointer is
+	// kept locally and won't be touched by anyone else for the duration
+	// of the call.
+	o.quarantined = nil
 	o.state = StateSwapping
 	o.mu.Unlock()
 
 	if err := o.swap.Swap(ctx, currentCanonical, quarantined, o.cfg.CanonicalAPIAddr, o.cfg.CanonicalTransportAddr); err != nil {
-		// Roll the state back to Quarantined so the operator can retry.
+		// Swap failed — restore the quarantine slot so the operator can retry.
 		o.mu.Lock()
+		o.quarantined = quarantined
 		o.state = StateQuarantined
 		o.mu.Unlock()
 		return fmt.Errorf("cutover: rollback swap: %w", err)
@@ -412,7 +453,6 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 	o.mu.Lock()
 	o.canonical = quarantined
 	o.canonicalStartedAt = o.clock()
-	o.quarantined = nil
 	o.quarantinedStartedAt = time.Time{}
 	o.quarantineExpiresAt = time.Time{}
 	o.state = StateIdle
@@ -424,13 +464,19 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 // FinalizeQuarantine stops the quarantined backend and returns the
 // orchestrator to StateIdle. Called by the supervisor when the
 // quarantine window has elapsed. Idempotent: a no-op if no quarantined
-// backend is currently parked.
+// backend is currently parked (e.g. because a concurrent Rollback
+// already claimed it — see Rollback locking discipline above).
 func (o *Orchestrator) FinalizeQuarantine(ctx context.Context) {
 	o.mu.Lock()
 	if o.state != StateQuarantined || o.quarantined == nil {
 		o.mu.Unlock()
 		return
 	}
+	// Claim the quarantined slot before releasing the lock so a
+	// concurrent Rollback observes nil and bails (mirrors the Rollback
+	// claim above; together these two CLAIM-before-Stop patterns
+	// eliminate the double-Stop race a concurrent caller could
+	// otherwise trigger).
 	quarantined := o.quarantined
 	o.quarantined = nil
 	o.quarantinedStartedAt = time.Time{}

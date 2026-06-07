@@ -282,20 +282,89 @@ func TestOrchestrator_Rollback_WithoutQuarantine_ReturnsError(t *testing.T) {
 }
 
 func TestOrchestrator_FinalizeQuarantine_StopsParkedBinary(t *testing.T) {
-	o, _, _, spawned := newOrchForTest(t)
+	o, blue, _, _ := newOrchForTest(t)
 	require.NoError(t, o.Upgrade(context.Background(), "green.exe"))
-	green := spawned.Load() // candidate that became canonical
-	_ = green
 
 	// At this point blue is parked in the quarantine slot.
 	snap := o.Status()
 	require.Equal(t, "blue.exe", snap.QuarantinedBinary)
+	require.Equal(t, 0, blue.stopCalls, "blue must not have been stopped yet")
 
 	o.FinalizeQuarantine(context.Background())
 
 	snap = o.Status()
 	assert.Equal(t, StateIdle, snap.State)
 	assert.Empty(t, snap.QuarantinedBinary)
+	// Explicit assertion that the review pass flagged as missing: blue
+	// MUST actually be stopped when the quarantine window expires.
+	assert.Equal(t, 1, blue.stopCalls,
+		"FinalizeQuarantine must stop the parked binary exactly once")
+}
+
+// TestOrchestrator_Rollback_Vs_FinalizeQuarantine_NoDoubleStop covers
+// the race the review pass surfaced. A concurrent Rollback and
+// FinalizeQuarantine could both capture the same quarantined handle
+// pointer and both call Stop() on it. With the claim-under-lock fix
+// only one path succeeds; the other observes a cleared slot and bails.
+func TestOrchestrator_Rollback_Vs_FinalizeQuarantine_NoDoubleStop(t *testing.T) {
+	o, blue, _, _ := newOrchForTest(t)
+	require.NoError(t, o.Upgrade(context.Background(), "green.exe"))
+	require.Equal(t, "blue.exe", o.Status().QuarantinedBinary)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_ = o.Rollback(context.Background())
+	}()
+	go func() {
+		defer wg.Done()
+		o.FinalizeQuarantine(context.Background())
+	}()
+	wg.Wait()
+
+	// Whichever path wins, blue is stopped AT MOST once — never twice.
+	assert.LessOrEqual(t, blue.stopCalls, 1,
+		"blue.stopCalls must be 0 or 1 — never both Rollback and FinalizeQuarantine stopping it")
+	assert.Equal(t, StateIdle, o.Status().State,
+		"orchestrator must end in StateIdle whichever path wins the race")
+}
+
+// TestOrchestrator_PanicDuringUpgrade_StateRecovers verifies the
+// deferred recover() in Upgrade() restores the orchestrator to
+// StateIdle even if a spawned ProcessHandle panics. Without this, a
+// panic in spawn / Start / Probe / Swap would wedge the state machine
+// in a non-idle state forever and every subsequent Upgrade attempt
+// would return ErrUpgradeInProgress. The recover re-raises the panic
+// so the original crash is still observable.
+func TestOrchestrator_PanicDuringUpgrade_StateRecovers(t *testing.T) {
+	blue := newFakeHandle("blue.exe")
+	swap := &stubSwap{}
+	spawn := func(p string) ProcessHandle {
+		panic("simulated spawn-time panic")
+	}
+	o := NewOrchestrator(
+		Config{
+			CanonicalAPIAddr:       ":9080",
+			CanonicalTransportAddr: ":4433",
+			CandidateAPIAddr:       ":9081",
+			CandidateTransportAddr: ":4434",
+		},
+		blue, stubValidator{}, stubSmoke{}, swap, spawn,
+	)
+
+	// Upgrade must re-panic — the original crash is still observable.
+	assert.PanicsWithValue(t, "simulated spawn-time panic", func() {
+		_ = o.Upgrade(context.Background(), "boom.exe")
+	})
+
+	// After the panic the orchestrator must be back to StateIdle so a
+	// subsequent Upgrade attempt is not perpetually rejected with
+	// ErrUpgradeInProgress.
+	assert.Equal(t, StateIdle, o.Status().State,
+		"orchestrator must be back in StateIdle after a runUpgrade panic")
+	assert.Equal(t, "blue.exe", o.Status().CanonicalBinary,
+		"blue must still be canonical — panic happened before any swap")
 }
 
 func TestOrchestrator_FinalizeQuarantine_Idempotent(t *testing.T) {
