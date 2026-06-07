@@ -182,3 +182,57 @@ func TestResolveExecutionUID_Windows(t *testing.T) {
 		assert.Equal(t, -1, uid, "Windows ResolveExecutionUID must return -1 (no UID chown)")
 	}
 }
+
+// TestCmdScriptPathWithSpaces verifies that buildCmdExeCommand sets SysProcAttr.CmdLine
+// to a correctly quoted cmd.exe /c <path> invocation when the temp directory path
+// contains a space. This covers the logged_in_user execution context where %TEMP%
+// resolves to a user-profile directory such as C:\Users\John Smith\AppData\Local\Temp\.
+// Without the CmdLine override, cmd.exe /c strips the outer quotes and cannot locate
+// the batch file.
+func TestCmdScriptPathWithSpaces(t *testing.T) {
+	// Synthetic path with a space in the directory component — mirrors a real
+	// user-profile %TEMP% path. No file is created: we verify CmdLine construction only.
+	spacedPath := `C:\Users\John Smith\AppData\Local\Temp\cfgms-script-abc123.cmd`
+
+	cmd := buildCmdExeCommand(context.Background(), spacedPath)
+
+	require.NotNil(t, cmd)
+	require.NotNil(t, cmd.SysProcAttr, "SysProcAttr must be set to override cmd.exe arg parsing")
+
+	// EscapeArg wraps a path containing spaces in double-quotes, so the CmdLine must
+	// be: cmd.exe /c "C:\Users\John Smith\AppData\Local\Temp\cfgms-script-abc123.cmd"
+	expectedCmdLine := `cmd.exe /c "C:\Users\John Smith\AppData\Local\Temp\cfgms-script-abc123.cmd"`
+	assert.Equal(t, expectedCmdLine, cmd.SysProcAttr.CmdLine,
+		"CmdLine must double-quote the path to handle spaces in the %%TEMP%% directory")
+}
+
+// TestCmdScriptPathWithoutSpaces verifies that buildCmdExeCommand also works correctly
+// for paths without spaces (the SYSTEM-context case where %TEMP% is C:\Windows\Temp\).
+func TestCmdScriptPathWithoutSpaces(t *testing.T) {
+	noSpacePath := `C:\Windows\Temp\cfgms-script-abc123.cmd`
+
+	cmd := buildCmdExeCommand(context.Background(), noSpacePath)
+
+	require.NotNil(t, cmd)
+	require.NotNil(t, cmd.SysProcAttr)
+
+	// EscapeArg does not add quotes when the path contains no spaces.
+	expectedCmdLine := `cmd.exe /c C:\Windows\Temp\cfgms-script-abc123.cmd`
+	assert.Equal(t, expectedCmdLine, cmd.SysProcAttr.CmdLine)
+}
+
+// TestBuildCmdExeCommand_ContentNotInline verifies that the CmdLine for buildCmdExeCommand
+// contains a file path, never inline script content — the file-path-only constraint
+// that distinguishes it from the banned pattern cmd.exe /c <inline-content>.
+func TestBuildCmdExeCommand_ContentNotInline(t *testing.T) {
+	tmpPath := `C:\Windows\Temp\cfgms-script-abc123.cmd`
+	inlineContent := "@echo hello from cfgms"
+
+	cmd := buildCmdExeCommand(context.Background(), tmpPath)
+
+	require.NotNil(t, cmd.SysProcAttr)
+	assert.NotContains(t, cmd.SysProcAttr.CmdLine, inlineContent,
+		"CmdLine must not contain inline script content")
+	assert.Contains(t, cmd.SysProcAttr.CmdLine, "cfgms-script-",
+		"CmdLine must reference the temp script file path")
+}

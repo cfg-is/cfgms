@@ -16,6 +16,13 @@ import (
 	"strings"
 )
 
+// buildCmdExeCommand is a Windows-only helper; this stub satisfies the compiler
+// on Unix platforms. buildWindowsCommand is only reached on Windows via the
+// runtime.GOOS switch in buildCommand, so this stub is never executed.
+func buildCmdExeCommand(_ context.Context, _ string) *exec.Cmd {
+	return nil
+}
+
 // detectLoggedInUser detects the currently logged-in console user on Unix systems.
 // Returns ErrNoUserLoggedIn if no interactive user is currently logged in.
 // The caller should queue execution for retry when ErrNoUserLoggedIn is returned.
