@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,6 +32,18 @@ import (
 // echoModuleBin is the path to the compiled echo_module binary. It is set by
 // TestMain before any tests run.
 var echoModuleBin string
+
+// shortBaseDir creates a temp dir under /tmp with a predictably short path so
+// that socket paths constructed from it fit within the macOS sun_path limit
+// (103 bytes). t.TempDir() on macOS returns /var/folders/... paths that are
+// already 80+ bytes, causing makeSocketPath to error before any gRPC is tried.
+func shortBaseDir(t *testing.T) string {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "cfgms-rt-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	return base
+}
 
 // binaryDir holds the temp dir for the compiled echo_module binary; cleaned up
 // after all tests complete.
@@ -80,7 +93,7 @@ func makeBypassBundle(binPath string) *bundle.Bundle {
 //   - Get() returns "echo:<resource_id>"
 //   - Stop() sends Shutdown RPC and the process exits within 10 s
 func TestEchoModuleLifecycle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -99,25 +112,31 @@ func TestEchoModuleLifecycle(t *testing.T) {
 	assert.Equal(t, runtime.StateStopped, handle.GetState())
 }
 
-// TestEchoModuleLifecycleWithOverlongRuntimeDir is the regression test for the
-// macOS CI failures (PR #1897 review): on macOS, t.TempDir() returns paths
+// TestEchoModuleLifecycleWithHashFallbackRuntimeDir is the regression test for
+// the macOS CI concern (PR #1897 review): on macOS, t.TempDir() returns paths
 // under /var/folders/... that, joined with the socket filename, exceed the
-// 104-byte sun_path limit. The runtime must fall back to a short hashed path
-// under /tmp so net.Listen("unix", ...) succeeds. This test forces the fallback
-// path on all platforms by passing a deliberately long runtimeDir.
-func TestEchoModuleLifecycleWithOverlongRuntimeDir(t *testing.T) {
-	// Build a runtime dir long enough that the natural socket path overflows
-	// 103 bytes — exercising the fallback even on Linux where t.TempDir() is
-	// normally short.
-	base := t.TempDir()
-	deep := filepath.Join(base,
-		"deeply", "nested", "directory", "tree",
-		"with", "enough", "path", "components",
-		"to", "blow", "past", "the", "macos", "sun_path", "limit",
-	)
-	require.NoError(t, os.MkdirAll(deep, 0o755))
+// 104-byte sun_path limit. The runtime must hash the socket name into the
+// steward-private sockets directory (never /tmp) so net.Listen("unix", ...)
+// succeeds.
+//
+// A runtimeDir of exactly 71 chars is used: the minimum that triggers the hash
+// fallback (natural = 71+33 = 104 > 103) while the hash path still fits
+// within the private dir (hash = 71+32 = 103 ≤ 103). Uses /tmp directly for
+// a predictably short base (~28 chars) so no platform-conditional skip is needed.
+func TestEchoModuleLifecycleWithHashFallbackRuntimeDir(t *testing.T) {
+	// Use /tmp directly for a short, predictable base on all platforms.
+	const targetLen = 71
+	base, err := os.MkdirTemp("/tmp", "cfgms-rt-test-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	if len(base) >= targetLen {
+		t.Fatalf("base dir %q (%d bytes) is already >= %d", base, len(base), targetLen)
+	}
+	paddingLen := targetLen - len(base) - 1
+	long := filepath.Join(base, strings.Repeat("d", paddingLen))
+	require.NoError(t, os.MkdirAll(long, 0o755))
 
-	rt := runtime.NewModuleRuntime(deep)
+	rt := runtime.NewModuleRuntime(long)
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -218,7 +237,7 @@ func TestStrictModeRejectsControllerApprovedUnknownPublisher(t *testing.T) {
 // TestControllerModePassesUnsignedBundle verifies that controller mode skips
 // signature verification.
 func TestControllerModePassesUnsignedBundle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
@@ -229,7 +248,7 @@ func TestControllerModePassesUnsignedBundle(t *testing.T) {
 // TestBypassModePassesUnsignedBundle verifies that bypass mode skips
 // signature verification.
 func TestBypassModePassesUnsignedBundle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -240,7 +259,7 @@ func TestBypassModePassesUnsignedBundle(t *testing.T) {
 // TestStopIsIdempotent verifies that calling Stop multiple times on the same
 // handle does not error or panic.
 func TestStopIsIdempotent(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -256,7 +275,7 @@ func TestStopIsIdempotent(t *testing.T) {
 func testEnforcerRuntimeWithKey(t *testing.T, cfgmsPub ed25519.PublicKey) *runtime.ModuleRuntime {
 	t.Helper()
 	rt := runtime.NewModuleRuntimeWithEnforcer(
-		t.TempDir(),
+		shortBaseDir(t),
 		stewardtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{
 				Name:      "cfgms",

@@ -160,8 +160,8 @@ Out-of-process module binaries are managed by the steward module runtime. Each m
 3. `running` — module is operating normally; the steward holds an active `StewardModuleClient` gRPC session
 
 **Socket paths:**
-- Unix: `${runtime_dir}/cfgms-module-<name>-<id>.sock`
-- Windows: `\\.\pipe\cfgms-module-<name>-<id>`
+- Unix: `${runtime_dir}/sockets/cfgms-module-<name>-<id>.sock` — sockets live in a steward-private directory created mode 0700; the mode is re-asserted on each start. Socket file permissions are the module-channel trust boundary: the gRPC channel carries no per-caller credentials, so access is controlled solely by the directory owner bit.
+- Windows: `\\.\pipe\cfgms-module-<name>-<id>` — Windows enforces per-user pipe ACLs at the kernel level.
 
 **Shutdown sequence:**
 

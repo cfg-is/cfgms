@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -25,30 +26,54 @@ import (
 // predictable.
 const unixSocketPathMax = 103
 
-// makeSocketPath returns the Unix domain socket path for a module instance.
-// Format: ${runtimeDir}/cfgms-module-${name}-${id}.sock
+// socketsSubdir is the name of the steward-private directory created under
+// runtimeDir for all module sockets. Mode 0700 restricts access to the steward
+// process owner, which is the sole trust boundary on the module gRPC channel
+// (the dialer uses insecure.NewCredentials with no per-caller authentication).
+const socketsSubdir = "sockets"
+
+// makeSocketPath returns the Unix domain socket path for a module instance,
+// creating the steward-private socket directory if it does not already exist.
 //
-// If the natural path would exceed the platform's sun_path limit, it falls
-// back to a short hashed path under /tmp. This handles long temp dirs on
-// macOS (/var/folders/xx/yyy/T/...), where t.TempDir() in tests produces
-// paths that exceed the 104-byte sun_path limit.
-//
-// TODO(production-wiring): when ModuleRuntime is wired into the steward boot
-// path, ensure the configured runtimeDir is short enough that the fallback is
-// never reached on macOS — or replace this fallback with a steward-owned,
-// mode-0700 subdirectory so /tmp predictability cannot be exploited locally.
-func makeSocketPath(runtimeDir, moduleName string, id int64) string {
-	name := fmt.Sprintf("cfgms-module-%s-%d.sock", sanitizeName(moduleName), id)
-	natural := filepath.Join(runtimeDir, name)
-	if len(natural) <= unixSocketPathMax {
-		return natural
+// All sockets live under ${runtimeDir}/sockets (mode 0700). The mode is
+// re-asserted on every call to guard against a pre-existing directory with
+// looser permissions. When the natural path would exceed the platform's
+// sun_path limit, the name is hashed into the same private directory — never
+// into /tmp or any world-writable location. If even the hashed path would
+// exceed sun_path, an error is returned; the operator must configure a shorter
+// runtimeDir (production deployments typically use /var/run/cfgms or similar).
+func makeSocketPath(runtimeDir, moduleName string, id int64) (string, error) {
+	sockDir := filepath.Join(runtimeDir, socketsSubdir)
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		return "", fmt.Errorf("create module socket dir %q: %w", sockDir, err)
 	}
-	// Hash the natural path (including runtimeDir and id) to retain uniqueness
-	// across runtime instances. 12 hex chars gives 48 bits of entropy — ample
-	// for collision avoidance within a host.
+	// Re-assert mode in case the directory already existed with looser permissions.
+	if err := os.Chmod(sockDir, 0o700); err != nil { // #nosec G302 -- 0700 on a directory is intentional hardening; execute bit is required for traversal
+		return "", fmt.Errorf("chmod module socket dir %q: %w", sockDir, err)
+	}
+
+	name := fmt.Sprintf("cfgms-module-%s-%d.sock", sanitizeName(moduleName), id)
+	natural := filepath.Join(sockDir, name)
+	if len(natural) <= unixSocketPathMax {
+		return natural, nil
+	}
+
+	// Hash the natural path (including sockDir and id) to retain uniqueness
+	// across runtime instances. 12 hex chars give 48 bits of entropy — ample
+	// for collision avoidance within a host. The hash stays in the private
+	// directory so socket permissions remain the access control boundary.
 	sum := sha256.Sum256([]byte(natural))
 	hash := hex.EncodeToString(sum[:6])
-	return filepath.Join("/tmp", fmt.Sprintf("cfgms-%s.sock", hash))
+	hashed := filepath.Join(sockDir, fmt.Sprintf("cfgms-%s.sock", hash))
+	if len(hashed) <= unixSocketPathMax {
+		return hashed, nil
+	}
+
+	return "", fmt.Errorf(
+		"module socket path %q (%d bytes) exceeds sun_path limit (%d); "+
+			"configure a shorter runtimeDir (e.g. /var/run/cfgms)",
+		hashed, len(hashed), unixSocketPathMax,
+	)
 }
 
 // waitForSocket polls the Unix socket at socketPath until it accepts a

@@ -95,9 +95,13 @@ func (r *ModuleRuntime) Start(
 			osArch, b.Manifest.Name, binaryKeys(b.Binaries))
 	}
 
-	// 4. Construct a unique socket path for this module instance.
+	// 4. Construct a unique socket path for this module instance. makeSocketPath
+	// also creates the steward-private socket directory (mode 0700).
 	id := handleSeq.Add(1)
-	socketPath := makeSocketPath(r.runtimeDir, b.Manifest.Name, id)
+	socketPath, err := makeSocketPath(r.runtimeDir, b.Manifest.Name, id)
+	if err != nil {
+		return nil, fmt.Errorf("socket path for module %q: %w", b.Manifest.Name, err)
+	}
 
 	// 5. Fork/exec the module binary with the socket path in its environment.
 	// #nosec G204 — binPath comes from the bundle manifest, not user-supplied input.
