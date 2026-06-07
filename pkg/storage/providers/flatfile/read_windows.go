@@ -43,7 +43,7 @@ func readFile(path string) ([]byte, error) {
 			return nil, err
 		}
 		lastErr = err
-		time.Sleep(delay)
+		time.Sleep(jitter(delay))
 		if delay < maxDelay {
 			delay *= 2
 			if delay > maxDelay {

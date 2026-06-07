@@ -181,8 +181,11 @@ func TestSQLite_WALModeIsActive(t *testing.T) {
 	require.NoError(t, db.QueryRow("PRAGMA journal_mode").Scan(&mode))
 	assert.Equal(t, "wal", mode, "expected journal_mode=wal, got %q", mode)
 
+	// Pin the documented busy_timeout exactly. Previously >= 1000 would
+	// silently allow regression to a value too small for 50k-endpoint
+	// contention; the openDB pragma in plugin.go commits to 5000ms.
 	var busyTimeout int
 	require.NoError(t, db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
-	assert.GreaterOrEqual(t, busyTimeout, 1000,
-		"busy_timeout must be >= 1s to absorb WAL writer contention; got %d ms", busyTimeout)
+	assert.Equal(t, 5000, busyTimeout,
+		"busy_timeout must be 5000ms per the documented contract; got %d ms", busyTimeout)
 }

@@ -4,6 +4,7 @@ package flatfile
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -116,8 +117,10 @@ func TestHelperProcess(t *testing.T) {
 				continue
 			}
 			// Sanity check: payload must parse as JSON. If it doesn't,
-			// that's a torn read disguised as a successful return.
-			if len(entry.Data) == 0 || entry.Data[0] != '{' {
+			// that's a torn read disguised as a successful return. Using
+			// json.Valid (not just a first-byte check) catches truncation
+			// AFTER the leading '{' too — review feedback from #1919.
+			if len(entry.Data) == 0 || entry.Data[0] != '{' || !json.Valid(entry.Data) {
 				tornReads++
 				fmt.Fprintf(os.Stderr, "helper reader: malformed payload: %q\n", entry.Data)
 				continue
@@ -158,7 +161,13 @@ func TestFlatFile_CrossProcess_OneWriterManyReaders(t *testing.T) {
 
 	const (
 		numReaders = 3
-		durationMs = "1500"
+		// 5 seconds gives the test enough wall-clock under CI load to
+		// actually exercise the rename/read sharing-violation retries.
+		// 1500ms was the prior value; review feedback flagged it as
+		// insufficient once subprocess fork+exec overhead was accounted
+		// for. 5s = plenty of headroom while still keeping the test
+		// fast enough that it doesn't dominate `go test ./...`.
+		durationMs = "5000"
 	)
 
 	spawn := func(mode string) *exec.Cmd {
