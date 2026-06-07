@@ -831,12 +831,35 @@ func (s *Server) SetModuleResolution(
 	s.moduleTrustStore = store
 }
 
-// getHTTPListenAddr determines the HTTP listen address.
-// HTTP port defaults to 9080; override with CFGMS_HTTP_LISTEN_ADDR.
+// getHTTPListenAddr determines the HTTP listen address with the
+// precedence established by Story #1919:
+//
+//	CLI flag --listen-api-addr (already applied to cfg.ListenAddr by
+//	cmd/controller/main.go's applyListenOverrides) >
+//	env var CFGMS_HTTP_LISTEN_ADDR >
+//	cfg file listen_addr >
+//	built-in default 0.0.0.0:9080.
+//
+// The CLI flag and env var are both applied to cfg.ListenAddr before
+// the server starts (the env var by config.LoadWithPath, the CLI flag
+// by main's applyListenOverrides), so reading cfg.ListenAddr here
+// honours both. The env-var-direct fast path is retained for callers
+// that bypass cfg (none in the regular startup flow, but defensive).
 func (s *Server) getHTTPListenAddr() string {
-	// If environment variable is set, use it
+	// If environment variable is set explicitly and cfg didn't reflect it,
+	// honour it. This is a safety net — config.LoadWithPath already pulls
+	// CFGMS_HTTP_LISTEN_ADDR into cfg.ListenAddr, so this branch only
+	// fires for non-config-managed callers (none today).
 	if addr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); addr != "" {
 		return addr
+	}
+
+	// cfg.ListenAddr carries the resolved CLI flag / env var / cfg-file
+	// value from controller startup. This is what makes the blue/green
+	// substrate work: a green controller spawned with --listen-api-addr
+	// :9081 actually binds on :9081 instead of the default :9080.
+	if s.cfg != nil && s.cfg.ListenAddr != "" {
+		return s.cfg.ListenAddr
 	}
 
 	// Default to port 9080 for HTTP API (gRPC typically on 8080)
