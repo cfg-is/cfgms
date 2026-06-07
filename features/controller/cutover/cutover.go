@@ -152,20 +152,27 @@ type Smoketester interface {
 }
 
 // SwapTarget is the abstract "this binary now owns the canonical ports"
-// effect. The production impl signals both processes (drain old; rebind
-// new) via the controller's local admin socket. Tests use a fake impl
+// effect. The production impl (PortSwapTarget) drains the old, waits
+// for the OS to release the canonical ports, then spawns a fresh
+// instance of the new binary on those ports. Tests use a fake impl
 // that just records the swap.
 //
-// Separating the swap mechanic from the orchestrator state machine lets
-// us implement the actual port rebind however turns out to fit the
-// platform (Linux SO_REUSEPORT swap, Windows alternate-port swap, etc.)
-// without touching the state machine again.
+// # Why Swap returns a ProcessHandle
+//
+// Some swap implementations (notably PortSwapTarget) STOP the supplied
+// `to` and spawn a fresh process on the canonical ports — the `to`
+// handle the orchestrator passed in is dead by the time Swap returns
+// nil. Returning the actual promoted handle keeps the orchestrator's
+// canonical pointer consistent with what's truly serving traffic.
+// Simple swap impls that don't respawn (e.g. tests) can return the
+// input `to` unchanged.
 type SwapTarget interface {
 	// Swap atomically transfers canonical-port ownership from `from`
-	// (currently listening on the canonical addrs) to `to` (currently
-	// listening on the candidate addrs). After Swap returns nil, `to` is
-	// the new canonical and `from` is the quarantined backend.
-	Swap(ctx context.Context, from, to ProcessHandle, canonicalAPIAddr, canonicalTransportAddr string) error
+	// (currently listening on the canonical addrs) to a new instance
+	// derived from `to` (currently listening on the candidate addrs).
+	// On success the returned ProcessHandle is the one the orchestrator
+	// should treat as the new canonical.
+	Swap(ctx context.Context, from, to ProcessHandle, canonicalAPIAddr, canonicalTransportAddr string) (ProcessHandle, error)
 }
 
 // Config holds orchestrator-level knobs. Defaults are populated in
@@ -384,21 +391,30 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 		stopCandidate()
 		return errors.New("cutover: no SwapTarget configured")
 	}
-	if err := o.swap.Swap(ctx, prevCanonical, candidate, o.cfg.CanonicalAPIAddr, o.cfg.CanonicalTransportAddr); err != nil {
+	promoted, err := o.swap.Swap(ctx, prevCanonical, candidate, o.cfg.CanonicalAPIAddr, o.cfg.CanonicalTransportAddr)
+	if err != nil {
 		// Swap failed. The original canonical MAY have been drained by
 		// the swap implementation before it returned the error, so its
-		// "still serving" status is uncertain. The orchestrator surfaces
-		// the failure to the operator and returns to idle; recovering the
-		// original canonical's listener (if it was drained) is the swap
-		// implementation's responsibility. Documented at the Swap
-		// interface contract.
+		// "still serving" status is uncertain. Documented at the Swap
+		// interface contract. The orchestrator surfaces the failure;
+		// recovering the original canonical's listener (if it was
+		// drained) is the swap implementation's responsibility.
 		stopCandidate()
 		return fmt.Errorf("cutover: swap canonical ownership: %w", err)
 	}
+	if promoted == nil {
+		// Defensive: a SwapTarget that returns (nil, nil) violates
+		// the contract; treat it as a failure rather than promoting
+		// a nil pointer.
+		stopCandidate()
+		return errors.New("cutover: SwapTarget returned nil promoted handle on success")
+	}
 
-	// Promote candidate → canonical and park previous → quarantined.
+	// Promote (the swap-returned handle, NOT the original candidate
+	// pointer — they may differ when the swap respawned) → canonical
+	// and park previous → quarantined.
 	o.mu.Lock()
-	o.canonical = candidate
+	o.canonical = promoted
 	o.canonicalStartedAt = o.clock()
 	o.quarantined = prevCanonical
 	o.quarantinedStartedAt = o.clock()
@@ -436,13 +452,22 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 	o.state = StateSwapping
 	o.mu.Unlock()
 
-	if err := o.swap.Swap(ctx, currentCanonical, quarantined, o.cfg.CanonicalAPIAddr, o.cfg.CanonicalTransportAddr); err != nil {
+	promoted, err := o.swap.Swap(ctx, currentCanonical, quarantined, o.cfg.CanonicalAPIAddr, o.cfg.CanonicalTransportAddr)
+	if err != nil {
 		// Swap failed — restore the quarantine slot so the operator can retry.
 		o.mu.Lock()
 		o.quarantined = quarantined
 		o.state = StateQuarantined
 		o.mu.Unlock()
 		return fmt.Errorf("cutover: rollback swap: %w", err)
+	}
+	if promoted == nil {
+		// Defensive (same as runUpgrade): refuse to promote a nil handle.
+		o.mu.Lock()
+		o.quarantined = quarantined
+		o.state = StateQuarantined
+		o.mu.Unlock()
+		return errors.New("cutover: SwapTarget returned nil promoted handle on rollback")
 	}
 
 	// Stop the now-rolled-back backend (the binary the operator regretted).
@@ -451,7 +476,7 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 	_ = currentCanonical.Stop(stopCtx)
 
 	o.mu.Lock()
-	o.canonical = quarantined
+	o.canonical = promoted
 	o.canonicalStartedAt = o.clock()
 	o.quarantinedStartedAt = time.Time{}
 	o.quarantineExpiresAt = time.Time{}

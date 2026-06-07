@@ -67,7 +67,7 @@ type stubSwap struct {
 	canonGRPC string
 }
 
-func (s *stubSwap) Swap(_ context.Context, from, to ProcessHandle, canonAPIAddr, canonTransportAddr string) error {
+func (s *stubSwap) Swap(_ context.Context, from, to ProcessHandle, canonAPIAddr, canonTransportAddr string) (ProcessHandle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -75,7 +75,14 @@ func (s *stubSwap) Swap(_ context.Context, from, to ProcessHandle, canonAPIAddr,
 	s.lastTo = to
 	s.canonAPI = canonAPIAddr
 	s.canonGRPC = canonTransportAddr
-	return s.swapErr
+	if s.swapErr != nil {
+		return nil, s.swapErr
+	}
+	// Simple test swap: the input `to` IS the new canonical. The
+	// production PortSwapTarget returns a freshly-spawned handle
+	// instead; this fake mirrors the simpler "no respawn" case which
+	// is sufficient for orchestrator-level logic tests.
+	return to, nil
 }
 
 // newOrchForTest is the standard test orchestrator: blue is canonical
