@@ -157,7 +157,20 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		ID:              peerCert.Subject.CommonName,
 		Name:            "mtls-admin:" + peerCert.Subject.CommonName,
 		IsAdmin:         true,
-		TenantID:        "default",
+		// Admin principals have NO tenant scope. Earlier this was
+		// hardcoded to "default" which silently restricted every admin
+		// read to tenant "default" — `cfg steward list` returned 0
+		// records on any deployment with non-default tenants (caught
+		// during the CFG-70-02 launcher install: the host's steward
+		// registered with tenant_id=infra-hyperv via its regtoken; the
+		// admin bundle's cert had IsAdmin=true but TenantID="default"
+		// so handleListStewards never saw it). Empty means
+		// isEmptyFilter() returns true for the admin-no-query case →
+		// GetAllStewards() returns every tenant's stewards.
+		// Handlers that need a fallback tenant for admin WRITES (e.g.
+		// handlers_configs.go) already substitute "default" when this
+		// field is empty.
+		TenantID:        "",
 		CertSerial:      serial,
 		CertFingerprint: hex.EncodeToString(fpSum[:]),
 		CertNotAfter:    peerCert.NotAfter,
