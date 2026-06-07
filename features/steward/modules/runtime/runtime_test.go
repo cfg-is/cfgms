@@ -33,6 +33,18 @@ import (
 // TestMain before any tests run.
 var echoModuleBin string
 
+// shortBaseDir creates a temp dir under /tmp with a predictably short path so
+// that socket paths constructed from it fit within the macOS sun_path limit
+// (103 bytes). t.TempDir() on macOS returns /var/folders/... paths that are
+// already 80+ bytes, causing makeSocketPath to error before any gRPC is tried.
+func shortBaseDir(t *testing.T) string {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "cfgms-rt-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	return base
+}
+
 // binaryDir holds the temp dir for the compiled echo_module binary; cleaned up
 // after all tests complete.
 var binaryDir string
@@ -81,7 +93,7 @@ func makeBypassBundle(binPath string) *bundle.Bundle {
 //   - Get() returns "echo:<resource_id>"
 //   - Stop() sends Shutdown RPC and the process exits within 10 s
 func TestEchoModuleLifecycle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -225,7 +237,7 @@ func TestStrictModeRejectsControllerApprovedUnknownPublisher(t *testing.T) {
 // TestControllerModePassesUnsignedBundle verifies that controller mode skips
 // signature verification.
 func TestControllerModePassesUnsignedBundle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeController, nil)
@@ -236,7 +248,7 @@ func TestControllerModePassesUnsignedBundle(t *testing.T) {
 // TestBypassModePassesUnsignedBundle verifies that bypass mode skips
 // signature verification.
 func TestBypassModePassesUnsignedBundle(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -247,7 +259,7 @@ func TestBypassModePassesUnsignedBundle(t *testing.T) {
 // TestStopIsIdempotent verifies that calling Stop multiple times on the same
 // handle does not error or panic.
 func TestStopIsIdempotent(t *testing.T) {
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
 	b := makeBypassBundle(echoModuleBin)
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
@@ -263,7 +275,7 @@ func TestStopIsIdempotent(t *testing.T) {
 func testEnforcerRuntimeWithKey(t *testing.T, cfgmsPub ed25519.PublicKey) *runtime.ModuleRuntime {
 	t.Helper()
 	rt := runtime.NewModuleRuntimeWithEnforcer(
-		t.TempDir(),
+		shortBaseDir(t),
 		stewardtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{
 				Name:      "cfgms",

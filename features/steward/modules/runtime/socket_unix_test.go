@@ -46,7 +46,7 @@ func buildLongDir(t *testing.T, targetLen int) string {
 // natural path fits the sun_path limit, it is used unchanged (under the
 // private sockets subdir).
 func TestMakeSocketPathShortRuntimeDirUsesNaturalPath(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortBaseDir(t) // t.TempDir() is too long on macOS (/var/folders/...)
 	path, err := makeSocketPath(dir, "echo", 1)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "sockets", "cfgms-module-echo-1.sock"), path)
@@ -127,7 +127,7 @@ func TestMakeSocketPathBoundary(t *testing.T) {
 // TestMakeSocketPath_ParentDirIsOwnerOnly asserts that makeSocketPath creates
 // a sockets directory with mode 0700, owned by the current process uid.
 func TestMakeSocketPath_ParentDirIsOwnerOnly(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortBaseDir(t) // t.TempDir() is too long on macOS (/var/folders/...)
 	_, err := makeSocketPath(dir, "echo", 1)
 	require.NoError(t, err)
 
@@ -148,7 +148,7 @@ func TestMakeSocketPath_ParentDirIsOwnerOnly(t *testing.T) {
 // already exists with looser permissions (0o755), makeSocketPath re-asserts
 // mode 0700 on every call.
 func TestMakeSocketPath_ParentDirModeReasserted(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortBaseDir(t) // t.TempDir() is too long on macOS (/var/folders/...)
 	sockDir := filepath.Join(dir, "sockets")
 	require.NoError(t, os.MkdirAll(sockDir, 0o755)) // pre-create with loose mode
 
