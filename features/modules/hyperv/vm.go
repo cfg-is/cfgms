@@ -114,12 +114,31 @@ func vmUserName(tenantID, hostName string) string {
 
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
 // $Name is the only parameter; its value is transmitted via ArgumentList.
-const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=[long]$vm.MemoryStartupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=$vm.Path; SwitchName=if ($adapter) { $adapter.SwitchName } else { "" }; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress`
+//
+// Path is read from Get-VMHardDiskDrive (the path of the first attached
+// hard disk), not Get-VM.Path which is the VM configuration directory.
+// VMConfig.VHDPath stores the disk path; conflating it with the config
+// directory caused #1887 B1 verification to flag 2-changed drift on
+// every successful create.
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=[long]$vm.MemoryStartupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; SwitchName=if ($adapter) { $adapter.SwitchName } else { "" }; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress`
 
 // psCreateVM is the script block passed to ExecutePS for VM creation.
 // All user-supplied values are transmitted via ArgumentList — none are
 // interpolated into the script text.
-const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -ProcessorCount $CPU -NewVHDPath $VHDPath -SwitchName $SwitchName -Generation 2 | Out-Null`
+//
+// Notes:
+//   - New-VM does NOT accept -ProcessorCount (real PS pitfall surfaced by
+//     the #1887 live-validation B1 bucket — previously masked because
+//     WinRM was broken and this command never actually ran). CPU count
+//     is set with a separate Set-VMProcessor call after the VM exists.
+//     A newly created Generation-2 VM defaults to 1 vCPU which we only
+//     resize if the desired count differs.
+//   - -NewVHDPath also requires -NewVHDSizeBytes; the cmdlet doesn't
+//     auto-default a size. Hardcoded to 64 GB here (matches Hyper-V
+//     Manager's default new-VM size and is the minimum sensible value
+//     for any Server 2022/2025 guest). The schema does not currently
+//     expose vhd_size_gb; future #1887 follow-up should add it.
+const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation 2 | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
 
 // psRemoveVM is the script block passed to ExecutePS for VM deletion.
 // $Name is the only parameter; its value is transmitted via ArgumentList.

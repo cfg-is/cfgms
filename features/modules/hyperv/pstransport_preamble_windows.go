@@ -40,13 +40,19 @@ function Cfgms-GetVM {
     $vm = Get-VM -Name $Name -ErrorAction SilentlyContinue
     if (-not $vm) { Write-Output '{"found":false}'; return }
     $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    # $vm.Path is the VM CONFIGURATION directory, not the VHD file. The
+    # module's VMConfig.VHDPath stores the path to the virtual disk; read
+    # it from Get-VMHardDiskDrive.Path (the first attached disk is the
+    # boot/data disk we manage). $vm.Path on its own caused the #1887 B1
+    # verification to find 2-changed drift on every successful create.
+    $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1
     $result = @{
         found              = $true
         Name               = $vm.Name
         MemoryStartupBytes = [long]$vm.MemoryStartupBytes
         ProcessorCount     = [int]$vm.ProcessorCount
         Generation         = [int]$vm.Generation
-        Path               = $vm.Path
+        Path               = if ($disk) { $disk.Path } else { '' }
         SwitchName         = if ($adapter) { $adapter.SwitchName } else { '' }
         State              = $vm.State.ToString()
     }
@@ -60,9 +66,21 @@ function Cfgms-CreateVM {
         [Parameter(Mandatory)][int]$MemoryMB,
         [Parameter(Mandatory)][int]$CPU,
         [Parameter(Mandatory)][string]$VHDPath,
-        [Parameter(Mandatory)][string]$SwitchName
+        [Parameter(Mandatory)][string]$SwitchName,
+        # Optional — defaults to a 64 GB dynamic VHD. The schema currently
+        # doesn't expose vhd_size_gb so the Go dispatcher never passes one;
+        # 64 GB matches the Hyper-V Manager default and is fine for any test
+        # VM. Future work: extend VMConfig with VHDSizeGB and propagate from
+        # the dispatcher (#1887 follow-up).
+        [int]$VHDSizeGB = 64
     )
-    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -ProcessorCount $CPU -NewVHDPath $VHDPath -SwitchName $SwitchName -Generation 2 | Out-Null
+    # New-VM does NOT accept -ProcessorCount (real PS pitfall — surfaced by
+    # PR #1912 live B1 bucket). Create with default 1 vCPU, then resize via
+    # Set-VMProcessor only when the operator asked for something different.
+    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes ($VHDSizeGB * 1GB) -SwitchName $SwitchName -Generation 2 | Out-Null
+    if ($CPU -ne 1) {
+        Set-VMProcessor -VMName $Name -Count $CPU
+    }
 }
 
 function Cfgms-RemoveVM     { param([Parameter(Mandatory)][string]$Name) Remove-VM -Name $Name -Force }
