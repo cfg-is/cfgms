@@ -26,11 +26,20 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 )
 
 func main() {
+	// On Windows, the SCM invokes us with no console and expects the
+	// process to RegisterServiceCtrlHandler + report SERVICE_RUNNING.
+	// tryRunAsService detects that environment and dispatches into the
+	// svc.Run loop; on non-Windows or when invoked interactively it's a
+	// no-op and we fall through to the regular CLI handling.
+	if tryRunAsService() {
+		return
+	}
 	if len(os.Args) < 2 {
 		// Default behaviour: supervise. The OS service manager invokes
 		// the launcher without args.
@@ -60,11 +69,31 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "Run with --help on each subcommand for details.\n")
 }
 
+// runRun is the interactive entry point (`cfgms-steward-launcher run`).
+// It parses the `run` flag set, then delegates to runSuperviseWithCtx
+// after wiring up signal handling on os.Interrupt / SIGTERM.
 func runRun(args []string) int {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+	return runSuperviseWithCtx(ctx, args)
+}
+
+// runSuperviseWithCtx parses the `run` flag set and starts the
+// supervision loop. Shared by the interactive runRun() entry point and
+// the Windows-service Execute() handler (which cancels ctx on SCM
+// Stop / Shutdown instead of via signal).
+func runSuperviseWithCtx(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
 	startupWindow := fs.Duration("startup-window", 30*time.Second, "How long a child must run to be considered healthy")
 	maxRollbacks := fs.Int("max-rollbacks", 1, "Cap on auto-rollback attempts per Supervise call")
+	childArgs := fs.String("child-args", "", "Space-separated args forwarded to the supervised steward (e.g. \"--regtoken xxx\")")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "launcher run: %v\n", err)
 		return 2
@@ -76,17 +105,8 @@ func runRun(args []string) int {
 		MaxRollbackCycles: *maxRollbacks,
 		Stdout:            os.Stdout,
 		Stderr:            os.Stderr,
+		ExtraArgs:         strings.Fields(*childArgs),
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		cancel()
-	}()
 
 	if err := sup.Supervise(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "launcher run: %v\n", err)
