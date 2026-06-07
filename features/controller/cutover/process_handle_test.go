@@ -34,7 +34,7 @@ func newTLSTestServer(h http.Handler) *httptest.Server {
 //
 // FAKE_CONTROLLER_API_LISTEN — address to bind an HTTP server on. The
 //
-//	handler responds 200 to /healthz, mirroring the real
+//	handler responds 200 to /api/v1/health, mirroring the real
 //	controller's healthz contract that HTTPSmoketester probes.
 //
 // FAKE_CONTROLLER_HANG_MS — if set, the process sleeps this many
@@ -67,7 +67,7 @@ func TestHelperProcess(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -356,11 +356,11 @@ func startSmoketestServer(t *testing.T, handler http.Handler) (listenAddr string
 	return srv.Listener.Addr().String(), srv.Close
 }
 
-// TestHTTPSmoketester_HealthyResponse verifies a 200 /healthz unblocks
+// TestHTTPSmoketester_HealthyResponse verifies a 200 /api/v1/health unblocks
 // the smoketest.
 func TestHTTPSmoketester_HealthyResponse(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	addr, cleanup := startSmoketestServer(t, mux)
@@ -379,7 +379,7 @@ func TestHTTPSmoketester_HealthyResponse(t *testing.T) {
 // orchestrator surfaces to the operator.
 func TestHTTPSmoketester_5xxResponse_Fails(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	addr, cleanup := startSmoketestServer(t, mux)
@@ -399,7 +399,7 @@ func TestHTTPSmoketester_5xxResponse_Fails(t *testing.T) {
 // pass — they prove the API is alive even without admin creds.
 func TestHTTPSmoketester_401Accepted(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	})
 	addr, cleanup := startSmoketestServer(t, mux)
