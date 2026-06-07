@@ -255,10 +255,10 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), 
 		if err != nil {
 			return nil, noop, err
 		}
-		// cmd.exe /c <filepath> executes the batch file by path; content is on disk,
-		// not passed inline. This differs from the banned pattern cmd.exe /c <inline-content>.
-		// #nosec G204 - tmpPath is a temp file created by this process; not user input
-		return exec.CommandContext(ctx, "cmd.exe", "/c", tmpPath), cleanup, nil
+		// buildCmdExeCommand (executor_windows.go) sets SysProcAttr.CmdLine so that
+		// the path is quoted before cmd.exe /c sees it. This is required when %TEMP%
+		// contains a space (e.g. a user-profile directory under logged_in_user context).
+		return buildCmdExeCommand(ctx, tmpPath), cleanup, nil
 
 	case ShellPython:
 		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
