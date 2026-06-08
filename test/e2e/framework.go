@@ -326,8 +326,15 @@ func (f *E2ETestFramework) initializeRBAC() error {
 func (f *E2ETestFramework) initializeController() error {
 	f.metrics.ComponentStartTimes["controller"] = time.Now()
 
+	// controllerConfig.Config.ListenAddr is the HTTP API bind address.
+	// Before Story #1919, this field was ignored at runtime — the HTTP API
+	// hardcoded 0.0.0.0:9080. The harness then connected to f.config.HTTPPort
+	// (9080) and the mismatch with ControllerPort (8080) was harmless.
+	// Story #1919 made getHTTPListenAddr() honor cfg.ListenAddr, exposing
+	// the harness bug: with ListenAddr set to ControllerPort=8080, registration
+	// to HTTPPort=9080 was hitting nothing. Bind HTTP on HTTPPort to match.
 	config := &controllerConfig.Config{
-		ListenAddr: fmt.Sprintf("localhost:%d", f.config.ControllerPort),
+		ListenAddr: fmt.Sprintf("localhost:%d", f.config.HTTPPort),
 		CertPath:   filepath.Join(f.tempDir, "certs"), // Legacy cert path
 		DataDir:    filepath.Join(f.tempDir, "controller-data"),
 		LogLevel:   "info",

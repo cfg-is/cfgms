@@ -45,10 +45,54 @@ func TestBuildRootCommand(t *testing.T) {
 func TestBuildRootCommandFlags(t *testing.T) {
 	cmd := buildRootCommand()
 
-	for _, name := range []string{"config", "init"} {
+	for _, name := range []string{"config", "init", "listen-api-addr", "listen-transport-addr"} {
 		flag := cmd.Flags().Lookup(name)
 		assert.NotNil(t, flag, "expected flag %q to be registered", name)
 	}
+}
+
+func TestApplyListenOverrides(t *testing.T) {
+	t.Run("empty strings leave config untouched", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		originalAPI := cfg.ListenAddr
+		originalTransport := cfg.Transport.ListenAddr
+
+		applyListenOverrides(cfg, "", "")
+
+		assert.Equal(t, originalAPI, cfg.ListenAddr, "API addr should not change when override is empty")
+		assert.Equal(t, originalTransport, cfg.Transport.ListenAddr, "transport addr should not change when override is empty")
+	})
+
+	t.Run("non-empty override replaces config value", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+
+		applyListenOverrides(cfg, "127.0.0.1:9081", "0.0.0.0:4434")
+
+		assert.Equal(t, "127.0.0.1:9081", cfg.ListenAddr)
+		assert.Equal(t, "0.0.0.0:4434", cfg.Transport.ListenAddr)
+	})
+
+	t.Run("partial override leaves the other addr alone", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		originalTransport := cfg.Transport.ListenAddr
+
+		applyListenOverrides(cfg, ":9081", "")
+
+		assert.Equal(t, ":9081", cfg.ListenAddr)
+		assert.Equal(t, originalTransport, cfg.Transport.ListenAddr)
+	})
+
+	t.Run("nil Transport struct is materialised on override", func(t *testing.T) {
+		// A config loaded from a YAML file that omits the transport section
+		// has cfg.Transport == nil; applying the override must not panic and
+		// must produce a populated TransportConfig with just the listen addr.
+		cfg := &config.Config{}
+
+		applyListenOverrides(cfg, "", "0.0.0.0:4434")
+
+		require.NotNil(t, cfg.Transport, "Transport must be allocated when an override is supplied")
+		assert.Equal(t, "0.0.0.0:4434", cfg.Transport.ListenAddr)
+	})
 }
 
 func TestRunInstallRequiresConfig(t *testing.T) {
@@ -120,7 +164,7 @@ func TestRunControllerNoDebugOutput(t *testing.T) {
 	os.Stdout = w
 
 	// Fails immediately at config load — no server is started.
-	err = runController("/nonexistent/config/path/does-not-exist", false)
+	err = runController("/nonexistent/config/path/does-not-exist", false, "", "")
 	require.Error(t, err, "runController must fail when config path does not exist")
 
 	require.NoError(t, w.Close())

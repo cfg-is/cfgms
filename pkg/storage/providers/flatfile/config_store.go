@@ -123,6 +123,14 @@ func (s *FlatFileConfigStore) findConfigFile(key *cfgconfig.ConfigKey) (string, 
 
 // writeAtomic writes data to path atomically via a temp file in the same directory.
 // The directory is created if it does not exist.
+//
+// On POSIX, os.Rename is atomic and concurrent readers always observe either
+// the pre-rename or post-rename file in full. On Windows, os.Rename FAILS
+// with ERROR_ACCESS_DENIED when a concurrent reader has the destination
+// file open — unlike POSIX, Windows doesn't let you rename over an
+// open-for-read file. To deliver the same cross-process safety on Windows
+// (needed for #1919 blue/green), atomicRename retries on EACCES with a
+// short backoff long enough to outlast any reasonable single read.
 func writeAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0750); err != nil {
@@ -153,7 +161,7 @@ func writeAtomic(path string, data []byte) error {
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := atomicRename(tmpPath, path); err != nil {
 		return fmt.Errorf("atomic rename failed: %w", err)
 	}
 	success = true
@@ -173,8 +181,10 @@ func (s *FlatFileConfigStore) readConfigFile(key *cfgconfig.ConfigKey) (*cfgconf
 		return nil, cfgconfig.ErrConfigNotFound
 	}
 
-	// #nosec G304 — path is validated by validateConfigKey at every public entry point and safeJoin inside findConfigFile
-	raw, err := os.ReadFile(path)
+	// readFile retries Windows ERROR_SHARING_VIOLATION (a concurrent
+	// flatfile writer's in-flight rename) up to renameMaxWait; on POSIX
+	// it is a direct os.ReadFile and contention does not arise.
+	raw, err := readFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, cfgconfig.ErrConfigNotFound
@@ -331,8 +341,9 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig
 			return nil
 		}
 
-		// #nosec G304 — path originates from WalkDir rooted at s.root
-		raw, err := os.ReadFile(path)
+		// path originates from WalkDir rooted at s.root; readFile retries
+		// transient Windows sharing violations from concurrent writers.
+		raw, err := readFile(path)
 		if err != nil {
 			return nil // skip unreadable files
 		}
@@ -618,8 +629,9 @@ func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.Co
 			return nil
 		}
 
-		// #nosec G304 — path from WalkDir rooted at s.root
-		raw, err := os.ReadFile(path)
+		// path from WalkDir rooted at s.root; readFile retries Windows
+		// sharing violations from concurrent writers.
+		raw, err := readFile(path)
 		if err != nil {
 			return nil
 		}

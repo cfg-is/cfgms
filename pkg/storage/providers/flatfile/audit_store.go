@@ -619,13 +619,15 @@ func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate
 			return nil
 		}
 		archivePath := filepath.Join(archiveDir, filepath.Base(path))
-		if err := os.Rename(path, archivePath); err != nil {
+		// atomicRename retries Windows ERROR_SHARING_VIOLATION from
+		// concurrent readers (blue/green substrate, Issue #1919).
+		if err := atomicRename(path, archivePath); err != nil {
 			return nil
 		}
 
-		// Count entries in the archived file
-		// #nosec G304 — archivePath constructed from controlled path
-		raw, err := os.ReadFile(archivePath)
+		// Count entries in the archived file. readFile retries Windows
+		// sharing violations from concurrent writers.
+		raw, err := readFile(archivePath)
 		if err == nil {
 			for _, line := range strings.Split(string(raw), "\n") {
 				if strings.TrimSpace(line) != "" {
@@ -658,9 +660,9 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 			return nil
 		}
 
-		// Count entries before deleting
-		// #nosec G304 — path from trusted WalkDir rooted at s.root
-		raw, err := os.ReadFile(path)
+		// Count entries before deleting. readFile retries Windows
+		// sharing violations from concurrent writers (Issue #1919).
+		raw, err := readFile(path)
 		if err == nil {
 			for _, line := range strings.Split(string(raw), "\n") {
 				if strings.TrimSpace(line) != "" {

@@ -744,31 +744,49 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Logging.Component = component
 	}
 
-	// Transport configuration environment variables
-	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" && cfg.Transport != nil {
+	// Transport configuration environment variables.
+	//
+	// If the config file omitted the `transport:` section entirely, cfg.Transport
+	// is nil at this point. Previously each env var was guarded with
+	// `&& cfg.Transport != nil`, which silently dropped the env-var override
+	// when the section was missing. That violated the documented precedence
+	// (env > cfg > default) and was caught by the Issue #1919 review.
+	// Materialise the struct on first use so env vars apply consistently.
+	ensureTransport := func() {
+		if cfg.Transport == nil {
+			cfg.Transport = &TransportConfig{}
+		}
+	}
+
+	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" {
+		ensureTransport()
 		cfg.Transport.ListenAddr = transportListenAddr
 	}
 
-	if transportUseCertManager := os.Getenv("CFGMS_TRANSPORT_USE_CERT_MANAGER"); transportUseCertManager != "" && cfg.Transport != nil {
+	if transportUseCertManager := os.Getenv("CFGMS_TRANSPORT_USE_CERT_MANAGER"); transportUseCertManager != "" {
 		if val, err := strconv.ParseBool(transportUseCertManager); err == nil {
+			ensureTransport()
 			cfg.Transport.UseCertManager = val
 		}
 	}
 
-	if transportMaxConns := os.Getenv("CFGMS_TRANSPORT_MAX_CONNECTIONS"); transportMaxConns != "" && cfg.Transport != nil {
+	if transportMaxConns := os.Getenv("CFGMS_TRANSPORT_MAX_CONNECTIONS"); transportMaxConns != "" {
 		if val, err := strconv.Atoi(transportMaxConns); err == nil {
+			ensureTransport()
 			cfg.Transport.MaxConnections = val
 		}
 	}
 
-	if transportKeepalive := os.Getenv("CFGMS_TRANSPORT_KEEPALIVE_PERIOD"); transportKeepalive != "" && cfg.Transport != nil {
+	if transportKeepalive := os.Getenv("CFGMS_TRANSPORT_KEEPALIVE_PERIOD"); transportKeepalive != "" {
 		if dur, err := time.ParseDuration(transportKeepalive); err == nil {
+			ensureTransport()
 			cfg.Transport.KeepalivePeriod = Duration(dur)
 		}
 	}
 
-	if transportIdleTimeout := os.Getenv("CFGMS_TRANSPORT_IDLE_TIMEOUT"); transportIdleTimeout != "" && cfg.Transport != nil {
+	if transportIdleTimeout := os.Getenv("CFGMS_TRANSPORT_IDLE_TIMEOUT"); transportIdleTimeout != "" {
 		if dur, err := time.ParseDuration(transportIdleTimeout); err == nil {
+			ensureTransport()
 			cfg.Transport.IdleTimeout = Duration(dur)
 		}
 	}
