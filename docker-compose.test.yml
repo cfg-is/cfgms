@@ -443,7 +443,12 @@ services:
       # Unified gRPC-over-QUIC transport (Story #515: replaces separate MQTT+QUIC)
       CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
       CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
-      # HTTP API uses default port 9080 (no override needed)
+      # HTTP API listen address. Story #1919 routed getHTTPListenAddr()
+      # through cfg.ListenAddr — DefaultConfig() now defaults to
+      # 127.0.0.1:8080 (loopback only, secure-by-default). Docker
+      # network sandbox already constrains exposure, so explicitly opt
+      # this container into 0.0.0.0:9080 (matches controller-east).
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"
       CFGMS_DB_HOST: "timescaledb-test"  # Share database with HA cluster
