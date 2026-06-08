@@ -261,7 +261,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	e.logger.Info("Configuration drift detected",
 		"resource", resource.Name,
-		"changes_required", len(stateDiff.ChangedFields))
+		"changes_required", len(stateDiff.ChangedFields),
+		"changed_fields", stateDiff.GetChangedFieldNames(),
+		"added_fields", stateDiff.GetAddedFieldNames(),
+		"removed_fields", stateDiff.GetRemovedFieldNames())
 
 	// Tag the event type for upstream telemetry before invoking the handler.
 	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
@@ -344,7 +347,11 @@ func (e *Executor) verifyChanges(ctx context.Context, module modules.Module,
 
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
 	if driftDetected {
-		e.logger.Debug("Verification found remaining drift",
+		// Promoted from Debug → Info: when a Set passes but verification
+		// still finds drift, operators need to know WHAT failed to apply
+		// without rebuilding the steward in debug mode. The fields are
+		// already structured so they don't clutter normal output.
+		e.logger.Info("Verification found remaining drift",
 			"changed_fields", stateDiff.GetChangedFieldNames(),
 			"added_fields", stateDiff.GetAddedFieldNames(),
 			"removed_fields", stateDiff.GetRemovedFieldNames(),

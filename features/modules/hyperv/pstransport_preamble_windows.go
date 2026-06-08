@@ -46,10 +46,18 @@ function Cfgms-GetVM {
     # boot/data disk we manage). $vm.Path on its own caused the #1887 B1
     # verification to find 2-changed drift on every successful create.
     $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    # $vm.MemoryStartupBytes is empty on Server 2025's Hyper-V PowerShell
+    # module — that property only populates via Get-VMMemory (the proper
+    # accessor). Using $vm.<prop> directly returns nil on 2025 even though
+    # the VM has memory configured, which caused B1 verification to flag
+    # "memory_mb: 0 -> 1024" drift on every successful create. Surfaced
+    # 2026-06-08 during live #1852 validation on CFG-70-02.
+    $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue
+    $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }
     $result = @{
         found              = $true
         Name               = $vm.Name
-        MemoryStartupBytes = [long]$vm.MemoryStartupBytes
+        MemoryStartupBytes = $startupBytes
         ProcessorCount     = [int]$vm.ProcessorCount
         Generation         = [int]$vm.Generation
         Path               = if ($disk) { $disk.Path } else { '' }

@@ -178,6 +178,17 @@ func TestValuesEqual(t *testing.T) {
 		{"different slices", []string{"a", "b", "c"}, []string{"a", "b", "d"}, false},
 		{"identical maps", map[string]int{"a": 1, "b": 2}, map[string]int{"a": 1, "b": 2}, true},
 		{"different maps", map[string]int{"a": 1, "b": 2}, map[string]int{"a": 1, "b": 3}, false},
+		// Cross-type numeric equality: int(N) vs int64(N) must compare
+		// equal. Caught during live hyperv #1852 validation — VM Get
+		// returned memory_mb as int64 (Get-VMMemory.Startup / 1MiB) while
+		// the desired-state cfg unmarshalled to int, so reflect.DeepEqual
+		// flagged "1024 -> 1024" drift on every convergence pass.
+		{"int vs int64 same value", int(1024), int64(1024), true},
+		{"int64 vs int same value", int64(1024), int(1024), true},
+		{"int vs float64 same value", int(1024), float64(1024), true},
+		{"int vs int64 different value", int(1024), int64(2048), false},
+		{"uint vs int64 same value", uint(7), int64(7), true},
+		{"float32 vs float64 same value", float32(0.5), float64(0.5), true},
 	}
 
 	for _, tt := range tests {
