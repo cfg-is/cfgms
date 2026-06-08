@@ -1,0 +1,36 @@
+# Force LF on text files that are executed in Linux containers.
+#
+# Without this, a Windows host with core.autocrlf=true checks files out with
+# CRLF, and any subsequent docker run that mounts the worktree (e.g. the
+# cfg-agent dispatch flow, dev containers) sees `bash\r: No such file or
+# directory` because the kernel reads the shebang line including the CR.
+
+# Shell scripts — Linux execution
+*.sh        text eol=lf
+*.bash      text eol=lf
+
+# Dockerfile + compose — used by docker, expects LF
+Dockerfile  text eol=lf
+*.dockerfile text eol=lf
+docker-compose*.yml text eol=lf
+
+# Go source — gofmt is LF-only by convention; protect against churn
+*.go        text eol=lf
+
+# Module / pin files used by Go tooling
+go.mod      text eol=lf
+go.sum      text eol=lf
+
+# YAML used by CI and module manifests
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Markdown — keep LF to avoid noisy diffs on cross-platform commits
+*.md        text eol=lf
+
+# Binary catch-all (Git auto-detects but explicit is clearer)
+*.png       binary
+*.jpg       binary
+*.gz        binary
+*.zip       binary
+*.exe       binary
