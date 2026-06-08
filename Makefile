@@ -26,6 +26,7 @@ STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CO
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
+STEWARD_LAUNCHER_BINARY=cfgms-steward-launcher
 CONTROLLER_BINARY=controller
 CLI_BINARY=cfg
 CERT_MANAGER_BINARY=cert-manager
@@ -102,12 +103,15 @@ proto-gen-modules: check-proto-grpc-tools
 
 # Build all binaries
 .PHONY: build
-build: fix-git-bare build-steward build-controller build-cli build-cert-manager build-stdlib-modules
+build: fix-git-bare build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
 
 # Build individual binaries
-.PHONY: build-steward build-controller build-cli build-cert-manager build-stdlib-modules
+.PHONY: build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
 build-steward:
 	go build ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+
+build-steward-launcher:
+	go build ${GO_BUILD_FLAGS} -o bin/${STEWARD_LAUNCHER_BINARY} ./cmd/cfgms-steward-launcher
 
 build-controller:
 	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
@@ -146,6 +150,7 @@ build-cross-platform:
 		echo "  Building for $$GOOS/$$GOARCH..."; \
 		mkdir -p $$OUTDIR; \
 		go build ${STEWARD_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_LAUNCHER_BINARY}$$EXT ./cmd/cfgms-steward-launcher && \
 		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
 		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
 		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
@@ -167,6 +172,7 @@ build-cross-validate:
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
 		ERROR_LOG=$$(mktemp); \
 		if go build ${STEWARD_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfgms-steward-launcher 2>>$$ERROR_LOG && \
 		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
 		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
 		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
