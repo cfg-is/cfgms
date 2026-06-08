@@ -29,12 +29,19 @@ import (
 // it. We achieve this by retrying the rename on EACCES /
 // ERROR_SHARING_VIOLATION with a randomised-jitter exponential backoff.
 //
-// Worst-case schedule across 12 attempts: ~63ms exponential ramp
-// (1→2→4→8→16→32→ saturate at 50) + 6 × 50ms saturated tail = ~363ms
-// pre-jitter. Jitter doubles the cumulative ceiling so an absolute
-// maximum hold time is ~750ms before surfacing the error to the caller.
-// That budget is intentionally generous: a stuck reader past that point
-// is a real fault, not normal contention.
+// Worst-case schedule across 30 attempts: ~127ms exponential ramp
+// (1→2→4→8→16→32→64→ saturate at 100) + 23 × 100ms saturated tail =
+// ~2.43s pre-jitter. Jitter (±50%) means the absolute maximum hold
+// time is ~3.6s before surfacing the error to the caller. The CI
+// stress test (TestFlatFile_CrossProcess_OneWriterManyReaders) runs
+// 3 concurrent reader processes against 1 writer for 5s, so the
+// writer must outlast a contention window where every retry attempt
+// can coincide with at least one reader's open-read-close cycle.
+// The earlier 12-attempt / ~750ms budget was too tight under that
+// load: a single rename collision within a 5s test would fail the
+// writer and abort the test. The wider budget is still small in
+// real-world terms — a stuck reader past 3.6s is a fault, not
+// normal contention.
 //
 // Jitter rationale: without it, every Windows process retrying against
 // the same target file fires on identical millisecond boundaries. Under
@@ -51,9 +58,9 @@ import (
 // both first-write (uncontested rename) and replace (contested rename).
 func atomicRename(src, dst string) error {
 	const (
-		maxAttempts = 12
+		maxAttempts = 30
 		baseDelay   = 1 * time.Millisecond
-		maxDelay    = 50 * time.Millisecond
+		maxDelay    = 100 * time.Millisecond
 	)
 	var lastErr error
 	delay := baseDelay
