@@ -689,6 +689,13 @@ services:
       # instead of "localhost:4433". Without this the steward connects to its
       # own loopback, fails the gRPC-over-QUIC handshake, and exits 1.
       CFGMS_EXTERNAL_HOSTNAME: "fleet-controller"
+      # Same Story #1919 rationale as controller-standalone: getHTTPListenAddr()
+      # now respects cfg.ListenAddr, and DefaultConfig() defaults to the secure
+      # 127.0.0.1:8080 loopback. The mounted controller.cfg sets ListenAddr
+      # implicitly via legacy mqtt/quic fields that no longer drive HTTP bind.
+      # Explicitly opt the fleet container into 0.0.0.0:9080 so stewards on the
+      # cfgms-fleet network can reach the registration endpoint.
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
       CFGMS_LOG_LEVEL: "info"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
