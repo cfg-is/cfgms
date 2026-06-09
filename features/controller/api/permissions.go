@@ -18,6 +18,7 @@ var knownPermissions = map[string]bool{
 	"steward:read-scripts":    true,
 	"steward:execute-scripts": true,
 	"steward:read-compliance": true,
+	"steward:read-modules":    true,
 	"steward:delete-config":   true,
 	// Config management
 	"config:list":             true,
@@ -76,6 +77,8 @@ var knownPermissions = map[string]bool{
 	"installer:upload": true,
 	"installer:read":   true,
 	"installer:delete": true,
+	// Steward binary publishing (Issue #1944)
+	"installer:publish:steward": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

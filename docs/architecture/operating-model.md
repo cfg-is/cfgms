@@ -368,6 +368,17 @@ Operators interact with CFGMS through layered UX surfaces.
 
 **Workflow engine — automation surface.** For SaaS/cloud operations that don't require a steward (M365, identity providers, ticketing systems), the workflow engine is the primary expression mechanism. See [controller operating model](controller-operating-model.md#workflow-engine).
 
+## Controller Blob Store Namespaces
+
+The controller blob store (`pkg/storage/interfaces/blob.BlobStore`) partitions binary artifacts by namespace within each tenant.
+
+| Namespace | Purpose |
+|-----------|---------|
+| `installers` | Platform installer packages uploaded via `PUT /api/v1/installer/artifacts/{platform}/{arch}` |
+| `steward-binaries` | Versioned steward binaries published via `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`. Each entry carries publisher-signature metadata and the publishing operator identity. |
+
+Steward binary distribution uses the `steward-binaries` namespace exclusively. Blob keys take the form `{version}-{platform}-{arch}` (e.g. `v0.5.12-linux-amd64`). Binaries must carry a valid Ed25519 publisher signature verified against the CFGMS publisher identity before storage.
+
 ## Monitoring Export Credentials
 
 OTLP exporter credentials (API keys / bearer tokens) are stored in `pkg/secrets`, not in config files. Configure the secret key name via `config["secret_key"]` and use `NewOTLPExporterWithSecrets` to wire the store at construction time.

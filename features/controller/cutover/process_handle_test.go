@@ -83,14 +83,6 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-// envForFakeController sets the env vars TestHelperProcess reads. Uses
-// t.Setenv so each test gets isolated state.
-func envForFakeController(t *testing.T, listenAddr string) {
-	t.Helper()
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	t.Setenv("FAKE_CONTROLLER_API_LISTEN", listenAddr)
-}
-
 // freePort returns a localhost address with an OS-assigned free port.
 // Used so tests don't fight over fixed port numbers.
 func freePort(t *testing.T) string {
@@ -230,7 +222,7 @@ func TestWaitForPortFree_PortAlreadyFree(t *testing.T) {
 func TestWaitForPortFree_PortStillBound_TimesOut(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { require.NoError(t, ln.Close()) }()
 
 	addr := ln.Addr().String()
 	err = waitForPortFree(context.Background(), addr, 300*time.Millisecond)
@@ -242,7 +234,7 @@ func TestWaitForPortFree_PortStillBound_TimesOut(t *testing.T) {
 func TestWaitForPortReady_PortListening(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { require.NoError(t, ln.Close()) }()
 
 	addr := ln.Addr().String()
 	start := time.Now()
@@ -426,4 +418,3 @@ func TestHTTPSmoketester_NoListener_Fails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not listening")
 }
-

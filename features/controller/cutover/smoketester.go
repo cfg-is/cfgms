@@ -4,10 +4,11 @@ package cutover
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/cert"
 )
 
 // HTTPSmoketester is the production Smoketester. It probes a candidate
@@ -91,11 +92,7 @@ func (h *HTTPSmoketester) Probe(ctx context.Context, _ ProcessHandle, listenAPIA
 	client := &http.Client{
 		Timeout: reqTO,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				//#nosec G402 -- smoketest acknowledges the cert is self-signed; we're probing liveness not authenticating
-				InsecureSkipVerify: h.SkipTLSVerify,
-				MinVersion:         tls.VersionTLS12,
-			},
+			TLSClientConfig: cert.CreateProbeClientTLSConfig(h.SkipTLSVerify),
 		},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
@@ -106,16 +103,16 @@ func (h *HTTPSmoketester) Probe(ctx context.Context, _ ProcessHandle, listenAPIA
 	if err != nil {
 		return fmt.Errorf("smoketest: GET %s: %w", probeURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 200 OK = healthy. 401 / 403 = auth-required which still proves
 	// the API is serving (the mTLS layer answered). Any other code,
 	// including a connection error masquerading as a low 5xx, is a
 	// smoketest failure.
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		return nil
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil
 	default:
 		return fmt.Errorf("smoketest: GET %s returned status %d (want 200/401/403)", probeURL, resp.StatusCode)
