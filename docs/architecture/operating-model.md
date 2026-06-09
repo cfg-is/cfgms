@@ -300,9 +300,28 @@ binaries read the same `data_dir`, same storage configuration, same identity
 material — so the green binary is bit-for-bit indistinguishable from the
 blue binary in terms of "what it serves." Only the listen addresses differ.
 
-The cutover mechanism itself (routing client traffic from blue → green) is
-the subject of story #1920; the substrate this section documents is the
-prerequisite that makes such routing safe to implement.
+The cutover mechanism itself (story #1920) is implemented as
+**port-ownership-swap** — not a byte-level reverse proxy. The
+orchestrator (`features/controller/cutover`) drains the previous
+canonical, waits for the canonical ports to free, then spawns a fresh
+instance of the new binary on those ports. Stewards reconnect via the
+gRPC-over-QUIC backoff already built into the client. Typical wall-
+clock window: 1-3 seconds.
+
+Operator commands:
+
+```sh
+cfg controller upgrade run --binary /opt/cfgms/cfgms-controller-vNEW \
+    --config /etc/cfgms/controller.cfg
+cfg controller upgrade status
+cfg controller upgrade rollback --config /etc/cfgms/controller.cfg
+```
+
+State persistence: `/var/lib/cfgms/cutover.state.json` (Linux) or
+`%ProgramData%\cfgms\cutover.state.json` (Windows) records the
+canonical + quarantined binary paths so `status` and `rollback` work
+across CLI invocations. The full operator runbook lives at
+[docs/operations/controller-upgrade.md](../operations/controller-upgrade.md).
 
 ## Deployment Modes
 
