@@ -42,9 +42,11 @@ const (
 	CommandPushSigningCert CommandType = "push_signing_cert"
 
 	// CommandPushStewardBinary instructs the steward to download a new binary from the
-	// controller, verify its SHA-256 digest against the manifest, invoke the launcher
-	// swap subcommand, and restart via the OS service manager. (Epic #1930)
-	// Params: version (string), download_url (string), sha256 (string), platform (string), arch (string).
+	// controller, verify its SHA-256 digest and Ed25519 publisher signature, enforce
+	// version monotonicity and revocation, invoke the launcher swap subcommand, and
+	// restart via the OS service manager. (Epic #1930, Issue #1943)
+	// Params: version (string), download_url (string), sha256 (string),
+	// platform (string), arch (string), publisher (string), bundle_signature ([]byte base64).
 	CommandPushStewardBinary CommandType = "push_steward_binary"
 )
 
@@ -117,19 +119,21 @@ const (
 	EventStewardUpgradeDispatched EventType = "steward.upgrade.dispatched"
 
 	// EventStewardUpgradeDownloaded is published by the steward when the binary
-	// download completes and the SHA-256 digest is verified. (Epic #1930)
+	// download completes and the SHA-256 digest and Ed25519 publisher signature
+	// are verified. (Epic #1930, Issue #1943)
 	EventStewardUpgradeDownloaded EventType = "steward.upgrade.downloaded"
 
 	// EventStewardUpgradeSwapped is published by the steward immediately before
-	// invoking the launcher swap subcommand. (Epic #1930)
+	// invoking the launcher swap subcommand. (Epic #1930, Issue #1943)
 	EventStewardUpgradeSwapped EventType = "steward.upgrade.swapped"
 
-	// EventStewardUpgradeCommitted is published by the steward on first heartbeat
-	// after restart with the new binary. (Epic #1930)
+	// EventStewardUpgradeCommitted is published by the steward on first reconnect
+	// after restart with the new binary. (Epic #1930, Issue #1943)
 	EventStewardUpgradeCommitted EventType = "steward.upgrade.committed"
 
-	// EventStewardUpgradeRolledBack is published by the steward when the launcher's
-	// auto-rollback budget has been exhausted and the previous binary is restored. (Epic #1930)
+	// EventStewardUpgradeRolledBack is published by the steward when the launcher
+	// auto-rolled-back to the previous version after the new binary failed its
+	// startup window. (Epic #1930, Issue #1943)
 	EventStewardUpgradeRolledBack EventType = "steward.upgrade.rolled_back"
 )
 

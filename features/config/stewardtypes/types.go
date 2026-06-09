@@ -47,6 +47,16 @@ type StewardSettings struct {
 	// DriftMode controls how the steward responds to detected configuration drift.
 	// Must be sourced exclusively from the controller-delivered cfg.
 	DriftMode DriftMode `yaml:"drift_mode,omitempty"`
+
+	// Upgrade configures the steward upgrade policy. (Issue #1943)
+	Upgrade UpgradeConfig `yaml:"upgrade,omitempty"`
+}
+
+// UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)
+type UpgradeConfig struct {
+	// AllowDowngrade permits installing a version older than or equal to the
+	// running version. Disabled by default to prevent accidental rollbacks.
+	AllowDowngrade bool `yaml:"allow_downgrade,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.
