@@ -18,26 +18,26 @@
 // Stages:
 //
 //   - idle         The single canonical backend is serving. No upgrade in
-//                  progress. cfg controller upgrade can be invoked.
+//     progress. cfg controller upgrade can be invoked.
 //   - preparing    The orchestrator has accepted an upgrade request,
-//                  validated the new binary, and is about to spawn the
-//                  candidate backend on the alternate listen addresses.
+//     validated the new binary, and is about to spawn the
+//     candidate backend on the alternate listen addresses.
 //   - smoketesting The candidate is running on alternate ports and the
-//                  orchestrator is hitting it with health-probe RPCs
-//                  before allowing it to take over the canonical ports.
+//     orchestrator is hitting it with health-probe RPCs
+//     before allowing it to take over the canonical ports.
 //   - swapping     Smoketests passed. The orchestrator is in the middle
-//                  of the port-ownership swap: canonical backend stops
-//                  listening; candidate takes over canonical ports.
-//                  This is the brief window of API unavailability for
-//                  connected stewards (the gRPC-over-QUIC client already
-//                  reconnects with exponential backoff so the window is
-//                  invisible to module convergence).
+//     of the port-ownership swap: canonical backend stops
+//     listening; candidate takes over canonical ports.
+//     This is the brief window of API unavailability for
+//     connected stewards (the gRPC-over-QUIC client already
+//     reconnects with exponential backoff so the window is
+//     invisible to module convergence).
 //   - quarantined  Cutover completed. The newly-canonical backend is
-//                  serving; the previously-canonical backend is parked
-//                  on alternate ports for the configured quarantine
-//                  window so cfg controller rollback can flip back
-//                  instantly. After the window expires the old backend
-//                  shuts down and the orchestrator returns to idle.
+//     serving; the previously-canonical backend is parked
+//     on alternate ports for the configured quarantine
+//     window so cfg controller rollback can flip back
+//     instantly. After the window expires the old backend
+//     shuts down and the orchestrator returns to idle.
 //
 // Concurrent cfg controller upgrade attempts are rejected with
 // ErrUpgradeInProgress while the state is anything other than idle.

@@ -551,6 +551,78 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleGetStewardModules handles GET /api/v1/stewards/{id}/modules.
+// Returns a 501 placeholder when the steward has no modules.loaded DNA attribute.
+func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	stewardInfo, exists := s.controllerService.GetStewardInfo(stewardID)
+	if !exists {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	// Cross-tenant check: the caller's tenant must be a prefix of or equal to the
+	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
+	// mTLS admin principals have empty TenantID (global access), so check is skipped for them.
+	adminPrincipal := s.extractAdminPrincipal(r)
+	var callerTenantID string
+	if adminPrincipal != nil {
+		callerTenantID = adminPrincipal.TenantID
+	} else {
+		callerTenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
+	}
+	if callerTenantID != "" {
+		tenantMatch := stewardInfo.TenantID == callerTenantID ||
+			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
+		if !tenantMatch {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	// Check DNA for modules.loaded attribute.
+	if stewardInfo.DNA == nil || stewardInfo.DNA.Attributes == nil {
+		s.logger.Info("Modules unavailable: steward DNA has no attributes", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotImplemented,
+			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"MODULES_UNAVAILABLE")
+		return
+	}
+
+	modulesRaw, ok := stewardInfo.DNA.Attributes["modules.loaded"]
+	if !ok {
+		s.logger.Info("Modules unavailable: modules.loaded attribute absent", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotImplemented,
+			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"MODULES_UNAVAILABLE")
+		return
+	}
+
+	type moduleEntry struct {
+		Name string `json:"name"`
+	}
+	parts := strings.Split(modulesRaw, ",")
+	modules := make([]moduleEntry, 0, len(parts))
+	for _, name := range parts {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			modules = append(modules, moduleEntry{Name: name})
+		}
+	}
+
+	s.logger.Info("Fetched steward loaded modules", "steward_id", stewardIDForLog, "count", len(modules))
+	s.writeSuccessResponse(w, map[string]interface{}{"modules": modules})
+}
+
 // handleGetStewardLogs handles GET /api/v1/stewards/{id}/logs.
 // Validates the steward exists and the query parameters, then returns 501 until a
 // log-pull transport is wired. The follow-up story must implement per-tenant ACL

@@ -590,12 +590,12 @@ func runConfigDeployments(cmd *cobra.Command, args []string) error {
 
 // apiRollbackPoint mirrors the server-side RollbackPoint for JSON decoding.
 type apiRollbackPoint struct {
-	CommitSHA  string    `json:"commit_sha"`
-	Timestamp  time.Time `json:"timestamp"`
-	Author     string    `json:"author"`
-	Message    string    `json:"message"`
-	RiskLevel  string    `json:"risk_level"`
-	CanRollback bool     `json:"can_rollback"`
+	CommitSHA   string    `json:"commit_sha"`
+	Timestamp   time.Time `json:"timestamp"`
+	Author      string    `json:"author"`
+	Message     string    `json:"message"`
+	RiskLevel   string    `json:"risk_level"`
+	CanRollback bool      `json:"can_rollback"`
 }
 
 // apiRollbackOperation mirrors the server-side RollbackOperation for JSON decoding.
