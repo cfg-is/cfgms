@@ -87,6 +87,11 @@ func saveStewardRunGlobals(t *testing.T) {
 	origNoBundle := noBundle
 	origUserConfigDir := userConfigDirFn
 	origSystemBundle := systemBundlePathFn
+	// exec vars
+	origExecCmd := stewardExecCommand
+	origExecShell := stewardExecShell
+	origExecTimeout := stewardExecTimeout
+	origExecJSON := stewardExecJSONOutput
 	t.Cleanup(func() {
 		stewardURL = origURL
 		stewardTLSInsecure = origInsecure
@@ -104,6 +109,10 @@ func saveStewardRunGlobals(t *testing.T) {
 		noBundle = origNoBundle
 		userConfigDirFn = origUserConfigDir
 		systemBundlePathFn = origSystemBundle
+		stewardExecCommand = origExecCmd
+		stewardExecShell = origExecShell
+		stewardExecTimeout = origExecTimeout
+		stewardExecJSONOutput = origExecJSON
 	})
 }
 
@@ -676,4 +685,123 @@ func TestStewardRunCommand_FlagsRegistered(t *testing.T) {
 
 func TestStewardRunResult_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardRunResultCmd.Flags().Lookup("device"), "run-result must have --device flag")
+}
+
+// ---------------------------------------------------------------------------
+// [REQUIRED TEST] exec — single-steward dispatch and output display
+// ---------------------------------------------------------------------------
+
+// TestRunCommandSingle_SubmitsCommandAndDisplaysOutput verifies that:
+//   - POST /api/v1/runs/command is called with target: id:<id>
+//   - The job output is printed after the run reaches terminal state.
+func TestRunCommandSingle_SubmitsCommandAndDisplaysOutput(t *testing.T) {
+	dir := t.TempDir()
+	bundleFile := generateTestBundleWithRSA(t, dir)
+
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/command":
+			capturedBody, _ = io.ReadAll(r.Body)
+			writeRunAPIResponse(w, map[string]string{"run_id": "exec-run-id"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/exec-run-id":
+			writeRunAPIResponse(w, map[string]interface{}{
+				"run_id":         "exec-run-id",
+				"status":         "completed",
+				"job_count":      1,
+				"completed_jobs": 1,
+				"failed_jobs":    0,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/exec-run-id/jobs":
+			writeRunAPIResponse(w, []map[string]interface{}{
+				{
+					"job_id":    "job-001",
+					"run_id":    "exec-run-id",
+					"device_id": "target-steward-id",
+					"status":    "completed",
+					"output":    "hello from steward\n",
+					"exit_code": 0,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	bundlePath = bundleFile
+	stewardExecCommand = "echo hello"
+	stewardExecShell = "bash"
+	stewardExecTimeout = 30 * time.Second
+	runWaitPollInterval = time.Millisecond
+
+	output := captureStdout(t, func() {
+		err := runRunCommandSingle(stewardExecCmd, []string{"target-steward-id"})
+		require.NoError(t, err)
+	})
+
+	// Verify request body has target: id:<steward-id>
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(capturedBody, &body))
+	assert.Equal(t, "id:target-steward-id", body["target"], "target must be id:<steward-id>")
+
+	// Verify output is displayed
+	assert.Contains(t, output, "exec-run-id")
+	assert.Contains(t, output, "hello from steward")
+}
+
+// TestRunCommandSingle_TimeoutError verifies that exec returns an error when the
+// wait timeout elapses before the run reaches a terminal state.
+func TestRunCommandSingle_TimeoutError(t *testing.T) {
+	dir := t.TempDir()
+	bundleFile := generateTestBundleWithRSA(t, dir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/command":
+			writeRunAPIResponse(w, map[string]string{"run_id": "timeout-exec-run"})
+		default:
+			// Always return running
+			writeRunAPIResponse(w, map[string]interface{}{
+				"run_id":         "timeout-exec-run",
+				"status":         "running",
+				"job_count":      1,
+				"completed_jobs": 0,
+				"failed_jobs":    0,
+			})
+		}
+	}))
+	defer server.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	bundlePath = bundleFile
+	stewardExecCommand = "sleep 999"
+	stewardExecShell = "bash"
+	stewardExecTimeout = 10 * time.Millisecond
+	runWaitPollInterval = time.Millisecond
+
+	_ = captureStdout(t, func() {
+		err := runRunCommandSingle(stewardExecCmd, []string{"some-steward-id"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "timed out")
+	})
+}
+
+func TestStewardExecCommandRegistered(t *testing.T) {
+	names := map[string]bool{}
+	for _, cmd := range stewardCmd.Commands() {
+		names[cmd.Name()] = true
+	}
+	assert.True(t, names["exec"], "stewardCmd must have 'exec' subcommand")
+}
+
+func TestStewardExecFlagsRegistered(t *testing.T) {
+	for _, flag := range []string{"command", "shell", "timeout", "json"} {
+		assert.NotNil(t, stewardExecCmd.Flags().Lookup(flag), "exec must have --%s flag", flag)
+	}
 }
