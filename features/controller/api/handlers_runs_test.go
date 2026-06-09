@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -554,4 +555,95 @@ func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
 				"%s %s must return 503 when run manager is not wired", tc.method, tc.path)
 		})
 	}
+}
+
+// ---- [REQUIRED TEST] Banned-pattern enforcement (C2) ------------------------
+
+// TestRunCommandSingle_RejectsBannedPattern_ControllerSide verifies that
+// POST /api/v1/runs/command returns HTTP 400 with BANNED_PATTERN when the decoded
+// command content contains any of the banned execution patterns. The command string
+// itself must not be logged — only the matched pattern name is logged.
+func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+
+	bannedCommands := []struct {
+		name string
+		cmd  string
+	}{
+		{"iex", "iex (Get-Something)"},
+		{"Invoke-Expression", "Invoke-Expression 'whoami'"},
+		{"-EncodedCommand", "powershell -EncodedCommand AABBCC"},
+		{"-ExecutionPolicy Bypass", "powershell -ExecutionPolicy Bypass -File script.ps1"},
+		{"bash -c", "bash -c 'rm -rf /'"},
+		{"eval", "eval $dangerous"},
+		{"python -c", "python -c 'import os; os.system(\"cmd\")'"},
+	}
+
+	for _, tc := range bannedCommands {
+		t.Run(tc.name, func(t *testing.T) {
+			content := base64.StdEncoding.EncodeToString([]byte(tc.cmd))
+			rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+				"target":  "all",
+				"content": content,
+				"shell":   "bash",
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code,
+				"command %q must be rejected as BANNED_PATTERN; body: %s", tc.name, rec.Body.String())
+
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Error)
+			assert.Equal(t, "BANNED_PATTERN", resp.Error.Code,
+				"error code must be BANNED_PATTERN for command %q", tc.name)
+		})
+	}
+}
+
+// ---- [REQUIRED TEST] Cross-tenant RBAC check (C3) ---------------------------
+
+// TestRunCommandSingle_RejectsCrossTenantSteward verifies that
+// POST /api/v1/runs/command with target "id:<steward-id>" returns HTTP 403
+// when the calling admin's tenant is NOT a prefix of the steward's tenant.
+func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	// Register a steward in "tenant-b".
+	require.NoError(t, server.controllerService.RegisterSteward("steward-in-tenant-b", "tenant-b", "", "online"))
+
+	// A key scoped to "tenant-a" must be rejected when targeting a steward in "tenant-b".
+	tenantAKey := NewEphemeralTestKey(t, server, []string{"steward:execute-scripts"}, "tenant-a", 5*time.Minute)
+	content := base64.StdEncoding.EncodeToString([]byte("echo hello"))
+	rec := postRunCommand(t, server, tenantAKey, map[string]interface{}{
+		"target":  "id:steward-in-tenant-b",
+		"content": content,
+		"shell":   "bash",
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"cross-tenant exec must return 403; body: %s", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "CROSS_TENANT_ACCESS_DENIED", resp.Error.Code)
+}
+
+// TestRunCommandSingle_AllowsSameTenantSteward verifies that
+// POST /api/v1/runs/command with target "id:<steward-id>" succeeds when the
+// calling admin's tenant matches the steward's tenant exactly.
+func TestRunCommandSingle_AllowsSameTenantSteward(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	require.NoError(t, server.controllerService.RegisterSteward("steward-same-tenant", "test-tenant", "", "online"))
+
+	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	content := base64.StdEncoding.EncodeToString([]byte("echo hello"))
+	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+		"target":  "id:steward-same-tenant",
+		"content": content,
+		"shell":   "bash",
+	})
+	// 200 OK — same-tenant exec must succeed.
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"same-tenant exec must return 200; body: %s", rec.Body.String())
 }

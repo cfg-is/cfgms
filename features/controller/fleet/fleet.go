@@ -36,6 +36,7 @@ type Filter struct {
 	Status        string            // "online", "offline", or "any"/empty (any status)
 	Hostname      string            // Substring match on DNA["hostname"] (kept for backward compat)
 	Name          string            // Glob match on DNA["hostname"] via path.Match (use name: selector key)
+	StewardID     string            // id: selector — exact match on steward ID for single-steward targeting
 }
 
 // ParseTargetSelector parses a space-separated key:value selector string into a Filter.
@@ -61,6 +62,8 @@ func ParseTargetSelector(s string) (Filter, error) {
 		value := token[idx+1:]
 
 		switch {
+		case key == "id":
+			f.StewardID = value
 		case key == "name":
 			f.Name = value
 		case key == "os":

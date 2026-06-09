@@ -100,31 +100,6 @@ func runSupervisor(t *testing.T, s *Supervisor, timeout time.Duration) error {
 	return s.Supervise(ctx)
 }
 
-// fakeClock simulates time so we can deterministically test the
-// startup-window logic without sleeping in real time.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) Since(t time.Time) time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now.Sub(t)
-}
-
-func (c *fakeClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
 // envForChild returns the env vars to pass to a child fake-steward by
 // re-using the test process env. The launcher inherits its environment;
 // to vary per-test behaviour we just mutate t.Setenv before invocation.

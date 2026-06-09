@@ -4,20 +4,95 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// bannedCommandPatterns lists strings that are rejected before dispatch (defence-in-depth,
+// path 3 per CLAUDE.md). Do NOT log the command string — log only the matched pattern name.
+var bannedCommandPatterns = []struct {
+	pattern string
+	name    string
+}{
+	{"iex", "iex"},
+	{"invoke-expression", "Invoke-Expression"},
+	{"-encodedcommand", "-EncodedCommand"},
+	{"-executionpolicy bypass", "-ExecutionPolicy Bypass"},
+	{"bash -c", "bash -c"},
+	{"eval", "eval"},
+	{"python -c", "python -c"},
+}
+
+// allowedCommandShells is the set of shell values accepted by POST /api/v1/runs/command.
+var allowedCommandShells = map[string]bool{
+	"bash": true,
+	"sh":   true,
+	"pwsh": true,
+	"cmd":  true,
+}
+
+// matchBannedPattern returns the pattern name if cmd contains a banned pattern (case-insensitive).
+// Returns "" when no banned pattern is found.
+func matchBannedPattern(cmd string) string {
+	lower := strings.ToLower(cmd)
+	for _, p := range bannedCommandPatterns {
+		if strings.Contains(lower, p.pattern) {
+			return p.name
+		}
+	}
+	return ""
+}
+
+// extractSingleStewardID returns the steward ID when target is exactly "id:<id>".
+// Returns "" for any other target form (fleet selector, "all", empty, etc.).
+func extractSingleStewardID(target string) string {
+	t := strings.TrimSpace(target)
+	if !strings.HasPrefix(t, "id:") {
+		return ""
+	}
+	id := strings.TrimPrefix(t, "id:")
+	// Reject multi-token targets like "id:foo os:linux"
+	if strings.ContainsAny(id, " \t") {
+		return ""
+	}
+	return id
+}
+
+// isAdminTenantScopeAllowed reports whether an admin with adminTenant may target a steward
+// with stewardTenant. An empty adminTenant (global mTLS admin) always returns true.
+// Otherwise the admin's tenant must be equal to or a path-prefix of the steward's tenant.
+func isAdminTenantScopeAllowed(adminTenant, stewardTenant string) bool {
+	if adminTenant == "" {
+		return true
+	}
+	if stewardTenant == "" {
+		return true
+	}
+	return stewardTenant == adminTenant || strings.HasPrefix(stewardTenant, adminTenant+"/")
+}
+
+// commandSignatureRequest is the signature block sent by the CLI in POST /api/v1/runs/command.
+type commandSignatureRequest struct {
+	Algorithm string `json:"algorithm"`
+	Value     string `json:"value"`      // base64-encoded raw signature bytes
+	PublicKey string `json:"public_key"` // cert PEM from the operator bundle
+}
 
 // postRunScriptRequest is the body of POST /api/v1/runs/script.
 type postRunScriptRequest struct {
@@ -31,10 +106,12 @@ type postRunScriptRequest struct {
 // postRunCommandRequest is the body of POST /api/v1/runs/command.
 // Content is the inline script body, base64-encoded.
 type postRunCommandRequest struct {
-	Target  string            `json:"target"`  // fleet selector string
-	Content string            `json:"content"` // base64-encoded inline script
-	Shell   string            `json:"shell"`   // shell to use (e.g. "bash")
-	Params  map[string]string `json:"params"`  // script parameters
+	Target         string                   `json:"target"`                    // fleet selector string
+	Content        string                   `json:"content"`                   // base64-encoded inline script
+	Shell          string                   `json:"shell"`                     // shell to use (e.g. "bash")
+	Params         map[string]string        `json:"params"`                    // script parameters
+	Signature      *commandSignatureRequest `json:"signature,omitempty"`       // mTLS admin signature for audit
+	TimeoutSeconds int                      `json:"timeout_seconds,omitempty"` // exec timeout; 0 = no limit
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.
@@ -163,9 +240,23 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Shell allowlist check.
+	if !allowedCommandShells[strings.ToLower(req.Shell)] {
+		s.writeErrorResponse(w, http.StatusBadRequest, "unsupported shell value", "UNSUPPORTED_SHELL")
+		return
+	}
+
 	inlineContent, err := base64.StdEncoding.DecodeString(req.Content)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "content must be base64-encoded", "INVALID_CONTENT")
+		return
+	}
+
+	// Banned-pattern enforcement (defence-in-depth, path 3). Log the pattern name only,
+	// never the command string itself.
+	if matched := matchBannedPattern(string(inlineContent)); matched != "" {
+		s.logger.Warn("run-command rejected: banned pattern", "pattern", matched)
+		s.writeErrorResponse(w, http.StatusBadRequest, "command contains a prohibited pattern", "BANNED_PATTERN")
 		return
 	}
 
@@ -175,10 +266,28 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cross-tenant RBAC check for single-steward targeting (id: selector).
+	// Admin mTLS principals (tenantID == "") have global scope and skip this check.
+	if stewardID := extractSingleStewardID(req.Target); stewardID != "" && tenantID != "" {
+		if s.controllerService != nil {
+			info, exists := s.controllerService.GetStewardInfo(stewardID)
+			if exists && !isAdminTenantScopeAllowed(tenantID, info.TenantID) {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"admin scope does not cover the target steward's tenant", "CROSS_TENANT_ACCESS_DENIED")
+				return
+			}
+		}
+	}
+
 	if s.fleetQuery == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
 		return
 	}
+
+	// Compute command_hash (SHA-256 of raw command bytes) for audit. The raw command string
+	// itself is never stored.
+	cmdHash := sha256.Sum256(inlineContent)
+	commandHash := hex.EncodeToString(cmdHash[:])
 
 	runID, err := controllerrun.SynthesizeCommandRun(
 		r.Context(),
@@ -199,6 +308,37 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create run", "INTERNAL_ERROR")
 		return
+	}
+
+	// Audit record: write what is known at dispatch time. command string and raw output are NOT stored.
+	if s.auditManager != nil {
+		signatureID := ""
+		if req.Signature != nil && req.Signature.Value != "" {
+			// signature_id = SHA-256 of the base64-encoded signature value (unique fingerprint).
+			sigHash := sha256.Sum256([]byte(req.Signature.Value))
+			signatureID = hex.EncodeToString(sigHash[:])
+		}
+		auditTenantID := tenantID
+		if auditTenantID == "" {
+			auditTenantID = audit.SystemTenantID
+		}
+		targetStewardID := extractSingleStewardID(req.Target)
+		if targetStewardID == "" {
+			targetStewardID = req.Target
+		}
+		evt := audit.NewEventBuilder().
+			Tenant(auditTenantID).
+			Type(business.AuditEventSystemAccess).
+			Action("exec-command").
+			User(principal.ID, business.AuditUserTypeHuman).
+			Resource("steward", targetStewardID, "").
+			Detail("run_id", runID).
+			Detail("command_hash", commandHash).
+			Detail("signature_id", signatureID).
+			Detail("admin_cn", principal.ID).
+			Detail("steward_id", targetStewardID).
+			Severity(business.AuditSeverityHigh)
+		_ = s.auditManager.RecordEvent(r.Context(), evt)
 	}
 
 	s.writeSuccessResponse(w, map[string]string{"run_id": runID})

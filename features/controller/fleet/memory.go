@@ -52,6 +52,9 @@ func matchesFilter(s StewardData, f Filter) bool {
 		attrs = map[string]string{}
 	}
 
+	if f.StewardID != "" && s.ID != f.StewardID {
+		return false
+	}
 	if f.TenantID != "" && s.TenantID != f.TenantID {
 		return false
 	}
