@@ -379,6 +379,66 @@ The controller blob store (`pkg/storage/interfaces/blob.BlobStore`) partitions b
 
 Steward binary distribution uses the `steward-binaries` namespace exclusively. Blob keys take the form `{version}-{platform}-{arch}` (e.g. `v0.5.12-linux-amd64`). Binaries must carry a valid Ed25519 publisher signature verified against the CFGMS publisher identity before storage.
 
+## Steward Upgrade Dispatch Flow (Epic #1930)
+
+The controller can push a new steward binary to one or more stewards via a selector-based fan-out.
+The flow enforces an approval gate before dispatch and records per-steward lifecycle state in a durable `UpgradeStore`.
+
+### Dispatch steps
+
+1. **Publish**: operator calls `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`.
+   The controller verifies the Ed25519 publisher signature and stores the blob with `publisher`, `publisher_tenant`, and `signature` labels.
+2. **Approve**: a separate operator (with `installer:approve:steward` permission) sets the `approved_by` label on the blob.
+   The controller records the approver identity in `BlobMeta.Labels["approved_by"]`.
+3. **Dispatch**: operator calls `POST /api/v1/stewards/upgrade` with a fleet selector (e.g. `id:steward-abc`), version, platform, and arch.
+   The controller:
+   a. Parses the selector and applies the caller's tenant scope.
+   b. Resolves matching stewards via `FleetQuery.Search`; drops stewards from other tenants (403 if none remain).
+   c. Verifies the blob's `approved_by` label is non-empty (403 if missing — "published but not approved").
+   d. Recomputes SHA-256 from the stored blob bytes (does not trust `BlobMeta.Checksum`).
+   e. Checks for non-terminal upgrade records per steward; returns 409 if any exist.
+   f. Creates one `UpgradeRecord` per steward (status: `dispatched`) with publisher provenance fields (`Publisher`, `BundleSignature`, `SignatureDigest`) and a 32-byte `OperationNonce` for replay defense.
+   g. Fans out `CommandPushStewardBinary` to each steward via the control plane (fire-and-forget goroutine).
+   h. Returns `202 Accepted` with `upgrade_id` (the first steward's record ID) and `steward_count`.
+
+### Approval state machine
+
+```
+published ──► approved ──► dispatchable
+   │               │
+   └── dispatch    └── dispatch blocked
+       blocked         unblocked
+```
+
+| Blob label       | Meaning |
+|-----------------|---------|
+| (absent)         | Not yet published (blob does not exist) |
+| `published_by`   | Binary has been published; awaiting approval |
+| `approved_by`    | Binary is approved and dispatchable |
+
+### UpgradeRecord lifecycle
+
+```
+dispatched ──► downloaded ──► swapped ──► committed
+                                     └──► rolled_back
+(any state) ──► failed
+```
+
+Terminal states (`committed`, `rolled_back`, `failed`) unblock re-dispatch to the same steward.
+
+### Durable store requirement
+
+The controller refuses dispatch with `503 Service Unavailable` if no durable `UpgradeStore` is
+configured at server startup. There is no silent in-memory fallback — durable state is required
+to survive controller restarts and HA failover replay.
+
+### Rollback
+
+`POST /api/v1/stewards/upgrade/{upgrade_id}/rollback` requires an explicit `version` field
+(named target, not most-recent). The rollback is a dispatch-equivalent action: it looks up the
+original steward, fetches the target-version blob (must be approved), creates a new `UpgradeRecord`,
+and fans out `CommandPushStewardBinary`. Requires `installer:dispatch:steward` permission.
+
 ## Monitoring Export Credentials
 
 OTLP exporter credentials (API keys / bearer tokens) are stored in `pkg/secrets`, not in config files. Configure the secret key name via `config["secret_key"]` and use `NewOTLPExporterWithSecrets` to wire the store at construction time.
