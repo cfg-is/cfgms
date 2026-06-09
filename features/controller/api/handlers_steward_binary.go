@@ -176,18 +176,25 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	// Operator identity from auth context.
 	publishedBy, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
 
+	labels := map[string]string{
+		"version":          version,
+		"platform":         platform,
+		"arch":             arch,
+		"published_by":     publishedBy,
+		"publisher":        "cfgms",
+		"signature_digest": sigDigest,
+		"signature":        base64.RawURLEncoding.EncodeToString(sigBytes),
+		"publisher_tenant": tenantID,
+	}
+	// Issue #1948: auto-approve when test mode is active (CFGMS_SEED_TEST_API_KEYS=1 +
+	// CFGMS_TEST_STEWARD_PUBLISHER_KEY set). Production binaries require a separate
+	// approval step; this path is never reachable in production.
+	if s.testAutoApproveStewardBinaries {
+		labels["approved_by"] = "auto-approved-test"
+	}
 	meta := blob.BlobMeta{
 		ContentType: "application/octet-stream",
-		Labels: map[string]string{
-			"version":          version,
-			"platform":         platform,
-			"arch":             arch,
-			"published_by":     publishedBy,
-			"publisher":        "cfgms",
-			"signature_digest": sigDigest,
-			"signature":        base64.RawURLEncoding.EncodeToString(sigBytes),
-			"publisher_tenant": tenantID,
-		},
+		Labels:      labels,
 	}
 
 	if putErr := s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(body), meta); putErr != nil {

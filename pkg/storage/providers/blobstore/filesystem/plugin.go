@@ -67,13 +67,26 @@ type blobMetaSidecar struct {
 }
 
 // validateKeyComponent rejects blob key fields that would enable path traversal.
-// Returns an error if the component contains "..", "/", or "\" characters.
+// TenantID may contain "/" to express hierarchical tenants (e.g. "root/child-a");
+// all other fields (Namespace, Name) must not contain path separators.
+// All fields reject ".." and leading "/" to prevent directory traversal.
 func validateKeyComponent(field, value string) error {
 	if strings.Contains(value, "..") {
 		return fmt.Errorf("blob key %s must not contain '..'", field)
 	}
-	if strings.ContainsAny(value, `/\`) {
-		return fmt.Errorf("blob key %s must not contain path separators", field)
+	if strings.Contains(value, `\`) {
+		return fmt.Errorf("blob key %s must not contain '\\'", field)
+	}
+	if field == "TenantID" {
+		// Hierarchical tenants use "/" as a path separator; reject only a leading
+		// slash (which would make filepath.Join treat it as an absolute path).
+		if strings.HasPrefix(value, "/") {
+			return fmt.Errorf("blob key TenantID must not start with '/'")
+		}
+		return nil
+	}
+	if strings.Contains(value, "/") {
+		return fmt.Errorf("blob key %s must not contain '/'", field)
 	}
 	return nil
 }

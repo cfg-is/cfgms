@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -263,10 +264,22 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Return upgrade_id as the first record's ID (single-steward: maps directly to the record).
 	returnUpgradeID := created[0].upgradeID
 
-	// Fan-out CommandPushStewardBinary — fire-and-forget goroutine.
+	// Fan-out CommandPushStewardBinary with completion callbacks so the upgrade
+	// record advances from dispatched → committed (success) or failed (error/timeout).
 	if s.commandPublisher != nil {
-		downloadURL := fmt.Sprintf("/api/v1/tenants/%s/installer/steward-binaries/%s/%s/%s",
-			callerTenantID, req.Version, req.Platform, req.Arch)
+		// Stewards download the binary via the controller's HTTPS API.
+		// ExternalURL (set via CFGMS_EXTERNAL_URL env or external_url in config) is the
+		// URL the steward uses to reach the controller's HTTP API. The download URL uses
+		// the caller's tenant namespace so the blob-store lookup resolves correctly.
+		baseURL := ""
+		if s.cfg != nil {
+			baseURL = strings.TrimRight(s.cfg.ExternalURL, "/")
+		}
+		if baseURL == "" {
+			baseURL = "https://localhost:9080"
+		}
+		downloadURL := fmt.Sprintf("%s/api/v1/installer/steward-binaries/%s/%s/%s",
+			baseURL, req.Version, req.Platform, req.Arch)
 		params := map[string]interface{}{
 			"version":          req.Version,
 			"download_url":     downloadURL,
@@ -279,20 +292,56 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		createdSnapshot := created
 		go func() {
 			for _, entry := range createdSnapshot {
-				if _, pubErr := s.commandPublisher.PublishCommand(
+				upgradeID := entry.upgradeID
+				stewardID := entry.stewardID
+				onComplete := func(event *cpTypes.Event) {
+					switch event.Type {
+					case cpTypes.EventCommandCompleted:
+						if updErr := s.upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID,
+							business.UpgradeStatusCommitted, ""); updErr != nil {
+							s.logger.Warn("Failed to mark upgrade committed",
+								"upgrade_id", upgradeID, "error", updErr)
+						}
+					case cpTypes.EventCommandFailed:
+						errMsg := ""
+						if event.Details != nil {
+							if msg, ok := event.Details["error"].(string); ok {
+								errMsg = msg
+							}
+						}
+						if updErr := s.upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID,
+							business.UpgradeStatusFailed, errMsg); updErr != nil {
+							s.logger.Warn("Failed to mark upgrade failed",
+								"upgrade_id", upgradeID, "error", updErr)
+						}
+					}
+				}
+				onTimeout := func() {
+					if updErr := s.upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID,
+						business.UpgradeStatusFailed, "command timed out"); updErr != nil {
+						s.logger.Warn("Failed to mark upgrade failed on timeout",
+							"upgrade_id", upgradeID, "error", updErr)
+					}
+				}
+				if _, pubErr := s.commandPublisher.PublishCommandWithCallback(
 					context.Background(),
-					entry.stewardID,
+					stewardID,
 					cpTypes.CommandPushStewardBinary,
 					params,
+					2*time.Minute,
+					onComplete,
+					onTimeout,
 				); pubErr != nil {
 					s.logger.Error("Failed to dispatch CommandPushStewardBinary",
 						"error", pubErr,
-						"steward_id", logging.SanitizeLogValue(entry.stewardID),
-						"upgrade_id", entry.upgradeID)
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"upgrade_id", upgradeID)
+					_ = s.upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID,
+						business.UpgradeStatusFailed, pubErr.Error())
 				} else {
 					s.logger.Info("CommandPushStewardBinary dispatched",
-						"steward_id", logging.SanitizeLogValue(entry.stewardID),
-						"upgrade_id", entry.upgradeID,
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"upgrade_id", upgradeID,
 						"version", logging.SanitizeLogValue(req.Version))
 				}
 			}
@@ -495,8 +544,15 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.commandPublisher != nil {
-		downloadURL := fmt.Sprintf("/api/v1/tenants/%s/installer/steward-binaries/%s/%s/%s",
-			callerTenantID, req.Version, original.Platform, original.Arch)
+		baseURL := ""
+		if s.cfg != nil {
+			baseURL = strings.TrimRight(s.cfg.ExternalURL, "/")
+		}
+		if baseURL == "" {
+			baseURL = "https://localhost:9080"
+		}
+		downloadURL := fmt.Sprintf("%s/api/v1/installer/steward-binaries/%s/%s/%s",
+			baseURL, req.Version, original.Platform, original.Arch)
 		params := map[string]interface{}{
 			"version":          req.Version,
 			"download_url":     downloadURL,
@@ -508,16 +564,50 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		}
 		stewardID := original.StewardID
 		go func() {
-			if _, pubErr := s.commandPublisher.PublishCommand(
+			onComplete := func(event *cpTypes.Event) {
+				switch event.Type {
+				case cpTypes.EventCommandCompleted:
+					if updErr := s.upgradeStore.UpdateUpgradeStatus(context.Background(), rollbackUpgradeID,
+						business.UpgradeStatusRolledBack, ""); updErr != nil {
+						s.logger.Warn("Failed to mark rollback committed",
+							"upgrade_id", rollbackUpgradeID, "error", updErr)
+					}
+				case cpTypes.EventCommandFailed:
+					errMsg := ""
+					if event.Details != nil {
+						if msg, ok := event.Details["error"].(string); ok {
+							errMsg = msg
+						}
+					}
+					if updErr := s.upgradeStore.UpdateUpgradeStatus(context.Background(), rollbackUpgradeID,
+						business.UpgradeStatusFailed, errMsg); updErr != nil {
+						s.logger.Warn("Failed to mark rollback failed",
+							"upgrade_id", rollbackUpgradeID, "error", updErr)
+					}
+				}
+			}
+			onTimeout := func() {
+				if updErr := s.upgradeStore.UpdateUpgradeStatus(context.Background(), rollbackUpgradeID,
+					business.UpgradeStatusFailed, "command timed out"); updErr != nil {
+					s.logger.Warn("Failed to mark rollback failed on timeout",
+						"upgrade_id", rollbackUpgradeID, "error", updErr)
+				}
+			}
+			if _, pubErr := s.commandPublisher.PublishCommandWithCallback(
 				context.Background(),
 				stewardID,
 				cpTypes.CommandPushStewardBinary,
 				params,
+				2*time.Minute,
+				onComplete,
+				onTimeout,
 			); pubErr != nil {
 				s.logger.Error("Failed to dispatch rollback CommandPushStewardBinary",
 					"error", pubErr,
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"rollback_upgrade_id", rollbackUpgradeID)
+				_ = s.upgradeStore.UpdateUpgradeStatus(context.Background(), rollbackUpgradeID,
+					business.UpgradeStatusFailed, pubErr.Error())
 			} else {
 				s.logger.Info("Rollback CommandPushStewardBinary dispatched",
 					"steward_id", logging.SanitizeLogValue(stewardID),

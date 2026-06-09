@@ -260,6 +260,11 @@ type TransportConfig struct {
 	// Mirrors steward.cfg upgrade.allow_downgrade. (Issue #1943)
 	UpgradeAllowDowngrade bool
 
+	// UpgradePublisherTrustStore, when non-nil, overrides CFGMSPublisherIdentity()
+	// during steward binary signature verification. Intended for test environments
+	// only — production deployments leave this nil. (Issue #1948)
+	UpgradePublisherTrustStore trust.TrustStore
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -302,26 +307,27 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	}
 
 	c := &TransportClient{
-		heartbeatInterval:     heartbeatInterval,
-		rng:                   rng,
-		heartbeatStop:         make(chan struct{}),
-		convergenceStop:       make(chan struct{}),
-		convergeInterval:      30 * time.Minute,
-		convergeIntervalCh:    make(chan struct{}, 1),
-		transportAddress:      cfg.ControllerURL,
-		certPath:              cfg.TLSCertPath,
-		caCertPEM:             cfg.CACertPEM,
-		serverCertPEM:         cfg.ServerCertPEM,
-		signingCertPEMs:       signingCertPEMs,
-		certManager:           cfg.CertManager,
-		offlineQueue:          offlineQueue,
-		commandReplayWindow:   cfg.SignedCommandReplayWindow,
-		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
-		scriptSigning:         cfg.ScriptSigning,
-		identityPersistFunc:   cfg.IdentityPersistFunc,
-		certStoreDir:          cfg.CertStoreDir,
-		upgradeAllowDowngrade: cfg.UpgradeAllowDowngrade,
-		logger:                cfg.Logger,
+		heartbeatInterval:          heartbeatInterval,
+		rng:                        rng,
+		heartbeatStop:              make(chan struct{}),
+		convergenceStop:            make(chan struct{}),
+		convergeInterval:           30 * time.Minute,
+		convergeIntervalCh:         make(chan struct{}, 1),
+		transportAddress:           cfg.ControllerURL,
+		certPath:                   cfg.TLSCertPath,
+		caCertPEM:                  cfg.CACertPEM,
+		serverCertPEM:              cfg.ServerCertPEM,
+		signingCertPEMs:            signingCertPEMs,
+		certManager:                cfg.CertManager,
+		offlineQueue:               offlineQueue,
+		commandReplayWindow:        cfg.SignedCommandReplayWindow,
+		commandMaxParamsBytes:      cfg.SignedCommandMaxParamsBytes,
+		scriptSigning:              cfg.ScriptSigning,
+		identityPersistFunc:        cfg.IdentityPersistFunc,
+		certStoreDir:               cfg.CertStoreDir,
+		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
+		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
+		logger:                     cfg.Logger,
 	}
 
 	return c, nil
