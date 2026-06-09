@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,6 +44,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -98,6 +100,37 @@ type TransportClient struct {
 	// handler by setupCommandHandler so CommandExecuteScript signature enforcement
 	// is active in controller-connected deployments, not just standalone mode.
 	scriptSigning stewardconfig.ScriptSigningConfig
+
+	// certStoreDir is the stable directory used for downloading upgrade binaries
+	// and checking startup flag files. Passed in from TransportConfig (Issue #1943).
+	certStoreDir string
+
+	// allowDowngrade permits the controller to push a version ≤ the running version.
+	// Sourced from steward.cfg upgrade.allow_downgrade (Issue #1943).
+	allowDowngrade bool
+
+	// revokedVersions is the steward-cached list of binary versions that must not
+	// be installed. Updated by the controller via heartbeat responses (Issue #1943).
+	revokedVersions []string
+
+	// runningVersion is the version of the currently running steward binary.
+	// Defaults to pkg/version.Version at handler invocation time; overridable
+	// in tests by setting this field directly.
+	runningVersion string
+
+	// launcherPathOverride overrides the compile-time constant launcher path.
+	// Empty string means use the default for the current platform (Issue #1943).
+	// Set only in tests.
+	launcherPathOverride string
+
+	// upgradePublisherStore overrides the trust store used for push_steward_binary
+	// signature verification. When nil, CFGMSPublisherIdentity() is used.
+	// Set only in tests.
+	upgradePublisherStore trust.TrustStore
+
+	// downloadHTTPClientOverride overrides the HTTP client used for binary downloads.
+	// When nil, buildDownloadHTTPClient() is called. Set only in tests.
+	downloadHTTPClientOverride *http.Client
 
 	// Last configuration received from the controller (for scheduled re-convergence)
 	lastConfigYAML    []byte
@@ -218,6 +251,16 @@ type TransportConfig struct {
 	// encryption key across restarts (Issue #920). May be nil.
 	SecretStore secretsif.SecretStore
 
+	// CertStoreDir is the stable directory for steward cert storage. Used as the
+	// base for the upgrades download directory and startup flag-file checks (Issue #1943).
+	// If empty the upgrade download feature is unavailable.
+	CertStoreDir string
+
+	// AllowDowngrade permits the controller to push a binary version older than or
+	// equal to the running version. Sourced from steward.cfg upgrade.allow_downgrade.
+	// Defaults to false (downgrade denied). (Issue #1943)
+	AllowDowngrade bool
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -277,6 +320,8 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
 		scriptSigning:         cfg.ScriptSigning,
 		identityPersistFunc:   cfg.IdentityPersistFunc,
+		certStoreDir:          cfg.CertStoreDir,
+		allowDowngrade:        cfg.AllowDowngrade,
 		logger:                cfg.Logger,
 	}
 
@@ -623,6 +668,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
 	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {
 		return c.handlePushSigningCert(ctx, cmd)
+	})
+
+	// Register push_steward_binary handler — controller instructs the steward to download
+	// and stage a new binary via the launcher swap subcommand (Issue #1943).
+	handler.RegisterHandler(cpTypes.CommandPushStewardBinary, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handlePushStewardBinary(ctx, cmd)
 	})
 
 	return handler, nil

@@ -40,6 +40,11 @@ const (
 	// Params: cert_pem (base64-encoded PEM certificate). Idempotent — same
 	// fingerprint triggers no disk write on the steward side. (Issue #1817)
 	CommandPushSigningCert CommandType = "push_signing_cert"
+
+	// CommandPushStewardBinary instructs the steward to download and stage a new
+	// binary version via the launcher swap subcommand. (Issue #1940)
+	// Params: version, download_url, sha256, platform, arch, publisher, bundle_signature.
+	CommandPushStewardBinary CommandType = "push_steward_binary"
 )
 
 // Command represents a command sent from controller to steward.
@@ -105,6 +110,22 @@ const (
 	// call to the controller. Details carry method, path, headers, body, execution_id,
 	// and a per-execution sequence number for correlation.
 	EventRelayRequest EventType = "relay_request"
+
+	// EventStewardUpgradeDownloaded is emitted by the steward after successfully
+	// downloading and verifying a new binary. Details: version, sha256, size_bytes. (Issue #1940)
+	EventStewardUpgradeDownloaded EventType = "steward_upgrade_downloaded"
+
+	// EventStewardUpgradeSwapped is emitted by the steward after the launcher
+	// successfully stages the new binary. Details: version, launcher_path. (Issue #1940)
+	EventStewardUpgradeSwapped EventType = "steward_upgrade_swapped"
+
+	// EventStewardUpgradeCommitted is emitted on startup when the launcher's
+	// upgrade-committed flag file is present (new version passed the startup window). (Issue #1940)
+	EventStewardUpgradeCommitted EventType = "steward_upgrade_committed"
+
+	// EventStewardUpgradeRolledBack is emitted on startup when the launcher's
+	// upgrade-rolled-back flag file is present (new version failed and was rolled back). (Issue #1940)
+	EventStewardUpgradeRolledBack EventType = "steward_upgrade_rolled_back"
 )
 
 // Event represents an event published from steward to controller.

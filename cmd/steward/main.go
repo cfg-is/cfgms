@@ -687,10 +687,12 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var scriptSigning stewardconfig.ScriptSigningConfig
+	var allowDowngrade bool
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		scriptSigning = cfg.Steward.ScriptSigning
+		allowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
@@ -708,6 +710,8 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		ScriptSigning:               scriptSigning,
+		CertStoreDir:                certStoreDir,
+		AllowDowngrade:              allowDowngrade,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -735,6 +739,9 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 
 	logger.Info("Connected to controller via gRPC transport",
 		"transport_address", regResp.TransportAddress)
+
+	// Emit any upgrade lifecycle events from the previous boot cycle (Issue #1943).
+	transportClient.EmitStartupUpgradeEvents(ctx, certStoreDir)
 
 	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
@@ -809,9 +816,11 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
+	var allowDowngrade bool
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+		allowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
 	}
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
@@ -825,6 +834,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		CertStoreDir:                certStoreDir,
+		AllowDowngrade:              allowDowngrade,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
