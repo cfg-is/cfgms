@@ -53,7 +53,7 @@ func TestHelperProcess(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "helper %s: openAndInit: %v\n", prefix, err)
 		os.Exit(2)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	store := &SQLiteStewardStore{db: db}
 	ctx := context.Background()
@@ -152,7 +152,7 @@ func TestSQLite_TwoProcesses_ConcurrentWrites_NoCorruption(t *testing.T) {
 	// confirm all 1000 records are present.
 	db, err = openAndInit(dbPath)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store := &SQLiteStewardStore{db: db}
 	records, err := store.ListStewards(context.Background())
 	require.NoError(t, err, "parent ListStewards")

@@ -251,4 +251,3 @@ func (l Layout) Rollback() (string, error) {
 	}
 	return newPS.Current, nil
 }
-
