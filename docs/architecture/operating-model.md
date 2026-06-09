@@ -142,6 +142,7 @@ The controller is the central management server. It does not manage devices dire
 4. **Run workflows** — Execute automation workflows for cloud/SaaS operations that don't require a steward (desired-state convergence for cloud resources, orchestration and data sync between third-party services, and imperative automation). See [controller operating model](controller-operating-model.md) for details
 5. **Manage identity** — Certificate authority, steward registration, tenant management
 6. **Orchestrate multi-node operations** — The controller is aware of application dependencies and infrastructure roles (e.g., Hyper-V clusters, SQL clusters, domain controllers, DNS/DHCP roles). Operations that span multiple devices — rolling updates, coordinated reboots, cluster-aware patching — are sequenced by the controller to maintain service availability. Individual stewards apply their cfgs; the controller decides the order and timing
+7. **Distribute steward binaries** — Versioned, publisher-signed steward binaries are stored in the controller blob store under the `steward-binaries` namespace (distinct from the `installers` namespace used by the install-package flow). Operators publish via `cfg installer publish` or `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`. The controller verifies the CFGMS publisher Ed25519 signature before accepting any binary.
 
 **What the controller is NOT:**
 - Not required for a steward to function

@@ -372,3 +372,232 @@ func TestInstallerUpload(t *testing.T) {
 		assert.Contains(t, output, "darwin/arm64")
 	})
 }
+
+func TestInstallerPublish(t *testing.T) {
+	t.Run("rejects unknown kind before HTTP call", func(t *testing.T) {
+		origKind := publishKind
+		origVersion := publishVersion
+		origPlatform := publishPlatform
+		origArch := publishArch
+		t.Cleanup(func() {
+			publishKind = origKind
+			publishVersion = origVersion
+			publishPlatform = origPlatform
+			publishArch = origArch
+		})
+
+		publishKind = "outpost" // unsupported
+		publishVersion = "v0.5.12"
+		publishPlatform = "linux"
+		publishArch = "amd64"
+
+		callCount := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+		}))
+		defer srv.Close()
+
+		origURL := publishAPIURL
+		origNoBundle := noBundle
+		t.Cleanup(func() {
+			publishAPIURL = origURL
+			noBundle = origNoBundle
+		})
+		publishAPIURL = srv.URL
+		noBundle = true
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "kind")
+		assert.Equal(t, 0, callCount, "no HTTP call must be made for unknown kind")
+	})
+
+	t.Run("rejects unknown platform before HTTP call", func(t *testing.T) {
+		origKind := publishKind
+		origVersion := publishVersion
+		origPlatform := publishPlatform
+		origArch := publishArch
+		t.Cleanup(func() {
+			publishKind = origKind
+			publishVersion = origVersion
+			publishPlatform = origPlatform
+			publishArch = origArch
+		})
+
+		publishKind = "steward"
+		publishVersion = "v0.5.12"
+		publishPlatform = "haiku" // unknown
+		publishArch = "amd64"
+
+		callCount := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+		}))
+		defer srv.Close()
+
+		origURL := publishAPIURL
+		origNoBundle := noBundle
+		t.Cleanup(func() {
+			publishAPIURL = origURL
+			noBundle = origNoBundle
+		})
+		publishAPIURL = srv.URL
+		noBundle = true
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "platform")
+		assert.Equal(t, 0, callCount, "no HTTP call must be made for unknown platform")
+	})
+
+	t.Run("rejects unknown arch before HTTP call", func(t *testing.T) {
+		origKind := publishKind
+		origVersion := publishVersion
+		origPlatform := publishPlatform
+		origArch := publishArch
+		t.Cleanup(func() {
+			publishKind = origKind
+			publishVersion = origVersion
+			publishPlatform = origPlatform
+			publishArch = origArch
+		})
+
+		publishKind = "steward"
+		publishVersion = "v0.5.12"
+		publishPlatform = "linux"
+		publishArch = "riscv64" // unknown
+
+		callCount := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+		}))
+		defer srv.Close()
+
+		origURL := publishAPIURL
+		origNoBundle := noBundle
+		t.Cleanup(func() {
+			publishAPIURL = origURL
+			noBundle = origNoBundle
+		})
+		publishAPIURL = srv.URL
+		noBundle = true
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "arch")
+		assert.Equal(t, 0, callCount, "no HTTP call must be made for unknown arch")
+	})
+
+	t.Run("rejects missing binary file before HTTP call", func(t *testing.T) {
+		origKind := publishKind
+		origVersion := publishVersion
+		origPlatform := publishPlatform
+		origArch := publishArch
+		origBinary := publishBinary
+		t.Cleanup(func() {
+			publishKind = origKind
+			publishVersion = origVersion
+			publishPlatform = origPlatform
+			publishArch = origArch
+			publishBinary = origBinary
+		})
+
+		publishKind = "steward"
+		publishVersion = "v0.5.12"
+		publishPlatform = "linux"
+		publishArch = "amd64"
+		publishBinary = "/nonexistent/steward"
+
+		callCount := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+		}))
+		defer srv.Close()
+
+		origURL := publishAPIURL
+		origNoBundle := noBundle
+		t.Cleanup(func() {
+			publishAPIURL = origURL
+			noBundle = origNoBundle
+		})
+		publishAPIURL = srv.URL
+		noBundle = true
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.Equal(t, 0, callCount, "no HTTP call must be made for missing binary")
+	})
+
+	t.Run("sends correct path and returns confirmation on success", func(t *testing.T) {
+		origKind := publishKind
+		origVersion := publishVersion
+		origPlatform := publishPlatform
+		origArch := publishArch
+		origBinary := publishBinary
+		origSig := publishSignature
+		origURL := publishAPIURL
+		origNoBundle := noBundle
+		t.Cleanup(func() {
+			publishKind = origKind
+			publishVersion = origVersion
+			publishPlatform = origPlatform
+			publishArch = origArch
+			publishBinary = origBinary
+			publishSignature = origSig
+			publishAPIURL = origURL
+			noBundle = origNoBundle
+		})
+
+		publishKind = "steward"
+		publishVersion = "v0.5.12"
+		publishPlatform = "linux"
+		publishArch = "amd64"
+		noBundle = true
+
+		dir := t.TempDir()
+		binaryPath := filepath.Join(dir, "cfgms-steward")
+		sigPath := filepath.Join(dir, "cfgms-steward.sig")
+		require.NoError(t, os.WriteFile(binaryPath, []byte("fake-binary-bytes"), 0600))
+		require.NoError(t, os.WriteFile(sigPath, make([]byte, 64), 0600))
+
+		publishBinary = binaryPath
+		publishSignature = sigPath
+
+		var receivedPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedPath = r.URL.Path
+			assert.Equal(t, "POST", r.Method)
+			assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+			assert.NotEmpty(t, r.URL.Query().Get("signature"), "signature must be present")
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"version":          "v0.5.12",
+					"platform":         "linux",
+					"arch":             "amd64",
+					"size":             int64(17),
+					"sha256":           "sha256:abc123",
+					"published_by":     "operator",
+					"publisher":        "cfgms",
+					"signature_digest": "deadbeef",
+				},
+			})
+		}))
+		defer srv.Close()
+
+		publishAPIURL = srv.URL
+
+		output := captureStdout(t, func() {
+			err := runInstallerPublish(installerPublishCmd, []string{})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "/api/v1/installer/steward-binaries/v0.5.12/linux/amd64", receivedPath)
+		assert.Contains(t, output, "v0.5.12")
+		assert.Contains(t, output, "linux")
+		assert.Contains(t, output, "amd64")
+	})
+}

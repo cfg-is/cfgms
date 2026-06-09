@@ -150,6 +150,14 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 			case "status":
 				// Status filter validation
 				validator.ValidateString(result, fieldName, value, "charset:alphanumeric_dash", "max_length:32")
+			case "signature":
+				// Ed25519 signature as standard base64 (Issue #1944: steward binary publish).
+				validator.ValidateString(result, fieldName, value, "charset:base64", "max_length:512")
+			case "force":
+				// Boolean flag query param.
+				if value != "true" && value != "false" {
+					result.AddError(fieldName, value, "enum", "force must be true or false")
+				}
 			default:
 				// Generic query parameter validation
 				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:512", "no_control_chars")

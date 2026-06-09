@@ -4,10 +4,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -88,6 +90,26 @@ func init() {
 
 	installerCmd.AddCommand(installerUploadCmd)
 	installerCmd.AddCommand(installerDownloadURLCmd)
+
+	installerPublishCmd.Flags().StringVar(&publishKind, "kind", "", "Binary kind: steward (required)")
+	installerPublishCmd.Flags().StringVar(&publishVersion, "version", "", "Semantic version, e.g. v0.5.12 (required)")
+	installerPublishCmd.Flags().StringVar(&publishPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
+	installerPublishCmd.Flags().StringVar(&publishArch, "arch", "", "Target architecture: amd64, arm64 (required)")
+	installerPublishCmd.Flags().StringVar(&publishBinary, "binary", "", "Path to the binary file (required)")
+	installerPublishCmd.Flags().StringVar(&publishSignature, "signature", "", "Path to the Ed25519 signature file (required)")
+	installerPublishCmd.Flags().BoolVar(&publishForce, "force", false, "Overwrite an existing published binary")
+	installerPublishCmd.Flags().StringVar(&publishAPIURL, "api-url", "", "Controller API URL (env: CFGMS_API_URL)")
+	installerPublishCmd.Flags().StringVar(&publishAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
+	installerPublishCmd.Flags().StringVar(&publishTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	installerPublishCmd.Flags().BoolVar(&publishTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	_ = installerPublishCmd.MarkFlagRequired("kind")
+	_ = installerPublishCmd.MarkFlagRequired("version")
+	_ = installerPublishCmd.MarkFlagRequired("platform")
+	_ = installerPublishCmd.MarkFlagRequired("arch")
+	_ = installerPublishCmd.MarkFlagRequired("binary")
+	_ = installerPublishCmd.MarkFlagRequired("signature")
+
+	installerCmd.AddCommand(installerPublishCmd)
 }
 
 func getInstallerClient() (*APIClient, error) {
@@ -221,4 +243,173 @@ func (c *APIClient) UploadInstallerArtifact(ctx context.Context, platform, arch 
 // InstallerDownloadURL returns the public download URL for the given platform/arch.
 func (c *APIClient) InstallerDownloadURL(platform, arch string) string {
 	return strings.TrimRight(c.baseURL, "/") + "/api/v1/installer/download/" + platform + "/" + arch
+}
+
+// --- Steward binary publish subcommand (Issue #1944) ---
+
+var (
+	publishKind        string
+	publishVersion     string
+	publishPlatform    string
+	publishArch        string
+	publishBinary      string
+	publishSignature   string
+	publishForce       bool
+	publishAPIURL      string
+	publishAPIKey      string
+	publishTLSCACert   string
+	publishTLSInsecure bool
+)
+
+var installerPublishCmd = &cobra.Command{
+	Use:   "publish",
+	Short: "Publish a versioned steward binary to the controller blob store",
+	Long: `Publish a versioned steward binary to the controller blob store.
+
+Streams the binary to POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}
+with the Ed25519 signature passed as a query parameter. The server verifies the
+signature against the CFGMS publisher identity before accepting the binary.
+
+The --kind flag must be "steward". Platform and arch must be explicit — no
+binary format detection is performed.
+
+Examples:
+  cfg installer publish --kind=steward --version=v0.5.12 --platform=linux --arch=amd64 \
+      --binary ./cfgms-steward --signature ./cfgms-steward.sig
+  cfg installer publish --kind=steward --version=v0.5.12 --platform=windows --arch=amd64 \
+      --binary ./cfgms-steward.exe --signature ./cfgms-steward.exe.sig --force`,
+	RunE: runInstallerPublish,
+}
+
+func getPublishClient() (*APIClient, error) {
+	apiURL := publishAPIURL
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	client, err := resolveBundleClient(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client != nil {
+		return client, nil
+	}
+
+	apiKey := publishAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("CFGMS_API_KEY")
+	}
+
+	insecure := publishTLSInsecure
+	if !insecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
+		insecure = true
+	}
+
+	caCertPath := publishTLSCACert
+	if caCertPath == "" {
+		caCertPath = os.Getenv("CFGMS_TLS_CA_CERT")
+	}
+
+	return newClientFromFlags(apiURL, apiKey, caCertPath, insecure)
+}
+
+func runInstallerPublish(cmd *cobra.Command, args []string) error {
+	if publishKind != "steward" {
+		return fmt.Errorf("unknown kind %q; only \"steward\" is supported", publishKind)
+	}
+	if !validInstallerPlatforms[publishPlatform] {
+		return fmt.Errorf("unknown platform %q; valid values: windows, darwin, linux", publishPlatform)
+	}
+	if !validInstallerArchs[publishArch] {
+		return fmt.Errorf("unknown arch %q; valid values: amd64, arm64", publishArch)
+	}
+
+	binaryInfo, err := os.Stat(publishBinary)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("binary file not found: %s", publishBinary)
+		}
+		return fmt.Errorf("cannot access binary file %s: %w", publishBinary, err)
+	}
+	if binaryInfo.Size() == 0 {
+		return fmt.Errorf("binary file is empty: %s", publishBinary)
+	}
+
+	// #nosec G304 - file path provided by user via CLI flag
+	sigBytes, err := os.ReadFile(publishSignature)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("signature file not found: %s", publishSignature)
+		}
+		return fmt.Errorf("cannot read signature file %s: %w", publishSignature, err)
+	}
+	if len(sigBytes) == 0 {
+		return fmt.Errorf("signature file is empty: %s", publishSignature)
+	}
+
+	// #nosec G304 - file path provided by user via CLI flag
+	f, err := os.Open(publishBinary)
+	if err != nil {
+		return fmt.Errorf("failed to open binary file %s: %w", publishBinary, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	client, err := getPublishClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	return client.PublishStewardBinary(context.Background(),
+		publishVersion, publishPlatform, publishArch,
+		f, sigBytes, publishForce)
+}
+
+// stewardBinaryPublishAPIResponse mirrors the server-side stewardBinaryPublishResponse wrapped in APIResponse.
+type stewardBinaryPublishAPIResponse struct {
+	Data struct {
+		Version         string `json:"version"`
+		Platform        string `json:"platform"`
+		Arch            string `json:"arch"`
+		Size            int64  `json:"size"`
+		SHA256          string `json:"sha256"`
+		PublishedBy     string `json:"published_by"`
+		Publisher       string `json:"publisher"`
+		SignatureDigest string `json:"signature_digest"`
+	} `json:"data"`
+}
+
+// PublishStewardBinary streams the binary to POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}
+// and prints the confirmation line to stdout on success. sigBytes is the raw Ed25519 signature.
+func (c *APIClient) PublishStewardBinary(ctx context.Context, version, platform, arch string, r io.Reader, sigBytes []byte, force bool) error {
+	sigBase64 := base64.StdEncoding.EncodeToString(sigBytes)
+	query := url.Values{}
+	query.Set("signature", sigBase64)
+	if force {
+		query.Set("force", "true")
+	}
+	path := "/api/v1/installer/steward-binaries/" + version + "/" + platform + "/" + arch + "?" + query.Encode()
+
+	resp, err := c.doRequestWithContentType(ctx, "POST", path, r, "application/octet-stream")
+	if err != nil {
+		return fmt.Errorf("failed to publish steward binary: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+
+	var apiResp stewardBinaryPublishAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	fmt.Printf("Published steward/%s/%s/%s (%d bytes, sha256: %s)\n",
+		apiResp.Data.Version,
+		apiResp.Data.Platform,
+		apiResp.Data.Arch,
+		apiResp.Data.Size,
+		strings.TrimPrefix(apiResp.Data.SHA256, "sha256:"),
+	)
+	return nil
 }
