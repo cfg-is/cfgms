@@ -54,6 +54,13 @@ func TestWindowsSecurityCollector(t *testing.T) {
 	require.NoError(t, err, "local_user_count must parse as integer: %q", countStr)
 	assert.Greater(t, count, 0, "local_user_count must be > 0")
 
+	// local_group_count must be a parseable integer > 0
+	groupCountStr, ok := attrs["local_group_count"]
+	require.True(t, ok, "local_group_count must be set")
+	groupCount, err := strconv.Atoi(groupCountStr)
+	require.NoError(t, err, "local_group_count must parse as integer: %q", groupCountStr)
+	assert.Greater(t, groupCount, 0, "local_group_count must be > 0")
+
 	// domain_joined must be exactly "true" or "false"
 	djVal, ok := attrs["domain_joined"]
 	require.True(t, ok, "domain_joined must be set")
@@ -135,8 +142,61 @@ func TestWindowsCollectBitLocker(t *testing.T) {
 		"bitlocker_enabled must be 'true' or 'false', got %q", blVal)
 }
 
-// TestWindowsCollectAVProducts verifies that collectAVProducts always sets
-// av_products_detected to a non-empty value.
+// TestWinCountWMICRows verifies the wmic output row counter.
+func TestWinCountWMICRows(t *testing.T) {
+	// Header + 2 data rows + blank trailing line (typical wmic output)
+	sample := "Name  \r\nAdministrator  \r\nrunneradmin  \r\n\r\n"
+	assert.Equal(t, 2, winCountWMICRows(sample), "should count 2 data rows")
+
+	assert.Equal(t, 0, winCountWMICRows(""), "empty output should yield 0")
+
+	// Header only — wmic returned no matching accounts
+	assert.Equal(t, 0, winCountWMICRows("Name  \r\n\r\n"), "header-only output should yield 0")
+}
+
+// TestWinCountNetLocalgroupMembers verifies the "net localgroup <name>" member counter.
+func TestWinCountNetLocalgroupMembers(t *testing.T) {
+	sample := "Alias name     Administrators\r\n" +
+		"Comment        \r\n\r\n" +
+		"Members\r\n\r\n" +
+		"------------------------\r\n" +
+		"Administrator\r\n" +
+		"runneradmin\r\n" +
+		"The command completed successfully.\r\n"
+	assert.Equal(t, 2, winCountNetLocalgroupMembers(sample), "should count 2 members")
+
+	// Non-English locale — French completion message ends in period, not "The command"
+	frenchSample := "Nom d'alias     Administrateurs\r\n\r\n" +
+		"Membres\r\n\r\n" +
+		"------------------------\r\n" +
+		"Administrator\r\n" +
+		"La commande s'est terminée correctement.\r\n"
+	assert.Equal(t, 1, winCountNetLocalgroupMembers(frenchSample), "should handle non-English locale")
+
+	// Zero members
+	emptyGroup := "Alias name     Guests\r\n\r\n" +
+		"Members\r\n\r\n" +
+		"------------------------\r\n" +
+		"The command completed successfully.\r\n"
+	assert.Equal(t, 0, winCountNetLocalgroupMembers(emptyGroup), "empty group should yield 0")
+}
+
+// TestWinCountLocalUsers exercises winCountLocalUsers against the live host.
+// On CI runners where wmic is absent, this specifically validates the PowerShell fallback.
+func TestWinCountLocalUsers(t *testing.T) {
+	count := winCountLocalUsers(context.Background())
+	assert.Greater(t, count, 0, "winCountLocalUsers must return > 0 on any live Windows host")
+}
+
+// TestWinCountLocalGroups exercises winCountLocalGroups against the live host.
+// On CI runners where wmic is absent, this specifically validates the PowerShell fallback.
+func TestWinCountLocalGroups(t *testing.T) {
+	count := winCountLocalGroups(context.Background())
+	assert.Greater(t, count, 0, "winCountLocalGroups must return > 0 on any live Windows host")
+}
+
+// TestWindowsCollectAVProducts verifies that collectAVProducts sets av_products_detected
+// to a real product name on workstation SKU and "none" on server SKU.
 func TestWindowsCollectAVProducts(t *testing.T) {
 	col := &WindowsSecurityCollector{}
 	attrs := make(map[string]string)
@@ -145,5 +205,13 @@ func TestWindowsCollectAVProducts(t *testing.T) {
 
 	avVal, ok := attrs["av_products_detected"]
 	require.True(t, ok, "av_products_detected must be set")
-	assert.NotEmpty(t, avVal, "av_products_detected must not be empty string")
+	if isWorkstationSKU() {
+		// Windows Defender is always registered in root/SecurityCenter2 on workstation SKU.
+		assert.NotEqual(t, "none", avVal,
+			"av_products_detected must be a product name on workstation SKU, got %q", avVal)
+	} else {
+		// root/SecurityCenter2 is not available on server SKU — expect "none".
+		assert.Equal(t, "none", avVal,
+			"av_products_detected must be 'none' on server SKU, got %q", avVal)
+	}
 }

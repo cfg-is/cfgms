@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"unsafe"
 
@@ -31,16 +32,7 @@ var (
 // Emits: local_user_count, local_admins_count, domain_joined, domain_name.
 // Counts only — no account names are stored (identity exfil prevention).
 func (w *WindowsSecurityCollector) CollectUsers(ctx context.Context, attributes map[string]string) error {
-	// Count local user accounts
-	output, err := runCommand(ctx, "wmic", "useraccount",
-		"where", "LocalAccount='TRUE'",
-		"get", "Name",
-	)
-	if err == nil {
-		attributes["local_user_count"] = fmt.Sprintf("%d", winCountWMICRows(output))
-	} else {
-		attributes["local_user_count"] = "0"
-	}
+	attributes["local_user_count"] = fmt.Sprintf("%d", winCountLocalUsers(ctx))
 
 	// Count members of the local Administrators group (count only)
 	netOut, err := runCommand(ctx, "net", "localgroup", "Administrators")
@@ -57,15 +49,7 @@ func (w *WindowsSecurityCollector) CollectUsers(ctx context.Context, attributes 
 // CollectGroups gathers local group count on Windows via wmic.
 // Emits: local_group_count.
 func (w *WindowsSecurityCollector) CollectGroups(ctx context.Context, attributes map[string]string) error {
-	output, err := runCommand(ctx, "wmic", "group",
-		"where", "LocalAccount='TRUE'",
-		"get", "Name",
-	)
-	if err == nil {
-		attributes["local_group_count"] = fmt.Sprintf("%d", winCountWMICRows(output))
-	} else {
-		attributes["local_group_count"] = "0"
-	}
+	attributes["local_group_count"] = fmt.Sprintf("%d", winCountLocalGroups(ctx))
 	return nil
 }
 
@@ -213,6 +197,69 @@ func (w *WindowsSecurityCollector) collectAVProducts(ctx context.Context, attrib
 	}
 }
 
+// winCountLocalUsers returns the count of local user accounts.
+// Tries wmic first; falls back to PowerShell Get-LocalUser on systems where wmic
+// is unavailable or returns 0 (wmic is deprecated on Windows 11 24H2+ and Server 2025).
+// PowerShell output is locale-independent (returns a plain integer).
+func winCountLocalUsers(ctx context.Context) int {
+	output, err := runCommand(ctx, "wmic", "useraccount",
+		"where", "LocalAccount='TRUE'",
+		"get", "Name",
+	)
+	if err == nil {
+		if count := winCountWMICRows(output); count > 0 {
+			return count
+		}
+	}
+	// Fallback: PowerShell Get-LocalUser (Windows 10+ / Server 2016+).
+	// Uses -File with a static temp script per the argv-only invocation rule.
+	return winPowerShellCount(ctx, "dna-users-*.ps1",
+		`(Get-LocalUser -ErrorAction SilentlyContinue | Measure-Object).Count`)
+}
+
+// winCountLocalGroups returns the count of local groups.
+// Tries wmic first; falls back to PowerShell Get-LocalGroup on systems where wmic
+// is unavailable or returns 0.
+func winCountLocalGroups(ctx context.Context) int {
+	output, err := runCommand(ctx, "wmic", "group",
+		"where", "LocalAccount='TRUE'",
+		"get", "Name",
+	)
+	if err == nil {
+		if count := winCountWMICRows(output); count > 0 {
+			return count
+		}
+	}
+	// Fallback: PowerShell Get-LocalGroup (Windows 10+ / Server 2016+).
+	return winPowerShellCount(ctx, "dna-groups-*.ps1",
+		`(Get-LocalGroup -ErrorAction SilentlyContinue | Measure-Object).Count`)
+}
+
+// winPowerShellCount runs a static PowerShell one-liner (via a temp -File) that
+// emits a single integer and returns that integer. Returns 0 on any error.
+func winPowerShellCount(ctx context.Context, tmpPattern, script string) int {
+	tmpFile, err := os.CreateTemp("", tmpPattern)
+	if err != nil {
+		return 0
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmpFile.WriteString(script); err != nil {
+		tmpFile.Close()
+		return 0
+	}
+	tmpFile.Close()
+	psOut, err := runCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", tmpPath)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(psOut))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // winCountWMICRows counts non-header, non-blank rows in wmic text output.
 func winCountWMICRows(output string) int {
 	count := 0
@@ -227,8 +274,9 @@ func winCountWMICRows(output string) int {
 	return count
 }
 
-// winCountNetLocalgroupMembers counts member lines in "net localgroup" output.
-// Members appear after the dashed separator line and before the completion message.
+// winCountNetLocalgroupMembers counts member lines in "net localgroup <name>" output.
+// Members appear after the dashed separator line.
+// Completion messages in all Windows locales end with a period; Windows account names cannot.
 func winCountNetLocalgroupMembers(output string) int {
 	count := 0
 	pastSep := false
@@ -238,7 +286,7 @@ func winCountNetLocalgroupMembers(output string) int {
 			pastSep = true
 			continue
 		}
-		if pastSep && line != "" && !strings.HasPrefix(line, "The command") {
+		if pastSep && line != "" && !strings.HasSuffix(line, ".") {
 			count++
 		}
 	}
