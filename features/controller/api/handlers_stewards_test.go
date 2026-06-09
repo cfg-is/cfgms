@@ -725,13 +725,13 @@ func TestHandleGetStewardDNA_AttributeDenylistRedaction(t *testing.T) {
 
 	// Register a steward with sensitive attributes present in DNA.
 	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
-		"hostname":         "denylist-host",
-		"os":               "linux",
-		"auth_token":       "supersecret",
-		"api_secret":       "topsecret",
-		"user_password":    "hunter2",
-		"user_credential":  "cred123",
-		"service_api_key":  "key456",
+		"hostname":        "denylist-host",
+		"os":              "linux",
+		"auth_token":      "supersecret",
+		"api_secret":      "topsecret",
+		"user_password":   "hunter2",
+		"user_credential": "cred123",
+		"service_api_key": "key456",
 	}, "test-tenant")
 
 	denylisted := []string{
