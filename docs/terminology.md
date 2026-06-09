@@ -262,7 +262,47 @@ The DNA system continuously updates this digital twin through:
 
 ### Module
 
-A Module is a discrete, reusable, and self-contained unit of functionality that implements Get/Set/Test for a resource type.
+A **Module** is an out-of-process gRPC binary that manages a specific resource type. The steward (or workflow engine) spawns the module binary as a child process; the module communicates back over a local Unix socket or named pipe using the CFGMS module gRPC API. Every module implements the standard contract: `Handshake` / `Get` / `Set` / `Test` / `Shutdown`. Modules commit to exactly one kind (`steward`, `outpost`, or `workflow`) via `executors:` in `module.yaml`.
+
+**Disambiguation**: "Module" is not the same as "pluggable provider." Pluggable providers (storage, logging, secrets, etc.) are central infrastructure backends. Modules are resource-management units that run on endpoints or the controller. See **Pluggable provider** below.
+
+### Module bundle
+
+A **module bundle** is a signed archive containing the module binary (cross-compiled for each supported `os-arch`), the `module.yaml` manifest, and one or more Ed25519 detached signatures. Bundles are content-addressed by the four-tuple `(publisher, name, version, content_hash)`. The content hash makes silent bundle mutation detectable — any change to binary content or manifest produces a different hash and therefore a different cache entry.
+
+### Module contract
+
+The **module contract** is the gRPC API that every CFGMS module must implement. It is defined in `api/proto/modules/` and documented in [`docs/architecture/modules/interface.md`](modules/interface.md). The contract has two variants: `ModuleService` (steward and outpost modules) and `WorkflowModuleService` (workflow modules). The only difference is the `Handshake` message, which carries the calling context. `Get`, `Set`, `Test`, and `Shutdown` messages are shared.
+
+### Module runtime
+
+The **module runtime** is the host-side component that manages the module process lifecycle: spawn, health-check, graceful shutdown. On a steward the module runtime is part of the steward binary. On the controller the module runtime is embedded in the workflow engine. The module runtime enforces the behavioral envelope declared in `module.yaml` where OS primitives support it (Linux namespaces, Windows Job Objects, macOS sandbox).
+
+### Module host
+
+A **module host** is the system component that owns a module runtime: the steward for `steward`- and `outpost`-kind modules, and the controller workflow engine for `workflow`-kind modules. The module host is responsible for fetching the bundle, verifying the content hash and trust, spawning the binary, and enforcing the behavioral envelope.
+
+### Publisher
+
+A **publisher** is the identity whose Ed25519 signing key is in a module bundle's signature block. Publisher public keys are baked into the steward binary at build time — they cannot be changed via `cfg push` or any runtime configuration path. The `publisher` field in `module.yaml` must match a registered publisher identity. CFGMS ships a built-in publisher identity (`cfgms`) for stdlib modules; third-party publishers require a steward binary rebuild to add their key to the trusted set.
+
+### Workflow module
+
+A **workflow module** is a module with `executors: [workflow]` in `module.yaml`. Workflow modules run on the controller's workflow engine against cloud and SaaS APIs (e.g. M365, identity providers, ticketing systems). They do not run on endpoints. The workflow engine dials the module process over a local socket and provides a tenant-scoped auth token in the `WorkflowHandshakeRequest`.
+
+### Steward module
+
+A **steward module** is a module with `executors: [steward]` in `module.yaml`. Steward modules run on the endpoint where the steward is installed and manage local resources on that device (files, packages, firewall rules, services, registry keys). Steward modules may use localhost transports (e.g. direct WMI) but never span to other hosts.
+
+### Outpost module
+
+An **outpost module** is a module with `executors: [outpost]` in `module.yaml`. Outpost modules run on a steward host but manage remote LAN devices — network gear, printers, IoT devices, or hypervisors that cannot run a steward themselves. The outpost module uses the steward as a proxy agent. The outpost runtime is reserved in ADR-006; its process model is not yet defined.
+
+### Pluggable provider
+
+A **pluggable provider** is a backend implementation of a central CFGMS infrastructure interface (storage, logging, secrets, directory, control-plane transport, data-plane transport). Pluggable providers live under `pkg/*/providers/` and are selected via YAML configuration at runtime. They register themselves at startup via `init()`.
+
+**Disambiguation from Module**: "Pluggable provider" refers strictly to the central-provider pattern described in `pkg/README.md` and [`docs/architecture/provider-architecture.md`](provider-architecture.md). Modules are a distinct concept: they manage endpoint resources, run out-of-process, and use a different interface (`ModuleService` gRPC). The terms "provider", "plugin", and "pluggable" in CFGMS documentation always refer to the central-provider pattern unless the surrounding context explicitly says "module."
 
 ### Configuration-Data
 
@@ -278,7 +318,7 @@ A managed system or service that a Steward is responsible for.
 
 ## Version Information
 
-- **Document Version:** 1.4
-- **Last Updated:** 2026-03-26
+- **Document Version:** 1.5
+- **Last Updated:** 2026-06-09
 - **Status:** Current
-- **Changes:** Updated communication diagrams to reflect gRPC-over-QUIC transport
+- **Changes:** Added module system terminology (Module, Module bundle, Module contract, Module runtime, Module host, Publisher, Workflow module, Steward module, Outpost module, Pluggable provider)

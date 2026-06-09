@@ -1,5 +1,7 @@
 # Package Module
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The Package module provides a unified interface for managing system packages across different package managers. It abstracts away the differences between package managers (apt, yum, dnf, pacman, brew, chocolatey, winget) and provides a consistent way to install, update, and remove packages.

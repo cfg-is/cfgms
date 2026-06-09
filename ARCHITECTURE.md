@@ -193,7 +193,7 @@ pkg/{provider}/providers/   ← Never import directly
 - Scale from single-server to distributed deployments
 - Gate commercial features through provider selection
 
-See [docs/architecture/plugin-architecture.md](docs/architecture/plugin-architecture.md) for detailed provider development guidelines.
+See [docs/architecture/provider-architecture.md](docs/architecture/provider-architecture.md) for detailed provider development guidelines.
 
 ## Module System
 
@@ -362,7 +362,7 @@ Designed for:
 
 **Design Philosophy**: Make providers pluggable by default. This allows the system to scale from single-server deployments to distributed, multi-region architectures without refactoring business logic.
 
-See [pkg/README.md](pkg/README.md) for provider development guidelines and [docs/architecture/plugin-architecture.md](docs/architecture/plugin-architecture.md) for the complete pattern.
+See [pkg/README.md](pkg/README.md) for provider development guidelines and [docs/architecture/provider-architecture.md](docs/architecture/provider-architecture.md) for the complete pattern.
 
 ### 3. Test-Driven Development
 
@@ -422,7 +422,7 @@ See [pkg/README.md](pkg/README.md) for provider development guidelines and [docs
 ### Key Files to Review
 
 - `CLAUDE.md` - AI-assisted development guidelines
-- `docs/architecture/plugin-architecture.md` - Plugin system design
+- `docs/architecture/provider-architecture.md` - Provider system design
 - `docs/architecture/modules/interface.md` - Module development
 - `docs/development/story-checklist.md` - Development workflow
 
