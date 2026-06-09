@@ -136,8 +136,8 @@ func runSwap(args []string) int {
 		fmt.Fprintf(os.Stderr, "launcher swap: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stdout, "launcher: staged %q as version %q at %q\n", sourceExe, version, dst)
-	fmt.Fprintf(os.Stdout, "launcher: next steward restart will exec the new version\n")
+	_, _ = fmt.Fprintf(os.Stdout, "launcher: staged %q as version %q at %q\n", sourceExe, version, dst)
+	_, _ = fmt.Fprintf(os.Stdout, "launcher: next steward restart will exec the new version\n")
 	return 0
 }
 
@@ -145,18 +145,18 @@ func runRollback(args []string) int {
 	fs := flag.NewFlagSet("rollback", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
 		return 2
 	}
 
 	layout := Layout{Root: *root, StewardBinaryName: defaultStewardBinaryName()}
 	newCurrent, err := layout.Rollback()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stdout, "launcher: rolled back; new active version is %q\n", newCurrent)
-	fmt.Fprintf(os.Stdout, "launcher: next steward restart will exec the rolled-back version\n")
+	_, _ = fmt.Fprintf(os.Stdout, "launcher: rolled back; new active version is %q\n", newCurrent)
+	_, _ = fmt.Fprintf(os.Stdout, "launcher: next steward restart will exec the rolled-back version\n")
 	return 0
 }
 
@@ -164,7 +164,7 @@ func runStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "launcher status: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher status: %v\n", err)
 		return 2
 	}
 
@@ -177,9 +177,9 @@ func runStatus(args []string) int {
 	if previous == "" {
 		previous = "<none>"
 	}
-	fmt.Fprintf(os.Stdout, "Root:     %s\n", *root)
-	fmt.Fprintf(os.Stdout, "Current:  %s\n", current)
-	fmt.Fprintf(os.Stdout, "Previous: %s\n", previous)
+	_, _ = fmt.Fprintf(os.Stdout, "Root:     %s\n", *root)
+	_, _ = fmt.Fprintf(os.Stdout, "Current:  %s\n", current)
+	_, _ = fmt.Fprintf(os.Stdout, "Previous: %s\n", previous)
 	return 0
 }
 

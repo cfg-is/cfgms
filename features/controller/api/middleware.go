@@ -154,9 +154,9 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	}
 	fpSum := sha256.Sum256(peerCert.Raw)
 	return &Principal{
-		ID:              peerCert.Subject.CommonName,
-		Name:            "mtls-admin:" + peerCert.Subject.CommonName,
-		IsAdmin:         true,
+		ID:      peerCert.Subject.CommonName,
+		Name:    "mtls-admin:" + peerCert.Subject.CommonName,
+		IsAdmin: true,
 		// Admin principals have NO tenant scope. Earlier this was
 		// hardcoded to "default" which silently restricted every admin
 		// read to tenant "default" — `cfg steward list` returned 0
