@@ -651,3 +651,125 @@ func TestHandleGetStewardConfig_InsufficientPermission(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// TestHandleGetStewardModules_StewardNotFound verifies 404 for an unknown steward ID.
+func TestHandleGetStewardModules_StewardNotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetStewardModules_ReturnsNotImplemented verifies 501 + MODULES_UNAVAILABLE
+// for a known steward with no module DNA and a tenant-authorized admin.
+func TestHandleGetStewardModules_ReturnsNotImplemented(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "no-modules-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MODULES_UNAVAILABLE", errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "steward does not report loaded modules")
+}
+
+// TestHandleGetStewardModules_Returns200WithModules verifies that a steward with a
+// modules.loaded DNA attribute returns 200 with the parsed module list.
+func TestHandleGetStewardModules_Returns200WithModules(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "modules-host", "os": "linux",
+		"modules.loaded": "file, service, package",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Modules []struct {
+				Name string `json:"name"`
+			} `json:"modules"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Modules, 3)
+	assert.Equal(t, "file", resp.Data.Modules[0].Name)
+	assert.Equal(t, "service", resp.Data.Modules[1].Name)
+	assert.Equal(t, "package", resp.Data.Modules[2].Name)
+}
+
+// TestHandleGetStewardModules_InvalidStewardID verifies 400 for a malformed steward ID.
+// Dots and colons fail identifierRegex (^[a-zA-Z0-9_-]+$) and are caught by
+// the validation middleware, which returns VALIDATION_ERROR.
+func TestHandleGetStewardModules_InvalidStewardID(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/steward.invalid:id/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleGetStewardModules_InsufficientPermission verifies 403 when the caller
+// lacks steward:read-modules permission.
+func TestHandleGetStewardModules_InsufficientPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestHandleGetStewardModules_RejectsCrossTenant verifies HTTP 404 (not 403) when
+// the caller's tenant_path is NOT a prefix of the steward's tenant_path.
+func TestHandleGetStewardModules_RejectsCrossTenant(t *testing.T) {
+	server := setupTestServer(t)
+	// Caller is in "other-tenant"; the steward is in "test-tenant".
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-modules"}, "other-tenant", 5*time.Minute)
+
+	// Register a steward under "test-tenant" (the default for registerTestSteward).
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "cross-tenant-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// Must be 404, not 403, to avoid existence disclosure across tenant boundaries.
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
