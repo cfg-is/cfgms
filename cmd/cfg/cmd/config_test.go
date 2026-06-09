@@ -759,3 +759,381 @@ func TestConfigUploadCommand(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed), "output should be valid JSON")
 	})
 }
+
+func TestConfigDiff_ShowsDifferences(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		assert.Equal(t, "GET", r.Method)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id": "steward-diff-test",
+				"version":    1,
+				"config": map[string]interface{}{
+					"hostname": "old-host.example.com",
+				},
+				"updated_at": "2026-06-09T10:00:00Z",
+			},
+			"timestamp": "2026-06-09T10:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	localConfig := "hostname: new-host.example.com\n"
+	tmpFile := filepath.Join(t.TempDir(), "new-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(localConfig), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	origDiffJSON := configDiffJSON
+	origSecrets := configDiffIncludeSecrets
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+		configDiffJSON = origDiffJSON
+		configDiffIncludeSecrets = origSecrets
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+	configDiffJSON = false
+	configDiffIncludeSecrets = false
+
+	var returnedErr error
+	diffOutput := captureStdout(t, func() {
+		returnedErr = runConfigDiff(configDiffCmd, []string{"steward-diff-test", tmpFile})
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-diff-test/config", capturedPath)
+	assert.ErrorIs(t, returnedErr, errDifferencesFound, "non-zero exit expected when configs differ")
+	assert.NotEmpty(t, diffOutput, "diff output should be printed")
+}
+
+func TestConfigDiff_SecretsRedactedByDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id": "steward-sec-test",
+				"version":    1,
+				"config": map[string]interface{}{
+					"api_key":    "supersecretapikey",
+					"password":   "mysecretpassword",
+					"token":      "bearer-token-xyz",
+					"secret_key": "verysecretvalue",
+					"credential": "mycredential",
+					"hostname":   "old-host.example.com",
+				},
+				"updated_at": "2026-06-09T10:00:00Z",
+			},
+			"timestamp": "2026-06-09T10:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	// Local file has a different hostname so hostname appears in the diff;
+	// the secret fields only exist in the server config and will be shown as
+	// deleted — redacted to *** — not as their raw values.
+	localConfig := "hostname: new-host.example.com\n"
+	tmpFile := filepath.Join(t.TempDir(), "new-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(localConfig), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	origDiffJSON := configDiffJSON
+	origSecrets := configDiffIncludeSecrets
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+		configDiffJSON = origDiffJSON
+		configDiffIncludeSecrets = origSecrets
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+	configDiffJSON = false
+	configDiffIncludeSecrets = false
+
+	var returnedErr error
+	diffOutput := captureStdout(t, func() {
+		returnedErr = runConfigDiff(configDiffCmd, []string{"steward-sec-test", tmpFile})
+	})
+
+	// Configs differ (hostname changed and secret keys deleted)
+	assert.ErrorIs(t, returnedErr, errDifferencesFound)
+
+	// Secret values must NOT appear in output — they are redacted to ***
+	assert.NotContains(t, diffOutput, "supersecretapikey")
+	assert.NotContains(t, diffOutput, "mysecretpassword")
+	assert.NotContains(t, diffOutput, "bearer-token-xyz")
+	assert.NotContains(t, diffOutput, "verysecretvalue")
+	assert.NotContains(t, diffOutput, "mycredential")
+
+	// Non-secret hostname change appears in the diff output
+	assert.Contains(t, diffOutput, "example.com")
+}
+
+func TestConfigDiff_404NoConfigStored(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "config not found"})
+	}))
+	defer server.Close()
+
+	tmpFile := filepath.Join(t.TempDir(), "new-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte("hostname: example.com\n"), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+
+	var returnedErr error
+	output := captureStdout(t, func() {
+		returnedErr = runConfigDiff(configDiffCmd, []string{"unknown-steward", tmpFile})
+	})
+
+	require.NoError(t, returnedErr, "404 should exit 0 with informational message")
+	assert.Contains(t, output, "No config stored for steward unknown-steward")
+}
+
+func TestConfigDiff_LocalFileNotFound(t *testing.T) {
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+	})
+
+	configAPIURL = "http://localhost:19999"
+	configTLSInsecure = true
+
+	err := runConfigDiff(configDiffCmd, []string{"steward-abc", "/nonexistent/path/config.yaml"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file not found")
+}
+
+func TestConfigDiff_IncludeSecretsFlag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id": "steward-sec2",
+				"version":    1,
+				"config": map[string]interface{}{
+					"api_key":  "plaintextsecret",
+					"hostname": "example.com",
+				},
+				"updated_at": "2026-06-09T10:00:00Z",
+			},
+			"timestamp": "2026-06-09T10:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	localConfig := "hostname: example.com\n"
+	tmpFile := filepath.Join(t.TempDir(), "new-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(localConfig), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	origSecrets := configDiffIncludeSecrets
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+		configDiffIncludeSecrets = origSecrets
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+	configDiffIncludeSecrets = true // bypass redaction
+
+	var returnedErr error
+	diffOutput := captureStdout(t, func() {
+		returnedErr = runConfigDiff(configDiffCmd, []string{"steward-sec2", tmpFile})
+	})
+
+	assert.ErrorIs(t, returnedErr, errDifferencesFound)
+	// With --include-secrets, the actual value must appear in the diff output
+	assert.Contains(t, diffOutput, "plaintextsecret")
+}
+
+func TestConfigDiff_IdenticalConfigsExitZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id": "steward-same",
+				"version":    1,
+				"config": map[string]interface{}{
+					"hostname": "example.com",
+				},
+				"updated_at": "2026-06-09T10:00:00Z",
+			},
+			"timestamp": "2026-06-09T10:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	// Local file has the same content as the server config
+	localConfig := "hostname: example.com\n"
+	tmpFile := filepath.Join(t.TempDir(), "same-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(localConfig), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+
+	err := runConfigDiff(configDiffCmd, []string{"steward-same", tmpFile})
+	require.NoError(t, err, "identical configs should exit 0")
+}
+
+func TestConfigDiff_APIErrorPropagated(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+	}))
+	defer server.Close()
+
+	tmpFile := filepath.Join(t.TempDir(), "new-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte("hostname: example.com\n"), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+
+	err := runConfigDiff(configDiffCmd, []string{"steward-abc", tmpFile})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errDifferencesFound, "API error should not be mistaken for differences")
+}
+
+func TestConfigDiff_JSONFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id": "steward-json",
+				"version":    1,
+				"config": map[string]interface{}{
+					"hostname": "old-host.example.com",
+				},
+				"updated_at": "2026-06-09T10:00:00Z",
+			},
+			"timestamp": "2026-06-09T10:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	localConfig := "hostname: new-host.example.com\n"
+	tmpFile := filepath.Join(t.TempDir(), "new-config.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(localConfig), 0600))
+
+	origURL := configAPIURL
+	origInsecure := configTLSInsecure
+	origDiffJSON := configDiffJSON
+	t.Cleanup(func() {
+		configAPIURL = origURL
+		configTLSInsecure = origInsecure
+		configDiffJSON = origDiffJSON
+	})
+
+	configAPIURL = server.URL
+	configTLSInsecure = true
+	configDiffJSON = true // request JSON output
+
+	var returnedErr error
+	diffOutput := captureStdout(t, func() {
+		returnedErr = runConfigDiff(configDiffCmd, []string{"steward-json", tmpFile})
+	})
+
+	assert.ErrorIs(t, returnedErr, errDifferencesFound)
+	// JSON output must be valid JSON
+	var parsed interface{}
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(diffOutput)), &parsed), "--json output should be valid JSON")
+}
+
+func TestRedactSecrets_NestedMap(t *testing.T) {
+	config := map[string]interface{}{
+		"hostname": "example.com",
+		"database": map[string]interface{}{
+			"password": "db-secret",
+			"host":     "db.example.com",
+		},
+		"api_key": "top-level-key",
+	}
+
+	redactSecrets(config)
+
+	assert.Equal(t, "example.com", config["hostname"], "non-secret key must be unchanged")
+	assert.Equal(t, "***", config["api_key"], "top-level secret key must be redacted")
+
+	db, ok := config["database"].(map[string]interface{})
+	require.True(t, ok, "database value must remain a map")
+	assert.Equal(t, "***", db["password"], "nested secret key must be redacted")
+	assert.Equal(t, "db.example.com", db["host"], "nested non-secret key must be unchanged")
+}
+
+func TestRedactSecrets_ArrayNestedSecrets(t *testing.T) {
+	// Mirrors the real CFGMS config shape: resources is a list of maps
+	// each with a nested config map that may contain secret keys.
+	config := map[string]interface{}{
+		"resources": []interface{}{
+			map[string]interface{}{
+				"name": "db-module",
+				"config": map[string]interface{}{
+					"password": "hunter2",
+					"api_key":  "AKIA1234",
+					"host":     "db.example.com",
+				},
+			},
+			map[string]interface{}{
+				"name":  "web-module",
+				"token": "bearer-xyz",
+				"host":  "web.example.com",
+			},
+		},
+	}
+
+	redactSecrets(config)
+
+	resources, ok := config["resources"].([]interface{})
+	require.True(t, ok, "resources must remain a slice")
+	require.Len(t, resources, 2)
+
+	db := resources[0].(map[string]interface{})
+	assert.Equal(t, "db-module", db["name"], "non-secret key in array element must be unchanged")
+	dbCfg := db["config"].(map[string]interface{})
+	assert.Equal(t, "***", dbCfg["password"], "array-nested password must be redacted")
+	assert.Equal(t, "***", dbCfg["api_key"], "array-nested api_key must be redacted")
+	assert.Equal(t, "db.example.com", dbCfg["host"], "array-nested non-secret key must be unchanged")
+
+	web := resources[1].(map[string]interface{})
+	assert.Equal(t, "***", web["token"], "array element top-level token must be redacted")
+	assert.Equal(t, "web.example.com", web["host"], "array element non-secret key must be unchanged")
+}

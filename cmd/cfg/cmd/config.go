@@ -7,16 +7,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/config/diff"
 )
+
+// errDifferencesFound is returned by runConfigDiff when the two configs differ.
+// The cobra RunE handler converts this to os.Exit(1) without printing an error message,
+// matching the conventional diff exit code 1 = "differences exist".
+var errDifferencesFound = errors.New("configurations differ")
+
+// secretKeyPatterns are case-insensitive substrings that mark a config key as sensitive.
+var secretKeyPatterns = []string{"token", "secret", "password", "credential", "api_key"}
 
 var (
 	configUploadStewardID   string
@@ -41,6 +55,10 @@ var (
 
 	// Deployments command flags
 	configDeploymentsJSON bool
+
+	// Diff command flags
+	configDiffJSON           bool
+	configDiffIncludeSecrets bool
 )
 
 var configCmd = &cobra.Command{
@@ -99,6 +117,36 @@ Examples:
   cfg config deployments my-prod-config --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigDeployments,
+}
+
+var configDiffCmd = &cobra.Command{
+	Use:   "diff <steward-id> <new-cfg.yaml>",
+	Short: "Diff local config against the config stored on the controller",
+	Long: `Show what would change if <new-cfg.yaml> were uploaded to <steward-id>.
+
+Fetches the config currently stored for the steward from the controller, then
+diffs it against the local file using the same semantic engine as 'cfg diff'.
+No mutation occurs.
+
+Secret-bearing keys (those whose names contain token, secret, password,
+credential, or api_key) are replaced with *** in the comparison by default.
+Pass --include-secrets to show raw values.
+
+Exit code is 1 when there are differences, 0 when configs are identical or
+no config is stored for the steward.
+
+Examples:
+  cfg config diff steward-abc123 new-config.yaml
+  cfg config diff steward-abc123 new-config.yaml --json
+  cfg config diff steward-abc123 new-config.yaml --include-secrets`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		err := runConfigDiff(cmd, args)
+		if errors.Is(err, errDifferencesFound) {
+			os.Exit(1)
+		}
+		return err
+	},
 }
 
 var configUploadCmd = &cobra.Command{
@@ -161,11 +209,20 @@ func init() {
 	configDeploymentsCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeploymentsCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 
+	// Diff command flags
+	configDiffCmd.Flags().BoolVar(&configDiffJSON, "json", false, "Emit JSON diff format instead of human-readable text")
+	configDiffCmd.Flags().BoolVar(&configDiffIncludeSecrets, "include-secrets", false, "Include raw secret values (skips redaction of token/secret/password/credential/api_key keys)")
+	configDiffCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configDiffCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
+	configDiffCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	configDiffCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+
 	configCmd.AddCommand(configUploadCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configDeleteCmd)
 	configCmd.AddCommand(configDeploymentsCmd)
+	configCmd.AddCommand(configDiffCmd)
 }
 
 func getConfigClient() (*APIClient, error) {
@@ -542,6 +599,166 @@ func runConfigDeployments(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		fmt.Println("No stewards found.")
+	}
+
+	return nil
+}
+
+// redactSecrets replaces values for keys matching secretKeyPatterns with "***".
+// Recurses into nested maps and slices so secrets inside resources[] are also redacted.
+func redactSecrets(config map[string]interface{}) {
+	for key, value := range config {
+		keyLower := strings.ToLower(key)
+		isSecret := false
+		for _, pattern := range secretKeyPatterns {
+			if strings.Contains(keyLower, pattern) {
+				isSecret = true
+				break
+			}
+		}
+		if isSecret {
+			config[key] = "***"
+		} else {
+			redactSecretsInValue(value)
+		}
+	}
+}
+
+// redactSecretsInValue recurses into maps and slices to find and redact secret keys.
+func redactSecretsInValue(v interface{}) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		redactSecrets(val)
+	case []interface{}:
+		for _, elem := range val {
+			redactSecretsInValue(elem)
+		}
+	}
+}
+
+func runConfigDiff(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+	newCfgPath := args[1]
+
+	// Validate local file exists before making any network call
+	if _, err := os.Stat(newCfgPath); os.IsNotExist(err) {
+		return fmt.Errorf("file not found: %s", newCfgPath)
+	}
+
+	client, err := getConfigAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/stewards/" + stewardID + "/config"
+	resp, err := client.doRequest(context.Background(), "GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Printf("No config stored for steward %s. Upload a config first.\n", stewardID)
+		return nil
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return client.parseError(resp)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp struct {
+		Data struct {
+			Config map[string]interface{} `json:"config"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	configData := apiResp.Data.Config
+	if !configDiffIncludeSecrets {
+		redactSecrets(configData)
+	}
+
+	yamlBytes, err := yaml.Marshal(configData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config to YAML: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "cfgms-diff-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	// #nosec G302 - 0700 is correct for a traversable private temp directory; the execute bit is required
+	if err := os.Chmod(tempDir, 0700); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return fmt.Errorf("failed to set temp dir permissions: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	tempFile := filepath.Join(tempDir, "server-config.yaml")
+	// #nosec G306 - explicit 0600 matches security requirement for temp config files
+	if err := os.WriteFile(tempFile, yamlBytes, 0600); err != nil {
+		return fmt.Errorf("failed to write temp config: %w", err)
+	}
+
+	semanticAnalyzer := diff.NewDefaultSemanticAnalyzer()
+	impactAnalyzer := diff.NewDefaultImpactAnalyzer()
+	exporter := diff.NewDefaultExporter()
+	engine := diff.NewDefaultEngine(semanticAnalyzer, impactAnalyzer, exporter)
+
+	fromRef, err := createConfigurationReference(tempFile)
+	if err != nil {
+		return fmt.Errorf("failed to create from reference: %w", err)
+	}
+
+	toRef, err := createConfigurationReference(newCfgPath)
+	if err != nil {
+		return fmt.Errorf("failed to create to reference: %w", err)
+	}
+
+	diffOptions := diff.DiffOptions{
+		IgnoreWhitespace: false,
+		IgnoreComments:   false,
+		IgnoreOrder:      false,
+		ContextLines:     3,
+		SemanticDiff:     true,
+		ImpactAnalysis:   true,
+	}
+
+	result, err := engine.Compare(context.Background(), *fromRef, *toRef, diffOptions)
+	if err != nil {
+		return fmt.Errorf("comparison failed: %w", err)
+	}
+
+	exportFormat := diff.ExportFormatText
+	if configDiffJSON {
+		exportFormat = diff.ExportFormatJSON
+	}
+
+	exportOptions := diff.ExportOptions{
+		Format:          exportFormat,
+		IncludeSummary:  true,
+		IncludeMetadata: false,
+		IncludeContext:  true,
+		ColorizeOutput:  true,
+		LineNumbers:     false,
+	}
+
+	outputBytes, err := engine.Export(context.Background(), result, exportOptions)
+	if err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	fmt.Print(string(outputBytes))
+
+	if result.Summary.TotalChanges > 0 {
+		return errDifferencesFound
 	}
 
 	return nil
