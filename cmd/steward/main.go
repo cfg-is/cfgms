@@ -172,6 +172,11 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 			"operation", "steward_mode",
 			"mode", "grpc_transport")
 
+		// Check for launcher-written upgrade flag files and emit lifecycle events.
+		// Must run before the heartbeat loop so the controller learns commit/rollback
+		// status on the first heartbeat after a restart. (Issue #1943)
+		checkUpgradeFlagFiles(ctx, defaultCertStoreDir(), transportCl, logger)
+
 		// Start scheduled convergence loop. The initial interval defaults to
 		// 30 minutes. When the controller delivers a cfg, the loop reads
 		// converge_interval from it and resets the ticker accordingly.
@@ -681,16 +686,18 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		logger.Info("Steward identity persisted for restart reuse", "steward_id", identity.StewardID)
 	}
 
-	// Optionally load the local steward config to apply custom replay window and
-	// params-size limits. If no config file is found (the common case when the
-	// steward is purely controller-managed), defaults apply in commands.Handler.
+	// Optionally load the local steward config to apply custom replay window,
+	// params-size limits, and upgrade policy. If no config file is found (the
+	// common case when the steward is purely controller-managed), defaults apply.
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var scriptSigning stewardconfig.ScriptSigningConfig
+	var upgradeAllowDowngrade bool
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		scriptSigning = cfg.Steward.ScriptSigning
+		upgradeAllowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
@@ -708,6 +715,8 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		ScriptSigning:               scriptSigning,
+		CertStoreDir:                certStoreDir,
+		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -809,9 +818,11 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
+	var upgradeAllowDowngradeReconnect bool
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+		upgradeAllowDowngradeReconnect = cfg.Steward.Upgrade.AllowDowngrade
 	}
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
@@ -825,6 +836,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		CertStoreDir:                certStoreDir,
+		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -957,4 +970,78 @@ func defaultCertStoreDir() string {
 	default:
 		return "/var/lib/cfgms/steward/certs"
 	}
+}
+
+// upgradeEventPublisher is the minimal interface required by checkUpgradeFlagFiles
+// to emit upgrade lifecycle events. Satisfied by *client.TransportClient.
+type upgradeEventPublisher interface {
+	GetStewardID() string
+	GetTenantID() string
+}
+
+// checkUpgradeFlagFiles reads launcher-written flag files in certStoreDir and
+// emits the corresponding upgrade lifecycle events, then deletes each file.
+//
+// Flag files written by the launcher after a supervised restart:
+//   - certStoreDir/upgrade-committed: new version passed its startup window.
+//   - certStoreDir/upgrade-rolled-back: launcher auto-rolled-back to previous version.
+//
+// Each file's content is the version string (e.g. "v1.2.3\n") so the event
+// carries the version. Missing or unreadable files are silently ignored.
+// (Issue #1943)
+func checkUpgradeFlagFiles(ctx context.Context, certStoreDir string, tc upgradeEventPublisher, logger logging.Logger) {
+	files := []struct {
+		name      string
+		eventType string
+	}{
+		{"upgrade-committed", "steward_upgrade_committed"},
+		{"upgrade-rolled-back", "steward_upgrade_rolled_back"},
+	}
+
+	for _, f := range files {
+		flagPath := filepath.Join(certStoreDir, f.name)
+		raw, err := os.ReadFile(flagPath) //#nosec G304 -- certStoreDir is from defaultCertStoreDir()
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logger.Warn("Could not read upgrade flag file",
+					"path", flagPath, "error", err.Error())
+			}
+			continue
+		}
+		version := strings.TrimSpace(string(raw))
+		logger.Info("Upgrade flag file detected",
+			"flag", f.name, "version", version)
+
+		// Emit the event before deleting the flag so a crash between the two
+		// results in re-emitting on the next start (idempotent from the
+		// controller's perspective) rather than silently losing the event.
+		if pubErr := publishUpgradeLifecycleEvent(ctx, tc, f.eventType, version, logger); pubErr != nil {
+			logger.Warn("Failed to publish upgrade lifecycle event",
+				"event_type", f.eventType, "error", pubErr.Error())
+		}
+
+		if delErr := os.Remove(flagPath); delErr != nil && !os.IsNotExist(delErr) {
+			logger.Warn("Failed to delete upgrade flag file",
+				"path", flagPath, "error", delErr.Error())
+		}
+	}
+}
+
+// publishUpgradeLifecycleEvent emits a single upgrade lifecycle event via the
+// transport client's control plane. Returns an error if the publish fails.
+func publishUpgradeLifecycleEvent(ctx context.Context, tc upgradeEventPublisher, eventType, version string, logger logging.Logger) error {
+	// TransportClient embeds publishEventWithQueue but that method is unexported.
+	// Cast to the concrete type — main.go is in the same binary and this cast
+	// is safe because main always creates a *client.TransportClient.
+	type eventPublisher interface {
+		upgradeEventPublisher
+		PublishUpgradeLifecycleEvent(ctx context.Context, eventType, version string) error
+	}
+	if ep, ok := tc.(eventPublisher); ok {
+		return ep.PublishUpgradeLifecycleEvent(ctx, eventType, version)
+	}
+	// Fallback: log the event locally when the interface is not satisfied.
+	logger.Info("Upgrade lifecycle event (no control plane publish)",
+		"event_type", eventType, "version", version)
+	return nil
 }

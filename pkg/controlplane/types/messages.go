@@ -40,6 +40,15 @@ const (
 	// Params: cert_pem (base64-encoded PEM certificate). Idempotent — same
 	// fingerprint triggers no disk write on the steward side. (Issue #1817)
 	CommandPushSigningCert CommandType = "push_signing_cert"
+
+	// CommandPushStewardBinary pushes a new steward binary to the steward.
+	// The steward downloads, verifies the SHA-256 digest and Ed25519 publisher
+	// signature, enforces version monotonicity and revocation, then invokes the
+	// launcher swap subcommand. The OS service manager restarts the steward after
+	// the swap completes. (Issue #1943)
+	// Params: version (string), download_url (string), sha256 (string),
+	// platform (string), arch (string), publisher (string), bundle_signature ([]byte base64).
+	CommandPushStewardBinary CommandType = "push_steward_binary"
 )
 
 // Command represents a command sent from controller to steward.
@@ -105,6 +114,22 @@ const (
 	// call to the controller. Details carry method, path, headers, body, execution_id,
 	// and a per-execution sequence number for correlation.
 	EventRelayRequest EventType = "relay_request"
+
+	// EventStewardUpgradeDownloaded indicates the steward downloaded and verified the
+	// new binary (SHA-256 and publisher signature validated). (Issue #1943)
+	EventStewardUpgradeDownloaded EventType = "steward_upgrade_downloaded"
+
+	// EventStewardUpgradeSwapped indicates the launcher swap subcommand completed
+	// successfully; the OS service manager will restart the steward. (Issue #1943)
+	EventStewardUpgradeSwapped EventType = "steward_upgrade_swapped"
+
+	// EventStewardUpgradeCommitted indicates the upgraded steward passed its startup
+	// window and the launcher committed the new version. (Issue #1943)
+	EventStewardUpgradeCommitted EventType = "steward_upgrade_committed"
+
+	// EventStewardUpgradeRolledBack indicates the launcher auto-rolled-back to the
+	// previous version after the new binary failed its startup window. (Issue #1943)
+	EventStewardUpgradeRolledBack EventType = "steward_upgrade_rolled_back"
 )
 
 // Event represents an event published from steward to controller.

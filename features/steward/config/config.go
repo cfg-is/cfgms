@@ -83,6 +83,7 @@ type (
 	ModuleTrustConfig   = stewardtypes.ModuleTrustConfig
 	ModuleTrustMode     = stewardtypes.ModuleTrustMode
 	RequiredModule      = stewardtypes.RequiredModule
+	UpgradeConfig       = stewardtypes.UpgradeConfig
 )
 
 // Constant re-exports from stewardtypes.
