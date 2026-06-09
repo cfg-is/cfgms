@@ -391,6 +391,31 @@ func init() {
 	stewardCmd.AddCommand(stewardRunResultCmd)
 	stewardCmd.AddCommand(stewardRunCancelCmd)
 	stewardCmd.AddCommand(stewardLogsCmd)
+
+	// upgrade subcommands
+	stewardUpgradeCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardUpgradeCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardUpgradeCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeVersion, "version", "", "Target steward version (required)")
+	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradePlatform, "platform", "", "Target platform (e.g. linux, windows; auto-detected if omitted)")
+	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeArch, "arch", "", "Target architecture (e.g. amd64, arm64; auto-detected if omitted)")
+	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeWait, "wait", false, "Block until all stewards reach a terminal state")
+	stewardUpgradeCmd.Flags().DurationVar(&stewardUpgradeWaitTimeout, "wait-timeout", 2*time.Minute, "Maximum time to wait when --wait is set")
+
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to query directly")
+
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to roll back")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeToVersion, "to-version", "", "Target version to roll back to (optional; used with --upgrade-id)")
+
+	stewardCmd.AddCommand(stewardUpgradeCmd)
+	stewardUpgradeCmd.AddCommand(stewardUpgradeStatusCmd)
+	stewardUpgradeCmd.AddCommand(stewardUpgradeRollbackCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,

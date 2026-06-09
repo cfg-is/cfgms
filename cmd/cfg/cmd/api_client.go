@@ -551,6 +551,142 @@ func (c *APIClient) GetTenantViaAPI(ctx context.Context, tenantID string) (*APIT
 	return &tenant, nil
 }
 
+// APIDispatchUpgradeRequest is the request body for POST /api/v1/stewards/upgrade.
+type APIDispatchUpgradeRequest struct {
+	Selector string `json:"selector"`
+	Version  string `json:"version"`
+	Platform string `json:"platform,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+}
+
+// APIDispatchUpgradeResponse is the response from POST /api/v1/stewards/upgrade.
+type APIDispatchUpgradeResponse struct {
+	UpgradeID    string `json:"upgrade_id"`
+	StewardCount int    `json:"steward_count"`
+	Status       string `json:"status"`
+}
+
+// APIUpgradeStewardStatus represents per-steward upgrade status within an upgrade record.
+type APIUpgradeStewardStatus struct {
+	Device      string `json:"device"`
+	Status      string `json:"status"`
+	Version     string `json:"version,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+// APIUpgradeStatusResponse is the response from GET /api/v1/stewards/upgrade/{id}
+// and from GET /api/v1/stewards/upgrade?selector=<selector>.
+type APIUpgradeStatusResponse struct {
+	UpgradeID string                    `json:"upgrade_id"`
+	Stewards  []APIUpgradeStewardStatus `json:"stewards"`
+}
+
+// APIRollbackRequest is the optional request body for POST /api/v1/stewards/upgrade/{id}/rollback.
+type APIRollbackRequest struct {
+	ToVersion string `json:"to_version,omitempty"`
+}
+
+// DispatchUpgrade calls POST /api/v1/stewards/upgrade and returns the dispatch result.
+func (c *APIClient) DispatchUpgrade(ctx context.Context, req *APIDispatchUpgradeRequest) (*APIDispatchUpgradeResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/upgrade", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var result APIDispatchUpgradeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// GetUpgradeStatus calls GET /api/v1/stewards/upgrade/{id} and returns the status.
+func (c *APIClient) GetUpgradeStatus(ctx context.Context, upgradeID string) (*APIUpgradeStatusResponse, error) {
+	result, _, err := c.GetUpgradeStatusWithHTTPStatus(ctx, upgradeID)
+	return result, err
+}
+
+// GetUpgradeStatusWithHTTPStatus calls GET /api/v1/stewards/upgrade/{id} and
+// returns the parsed status, the raw HTTP status code, and any transport error.
+// The caller may inspect the HTTP status code before deciding whether to retry or abort.
+func (c *APIClient) GetUpgradeStatusWithHTTPStatus(ctx context.Context, upgradeID string) (*APIUpgradeStatusResponse, int, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, resp.StatusCode, fmt.Errorf("upgrade status request failed with status %d", resp.StatusCode)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode, c.parseError(resp)
+	}
+
+	var result APIUpgradeStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, resp.StatusCode, nil
+}
+
+// ListUpgradeStatusBySelector calls GET /api/v1/stewards/upgrade?selector=<selector>
+// to retrieve the most recent upgrade status per steward matching the selector.
+func (c *APIClient) ListUpgradeStatusBySelector(ctx context.Context, selector string) (*APIUpgradeStatusResponse, error) {
+	path := "/api/v1/stewards/upgrade?selector=" + url.QueryEscape(selector)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result APIUpgradeStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// RollbackUpgrade calls POST /api/v1/stewards/upgrade/{id}/rollback.
+func (c *APIClient) RollbackUpgrade(ctx context.Context, upgradeID string, req *APIRollbackRequest) (*APIUpgradeStatusResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID)+"/rollback", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, c.parseError(resp)
+	}
+
+	var result APIUpgradeStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
 // parseError extracts error message from HTTP response
 func (c *APIClient) parseError(resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
