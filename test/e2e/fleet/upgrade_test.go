@@ -125,9 +125,12 @@ func TestFleetStewardUpgradeHappyPath(t *testing.T) {
 	client := insecureHTTPClient()
 	waitForControllerAPI(t, client)
 
-	// Publish the running steward binary re-labelled as v0.5.99-test.
+	// Publish a small payload as v0.5.99-test. The actual steward binary (~30-50 MiB)
+	// causes the in-container download to exceed the 35 s status poll window in CI.
+	// Any signed payload works — the handler verifies the Ed25519 signature and stages
+	// via launcher swap; binary content is not executed by this test flow.
 	// force=true so reruns on the same Docker stack don't conflict.
-	binaryContent := extractBinaryFromContainer(t, "fleet-steward-1", "/app/steward")
+	binaryContent := []byte("cfgms-steward-upgrade-e2e-happy-path-test-payload")
 	code := publishStewardBin(t, client, "v0.5.99-test", binaryContent, true)
 	require.Equal(t, http.StatusOK, code, "publish v0.5.99-test must return 200")
 
@@ -173,12 +176,22 @@ func TestFleetStewardUpgradeBrokenBinaryRollback(t *testing.T) {
 	code := publishStewardBin(t, client, "v0.5.100-broken", origContent, true)
 	require.Equal(t, http.StatusOK, code, "publish v0.5.100-broken must return 200")
 
-	// Corrupt the blob file after publish. The metadata still holds the original
-	// signature. At dispatch the controller recomputes SHA-256 over the corrupted
-	// content and sends that new hash with the old signature. The steward verifies
-	// the signature against the new hash and it fails — causing EventCommandFailed.
+	// Corrupt the stored blob. The metadata signature remains valid for the ORIGINAL
+	// content's SHA-256 but not the corrupted content's SHA-256.
+	//
+	// The filesystem provider's checksumVerifyingReader validates SHA-256 on every
+	// GetBlob read. Without updating the sidecar checksum to match the corrupted blob,
+	// the dispatch handler's io.ReadAll returns ErrBlobChecksumMismatch → 500.
+	// We update the checksum so the read succeeds; the controller then recomputes
+	// SHA-256 from the corrupted content and sends it with the original signature.
+	// The steward's Ed25519 verification fails → EventCommandFailed → status "failed".
+	corruptedContent := []byte("CORRUPTED-BY-E2E-TEST")
 	dockerExecRoot(t, "fleet-controller", "sh", "-c",
 		"printf 'CORRUPTED-BY-E2E-TEST' > "+blobPath("v0.5.100-broken"))
+	corruptedSum := sha256.Sum256(corruptedContent)
+	dockerExecRoot(t, "fleet-controller", "sh", "-c",
+		fmt.Sprintf(`sed -i 's/"checksum":"[^"]*"/"checksum":"%s"/' %s`,
+			hex.EncodeToString(corruptedSum[:]), blobMetaPath("v0.5.100-broken")))
 
 	stewardID := suite.stewardIDs["fleet-steward-1"]
 	require.NotEmpty(t, stewardID)
