@@ -651,3 +651,118 @@ func TestHandleGetStewardConfig_InsufficientPermission(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// TestHandleGetStewardModules_StewardNotFound verifies 404 for an unknown steward.
+func TestHandleGetStewardModules_StewardNotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetStewardModules_ReturnsNotImplemented verifies 501 + MODULES_UNAVAILABLE
+// for a known steward with no module DNA and a tenant-authorized admin.
+func TestHandleGetStewardModules_ReturnsNotImplemented(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	// Register a steward in "test-tenant" with DNA that has no modules.loaded attribute.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-no-modules", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MODULES_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleGetStewardModules_RejectsCrossTenant verifies HTTP 404 (not 403) when
+// the API key's tenant is NOT a prefix of the steward's tenant_path.
+func TestHandleGetStewardModules_RejectsCrossTenant(t *testing.T) {
+	server := setupTestServer(t)
+	// API key belongs to "other-tenant", steward is registered in "test-tenant".
+	crossTenantKey := NewEphemeralTestKey(t, server, []string{"steward:read-modules"}, "other-tenant", 5*time.Minute)
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-tenant-a", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", crossTenantKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// Must be 404 (not 403) to avoid confirming steward existence across tenants.
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleGetStewardModules_ReturnsModuleList verifies 200 with a module list when
+// the steward's DNA includes a populated "modules.loaded" attribute.
+func TestHandleGetStewardModules_ReturnsModuleList(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	// Register a steward with modules.loaded in its DNA attributes.
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname":       "host-with-modules",
+		"os":             "linux",
+		"modules.loaded": "file, service, patch",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Modules []struct {
+				Name string `json:"name"`
+			} `json:"modules"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Modules, 3)
+	assert.Equal(t, "file", resp.Data.Modules[0].Name)
+	assert.Equal(t, "service", resp.Data.Modules[1].Name)
+	assert.Equal(t, "patch", resp.Data.Modules[2].Name)
+}
+
+// TestParseStewardModuleList covers the comma-split, whitespace-trim, and empty-entry
+// handling in parseStewardModuleList.
+func TestParseStewardModuleList(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"empty string", "", nil},
+		{"single module", "file", []string{"file"}},
+		{"multiple modules", "file,service,patch", []string{"file", "service", "patch"}},
+		{"spaces around names", " file , service , patch ", []string{"file", "service", "patch"}},
+		{"trailing comma", "file,service,", []string{"file", "service"}},
+		{"leading comma", ",file,service", []string{"file", "service"}},
+		{"whitespace-only entry", "file,,service", []string{"file", "service"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseStewardModuleList(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

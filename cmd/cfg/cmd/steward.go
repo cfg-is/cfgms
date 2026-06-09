@@ -30,6 +30,7 @@ var (
 	stewardTLSCACert        string
 	stewardTLSInsecure      bool
 	stewardStatusJSONOutput bool
+	stewardModulesJSON      bool
 )
 
 // stewardCmd is the parent command for steward subcommands.
@@ -162,6 +163,12 @@ func init() {
 	stewardStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardStatusCmd.Flags().BoolVar(&stewardStatusJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
+	stewardModulesCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardModulesCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardModulesCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardModulesCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardModulesCmd.Flags().BoolVar(&stewardModulesJSON, "json", false, "Emit JSON output instead of human-readable text")
+
 	// run-script flags
 	stewardRunScriptCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardRunScriptCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -208,6 +215,7 @@ func init() {
 
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
+	stewardCmd.AddCommand(stewardModulesCmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
 	stewardCmd.AddCommand(stewardRunStatusCmd)
@@ -280,6 +288,23 @@ Examples:
   cfg steward status <steward-id> --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardStatus,
+}
+
+// stewardModulesCmd lists the modules currently loaded by a named steward.
+var stewardModulesCmd = &cobra.Command{
+	Use:   "modules <id>",
+	Short: "List modules loaded by a steward",
+	Long: `Display the modules currently loaded by the named steward.
+
+Prints a tabular list of module names reported in the steward's DNA. If the
+steward does not report module data (older steward versions), a notice is printed
+and the command exits successfully.
+
+Examples:
+  cfg steward modules <steward-id>
+  cfg steward modules <steward-id> --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardModules,
 }
 
 // stewardStatusInfo is a local representation of a steward detail from the API response.
@@ -420,6 +445,79 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
 		}
 		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+func runStewardModules(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID+"/modules")
+	if err != nil {
+		return fmt.Errorf("failed to fetch steward modules: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward not found")
+	}
+
+	if resp.StatusCode == http.StatusNotImplemented {
+		fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if stewardModulesJSON {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Data struct {
+			Modules []struct {
+				Name string `json:"name"`
+			} `json:"modules"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(apiResp.Data.Modules) == 0 {
+		fmt.Println("No modules loaded.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "NAME"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "----"); err != nil {
+		return err
+	}
+	for _, m := range apiResp.Data.Modules {
+		if _, err := fmt.Fprintln(w, m.Name); err != nil {
 			return err
 		}
 	}

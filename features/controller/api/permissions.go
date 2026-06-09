@@ -18,6 +18,7 @@ var knownPermissions = map[string]bool{
 	"steward:execute-scripts": true,
 	"steward:read-compliance": true,
 	"steward:delete-config":   true,
+	"steward:read-modules":    true,
 	// Config management
 	"config:list":             true,
 	"config:list-deployments": true,

@@ -262,6 +262,127 @@ func TestStewardStatusCommand(t *testing.T) {
 	})
 }
 
+// TestStewardModules_CallsEndpoint verifies that `cfg steward modules <id>` calls
+// GET /api/v1/stewards/{id}/modules, prints the 501 notice without error, and exits 0.
+func TestStewardModules_CallsEndpoint(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{
+				"code":    "MODULES_UNAVAILABLE",
+				"message": "steward does not report loaded modules in DNA",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runStewardModules(stewardModulesCmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc/modules", requestPath)
+	assert.Contains(t, output, "Module list not available")
+}
+
+// TestStewardModules_NotFound verifies that a 404 response returns an error.
+func TestStewardModules_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{"code": "STEWARD_NOT_FOUND"},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardModules(stewardModulesCmd, []string{"unknown-steward"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestStewardModules_ServerError verifies that a non-2xx/non-404/non-501 response returns an error.
+func TestStewardModules_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardModules(stewardModulesCmd, []string{"steward-abc"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+// TestStewardModules_PrintsTabularList verifies that a 200 response with modules
+// is printed as a tabular NAME column.
+func TestStewardModules_PrintsTabularList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"modules": []map[string]string{
+					{"name": "file"},
+					{"name": "service"},
+					{"name": "patch"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runStewardModules(stewardModulesCmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "NAME")
+	assert.Contains(t, output, "file")
+	assert.Contains(t, output, "service")
+	assert.Contains(t, output, "patch")
+}
+
 func TestStewardList_UsesBundleClientPattern(t *testing.T) {
 	// Verify resolveBundleClient is used by confirming --no-bundle flag is inherited
 	// from rootCmd's persistent flags (the same flag resolveBundleClient reads).

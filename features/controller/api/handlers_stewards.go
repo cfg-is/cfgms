@@ -550,6 +550,85 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleGetStewardModules handles GET /api/v1/stewards/{id}/modules.
+// Returns 501 when the steward's DNA carries no "modules.loaded" attribute,
+// 404 for unknown stewards or cross-tenant callers, and 200 with a module list
+// when DNA includes the attribute.
+func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	stewardInfo, exists := s.controllerService.GetStewardInfo(stewardID)
+	if !exists {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	// Cross-tenant check: the caller's TenantID must equal or be an ancestor of the
+	// steward's TenantID. Return 404 (not 403) to avoid confirming existence across tenants.
+	// Admin principals (mTLS) have an empty TenantID and bypass this check.
+	if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil && principal.TenantID != "" {
+		st := stewardInfo.TenantID
+		ct := principal.TenantID
+		if st != ct && !strings.HasPrefix(st, ct+"/") {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	// Check DNA for modules.loaded attribute.
+	if stewardInfo.DNA == nil || stewardInfo.DNA.Attributes == nil {
+		s.logger.Info("Steward DNA unavailable for modules query", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotImplemented,
+			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"MODULES_UNAVAILABLE")
+		return
+	}
+
+	modulesAttr, ok := stewardInfo.DNA.Attributes["modules.loaded"]
+	if !ok {
+		s.logger.Info("Steward DNA has no modules.loaded attribute", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotImplemented,
+			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"MODULES_UNAVAILABLE")
+		return
+	}
+
+	type moduleEntry struct {
+		Name string `json:"name"`
+	}
+	names := parseStewardModuleList(modulesAttr)
+	entries := make([]moduleEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, moduleEntry{Name: name})
+	}
+
+	s.logger.Info("Retrieved loaded modules for steward", "steward_id", stewardIDForLog, "count", len(entries))
+	s.writeSuccessResponse(w, map[string]interface{}{"modules": entries})
+}
+
+// parseStewardModuleList splits a comma-separated module name string into a slice,
+// trimming whitespace and dropping empty entries.
+func parseStewardModuleList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
 func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
