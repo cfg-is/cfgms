@@ -144,7 +144,8 @@ func TestFleetStewardUpgradeHappyPath(t *testing.T) {
 		"upgrade status must reach 'committed' within 35s (got %q)", status)
 
 	// Verify via steward log that the upgrade version was processed.
-	suite.waitForStewardVersion(t, "fleet-steward-1", "v0.5.99-test", 10*time.Second)
+	require.True(t, suite.waitForStewardVersion(t, "fleet-steward-1", "v0.5.99-test", 10*time.Second),
+		"steward must log v0.5.99-test within 10s of upgrade completion")
 
 	// Steward must still be reachable after the upgrade (steward_id unchanged).
 	state, err := suite.getStewardConnectionState(t, stewardID)
@@ -188,8 +189,10 @@ func TestFleetStewardUpgradeBrokenBinaryRollback(t *testing.T) {
 	t.Logf("Broken-binary upgrade dispatched: upgrade_id=%s", upgradeID)
 
 	status := fetchUpgradeStatus(t, client, upgradeID, 35*time.Second)
-	require.Truef(t, status == "failed" || status == "rolled_back",
-		"upgrade status must reach 'failed' or 'rolled_back' within 35s (got %q)", status)
+	// The handler marks the record "failed" (not "rolled_back") on EventCommandFailed;
+	// "rolled_back" is only set by the explicit rollback endpoint, which isn't invoked here.
+	require.Equal(t, "failed", status,
+		"upgrade status must reach 'failed' within 35s (got %q)", status)
 
 	// Steward must still be alive after the failed upgrade.
 	state, err := suite.getStewardConnectionState(t, stewardID)
@@ -329,7 +332,13 @@ func TestFleetUpgrade_ConcurrentUpgradeRejected(t *testing.T) {
 	require.True(t, suite.waitForConvergence(t, stewardID, 30*time.Second),
 		"steward must be connected before dispatch")
 
-	// First dispatch creates a record in "dispatched" state.
+	// First dispatch creates a record in "dispatched" state. The handler returns
+	// 202 synchronously and launches a goroutine to publish the command to the
+	// steward. That goroutine must complete a gRPC round-trip to the steward
+	// (O(50ms) over Docker networking) before it can transition the record to a
+	// terminal state. The second dispatch is issued within the same Go goroutine
+	// right after the first HTTP response returns (O(<5ms)), so the record is
+	// guaranteed to still be in "dispatched" state.
 	code1, upgradeID := doDispatchUpgrade(t, client, stewardID, "v0.5.96-conc")
 	require.Equal(t, http.StatusAccepted, code1, "first dispatch must return 202")
 	require.NotEmpty(t, upgradeID)
