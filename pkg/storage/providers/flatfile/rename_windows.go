@@ -11,97 +11,97 @@ import (
 	"os"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
-// atomicRename renames src → dst on Windows with a short retry loop that
-// outlasts a concurrent reader's open-read-close cycle.
+// atomicRename renames src → dst on Windows with semantics that match POSIX
+// rename(2): the rename is atomic with respect to concurrent readers, who
+// keep reading their handle's view of the pre-rename file until they close
+// it.
 //
-// Why a retry: Windows differs from POSIX in that MoveFileEx /
-// MOVEFILE_REPLACE_EXISTING (the path os.Rename takes on Windows for
-// existing-target replacement) fails with ERROR_ACCESS_DENIED (errno 5)
-// or ERROR_SHARING_VIOLATION (errno 32) when ANY other handle has the
-// destination file open — even just for reading. POSIX has no such
-// restriction: rename(2) decouples the directory entry from the open
-// handle so concurrent readers continue reading the orphaned inode.
+// We use ReplaceFileW for the existing-dst path. The Win32 API guarantees:
+//   - atomic from observer perspective (no torn read between unlink + rename)
+//   - succeeds with REPLACEFILE_WRITE_THROUGH while readers have dst open;
+//     they keep their pre-rename view, same as POSIX
+//   - the implementation does the directory-entry swap in a single critical
+//     section inside the filesystem driver
 //
-// The blue/green substrate (Issue #1919) requires a controller writer
-// to be able to replace a config file while a peer controller is reading
-// it. We achieve this by retrying the rename on EACCES /
-// ERROR_SHARING_VIOLATION with a randomised-jitter exponential backoff.
+// For the first-write case (dst does not yet exist), ReplaceFileW returns
+// ERROR_FILE_NOT_FOUND and we fall back to MoveFileEx via os.Rename. That
+// path has no contention risk because there's no destination handle to clash
+// with.
 //
-// Worst-case schedule across 30 attempts: ~127ms exponential ramp
-// (1→2→4→8→16→32→64→ saturate at 100) + 23 × 100ms saturated tail =
-// ~2.43s pre-jitter. Jitter (±50%) means the absolute maximum hold
-// time is ~3.6s before surfacing the error to the caller. The CI
-// stress test (TestFlatFile_CrossProcess_OneWriterManyReaders) runs
-// 3 concurrent reader processes against 1 writer for 5s, so the
-// writer must outlast a contention window where every retry attempt
-// can coincide with at least one reader's open-read-close cycle.
-// The earlier 12-attempt / ~750ms budget was too tight under that
-// load: a single rename collision within a 5s test would fail the
-// writer and abort the test. The wider budget is still small in
-// real-world terms — a stuck reader past 3.6s is a fault, not
-// normal contention.
-//
-// Jitter rationale: without it, every Windows process retrying against
-// the same target file fires on identical millisecond boundaries. Under
-// sustained blue/green load (peer reading from a file while we replace
-// it), correlated retries become a self-amplifying contention storm.
-// Randomising each sleep by ±50% de-correlates retry attempts across
-// processes and prevents the livelock failure mode.
-//
-// Note: ReplaceFileW would be a more elegant solution because it allows
-// the replace to proceed even with open readers (the readers keep their
-// view of the old file, just like POSIX). But ReplaceFileW also requires
-// the destination to already exist, so the "first-write" path would
-// need separate code anyway. The retry strategy works uniformly for
-// both first-write (uncontested rename) and replace (contested rename).
+// This replaces the earlier retry-loop strategy (30 × 100ms backoff). Under
+// the cross-process stress test (#1919) on slow CI runners — 3 readers + 1
+// writer for 5s — every retry attempt could coincide with at least one open
+// reader, and the writer occasionally exhausted the 3.6s budget. The retry
+// path was a workaround for not using ReplaceFileW; this commit switches to
+// the API that was always the correct choice (the previous comment block
+// already acknowledged ReplaceFileW would be "a more elegant solution" but
+// rejected it because of the first-write split — which we handle cleanly via
+// the ERROR_FILE_NOT_FOUND fallback below).
 func atomicRename(src, dst string) error {
-	const (
-		maxAttempts = 30
-		baseDelay   = 1 * time.Millisecond
-		maxDelay    = 100 * time.Millisecond
-	)
-	var lastErr error
-	delay := baseDelay
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err := os.Rename(src, dst)
-		if err == nil {
-			return nil
-		}
-		if !isRetryableRenameError(err) {
-			return err
-		}
-		lastErr = err
-		time.Sleep(jitter(delay))
-		if delay < maxDelay {
-			delay *= 2
-			if delay > maxDelay {
-				delay = maxDelay
-			}
-		}
+	// Fast path: try POSIX-style atomic replace.
+	if err := replaceFileW(dst, src); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.Errno(2 /* ERROR_FILE_NOT_FOUND */)) {
+		return err
 	}
-	return lastErr
+	// dst does not exist — first write. Plain rename is safe here because
+	// there's no destination handle to contend with.
+	return os.Rename(src, dst)
 }
 
-// jitter returns d randomised by ±50% so concurrent writers/readers
-// retrying against the same target don't fire on aligned millisecond
-// boundaries. Uses math/rand/v2 (Go 1.22+) which is seeded automatically
-// — fine for jitter, NOT for cryptographic purposes.
+// replaceFileW calls the Win32 ReplaceFileW API. dst must exist; src must
+// exist; dst is replaced by src atomically. Returns the syscall errno on
+// failure so the caller can switch on ERROR_FILE_NOT_FOUND for the
+// first-write fallback.
+func replaceFileW(dst, src string) error {
+	const replaceFlagWriteThrough = 0x00000001
+	dstW, err := syscall.UTF16PtrFromString(dst)
+	if err != nil {
+		return err
+	}
+	srcW, err := syscall.UTF16PtrFromString(src)
+	if err != nil {
+		return err
+	}
+	r1, _, e1 := procReplaceFileW.Call(
+		uintptr(unsafe.Pointer(dstW)),
+		uintptr(unsafe.Pointer(srcW)),
+		0, // no backup
+		uintptr(replaceFlagWriteThrough),
+		0, 0,
+	)
+	if r1 == 0 {
+		return e1
+	}
+	return nil
+}
+
+var (
+	kernel32         = syscall.MustLoadDLL("kernel32.dll")
+	procReplaceFileW = kernel32.MustFindProc("ReplaceFileW")
+)
+
+// jitter returns d randomised by ±50% so concurrent readers/writers retrying
+// against the same target don't fire on aligned millisecond boundaries.
+// Used by readFile's retry on ERROR_SHARING_VIOLATION. The writer side no
+// longer needs retries (ReplaceFileW handles open readers natively) but the
+// reader-side retry is kept as defense-in-depth against transient FS-driver
+// hiccups during the rename window.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}
-	// Random factor in [0.5, 1.5).
 	factor := 0.5 + rand.Float64() //nolint:gosec // jitter, not crypto
 	return time.Duration(float64(d) * factor)
 }
 
-// isRetryableRenameError reports whether err is the specific Windows
-// failure mode that occurs when a concurrent reader holds the destination
-// file open. Any other failure (permission denied at the directory
-// level, disk full, path invalid) is non-retryable and surfaces
-// immediately.
+// isRetryableRenameError reports whether err is the Windows transient
+// failure mode that occurs when a concurrent operation has the file open.
+// Used by readFile (rename_windows is no longer the only caller after the
+// ReplaceFileW switch — the name is kept for continuity with read_windows.go).
 func isRetryableRenameError(err error) bool {
 	if err == nil {
 		return false

@@ -6,26 +6,31 @@
 package flatfile
 
 import (
+	"io"
 	"os"
+	"syscall"
 	"time"
 )
 
-// readFile reads path with a short retry loop on the Windows-specific
-// "process cannot access the file because it is being used by another
-// process" failure mode that occurs when a concurrent writer is in the
-// middle of replacing the file.
+// readFile reads path with Windows share semantics that let concurrent
+// writers replace the file underneath us. Without these flags, Go's stock
+// os.ReadFile opens with dwShareMode = FILE_SHARE_READ, which blocks any
+// concurrent ReplaceFileW / MoveFileEx for the entire open window. Under
+// the blue/green substrate (#1919), where readers cycle continuously, that
+// blockage is exactly what trips the writer's atomic-replace path on
+// Windows CI runners.
 //
-// Windows opens a regular os.ReadFile with dwShareMode = FILE_SHARE_READ.
-// If another process has the file open (which a writer briefly does
-// during its MoveFileEx replace operation), the open fails with
-// ERROR_SHARING_VIOLATION (errno 32) until the writer's handle closes.
-// The blue/green substrate (#1919) needs concurrent reader + writer
-// processes to coexist without spurious read failures, so this helper
-// retries with a short backoff that outlasts a single writer's
-// in-flight replace.
+// FILE_SHARE_DELETE: lets the writer rename the file (the reader keeps its
+// own handle to the original directory entry).
+// FILE_SHARE_WRITE: lets the writer open the file for write during replace.
 //
-// Symmetric with atomicRename's writer-side retry: same error codes,
-// same bounded budget.
+// The reader keeps reading from the pre-rename inode-equivalent until it
+// closes its handle, matching POSIX rename(2) semantics. A subsequent
+// reader sees the post-rename file.
+//
+// We keep a short retry on ERROR_SHARING_VIOLATION (errno 32) as
+// defense-in-depth for transient FS-driver glitches during the rename
+// window. With the share flags above, retries should be rare.
 func readFile(path string) ([]byte, error) {
 	const (
 		maxAttempts = 12
@@ -35,7 +40,7 @@ func readFile(path string) ([]byte, error) {
 	var lastErr error
 	delay := baseDelay
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		data, err := os.ReadFile(path) //#nosec G304 -- caller validates path
+		data, err := readWithShareFlags(path)
 		if err == nil {
 			return data, nil
 		}
@@ -52,4 +57,32 @@ func readFile(path string) ([]byte, error) {
 		}
 	}
 	return nil, lastErr
+}
+
+// readWithShareFlags opens path with FILE_SHARE_READ | FILE_SHARE_WRITE |
+// FILE_SHARE_DELETE, reads the whole file, and closes. Equivalent to
+// os.ReadFile except for the share-mode override that lets a concurrent
+// writer's ReplaceFileW succeed.
+func readWithShareFlags(path string) ([]byte, error) {
+	pathW, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := syscall.CreateFile(
+		pathW,
+		syscall.GENERIC_READ,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		// Surface the underlying errno (syscall.Errno) so caller's
+		// isRetryableRenameError / os.IsNotExist work uniformly.
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(handle), path)
+	defer f.Close()
+	return io.ReadAll(f)
 }
