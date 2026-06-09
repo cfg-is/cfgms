@@ -27,8 +27,14 @@ import (
 //
 //	FAKE_STEWARD_SLEEP_MS    Sleep this many ms before exiting. Default 0.
 //	FAKE_STEWARD_EXIT_CODE   Exit with this status. Default 0.
-//	FAKE_STEWARD_MARKER_FILE Touch this file before sleeping so the test can
-//	                         verify which version actually ran.
+//	FAKE_STEWARD_MARKER_FILE       Touch this file before sleeping so the test
+//	                               can verify which version actually ran.
+//	FAKE_STEWARD_EXIT_MARKER_FILE  Touch this file AFTER the sleep, just before
+//	                               os.Exit. Used by the #1928 Job-Object test
+//	                               to distinguish "naturally completed" from
+//	                               "killed by the Job Object when the parent
+//	                               died." If absent on file system after the
+//	                               sleep budget, the kill landed.
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -40,6 +46,9 @@ func TestHelperProcess(t *testing.T) {
 		if n, err := strconv.Atoi(sleepMs); err == nil && n > 0 {
 			time.Sleep(time.Duration(n) * time.Millisecond)
 		}
+	}
+	if exitMarker := os.Getenv("FAKE_STEWARD_EXIT_MARKER_FILE"); exitMarker != "" {
+		_ = os.WriteFile(exitMarker, []byte("natural-exit"), 0o600)
 	}
 	code := 0
 	if c := os.Getenv("FAKE_STEWARD_EXIT_CODE"); c != "" {
@@ -98,31 +107,6 @@ func runSupervisor(t *testing.T, s *Supervisor, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return s.Supervise(ctx)
-}
-
-// fakeClock simulates time so we can deterministically test the
-// startup-window logic without sleeping in real time.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) Since(t time.Time) time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now.Sub(t)
-}
-
-func (c *fakeClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
 }
 
 // envForChild returns the env vars to pass to a child fake-steward by

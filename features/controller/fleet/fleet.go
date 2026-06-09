@@ -36,6 +36,7 @@ type Filter struct {
 	Status        string            // "online", "offline", or "any"/empty (any status)
 	Hostname      string            // Substring match on DNA["hostname"] (kept for backward compat)
 	Name          string            // Glob match on DNA["hostname"] via path.Match (use name: selector key)
+	DeviceID      string            // Match by exact device ID (id: selector)
 }
 
 // ParseTargetSelector parses a space-separated key:value selector string into a Filter.
@@ -71,6 +72,8 @@ func ParseTargetSelector(s string) (Filter, error) {
 			f.Architecture = value
 		case key == "tag":
 			f.Tags = append(f.Tags, value)
+		case key == "id":
+			f.DeviceID = value
 		case strings.HasPrefix(key, "dna."):
 			dnaKey := strings.TrimPrefix(key, "dna.")
 			if f.DNAAttributes == nil {

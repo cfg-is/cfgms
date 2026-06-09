@@ -8,6 +8,15 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestUpgradeConstants(t *testing.T) {
+	assert.Equal(t, "push_steward_binary", string(CommandPushStewardBinary))
+	assert.Equal(t, "steward.upgrade.dispatched", string(EventStewardUpgradeDispatched))
+	assert.Equal(t, "steward.upgrade.downloaded", string(EventStewardUpgradeDownloaded))
+	assert.Equal(t, "steward.upgrade.swapped", string(EventStewardUpgradeSwapped))
+	assert.Equal(t, "steward.upgrade.committed", string(EventStewardUpgradeCommitted))
+	assert.Equal(t, "steward.upgrade.rolled_back", string(EventStewardUpgradeRolledBack))
+}
+
 func TestEventFilter_Match(t *testing.T) {
 	tests := []struct {
 		name     string

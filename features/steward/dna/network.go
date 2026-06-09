@@ -111,5 +111,11 @@ func (g *GenericNetworkCollector) CollectFirewall(_ context.Context, attributes 
 	return nil
 }
 
+// LinuxNetworkCollector handles Linux-specific network collection
+type LinuxNetworkCollector struct{}
+
 // DarwinNetworkCollector handles macOS-specific network collection
 type DarwinNetworkCollector struct{}
+
+// WindowsNetworkCollector handles Windows-specific network collection.
+// Full definition is in network_windows.go.
