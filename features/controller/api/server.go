@@ -100,6 +100,7 @@ type Server struct {
 	moduleBundleApprover    resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
 	moduleTrustStore        trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
 	stewardBinaryTrustStore trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
+	upgradeStore            business.UpgradeStore             // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
 	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce               sync.Once                         // idempotent Close
@@ -497,6 +498,16 @@ func (s *Server) setupRouter() {
 	stewardBinaries.Handle("/{version}/{platform}/{arch}",
 		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetStewardBinary))).Methods("GET")
 
+	// Steward upgrade dispatch endpoints (Issue #1945).
+	// Always registered — handlers return 503 when upgradeStore is nil (nil-safe by design).
+	stewardUpgrade := api.PathPrefix("/stewards/upgrade").Subrouter()
+	stewardUpgrade.Handle("",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleDispatchUpgrade))).Methods("POST")
+	stewardUpgrade.Handle("/{upgrade_id}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleUpgradeStatus))).Methods("GET")
+	stewardUpgrade.Handle("/{upgrade_id}/rollback",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleUpgradeRollback))).Methods("POST")
+
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
 	s.router.HandleFunc("/api/v1/installer/download/{platform}/{arch}", s.handleDownloadInstallPackage).Methods("GET")
@@ -831,6 +842,15 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ipTrustStore = store
+}
+
+// SetUpgradeStore wires the durable UpgradeStore used by the steward upgrade
+// dispatch endpoint (Issue #1945). When nil, POST /api/v1/stewards/upgrade
+// returns 503. No silent in-memory fallback.
+func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upgradeStore = store
 }
 
 // SetSigningRotationService wires the signing rotation service for the

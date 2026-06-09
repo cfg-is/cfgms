@@ -79,6 +79,9 @@ var knownPermissions = map[string]bool{
 	"installer:delete": true,
 	// Steward binary publishing (Issue #1944)
 	"installer:publish:steward": true,
+	// Steward upgrade dispatch and approval (Issue #1945)
+	"installer:dispatch:steward": true,
+	"installer:approve:steward":  true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
