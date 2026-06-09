@@ -341,7 +341,7 @@ This is the same controller — it just has no stewards registered. The workflow
 
 Operators interact with CFGMS through layered UX surfaces.
 
-**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows.
+**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows. `cfg steward logs` is available but returns 501 until a log-pull transport is wired.
 
 **Web UI (planned before v1).** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
 

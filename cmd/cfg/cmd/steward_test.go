@@ -262,6 +262,61 @@ func TestStewardStatusCommand(t *testing.T) {
 	})
 }
 
+func TestStewardLogs_CallsEndpoint(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"code":    "LOGS_UNAVAILABLE",
+			"message": "steward log pull not yet supported; collect logs directly from the steward host",
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origTail := stewardLogsTail
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardLogsTail = origTail
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardLogsTail = 100
+
+	output := captureStdout(t, func() {
+		err := runStewardLogs(stewardLogsCmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc/logs", requestPath)
+	assert.Contains(t, output, "not yet available")
+}
+
+func TestStewardLogs_HandlesNotImplemented(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "LOGS_UNAVAILABLE"})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardLogs(stewardLogsCmd, []string{"steward-abc"})
+	assert.NoError(t, err, "501 response must not return an error")
+}
+
 func TestStewardList_UsesBundleClientPattern(t *testing.T) {
 	// Verify resolveBundleClient is used by confirming --no-bundle flag is inherited
 	// from rootCmd's persistent flags (the same flag resolveBundleClient reads).
