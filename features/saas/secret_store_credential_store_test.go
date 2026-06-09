@@ -40,31 +40,6 @@ func newTestCredentialStore(t *testing.T) auth.CredentialStore {
 	return NewSecretStoreCredentialStore(store)
 }
 
-// newBenchCredentialStore creates a SecretStoreCredentialStore backed by a real steward
-// store for use in benchmarks.
-func newBenchCredentialStore(b *testing.B) auth.CredentialStore {
-	b.Helper()
-	if _, err := os.Stat("/etc/machine-id"); os.IsNotExist(err) {
-		b.Skip("skipping: /etc/machine-id not available (required for platform key derivation on Linux)")
-	}
-
-	tmpDir := b.TempDir()
-	provider := &stewardprovider.StewardProvider{}
-	store, err := provider.CreateSecretStore(map[string]interface{}{
-		"secrets_dir": tmpDir,
-	})
-	if err != nil {
-		b.Fatalf("failed to create secret store: %v", err)
-	}
-	b.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			b.Errorf("failed to close secret store: %v", err)
-		}
-	})
-
-	return NewSecretStoreCredentialStore(store)
-}
-
 func TestSecretStoreCredentialStore_StoreAndGetToken(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
