@@ -20,6 +20,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"net/url"
+
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +32,8 @@ var (
 	stewardTLSCACert        string
 	stewardTLSInsecure      bool
 	stewardStatusJSONOutput bool
+	stewardDNAAttribute     string
+	stewardDNAJSONOutput    bool
 )
 
 // stewardCmd is the parent command for steward subcommands.
@@ -162,6 +166,13 @@ func init() {
 	stewardStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardStatusCmd.Flags().BoolVar(&stewardStatusJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
+	stewardDNACmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardDNACmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardDNACmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardDNACmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardDNACmd.Flags().StringVar(&stewardDNAAttribute, "attribute", "", "Return a single attribute value by key (for scripted probes)")
+	stewardDNACmd.Flags().BoolVar(&stewardDNAJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+
 	// run-script flags
 	stewardRunScriptCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardRunScriptCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -208,6 +219,7 @@ func init() {
 
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
+	stewardCmd.AddCommand(stewardDNACmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
 	stewardCmd.AddCommand(stewardRunStatusCmd)
@@ -280,6 +292,116 @@ Examples:
   cfg steward status <steward-id> --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardStatus,
+}
+
+// stewardDNACmd shows the DNA snapshot for a single steward.
+var stewardDNACmd = &cobra.Command{
+	Use:   "dna <id>",
+	Short: "Show DNA snapshot for a steward",
+	Long: `Display the most recent DNA snapshot for a steward registered with the controller.
+
+Use --attribute to retrieve a single dotted-path attribute value for scripted probes.
+Use --json to write the raw API response body to stdout.
+
+Examples:
+  # Show full DNA in human-readable form
+  cfg steward dna <steward-id>
+
+  # Show DNA as raw JSON
+  cfg steward dna <steward-id> --json
+
+  # Retrieve a single attribute value (exits non-zero if not present)
+  cfg steward dna <steward-id> --attribute os`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardDNA,
+}
+
+// stewardDNAInfo is a local representation of the DNA snapshot returned by the API.
+type stewardDNAInfo struct {
+	Hostname     string            `json:"hostname"`
+	OS           string            `json:"os"`
+	Architecture string            `json:"architecture"`
+	CollectedAt  string            `json:"collected_at"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+}
+
+func runStewardDNA(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/stewards/" + stewardID + "/dna"
+	if stewardDNAAttribute != "" {
+		path += "?attribute=" + url.QueryEscape(stewardDNAAttribute)
+	}
+
+	resp, err := client.Get(context.Background(), path)
+	if err != nil {
+		return fmt.Errorf("failed to fetch steward DNA: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		if stewardDNAAttribute != "" {
+			return fmt.Errorf("attribute %q not found for steward %s", stewardDNAAttribute, stewardID)
+		}
+		return fmt.Errorf("steward %s not found or has no DNA snapshot", stewardID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Single attribute: the handler returns {"value":"<val>"} directly (no data wrapper).
+	if stewardDNAAttribute != "" {
+		var attrResp struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(body, &attrResp); err != nil {
+			return fmt.Errorf("failed to parse attribute response: %w", err)
+		}
+		fmt.Println(attrResp.Value)
+		return nil
+	}
+
+	if stewardDNAJSONOutput {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Data stewardDNAInfo `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	d := apiResp.Data
+	fmt.Printf("Hostname:      %s\n", d.Hostname)
+	fmt.Printf("OS:            %s\n", d.OS)
+	if d.Architecture != "" {
+		fmt.Printf("Architecture:  %s\n", d.Architecture)
+	}
+	if d.CollectedAt != "" {
+		fmt.Printf("CollectedAt:   %s\n", d.CollectedAt)
+	}
+	for k, v := range d.Attributes {
+		fmt.Printf("%s=%s\n", k, v)
+	}
+	return nil
 }
 
 // stewardStatusInfo is a local representation of a steward detail from the API response.

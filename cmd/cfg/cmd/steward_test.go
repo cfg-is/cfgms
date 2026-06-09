@@ -278,3 +278,154 @@ func TestStewardList_UsesBundleClientPattern(t *testing.T) {
 	}
 	assert.True(t, found, "list must be registered as subcommand of stewardCmd")
 }
+
+// ---- steward dna tests ----
+
+// TestStewardDNA_CallsEndpoint verifies that `cfg steward dna <id>` calls
+// GET /api/v1/stewards/<id>/dna and that the tabular output contains "Hostname".
+func TestStewardDNA_CallsEndpoint(t *testing.T) {
+	var requestPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"hostname":     "myhost",
+				"os":           "linux",
+				"architecture": "amd64",
+				"collected_at": "2026-06-09T10:00:00Z",
+				"attributes": map[string]string{
+					"env": "prod",
+				},
+			},
+			"timestamp": time.Now().UTC(),
+		})
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	origJSON := stewardDNAJSONOutput
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+		stewardDNAJSONOutput = origJSON
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = ""
+	stewardDNAJSONOutput = false
+
+	output := captureStdout(t, func() {
+		err := runStewardDNA(stewardDNACmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc/dna", requestPath)
+	assert.Contains(t, output, "Hostname")
+	assert.Contains(t, output, "myhost")
+}
+
+// TestStewardDNA_AttributeFlag verifies that --attribute appends the query parameter
+// and prints only the raw value (no label).
+func TestStewardDNA_AttributeFlag(t *testing.T) {
+	var requestURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"value": "linux"})
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	origJSON := stewardDNAJSONOutput
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+		stewardDNAJSONOutput = origJSON
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = "os"
+	stewardDNAJSONOutput = false
+
+	output := captureStdout(t, func() {
+		err := runStewardDNA(stewardDNACmd, []string{"steward-xyz"})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, requestURL, "attribute=os")
+	assert.Equal(t, "linux\n", output)
+}
+
+// TestStewardDNA_AttributeNotFound verifies non-zero exit (error) when the server returns 404.
+func TestStewardDNA_AttributeNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{"code": "DNA_ATTRIBUTE_NOT_FOUND", "message": "attribute not found"},
+		})
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = "nonexistent"
+
+	err := runStewardDNA(stewardDNACmd, []string{"steward-abc"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent")
+}
+
+// TestStewardDNA_JSONOutput verifies that --json writes the raw response body to stdout.
+func TestStewardDNA_JSONOutput(t *testing.T) {
+	rawBody := `{"data":{"hostname":"myhost","os":"linux"},"timestamp":"2026-06-09T10:00:00Z"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(rawBody))
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	origJSON := stewardDNAJSONOutput
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+		stewardDNAJSONOutput = origJSON
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = ""
+	stewardDNAJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runStewardDNA(stewardDNACmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, rawBody, output)
+}

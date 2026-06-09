@@ -203,7 +203,28 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, apiStewardInfo)
 }
 
+// dnaAttributeDenylist contains glob-style patterns (case-insensitive substring match)
+// for attribute keys that must never be returned via ?attribute=<key>. 404 is returned
+// rather than 403 to avoid disclosing whether a sensitive attribute exists.
+var dnaAttributeDenylist = []string{"token", "secret", "password", "credential", "api_key"}
+
+// dnaAttributeMaxLen is the maximum accepted length for the ?attribute= query parameter.
+const dnaAttributeMaxLen = 128
+
+// isDNAAttributeDenylisted reports whether key matches any denylist pattern (case-insensitive).
+// Returns the matched pattern for logging, or "" when not matched.
+func isDNAAttributeDenylisted(key string) string {
+	lower := strings.ToLower(key)
+	for _, pattern := range dnaAttributeDenylist {
+		if strings.Contains(lower, pattern) {
+			return pattern
+		}
+	}
+	return ""
+}
+
 // handleGetStewardDNA handles GET /api/v1/stewards/{id}/dna
+// Optional query parameter: ?attribute=<key> returns a single attribute value.
 func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -213,6 +234,28 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 		return
+	}
+
+	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
+	// principals have TenantID="" meaning no scope restriction.
+	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		info, ok := s.controllerService.GetStewardInfo(stewardID)
+		stewardTenant := ""
+		if ok {
+			stewardTenant = info.TenantID
+		}
+		// Allow access when caller's tenant equals or is a hierarchical ancestor of the
+		// steward's tenant (e.g. "root/msp-a" can read "root/msp-a/client-1" stewards).
+		// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
+		sameTenant := stewardTenant == callerTenant
+		ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+		if !ok || (!sameTenant && !ancestorTenant) {
+			// 404 instead of 403 to avoid disclosing steward existence across tenants.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
 	}
 
 	// Create gRPC request
@@ -232,6 +275,28 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	dnaInfo := DNAFromProto(dnaResp)
 	if dnaInfo == nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "DNA not found for steward", "DNA_NOT_FOUND")
+		return
+	}
+
+	// Handle optional ?attribute=<key> filter.
+	attrKey := r.URL.Query().Get("attribute")
+	if attrKey != "" {
+		if len(attrKey) > dnaAttributeMaxLen {
+			s.writeErrorResponse(w, http.StatusBadRequest, "attribute key too long", "ATTRIBUTE_KEY_TOO_LONG")
+			return
+		}
+		if matched := isDNAAttributeDenylisted(attrKey); matched != "" {
+			s.logger.Info("attribute key matches denylist; returning 404", "matched_pattern", matched)
+			s.writeErrorResponse(w, http.StatusNotFound, "attribute not found", "DNA_ATTRIBUTE_REDACTED")
+			return
+		}
+		val, ok := dnaInfo.Attributes[attrKey]
+		if !ok {
+			s.logger.Info("DNA attribute not found", "steward_id", stewardIDForLog, "attribute", logging.SanitizeLogValue(attrKey))
+			s.writeErrorResponse(w, http.StatusNotFound, "attribute not found", "DNA_ATTRIBUTE_NOT_FOUND")
+			return
+		}
+		s.respondJSON(w, http.StatusOK, map[string]string{"value": val})
 		return
 	}
 
