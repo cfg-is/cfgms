@@ -65,7 +65,7 @@ type clock interface {
 
 type realClock struct{}
 
-func (realClock) Now() time.Time              { return time.Now() }
+func (realClock) Now() time.Time                  { return time.Now() }
 func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
 
 // Supervise runs the supervision loop until ctx is cancelled, the child
@@ -169,7 +169,7 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			return fmt.Errorf("launcher: rollback after child failure: %w", rbErr)
 		}
 		rollbacksRemaining--
-		fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, ranFor)
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, ranFor)
 	}
 }
 

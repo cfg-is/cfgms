@@ -43,9 +43,9 @@ func main() {
 // buildRootCommand constructs the cobra command tree for cfgms-controller.
 func buildRootCommand() *cobra.Command {
 	var (
-		configPath        string
-		initMode          bool
-		listenAPIAddr     string
+		configPath          string
+		initMode            bool
+		listenAPIAddr       string
 		listenTransportAddr string
 	)
 
