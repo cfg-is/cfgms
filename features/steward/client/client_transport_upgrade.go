@@ -104,11 +104,11 @@ func parsePushStewardBinaryParams(raw map[string]interface{}) (*pushStewardBinar
 // Algorithm:
 //  1. Parse and validate params.
 //  2. Host pinning: assert download_url host matches the controller endpoint host.
-//  3. Size cap: refuse if Content-Length > MaxBinarySizeBytes; enforce during streaming.
-//  4. Download to certStoreDir/upgrades/<seq>.bin (dir 0700, file 0600).
-//  5. SHA-256 verify: compare recomputed digest to cmd.SHA256.
-//  6. Publisher signature verify via trust.VerifyBundleSignature.
-//  7. Version monotonicity check.
+//  3. Version monotonicity check — fast pre-download gate.
+//  4. Size cap: refuse if Content-Length > MaxBinarySizeBytes; enforce during streaming.
+//  5. Download to certStoreDir/upgrades/<seq>.bin (dir 0700, file 0600).
+//  6. SHA-256 verify: compare recomputed digest to cmd.SHA256.
+//  7. Publisher signature verify via trust.VerifyBundleSignature.
 //  8. Revocation check.
 //  9. Emit EventStewardUpgradeDownloaded.
 //  10. Emit EventStewardUpgradeSwapped.
@@ -143,6 +143,19 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 			downloadHost, controllerHost)
 	}
 
+	// Step 3: Version monotonicity — fast pre-download gate avoids an unnecessary network
+	// round-trip when the target version is already older than the running version.
+	c.mu.RLock()
+	allowDowngrade := c.upgradeAllowDowngrade
+	c.mu.RUnlock()
+	if !allowDowngrade && !isNewerVersion(params.Version, version.Version) {
+		c.logger.Warn("push_steward_binary: downgrade denied",
+			"target_version", logging.SanitizeLogValue(params.Version),
+			"running_version", version.Version)
+		return fmt.Errorf("push_steward_binary: %w (target=%q running=%q)",
+			ErrDowngradeDenied, params.Version, version.Version)
+	}
+
 	// Ensure downloads directory exists with restricted permissions.
 	c.mu.RLock()
 	certStoreDir := c.certStoreDir
@@ -155,7 +168,7 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 		return fmt.Errorf("push_steward_binary: create upgrades dir: %w", err)
 	}
 
-	// Step 3-4: Download to temp file.
+	// Step 4-5: Download to temp file.
 	seq := upgradeSeq.Add(1)
 	tmpPath := filepath.Join(upgradesDir, fmt.Sprintf("upgrade-%d.bin", seq))
 
@@ -165,14 +178,14 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 		return fmt.Errorf("push_steward_binary: download failed: %w", dlErr)
 	}
 
-	// Step 5: SHA-256 check.
+	// Step 6: SHA-256 check.
 	if !strings.EqualFold(recomputedSHA256, params.SHA256) {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("push_steward_binary: sha256 mismatch: expected %q computed %q",
 			params.SHA256, recomputedSHA256)
 	}
 
-	// Step 6: Publisher signature verification.
+	// Step 7: Publisher signature verification.
 	if err := c.verifyBinarySignature(recomputedSHA256, params); err != nil {
 		_ = os.Remove(tmpPath)
 		c.logger.Warn("push_steward_binary: signature verification failed",
@@ -180,19 +193,6 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 			"publisher", logging.SanitizeLogValue(params.Publisher),
 			"error", err.Error())
 		return fmt.Errorf("push_steward_binary: signature verification failed: %w", err)
-	}
-
-	// Step 7: Version monotonicity.
-	c.mu.RLock()
-	allowDowngrade := c.upgradeAllowDowngrade
-	c.mu.RUnlock()
-	if !allowDowngrade && !isNewerVersion(params.Version, version.Version) {
-		_ = os.Remove(tmpPath)
-		c.logger.Warn("push_steward_binary: downgrade denied",
-			"target_version", logging.SanitizeLogValue(params.Version),
-			"running_version", version.Version)
-		return fmt.Errorf("push_steward_binary: %w (target=%q running=%q)",
-			ErrDowngradeDenied, params.Version, version.Version)
 	}
 
 	// Step 8: Revocation check.

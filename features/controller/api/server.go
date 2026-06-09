@@ -544,6 +544,11 @@ func (s *Server) setupRouter() {
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
 	s.router.HandleFunc("/api/v1/installer/download/{platform}/{arch}", s.handleDownloadInstallPackage).Methods("GET")
 
+	// Steward binary public download — no auth required (Issue #1948).
+	// The binary's Ed25519 signature authenticates content at the steward side.
+	// Steward mTLS certs lack the admin marker required by the authenticated GET endpoint.
+	s.router.HandleFunc("/api/v1/public/steward-binaries/{version}/{platform}/{arch}", s.handleGetStewardBinaryPublic).Methods("GET")
+
 	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
 	// run manager is not wired (transport-disabled deployments).
 	runs := api.PathPrefix("/runs").Subrouter()

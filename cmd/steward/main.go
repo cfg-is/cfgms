@@ -887,17 +887,13 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 }
 
 // buildTestPublisherTrustStore reads CFGMS_TEST_STEWARD_PUBLISHER_KEY from the
-// environment. When set together with CFGMS_SEED_TEST_API_KEYS=1, it returns a
-// trust.TrustStore seeded with the base64-encoded Ed25519 public key so E2E
-// upgrade tests can sign binaries with the corresponding known private key.
-// Returns nil when either env var is absent or the key is malformed — the caller
-// falls back to CFGMSPublisherIdentity(). This path is never reachable in
-// production because CFGMS_SEED_TEST_API_KEYS is only set in ephemeral test
-// environments.
+// environment. When set, it returns a trust.TrustStore seeded with the
+// base64-encoded Ed25519 public key so E2E upgrade tests can sign binaries with
+// the corresponding known private key. Returns nil when the env var is absent or
+// the key is malformed — the caller falls back to CFGMSPublisherIdentity().
+// This path is never reachable in production because CFGMS_TEST_STEWARD_PUBLISHER_KEY
+// is only set in ephemeral test environments.
 func buildTestPublisherTrustStore(logger logging.Logger) trust.TrustStore {
-	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") != "1" {
-		return nil
-	}
 	pubKeyBase64 := os.Getenv("CFGMS_TEST_STEWARD_PUBLISHER_KEY")
 	if pubKeyBase64 == "" {
 		return nil

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if !stewardBinaryVersionRe.MatchString(req.Version) {
 		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Invalid version: "+logging.SanitizeLogValue(req.Version)+"; must match ^v\\d+\\.\\d+\\.\\d+",
+			"Invalid version: "+logging.SanitizeLogValue(req.Version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
 			"INVALID_VERSION")
 		return
 	}
@@ -278,8 +279,8 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		if baseURL == "" {
 			baseURL = "https://localhost:9080"
 		}
-		downloadURL := fmt.Sprintf("%s/api/v1/installer/steward-binaries/%s/%s/%s",
-			baseURL, req.Version, req.Platform, req.Arch)
+		downloadURL := fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
+			baseURL, req.Version, req.Platform, req.Arch, url.QueryEscape(callerTenantID))
 		params := map[string]interface{}{
 			"version":          req.Version,
 			"download_url":     downloadURL,
@@ -456,7 +457,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	if !stewardBinaryVersionRe.MatchString(req.Version) {
 		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Invalid version: "+logging.SanitizeLogValue(req.Version)+"; must match ^v\\d+\\.\\d+\\.\\d+",
+			"Invalid version: "+logging.SanitizeLogValue(req.Version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
 			"INVALID_VERSION")
 		return
 	}
@@ -551,8 +552,8 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		if baseURL == "" {
 			baseURL = "https://localhost:9080"
 		}
-		downloadURL := fmt.Sprintf("%s/api/v1/installer/steward-binaries/%s/%s/%s",
-			baseURL, req.Version, original.Platform, original.Arch)
+		downloadURL := fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
+			baseURL, req.Version, original.Platform, original.Arch, url.QueryEscape(callerTenantID))
 		params := map[string]interface{}{
 			"version":          req.Version,
 			"download_url":     downloadURL,
