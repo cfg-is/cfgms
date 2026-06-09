@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	gdaptypes "github.com/cfgis/cfgms/features/workflow/modules/m365/gdap/types"
-	"github.com/cfgis/cfgms/features/tenant"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 

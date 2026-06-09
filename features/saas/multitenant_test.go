@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	saas "github.com/cfgis/cfgms/features/saas"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -26,8 +26,9 @@ type psHostTransport struct{}
 // winrmClient path (still buildable, even if the lab deployment shape it
 // targets — local steward on Hyper-V host — only exists on Windows).
 //
-//nolint:unused // The signature must match the Windows version so module.go
 // can reference newPSHostTransport unconditionally.
+//
+//nolint:unused // The signature must match the Windows version so module.go
 func newPSHostTransport(_ context.Context) (*psHostTransport, error) {
 	return nil, errPSHostUnsupported
 }

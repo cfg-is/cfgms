@@ -20,9 +20,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cfgis/cfgms/features/saas"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	gdaptypes "github.com/cfgis/cfgms/features/workflow/modules/m365/gdap/types"
-	"github.com/cfgis/cfgms/features/saas"
 )
 
 // GDAPProvider implements GDAP-aware M365 operations for MSP scenarios

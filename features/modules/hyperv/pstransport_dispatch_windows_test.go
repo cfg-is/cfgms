@@ -316,6 +316,61 @@ func TestPSDispatch_VMAttachment(t *testing.T) {
 	}
 }
 
+// TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
+// psXxx constant defined in vm.go, vswitch.go, and snapshot.go without
+// silently returning an empty expression. This guards against the production
+// dispatch switch (pstransport_dispatch_windows.go) and dispatchForTest
+// drifting apart: if a new psXxx const is added in a resource file but not
+// in either switch table, this test fails with an empty-expression assertion.
+func TestDispatch_AllKnownCommands(t *testing.T) {
+	ctx := context.Background()
+
+	commands := []struct {
+		name    string
+		command string
+		args    map[string]string
+	}{
+		// VM verbs (vm.go)
+		{"psGetVM", psGetVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw"}},
+		{"psRemoveVM", psRemoveVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psStartVM", psStartVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psStopVM", psStopVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psSetVMProcessor", psSetVMProcessor, map[string]string{"Name": "cfgms-t__web-01", "CPU": "2"}},
+		{"psSetVMMemory", psSetVMMemory, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048"}},
+		// VSwitch verbs (vswitch.go)
+		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psCreateVSwitchInternal", psCreateVSwitchInternal, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psCreateVSwitchPrivate", psCreateVSwitchPrivate, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psGetVMAttachment", psGetVMAttachment, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
+		{"psAttachVMNoAdapterName", psAttachVMNoAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
+		{"psAttachVMWithAdapterName", psAttachVMWithAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"}},
+		{"psDetachVM", psDetachVM, map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"}},
+		// Snapshot verbs (snapshot.go)
+		{"psGetSnapshot", psGetSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		{"psCreateSnapshot", psCreateSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		{"psRemoveSnapshot", psRemoveSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		{"psRestoreSnapshot", psRestoreSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		// Dynamic psCreateVSwitchExternal (vswitch.go) — both AllowManagementOS values
+		{"psCreateVSwitchExternal/true", psCreateVSwitchExternal(true), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
+		{"psCreateVSwitchExternal/false", psCreateVSwitchExternal(false), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
+	}
+
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []string
+			_, err := dispatchForTest(ctx, tc.command, tc.args, func(expr string) (string, error) {
+				captured = append(captured, expr)
+				return "", nil
+			})
+			require.NoError(t, err, "dispatchForTest must not error for known command %s", tc.name)
+			require.Len(t, captured, 1, "dispatchForTest must emit exactly one expression for known command %s", tc.name)
+			assert.NotEmpty(t, captured[0], "dispatchForTest must produce a non-empty expression for %s", tc.name)
+		})
+	}
+}
+
 // TestQuoteForPS_SingleQuoteEscapes verifies the WQL-style single-quote
 // doubling for embedded apostrophes. The hyperv module's name allowlist
 // rejects apostrophes for resource names, but the quoting layer must still

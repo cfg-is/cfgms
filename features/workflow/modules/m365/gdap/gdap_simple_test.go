@@ -7,8 +7,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	saas "github.com/cfgis/cfgms/features/saas"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

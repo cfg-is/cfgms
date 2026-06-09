@@ -80,7 +80,7 @@ func NewValidator() *Validator {
 		//                            1000-char limit even for trivial commands.
 		//                            Bumped during #1887 live validation when every
 		//                            `cfg steward run-command` was rejected.
-		allowedCharsets:     make(map[string]*regexp.Regexp),
+		allowedCharsets: make(map[string]*regexp.Regexp),
 	}
 
 	// Define allowed character sets
