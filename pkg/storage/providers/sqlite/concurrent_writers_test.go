@@ -183,9 +183,11 @@ func TestSQLite_WALModeIsActive(t *testing.T) {
 
 	// Pin the documented busy_timeout exactly. Previously >= 1000 would
 	// silently allow regression to a value too small for 50k-endpoint
-	// contention; the openDB pragma in plugin.go commits to 5000ms.
+	// contention; the openDB pragma in plugin.go commits to 15000ms (was
+	// 5000ms — the lower value occasionally tripped SQLITE_BUSY on slow
+	// Windows CI runners under TestSQLite_TwoProcesses).
 	var busyTimeout int
 	require.NoError(t, db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
-	assert.Equal(t, 5000, busyTimeout,
-		"busy_timeout must be 5000ms per the documented contract; got %d ms", busyTimeout)
+	assert.Equal(t, 15000, busyTimeout,
+		"busy_timeout must be 15000ms per the documented contract; got %d ms", busyTimeout)
 }

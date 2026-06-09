@@ -131,7 +131,14 @@ func (p *SQLiteProvider) Available() (bool, error) {
 // at openAndInit" (the Linux CI failure mode in
 // TestSQLite_TwoProcesses_ConcurrentWrites_NoCorruption).
 func openDB(path string) (*sql.DB, error) {
-	const pragmas = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+	// busy_timeout 15s (was 5s): TestSQLite_TwoProcesses_ConcurrentWrites
+	// occasionally failed on Windows CI runners with SQLITE_BUSY mid-loop
+	// (e.g. iter 25 of 500). The 5s budget was sometimes exhausted by a
+	// single contended commit on CI's I/O. 15s is still small relative to
+	// real-world controller batch commits and gives Windows CI's I/O
+	// variance enough headroom without hiding genuine deadlocks (those
+	// would still surface after 15s).
+	const pragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
 
 	var dsn string
 	switch {
