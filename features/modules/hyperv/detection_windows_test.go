@@ -273,16 +273,18 @@ func TestWindowsDetector_RejectsPathSpoofing(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Run the real psRunFn — production code path against real exec.Command.
-	// On a non-Hyper-V dev box the expected result is (false, nil) regardless.
-	// What we pin here is that the SENTINEL was not written: the absolute
-	// path resolution under %SystemRoot% means our shim was never invoked.
+	// The load-bearing assertion is "sentinel NOT written": if the absolute
+	// path resolution works, our shim is never invoked, so the marker file
+	// is never created. The boolean return is NOT asserted: on a real
+	// Hyper-V host (including GitHub windows-latest runners, which ship the
+	// Hyper-V module and return a valid Get-VMHost result), the detector
+	// legitimately returns true via the real powershell.exe — that is the
+	// defense working correctly, not failing. The falsifiable absolute-path
+	// regression-pin lives in TestPowershellExe_ReturnsAbsolutePath above.
 	d := &windowsHypervDetector{}
-	ok, err := d.IsHypervHost(context.Background())
+	_, err := d.IsHypervHost(context.Background())
 	if err != nil {
 		t.Logf("PATH-spoof test surfaced %v — acceptable as long as sentinel absent (PATH was not honored)", err)
-	}
-	if ok {
-		t.Errorf("PATH-spoof test produced ok=true — detector honored the shim instead of the absolute powershell.exe path")
 	}
 	if _, statErr := os.Stat(sentinel); statErr == nil {
 		t.Errorf("sentinel %q was written — the PATH-resident shim ran. Absolute-path defense is broken.", sentinel)
