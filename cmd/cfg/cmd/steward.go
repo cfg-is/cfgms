@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -31,6 +32,14 @@ var (
 	stewardTLSInsecure      bool
 	stewardStatusJSONOutput bool
 	stewardModulesJSON      bool
+)
+
+var (
+	stewardLogsTail   int
+	stewardLogsSince  string
+	stewardLogsLevel  string
+	stewardLogsModule string
+	stewardLogsJSON   bool
 )
 
 // stewardCmd is the parent command for steward subcommands.
@@ -151,6 +160,95 @@ Examples:
 	RunE: runRunCancel,
 }
 
+// stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
+var stewardLogsCmd = &cobra.Command{
+	Use:   "logs <id>",
+	Short: "Pull recent log entries from a steward",
+	Long: `Pull recent log entries from the controller's log-pull endpoint for a steward.
+
+Note: Log pull is not yet available. Collect logs directly from the steward host.
+
+Examples:
+  cfg steward logs <steward-id>
+  cfg steward logs <steward-id> --tail 50 --level WARN
+  cfg steward logs <steward-id> --since 1h --module file`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardLogs,
+}
+
+func runStewardLogs(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	v := url.Values{}
+	v.Set("tail", fmt.Sprintf("%d", stewardLogsTail))
+	if stewardLogsSince != "" {
+		v.Set("since", stewardLogsSince)
+	}
+	if stewardLogsLevel != "" {
+		v.Set("level", stewardLogsLevel)
+	}
+	if stewardLogsModule != "" {
+		v.Set("module", stewardLogsModule)
+	}
+	path := "/api/v1/stewards/" + stewardID + "/logs?" + v.Encode()
+
+	resp, err := client.Get(context.Background(), path)
+	if err != nil {
+		return fmt.Errorf("failed to fetch logs: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+
+	if resp.StatusCode == http.StatusNotImplemented {
+		fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if stewardLogsJSON {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Lines []struct {
+			Timestamp string `json:"timestamp"`
+			Level     string `json:"level"`
+			Module    string `json:"module"`
+			Message   string `json:"message"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	for _, line := range apiResp.Lines {
+		fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+	}
+	return nil
+}
+
 func init() {
 	stewardListCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardListCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -214,6 +312,17 @@ func init() {
 	stewardModulesCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardModulesCmd.Flags().BoolVar(&stewardModulesJSON, "json", false, "Emit JSON output instead of human-readable text")
 
+	// logs flags
+	stewardLogsCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardLogsCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardLogsCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardLogsCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardLogsCmd.Flags().IntVar(&stewardLogsTail, "tail", 100, "Number of log lines to return (1-1000)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsSince, "since", "", "Return logs from this duration ago (e.g. 1h, 30m)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsLevel, "level", "", "Filter by log level (DEBUG, INFO, WARN, ERROR)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsModule, "module", "", "Filter by module name")
+	stewardLogsCmd.Flags().BoolVar(&stewardLogsJSON, "json", false, "Emit raw JSON output instead of human-readable text")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
 	stewardCmd.AddCommand(stewardModulesCmd)
@@ -222,6 +331,7 @@ func init() {
 	stewardCmd.AddCommand(stewardRunStatusCmd)
 	stewardCmd.AddCommand(stewardRunResultCmd)
 	stewardCmd.AddCommand(stewardRunCancelCmd)
+	stewardCmd.AddCommand(stewardLogsCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,

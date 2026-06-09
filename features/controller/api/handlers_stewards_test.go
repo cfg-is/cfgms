@@ -773,3 +773,152 @@ func TestHandleGetStewardModules_RejectsCrossTenant(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
 }
+
+// TestHandleGetStewardLogs_ReturnsNotImplemented verifies that GET /api/v1/stewards/{id}/logs
+// returns 501 with LOGS_UNAVAILABLE error code for a valid steward ID.
+func TestHandleGetStewardLogs_ReturnsNotImplemented(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-test-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, "LOGS_UNAVAILABLE", body["code"])
+}
+
+// TestHandleGetStewardLogs_StewardNotFound verifies that GET /api/v1/stewards/{id}/logs
+// returns 404 when the steward ID is not found.
+func TestHandleGetStewardLogs_StewardNotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleGetStewardLogs_InsufficientPermission verifies 403 when the caller
+// lacks steward:read-logs permission.
+func TestHandleGetStewardLogs_InsufficientPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidTailParameter verifies 400 for out-of-range tail value.
+func TestHandleGetStewardLogs_InvalidTailParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?tail=9999", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidSinceParameter verifies 400 for non-parseable duration.
+func TestHandleGetStewardLogs_InvalidSinceParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?since=notaduration", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidLevelParameter verifies 400 for unknown log level.
+func TestHandleGetStewardLogs_InvalidLevelParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?level=TRACE", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidModuleParameter verifies 400 for module name exceeding 128 chars.
+func TestHandleGetStewardLogs_InvalidModuleParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	longModule := strings.Repeat("x", 129)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?module="+longModule, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleCreateAPIKey_AcceptsStewardReadLogs verifies that steward:read-logs is a
+// registered permission and can be granted via handleCreateAPIKey. Without this entry in
+// knownPermissions, operators cannot mint keys that reach the logs endpoint.
+func TestHandleCreateAPIKey_AcceptsStewardReadLogs(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Call handleCreateAPIKey directly with the steward:read-logs permission.
+	body := []byte(`{"name":"logs-key","permissions":["steward:read-logs"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/api-keys", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := req.Context()
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, "test-tenant")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleCreateAPIKey(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "steward:read-logs must be a known permission")
+}

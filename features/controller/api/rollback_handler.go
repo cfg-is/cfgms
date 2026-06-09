@@ -5,23 +5,59 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // RollbackHandler handles rollback-related API requests
 type RollbackHandler struct {
-	rollbackManager rollback.RollbackManager
+	rollbackManager     rollback.RollbackManager
+	PrincipalExtractor  func(r *http.Request) *Principal
+	stewardTenantLookup func(stewardID string) string
+	auditManager        *audit.Manager
+	logger              logging.Logger
 }
 
-// NewRollbackHandler creates a new rollback handler
-func NewRollbackHandler(rollbackManager rollback.RollbackManager) *RollbackHandler {
+// executeRollbackRequest extends RollbackRequest with handler-local cross-tenant check fields.
+// StewardTenantPath is an optional caller-supplied hint used as a fallback when the server-side
+// lookup function is not available (e.g. in unit tests).
+type executeRollbackRequest struct {
+	rollback.RollbackRequest
+	StewardTenantPath string `json:"steward_tenant_path,omitempty"`
+}
+
+// NewRollbackHandler creates a new rollback handler.
+//
+// principalExtractor retrieves the authenticated principal from the request context
+// (set by authenticationMiddleware; captures both mTLS admin certs and scoped API keys).
+//
+// stewardTenantLookup resolves a steward's registered tenant path from the controller
+// registry; the handler uses this for authoritative server-side cross-tenant enforcement.
+// When nil the handler falls back to the optional steward_tenant_path field in the request
+// body (used by tests; not a secure substitute for server-side resolution in production).
+//
+// auditManager may be nil — audit writes are skipped when nil.
+func NewRollbackHandler(
+	rollbackManager rollback.RollbackManager,
+	principalExtractor func(*http.Request) *Principal,
+	stewardTenantLookup func(stewardID string) string,
+	auditManager *audit.Manager,
+) *RollbackHandler {
 	return &RollbackHandler{
-		rollbackManager: rollbackManager,
+		rollbackManager:     rollbackManager,
+		PrincipalExtractor:  principalExtractor,
+		stewardTenantLookup: stewardTenantLookup,
+		auditManager:        auditManager,
+		logger:              logging.ForComponent("rollback-handler"),
 	}
 }
 
@@ -109,15 +145,50 @@ func (h *RollbackHandler) PreviewRollback(w http.ResponseWriter, r *http.Request
 func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Parse request body
-	var request rollback.RollbackRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	// Parse request body using the extended local struct that includes steward_tenant_path.
+	var req executeRollbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.sendError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
+	var principal *Principal
+	if h.PrincipalExtractor != nil {
+		principal = h.PrincipalExtractor(r)
+	}
+
+	// Cross-tenant enforcement. For a scoped principal (non-admin with a TenantID), we
+	// must verify the target steward belongs to the principal's tenant or a child.
+	//
+	// Two-phase check with segment-boundary comparison (prevents "root/msp-ab" from
+	// matching "root/msp-a" — only self and children like "root/msp-a/client-1" pass):
+	//   Phase 1 (authoritative): server-side registry lookup via stewardTenantLookup —
+	//     this is always used in production and cannot be bypassed by the caller.
+	//   Phase 2 (fallback): caller-supplied steward_tenant_path field — used when
+	//     stewardTenantLookup is nil (e.g. handler unit tests).
+	if principal != nil && !principal.IsAdmin && principal.TenantID != "" {
+		var resolvedTenant string
+		if h.stewardTenantLookup != nil {
+			resolvedTenant = h.stewardTenantLookup(req.TargetID)
+		} else {
+			resolvedTenant = req.StewardTenantPath
+		}
+		if resolvedTenant != "" {
+			scope := strings.TrimRight(principal.TenantID, "/")
+			sameOrChild := resolvedTenant == scope ||
+				strings.HasPrefix(resolvedTenant, scope+"/")
+			if !sameOrChild {
+				h.sendJSON(w, http.StatusBadRequest, map[string]interface{}{
+					"code":    "CROSS_TENANT_ROLLBACK",
+					"message": "target version belongs to a different tenant",
+				})
+				return
+			}
+		}
+	}
+
 	// Execute rollback
-	operation, err := h.rollbackManager.ExecuteRollback(ctx, request)
+	operation, err := h.rollbackManager.ExecuteRollback(ctx, req.RollbackRequest)
 	if err != nil {
 		// Check for specific error types
 		if rollbackErr, ok := err.(*rollback.RollbackError); ok {
@@ -141,10 +212,54 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Write to central audit log after successful rollback initiation.
+	if h.auditManager != nil {
+		adminCN := ""
+		if principal != nil {
+			adminCN = principal.ID
+		}
+		toVersion := req.RollbackTo
+		fromVersion := h.extractFromVersion(operation)
+
+		event := audit.ConfigurationEvent(
+			req.TargetID,
+			adminCN,
+			"steward",
+			req.TargetID,
+			req.TargetID,
+			"rollback_execute",
+		).Detail("admin_cn", logging.SanitizeLogValue(adminCN)).
+			Detail("steward_id", logging.SanitizeLogValue(req.TargetID)).
+			Detail("from_version", logging.SanitizeLogValue(fromVersion)).
+			Detail("to_version", logging.SanitizeLogValue(toVersion)).
+			Detail("rollback_id", logging.SanitizeLogValue(operation.ID)).
+			Result(business.AuditResultSuccess)
+
+		if err := h.auditManager.RecordEvent(ctx, event); err != nil {
+			h.logger.Warn("Failed to emit rollback audit event",
+				"rollback_id", logging.SanitizeLogValue(operation.ID),
+				"error", err)
+		}
+	}
+
 	// Send response
 	h.sendJSON(w, http.StatusAccepted, map[string]interface{}{
 		"rollback": operation,
 	})
+}
+
+// extractFromVersion attempts to find the "from_version" in the rollback operation's
+// audit trail entries. Returns empty string if not recorded.
+func (h *RollbackHandler) extractFromVersion(op *rollback.RollbackOperation) string {
+	if op == nil {
+		return ""
+	}
+	for _, entry := range op.AuditTrail {
+		if v, ok := entry.Details["from_version"]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	return ""
 }
 
 // GetRollbackStatus returns the status of a rollback operation
@@ -253,8 +368,7 @@ func (h *RollbackHandler) sendJSON(w http.ResponseWriter, status int, data inter
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		// Log error but can't return error from HTTP handler
-		_ = err // Explicitly ignore JSON encoding errors in HTTP handler
+		h.logger.Error("Failed to encode rollback response", "status", status, "error", err)
 	}
 }
 

@@ -759,3 +759,333 @@ func TestConfigUploadCommand(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed), "output should be valid JSON")
 	})
 }
+
+func TestConfigRollback_ExecutesRollback(t *testing.T) {
+	t.Run("calls execute endpoint with correct body and polls status", func(t *testing.T) {
+		var (
+			executeMethod string
+			executePath   string
+			executeBody   string
+			statusPath    string
+		)
+
+		callCount := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			switch {
+			case r.Method == "POST" && r.URL.Path == "/api/v1/rollback/execute":
+				executeMethod = r.Method
+				executePath = r.URL.Path
+				bodyBytes, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				executeBody = string(bodyBytes)
+
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"rollback": map[string]interface{}{
+						"id":     "rb-001",
+						"status": "pending",
+					},
+				})
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/rollback/"):
+				statusPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"rollback": map[string]interface{}{
+						"id":     "rb-001",
+						"status": "completed",
+					},
+				})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		origDryRun := configRollbackDryRun
+		origJSON := configRollbackJSON
+		origPollInterval := rollbackPollInterval
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+			configRollbackDryRun = origDryRun
+			configRollbackJSON = origJSON
+			rollbackPollInterval = origPollInterval
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "abc1234567890"
+		configRollbackDryRun = false
+		configRollbackJSON = false
+		rollbackPollInterval = 0 // no sleep in tests
+
+		output := captureStdout(t, func() {
+			err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "POST", executeMethod)
+		assert.Equal(t, "/api/v1/rollback/execute", executePath)
+		assert.Equal(t, "/api/v1/rollback/rb-001/status", statusPath)
+		assert.Contains(t, output, "completed")
+
+		// Verify request body uses rollback_to field (not "version")
+		var reqBody map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(executeBody), &reqBody))
+		assert.Equal(t, "abc1234567890", reqBody["rollback_to"])
+		assert.Equal(t, "steward", reqBody["target_type"])
+		assert.Equal(t, "steward-abc", reqBody["target_id"])
+		_, hasVersion := reqBody["version"]
+		assert.False(t, hasVersion, "request body must use rollback_to not version")
+	})
+
+	t.Run("surfaces 412 approval required message", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "approval required"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "abc123"
+
+		err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "412")
+	})
+
+	t.Run("surfaces 409 in-progress message", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "rollback in progress"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "abc123"
+
+		err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "409")
+	})
+
+	t.Run("surfaces 403 permission denied as error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "permission denied"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "abc123"
+
+		err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "403")
+	})
+
+	t.Run("surfaces 422 validation failed as error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "validation failed"})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "abc123"
+
+		err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "422")
+	})
+}
+
+func TestConfigRollback_DryRun(t *testing.T) {
+	t.Run("calls preview endpoint when --dry-run is set", func(t *testing.T) {
+		var (
+			capturedMethod string
+			capturedPath   string
+			capturedBody   string
+		)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedMethod = r.Method
+			capturedPath = r.URL.Path
+			bodyBytes, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			capturedBody = string(bodyBytes)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"preview": map[string]interface{}{
+					"changes":           []interface{}{},
+					"affected_modules":  []string{},
+					"requires_approval": false,
+				},
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		origDryRun := configRollbackDryRun
+		origJSON := configRollbackJSON
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+			configRollbackDryRun = origDryRun
+			configRollbackJSON = origJSON
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "abc1234567890"
+		configRollbackDryRun = true
+		configRollbackJSON = false
+
+		output := captureStdout(t, func() {
+			err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+			require.NoError(t, err)
+		})
+
+		assert.Equal(t, "POST", capturedMethod)
+		assert.Equal(t, "/api/v1/rollback/preview", capturedPath)
+		assert.Contains(t, output, "preview")
+
+		// Verify request body uses rollback_to field
+		var reqBody map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(capturedBody), &reqBody))
+		assert.Equal(t, "abc1234567890", reqBody["rollback_to"])
+	})
+}
+
+func TestConfigRollback_ListsPointsWhenNoVersion(t *testing.T) {
+	t.Run("lists rollback points when --to is omitted", func(t *testing.T) {
+		var capturedQuery string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"rollback_points": []map[string]interface{}{
+					{
+						"commit_sha":   "abc1234567890",
+						"timestamp":    "2026-06-01T10:00:00Z",
+						"author":       "admin",
+						"message":      "Update config",
+						"risk_level":   "low",
+						"can_rollback": true,
+					},
+				},
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = "" // omitted
+
+		output := captureStdout(t, func() {
+			err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, capturedQuery, "target_type=steward")
+		assert.Contains(t, capturedQuery, "target_id=steward-abc")
+		assert.Contains(t, output, "abc1234567890")
+	})
+
+	t.Run("prints empty message when no rollback points", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"rollback_points": []interface{}{},
+			})
+		}))
+		defer server.Close()
+
+		origURL := configAPIURL
+		origInsecure := configTLSInsecure
+		origTo := configRollbackTo
+		t.Cleanup(func() {
+			configAPIURL = origURL
+			configTLSInsecure = origInsecure
+			configRollbackTo = origTo
+		})
+
+		configAPIURL = server.URL
+		configTLSInsecure = true
+		configRollbackTo = ""
+
+		output := captureStdout(t, func() {
+			err := runConfigRollback(configRollbackCmd, []string{"steward-abc"})
+			require.NoError(t, err)
+		})
+
+		assert.Contains(t, output, "No rollback points available")
+	})
+}

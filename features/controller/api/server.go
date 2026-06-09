@@ -357,6 +357,7 @@ func (s *Server) setupRouter() {
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
 	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
+	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
 
 	// Configuration management endpoints
@@ -511,8 +512,28 @@ func (s *Server) setupRouter() {
 
 	// Rollback management endpoints (Story #416)
 	if s.rollbackManager != nil {
-		rollbackHandler := NewRollbackHandler(s.rollbackManager)
+		// Read the principal from the request context (set by authenticationMiddleware)
+		// so both mTLS admin principals and scoped API-key principals are evaluated.
+		rollbackPrincipalExtractor := func(r *http.Request) *Principal {
+			p, _ := r.Context().Value(principalContextKey).(*Principal)
+			return p
+		}
+		// Resolve the steward's registered tenant from the controller registry.
+		// This is the authoritative cross-tenant check — it cannot be bypassed by
+		// the caller supplying a fabricated steward_tenant_path in the request body.
+		stewardTenantLookup := func(stewardID string) string {
+			if s.controllerService != nil {
+				if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
+					return info.TenantID
+				}
+			}
+			return ""
+		}
+		rollbackHandler := NewRollbackHandler(s.rollbackManager, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
 		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
+		// Require config/rollback permission for all rollback endpoints — same gate pattern
+		// as every other mutating endpoint in this server.
+		rollbackRouter.Use(s.requirePermission("config", "rollback"))
 		rollbackHandler.RegisterRoutes(rollbackRouter)
 		s.logger.Info("Rollback API routes registered")
 	}

@@ -10,6 +10,7 @@ var knownPermissions = map[string]bool{
 	"steward:list":            true,
 	"steward:read":            true,
 	"steward:read-dna":        true,
+	"steward:read-logs":       true,
 	"steward:auth-refresh":    true,
 	"steward:read-config":     true,
 	"steward:write-config":    true,
