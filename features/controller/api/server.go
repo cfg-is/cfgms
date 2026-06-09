@@ -99,6 +99,7 @@ type Server struct {
 	moduleBundleResolver    resolution.BundleResolver         // Issue #1884: git source resolver for uncached modules
 	moduleBundleApprover    resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
 	moduleTrustStore        trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
+	stewardBinaryTrustStore trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
 	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce               sync.Once                         // idempotent Close
@@ -484,6 +485,14 @@ func (s *Server) setupRouter() {
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "upload")(http.HandlerFunc(s.handleUploadInstallerArtifact))).Methods("PUT")
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
+
+	// Steward binary publish/get endpoints (Issue #1944).
+	// Distinct from the installer artifact namespace; blobs live under "steward-binaries".
+	stewardBinaries := api.PathPrefix("/installer/steward-binaries").Subrouter()
+	stewardBinaries.Handle("/{version}/{platform}/{arch}",
+		s.requirePermission("installer", "publish:steward")(http.HandlerFunc(s.handlePublishStewardBinary))).Methods("POST")
+	stewardBinaries.Handle("/{version}/{platform}/{arch}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetStewardBinary))).Methods("GET")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.

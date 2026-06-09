@@ -133,7 +133,7 @@ func runSwap(args []string) int {
 
 	dst, err := layout.StageBinary(version, sourceExe)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "launcher swap: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher swap: %v\n", err)
 		return 1
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "launcher: staged %q as version %q at %q\n", sourceExe, version, dst)
@@ -145,14 +145,14 @@ func runRollback(args []string) int {
 	fs := flag.NewFlagSet("rollback", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
 		return 2
 	}
 
 	layout := Layout{Root: *root, StewardBinaryName: defaultStewardBinaryName()}
 	newCurrent, err := layout.Rollback()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher rollback: %v\n", err)
 		return 1
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "launcher: rolled back; new active version is %q\n", newCurrent)
@@ -164,7 +164,7 @@ func runStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "launcher status: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "launcher status: %v\n", err)
 		return 2
 	}
 
