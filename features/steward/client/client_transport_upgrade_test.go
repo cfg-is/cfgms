@@ -755,8 +755,8 @@ func TestHandlePushStewardBinary_LauncherPathConstant(t *testing.T) {
 // and has the expected string value.
 func TestUpgradeCommandRegistered(t *testing.T) {
 	assert.Equal(t, cpTypes.CommandType("push_steward_binary"), cpTypes.CommandPushStewardBinary)
-	assert.Equal(t, cpTypes.EventType("steward_upgrade_downloaded"), cpTypes.EventStewardUpgradeDownloaded)
-	assert.Equal(t, cpTypes.EventType("steward_upgrade_swapped"), cpTypes.EventStewardUpgradeSwapped)
-	assert.Equal(t, cpTypes.EventType("steward_upgrade_committed"), cpTypes.EventStewardUpgradeCommitted)
-	assert.Equal(t, cpTypes.EventType("steward_upgrade_rolled_back"), cpTypes.EventStewardUpgradeRolledBack)
+	assert.Equal(t, cpTypes.EventType("steward.upgrade.downloaded"), cpTypes.EventStewardUpgradeDownloaded)
+	assert.Equal(t, cpTypes.EventType("steward.upgrade.swapped"), cpTypes.EventStewardUpgradeSwapped)
+	assert.Equal(t, cpTypes.EventType("steward.upgrade.committed"), cpTypes.EventStewardUpgradeCommitted)
+	assert.Equal(t, cpTypes.EventType("steward.upgrade.rolled_back"), cpTypes.EventStewardUpgradeRolledBack)
 }

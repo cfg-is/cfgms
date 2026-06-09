@@ -23,6 +23,7 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
@@ -994,8 +995,8 @@ func checkUpgradeFlagFiles(ctx context.Context, certStoreDir string, tc upgradeE
 		name      string
 		eventType string
 	}{
-		{"upgrade-committed", "steward_upgrade_committed"},
-		{"upgrade-rolled-back", "steward_upgrade_rolled_back"},
+		{"upgrade-committed", string(cpTypes.EventStewardUpgradeCommitted)},
+		{"upgrade-rolled-back", string(cpTypes.EventStewardUpgradeRolledBack)},
 	}
 
 	for _, f := range files {

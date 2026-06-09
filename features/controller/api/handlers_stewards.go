@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -548,6 +549,76 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	s.logger.Info("Configuration deleted", "steward_id", stewardIDForLog)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetStewardLogs handles GET /api/v1/stewards/{id}/logs.
+// Validates the steward exists and the query parameters, then returns 501 until a
+// log-pull transport is wired. The follow-up story must implement per-tenant ACL
+// gating, secret redaction via logging.SanitizeLogValue, and documented pagination caps.
+func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if stewardID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	q := r.URL.Query()
+
+	// Parse and validate tail (default 100, max 1000).
+	tail := 100
+	if tailStr := q.Get("tail"); tailStr != "" {
+		v, err := strconv.Atoi(tailStr)
+		if err != nil || v < 1 || v > 1000 {
+			s.writeErrorResponse(w, http.StatusBadRequest, "tail must be an integer between 1 and 1000", "INVALID_PARAMETER")
+			return
+		}
+		tail = v
+	}
+
+	// Validate since is a parseable Go duration.
+	since := q.Get("since")
+	if since != "" {
+		if _, err := time.ParseDuration(since); err != nil {
+			s.writeErrorResponse(w, http.StatusBadRequest, "since must be a valid Go duration (e.g. 1h, 30m)", "INVALID_PARAMETER")
+			return
+		}
+	}
+
+	// Validate level is one of the four allowed values.
+	level := q.Get("level")
+	if level != "" && level != "DEBUG" && level != "INFO" && level != "WARN" && level != "ERROR" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "level must be DEBUG, INFO, WARN, or ERROR", "INVALID_PARAMETER")
+		return
+	}
+
+	// Cap module at 128 characters.
+	module := q.Get("module")
+	if len(module) > 128 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "module parameter exceeds maximum length of 128 characters", "INVALID_PARAMETER")
+		return
+	}
+
+	s.logger.Debug("Steward log pull request",
+		"steward_id", stewardIDForLog,
+		"tail", tail,
+		"since", logging.SanitizeLogValue(since),
+		"level", logging.SanitizeLogValue(level),
+		"module", logging.SanitizeLogValue(module),
+	)
+
+	_, exists := s.controllerService.GetStewardInfo(stewardID)
+	if !exists {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	s.respondJSON(w, http.StatusNotImplemented, map[string]string{
+		"code":    "LOGS_UNAVAILABLE",
+		"message": "steward log pull not yet supported; collect logs directly from the steward host",
+	})
 }
 
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective

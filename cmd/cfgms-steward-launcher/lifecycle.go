@@ -65,7 +65,7 @@ type clock interface {
 
 type realClock struct{}
 
-func (realClock) Now() time.Time              { return time.Now() }
+func (realClock) Now() time.Time                  { return time.Now() }
 func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
 
 // Supervise runs the supervision loop until ctx is cancelled, the child
@@ -169,7 +169,7 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			return fmt.Errorf("launcher: rollback after child failure: %w", rbErr)
 		}
 		rollbacksRemaining--
-		fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, ranFor)
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, ranFor)
 	}
 }
 
@@ -177,10 +177,35 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 // Wait. The child inherits the launcher's stdin/stdout/stderr (overridable
 // in tests via Supervisor.Stdout / .Stderr). The child also receives any
 // ExtraArgs.
+//
+// On Windows, the child is assigned to a Job Object with
+// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so that an abnormal launcher exit
+// (SCM TerminateProcess, crash, panic-without-defer) takes the steward
+// with it (#1928). attachChildToJobObject is a no-op on POSIX —
+// process-group / pdeathsig semantics already cover that case.
 func (s *Supervisor) execOnce(ctx context.Context, exe string) error {
 	cmd := exec.CommandContext(ctx, exe, s.ExtraArgs...) //#nosec G204 -- exe path is validated via Layout
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
-	return cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := attachChildToJobObject(cmd); err != nil {
+		// Best-effort: if the assignment fails, the child is already
+		// running and orphaning it on launcher exit is the very bug we
+		// were trying to prevent. Kill the child and return so the
+		// supervisor can decide whether to retry / rollback. Surface
+		// any kill/wait error in the wrapped message so an unkillable
+		// child (very rare; insufficient privilege under a restricted
+		// token) does not hide as a plain attach failure while a
+		// fully-unsupervised steward keeps running.
+		killErr := cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		if killErr != nil || waitErr != nil {
+			return fmt.Errorf("attachChildToJobObject failed: %w (cleanup: kill=%v wait=%v)", err, killErr, waitErr)
+		}
+		return fmt.Errorf("attachChildToJobObject failed: %w", err)
+	}
+	return cmd.Wait()
 }

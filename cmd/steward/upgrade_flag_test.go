@@ -69,9 +69,9 @@ func TestCheckUpgradeFlagFiles_CommittedAndRolledBack(t *testing.T) {
 	for _, e := range events {
 		byType[e.eventType] = e.version
 	}
-	assert.Equal(t, "v1.2.3", byType["steward_upgrade_committed"],
+	assert.Equal(t, "v1.2.3", byType["steward.upgrade.committed"],
 		"committed event must carry committed version")
-	assert.Equal(t, "v1.2.2", byType["steward_upgrade_rolled_back"],
+	assert.Equal(t, "v1.2.2", byType["steward.upgrade.rolled_back"],
 		"rolled-back event must carry rolled-back version")
 
 	// Flag files must be deleted after processing.
@@ -96,7 +96,7 @@ func TestCheckUpgradeFlagFiles_OnlyCommitted(t *testing.T) {
 
 	events := pub.captured()
 	require.Len(t, events, 1)
-	assert.Equal(t, "steward_upgrade_committed", events[0].eventType)
+	assert.Equal(t, "steward.upgrade.committed", events[0].eventType)
 	assert.Equal(t, "v2.0.0", events[0].version)
 
 	_, err := os.Stat(filepath.Join(certStoreDir, "upgrade-committed"))

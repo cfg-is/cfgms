@@ -41,11 +41,10 @@ const (
 	// fingerprint triggers no disk write on the steward side. (Issue #1817)
 	CommandPushSigningCert CommandType = "push_signing_cert"
 
-	// CommandPushStewardBinary pushes a new steward binary to the steward.
-	// The steward downloads, verifies the SHA-256 digest and Ed25519 publisher
-	// signature, enforces version monotonicity and revocation, then invokes the
-	// launcher swap subcommand. The OS service manager restarts the steward after
-	// the swap completes. (Issue #1943)
+	// CommandPushStewardBinary instructs the steward to download a new binary from the
+	// controller, verify its SHA-256 digest and Ed25519 publisher signature, enforce
+	// version monotonicity and revocation, invoke the launcher swap subcommand, and
+	// restart via the OS service manager. (Epic #1930, Issue #1943)
 	// Params: version (string), download_url (string), sha256 (string),
 	// platform (string), arch (string), publisher (string), bundle_signature ([]byte base64).
 	CommandPushStewardBinary CommandType = "push_steward_binary"
@@ -115,21 +114,27 @@ const (
 	// and a per-execution sequence number for correlation.
 	EventRelayRequest EventType = "relay_request"
 
-	// EventStewardUpgradeDownloaded indicates the steward downloaded and verified the
-	// new binary (SHA-256 and publisher signature validated). (Issue #1943)
-	EventStewardUpgradeDownloaded EventType = "steward_upgrade_downloaded"
+	// EventStewardUpgradeDispatched is published by the controller when it fans out
+	// CommandPushStewardBinary to a steward. (Epic #1930)
+	EventStewardUpgradeDispatched EventType = "steward.upgrade.dispatched"
 
-	// EventStewardUpgradeSwapped indicates the launcher swap subcommand completed
-	// successfully; the OS service manager will restart the steward. (Issue #1943)
-	EventStewardUpgradeSwapped EventType = "steward_upgrade_swapped"
+	// EventStewardUpgradeDownloaded is published by the steward when the binary
+	// download completes and the SHA-256 digest and Ed25519 publisher signature
+	// are verified. (Epic #1930, Issue #1943)
+	EventStewardUpgradeDownloaded EventType = "steward.upgrade.downloaded"
 
-	// EventStewardUpgradeCommitted indicates the upgraded steward passed its startup
-	// window and the launcher committed the new version. (Issue #1943)
-	EventStewardUpgradeCommitted EventType = "steward_upgrade_committed"
+	// EventStewardUpgradeSwapped is published by the steward immediately before
+	// invoking the launcher swap subcommand. (Epic #1930, Issue #1943)
+	EventStewardUpgradeSwapped EventType = "steward.upgrade.swapped"
 
-	// EventStewardUpgradeRolledBack indicates the launcher auto-rolled-back to the
-	// previous version after the new binary failed its startup window. (Issue #1943)
-	EventStewardUpgradeRolledBack EventType = "steward_upgrade_rolled_back"
+	// EventStewardUpgradeCommitted is published by the steward on first reconnect
+	// after restart with the new binary. (Epic #1930, Issue #1943)
+	EventStewardUpgradeCommitted EventType = "steward.upgrade.committed"
+
+	// EventStewardUpgradeRolledBack is published by the steward when the launcher
+	// auto-rolled-back to the previous version after the new binary failed its
+	// startup window. (Epic #1930, Issue #1943)
+	EventStewardUpgradeRolledBack EventType = "steward.upgrade.rolled_back"
 )
 
 // Event represents an event published from steward to controller.

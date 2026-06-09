@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -30,6 +31,14 @@ var (
 	stewardTLSCACert        string
 	stewardTLSInsecure      bool
 	stewardStatusJSONOutput bool
+)
+
+var (
+	stewardLogsTail   int
+	stewardLogsSince  string
+	stewardLogsLevel  string
+	stewardLogsModule string
+	stewardLogsJSON   bool
 )
 
 // stewardCmd is the parent command for steward subcommands.
@@ -75,6 +84,15 @@ var (
 	stewardRunResultDevice string
 )
 
+// Package-level vars for steward exec (single-steward ad-hoc run). Declared
+// separately from run-command vars so the two commands cannot share state.
+var (
+	stewardExecCommand    string
+	stewardExecShell      string
+	stewardExecTimeout    time.Duration
+	stewardExecJSONOutput bool
+)
+
 // runWaitPollInterval is the delay between status polls in the --wait loop.
 // Overridable in tests to avoid real sleeps.
 var runWaitPollInterval = 5 * time.Second
@@ -114,6 +132,35 @@ Examples:
 	RunE: runRunCommand,
 }
 
+var stewardExecCmd = &cobra.Command{
+	Use:   "exec <steward-id>",
+	Short: "Execute an ad-hoc command on a single steward",
+	Long: `Sign and submit an inline command to a single named steward and display the result.
+
+The argument is the steward ID to target. The command is submitted as a signed
+inline script and the controller dispatches it exclusively to that steward.
+The CLI blocks until the job reaches a terminal state or the timeout elapses.
+
+Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
+
+The --shell flag is required. Allowed values: bash, sh, pwsh (cmd on Windows as fallback).
+
+Output is capped at 64 KB in the CLI display. If the output exceeds the cap a
+truncation warning is printed to stderr.
+
+Examples:
+  # Run a command on a specific steward with 30-second timeout
+  cfg steward exec steward-abc123 --command "hostname" --shell bash --timeout 30s
+
+  # Run a script file on a steward
+  cfg steward exec steward-abc123 --command ./scripts/check.sh --shell bash
+
+  # Output as JSON
+  cfg steward exec steward-abc123 --command "uptime" --shell bash --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRunCommandSingle,
+}
+
 var stewardRunStatusCmd = &cobra.Command{
 	Use:   "run-status <run-id>",
 	Short: "Show status of a run",
@@ -148,6 +195,95 @@ Examples:
   cfg steward run-cancel 550e8400-e29b-41d4-a716-446655440000`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunCancel,
+}
+
+// stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
+var stewardLogsCmd = &cobra.Command{
+	Use:   "logs <id>",
+	Short: "Pull recent log entries from a steward",
+	Long: `Pull recent log entries from the controller's log-pull endpoint for a steward.
+
+Note: Log pull is not yet available. Collect logs directly from the steward host.
+
+Examples:
+  cfg steward logs <steward-id>
+  cfg steward logs <steward-id> --tail 50 --level WARN
+  cfg steward logs <steward-id> --since 1h --module file`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardLogs,
+}
+
+func runStewardLogs(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	v := url.Values{}
+	v.Set("tail", fmt.Sprintf("%d", stewardLogsTail))
+	if stewardLogsSince != "" {
+		v.Set("since", stewardLogsSince)
+	}
+	if stewardLogsLevel != "" {
+		v.Set("level", stewardLogsLevel)
+	}
+	if stewardLogsModule != "" {
+		v.Set("module", stewardLogsModule)
+	}
+	path := "/api/v1/stewards/" + stewardID + "/logs?" + v.Encode()
+
+	resp, err := client.Get(context.Background(), path)
+	if err != nil {
+		return fmt.Errorf("failed to fetch logs: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+
+	if resp.StatusCode == http.StatusNotImplemented {
+		fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if stewardLogsJSON {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Lines []struct {
+			Timestamp string `json:"timestamp"`
+			Level     string `json:"level"`
+			Module    string `json:"module"`
+			Message   string `json:"message"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	for _, line := range apiResp.Lines {
+		fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+	}
+	return nil
 }
 
 func init() {
@@ -187,6 +323,16 @@ func init() {
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
 	stewardRunCommandCmd.Flags().DurationVar(&stewardRunWaitTimeout, "wait-timeout", 5*time.Minute, "Maximum time to wait when --wait is set")
 
+	// exec flags (single-steward ad-hoc run)
+	stewardExecCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardExecCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardExecCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardExecCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
+	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, pwsh)")
+	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", 30*time.Second, "Maximum time to wait for job completion")
+	stewardExecCmd.Flags().BoolVar(&stewardExecJSONOutput, "json", false, "Emit JSON job record instead of plain output")
+
 	// run-status flags
 	stewardRunStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardRunStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -206,13 +352,26 @@ func init() {
 	stewardRunCancelCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCancelCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 
+	// logs flags
+	stewardLogsCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardLogsCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardLogsCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardLogsCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardLogsCmd.Flags().IntVar(&stewardLogsTail, "tail", 100, "Number of log lines to return (1-1000)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsSince, "since", "", "Return logs from this duration ago (e.g. 1h, 30m)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsLevel, "level", "", "Filter by log level (DEBUG, INFO, WARN, ERROR)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsModule, "module", "", "Filter by module name")
+	stewardLogsCmd.Flags().BoolVar(&stewardLogsJSON, "json", false, "Emit raw JSON output instead of human-readable text")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
+	stewardCmd.AddCommand(stewardExecCmd)
 	stewardCmd.AddCommand(stewardRunStatusCmd)
 	stewardCmd.AddCommand(stewardRunResultCmd)
 	stewardCmd.AddCommand(stewardRunCancelCmd)
+	stewardCmd.AddCommand(stewardLogsCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,
@@ -453,6 +612,8 @@ type runJobRecord struct {
 	DeviceID    string `json:"device_id"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Status      string `json:"status"`
+	Output      string `json:"output,omitempty"`
+	ExitCode    int    `json:"exit_code,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +742,133 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(runID)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// exec (single-steward ad-hoc run)
+// ---------------------------------------------------------------------------
+
+// execCLIOutputCap is the maximum bytes of job output the CLI displays.
+// If the output exceeds this cap, a truncation warning is printed to stderr.
+const execCLIOutputCap = 64 * 1024
+
+func runRunCommandSingle(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	if stewardExecCommand == "" {
+		return fmt.Errorf("--command is required")
+	}
+	if stewardExecShell == "" {
+		return fmt.Errorf("--shell is required")
+	}
+
+	content, err := readCommandContent(stewardExecCommand)
+	if err != nil {
+		return err
+	}
+
+	sig, err := signCommandContent(content)
+	if err != nil {
+		return err
+	}
+
+	timeout := stewardExecTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	reqBody := map[string]interface{}{
+		"target":    "id:" + stewardID,
+		"content":   base64.StdEncoding.EncodeToString(content),
+		"shell":     stewardExecShell,
+		"signature": sig,
+	}
+
+	bodyJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to encode request: %w", err)
+	}
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("failed to submit command: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	var apiResp struct {
+		Data struct {
+			RunID string `json:"run_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	runID := apiResp.Data.RunID
+	fmt.Printf("Run ID: %s\n", runID)
+
+	if err := waitForRun(context.Background(), client, runID, timeout); err != nil {
+		return err
+	}
+
+	return fetchAndDisplayExecOutput(client, runID, stewardID)
+}
+
+// fetchAndDisplayExecOutput retrieves job records for runID and prints the output
+// for the job targeting stewardID. Applies the 64 KB CLI display cap.
+func fetchAndDisplayExecOutput(client *APIClient, runID, stewardID string) error {
+	resp, err := client.Get(context.Background(), "/api/v1/runs/"+runID+"/jobs")
+	if err != nil {
+		return fmt.Errorf("failed to fetch job output: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to get job results: %s - %s", resp.Status, string(body))
+	}
+
+	var apiResp struct {
+		Data []runJobRecord `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse job results: %w", err)
+	}
+
+	if stewardExecJSONOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(apiResp.Data)
+	}
+
+	for _, job := range apiResp.Data {
+		if job.DeviceID != stewardID {
+			continue
+		}
+		output := job.Output
+		if len(output) > execCLIOutputCap {
+			fmt.Fprintf(os.Stderr, "warning: output truncated at 64 KB\n")
+			output = output[:execCLIOutputCap]
+		}
+		fmt.Printf("Exit code: %d\n", job.ExitCode)
+		if output != "" {
+			fmt.Print(output)
+		}
+		return nil
+	}
+
+	fmt.Println("No output returned for steward", stewardID)
 	return nil
 }
 

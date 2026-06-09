@@ -107,6 +107,25 @@ func TestParseTargetSelector(t *testing.T) {
 		_, err := ParseTargetSelector("badtoken")
 		require.Error(t, err)
 	})
+
+	t.Run("id selector sets DeviceID", func(t *testing.T) {
+		f, err := ParseTargetSelector("id:steward-abc123")
+		require.NoError(t, err)
+		assert.Equal(t, "steward-abc123", f.DeviceID)
+	})
+}
+
+// TestFleetQuery_DeviceIDFilter verifies that Filter.DeviceID matches only the exact device.
+func TestFleetQuery_DeviceIDFilter(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{DeviceID: "device-001"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "device-001", results[0].ID)
 }
 
 // TestFleetQuery_GlobNameFilter is a required test: Search returns only stewards whose
