@@ -6,7 +6,7 @@ publisher: cfgms
 
 # Supported execution environments
 executors:
-  - outpost  # Network-based AD management for remote domain controllers
+  - steward  # Runs as a steward module today; the outpost runtime does not exist yet (see note below)
 
 # Candidate for relocation to outpost kind when outpost runtime lands.
 # This module's network-LDAP-only design fits the outpost (remote-network
