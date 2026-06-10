@@ -240,4 +240,4 @@ Allow operators to inject publisher keys via `cfg push` at runtime without a ste
 - Story #1879 — modules: write ADR-006 — Module Packaging and Distribution
 - [ADR-001](001-central-provider-compliance-enforcement.md) — Central Provider Compliance Enforcement
 - [ADR-003](003-storage-data-taxonomy.md) — Storage Data Taxonomy
-- `docs/architecture/plugin-architecture.md` — CFGMS pluggable provider architecture
+- `docs/architecture/provider-architecture.md` — CFGMS pluggable provider architecture

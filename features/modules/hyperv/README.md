@@ -1,5 +1,7 @@
 # Hyper-V Module
 
+**Kind:** steward
+
 Remote Hyper-V management via WinRM for CFGMS. Manages VMs, snapshots, and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
 
 ## Purpose and scope

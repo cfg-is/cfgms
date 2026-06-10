@@ -1,5 +1,7 @@
 # ACME Module
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The ACME Module provides automated TLS certificate management via the ACME protocol (RFC 8555). It uses the lego library to interact with ACME-compatible servers such as Let's Encrypt for certificate issuance and renewal. Supports both HTTP-01 and DNS-01 challenge types with Cloudflare, Route53, and Azure DNS providers.

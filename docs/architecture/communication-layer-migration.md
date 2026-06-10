@@ -99,6 +99,6 @@ dp := dpgrpc.New(dpgrpc.ModeClient)
 
 ## Related Documentation
 
-- [Plugin Architecture](plugin-architecture.md) - Provider pattern foundation
+- [Provider Architecture](provider-architecture.md) - Provider pattern foundation
 - [Central Provider Compliance](decisions/001-central-provider-compliance-enforcement.md) - Enforcement ADR
 - Archived: Previous transport protocol design (removed in Phase 10.11)

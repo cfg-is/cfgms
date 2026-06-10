@@ -1,5 +1,7 @@
 # Script Module
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The Script module provides cross-platform script execution capabilities for CFGMS. It is designed for:

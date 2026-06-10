@@ -1,5 +1,7 @@
 # Firewall Module
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The Firewall module provides a unified interface for managing firewall rules across different operating systems. It enables consistent configuration and management of firewall rules regardless of the underlying platform, supporting Linux (iptables/nftables), macOS (pf), and Windows (Windows Firewall).

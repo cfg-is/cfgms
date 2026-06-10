@@ -206,6 +206,8 @@ A module commits to exactly one kind via `executors:` in `module.yaml`. Cross-ki
 
 **Provider vs Module:** "Provider" / "plugin" / "pluggable" refer to the central-provider pattern (storage, logging, secrets, etc.). Modules are a different concept and never use "plugin" terminology.
 
+See ADR-006 (`docs/architecture/decisions/006-module-packaging-and-distribution.md`) for the full module packaging architecture.
+
 ## Testing
 
 ### Standards
