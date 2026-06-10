@@ -282,13 +282,15 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		downloadURL := fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
 			baseURL, req.Version, req.Platform, req.Arch, url.QueryEscape(callerTenantID))
 		params := map[string]interface{}{
-			"version":          req.Version,
-			"download_url":     downloadURL,
-			"sha256":           computedSHA256,
-			"platform":         req.Platform,
-			"arch":             req.Arch,
-			"publisher":        publisher,
-			"bundle_signature": base64.RawURLEncoding.EncodeToString(bundleSig),
+			"version":      req.Version,
+			"download_url": downloadURL,
+			"sha256":       computedSHA256,
+			"platform":     req.Platform,
+			"arch":         req.Arch,
+			"publisher":    publisher,
+			// StdEncoding (with padding) so the steward's pushStewardBinaryParams.BundleSignature
+			// []byte field decodes it via Go's JSON codec, which uses base64.StdEncoding. (Issue #1948)
+			"bundle_signature": base64.StdEncoding.EncodeToString(bundleSig),
 		}
 		createdSnapshot := created
 		go func() {
@@ -555,13 +557,15 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		downloadURL := fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
 			baseURL, req.Version, original.Platform, original.Arch, url.QueryEscape(callerTenantID))
 		params := map[string]interface{}{
-			"version":          req.Version,
-			"download_url":     downloadURL,
-			"sha256":           computedSHA256,
-			"platform":         original.Platform,
-			"arch":             original.Arch,
-			"publisher":        publisher,
-			"bundle_signature": base64.RawURLEncoding.EncodeToString(bundleSig),
+			"version":      req.Version,
+			"download_url": downloadURL,
+			"sha256":       computedSHA256,
+			"platform":     original.Platform,
+			"arch":         original.Arch,
+			"publisher":    publisher,
+			// StdEncoding (with padding) so the steward's pushStewardBinaryParams.BundleSignature
+			// []byte field decodes it via Go's JSON codec, which uses base64.StdEncoding. (Issue #1948)
+			"bundle_signature": base64.StdEncoding.EncodeToString(bundleSig),
 		}
 		stewardID := original.StewardID
 		go func() {
