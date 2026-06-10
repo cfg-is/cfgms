@@ -262,6 +262,264 @@ func TestStewardStatusCommand(t *testing.T) {
 	})
 }
 
+// TestStewardModules_CallsEndpoint verifies that the modules command calls the correct
+// API path and prints the 501 unavailability message without erroring.
+func TestStewardModules_CallsEndpoint(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{
+				"code":    "MODULES_UNAVAILABLE",
+				"message": "steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runStewardModules(stewardModulesCmd, []string{"steward-abc123"})
+		require.NoError(t, err, "501 response must not error the command")
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc123/modules", requestPath)
+	assert.Contains(t, output, "Module list not available")
+}
+
+func TestStewardModules_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{"code": "STEWARD_NOT_FOUND", "message": "Steward not found"},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardModules(stewardModulesCmd, []string{"nonexistent-steward"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestStewardModules_NonOKStatusReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardModules(stewardModulesCmd, []string{"steward-abc123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestStewardModules_JSONFlag(t *testing.T) {
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data":      map[string]interface{}{"modules": []map[string]string{{"name": "file"}}},
+			"timestamp": now,
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origJSON := stewardModulesJSON
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardModulesJSON = origJSON
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardModulesJSON = true
+
+	output := captureStdout(t, func() {
+		err := runStewardModules(stewardModulesCmd, []string{"steward-abc123"})
+		require.NoError(t, err)
+	})
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(output), &parsed), "output must be valid JSON")
+	assert.Contains(t, output, "file")
+}
+
+func TestStewardModules_HappyPath(t *testing.T) {
+	now := time.Now().UTC()
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"modules": []map[string]string{
+					{"name": "file"},
+					{"name": "service"},
+					{"name": "package"},
+				},
+			},
+			"timestamp": now,
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runStewardModules(stewardModulesCmd, []string{"steward-abc123"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc123/modules", requestPath)
+	assert.Contains(t, output, "NAME")
+	assert.Contains(t, output, "file")
+	assert.Contains(t, output, "service")
+	assert.Contains(t, output, "package")
+}
+
+func TestStewardLogs_CallsEndpoint(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"code":    "LOGS_UNAVAILABLE",
+			"message": "steward log pull not yet supported; collect logs directly from the steward host",
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origTail := stewardLogsTail
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardLogsTail = origTail
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardLogsTail = 100
+
+	output := captureStdout(t, func() {
+		err := runStewardLogs(stewardLogsCmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc/logs", requestPath)
+	assert.Contains(t, output, "not yet available")
+}
+
+func TestStewardLogs_HandlesNotImplemented(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "LOGS_UNAVAILABLE"})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardLogs(stewardLogsCmd, []string{"steward-abc"})
+	assert.NoError(t, err, "501 response must not return an error")
+}
+
+func TestStewardLogs_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{"code": "STEWARD_NOT_FOUND", "message": "Steward not found"},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardLogs(stewardLogsCmd, []string{"nonexistent-steward"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestStewardLogs_NonOKStatusReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardLogs(stewardLogsCmd, []string{"steward-abc"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
 func TestStewardList_UsesBundleClientPattern(t *testing.T) {
 	// Verify resolveBundleClient is used by confirming --no-bundle flag is inherited
 	// from rootCmd's persistent flags (the same flag resolveBundleClient reads).
@@ -277,4 +535,155 @@ func TestStewardList_UsesBundleClientPattern(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "list must be registered as subcommand of stewardCmd")
+}
+
+// ---- steward dna tests ----
+
+// TestStewardDNA_CallsEndpoint verifies that `cfg steward dna <id>` calls
+// GET /api/v1/stewards/<id>/dna and that the tabular output contains "Hostname".
+func TestStewardDNA_CallsEndpoint(t *testing.T) {
+	var requestPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"hostname":     "myhost",
+				"os":           "linux",
+				"architecture": "amd64",
+				"collected_at": "2026-06-09T10:00:00Z",
+				"attributes": map[string]string{
+					"env": "prod",
+				},
+			},
+			"timestamp": time.Now().UTC(),
+		})
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	origJSON := stewardDNAJSONOutput
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+		stewardDNAJSONOutput = origJSON
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = ""
+	stewardDNAJSONOutput = false
+
+	output := captureStdout(t, func() {
+		err := runStewardDNA(stewardDNACmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc/dna", requestPath)
+	assert.Contains(t, output, "Hostname")
+	assert.Contains(t, output, "myhost")
+}
+
+// TestStewardDNA_AttributeFlag verifies that --attribute appends the query parameter
+// and prints only the raw value (no label).
+func TestStewardDNA_AttributeFlag(t *testing.T) {
+	var requestURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"value": "linux"})
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	origJSON := stewardDNAJSONOutput
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+		stewardDNAJSONOutput = origJSON
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = "os"
+	stewardDNAJSONOutput = false
+
+	output := captureStdout(t, func() {
+		err := runStewardDNA(stewardDNACmd, []string{"steward-xyz"})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, requestURL, "attribute=os")
+	assert.Equal(t, "linux\n", output)
+}
+
+// TestStewardDNA_AttributeNotFound verifies non-zero exit (error) when the server returns 404.
+func TestStewardDNA_AttributeNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{"code": "DNA_ATTRIBUTE_NOT_FOUND", "message": "attribute not found"},
+		})
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = "nonexistent"
+
+	err := runStewardDNA(stewardDNACmd, []string{"steward-abc"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent")
+}
+
+// TestStewardDNA_JSONOutput verifies that --json writes the raw response body to stdout.
+func TestStewardDNA_JSONOutput(t *testing.T) {
+	rawBody := `{"data":{"hostname":"myhost","os":"linux"},"timestamp":"2026-06-09T10:00:00Z"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(rawBody))
+	}))
+	defer srv.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origAttr := stewardDNAAttribute
+	origJSON := stewardDNAJSONOutput
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardDNAAttribute = origAttr
+		stewardDNAJSONOutput = origJSON
+	})
+
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardDNAAttribute = ""
+	stewardDNAJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runStewardDNA(stewardDNACmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, rawBody, output)
 }

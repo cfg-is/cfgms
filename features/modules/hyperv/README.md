@@ -1,5 +1,7 @@
 # Hyper-V Module
 
+**Kind:** steward
+
 Remote Hyper-V management via WinRM for CFGMS. Manages VMs, snapshots, and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
 
 ## Purpose and scope
@@ -98,6 +100,27 @@ config:
 3. **VHD path is immutable** — The virtual disk path is set at creation and cannot be changed via this module.
 4. **Basic auth is structurally disabled** — Only NTLM over HTTPS (port 5986) is supported. WinRM must be configured for HTTPS on the target host.
 5. **Integration tests require a live host** — Unit tests use a test implementation of the WinRM transport interface; full end-to-end validation requires `CFGMS_HYPERV_HOST` to be set.
+
+## Host detection
+
+The module activates only on hosts where Hyper-V is actually present, and cleanly declines work on hosts where it isn't. This avoids two failure modes the M2 epic explicitly calls out: a steward on a Linux host crashing when a config pushes a `module: hyperv` resource at it, and a misconfigured `%PATH%` on a Windows host tricking the detector into running Hyper-V cmdlets that don't exist.
+
+### Detection on Windows
+
+1. The detector invokes `powershell.exe` via the absolute path `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`. It never resolves `powershell.exe` through `%PATH%`. Without this, a directory writable by the steward's service account that appears earlier on `%PATH%` than `System32` could host a `powershell.exe` shim that exits 0 with empty output — bypassing the detection gate. The absolute-path resolution closes that bypass.
+2. The cmdlet run is `Get-VMHost | ConvertTo-Json`. A successful exit code on its own is not sufficient: the detector parses the JSON output and requires a non-empty `Name` field (the host's own hostname, as reported by Hyper-V). Empty or unparseable stdout is treated as "not a Hyper-V host." This is defense-in-depth against the same shim-bypass scenario, and also fails closed against a degraded Hyper-V install whose cmdlet returns a stub object.
+3. Cmdlet-not-found and access-denied errors are classified as soft failures and return `(false, nil)` — the module declines work on those hosts rather than crashing.
+4. Positive detection is cached for 5 minutes at the detector level. Negative results are not cached at the detector level. The module wraps the detector with a second 5-minute positive-result cache (`checkDetection` in `module.go`) so that operations within a single steward run don't re-invoke PowerShell on every Set/Get call. A host that gains the Hyper-V role mid-operation is picked up after the longer of the two caches expires.
+
+### Behavior on non-Hyper-V hosts (including all Linux and macOS)
+
+`Get` and `Set` short-circuit at the detection gate and return `ErrHostNotHyperV`. Before returning, both methods emit a structured warning via `slog`:
+
+```
+hyperv: declining resource — host is not a Hyper-V host  resource_id=vm:web-01
+```
+
+The `resource_id` is sanitised via `logging.SanitizeLogValue()` to defend against log-injection payloads in attacker-controlled resource names. The module does not panic, does not call into the WinRM transport, and does not invoke any Hyper-V cmdlet — operators reading the steward log can immediately see which resource was declined and why.
 
 ## Service Account Requirements
 

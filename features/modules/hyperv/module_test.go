@@ -626,6 +626,66 @@ func TestModule_Set_ReturnsErrHostNotHyperV_WhenDetectorReturnsFalse(t *testing.
 	assert.ErrorIs(t, err, ErrHostNotHyperV)
 }
 
+// TestModule_LogsDeclineOnNonHypervHost verifies that Get and Set emit a
+// structured warning via the module's INJECTED logger (not the slog global)
+// when the host is not a Hyper-V host. Without this log an operator who
+// pushes a config containing hyperv resources to a Linux steward sees only
+// the bare ErrHostNotHyperV — no explanation of what went wrong or which
+// resource was declined. The log carries resource_id, sanitised via
+// logging.SanitizeLogValue to defend against log-injection payloads in
+// attacker-controlled resource names.
+//
+// Uses the per-module bufferLogger via SetLogger so the test never touches
+// the process-global slog default — that would race any other test in the
+// package that emits warnings (especially under `go test -race`).
+func TestModule_LogsDeclineOnNonHypervHost(t *testing.T) {
+	t.Run("Get logs decline", func(t *testing.T) {
+		m := newModuleWithDetector(nil, &fakeDetector{result: false})
+		bufLog := newBufferLogger()
+		require.NoError(t, m.SetLogger(bufLog))
+
+		_, err := m.Get(context.Background(), "vm:web-01")
+		assert.ErrorIs(t, err, ErrHostNotHyperV)
+
+		out := bufLog.buf.String()
+		assert.Contains(t, out, "declining resource",
+			"Get must log a decline warning when host is not Hyper-V; got %q", out)
+		assert.Contains(t, out, "not a Hyper-V host",
+			"decline log must include 'not a Hyper-V host' rationale; got %q", out)
+		assert.Contains(t, out, "vm:web-01",
+			"decline log must include the resource_id; got %q", out)
+	})
+
+	t.Run("Set logs decline", func(t *testing.T) {
+		m := newModuleWithDetector(nil, &fakeDetector{result: false})
+		bufLog := newBufferLogger()
+		require.NoError(t, m.SetLogger(bufLog))
+
+		err := m.Set(context.Background(), "vm:web-01", &VMConfig{})
+		assert.ErrorIs(t, err, ErrHostNotHyperV)
+
+		out := bufLog.buf.String()
+		assert.Contains(t, out, "declining resource",
+			"Set must log a decline warning when host is not Hyper-V; got %q", out)
+		assert.Contains(t, out, "not a Hyper-V host",
+			"decline log must include 'not a Hyper-V host' rationale; got %q", out)
+		assert.Contains(t, out, "vm:web-01",
+			"decline log must include the resource_id; got %q", out)
+	})
+
+	t.Run("no-op when no logger injected", func(t *testing.T) {
+		// When SetLogger has not been called, the module must NOT panic
+		// or fall back to the slog global. It just silently skips the
+		// log call — the error return still tells the caller what
+		// happened.
+		m := newModuleWithDetector(nil, &fakeDetector{result: false})
+		_, err := m.Get(context.Background(), "vm:web-01")
+		assert.ErrorIs(t, err, ErrHostNotHyperV)
+		err = m.Set(context.Background(), "vm:web-01", &VMConfig{})
+		assert.ErrorIs(t, err, ErrHostNotHyperV)
+	})
+}
+
 // ─── buildInvokeCommand unit tests ─────────────────────────────────────────────
 
 func TestBuildInvokeCommand_NoArgs(t *testing.T) {

@@ -196,6 +196,40 @@ func TestLoadWithPath_TransportListenAddrEnvVar(t *testing.T) {
 		"CFGMS_TRANSPORT_LISTEN_ADDR must override transport.listen_addr")
 }
 
+// TestLoadWithPath_TransportEnvVarAppliesWhenSectionMissing was added in
+// the Story #1919 fix-up after review feedback. The previous behaviour
+// was to silently drop CFGMS_TRANSPORT_* env vars when the YAML config
+// file omitted the `transport:` section entirely (cfg.Transport was nil
+// at env-var application time and each env block was guarded by
+// `&& cfg.Transport != nil`). The documented precedence is env > cfg >
+// default, so an env-var set by the operator must always apply.
+func TestLoadWithPath_TransportEnvVarAppliesWhenSectionMissing(t *testing.T) {
+	// A minimal config YAML with NO transport: block. Mimics a
+	// production config that wants to opt out of the canonical defaults
+	// and configure the transport entirely via env vars (e.g. a green
+	// controller standing up next to a blue one with shared cfg).
+	dir := t.TempDir()
+	cfgPath := dir + "/controller.cfg"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`
+listen_addr: ":9080"
+external_url: "https://localhost:9080"
+data_dir: "/tmp/cfgms-data"
+log_level: "info"
+`), 0o600))
+
+	t.Setenv("CFGMS_TRANSPORT_LISTEN_ADDR", "0.0.0.0:4434")
+	t.Setenv("CFGMS_TRANSPORT_MAX_CONNECTIONS", "9999")
+
+	cfg, err := LoadWithPath(cfgPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Transport,
+		"Transport must be materialised when env var is set, even if YAML omits the section")
+	assert.Equal(t, "0.0.0.0:4434", cfg.Transport.ListenAddr,
+		"CFGMS_TRANSPORT_LISTEN_ADDR must apply even when transport: section is omitted from YAML")
+	assert.Equal(t, 9999, cfg.Transport.MaxConnections,
+		"CFGMS_TRANSPORT_MAX_CONNECTIONS must apply even when transport: section is omitted from YAML")
+}
+
 // TestDuration_UnmarshalYAML verifies Duration type parses human-readable strings from YAML.
 func TestDuration_UnmarshalYAML(t *testing.T) {
 	dir := t.TempDir()

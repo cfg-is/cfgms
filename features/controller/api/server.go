@@ -99,6 +99,8 @@ type Server struct {
 	moduleBundleResolver    resolution.BundleResolver         // Issue #1884: git source resolver for uncached modules
 	moduleBundleApprover    resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
 	moduleTrustStore        trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
+	stewardBinaryTrustStore trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
+	upgradeStore            business.UpgradeStore             // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
 	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce               sync.Once                         // idempotent Close
@@ -357,6 +359,7 @@ func (s *Server) setupRouter() {
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
 	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
+	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
 
 	// Configuration management endpoints
@@ -465,6 +468,9 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
 	stewards.Handle("/{id}/compliance/report", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardComplianceReport))).Methods("GET")
 
+	// Module inventory endpoint (Issue #1949)
+	stewards.Handle("/{id}/modules", s.requirePermission("steward", "read-modules")(http.HandlerFunc(s.handleGetStewardModules))).Methods("GET")
+
 	// System-wide compliance endpoints
 	compliance := api.PathPrefix("/compliance").Subrouter()
 	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
@@ -483,6 +489,24 @@ func (s *Server) setupRouter() {
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "upload")(http.HandlerFunc(s.handleUploadInstallerArtifact))).Methods("PUT")
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
 	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
+
+	// Steward binary publish/get endpoints (Issue #1944).
+	// Distinct from the installer artifact namespace; blobs live under "steward-binaries".
+	stewardBinaries := api.PathPrefix("/installer/steward-binaries").Subrouter()
+	stewardBinaries.Handle("/{version}/{platform}/{arch}",
+		s.requirePermission("installer", "publish:steward")(http.HandlerFunc(s.handlePublishStewardBinary))).Methods("POST")
+	stewardBinaries.Handle("/{version}/{platform}/{arch}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetStewardBinary))).Methods("GET")
+
+	// Steward upgrade dispatch endpoints (Issue #1945).
+	// Always registered — handlers return 503 when upgradeStore is nil (nil-safe by design).
+	stewardUpgrade := api.PathPrefix("/stewards/upgrade").Subrouter()
+	stewardUpgrade.Handle("",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleDispatchUpgrade))).Methods("POST")
+	stewardUpgrade.Handle("/{upgrade_id}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleUpgradeStatus))).Methods("GET")
+	stewardUpgrade.Handle("/{upgrade_id}/rollback",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleUpgradeRollback))).Methods("POST")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
@@ -508,8 +532,28 @@ func (s *Server) setupRouter() {
 
 	// Rollback management endpoints (Story #416)
 	if s.rollbackManager != nil {
-		rollbackHandler := NewRollbackHandler(s.rollbackManager)
+		// Read the principal from the request context (set by authenticationMiddleware)
+		// so both mTLS admin principals and scoped API-key principals are evaluated.
+		rollbackPrincipalExtractor := func(r *http.Request) *Principal {
+			p, _ := r.Context().Value(principalContextKey).(*Principal)
+			return p
+		}
+		// Resolve the steward's registered tenant from the controller registry.
+		// This is the authoritative cross-tenant check — it cannot be bypassed by
+		// the caller supplying a fabricated steward_tenant_path in the request body.
+		stewardTenantLookup := func(stewardID string) string {
+			if s.controllerService != nil {
+				if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
+					return info.TenantID
+				}
+			}
+			return ""
+		}
+		rollbackHandler := NewRollbackHandler(s.rollbackManager, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
 		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
+		// Require config/rollback permission for all rollback endpoints — same gate pattern
+		// as every other mutating endpoint in this server.
+		rollbackRouter.Use(s.requirePermission("config", "rollback"))
 		rollbackHandler.RegisterRoutes(rollbackRouter)
 		s.logger.Info("Rollback API routes registered")
 	}
@@ -800,6 +844,15 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.ipTrustStore = store
 }
 
+// SetUpgradeStore wires the durable UpgradeStore used by the steward upgrade
+// dispatch endpoint (Issue #1945). When nil, POST /api/v1/stewards/upgrade
+// returns 503. No silent in-memory fallback.
+func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upgradeStore = store
+}
+
 // SetSigningRotationService wires the signing rotation service for the
 // POST /api/v1/certificates/signing/rotate endpoint (Issue #1816).
 // Call this after New() returns but before Start() is called.
@@ -831,12 +884,35 @@ func (s *Server) SetModuleResolution(
 	s.moduleTrustStore = store
 }
 
-// getHTTPListenAddr determines the HTTP listen address.
-// HTTP port defaults to 9080; override with CFGMS_HTTP_LISTEN_ADDR.
+// getHTTPListenAddr determines the HTTP listen address with the
+// precedence established by Story #1919:
+//
+//	CLI flag --listen-api-addr (already applied to cfg.ListenAddr by
+//	cmd/controller/main.go's applyListenOverrides) >
+//	env var CFGMS_HTTP_LISTEN_ADDR >
+//	cfg file listen_addr >
+//	built-in default 0.0.0.0:9080.
+//
+// The CLI flag and env var are both applied to cfg.ListenAddr before
+// the server starts (the env var by config.LoadWithPath, the CLI flag
+// by main's applyListenOverrides), so reading cfg.ListenAddr here
+// honours both. The env-var-direct fast path is retained for callers
+// that bypass cfg (none in the regular startup flow, but defensive).
 func (s *Server) getHTTPListenAddr() string {
-	// If environment variable is set, use it
+	// If environment variable is set explicitly and cfg didn't reflect it,
+	// honour it. This is a safety net — config.LoadWithPath already pulls
+	// CFGMS_HTTP_LISTEN_ADDR into cfg.ListenAddr, so this branch only
+	// fires for non-config-managed callers (none today).
 	if addr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); addr != "" {
 		return addr
+	}
+
+	// cfg.ListenAddr carries the resolved CLI flag / env var / cfg-file
+	// value from controller startup. This is what makes the blue/green
+	// substrate work: a green controller spawned with --listen-api-addr
+	// :9081 actually binds on :9081 instead of the default :9080.
+	if s.cfg != nil && s.cfg.ListenAddr != "" {
+		return s.cfg.ListenAddr
 	}
 
 	// Default to port 9080 for HTTP API (gRPC typically on 8080)

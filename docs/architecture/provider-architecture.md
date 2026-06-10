@@ -1,8 +1,8 @@
-# CFGMS Plugin Architecture Guide
+# CFGMS Provider Architecture Guide
 
 ## Overview
 
-CFGMS implements a **Salt-inspired pluggable architecture** that separates interface definitions from implementations, enabling runtime plugin discovery and configuration-driven backend selection.
+CFGMS implements a **pluggable provider architecture** that separates interface definitions from implementations, enabling runtime provider discovery and configuration-driven backend selection.
 
 ## Design Principles
 
@@ -13,9 +13,9 @@ Based on CFGMS's documented "Pluggable Infrastructure Design Paradigm":
 ### Core Principles
 
 1. **Interface-First Development** - Define contracts before implementations
-2. **Runtime Discovery** - Plugins register themselves at startup via `init()`
+2. **Runtime Discovery** - Providers register themselves at startup via `init()`
 3. **Configuration-Driven Selection** - Users choose backends via YAML config
-4. **Graceful Degradation** - Missing plugins don't break the system
+4. **Graceful Degradation** - Missing providers don't break the system
 5. **Clear Separation** - Business logic never imports specific providers
 
 ## Directory Structure
@@ -71,7 +71,7 @@ type ConfigStore interface {
     DeleteConfig(tenantID, key string) error
 }
 
-// pkg/storage/interfaces/plugin.go
+// pkg/storage/interfaces/provider.go
 // StorageProvider implements ALL storage interfaces for a backend
 type StorageProvider interface {
     Name() string
@@ -89,7 +89,7 @@ type StorageProvider interface {
 ### Step 2: Provider Implementation (One Provider = All Storage Types)
 
 ```go
-// pkg/storage/providers/database/plugin.go
+// pkg/storage/providers/database/provider.go
 package database
 
 import "your.domain/cfgms/pkg/storage/interfaces"
@@ -118,7 +118,7 @@ func (p *DatabaseProvider) Description() string {
     return "PostgreSQL-backed storage for production-scale deployments"
 }
 
-// Salt-style auto-registration
+// Auto-registration
 func init() {
     interfaces.RegisterStorageProvider(&DatabaseProvider{})
 }
@@ -180,29 +180,29 @@ The actual `StorageManager` in `pkg/storage/interfaces` composes providers for e
 
 See `pkg/storage/interfaces/provider.go` for the `StorageManager` and `CreateOSSStorageManager` wiring.
 
-## Plugin Discovery and Management
+## Provider Discovery and Management
 
-### List Available Plugins
+### List Available Providers
 
 ```bash
-cfg plugins list storage
+cfg providers list storage
 ```
 
 ```
-Available Storage Plugins (business data):
+Available Storage Providers (business data):
   ✅ sqlite      - SQLite storage (default)
   ✅ database    - PostgreSQL storage (requires: postgresql client)
 
-Available Storage Plugins (config storage):
+Available Storage Providers (config storage):
   ✅ flatfile    - Flat-file storage (default)
   ✅ database    - PostgreSQL storage (production scale / SaaS)
 
-Available Storage Plugins (blob storage):
+Available Storage Providers (blob storage):
   ✅ filesystem  - Local filesystem (default)
   ✅ s3          - S3-compatible object storage
 ```
 
-### Runtime Plugin Information
+### Runtime Provider Information
 
 ```go
 // Get all registered storage providers
@@ -223,12 +223,12 @@ if err != nil {
 
 ```go
 // features/storage/interfaces/compliance_test.go
-func TestStoragePluginCompliance(t *testing.T) {
-    plugins := interfaces.GetAvailableStoragePlugins()
+func TestStorageProviderCompliance(t *testing.T) {
+    providers := interfaces.GetAvailableStorageProviders()
     
-    for name, plugin := range plugins {
+    for name, provider := range providers {
         t.Run(name, func(t *testing.T) {
-            store, err := plugin.Create(map[string]interface{}{})
+            store, err := provider.Create(map[string]interface{}{})
             require.NoError(t, err)
             
             // Test all interface methods
@@ -256,11 +256,11 @@ func TestAdminConsentFlow(t *testing.T) {
 }
 ```
 
-## Plugin Development Guidelines
+## Provider Development Guidelines
 
-### 1. Plugin Naming Convention
+### 1. Provider Naming Convention
 
-- Plugin names should be lowercase, descriptive
+- Provider names should be lowercase, descriptive
 - Use hyphens for multi-word names: `azure-sql`, `s3-bucket`
 
 ### 2. Dependency Management
@@ -271,16 +271,16 @@ func TestAdminConsentFlow(t *testing.T) {
 ### 3. Configuration Schema
 
 - Use simple `map[string]interface{}` for flexibility
-- Document required/optional fields in plugin description
+- Document required/optional fields in provider description
 
 ### 4. Error Handling
 
-- Return wrapped errors with plugin context
-- Use consistent error formats across plugins
+- Return wrapped errors with provider context
+- Use consistent error formats across providers
 
 ### 5. Documentation
 
-- Each plugin must have a README.md in its directory
+- Each provider must have a README.md in its directory
 - Document configuration options and examples
 
 ## Migration from Existing Patterns
@@ -300,17 +300,17 @@ func NewBackend(backendType BackendType, config *Config, logger Logger) (Backend
 }
 ```
 
-### Target State (Plugin Pattern)
+### Target State (Provider Pattern)
 
 ```go
-// Features automatically discover plugins via init() registration
+// Features automatically discover providers via init() registration
 func CreateStorageFromConfig(backendType string, config map[string]interface{}) (Backend, error) {
-    plugin, err := GetStoragePlugin(backendType)
+    provider, err := GetStorageProvider(backendType)
     if err != nil {
-        available := GetAvailableStoragePlugins()
+        available := GetAvailableStorageProviders()
         return nil, fmt.Errorf("backend '%s' unavailable. Available: %v", backendType, available)
     }
-    return plugin.Create(config)
+    return provider.Create(config)
 }
 ```
 
@@ -346,11 +346,11 @@ Modules get injected with the specific interface they need
 
 1. **Consistency**: All data in same storage system (no mixed backends)
 2. **Simplicity**: One storage decision affects entire system
-3. **Developer Experience**: Clear separation between plugin development and usage
+3. **Developer Experience**: Clear separation between provider development and usage
 4. **Testing**: Easy to test against all available backends
-5. **Deployment Flexibility**: Runtime plugin discovery based on environment
+5. **Deployment Flexibility**: Runtime provider discovery based on environment
 6. **User Experience**: Simple configuration with automatic capability detection
-7. **Maintainability**: Plugins can be developed/tested independently
+7. **Maintainability**: Providers can be developed/tested independently
 
 ## Examples in Codebase
 

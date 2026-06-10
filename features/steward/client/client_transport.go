@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,6 +44,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -142,6 +144,36 @@ type TransportClient struct {
 	currentDNAHash   string            // SHA-256 hash of most-recently observed DNA
 	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
 
+	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
+	// downloads binaries to a subdirectory here. (Issue #1943)
+	certStoreDir string
+
+	// revokedVersions is the controller-supplied list of revoked steward versions.
+	// Protected by revokedVersionsMu. Updated via SetRevokedVersions. (Issue #1943)
+	revokedVersionsMu sync.RWMutex
+	revokedVersions   []string
+
+	// upgradeAllowDowngrade permits installing a version ≤ the running version.
+	// From steward.cfg upgrade.allow_downgrade. Protected by mu. (Issue #1943)
+	upgradeAllowDowngrade bool
+
+	// launcherSwapFunc is the function invoked to call the launcher swap subcommand.
+	// When nil the default exec.CommandContext implementation is used. Injectable
+	// for testing so tests do not require the launcher binary on disk. (Issue #1943)
+	launcherSwapFunc func(ctx context.Context, launcherPath, version, binaryPath string) error
+
+	// upgradePublisherTrustStore, when non-nil, overrides CFGMSPublisherIdentity()
+	// in the signature verification step. Injectable for testing. (Issue #1943)
+	upgradePublisherTrustStore trust.TrustStore
+
+	// upgradeHTTPClient, when non-nil, overrides the default mTLS HTTP client
+	// used by the upgrade download step. Injectable for testing. (Issue #1943)
+	upgradeHTTPClient *http.Client
+
+	// launcherPathOverride, when non-empty, overrides the compile-time constant
+	// launcher path returned by launcherPath(). Injectable for testing. (Issue #1943)
+	launcherPathOverride string
+
 	// Logger
 	logger logging.Logger
 }
@@ -226,6 +258,16 @@ type TransportConfig struct {
 	// encryption key across restarts (Issue #920). May be nil.
 	SecretStore secretsif.SecretStore
 
+	// CertStoreDir is the on-disk cert/identity directory used by the upgrade
+	// handler to download and stage new steward binaries. When empty the upgrade
+	// handler returns an error. (Issue #1943)
+	CertStoreDir string
+
+	// UpgradeAllowDowngrade, when true, permits the upgrade handler to install a
+	// steward version older than or equal to the currently running version.
+	// Mirrors steward.cfg upgrade.allow_downgrade. (Issue #1943)
+	UpgradeAllowDowngrade bool
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -286,6 +328,8 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		scriptSigning:         cfg.ScriptSigning,
 		identityPersistFunc:   cfg.IdentityPersistFunc,
 		secretStore:           cfg.SecretStore,
+		certStoreDir:          cfg.CertStoreDir,
+		upgradeAllowDowngrade: cfg.UpgradeAllowDowngrade,
 		logger:                cfg.Logger,
 	}
 
@@ -633,6 +677,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
 	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {
 		return c.handlePushSigningCert(ctx, cmd)
+	})
+
+	// Register push_steward_binary handler — controller pushes a new steward binary.
+	// The handler downloads, verifies, and stages the binary via the launcher. (Issue #1943)
+	handler.RegisterHandler(cpTypes.CommandPushStewardBinary, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handlePushStewardBinary(ctx, cmd)
 	})
 
 	return handler, nil
@@ -1195,6 +1245,47 @@ func (c *TransportClient) SetTenantID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tenantID = id
+}
+
+// SetRevokedVersions updates the cached list of revoked steward versions received
+// from the controller. The upgrade handler checks this list before invoking the
+// launcher swap. (Issue #1943)
+func (c *TransportClient) SetRevokedVersions(versions []string) {
+	c.revokedVersionsMu.Lock()
+	defer c.revokedVersionsMu.Unlock()
+	c.revokedVersions = make([]string, len(versions))
+	copy(c.revokedVersions, versions)
+}
+
+// PublishUpgradeLifecycleEvent emits a single upgrade lifecycle event (committed
+// or rolled-back) detected from launcher-written flag files on startup. Called by
+// cmd/steward/main.go's checkUpgradeFlagFiles. (Issue #1943)
+func (c *TransportClient) PublishUpgradeLifecycleEvent(ctx context.Context, eventType, version string) error {
+	c.mu.RLock()
+	sid := c.stewardID
+	tid := c.tenantID
+	c.mu.RUnlock()
+
+	var et cpTypes.EventType
+	switch eventType {
+	case string(cpTypes.EventStewardUpgradeCommitted):
+		et = cpTypes.EventStewardUpgradeCommitted
+	case string(cpTypes.EventStewardUpgradeRolledBack):
+		et = cpTypes.EventStewardUpgradeRolledBack
+	default:
+		return fmt.Errorf("unknown upgrade lifecycle event type %q", eventType)
+	}
+
+	return c.publishEventWithQueue(ctx, &cpTypes.Event{
+		ID:        fmt.Sprintf("evt_upg_lc_%d", time.Now().UnixNano()),
+		Type:      et,
+		StewardID: sid,
+		TenantID:  tid,
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"version": version,
+		},
+	})
 }
 
 // createTLSConfig creates a TLS configuration for gRPC-over-QUIC with mTLS.

@@ -112,14 +112,47 @@ func (p *SQLiteProvider) Available() (bool, error) {
 }
 
 // openDB opens (or creates) a SQLite database at path and enables WAL mode and foreign keys.
+//
+// Pragmas are passed via DSN _pragma=name(value) tokens rather than db.Exec
+// because database/sql maintains a connection pool — db.Exec runs on one
+// pool connection and the pragma never propagates to siblings. Under
+// concurrent load (TestSQLite_TwoStoreInstances_ConcurrentWrites_NoCorruption
+// hit this on Windows CI) a sibling connection without busy_timeout would
+// return SQLITE_BUSY immediately on lock contention, defeating the 5s
+// retry budget. modernc.org/sqlite applies _pragma= tokens at every
+// connection open via its ConnectionHook, so every pool connection ends
+// up with the pragmas applied.
+//
+// Pragma order in the DSN matters: busy_timeout MUST appear before
+// journal_mode=WAL because the journal-mode change itself can hit BUSY
+// under contention, and SQLite only honors busy_timeout once it's set.
+// On a fresh DB this is irrelevant; on a contended one it's the
+// difference between "WAL set up correctly" and "second opener crashes
+// at openAndInit" (the Linux CI failure mode in
+// TestSQLite_TwoProcesses_ConcurrentWrites_NoCorruption).
 func openDB(path string) (*sql.DB, error) {
-	// modernc.org/sqlite accepts the path directly. For in-memory databases a
-	// shared cache is required so multiple connections in tests see the same data.
-	dsn := path
-	if path == ":memory:" {
-		dsn = "file::memory:?cache=shared"
-	} else if !strings.HasPrefix(path, "file:") {
-		dsn = "file:" + path
+	// busy_timeout 15s (was 5s): TestSQLite_TwoProcesses_ConcurrentWrites
+	// occasionally failed on Windows CI runners with SQLITE_BUSY mid-loop
+	// (e.g. iter 25 of 500). The 5s budget was sometimes exhausted by a
+	// single contended commit on CI's I/O. 15s is still small relative to
+	// real-world controller batch commits and gives Windows CI's I/O
+	// variance enough headroom without hiding genuine deadlocks (those
+	// would still surface after 15s).
+	const pragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+
+	var dsn string
+	switch {
+	case path == ":memory:":
+		// Shared cache so multiple connections in tests see the same data.
+		dsn = "file::memory:?cache=shared&" + pragmas
+	case strings.HasPrefix(path, "file:"):
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		dsn = path + sep + pragmas
+	default:
+		dsn = "file:" + path + "?" + pragmas
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -129,21 +162,6 @@ func openDB(path string) (*sql.DB, error) {
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: failed to ping %s: %w", path, err)
-	}
-	// Pragmas are set via explicit statements so they apply across both
-	// mattn/go-sqlite3 (CGO) and modernc.org/sqlite (pure-Go) without relying
-	// on driver-specific DSN query parameters.
-	for _, pragma := range []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA foreign_keys = ON",
-		// Retry for up to 5 s on SQLITE_BUSY instead of failing immediately.
-		// Required for correct concurrent-write semantics (e.g. RotateToken race).
-		"PRAGMA busy_timeout = 5000",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("sqlite: failed to set %s on %s: %w", pragma, path, err)
-		}
 	}
 	return db, nil
 }

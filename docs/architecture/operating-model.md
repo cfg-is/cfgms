@@ -139,7 +139,7 @@ The controller is the central management server. It does not manage devices dire
 1. **Store cfgs** — Version-controlled configuration storage. Cfgs are authored here (via API, workflow, or direct edit) and distributed to stewards
 2. **Distribute cfgs** — Push cfgs to stewards over the data plane. The controller decides which steward gets which cfg (based on tenant hierarchy, groups, targeting rules)
 3. **Collect reports** — Receive status, events, DNA, health, and historical performance metrics from stewards. Aggregate for fleet-wide dashboards, compliance reporting, trend analysis, and troubleshooting. This data is the foundation for future Digital Experience (DEX) capabilities
-4. **Run workflows** — Execute automation workflows for cloud/SaaS operations that don't require a steward (desired-state convergence for cloud resources, orchestration and data sync between third-party services, and imperative automation). See [controller operating model](controller-operating-model.md) for details
+4. **Run workflows** — Execute automation workflows for cloud/SaaS operations that don't require a steward (desired-state convergence for cloud resources, orchestration and data sync between third-party services, and imperative automation). The workflow engine runs **workflow-kind modules** (`executors: [workflow]`) — out-of-process gRPC binaries that the controller spawns to interact with cloud APIs on behalf of the workflow. See [controller operating model](controller-operating-model.md) for details
 5. **Manage identity** — Certificate authority, steward registration, tenant management
 6. **Orchestrate multi-node operations** — The controller is aware of application dependencies and infrastructure roles (e.g., Hyper-V clusters, SQL clusters, domain controllers, DNS/DHCP roles). Operations that span multiple devices — rolling updates, coordinated reboots, cluster-aware patching — are sequenced by the controller to maintain service availability. Individual stewards apply their cfgs; the controller decides the order and timing
 
@@ -206,6 +206,8 @@ Regional infrastructure component deployed at site level. Two roles:
 1. **Proxy cache** — Caches binaries, packages, and cfg artifacts used by multiple stewards at the site, reducing WAN bandwidth and speeding up deployments
 2. **Network operations** — Manages agentless endpoints that can't run a steward (switches, firewalls, APs, printers) via SSH, SNMP, and vendor APIs. Also performs network scans and topology discovery
 
+The outpost runs **outpost-kind modules** (`executors: [outpost]`) to manage remote LAN devices. Outpost modules run on the outpost host and use the outpost as a proxy agent for devices that cannot run a steward. The outpost module runtime is the same gRPC-based runtime as the steward, scoped to the outpost process.
+
 Reports to controller. Not yet implemented.
 
 ## Failure Modes
@@ -237,6 +239,91 @@ On startup, the steward:
 2. Applies immediately (full convergence)
 3. Reconnects to controller if configured
 4. Resumes normal schedule
+
+## Concurrent Controller Execution (Blue/Green Pattern)
+
+CFGMS controllers are designed to support a **blue/green upgrade pattern**: two
+controller binaries running on the same host (or two hosts sharing storage)
+can coexist on the same data directory without corrupting state. This is the
+substrate for the zero-downtime upgrade flow described in epic #1917.
+
+### What's safe
+
+- **Read concurrency.** Both controllers can serve API reads concurrently against
+  shared storage. Storage backends are coordinated via filesystem-level
+  primitives (POSIX rename / Windows MoveFileEx + retry for flatfile; WAL-mode
+  shared-memory locking for SQLite).
+- **Single-writer + reader peers.** During cutover, one controller is the
+  primary writer for new state (registrations, heartbeats, config updates) and
+  the peer serves reads. Identity continuity is exact: a steward registered
+  against the writer is immediately visible on a read from the peer — no
+  replication lag, no re-registration. See `pkg/storage/providers/sqlite/
+  concurrent_writers_test.go::TestSQLite_IdentityContinuity_BlueWriteGreenRead`
+  for the pinned guarantee.
+- **Concurrent writes to disjoint keys.** Two writers updating different
+  records concurrently complete safely. WAL coordinates SQLite writers; atomic
+  rename + retry coordinates flatfile writers.
+
+### What's not safe (yet)
+
+- **Concurrent writes to the same key.** Two writers updating the same
+  steward record / config / RBAC entry at the same moment race on
+  last-writer-wins semantics. No corruption, but the merge is unordered. This
+  is acceptable for blue/green cutover (the primary writer is well-defined at
+  any given moment) but is **not** acceptable for multi-active HA — that
+  needs a separate epic with proper write coordination.
+- **Schema migrations during cutover.** A migration that changes column or
+  field shapes must run during a maintenance window or after both sides have
+  upgraded. Blue/green cutover assumes both binaries speak the same storage
+  schema.
+
+### Storage layer guarantees
+
+| Backend  | Concurrency contract                                                                                                                                                                                                              |
+|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| SQLite   | WAL mode + `busy_timeout=5000ms`. Multiple `*sql.DB` handles on the same file (in-process OR cross-process) write safely without lock failures. Tested at 1000 concurrent writes split across two handles with zero failures.    |
+| Flatfile | Writes commit via atomic temp-file + rename. On Windows, rename retries `ERROR_SHARING_VIOLATION` from concurrent readers; reads retry the same error from concurrent writers. Tested with 1 writer + N reader subprocesses, 0 torn reads. |
+
+### Operator interface
+
+The blue controller runs on the canonical ports from `controller.cfg`. The
+green controller binds on overrides supplied at startup:
+
+```sh
+cfgms-controller \
+    --config /etc/cfgms/controller.cfg \
+    --listen-api-addr :9081 \
+    --listen-transport-addr :4434
+```
+
+Precedence: CLI flag > env var (`CFGMS_HTTP_LISTEN_ADDR`,
+`CFGMS_TRANSPORT_LISTEN_ADDR`) > cfg file value > built-in default. Both
+binaries read the same `data_dir`, same storage configuration, same identity
+material — so the green binary is bit-for-bit indistinguishable from the
+blue binary in terms of "what it serves." Only the listen addresses differ.
+
+The cutover mechanism itself (story #1920) is implemented as
+**port-ownership-swap** — not a byte-level reverse proxy. The
+orchestrator (`features/controller/cutover`) drains the previous
+canonical, waits for the canonical ports to free, then spawns a fresh
+instance of the new binary on those ports. Stewards reconnect via the
+gRPC-over-QUIC backoff already built into the client. Typical wall-
+clock window: 1-3 seconds.
+
+Operator commands:
+
+```sh
+cfg controller upgrade run --binary /opt/cfgms/cfgms-controller-vNEW \
+    --config /etc/cfgms/controller.cfg
+cfg controller upgrade status
+cfg controller upgrade rollback --config /etc/cfgms/controller.cfg
+```
+
+State persistence: `/var/lib/cfgms/cutover.state.json` (Linux) or
+`%ProgramData%\cfgms\cutover.state.json` (Windows) records the
+canonical + quarantined binary paths so `status` and `rollback` work
+across CLI invocations. The full operator runbook lives at
+[docs/operations/controller-upgrade.md](../operations/controller-upgrade.md).
 
 ## Deployment Modes
 
@@ -275,13 +362,84 @@ This is the same controller — it just has no stewards registered. The workflow
 
 Operators interact with CFGMS through layered UX surfaces.
 
-**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows.
+**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows. `cfg steward logs` is available but returns 501 until a log-pull transport is wired.
 
 **Web UI (planned before v1).** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
 
 **REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
 
 **Workflow engine — automation surface.** For SaaS/cloud operations that don't require a steward (M365, identity providers, ticketing systems), the workflow engine is the primary expression mechanism. See [controller operating model](controller-operating-model.md#workflow-engine).
+
+## Controller Blob Store Namespaces
+
+The controller blob store (`pkg/storage/interfaces/blob.BlobStore`) partitions binary artifacts by namespace within each tenant.
+
+| Namespace | Purpose |
+|-----------|---------|
+| `installers` | Platform installer packages uploaded via `PUT /api/v1/installer/artifacts/{platform}/{arch}` |
+| `steward-binaries` | Versioned steward binaries published via `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`. Each entry carries publisher-signature metadata and the publishing operator identity. |
+
+Steward binary distribution uses the `steward-binaries` namespace exclusively. Blob keys take the form `{version}-{platform}-{arch}` (e.g. `v0.5.12-linux-amd64`). Binaries must carry a valid Ed25519 publisher signature verified against the CFGMS publisher identity before storage.
+
+## Steward Upgrade Dispatch Flow (Epic #1930)
+
+The controller can push a new steward binary to one or more stewards via a selector-based fan-out.
+The flow enforces an approval gate before dispatch and records per-steward lifecycle state in a durable `UpgradeStore`.
+
+### Dispatch steps
+
+1. **Publish**: operator calls `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`.
+   The controller verifies the Ed25519 publisher signature and stores the blob with `publisher`, `publisher_tenant`, and `signature` labels.
+2. **Approve**: a separate operator (with `installer:approve:steward` permission) sets the `approved_by` label on the blob.
+   The controller records the approver identity in `BlobMeta.Labels["approved_by"]`.
+3. **Dispatch**: operator calls `POST /api/v1/stewards/upgrade` with a fleet selector (e.g. `id:steward-abc`), version, platform, and arch.
+   The controller:
+   a. Parses the selector and applies the caller's tenant scope.
+   b. Resolves matching stewards via `FleetQuery.Search`; drops stewards from other tenants (403 if none remain).
+   c. Verifies the blob's `approved_by` label is non-empty (403 if missing — "published but not approved").
+   d. Recomputes SHA-256 from the stored blob bytes (does not trust `BlobMeta.Checksum`).
+   e. Checks for non-terminal upgrade records per steward; returns 409 if any exist.
+   f. Creates one `UpgradeRecord` per steward (status: `dispatched`) with publisher provenance fields (`Publisher`, `BundleSignature`, `SignatureDigest`) and a 32-byte `OperationNonce` for replay defense.
+   g. Fans out `CommandPushStewardBinary` to each steward via the control plane (fire-and-forget goroutine).
+   h. Returns `202 Accepted` with `upgrade_id` (the first steward's record ID) and `steward_count`.
+
+### Approval state machine
+
+```
+published ──► approved ──► dispatchable
+   │               │
+   └── dispatch    └── dispatch blocked
+       blocked         unblocked
+```
+
+| Blob label       | Meaning |
+|-----------------|---------|
+| (absent)         | Not yet published (blob does not exist) |
+| `published_by`   | Binary has been published; awaiting approval |
+| `approved_by`    | Binary is approved and dispatchable |
+
+### UpgradeRecord lifecycle
+
+```
+dispatched ──► downloaded ──► swapped ──► committed
+                                     └──► rolled_back
+(any state) ──► failed
+```
+
+Terminal states (`committed`, `rolled_back`, `failed`) unblock re-dispatch to the same steward.
+
+### Durable store requirement
+
+The controller refuses dispatch with `503 Service Unavailable` if no durable `UpgradeStore` is
+configured at server startup. There is no silent in-memory fallback — durable state is required
+to survive controller restarts and HA failover replay.
+
+### Rollback
+
+`POST /api/v1/stewards/upgrade/{upgrade_id}/rollback` requires an explicit `version` field
+(named target, not most-recent). The rollback is a dispatch-equivalent action: it looks up the
+original steward, fetches the target-version blob (must be approved), creates a new `UpgradeRecord`,
+and fans out `CommandPushStewardBinary`. Requires `installer:dispatch:steward` permission.
 
 ## Monitoring Export Credentials
 

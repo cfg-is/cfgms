@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 var (
@@ -197,6 +198,12 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 //   - "vmattach:<vmName>/<switchName>": retrieve VMAttachmentConfig for the named attachment
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if err := m.checkDetection(ctx); err != nil {
+		if errors.Is(err, ErrHostNotHyperV) {
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: declining resource — host is not a Hyper-V host",
+					"resource_id", logging.SanitizeLogValue(resourceID))
+			}
+		}
 		return nil, err
 	}
 	prefix, name, ok := splitResourceID(resourceID)
@@ -229,6 +236,12 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 //   - "vmattach:<vmName>/<switchName>": attach or detach a VM network adapter
 func (m *hypervModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if err := m.checkDetection(ctx); err != nil {
+		if errors.Is(err, ErrHostNotHyperV) {
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: declining resource — host is not a Hyper-V host",
+					"resource_id", logging.SanitizeLogValue(resourceID))
+			}
+		}
 		return err
 	}
 	prefix, _, ok := splitResourceID(resourceID)

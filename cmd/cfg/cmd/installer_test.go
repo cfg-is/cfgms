@@ -3,6 +3,12 @@
 package cmd
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -371,4 +377,226 @@ func TestInstallerUpload(t *testing.T) {
 		assert.Equal(t, "/api/v1/installer/artifacts/darwin/arm64", receivedPath)
 		assert.Contains(t, output, "darwin/arm64")
 	})
+}
+
+// ---- Publish subcommand tests ----
+
+// TestPublishCLI_RequiresPlatformAndArch verifies that cfg installer publish returns a usage
+// error before making any HTTP call when --platform or --arch is absent.
+func TestPublishCLI_RequiresPlatformAndArch(t *testing.T) {
+	// resetPublishFlags restores package-level flag vars after each sub-test.
+	resetPublishFlags := func(t *testing.T) {
+		t.Helper()
+		t.Cleanup(func() {
+			publishKind = ""
+			publishVersion = ""
+			installerPlatform = ""
+			installerArch = ""
+			publishBinary = ""
+			publishSignature = ""
+			publishForce = false
+			installerAPIURL = ""
+			noBundle = false
+		})
+	}
+
+	t.Run("rejects missing platform", func(t *testing.T) {
+		resetPublishFlags(t)
+		noBundle = true
+		publishKind = "steward"
+		publishVersion = "v1.0.0"
+		installerPlatform = "" // omitted
+		installerArch = "amd64"
+		publishBinary = "somefile"
+		publishSignature = "somefile.sig"
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown platform")
+	})
+
+	t.Run("rejects missing arch", func(t *testing.T) {
+		resetPublishFlags(t)
+		noBundle = true
+		publishKind = "steward"
+		publishVersion = "v1.0.0"
+		installerPlatform = "linux"
+		installerArch = "" // omitted
+		publishBinary = "somefile"
+		publishSignature = "somefile.sig"
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown arch")
+	})
+
+	t.Run("rejects unknown kind", func(t *testing.T) {
+		resetPublishFlags(t)
+		noBundle = true
+		publishKind = "outpost" // invalid kind
+		publishVersion = "v1.0.0"
+		installerPlatform = "linux"
+		installerArch = "amd64"
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--kind")
+	})
+
+	t.Run("rejects missing binary file", func(t *testing.T) {
+		resetPublishFlags(t)
+		noBundle = true
+		publishKind = "steward"
+		publishVersion = "v1.0.0"
+		installerPlatform = "linux"
+		installerArch = "amd64"
+		publishBinary = "/nonexistent/path/binary"
+		publishSignature = "somefile.sig"
+
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "binary file not found")
+	})
+}
+
+// TestPublishCLI_SuccessfulPublish verifies that a valid publish call sends the correct request
+// and prints the expected output.
+func TestPublishCLI_SuccessfulPublish(t *testing.T) {
+	// Generate a real Ed25519 key pair for signing.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_ = pub
+
+	binaryContent := []byte("cfgms-steward-test-binary")
+
+	// Create temporary binary and signature files.
+	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "cfgms-steward")
+	require.NoError(t, os.WriteFile(binaryPath, binaryContent, 0600))
+
+	// Sign: Ed25519 over the SHA-256 hex of the binary content.
+	sum := sha256.Sum256(binaryContent)
+	hash := hex.EncodeToString(sum[:])
+	sig := ed25519.Sign(priv, []byte(hash))
+	sigPath := filepath.Join(dir, "cfgms-steward.sig")
+	require.NoError(t, os.WriteFile(sigPath, sig, 0600))
+
+	// Save and restore flag state.
+	origKind := publishKind
+	origVersion := publishVersion
+	origPlatform := installerPlatform
+	origArch := installerArch
+	origBinary := publishBinary
+	origSig := publishSignature
+	origURL := installerAPIURL
+	origNoBundle := noBundle
+	t.Cleanup(func() {
+		publishKind = origKind
+		publishVersion = origVersion
+		installerPlatform = origPlatform
+		installerArch = origArch
+		publishBinary = origBinary
+		publishSignature = origSig
+		installerAPIURL = origURL
+		noBundle = origNoBundle
+	})
+
+	publishKind = "steward"
+	publishVersion = "v1.2.3"
+	installerPlatform = "linux"
+	installerArch = "amd64"
+	publishBinary = binaryPath
+	publishSignature = sigPath
+	noBundle = true
+
+	var receivedPath string
+	var receivedSigHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedSigHeader = r.URL.Query().Get("signature")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"version":          "v1.2.3",
+				"platform":         "linux",
+				"arch":             "amd64",
+				"size":             int64(len(binaryContent)),
+				"sha256":           "sha256:abc123",
+				"published_by":     "admin@example.com",
+				"publisher":        "cfgms",
+				"signature_digest": "deadbeef",
+			},
+		})
+	}))
+	defer server.Close()
+	installerAPIURL = server.URL
+
+	output := captureStdout(t, func() {
+		err := runInstallerPublish(installerPublishCmd, []string{})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/installer/steward-binaries/v1.2.3/linux/amd64", receivedPath)
+	assert.NotEmpty(t, receivedSigHeader, "signature query param must be sent")
+	// Verify the signature is valid URL-safe base64 (no padding).
+	_, decErr := base64.RawURLEncoding.DecodeString(receivedSigHeader)
+	assert.NoError(t, decErr, "signature must be valid URL-safe base64")
+
+	assert.Contains(t, output, "v1.2.3")
+	assert.Contains(t, output, "linux/amd64")
+	assert.Contains(t, output, "admin@example.com")
+}
+
+// TestPublishCLI_DuplicateReturns409 verifies that a 409 response from the server
+// results in an error returned to the caller (no silent swallow).
+func TestPublishCLI_DuplicateReturns409(t *testing.T) {
+	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "cfgms-steward")
+	require.NoError(t, os.WriteFile(binaryPath, []byte("content"), 0600))
+	sigPath := filepath.Join(dir, "cfgms-steward.sig")
+	require.NoError(t, os.WriteFile(sigPath, bytes.Repeat([]byte{0}, 64), 0600))
+
+	origKind := publishKind
+	origVersion := publishVersion
+	origPlatform := installerPlatform
+	origArch := installerArch
+	origBinary := publishBinary
+	origSig := publishSignature
+	origURL := installerAPIURL
+	origNoBundle := noBundle
+	t.Cleanup(func() {
+		publishKind = origKind
+		publishVersion = origVersion
+		installerPlatform = origPlatform
+		installerArch = origArch
+		publishBinary = origBinary
+		publishSignature = origSig
+		installerAPIURL = origURL
+		noBundle = origNoBundle
+	})
+
+	publishKind = "steward"
+	publishVersion = "v1.0.0"
+	installerPlatform = "linux"
+	installerArch = "amd64"
+	publishBinary = binaryPath
+	publishSignature = sigPath
+	noBundle = true
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "DUPLICATE_BINARY",
+			"message": "Steward binary already exists; use --force to overwrite",
+		})
+	}))
+	defer server.Close()
+	installerAPIURL = server.URL
+
+	err := runInstallerPublish(installerPublishCmd, []string{})
+	require.Error(t, err)
+	assert.True(t, strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "DUPLICATE") || strings.Contains(err.Error(), "Conflict"),
+		"expected 409/conflict in error: %v", err)
 }
