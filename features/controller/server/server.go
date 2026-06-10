@@ -65,6 +65,7 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -737,6 +738,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	logger.Info("HTTP API server initialized successfully")
+
+	// Issue #1948: Wire in-memory upgrade store so the dispatch/status endpoints
+	// are operational. A durable SQLite-backed store is a follow-up; for the
+	// OSS composite deployment the in-memory store is sufficient because upgrade
+	// records are short-lived (< 60s) and not required to survive a controller restart.
+	httpServer.SetUpgradeStore(memoryprovider.NewUpgradeStore())
+	logger.Info("In-memory upgrade store wired to HTTP API server (Issue #1948)")
 
 	// Wire the shared connection registry into the API server so
 	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).

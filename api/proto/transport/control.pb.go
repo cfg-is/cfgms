@@ -29,42 +29,46 @@ const (
 type CommandType int32
 
 const (
-	CommandType_COMMAND_TYPE_UNSPECIFIED        CommandType = 0
-	CommandType_COMMAND_TYPE_SYNC_CONFIG        CommandType = 1
-	CommandType_COMMAND_TYPE_SYNC_DNA           CommandType = 2
-	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE  CommandType = 3
-	CommandType_COMMAND_TYPE_EXECUTE_TASK       CommandType = 4
-	CommandType_COMMAND_TYPE_SHUTDOWN           CommandType = 5
-	CommandType_COMMAND_TYPE_VALIDATE_CONFIG    CommandType = 6
-	CommandType_COMMAND_TYPE_RECONNECT          CommandType = 7
+	CommandType_COMMAND_TYPE_UNSPECIFIED       CommandType = 0
+	CommandType_COMMAND_TYPE_SYNC_CONFIG       CommandType = 1
+	CommandType_COMMAND_TYPE_SYNC_DNA          CommandType = 2
+	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE CommandType = 3
+	CommandType_COMMAND_TYPE_EXECUTE_TASK      CommandType = 4
+	CommandType_COMMAND_TYPE_SHUTDOWN          CommandType = 5
+	CommandType_COMMAND_TYPE_VALIDATE_CONFIG   CommandType = 6
+	CommandType_COMMAND_TYPE_RECONNECT         CommandType = 7
 	// COMMAND_TYPE_EXECUTE_SCRIPT = 8 is reserved for Issue #1669; proto regen deferred.
 	// CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT added manually pending proto regen (Issue #1817).
-	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT  CommandType = 9
+	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT CommandType = 9
+	// CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY added manually pending proto regen (Issue #1943).
+	CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY CommandType = 10
 )
 
 // Enum value maps for CommandType.
 var (
 	CommandType_name = map[int32]string{
-		0: "COMMAND_TYPE_UNSPECIFIED",
-		1: "COMMAND_TYPE_SYNC_CONFIG",
-		2: "COMMAND_TYPE_SYNC_DNA",
-		3: "COMMAND_TYPE_CONNECT_DATAPLANE",
-		4: "COMMAND_TYPE_EXECUTE_TASK",
-		5: "COMMAND_TYPE_SHUTDOWN",
-		6: "COMMAND_TYPE_VALIDATE_CONFIG",
-		7: "COMMAND_TYPE_RECONNECT",
-		9: "COMMAND_TYPE_PUSH_SIGNING_CERT",
+		0:  "COMMAND_TYPE_UNSPECIFIED",
+		1:  "COMMAND_TYPE_SYNC_CONFIG",
+		2:  "COMMAND_TYPE_SYNC_DNA",
+		3:  "COMMAND_TYPE_CONNECT_DATAPLANE",
+		4:  "COMMAND_TYPE_EXECUTE_TASK",
+		5:  "COMMAND_TYPE_SHUTDOWN",
+		6:  "COMMAND_TYPE_VALIDATE_CONFIG",
+		7:  "COMMAND_TYPE_RECONNECT",
+		9:  "COMMAND_TYPE_PUSH_SIGNING_CERT",
+		10: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
 	}
 	CommandType_value = map[string]int32{
-		"COMMAND_TYPE_UNSPECIFIED":       0,
-		"COMMAND_TYPE_SYNC_CONFIG":       1,
-		"COMMAND_TYPE_SYNC_DNA":          2,
-		"COMMAND_TYPE_CONNECT_DATAPLANE": 3,
-		"COMMAND_TYPE_EXECUTE_TASK":      4,
-		"COMMAND_TYPE_SHUTDOWN":          5,
-		"COMMAND_TYPE_VALIDATE_CONFIG":   6,
-		"COMMAND_TYPE_RECONNECT":         7,
-		"COMMAND_TYPE_PUSH_SIGNING_CERT": 9,
+		"COMMAND_TYPE_UNSPECIFIED":         0,
+		"COMMAND_TYPE_SYNC_CONFIG":         1,
+		"COMMAND_TYPE_SYNC_DNA":            2,
+		"COMMAND_TYPE_CONNECT_DATAPLANE":   3,
+		"COMMAND_TYPE_EXECUTE_TASK":        4,
+		"COMMAND_TYPE_SHUTDOWN":            5,
+		"COMMAND_TYPE_VALIDATE_CONFIG":     6,
+		"COMMAND_TYPE_RECONNECT":           7,
+		"COMMAND_TYPE_PUSH_SIGNING_CERT":   9,
+		"COMMAND_TYPE_PUSH_STEWARD_BINARY": 10,
 	}
 )
 
@@ -105,6 +109,10 @@ const (
 	EventType_EVENT_TYPE_TASK_COMPLETED EventType = 3
 	EventType_EVENT_TYPE_TASK_FAILED    EventType = 4
 	EventType_EVENT_TYPE_ERROR          EventType = 5
+	// Command lifecycle events added manually pending proto regen (Issue #1948).
+	EventType_EVENT_TYPE_COMMAND_RECEIVED  EventType = 6
+	EventType_EVENT_TYPE_COMMAND_COMPLETED EventType = 7
+	EventType_EVENT_TYPE_COMMAND_FAILED    EventType = 8
 )
 
 // Enum value maps for EventType.
@@ -116,14 +124,20 @@ var (
 		3: "EVENT_TYPE_TASK_COMPLETED",
 		4: "EVENT_TYPE_TASK_FAILED",
 		5: "EVENT_TYPE_ERROR",
+		6: "EVENT_TYPE_COMMAND_RECEIVED",
+		7: "EVENT_TYPE_COMMAND_COMPLETED",
+		8: "EVENT_TYPE_COMMAND_FAILED",
 	}
 	EventType_value = map[string]int32{
-		"EVENT_TYPE_UNSPECIFIED":    0,
-		"EVENT_TYPE_CONFIG_APPLIED": 1,
-		"EVENT_TYPE_DNA_SYNCED":     2,
-		"EVENT_TYPE_TASK_COMPLETED": 3,
-		"EVENT_TYPE_TASK_FAILED":    4,
-		"EVENT_TYPE_ERROR":          5,
+		"EVENT_TYPE_UNSPECIFIED":       0,
+		"EVENT_TYPE_CONFIG_APPLIED":    1,
+		"EVENT_TYPE_DNA_SYNCED":        2,
+		"EVENT_TYPE_TASK_COMPLETED":    3,
+		"EVENT_TYPE_TASK_FAILED":       4,
+		"EVENT_TYPE_ERROR":             5,
+		"EVENT_TYPE_COMMAND_RECEIVED":  6,
+		"EVENT_TYPE_COMMAND_COMPLETED": 7,
+		"EVENT_TYPE_COMMAND_FAILED":    8,
 	}
 )
 

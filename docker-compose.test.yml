@@ -700,8 +700,17 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
       # Issue #1709: seed installer API key for E2E install-package flow test.
+      # Issue #1948: seed upgrade test API key for E2E fleet upgrade tests.
       CFGMS_SEED_TEST_API_KEYS: "1"
       CFGMS_API_KEY_INSTALLER: "installer-test-key"
+      CFGMS_API_KEY_UPGRADE_TEST: "cfgms-upgrade-test-key"
+      # Issue #1948: ExternalURL used by dispatch handler to build steward download URLs.
+      # Must match the hostname reachable by fleet stewards on the cfgms-fleet network.
+      CFGMS_EXTERNAL_URL: "https://fleet-controller:9080"
+      # Issue #1948: Test Ed25519 publisher key (public key from zero-seed).
+      # Allows E2E upgrade tests to sign binaries with the known zero-seed private key.
+      # Active only when CFGMS_SEED_TEST_API_KEYS=1.
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
@@ -730,6 +739,9 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+      # Issue #1948: same test publisher key as fleet-controller so E2E upgrade tests
+      # can sign binaries with the zero-seed private key and have them verify on the steward.
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward1_data:/app/data
@@ -760,6 +772,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward2_data:/app/data
