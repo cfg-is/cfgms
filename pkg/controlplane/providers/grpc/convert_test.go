@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,13 +86,23 @@ func TestCommandNil(t *testing.T) {
 }
 
 func TestCommandTypeRoundTrip(t *testing.T) {
+	// Every command type the controller can dispatch must survive the
+	// semantic→proto→semantic round-trip. A type missing from either map
+	// serialises to the zero enum value, which mutates the signed Type field
+	// and makes steward-side signature verification fail (Issue #1943/#1948).
 	allTypes := []types.CommandType{
 		types.CommandSyncConfig,
 		types.CommandSyncDNA,
+		types.CommandReconnect,
+		types.CommandPushSigningCert,
+		types.CommandPushStewardBinary,
 	}
 	for _, ct := range allTypes {
 		t.Run(string(ct), func(t *testing.T) {
-			pb := commandTypeToProto[ct]
+			pb, ok := commandTypeToProto[ct]
+			require.True(t, ok, "command type %q missing from commandTypeToProto", ct)
+			require.NotEqual(t, transportpb.CommandType_COMMAND_TYPE_UNSPECIFIED, pb,
+				"command type %q maps to the zero enum value", ct)
 			result := protoToCommandType[pb]
 			assert.Equal(t, ct, result)
 		})
@@ -155,16 +166,27 @@ func TestEventNil(t *testing.T) {
 }
 
 func TestEventTypeRoundTrip(t *testing.T) {
+	// Command lifecycle events must survive the round-trip: the controller's
+	// upgrade-dispatch callback keys off EventCommandCompleted/Failed to advance
+	// the upgrade record from dispatched → committed/failed. A missing mapping
+	// serialises to the zero enum, the controller sees Type="", and the upgrade
+	// hangs in "dispatched" until timeout (Issue #1948).
 	allTypes := []types.EventType{
 		types.EventConfigApplied,
 		types.EventDNASynced,
 		types.EventTaskCompleted,
 		types.EventTaskFailed,
 		types.EventError,
+		types.EventCommandReceived,
+		types.EventCommandCompleted,
+		types.EventCommandFailed,
 	}
 	for _, et := range allTypes {
 		t.Run(string(et), func(t *testing.T) {
-			pb := eventTypeToProto[et]
+			pb, ok := eventTypeToProto[et]
+			require.True(t, ok, "event type %q missing from eventTypeToProto", et)
+			require.NotEqual(t, transportpb.EventType_EVENT_TYPE_UNSPECIFIED, pb,
+				"event type %q maps to the zero enum value", et)
 			result := protoToEventType[pb]
 			assert.Equal(t, et, result)
 		})

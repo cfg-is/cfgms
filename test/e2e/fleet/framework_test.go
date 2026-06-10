@@ -417,6 +417,72 @@ func (s *FleetTestSuite) readStewardLog(t *testing.T, container string) (string,
 		`ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null`)
 }
 
+const upgradeAPIKey = "cfgms-upgrade-test-key"
+
+// upgradeStatusResponse mirrors the controller's APIResponse wrapper for upgrade records.
+type upgradeStatusResponse struct {
+	Data struct {
+		Status string `json:"status"`
+	} `json:"data"`
+}
+
+// fetchUpgradeStatus polls GET /api/v1/stewards/upgrade/{upgrade_id} until the status
+// is terminal (committed, failed, rolled_back) or the timeout expires.
+// Returns the last observed status string, or "timeout" if no terminal status was seen.
+func fetchUpgradeStatus(t *testing.T, client *http.Client, upgradeID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := "unknown"
+	for time.Now().Before(deadline) {
+		url := fmt.Sprintf("%s/api/v1/stewards/upgrade/%s", fleetControllerHTTP, upgradeID)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		req.Header.Set("X-API-Key", upgradeAPIKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		var result upgradeStatusResponse
+		if jerr := json.Unmarshal(body, &result); jerr != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		last = result.Data.Status
+		if last == "committed" || last == "failed" || last == "rolled_back" {
+			return last
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Logf("fetchUpgradeStatus: timeout after %v; last status = %q", timeout, last)
+	return "timeout"
+}
+
+// waitForStewardVersion polls the steward container's log until the specified version
+// string appears (indicating the upgrade handler processed that version). Returns true
+// if found within the timeout.
+func (s *FleetTestSuite) waitForStewardVersion(t *testing.T, container, version string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		log, err := s.readStewardLog(t, container)
+		if err == nil && strings.Contains(log, version) {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
 // TestFleetWalkthrough is the single ordered entry point for all fleet walkthrough scenarios.
 // Scenarios execute in definition order via t.Run so each is individually identified in output.
 func TestFleetWalkthrough(t *testing.T) {

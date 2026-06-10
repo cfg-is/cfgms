@@ -6,7 +6,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	crand "crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +28,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
@@ -742,6 +745,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		ScriptSigning:               scriptSigning,
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
+		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -863,6 +867,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
+		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -903,6 +908,37 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
 
 	return transportClient, nil
+}
+
+// buildTestPublisherTrustStore reads CFGMS_TEST_STEWARD_PUBLISHER_KEY from the
+// environment. When set, it returns a trust.TrustStore seeded with the
+// base64-encoded Ed25519 public key so E2E upgrade tests can sign binaries with
+// the corresponding known private key. Returns nil when the env var is absent or
+// the key is malformed — the caller falls back to CFGMSPublisherIdentity().
+// This path is never reachable in production because CFGMS_TEST_STEWARD_PUBLISHER_KEY
+// is only set in ephemeral test environments.
+func buildTestPublisherTrustStore(logger logging.Logger) trust.TrustStore {
+	pubKeyBase64 := os.Getenv("CFGMS_TEST_STEWARD_PUBLISHER_KEY")
+	if pubKeyBase64 == "" {
+		return nil
+	}
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKeyBase64)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		if logger != nil {
+			logger.Warn("CFGMS_TEST_STEWARD_PUBLISHER_KEY is set but malformed; ignoring")
+		}
+		return nil
+	}
+	ts := trust.NewInMemoryTrustStore()
+	_ = ts.AddPublisher(trust.PublisherIdentity{
+		Name:      "cfgms",
+		PublicKey: pubKeyBytes,
+		Algorithm: "ed25519",
+	})
+	if logger != nil {
+		logger.Info("Test mode: overriding steward binary publisher trust store (Issue #1948)")
+	}
+	return ts
 }
 
 // hasValidClientCert reports whether certs contains at least one non-expired client certificate.
