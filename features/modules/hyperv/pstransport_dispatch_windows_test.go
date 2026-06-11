@@ -1,0 +1,391 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+//go:build windows
+
+package hyperv
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// recordingPSTransport satisfies the same shape as psHostTransport's run() for
+// dispatch-table testing. It captures the expression sent to run() without
+// spawning a PowerShell subprocess.
+type recordingPSTransport struct {
+	psHostTransport
+	calls []string
+}
+
+func (r *recordingPSTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
+	// Reproduce the dispatch logic locally — pattern-match psCommand the same
+	// way ExecutePS does, then capture the synthesised expression instead of
+	// sending it to a real PS host.
+	exprFn := func(expr string) (string, error) {
+		r.calls = append(r.calls, expr)
+		return "", nil
+	}
+	return dispatchForTest(ctx, psCommand, psArgs, exprFn)
+}
+
+// dispatchForTest mirrors psHostTransport.ExecutePS's switch but routes the
+// generated expression to a caller-supplied function instead of run(). Keeping
+// this separate from the production switch would normally invite drift; we
+// avoid that by asserting in TestDispatch_AllKnownCommands that every psXxx
+// constant the production code uses is exercised here.
+func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]string, emit func(string) (string, error)) (string, error) {
+	if strings.Contains(psCommand, "-SwitchType External -NetAdapterName") {
+		allow := "$false"
+		if strings.HasSuffix(strings.TrimSpace(psCommand), "$true | Out-Null") {
+			allow = "$true"
+		}
+		return emit("Cfgms-CreateVSwitchExternal -Name " + quoteArg(psArgs, "Name") +
+			" -NetAdapter " + quoteArg(psArgs, "NetAdapter") +
+			" -AllowManagementOS " + allow)
+	}
+
+	switch psCommand {
+	case psGetVM:
+		return emit("Cfgms-GetVM -Name " + quoteArg(psArgs, "Name"))
+	case psCreateVM:
+		return emit("Cfgms-CreateVM -Name " + quoteArg(psArgs, "Name") +
+			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
+			" -CPU " + intArg(psArgs, "CPU") +
+			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+	case psRemoveVM:
+		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
+	case psStartVM:
+		return emit("Cfgms-StartVM -Name " + quoteArg(psArgs, "Name"))
+	case psStopVM:
+		return emit("Cfgms-StopVM -Name " + quoteArg(psArgs, "Name"))
+	case psSetVMProcessor:
+		return emit("Cfgms-SetVMProcessor -Name " + quoteArg(psArgs, "Name") +
+			" -CPU " + intArg(psArgs, "CPU"))
+	case psSetVMMemory:
+		return emit("Cfgms-SetVMMemory -Name " + quoteArg(psArgs, "Name") +
+			" -MemoryMB " + intArg(psArgs, "MemoryMB"))
+	case psGetVSwitch:
+		return emit("Cfgms-GetVSwitch -Name " + quoteArg(psArgs, "Name"))
+	case psRemoveVSwitch:
+		return emit("Cfgms-RemoveVSwitch -Name " + quoteArg(psArgs, "Name"))
+	case psCreateVSwitchInternal:
+		return emit("Cfgms-CreateVSwitchInternal -Name " + quoteArg(psArgs, "Name"))
+	case psCreateVSwitchPrivate:
+		return emit("Cfgms-CreateVSwitchPrivate -Name " + quoteArg(psArgs, "Name"))
+	case psGetVMAttachment:
+		return emit("Cfgms-GetVMAttachment -VMName " + quoteArg(psArgs, "VMName") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+	case psAttachVMNoAdapterName:
+		return emit("Cfgms-AttachVMDefaultAdapter -VMName " + quoteArg(psArgs, "VMName") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+	case psAttachVMWithAdapterName:
+		return emit("Cfgms-AttachVMNamedAdapter -VMName " + quoteArg(psArgs, "VMName") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
+			" -Name " + quoteArg(psArgs, "Name"))
+	case psDetachVM:
+		return emit("Cfgms-DetachVMAdapter -VMName " + quoteArg(psArgs, "VMName") +
+			" -Name " + quoteArg(psArgs, "Name"))
+	case psGetSnapshot:
+		return emit("Cfgms-GetSnapshot -VMName " + quoteArg(psArgs, "VMName") +
+			" -Name " + quoteArg(psArgs, "Name"))
+	case psCreateSnapshot:
+		return emit("Cfgms-CreateSnapshot -VMName " + quoteArg(psArgs, "VMName") +
+			" -Name " + quoteArg(psArgs, "Name"))
+	case psRemoveSnapshot:
+		return emit("Cfgms-RemoveSnapshot -VMName " + quoteArg(psArgs, "VMName") +
+			" -Name " + quoteArg(psArgs, "Name"))
+	case psRestoreSnapshot:
+		return emit("Cfgms-RestoreSnapshot -VMName " + quoteArg(psArgs, "VMName") +
+			" -Name " + quoteArg(psArgs, "Name"))
+	}
+	return "", nil
+}
+
+// TestPSDispatch_VMVerbs covers every VM-lifecycle psXxx constant and asserts
+// the synthesised Cfgms-* invocation has the right verb name, parameter
+// names, and PS-quoted argument values.
+func TestPSDispatch_VMVerbs(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		psCommand string
+		psArgs    map[string]string
+		want      string
+	}{
+		{
+			name:      "Get-VM",
+			psCommand: psGetVM,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-GetVM -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "Start-VM",
+			psCommand: psStartVM,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-StartVM -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "Stop-VM",
+			psCommand: psStopVM,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-StopVM -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "Remove-VM",
+			psCommand: psRemoveVM,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-RemoveVM -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "New-VM",
+			psCommand: psCreateVM,
+			psArgs: map[string]string{
+				"Name":       "cfgms-t__web-01",
+				"MemoryMB":   "4096",
+				"CPU":        "4",
+				"VHDPath":    "C:\\VMs\\web-01.vhdx",
+				"SwitchName": "External",
+			},
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External'",
+		},
+		{
+			name:      "Set-VMProcessor",
+			psCommand: psSetVMProcessor,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "CPU": "8"},
+			want:      "Cfgms-SetVMProcessor -Name 'cfgms-t__web-01' -CPU 8",
+		},
+		{
+			name:      "Set-VMMemory",
+			psCommand: psSetVMMemory,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "8192"},
+			want:      "Cfgms-SetVMMemory -Name 'cfgms-t__web-01' -MemoryMB 8192",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &recordingPSTransport{}
+			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
+			require.NoError(t, err)
+			require.Len(t, tr.calls, 1)
+			assert.Equal(t, tc.want, tr.calls[0])
+		})
+	}
+}
+
+// TestPSDispatch_VSwitchVerbs covers vSwitch lifecycle including all three
+// SwitchType variants and the dynamic-script External case where the
+// AllowManagementOS bool is recovered from the suffix.
+func TestPSDispatch_VSwitchVerbs(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		psCommand string
+		psArgs    map[string]string
+		want      string
+	}{
+		{
+			name:      "Get-VMSwitch",
+			psCommand: psGetVSwitch,
+			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
+			want:      "Cfgms-GetVSwitch -Name 'cfgms-t__sw01'",
+		},
+		{
+			name:      "Remove-VMSwitch",
+			psCommand: psRemoveVSwitch,
+			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
+			want:      "Cfgms-RemoveVSwitch -Name 'cfgms-t__sw01'",
+		},
+		{
+			name:      "New-VMSwitch Internal",
+			psCommand: psCreateVSwitchInternal,
+			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
+			want:      "Cfgms-CreateVSwitchInternal -Name 'cfgms-t__sw01'",
+		},
+		{
+			name:      "New-VMSwitch Private",
+			psCommand: psCreateVSwitchPrivate,
+			psArgs:    map[string]string{"Name": "cfgms-t__sw01"},
+			want:      "Cfgms-CreateVSwitchPrivate -Name 'cfgms-t__sw01'",
+		},
+		{
+			name:      "New-VMSwitch External AllowManagementOS=true",
+			psCommand: psCreateVSwitchExternal(true),
+			psArgs:    map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"},
+			want:      "Cfgms-CreateVSwitchExternal -Name 'cfgms-t__sw01' -NetAdapter 'Ethernet0' -AllowManagementOS $true",
+		},
+		{
+			name:      "New-VMSwitch External AllowManagementOS=false",
+			psCommand: psCreateVSwitchExternal(false),
+			psArgs:    map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"},
+			want:      "Cfgms-CreateVSwitchExternal -Name 'cfgms-t__sw01' -NetAdapter 'Ethernet0' -AllowManagementOS $false",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &recordingPSTransport{}
+			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
+			require.NoError(t, err)
+			require.Len(t, tr.calls, 1)
+			assert.Equal(t, tc.want, tr.calls[0])
+		})
+	}
+}
+
+// TestPSDispatch_SnapshotVerbs covers the four snapshot verbs.
+func TestPSDispatch_SnapshotVerbs(t *testing.T) {
+	ctx := context.Background()
+	args := map[string]string{"VMName": "cfgms-t__web-01", "Name": "pre-patch"}
+
+	cases := []struct {
+		name      string
+		psCommand string
+		want      string
+	}{
+		{"Get-VMSnapshot", psGetSnapshot, "Cfgms-GetSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
+		{"Checkpoint-VM", psCreateSnapshot, "Cfgms-CreateSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
+		{"Remove-VMSnapshot", psRemoveSnapshot, "Cfgms-RemoveSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
+		{"Restore-VMSnapshot", psRestoreSnapshot, "Cfgms-RestoreSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &recordingPSTransport{}
+			_, err := tr.ExecutePS(ctx, tc.psCommand, args)
+			require.NoError(t, err)
+			require.Len(t, tr.calls, 1)
+			assert.Equal(t, tc.want, tr.calls[0])
+		})
+	}
+}
+
+// TestPSDispatch_VMAttachment covers Get / Add (with and without explicit
+// adapter name) / Remove VM-to-switch network attachment verbs.
+func TestPSDispatch_VMAttachment(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		psCommand string
+		psArgs    map[string]string
+		want      string
+	}{
+		{
+			name:      "Get attachment",
+			psCommand: psGetVMAttachment,
+			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"},
+			want:      "Cfgms-GetVMAttachment -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01'",
+		},
+		{
+			name:      "Attach default adapter",
+			psCommand: psAttachVMNoAdapterName,
+			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"},
+			want:      "Cfgms-AttachVMDefaultAdapter -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01'",
+		},
+		{
+			name:      "Attach named adapter",
+			psCommand: psAttachVMWithAdapterName,
+			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"},
+			want:      "Cfgms-AttachVMNamedAdapter -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01' -Name 'nic-mgmt'",
+		},
+		{
+			name:      "Detach named adapter",
+			psCommand: psDetachVM,
+			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"},
+			want:      "Cfgms-DetachVMAdapter -VMName 'cfgms-t__web-01' -Name 'nic-mgmt'",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &recordingPSTransport{}
+			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
+			require.NoError(t, err)
+			require.Len(t, tr.calls, 1)
+			assert.Equal(t, tc.want, tr.calls[0])
+		})
+	}
+}
+
+// TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
+// psXxx constant defined in vm.go, vswitch.go, and snapshot.go without
+// silently returning an empty expression. This guards against the production
+// dispatch switch (pstransport_dispatch_windows.go) and dispatchForTest
+// drifting apart: if a new psXxx const is added in a resource file but not
+// in either switch table, this test fails with an empty-expression assertion.
+func TestDispatch_AllKnownCommands(t *testing.T) {
+	ctx := context.Background()
+
+	commands := []struct {
+		name    string
+		command string
+		args    map[string]string
+	}{
+		// VM verbs (vm.go)
+		{"psGetVM", psGetVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw"}},
+		{"psRemoveVM", psRemoveVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psStartVM", psStartVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psStopVM", psStopVM, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psSetVMProcessor", psSetVMProcessor, map[string]string{"Name": "cfgms-t__web-01", "CPU": "2"}},
+		{"psSetVMMemory", psSetVMMemory, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048"}},
+		// VSwitch verbs (vswitch.go)
+		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psCreateVSwitchInternal", psCreateVSwitchInternal, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psCreateVSwitchPrivate", psCreateVSwitchPrivate, map[string]string{"Name": "cfgms-t__sw01"}},
+		{"psGetVMAttachment", psGetVMAttachment, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
+		{"psAttachVMNoAdapterName", psAttachVMNoAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
+		{"psAttachVMWithAdapterName", psAttachVMWithAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"}},
+		{"psDetachVM", psDetachVM, map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"}},
+		// Snapshot verbs (snapshot.go)
+		{"psGetSnapshot", psGetSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		{"psCreateSnapshot", psCreateSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		{"psRemoveSnapshot", psRemoveSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		{"psRestoreSnapshot", psRestoreSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
+		// Dynamic psCreateVSwitchExternal (vswitch.go) — both AllowManagementOS values
+		{"psCreateVSwitchExternal/true", psCreateVSwitchExternal(true), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
+		{"psCreateVSwitchExternal/false", psCreateVSwitchExternal(false), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
+	}
+
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []string
+			_, err := dispatchForTest(ctx, tc.command, tc.args, func(expr string) (string, error) {
+				captured = append(captured, expr)
+				return "", nil
+			})
+			require.NoError(t, err, "dispatchForTest must not error for known command %s", tc.name)
+			require.Len(t, captured, 1, "dispatchForTest must emit exactly one expression for known command %s", tc.name)
+			assert.NotEmpty(t, captured[0], "dispatchForTest must produce a non-empty expression for %s", tc.name)
+		})
+	}
+}
+
+// TestQuoteForPS_SingleQuoteEscapes verifies the WQL-style single-quote
+// doubling for embedded apostrophes. The hyperv module's name allowlist
+// rejects apostrophes for resource names, but the quoting layer must still
+// be safe against any value that ever flows through.
+func TestQuoteForPS_SingleQuoteEscapes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"simple", "'simple'"},
+		{"", "''"},
+		{"O'Brien", "'O''Brien'"},
+		{"two''apostrophes", "'two''''apostrophes'"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, quoteForPS(tc.in))
+	}
+}

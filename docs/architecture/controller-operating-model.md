@@ -374,17 +374,17 @@ resources:
 
 ### How It Works
 
-The workflow engine hosts **cloud modules** that implement the same Get/Set contract as steward modules, but execute against external APIs instead of local system state:
+The workflow engine hosts **workflow modules** that implement the same Get/Set contract as steward modules, but execute against external APIs instead of local system state. The M365 family (auth, conditional-access, intune-policy, entra-group, entra-admin-unit, entra-user, entra-application) lives at `features/workflow/modules/m365/` and is the first set of these.
 
-1. **Get** — Query the cloud API for current resource state (e.g., read current conditional access policies from Entra ID)
+1. **Get** — Query the external API for current resource state (e.g., read current conditional access policies from Entra ID)
 2. **Compare** — Engine compares current state against desired state from the cfg
-3. **Set** — If drifted, call the cloud API to converge (e.g., create/update the policy)
+3. **Set** — If drifted, call the external API to converge (e.g., create/update the policy)
 
-This means cloud resources get the same convergence loop as local resources — scheduled re-checks detect drift (someone changed a policy in the portal), and the controller corrects it.
+This means externally-managed resources get the same convergence loop as local resources — scheduled re-checks detect drift (someone changed a policy in the portal), and the controller corrects it.
 
-### Event Hooks for Cloud Resources
+### Event Hooks for Workflow-Managed Resources
 
-Cloud modules can register monitors using platform-native mechanisms:
+Workflow modules can register monitors using platform-native mechanisms:
 
 - **Log ingestion** — consume audit logs from M365, Azure, AWS to detect changes in near-real-time
 - **Webhook receivers** — receive change notifications from cloud platforms

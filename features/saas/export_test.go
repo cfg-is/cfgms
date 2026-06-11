@@ -5,7 +5,7 @@ package saas
 import (
 	"net/http"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 )
 
 // SetProviderBaseURL sets the baseURL field of a MicrosoftMultiTenantProvider.

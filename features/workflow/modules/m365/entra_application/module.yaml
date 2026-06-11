@@ -1,0 +1,24 @@
+name: m365-entra-application
+version: 0.1.0
+description: >
+  Desired-state management of Microsoft Entra ID Application Registrations
+  via the Microsoft Graph API. Manages application definitions, redirect
+  URIs, API permissions, secrets / certificate credentials, and
+  service-principal assignments as named resources.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set

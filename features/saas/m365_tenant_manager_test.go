@@ -12,113 +12,32 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
-	gdaptypes "github.com/cfgis/cfgms/features/modules/m365/gdap/types"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
+	gdaptypes "github.com/cfgis/cfgms/features/workflow/modules/m365/gdap/types"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// Mock implementations
-
-type mockTenantStore struct {
-	tenants map[string]*business.TenantData
-}
-
-func newMockTenantStore() *mockTenantStore {
-	return &mockTenantStore{
-		tenants: make(map[string]*business.TenantData),
-	}
-}
-
-func (m *mockTenantStore) CreateTenant(ctx context.Context, t *business.TenantData) error {
-	t.CreatedAt = time.Now()
-	t.UpdatedAt = time.Now()
-	m.tenants[t.ID] = t
-	return nil
-}
-
-func (m *mockTenantStore) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
-	t, exists := m.tenants[tenantID]
-	if !exists {
-		return nil, tenant.ErrTenantNotFound
-	}
-	return t, nil
-}
-
-func (m *mockTenantStore) UpdateTenant(ctx context.Context, t *business.TenantData) error {
-	if _, exists := m.tenants[t.ID]; !exists {
-		return tenant.ErrTenantNotFound
-	}
-	t.UpdatedAt = time.Now()
-	m.tenants[t.ID] = t
-	return nil
-}
-
-func (m *mockTenantStore) DeleteTenant(ctx context.Context, tenantID string) error {
-	delete(m.tenants, tenantID)
-	return nil
-}
-
-func (m *mockTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*business.TenantData, error) {
-	var result []*business.TenantData
-	for _, t := range m.tenants {
-		if filter != nil {
-			if filter.Status != "" && t.Status != filter.Status {
-				continue
-			}
-			if filter.ParentID != "" && t.ParentID != filter.ParentID {
-				continue
-			}
-		}
-		result = append(result, t)
-	}
-	return result, nil
-}
-
-func (m *mockTenantStore) GetTenantHierarchy(ctx context.Context, tenantID string) (*tenant.TenantHierarchy, error) {
-	return &tenant.TenantHierarchy{
-		TenantID: tenantID,
-		Path:     []string{tenantID},
-		Depth:    0,
-		Children: []string{},
-	}, nil
-}
-
-func (m *mockTenantStore) GetChildTenants(ctx context.Context, parentID string) ([]*business.TenantData, error) {
-	var children []*business.TenantData
-	for _, t := range m.tenants {
-		if t.ParentID == parentID {
-			children = append(children, t)
-		}
-	}
-	return children, nil
-}
-
-func (m *mockTenantStore) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
-	return []string{tenantID}, nil
-}
-
-func (m *mockTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
-	return false, nil
+// newTestTenantStore returns a real CFGMS tenant store backed by in-memory SQLite.
+func newTestTenantStore(t *testing.T) business.TenantStore {
+	t.Helper()
+	return pkgtesting.SetupTestStorage(t).GetTenantStore()
 }
 
 // Test setup helper
-func setupTestManager(t *testing.T) (*M365TenantManager, *mockTenantStore, context.Context) {
+func setupTestManager(t *testing.T) (*M365TenantManager, business.TenantStore, context.Context) {
 	ctx := context.Background()
 
-	// Create mock tenant store
-	mockStore := newMockTenantStore()
-
-	// Create CFGMS tenant manager without RBAC for these tests
-	// (M365 integration tests don't need full RBAC setup)
-	cfgmsTenantManager := tenant.NewManager(mockStore, nil)
+	store := newTestTenantStore(t)
+	cfgmsTenantManager := tenant.NewManager(store, nil)
 
 	// Create credential store
-	mockCredStore := newTestCredentialStore(t)
+	credStore := newTestCredentialStore(t)
 
 	// Create M365 provider
 	httpClient := NewGraphHTTPClient(100, 1000)
-	m365Provider := NewMicrosoftMultiTenantProvider(mockCredStore, httpClient)
+	m365Provider := NewMicrosoftMultiTenantProvider(credStore, httpClient)
 
 	// Create admin consent flow (can be nil for basic tests)
 	var adminConsentFlow *auth.AdminConsentFlow
@@ -134,7 +53,7 @@ func setupTestManager(t *testing.T) (*M365TenantManager, *mockTenantStore, conte
 		gdapProvider,
 	)
 
-	return manager, mockStore, ctx
+	return manager, store, ctx
 }
 
 // Tests
@@ -184,7 +103,7 @@ func TestM365TenantMetadata_MarshalUnmarshal(t *testing.T) {
 }
 
 func TestCreateCFGMSTenant(t *testing.T) {
-	manager, mockStore, ctx := setupTestManager(t)
+	manager, store, ctx := setupTestManager(t)
 
 	m365Tenant := &TenantInfo{
 		TenantID:    "m365-tenant-123",
@@ -199,7 +118,7 @@ func TestCreateCFGMSTenant(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify tenant was created
-	tenants, err := mockStore.ListTenants(ctx, nil)
+	tenants, err := store.ListTenants(ctx, nil)
 	require.NoError(t, err)
 	assert.Len(t, tenants, 1)
 
@@ -392,7 +311,7 @@ func TestGenerateHealthDetails(t *testing.T) {
 }
 
 func TestListM365Tenants(t *testing.T) {
-	manager, mockStore, ctx := setupTestManager(t)
+	manager, store, ctx := setupTestManager(t)
 
 	// Create M365 tenant
 	m365Metadata := &tenant.M365TenantMetadata{
@@ -418,8 +337,8 @@ func TestListM365Tenants(t *testing.T) {
 	}
 
 	// Add both to store
-	require.NoError(t, mockStore.CreateTenant(ctx, m365Tenant))
-	require.NoError(t, mockStore.CreateTenant(ctx, regularTenant))
+	require.NoError(t, store.CreateTenant(ctx, m365Tenant))
+	require.NoError(t, store.CreateTenant(ctx, regularTenant))
 
 	// List M365 tenants
 	m365Tenants, err := manager.listM365Tenants(ctx)
@@ -431,7 +350,7 @@ func TestListM365Tenants(t *testing.T) {
 }
 
 func TestGetTenantByM365ID(t *testing.T) {
-	manager, mockStore, ctx := setupTestManager(t)
+	manager, store, ctx := setupTestManager(t)
 
 	// Create M365 tenant
 	m365Metadata := &tenant.M365TenantMetadata{
@@ -449,7 +368,7 @@ func TestGetTenantByM365ID(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, mockStore.CreateTenant(ctx, targetTenant))
+	require.NoError(t, store.CreateTenant(ctx, targetTenant))
 
 	// Find by M365 ID
 	found, err := manager.getTenantByM365ID(ctx, "m365-target")
@@ -463,7 +382,7 @@ func TestGetTenantByM365ID(t *testing.T) {
 }
 
 func TestUpdateTenantMetadata(t *testing.T) {
-	manager, mockStore, ctx := setupTestManager(t)
+	manager, store, ctx := setupTestManager(t)
 
 	// Create existing tenant
 	originalMetadata := &tenant.M365TenantMetadata{
@@ -483,7 +402,7 @@ func TestUpdateTenantMetadata(t *testing.T) {
 		Status: tenant.TenantStatusActive,
 	}
 
-	require.NoError(t, mockStore.CreateTenant(ctx, existingTenant))
+	require.NoError(t, store.CreateTenant(ctx, existingTenant))
 
 	// Update metadata
 	newM365Info := &TenantInfo{
@@ -498,7 +417,7 @@ func TestUpdateTenantMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	// Retrieve and verify
-	updated, err := mockStore.GetTenant(ctx, "tenant-1")
+	updated, err := store.GetTenant(ctx, "tenant-1")
 	require.NoError(t, err)
 
 	updatedMetadata, err := manager.getM365Metadata(updated)
@@ -518,21 +437,21 @@ func TestHealthStatus_Constants(t *testing.T) {
 	assert.Equal(t, tenant.HealthStatus("unknown"), tenant.HealthStatusUnknown)
 }
 
-// countingTenantStore wraps mockTenantStore and records ListTenants call count.
+// countingTenantStore wraps a real business.TenantStore and records ListTenants call count.
 type countingTenantStore struct {
-	*mockTenantStore
+	business.TenantStore
 	listTenantsCallCount int
 }
 
 func (c *countingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*business.TenantData, error) {
 	c.listTenantsCallCount++
-	return c.mockTenantStore.ListTenants(ctx, filter)
+	return c.TenantStore.ListTenants(ctx, filter)
 }
 
 func setupTestManagerWithCountingStore(t *testing.T) (*M365TenantManager, *countingTenantStore, context.Context) {
 	t.Helper()
 	ctx := context.Background()
-	counting := &countingTenantStore{mockTenantStore: newMockTenantStore()}
+	counting := &countingTenantStore{TenantStore: newTestTenantStore(t)}
 	cfgmsTenantManager := tenant.NewManager(counting, nil)
 	m365Provider := NewMicrosoftMultiTenantProvider(newTestCredentialStore(t), NewGraphHTTPClient(100, 1000))
 	manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, nil)
@@ -577,21 +496,21 @@ func TestM365TenantManager_GetTenantByM365ID_Index(t *testing.T) {
 		"ListTenants should be called exactly once across %d getTenantByM365ID calls", n)
 }
 
-// failingTenantStore is a countingTenantStore variant whose ListTenants always returns an error.
+// failingTenantStore wraps a real business.TenantStore and injects a ListTenants error.
 type failingTenantStore struct {
-	*mockTenantStore
+	business.TenantStore
 	listErr error
 }
 
-func (f *failingTenantStore) ListTenants(ctx context.Context, filter *tenant.TenantFilter) ([]*business.TenantData, error) {
+func (f *failingTenantStore) ListTenants(_ context.Context, _ *tenant.TenantFilter) ([]*business.TenantData, error) {
 	return nil, f.listErr
 }
 
 func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
 	ctx := context.Background()
 	failing := &failingTenantStore{
-		mockTenantStore: newMockTenantStore(),
-		listErr:         fmt.Errorf("storage unavailable"),
+		TenantStore: newTestTenantStore(t),
+		listErr:     fmt.Errorf("storage unavailable"),
 	}
 	cfgmsTenantManager := tenant.NewManager(failing, nil)
 	m365Provider := NewMicrosoftMultiTenantProvider(newTestCredentialStore(t), NewGraphHTTPClient(100, 1000))
@@ -609,81 +528,8 @@ func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
 	assert.True(t, indexIsNil, "index must remain nil after a failed ListTenants so the next call retries")
 }
 
-// mockGDAPProvider is a test-local GDAP implementation for benchmark setup.
-type mockGDAPProvider struct {
-	relationships []gdaptypes.GDAPRelationship
-}
-
-func (m *mockGDAPProvider) DiscoverGDAPCustomers(_ context.Context) ([]gdaptypes.GDAPRelationship, error) {
-	return m.relationships, nil
-}
-
-func (m *mockGDAPProvider) ValidateGDAPAccess(_ context.Context, customerTenantID string, _ []string) (*gdaptypes.GDAPRelationship, error) {
-	for i := range m.relationships {
-		if m.relationships[i].CustomerTenantID == customerTenantID {
-			return &m.relationships[i], nil
-		}
-	}
-	return nil, fmt.Errorf("relationship not found")
-}
-
-func BenchmarkM365TenantManager_DiscoverAndSyncTenants(b *testing.B) {
-	ctx := context.Background()
-	const n = 100
-
-	relationships := make([]gdaptypes.GDAPRelationship, n)
-	for i := range n {
-		relationships[i] = gdaptypes.GDAPRelationship{
-			RelationshipID:   fmt.Sprintf("rel-%d", i),
-			CustomerTenantID: fmt.Sprintf("m365-bench-%d", i),
-			CustomerName:     fmt.Sprintf("Bench Tenant %d", i),
-			Status:           gdaptypes.GDAPStatusActive,
-			ExpiresAt:        time.Now().Add(365 * 24 * time.Hour),
-		}
-	}
-
-	for range b.N {
-		b.StopTimer()
-
-		mockStore := newMockTenantStore()
-		cfgmsTenantManager := tenant.NewManager(mockStore, nil)
-		m365Provider := NewMicrosoftMultiTenantProvider(newBenchCredentialStore(b), NewGraphHTTPClient(100, 1000))
-		gdap := &mockGDAPProvider{relationships: relationships}
-		manager := NewM365TenantManager(cfgmsTenantManager, m365Provider, nil, gdap)
-
-		// Pre-seed 100 M365 tenants so all sync iterations hit the update path.
-		for i := range n {
-			meta := &tenant.M365TenantMetadata{
-				M365TenantID:    fmt.Sprintf("m365-bench-%d", i),
-				PrimaryDomain:   fmt.Sprintf("bench%d.example.com", i),
-				DiscoveryMethod: "gdap",
-				HealthStatus:    tenant.HealthStatusUnknown,
-			}
-			metaJSON, err := json.Marshal(meta)
-			if err != nil {
-				b.Fatalf("failed to marshal metadata for tenant %d: %v", i, err)
-			}
-			if err := mockStore.CreateTenant(ctx, &business.TenantData{
-				ID:   fmt.Sprintf("cfgms-bench-%d", i),
-				Name: fmt.Sprintf("Bench-Tenant-%d", i),
-				Metadata: map[string]string{
-					"m365_metadata": string(metaJSON),
-					"tenant_type":   "m365",
-				},
-			}); err != nil {
-				b.Fatalf("failed to seed tenant %d: %v", i, err)
-			}
-		}
-
-		b.StartTimer()
-		result, err := manager.DiscoverAndSyncTenants(ctx, "gdap")
-		b.StopTimer()
-
-		if err != nil {
-			b.Fatalf("DiscoverAndSyncTenants failed: %v", err)
-		}
-		if result.Metadata["synced_count"] != n {
-			b.Fatalf("expected %d synced, got %v", n, result.Metadata["synced_count"])
-		}
-	}
-}
+// BenchmarkM365TenantManager_DiscoverAndSyncTenants lives in
+// features/workflow/modules/m365/gdap/benchmark_test.go where it can use the
+// real gdap.GDAPProvider backed by a local httptest.Server. It was moved there
+// because features/workflow/modules/m365/gdap imports features/saas, creating
+// an import cycle that prevents importing the real GDAPProvider from this package.

@@ -356,26 +356,37 @@ func TestNonEmptyAdapterName_IncludesNameParam(t *testing.T) {
 
 // ─── Get not found tests ───────────────────────────────────────────────────────
 
-// TestGet_VSwitch_ReturnsErrVSwitchNotFound_WhenMissing verifies that Get returns
-// ErrVSwitchNotFound when the remote host reports the switch does not exist.
-func TestGet_VSwitch_ReturnsErrVSwitchNotFound_WhenMissing(t *testing.T) {
+// TestGet_VSwitch_ReturnsAbsentWhenMissing verifies that Get returns a
+// state:"absent" ConfigState (no error) when the remote host reports the
+// switch does not exist. This matches the contract honored by the directory
+// and file modules and lets the unified executor detect drift against a
+// desired state:"present" configuration.
+func TestGet_VSwitch_ReturnsAbsentWhenMissing(t *testing.T) {
 	transport := &testWinRMTransport{output: `{"found":false}`}
 	m := vswitchModuleWithTransport(transport, "t")
 
-	_, err := m.Get(context.Background(), "vswitch:nonexistent")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVSwitchNotFound)
+	state, err := m.Get(context.Background(), "vswitch:nonexistent")
+	require.NoError(t, err, "missing resource must NOT be reported as an error — caller would interpret it as a Get failure")
+	require.NotNil(t, state)
+	assert.Equal(t, "absent", state.AsMap()["state"],
+		"missing vSwitch must surface as state:absent so the executor can drive Set")
 }
 
-// TestGet_VSwitch_ReturnsErrVSwitchNotFound_OnTransportError verifies that transport
-// errors are surfaced as ErrVSwitchNotFound.
-func TestGet_VSwitch_ReturnsErrVSwitchNotFound_OnTransportError(t *testing.T) {
+// TestGet_VSwitch_WrapsTransportError verifies that transport-layer failures
+// are returned as wrapped errors (NOT as ErrVSwitchNotFound) so the executor
+// can distinguish "absent" from "transport broken". Conflating the two was the
+// root cause of F14 — every failed Get aborted the Set even though the host
+// was simply offline.
+func TestGet_VSwitch_WrapsTransportError(t *testing.T) {
 	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
 	m := vswitchModuleWithTransport(transport, "t")
 
 	_, err := m.Get(context.Background(), "vswitch:unreachable")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVSwitchNotFound)
+	assert.NotErrorIs(t, err, ErrVSwitchNotFound,
+		"transport errors must NOT be reported as ErrVSwitchNotFound")
+	assert.Contains(t, err.Error(), "winrm: connection refused",
+		"underlying transport error message must be preserved in the chain")
 }
 
 // TestGet_VSwitch_NoTransport verifies that Get returns ErrVSwitchNotFound when the

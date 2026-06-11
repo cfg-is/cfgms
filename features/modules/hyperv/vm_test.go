@@ -175,27 +175,38 @@ func TestSet_VMAbsent_CallsRemoveVM(t *testing.T) {
 
 // ─── Get not found tests ───────────────────────────────────────────────────────
 
-// TestGet_VM_ReturnsErrVMNotFound_WhenMissing verifies that Get returns ErrVMNotFound
-// when the remote host reports the VM does not exist.
-func TestGet_VM_ReturnsErrVMNotFound_WhenMissing(t *testing.T) {
+// TestGet_VM_ReturnsAbsentWhenMissing verifies that Get returns a state:"absent"
+// ConfigState (no error) when the remote host reports the VM does not exist.
+// This matches the contract honored by the directory and file modules and lets
+// the unified executor detect drift against a desired state:"present"/"running"
+// configuration.
+func TestGet_VM_ReturnsAbsentWhenMissing(t *testing.T) {
 	// Transport returns not-found JSON (VM absent on host)
 	transport := &testWinRMTransport{output: `{"found":false}`}
 	m := vmModuleWithTransport(transport, "t")
 
-	_, err := m.Get(context.Background(), "vm:nonexistent")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVMNotFound)
+	state, err := m.Get(context.Background(), "vm:nonexistent")
+	require.NoError(t, err, "missing VM must NOT be reported as an error")
+	require.NotNil(t, state)
+	assert.Equal(t, "absent", state.AsMap()["state"],
+		"missing VM must surface as state:absent so the executor can drive Set")
 }
 
-// TestGet_VM_ReturnsErrVMNotFound_OnTransportError verifies that transport errors
-// (e.g., WinRM connection failure) are surfaced as ErrVMNotFound.
-func TestGet_VM_ReturnsErrVMNotFound_OnTransportError(t *testing.T) {
+// TestGet_VM_WrapsTransportError verifies that transport-layer failures (e.g.
+// WinRM connection refused) are returned as wrapped errors, NOT as
+// ErrVMNotFound. Conflating "absent" with "transport broken" was the root
+// cause of F14: every failed Get aborted the Set even when the host was
+// simply offline.
+func TestGet_VM_WrapsTransportError(t *testing.T) {
 	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
 	m := vmModuleWithTransport(transport, "t")
 
 	_, err := m.Get(context.Background(), "vm:unreachable")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVMNotFound)
+	assert.NotErrorIs(t, err, ErrVMNotFound,
+		"transport errors must NOT be reported as ErrVMNotFound")
+	assert.Contains(t, err.Error(), "winrm: connection refused",
+		"underlying transport error message must be preserved in the chain")
 }
 
 // ─── Tenant isolation tests ────────────────────────────────────────────────────
@@ -367,10 +378,14 @@ func TestGet_VM_ReturnsConfig(t *testing.T) {
 }
 
 // TestSet_VMCreate verifies that Set creates a VM and passes all fields via ArgumentList.
-// setVM now calls getVM first to check existence; empty transport output → ErrVMNotFound →
-// falls through to New-VM. So two transport calls are expected: getVM (call[0]) + New-VM (call[1]).
+// setVM calls getVM first to check existence: the mock returns `{"found":false}`
+// for call[0] so getVM reports state:"absent" (per the F14 contract), then Set
+// falls through to New-VM as call[1]. Two transport calls expected total:
+// getVM (call[0]) + New-VM (call[1]).
 func TestSet_VMCreate(t *testing.T) {
-	transport := &testWinRMTransport{}
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":false}`},
+	}
 	m := vmModuleWithTransport(transport, "dev")
 
 	cfg := &VMConfig{

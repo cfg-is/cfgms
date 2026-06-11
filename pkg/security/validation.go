@@ -71,11 +71,16 @@ func (vr *ValidationResult) AddErrorf(field, value, rule, format string, args ..
 // NewValidator creates a new validator with secure defaults
 func NewValidator() *Validator {
 	v := &Validator{
-		maxStringLength:     4096, // 4KB max string length
-		maxSliceLength:      1000, // Max 1000 items in arrays/slices
-		maxJSONDepth:        10,
-		maxJSONStringLength: 1000,
-		allowedCharsets:     make(map[string]*regexp.Regexp),
+		maxStringLength:     4096,  // 4KB max single field length
+		maxSliceLength:      1000,  // Max 1000 items in arrays/slices
+		maxJSONDepth:        10,    // Max nesting depth
+		maxJSONStringLength: 65536, // 64KB per JSON string value — signed envelopes
+		//                            (operator cert PEM, base64 signature, base64
+		//                            script body) routinely exceed the previous
+		//                            1000-char limit even for trivial commands.
+		//                            Bumped during #1887 live validation when every
+		//                            `cfg steward run-command` was rejected.
+		allowedCharsets: make(map[string]*regexp.Regexp),
 	}
 
 	// Define allowed character sets

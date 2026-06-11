@@ -29,7 +29,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 )
 
 // SaaSteward is the main SaaS management component

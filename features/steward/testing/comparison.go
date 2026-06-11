@@ -186,7 +186,17 @@ func (c *StateComparator) calculateDifferences(current, desired map[string]inter
 	}
 }
 
-// valuesEqual compares two values for equality, handling different types appropriately
+// valuesEqual compares two values for equality, handling different types appropriately.
+//
+// Special-case for NUMERIC TYPES across kinds (int/int64/float64/etc.):
+// reflect.DeepEqual treats `int(1024)` and `int64(1024)` as different even
+// though they represent the same numeric value. This bit modules in real
+// deployments: a Get() that returns int64 (e.g. hyperv's memory_mb from
+// Get-VMMemory.Startup divided by 1MB) would never converge against a
+// desired state YAML that unmarshalled to int. The fix normalises both
+// sides to int64 (or float64 if either has a fractional part) before
+// comparing. Booleans, strings, and complex values fall through to the
+// DeepEqual path unchanged.
 func (c *StateComparator) valuesEqual(current, desired interface{}) bool {
 	// Handle nil values
 	if current == nil && desired == nil {
@@ -196,8 +206,54 @@ func (c *StateComparator) valuesEqual(current, desired interface{}) bool {
 		return false
 	}
 
-	// Use reflect.DeepEqual for comprehensive comparison
+	// Numeric cross-type equality: int/int8/int16/int32/int64/uint*/float*
+	// all coerce to a common representation before comparison.
+	if curN, ok := toFloat64(current); ok {
+		if desN, ok2 := toFloat64(desired); ok2 {
+			return curN == desN
+		}
+	}
+
+	// Use reflect.DeepEqual for comprehensive comparison of everything
+	// else (strings, slices, maps, structs).
 	return reflect.DeepEqual(current, desired)
+}
+
+// toFloat64 returns the numeric value of v as a float64 and true when v
+// is any of Go's built-in numeric types. Returns (0, false) for non-
+// numeric values. Float64 covers the full int64 range exactly up to
+// 2^53; values above that lose precision but cfg drift comparisons
+// don't realistically span that range (memory_mb in petabytes? cpu
+// count in billions?).
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int8:
+		return float64(n), true
+	case int16:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint8:
+		return float64(n), true
+	case uint16:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case float32:
+		return float64(n), true
+	case float64:
+		return n, true
+	default:
+		return 0, false
+	}
 }
 
 // getDiffType determines the type of difference between two values

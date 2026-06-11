@@ -1,0 +1,24 @@
+name: m365-entra-user
+version: 0.1.0
+description: >
+  Desired-state management of Microsoft Entra ID (Azure AD) user accounts
+  via the Microsoft Graph API. Manages user profiles, licenses, and
+  account lifecycle (created / enabled / disabled / deleted) as named
+  resources.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set

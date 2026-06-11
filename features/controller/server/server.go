@@ -1104,10 +1104,16 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logg
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
 // Returns nil, nil on failure so the controller starts without workflow support rather than failing.
 func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger logging.Logger) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
-	// Create a minimal module factory for the workflow engine.
-	// The controller does not load steward modules directly; the factory is
-	// required by the engine constructor but not exercised during REST API use.
-	moduleFactory := workflow.NewNullModuleFactory()
+	// Workflow module factory: looks up controller-kind module bundles by
+	// name in the controller's module cache (#1883) and (eventually) fork/
+	// execs them as workflow-kind module subprocesses connected over the
+	// WorkflowModuleClient gRPC contract (#1881).
+	//
+	// The cache is wired in once a controller-side ModuleCache instance is
+	// available; until then we pass nil and the factory surfaces
+	// "no cache backing" on any module instantiation. REST-only deployments
+	// (which never resolve modules through the engine) are unaffected.
+	moduleFactory := workflow.NewWorkflowModuleFactory(nil)
 
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil)
 

@@ -23,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -175,6 +176,29 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		logger.Info("Running in gRPC controller-connected mode",
 			"operation", "steward_mode",
 			"mode", "grpc_transport")
+
+		// Collect and publish DNA so the controller's steward record carries
+		// `os`, `hostname`, `arch`, etc. — selectors like `os:windows` and
+		// `cfg steward run-command --target …` depend on the controller
+		// having received a non-empty DNA snapshot. Without this one-shot
+		// publish, the controller's steward record stays at its registration-
+		// time defaults (empty DNA) and every selector matches zero stewards.
+		// Failures are non-fatal — the steward stays usable for config
+		// convergence even if DNA publication is briefly unavailable; the
+		// controller will pick up DNA on the next convergence-driven publish
+		// in publishConfigStatus.
+		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(ctx); dnaErr == nil && currentDNA != nil {
+			if pubErr := transportCl.PublishDNAUpdate(ctx, currentDNA.Attributes, "", ""); pubErr != nil {
+				logger.Warn("Initial DNA publish failed; controller selectors may not find this steward until next config apply",
+					"error", pubErr)
+			} else {
+				logger.Info("Initial DNA snapshot published",
+					"attribute_count", len(currentDNA.Attributes))
+			}
+		} else if dnaErr != nil {
+			logger.Warn("DNA collection failed at startup; controller selectors may match no stewards until DNA is collected later",
+				"error", dnaErr)
+		}
 
 		// Check for launcher-written upgrade flag files and emit lifecycle events.
 		// Must run before the heartbeat loop so the controller learns commit/rollback

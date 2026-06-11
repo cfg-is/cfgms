@@ -149,13 +149,16 @@ func RedactedID(s string) string {
 	return SanitizeLogValue(s[:8]) + "…"
 }
 
-// sanitizeMapValues sanitizes all string values in a map for safe logging.
-// Non-string values are left unchanged.
+// sanitizeMapValues sanitizes every value in a map for safe logging.
+//
+// String values are sanitized via SanitizeLogValue. Go `error` and
+// fmt.Stringer values are converted to their textual form and sanitized so
+// they don't render as `{}` (a Go `error` such as *errors.errorString has
+// only unexported fields and serializes to an empty JSON object). Maps and
+// slices are walked recursively. Other types are left as-is.
 func sanitizeMapValues(fields map[string]any) {
 	for k, v := range fields {
-		if str, ok := v.(string); ok {
-			fields[k] = SanitizeLogValue(str)
-		}
+		fields[k] = sanitizeValueRecursive(v, 0)
 	}
 }
 

@@ -78,7 +78,7 @@ The `executors` field must contain exactly one element. `kind` is computed at pa
 
 - `acme` - ACME/Let's Encrypt certificate management
 - `activedirectory` - Local Active Directory integration (steward)
-- `hyperv` - Remote Hyper-V management via WinRM
+- `hyperv` - In-host Hyper-V management via a persistent PowerShell host subprocess (steward kind; runs on the Hyper-V host itself)
 
 **Outpost modules:**
 
@@ -86,7 +86,7 @@ The `executors` field must contain exactly one element. `kind` is computed at pa
 
 **Workflow modules:**
 
-- `m365/*` - Microsoft 365 modules (auth, conditional access, Entra groups/users/apps/admin units, Intune policy, GDAP)
+- `m365/*` (workflow kind, hosted by the controller workflow engine, at `features/workflow/modules/m365/`) - Microsoft 365 modules: `auth`, `conditional_access`, `entra_admin_unit`, `entra_application`, `entra_group`, `entra_user`, `intune_policy`. The `gdap/` and `graph/` directories under the same parent are shared support packages, not module roots.
 
 ## Script Module — Parameter Environment Variables
 

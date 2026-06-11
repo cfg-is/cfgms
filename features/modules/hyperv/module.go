@@ -5,6 +5,7 @@ package hyperv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -100,16 +101,34 @@ func (m *hypervModule) checkDetection(ctx context.Context) error {
 	return nil
 }
 
-// Configure implements modules.Configurable. It extracts WinRM connection details
-// from config and wires the transport. SecretStore must be injected before calling.
+// Configure implements modules.Configurable. It picks the transport — local
+// PS host (preferred, replaces #1852's broken WinRM stack) or WinRM (named
+// fallback per #1887 AC) — and wires per-resource bookkeeping.
 //
-// Required config keys:
-//   - winrm_host: hostname or IP of the Hyper-V host
-//   - winrm_user_secret: SecretStore key for the WinRM username
-//   - winrm_pass_secret: SecretStore key for the WinRM password
+// SecretStore must be injected before calling. (WinRM-fallback needs it for
+// credential lookup; PS-host doesn't need credentials at all but the check
+// stays since the broader module surface assumes it.)
 //
-// Optional config keys:
-//   - tenant_id: tenant identifier used to namespace host-side VM names
+// Optional config keys (all default-driven for the post-#1894 in-host
+// deployment shape):
+//
+//   - tenant_id        — tenant identifier used to namespace host-side VM
+//     names (default "").
+//   - steward_id       — audit-trail subject id (default "<tenant>/hyperv").
+//   - audit_manager    — *audit.Manager to record verb invocations.
+//   - transport        — "ps-host" (default) or "winrm". "ps-host" runs the
+//     persistent powershell.exe subprocess described in
+//     pstransport_windows.go. "winrm" preserves the legacy remote
+//     execution path with the keys below.
+//
+// WinRM-fallback config keys (only consulted when transport == "winrm"):
+//   - winrm_host        — hostname or IP of the Hyper-V host.
+//   - winrm_user_secret — SecretStore key for the WinRM username.
+//   - winrm_pass_secret — SecretStore key for the WinRM password.
+//
+// On Linux/macOS the PS host transport is not available (Hyper-V is a
+// Windows-only feature) and Configure falls back to WinRM regardless of the
+// explicit `transport` setting.
 func (m *hypervModule) Configure(config modules.ConfigState) error {
 	if config == nil {
 		return errConfigRequired
@@ -122,26 +141,7 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 
 	configMap := config.AsMap()
 
-	host, _ := configMap["winrm_host"].(string)
-	if host == "" {
-		return errHostRequired
-	}
-
-	userSecretKey, _ := configMap["winrm_user_secret"].(string)
-	if userSecretKey == "" {
-		return errUserSecretKeyRequired
-	}
-
-	passSecretKey, _ := configMap["winrm_pass_secret"].(string)
-	if passSecretKey == "" {
-		return errPassSecretKeyRequired
-	}
-
-	m.host = host
-	m.userSecretKey = userSecretKey
-	m.passSecretKey = passSecretKey
 	m.tenantID, _ = configMap["tenant_id"].(string)
-	m.transport = newWinRMClientWithStore(host, userSecretKey, passSecretKey, store)
 	m.auditMgr, _ = configMap["audit_manager"].(*audit.Manager)
 	stewardID, _ := configMap["steward_id"].(string)
 	if stewardID == "" {
@@ -149,7 +149,45 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	}
 	m.stewardID = stewardID
 
-	return nil
+	transportChoice, _ := configMap["transport"].(string)
+	if transportChoice == "" {
+		transportChoice = "ps-host"
+	}
+
+	switch transportChoice {
+	case "ps-host":
+		// Try the persistent PS host. On non-Windows this returns
+		// errPSHostUnsupported and we fall through to the WinRM path so
+		// non-Windows builds remain usable for cross-platform tests.
+		ps, err := newPSHostTransport(context.Background())
+		if err == nil {
+			m.transport = ps
+			return nil
+		}
+		// PS host unavailable (non-Windows, or powershell.exe missing).
+		// Fall through to WinRM if the operator provided enough config.
+		fallthrough
+	case "winrm":
+		host, _ := configMap["winrm_host"].(string)
+		if host == "" {
+			return errHostRequired
+		}
+		userSecretKey, _ := configMap["winrm_user_secret"].(string)
+		if userSecretKey == "" {
+			return errUserSecretKeyRequired
+		}
+		passSecretKey, _ := configMap["winrm_pass_secret"].(string)
+		if passSecretKey == "" {
+			return errPassSecretKeyRequired
+		}
+		m.host = host
+		m.userSecretKey = userSecretKey
+		m.passSecretKey = passSecretKey
+		m.transport = newWinRMClientWithStore(host, userSecretKey, passSecretKey, store)
+		return nil
+	default:
+		return fmt.Errorf("hyperv: unknown transport %q (valid: \"ps-host\", \"winrm\")", transportChoice)
+	}
 }
 
 // Get returns the current Hyper-V resource configuration.

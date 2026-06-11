@@ -216,6 +216,17 @@ func psCreateVSwitchExternal(allowManagementOS bool) string {
 
 // getVSwitch retrieves the current state of a virtual switch by user-visible name.
 // Returns ErrVSwitchNotFound if the switch does not exist or the transport fails.
+// getVSwitch returns the current state of a virtual switch on the host.
+//
+// Contract (matches the directory/file modules):
+//   - resource exists  → (&VSwitchConfig{State: "present", ...}, nil)
+//   - resource absent  → (&VSwitchConfig{Name, State: "absent"}, nil)
+//   - module not ready → (nil, ErrVSwitchNotFound)
+//   - transport failed → (nil, wrapped error)
+//
+// Returning state:"absent" rather than an error lets the unified executor
+// detect drift against a desired state:"present" config and proceed to Set,
+// instead of treating "absent" as a fatal Get failure.
 func (m *hypervModule) getVSwitch(ctx context.Context, switchName string) (*VSwitchConfig, error) {
 	if m.transport == nil {
 		return nil, ErrVSwitchNotFound
@@ -224,17 +235,19 @@ func (m *hypervModule) getVSwitch(ctx context.Context, switchName string) (*VSwi
 	hostName := vswitchHostName(m.tenantID, switchName)
 	output, err := m.transport.ExecutePS(ctx, psGetVSwitch, map[string]string{"Name": hostName})
 	if err != nil {
-		return nil, ErrVSwitchNotFound
+		return nil, fmt.Errorf("hyperv: get vswitch %q: %w", switchName, err)
 	}
 
 	var parsed map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
-		return nil, ErrVSwitchNotFound
+		return nil, fmt.Errorf("hyperv: parse get-vswitch response for %q: %w", switchName, jsonErr)
 	}
 
 	found, _ := parsed["found"].(bool)
 	if !found {
-		return nil, ErrVSwitchNotFound
+		// Absent is a valid current state — the executor compares this against
+		// the desired state and calls Set to create the resource when needed.
+		return &VSwitchConfig{Name: switchName, State: "absent"}, nil
 	}
 
 	cfg := &VSwitchConfig{Name: switchName, State: "present"}

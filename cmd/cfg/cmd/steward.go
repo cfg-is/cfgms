@@ -1327,17 +1327,29 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 	}, nil
 }
 
-// parsePrivKeyFromPEM decodes a PEM block and parses a PKCS#8 private key.
+// parsePrivKeyFromPEM decodes a PEM block and parses a private key in any of
+// the three formats `controller --init` may have emitted: PKCS#8 (modern
+// default), PKCS#1 RSA (legacy "RSA PRIVATE KEY"), or SEC1 EC ("EC PRIVATE
+// KEY"). Tries them in order; returns the first that succeeds.
+//
+// Earlier versions only tried PKCS#8, which left every admin bundle minted
+// before the controller switched its key emitter unable to sign run-command
+// requests (surfaced via the #1887 #1852 validation session).
 func parsePrivKeyFromPEM(pemData string) (interface{}, error) {
 	block, _ := pem.Decode([]byte(pemData))
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block found in key data")
 	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
+	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return key, nil
 	}
-	return key, nil
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("parse private key: not PKCS#8, PKCS#1, or SEC1")
 }
 
 // fetchRunRecord calls GET /api/v1/runs/{runID} and returns the parsed record.

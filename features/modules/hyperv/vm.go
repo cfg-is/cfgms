@@ -114,12 +114,31 @@ func vmUserName(tenantID, hostName string) string {
 
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
 // $Name is the only parameter; its value is transmitted via ArgumentList.
-const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=[long]$vm.MemoryStartupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=$vm.Path; SwitchName=if ($adapter) { $adapter.SwitchName } else { "" }; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress`
+//
+// Path is read from Get-VMHardDiskDrive (the path of the first attached
+// hard disk), not Get-VM.Path which is the VM configuration directory.
+// VMConfig.VHDPath stores the disk path; conflating it with the config
+// directory caused #1887 B1 verification to flag 2-changed drift on
+// every successful create.
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; SwitchName=if ($adapter) { $adapter.SwitchName } else { "" }; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress`
 
 // psCreateVM is the script block passed to ExecutePS for VM creation.
 // All user-supplied values are transmitted via ArgumentList — none are
 // interpolated into the script text.
-const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -ProcessorCount $CPU -NewVHDPath $VHDPath -SwitchName $SwitchName -Generation 2 | Out-Null`
+//
+// Notes:
+//   - New-VM does NOT accept -ProcessorCount (real PS pitfall surfaced by
+//     the #1887 live-validation B1 bucket — previously masked because
+//     WinRM was broken and this command never actually ran). CPU count
+//     is set with a separate Set-VMProcessor call after the VM exists.
+//     A newly created Generation-2 VM defaults to 1 vCPU which we only
+//     resize if the desired count differs.
+//   - -NewVHDPath also requires -NewVHDSizeBytes; the cmdlet doesn't
+//     auto-default a size. Hardcoded to 64 GB here (matches Hyper-V
+//     Manager's default new-VM size and is the minimum sensible value
+//     for any Server 2022/2025 guest). The schema does not currently
+//     expose vhd_size_gb; future #1887 follow-up should add it.
+const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation 2 | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
 
 // psRemoveVM is the script block passed to ExecutePS for VM deletion.
 // $Name is the only parameter; its value is transmitted via ArgumentList.
@@ -139,6 +158,17 @@ const psSetVMProcessor = `Set-VMProcessor -VMName $Name -Count $CPU`
 const psSetVMMemory = `Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)`
 
 // getVM retrieves the current state of a VM by user-visible name.
+// getVM returns the current state of a VM on the host.
+//
+// Contract (matches the directory/file modules):
+//   - resource exists  → (&VMConfig{State: "running"|"stopped"|..., ...}, nil)
+//   - resource absent  → (&VMConfig{Name, State: "absent"}, nil)
+//   - module not ready → (nil, ErrVMNotFound)
+//   - transport failed → (nil, wrapped error)
+//
+// Returning state:"absent" rather than an error lets the unified executor
+// detect drift against a desired state:"present"/"running" config and
+// proceed to Set, instead of treating "absent" as a fatal Get failure.
 func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, error) {
 	if m.transport == nil {
 		return nil, ErrVMNotFound
@@ -147,17 +177,19 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	hostName := vmHostName(m.tenantID, vmName)
 	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": hostName})
 	if err != nil {
-		return nil, ErrVMNotFound
+		return nil, fmt.Errorf("hyperv: get vm %q: %w", vmName, err)
 	}
 
 	var parsed map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
-		return nil, ErrVMNotFound
+		return nil, fmt.Errorf("hyperv: parse get-vm response for %q: %w", vmName, jsonErr)
 	}
 
 	found, _ := parsed["found"].(bool)
 	if !found {
-		return nil, ErrVMNotFound
+		// Absent is a valid current state — the executor compares this against
+		// the desired state and calls Set to create the resource when needed.
+		return &VMConfig{Name: vmName, State: "absent"}, nil
 	}
 
 	// Strip the host-side prefix to recover the user-visible VM name.
@@ -270,10 +302,14 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		currentVM = cachedVM
 	} else {
 		current, err := m.getVM(ctx, vmName)
-		if err != nil && !errors.Is(err, ErrVMNotFound) {
+		if err != nil {
+			// getVM no longer returns a sentinel for "not found" — absence is
+			// signalled by State=="absent" with err==nil. Any real error here
+			// (module not configured, transport down, malformed response) is
+			// fatal for this Set call.
 			return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
 		}
-		if err == nil {
+		if current.State != "absent" {
 			vmExists = true
 			currentVM = *current
 		}

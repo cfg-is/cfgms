@@ -90,3 +90,55 @@ func TestGenericConfigState_ExcludesIdentifierFields(t *testing.T) {
 	assert.NotContains(t, fields, "path")
 	assert.NotContains(t, fields, "name")
 }
+
+// TestGenericConfigState_ExcludesModuleOperationalKeys verifies that the
+// fields used by a module to set up its transport/identity at Configure
+// time — `transport`, `tenant_id`, `audit_manager`, `steward_id`, and the
+// `winrm_*` credential pointers — are not surfaced as managed fields. A
+// module's Get response never includes them, so leaving them in the
+// comparison set produces false-positive "added" drift on every
+// convergence cycle.
+//
+// Regression test for the #1887 live-validation finding: the hyperv module
+// was creating vSwitches successfully but the executor's verification
+// reported "0 changed, 2 added, 0 removed" because `transport` and
+// `tenant_id` appeared as "added" relative to the module's typed
+// VSwitchConfig. Without this exclusion the executor would retry forever
+// (the lab accumulated 27 duplicate vSwitches before the fix).
+func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
+	state := &genericConfigState{data: map[string]interface{}{
+		// Identifier — pre-existing exclusion, kept here as a control.
+		"path": "vswitch:test",
+		"name": "test",
+		// Module-operational keys — newly excluded.
+		"transport":         "ps-host",
+		"tenant_id":         "tenant-x",
+		"steward_id":        "steward-y",
+		"audit_manager":     "ignored-pointer-shaped",
+		"winrm_host":        "127.0.0.1",
+		"winrm_user_secret": "secret/user",
+		"winrm_pass_secret": "secret/pass",
+		// Actual resource state — must remain.
+		"switch_type": "internal",
+		"state":       "present",
+	}}
+
+	fields := state.GetManagedFields()
+
+	// The 7 module-operational keys + the 2 identifier keys must all be
+	// excluded.
+	for _, key := range []string{
+		"path", "name",
+		"transport", "tenant_id", "steward_id", "audit_manager",
+		"winrm_host", "winrm_user_secret", "winrm_pass_secret",
+	} {
+		assert.NotContains(t, fields, key,
+			"%q is a module-operational/identifier key and must not appear in managed fields", key)
+	}
+
+	// The 2 real resource-state keys must remain.
+	assert.Contains(t, fields, "switch_type")
+	assert.Contains(t, fields, "state")
+	assert.Len(t, fields, 2,
+		"only the genuine resource-state keys should remain after exclusion; got %v", fields)
+}

@@ -1,0 +1,24 @@
+name: m365-intune-policy
+version: 0.1.0
+description: >
+  Desired-state management of Microsoft Intune device-compliance and
+  device-configuration policies via the Microsoft Graph API. Manages
+  policy definitions, assignments, and the supported device-platform
+  surface as named resources.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set

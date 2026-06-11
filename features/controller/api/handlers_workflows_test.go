@@ -32,7 +32,7 @@ func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigSto
 	configStore := storageManager.GetConfigStore()
 
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(workflow.NewNullModuleFactory(), logger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil), logger, nil)
 
 	handler := NewWorkflowHandler(engine, configStore, nil, logger)
 	return handler, configStore
@@ -547,7 +547,7 @@ func TestWorkflowHandler_SpecialCharsInName_HandledSafely(t *testing.T) {
 	_, configStore := newTestWorkflowHandler(t)
 	capLogger := &capturingLogger{}
 
-	engine := workflow.NewEngine(workflow.NewNullModuleFactory(), capLogger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil), capLogger, nil)
 	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
