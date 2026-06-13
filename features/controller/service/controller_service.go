@@ -336,6 +336,45 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	return info, exists
 }
 
+// RecordHeartbeat advances the live heartbeat state for a registered steward in
+// the in-memory registry that the steward API serves (handlers_stewards.go ->
+// GetStewardInfo). It is the bridge from the control-plane heartbeat dispatch
+// into that registry.
+//
+// Without this bridge the registry is only ever populated by registration and
+// warm-load (LastHeartbeat = record.StoredAt), so GET /api/v1/stewards/{id}
+// reports a last_seen frozen at registration time and a status stuck at
+// "registered" even while the steward is actively heartbeating (Issue #1986).
+//
+// On the first heartbeat a freshly-registered steward is promoted to "active",
+// mirroring the durable StewardStore lifecycle. A zero ts falls back to now.
+// Returns false when the steward is unknown to this controller (e.g. a heartbeat
+// arriving before warm-load or for a deregistered steward).
+func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.Time) bool {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return false
+	}
+
+	steward.LastHeartbeat = ts
+	if version != "" {
+		steward.Version = version
+	}
+	// Promote registered -> active on the first heartbeat. Leave any other
+	// lifecycle status (e.g. an operator-set state) untouched.
+	if steward.Status == "" || steward.Status == "registered" {
+		steward.Status = "active"
+	}
+	return true
+}
+
 // RegisterSteward records or updates a steward that registered via the HTTP path.
 // It is idempotent: calling it twice with the same stewardID overwrites the entry.
 //

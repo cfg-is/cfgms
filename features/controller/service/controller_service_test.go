@@ -133,6 +133,63 @@ func TestLoadFromStorage_LiveStewardNotOverwritten(t *testing.T) {
 	assert.Equal(t, "online", info.Status)
 }
 
+// TestRecordHeartbeat_AdvancesRegistryAndPromotes proves the Issue #1986 fix:
+// a control-plane heartbeat advances the API-served registry's LastHeartbeat and
+// promotes a freshly-registered steward to "active". Without RecordHeartbeat the
+// registry is frozen at the warm-loaded StoredAt and status never leaves
+// "registered" even while the steward heartbeats.
+func TestRecordHeartbeat_AdvancesRegistryAndPromotes(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	registeredAt := time.Now().Add(-72 * time.Hour)
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{
+		ID:            "dev-1",
+		TenantID:      "tenant-a",
+		LastHeartbeat: registeredAt,
+		Status:        "registered",
+		Metrics:       make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	beat := time.Now()
+	ok := svc.RecordHeartbeat("dev-1", "v0.5.0-dev", beat)
+	require.True(t, ok, "heartbeat for a known steward must be recorded")
+
+	info, found := svc.GetStewardInfo("dev-1")
+	require.True(t, found)
+	assert.WithinDuration(t, beat, info.LastHeartbeat, time.Millisecond,
+		"last_seen must advance to the heartbeat timestamp, not stay at registration time")
+	assert.Equal(t, "active", info.Status, "first heartbeat must promote registered -> active")
+	assert.Equal(t, "v0.5.0-dev", info.Version, "heartbeat must populate the reported version")
+}
+
+// TestRecordHeartbeat_ZeroTimestampFallsBackToNow ensures a heartbeat carrying no
+// timestamp still advances last_seen rather than zeroing it.
+func TestRecordHeartbeat_ZeroTimestampFallsBackToNow(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{ID: "dev-1", Status: "active", LastHeartbeat: time.Now().Add(-time.Hour)}
+	svc.mu.Unlock()
+
+	before := time.Now()
+	ok := svc.RecordHeartbeat("dev-1", "", time.Time{})
+	require.True(t, ok)
+
+	info, _ := svc.GetStewardInfo("dev-1")
+	assert.False(t, info.LastHeartbeat.Before(before), "zero ts must fall back to now, not zero out last_seen")
+}
+
+// TestRecordHeartbeat_UnknownStewardReturnsFalse ensures heartbeats for stewards
+// this controller does not know about are reported (not silently created).
+func TestRecordHeartbeat_UnknownStewardReturnsFalse(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ok := svc.RecordHeartbeat("ghost", "v1", time.Now())
+	assert.False(t, ok, "heartbeat for an unknown steward must return false")
+	_, found := svc.GetStewardInfo("ghost")
+	assert.False(t, found, "RecordHeartbeat must not fabricate a registry entry")
+}
+
 func TestStoreDNA_WriteOnSync(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	ctx := context.Background()

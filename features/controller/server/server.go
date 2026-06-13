@@ -581,6 +581,54 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Heartbeat monitoring service initialized successfully")
 
+		// Issue #1986: bridge control-plane heartbeats into the steward registry
+		// the API serves. heartbeat.Service tracks liveness in its own in-memory
+		// map but never updates ControllerService, so GET /api/v1/stewards/{id}
+		// would report a last_seen frozen at registration time and a status stuck
+		// at "registered" even while the steward heartbeats. Register a second
+		// heartbeat handler that advances the registry via RecordHeartbeat.
+		//
+		// The same handler carries Layer-3 instrumentation: it records the
+		// controller-side receipt cadence per steward and warns when a gap exceeds
+		// the expected steward interval, so intermittent heartbeat loss is
+		// observable without changing log levels.
+		if controllerService != nil {
+			var heartbeatGapTracker sync.Map // stewardID -> time.Time (last receipt)
+			const heartbeatGapWarnThreshold = 45 * time.Second
+			if subErr := controlPlane.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
+				if hb == nil {
+					return nil
+				}
+				recorded := controllerService.RecordHeartbeat(hb.StewardID, hb.Version, hb.Timestamp)
+
+				now := time.Now()
+				if prev, ok := heartbeatGapTracker.Load(hb.StewardID); ok {
+					gap := now.Sub(prev.(time.Time))
+					if gap > heartbeatGapWarnThreshold {
+						logger.Warn("Steward heartbeat receipt gap exceeded expected interval (Issue #1986 Layer 3)",
+							"steward_id", logging.SanitizeLogValue(hb.StewardID),
+							"gap", gap.Round(time.Millisecond),
+							"recorded", recorded)
+					} else {
+						logger.Debug("heartbeat received",
+							"steward_id", logging.SanitizeLogValue(hb.StewardID),
+							"gap", gap.Round(time.Millisecond),
+							"recorded", recorded)
+					}
+				} else {
+					logger.Debug("heartbeat received (first)",
+						"steward_id", logging.SanitizeLogValue(hb.StewardID),
+						"recorded", recorded)
+				}
+				heartbeatGapTracker.Store(hb.StewardID, now)
+				return nil
+			}); subErr != nil {
+				logger.Warn("Failed to register steward-registry heartbeat bridge", "error", subErr)
+			} else {
+				logger.Info("Steward-registry heartbeat bridge registered (Issue #1986)")
+			}
+		}
+
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
