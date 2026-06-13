@@ -304,8 +304,8 @@ func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
 	delReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodDelete, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), admin)
 	delRec := httptest.NewRecorder()
 	server.handleDeleteRun(delRec, delReq)
-	require.NotEqual(t, http.StatusUnauthorized, delRec.Code, "admin DELETE must not 401; body: %s", delRec.Body.String())
-	require.NotEqual(t, http.StatusNotFound, delRec.Code, "admin DELETE must find the run; body: %s", delRec.Body.String())
+	require.Contains(t, []int{http.StatusOK, http.StatusConflict}, delRec.Code,
+		"admin DELETE must succeed (200) or be already-terminal (409) — never 401/404/5xx; body: %s", delRec.Body.String())
 }
 
 // TestGetRun_NonAdminCrossTenant_NotFound guards isolation: a tenant-scoped caller
