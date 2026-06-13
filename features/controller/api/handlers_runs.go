@@ -97,13 +97,18 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	// Admin mTLS principals carry global (cross-tenant) scope with an empty TenantID
+	// (middleware.go); this path is designed for it — an empty tenant yields an
+	// unscoped fleet search, the RBAC check below is skipped, and the audit uses the
+	// system-tenant sentinel. Only a NON-admin principal with no tenant is a genuine
+	// auth failure (Issue #1990).
+	if tenantID == "" && !principal.IsAdmin {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
@@ -190,13 +195,18 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	// Admin mTLS principals carry global (cross-tenant) scope with an empty TenantID
+	// (middleware.go); this path is designed for it — an empty tenant yields an
+	// unscoped fleet search, the RBAC check below is skipped, and the audit uses the
+	// system-tenant sentinel. Only a NON-admin principal with no tenant is a genuine
+	// auth failure (Issue #1990).
+	if tenantID == "" && !principal.IsAdmin {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}

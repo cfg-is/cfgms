@@ -18,8 +18,27 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	_ "modernc.org/sqlite"
 )
+
+// postRunWithPrincipal calls a run handler directly with the given principal +
+// its tenant injected into the request context, exactly as authenticationMiddleware
+// would for an mTLS admin cert. An X-API-Key request always carries a tenant, so it
+// cannot reproduce the admin-mTLS global-scope (empty-tenant) path — Issue #1990.
+func postRunWithPrincipal(t *testing.T, handler http.HandlerFunc, path string, p *Principal, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
+}
 
 // ---- test helpers -----------------------------------------------------------
 
@@ -181,6 +200,60 @@ func TestPostRunScript_TwoStewardFanout(t *testing.T) {
 			"queued execution must carry workflow_run_id")
 		assert.NotEmpty(t, e.Metadata["job_id"], "queued execution must carry job_id")
 	}
+}
+
+// ---- [REQUIRED TEST] admin mTLS (empty-tenant) run dispatch (Issue #1990) ---
+
+// TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized proves the Issue #1990 fix:
+// an admin mTLS principal (global scope, TenantID="") can dispatch cfg steward exec.
+// Before the fix the early tenantID=="" gate returned 401 before the admin-aware
+// logic ran.
+func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	body := map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "admin exec should reach run synthesis; body: %s", rec.Body.String())
+}
+
+// TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized is the same guard for run-script.
+func TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	body := map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"}
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"admin mTLS principal (empty tenant) must not be rejected; body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestRunCommand_NonAdminEmptyTenant_StillUnauthorized guards against regression:
+// a non-admin principal with no tenant must remain unauthorized.
+func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	body := map[string]interface{}{
+		"target":  "all",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		&Principal{ID: "scoped-key", IsAdmin: false, TenantID: ""}, body)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a non-admin principal with no tenant must remain unauthorized")
 }
 
 // ---- [REQUIRED TEST] GET /api/v1/runs/{run_id}/jobs accuracy ---------------
