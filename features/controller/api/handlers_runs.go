@@ -89,6 +89,35 @@ type postRunCommandRequest struct {
 	Signature *execCommandSignature `json:"signature"` // optional mTLS signing envelope
 }
 
+// authRunAccess authenticates a request to the ad-hoc run API and returns the
+// principal and its tenant scope. Admin mTLS principals carry global
+// (cross-tenant) scope with an empty TenantID (middleware.go); the run path is
+// designed for that — an empty tenant yields an unscoped fleet search, the
+// dispatch RBAC check is skipped, and the audit uses the system-tenant sentinel.
+// Only a NON-admin principal with no tenant is a genuine auth failure. On failure
+// it writes the 401 and returns ok=false (Issue #1990).
+func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principal *Principal, tenantID string, ok bool) {
+	principal, hasPrincipal := r.Context().Value(principalContextKey).(*Principal)
+	if !hasPrincipal || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return nil, "", false
+	}
+	tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
+	if tenantID == "" && !principal.IsAdmin {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return nil, "", false
+	}
+	return principal, tenantID, true
+}
+
+// runVisibleTo reports whether the principal may read/cancel the given run. Admin
+// mTLS principals have global access; tenant-scoped callers may access only runs
+// owned by their tenant. Callers return 404 (not 403) on false to avoid leaking
+// cross-tenant run existence (Issue #1990).
+func runVisibleTo(principal *Principal, run *controllerrun.RunRecord, tenantID string) bool {
+	return principal.IsAdmin || run.TenantID == tenantID
+}
+
 // handlePostRunScript handles POST /api/v1/runs/script.
 // Creates a run record and fans out one QueuedExecution per matched steward.
 func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
@@ -97,14 +126,8 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
-		return
-	}
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -143,9 +166,12 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// parameter resolution and the required API scope (Issue #1675). The scope
 	// is read from the store — never from the request body — so callers cannot
 	// widen it beyond what was set by script:admin.
+	// Privilege metadata is tenant-scoped. A global admin (empty tenant) is not
+	// bound by per-tenant script scope, so skip the lookup rather than querying the
+	// store with an empty tenant key (which is undefined/store-dependent) — Issue #1990.
 	var paramPlatformBindings map[string]string
 	var requiredAPIScope []string
-	if s.privilegeStore != nil {
+	if s.privilegeStore != nil && tenantID != "" {
 		meta, loadErr := s.loadPrivilegeMetadata(r.Context(), tenantID, req.ScriptID)
 		if loadErr == nil && meta != nil {
 			paramPlatformBindings = meta.ParamPlatformBindings
@@ -190,14 +216,8 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
-		return
-	}
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -301,9 +321,8 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -326,7 +345,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant isolation: return 404 (not 403) to avoid leaking existence across tenants.
-	if run.TenantID != tenantID {
+	if !runVisibleTo(principal, run, tenantID) {
 		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 		return
 	}
@@ -341,9 +360,8 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -365,7 +383,7 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
 		return
 	}
-	if run.TenantID != tenantID {
+	if !runVisibleTo(principal, run, tenantID) {
 		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 		return
 	}
@@ -391,9 +409,8 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -416,7 +433,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel run", "INTERNAL_ERROR")
 		return
 	}
-	if run.TenantID != tenantID {
+	if !runVisibleTo(principal, run, tenantID) {
 		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 		return
 	}
