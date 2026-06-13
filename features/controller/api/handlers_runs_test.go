@@ -15,12 +15,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	_ "modernc.org/sqlite"
 )
+
+// withPrincipal injects a principal + its tenant into the request context exactly
+// as authenticationMiddleware does for an mTLS admin cert (Issue #1990).
+func withPrincipal(req *http.Request, p *Principal) *http.Request {
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	return req.WithContext(ctx)
+}
 
 // postRunWithPrincipal calls a run handler directly with the given principal +
 // its tenant injected into the request context, exactly as authenticationMiddleware
@@ -254,6 +264,74 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"a non-admin principal with no tenant must remain unauthorized")
+}
+
+// TestRunLifecycle_AdminMTLSEmptyTenant covers the FULL cfg steward exec lifecycle
+// for an admin mTLS principal (Issue #1990): dispatch, then read the run + jobs and
+// cancel it. The exec CLI dispatches and then polls GET /runs/{id} for output, so
+// fixing only the POST gate would leave exec broken — the GET/DELETE handlers must
+// also admit admin principals. Before the full fix those handlers 401'd admins.
+func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}
+
+	// 1. Dispatch (POST) as admin.
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "dispatch body: %s", rec.Body.String())
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	runID, _ := resp.Data.(map[string]interface{})["run_id"].(string)
+	require.NotEmpty(t, runID, "dispatch must return a run_id")
+
+	// 2. GET the run as admin (the exec CLI polls this) — must not 401, must find it.
+	getReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), admin)
+	getRec := httptest.NewRecorder()
+	server.handleGetRun(getRec, getReq)
+	require.Equal(t, http.StatusOK, getRec.Code, "admin GET run must succeed (not 401/404); body: %s", getRec.Body.String())
+
+	// 3. GET the run's jobs as admin — must not 401.
+	jobsReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/jobs", nil), map[string]string{"run_id": runID}), admin)
+	jobsRec := httptest.NewRecorder()
+	server.handleGetRunJobs(jobsRec, jobsReq)
+	require.Equal(t, http.StatusOK, jobsRec.Code, "admin GET jobs must succeed; body: %s", jobsRec.Body.String())
+
+	// 4. DELETE/cancel the run as admin — must not 401 (200 cancel or 409 if already terminal).
+	delReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodDelete, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), admin)
+	delRec := httptest.NewRecorder()
+	server.handleDeleteRun(delRec, delReq)
+	require.NotEqual(t, http.StatusUnauthorized, delRec.Code, "admin DELETE must not 401; body: %s", delRec.Body.String())
+	require.NotEqual(t, http.StatusNotFound, delRec.Code, "admin DELETE must find the run; body: %s", delRec.Body.String())
+}
+
+// TestGetRun_NonAdminCrossTenant_NotFound guards isolation: a tenant-scoped caller
+// cannot read another tenant's run (admin-aware ownership check must not weaken this).
+func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "tenant-a"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	// Admin dispatches a run owned by the global/empty tenant.
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+			"shell":   "pwsh",
+		})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	runID := resp.Data.(map[string]interface{})["run_id"].(string)
+
+	// A tenant-scoped (non-admin) caller from a different tenant must get 404.
+	scoped := &Principal{ID: "tenant-b-key", IsAdmin: false, TenantID: "tenant-b"}
+	getReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), scoped)
+	getRec := httptest.NewRecorder()
+	server.handleGetRun(getRec, getReq)
+	assert.Equal(t, http.StatusNotFound, getRec.Code, "a scoped caller must not see another tenant's run")
 }
 
 // ---- [REQUIRED TEST] GET /api/v1/runs/{run_id}/jobs accuracy ---------------
