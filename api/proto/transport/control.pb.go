@@ -29,19 +29,17 @@ const (
 type CommandType int32
 
 const (
-	CommandType_COMMAND_TYPE_UNSPECIFIED       CommandType = 0
-	CommandType_COMMAND_TYPE_SYNC_CONFIG       CommandType = 1
-	CommandType_COMMAND_TYPE_SYNC_DNA          CommandType = 2
-	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE CommandType = 3
-	CommandType_COMMAND_TYPE_EXECUTE_TASK      CommandType = 4
-	CommandType_COMMAND_TYPE_SHUTDOWN          CommandType = 5
-	CommandType_COMMAND_TYPE_VALIDATE_CONFIG   CommandType = 6
-	CommandType_COMMAND_TYPE_RECONNECT         CommandType = 7
-	// COMMAND_TYPE_EXECUTE_SCRIPT = 8 is reserved for Issue #1669; proto regen deferred.
-	// CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT added manually pending proto regen (Issue #1817).
-	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT CommandType = 9
-	// CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY added manually pending proto regen (Issue #1943).
-	CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY CommandType = 10
+	CommandType_COMMAND_TYPE_UNSPECIFIED         CommandType = 0
+	CommandType_COMMAND_TYPE_SYNC_CONFIG         CommandType = 1
+	CommandType_COMMAND_TYPE_SYNC_DNA            CommandType = 2
+	CommandType_COMMAND_TYPE_CONNECT_DATAPLANE   CommandType = 3
+	CommandType_COMMAND_TYPE_EXECUTE_TASK        CommandType = 4
+	CommandType_COMMAND_TYPE_SHUTDOWN            CommandType = 5
+	CommandType_COMMAND_TYPE_VALIDATE_CONFIG     CommandType = 6
+	CommandType_COMMAND_TYPE_RECONNECT           CommandType = 7
+	CommandType_COMMAND_TYPE_EXECUTE_SCRIPT      CommandType = 8  // Issue #1669/#1992: controller dispatches a signed script execution to a steward
+	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT   CommandType = 9  // Issue #1817: controller pushes current signing cert on every steward connect
+	CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY CommandType = 10 // Issue #1943: controller pushes a new steward binary for self-upgrade
 )
 
 // Enum value maps for CommandType.
@@ -55,6 +53,7 @@ var (
 		5:  "COMMAND_TYPE_SHUTDOWN",
 		6:  "COMMAND_TYPE_VALIDATE_CONFIG",
 		7:  "COMMAND_TYPE_RECONNECT",
+		8:  "COMMAND_TYPE_EXECUTE_SCRIPT",
 		9:  "COMMAND_TYPE_PUSH_SIGNING_CERT",
 		10: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
 	}
@@ -67,6 +66,7 @@ var (
 		"COMMAND_TYPE_SHUTDOWN":            5,
 		"COMMAND_TYPE_VALIDATE_CONFIG":     6,
 		"COMMAND_TYPE_RECONNECT":           7,
+		"COMMAND_TYPE_EXECUTE_SCRIPT":      8,
 		"COMMAND_TYPE_PUSH_SIGNING_CERT":   9,
 		"COMMAND_TYPE_PUSH_STEWARD_BINARY": 10,
 	}
@@ -103,16 +103,15 @@ func (CommandType) EnumDescriptor() ([]byte, []int) {
 type EventType int32
 
 const (
-	EventType_EVENT_TYPE_UNSPECIFIED    EventType = 0
-	EventType_EVENT_TYPE_CONFIG_APPLIED EventType = 1
-	EventType_EVENT_TYPE_DNA_SYNCED     EventType = 2
-	EventType_EVENT_TYPE_TASK_COMPLETED EventType = 3
-	EventType_EVENT_TYPE_TASK_FAILED    EventType = 4
-	EventType_EVENT_TYPE_ERROR          EventType = 5
-	// Command lifecycle events added manually pending proto regen (Issue #1948).
-	EventType_EVENT_TYPE_COMMAND_RECEIVED  EventType = 6
-	EventType_EVENT_TYPE_COMMAND_COMPLETED EventType = 7
-	EventType_EVENT_TYPE_COMMAND_FAILED    EventType = 8
+	EventType_EVENT_TYPE_UNSPECIFIED       EventType = 0
+	EventType_EVENT_TYPE_CONFIG_APPLIED    EventType = 1
+	EventType_EVENT_TYPE_DNA_SYNCED        EventType = 2
+	EventType_EVENT_TYPE_TASK_COMPLETED    EventType = 3
+	EventType_EVENT_TYPE_TASK_FAILED       EventType = 4
+	EventType_EVENT_TYPE_ERROR             EventType = 5
+	EventType_EVENT_TYPE_COMMAND_RECEIVED  EventType = 6 // Issue #1948: steward acknowledges a dispatched command
+	EventType_EVENT_TYPE_COMMAND_COMPLETED EventType = 7 // Issue #1948: command handler succeeded (drives upgrade commit)
+	EventType_EVENT_TYPE_COMMAND_FAILED    EventType = 8 // Issue #1948: command handler failed (drives upgrade failure)
 )
 
 // Enum value maps for EventType.
@@ -598,9 +597,9 @@ type Heartbeat struct {
 	Timestamp       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Metrics         map[string]string      `protobuf:"bytes,5,rep,name=metrics,proto3" json:"metrics,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Version         string                 `protobuf:"bytes,6,opt,name=version,proto3" json:"version,omitempty"`
-	DnaHash         string                 `protobuf:"bytes,7,opt,name=dna_hash,json=dnaHash,proto3" json:"dna_hash,omitempty"`
-	ActiveSessions  int32                  `protobuf:"varint,8,opt,name=active_sessions,json=activeSessions,proto3" json:"active_sessions,omitempty"`
-	ConnectionState string                 `protobuf:"bytes,9,opt,name=connection_state,json=connectionState,proto3" json:"connection_state,omitempty"`
+	DnaHash         string                 `protobuf:"bytes,7,opt,name=dna_hash,json=dnaHash,proto3" json:"dna_hash,omitempty"`                         // for hash-based sync detection
+	ActiveSessions  int32                  `protobuf:"varint,8,opt,name=active_sessions,json=activeSessions,proto3" json:"active_sessions,omitempty"`   // number of active control-channel streams (1 when connected, 0 otherwise)
+	ConnectionState string                 `protobuf:"bytes,9,opt,name=connection_state,json=connectionState,proto3" json:"connection_state,omitempty"` // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -786,72 +785,101 @@ func (x *Response) GetDetails() map[string]string {
 var File_transport_control_proto protoreflect.FileDescriptor
 
 const file_transport_control_proto_rawDesc = "" +
-	"\n\x17transport/control.proto\x12\x0fcfgms.transport\x1a\x1fg" +
-	"oogle/protobuf/timestamp.proto\"\xf6\x01\n\x0eControlMessage\x12" +
-	"4\n\x07command\x18\x01 \x01(\x0b2\x18.cfgms.transport.Command" +
-	"H\x00R\x07command\x12.\n\x05event\x18\x02 \x01(\x0b2\x16.cfgm" +
-	"s.transport.EventH\x00R\x05event\x12:\n\theartbeat\x18\x03 \x01" +
-	"(\x0b2\x1a.cfgms.transport.HeartbeatH\x00R\theartbeat\x127\n\x08" +
-	"response\x18\x04 \x01(\x0b2\x19.cfgms.transport.ResponseH\x00" +
-	"R\x08responseB\t\n\x07payload\"\xd6\x02\n\x07Command\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x120\n\x04type\x18\x02 \x01(\x0e" +
-	"2\x1c.cfgms.transport.CommandTypeR\x04type\x12\x1d\n\nsteward" +
-	"_id\x18\x03 \x01(\tR\tstewardId\x12\x1b\n\ttenant_id\x18\x04 " +
-	"\x01(\tR\x08tenantId\x128\n\ttimestamp\x18\x05 \x01(\x0b2\x1a" +
-	".google.protobuf.TimestampR\ttimestamp\x12<\n\x06params\x18\x06" +
-	" \x03(\x0b2$.cfgms.transport.Command.ParamsEntryR\x06params\x12" +
-	"\x1a\n\x08priority\x18\x07 \x01(\x05R\x08priority\x1a9\n\x0bP" +
-	"aramsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x03\n\x05" +
-	"Event\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12.\n\x04type\x18" +
-	"\x02 \x01(\x0e2\x1a.cfgms.transport.EventTypeR\x04type\x12\x1d" +
-	"\n\nsteward_id\x18\x03 \x01(\tR\tstewardId\x12\x1b\n\ttenant_" +
-	"id\x18\x04 \x01(\tR\x08tenantId\x128\n\ttimestamp\x18\x05 \x01" +
-	"(\x0b2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x1d\n\nc" +
-	"ommand_id\x18\x06 \x01(\tR\tcommandId\x12=\n\x07details\x18\x07" +
-	" \x03(\x0b2#.cfgms.transport.Event.DetailsEntryR\x07details\x12" +
-	"5\n\x08severity\x18\x08 \x01(\x0e2\x19.cfgms.transport.Severi" +
-	"tyR\x08severity\x1a:\n\x0cDetailsEntry\x12\x10\n\x03key\x18\x01" +
-	" \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value" +
-	":\x028\x01\"\xc1\x03\n\tHeartbeat\x12\x1d\n\nsteward_id\x18\x01" +
-	" \x01(\tR\tstewardId\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08" +
-	"tenantId\x126\n\x06status\x18\x03 \x01(\x0e2\x1e.cfgms.transp" +
-	"ort.StewardStatusR\x06status\x128\n\ttimestamp\x18\x04 \x01(\x0b" +
-	"2\x1a.google.protobuf.TimestampR\ttimestamp\x12A\n\x07metrics" +
-	"\x18\x05 \x03(\x0b2'.cfgms.transport.Heartbeat.MetricsEntryR\x07" +
-	"metrics\x12\x18\n\x07version\x18\x06 \x01(\tR\x07version\x12\x19" +
-	"\n\x08dna_hash\x18\x07 \x01(\tR\x07dnaHash\x12'\n\x0factive_s" +
-	"essions\x18\x08 \x01(\x05R\x0eactiveSessions\x12)\n\x10connec" +
-	"tion_state\x18\t \x01(\tR\x0fconnectionState\x1a:\n\x0cMetric" +
-	"sEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05" +
-	"value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x02\n\x08Resp" +
-	"onse\x12\x1d\n\ncommand_id\x18\x01 \x01(\tR\tcommandId\x12\x1d" +
-	"\n\nsteward_id\x18\x02 \x01(\tR\tstewardId\x12\x18\n\x07succe" +
-	"ss\x18\x03 \x01(\x08R\x07success\x12\x18\n\x07message\x18\x04" +
-	" \x01(\tR\x07message\x128\n\ttimestamp\x18\x05 \x01(\x0b2\x1a" +
-	".google.protobuf.TimestampR\ttimestamp\x12@\n\x07details\x18\x06" +
-	" \x03(\x0b2&.cfgms.transport.Response.DetailsEntryR\x07detail" +
-	"s\x1a:\n\x0cDetailsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03" +
-	"key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xe4" +
-	"\x01\n\x0bCommandType\x12\x1c\n\x18COMMAND_TYPE_UNSPECIFIED\x10" +
-	"\x00\x12\x1c\n\x18COMMAND_TYPE_SYNC_CONFIG\x10\x01\x12\x19\n\x15" +
-	"COMMAND_TYPE_SYNC_DNA\x10\x02\x12\"\n\x1eCOMMAND_TYPE_CONNECT" +
-	"_DATAPLANE\x10\x03\x12\x1d\n\x19COMMAND_TYPE_EXECUTE_TASK\x10" +
-	"\x04\x12\x19\n\x15COMMAND_TYPE_SHUTDOWN\x10\x05\x12 \n\x1cCOM" +
-	"MAND_TYPE_VALIDATE_CONFIG\x10\x06*\xb2\x01\n\tEventType\x12\x1a" +
-	"\n\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n\x19EVENT_TYPE_" +
-	"CONFIG_APPLIED\x10\x01\x12\x19\n\x15EVENT_TYPE_DNA_SYNCED\x10" +
-	"\x02\x12\x1d\n\x19EVENT_TYPE_TASK_COMPLETED\x10\x03\x12\x1a\n" +
-	"\x16EVENT_TYPE_TASK_FAILED\x10\x04\x12\x14\n\x10EVENT_TYPE_ER" +
-	"ROR\x10\x05*x\n\x08Severity\x12\x18\n\x14SEVERITY_UNSPECIFIED" +
-	"\x10\x00\x12\x11\n\x0dSEVERITY_INFO\x10\x01\x12\x14\n\x10SEVE" +
-	"RITY_WARNING\x10\x02\x12\x12\n\x0eSEVERITY_ERROR\x10\x03\x12\x15" +
-	"\n\x11SEVERITY_CRITICAL\x10\x04*\xa3\x01\n\x0dStewardStatus\x12" +
-	"\x1e\n\x1aSTEWARD_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n\x16STE" +
-	"WARD_STATUS_HEALTHY\x10\x01\x12\x1b\n\x17STEWARD_STATUS_DEGRA" +
-	"DED\x10\x02\x12\x18\n\x14STEWARD_STATUS_ERROR\x10\x03\x12\x1f" +
-	"\n\x1bSTEWARD_STATUS_DISCONNECTED\x10\x04B,Z*github.com/cfgis" +
-	"/cfgms/api/proto/transportb\x06proto3"
+	"\n" +
+	"\x17transport/control.proto\x12\x0fcfgms.transport\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf6\x01\n" +
+	"\x0eControlMessage\x124\n" +
+	"\acommand\x18\x01 \x01(\v2\x18.cfgms.transport.CommandH\x00R\acommand\x12.\n" +
+	"\x05event\x18\x02 \x01(\v2\x16.cfgms.transport.EventH\x00R\x05event\x12:\n" +
+	"\theartbeat\x18\x03 \x01(\v2\x1a.cfgms.transport.HeartbeatH\x00R\theartbeat\x127\n" +
+	"\bresponse\x18\x04 \x01(\v2\x19.cfgms.transport.ResponseH\x00R\bresponseB\t\n" +
+	"\apayload\"\xd6\x02\n" +
+	"\aCommand\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x1c.cfgms.transport.CommandTypeR\x04type\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x03 \x01(\tR\tstewardId\x12\x1b\n" +
+	"\ttenant_id\x18\x04 \x01(\tR\btenantId\x128\n" +
+	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12<\n" +
+	"\x06params\x18\x06 \x03(\v2$.cfgms.transport.Command.ParamsEntryR\x06params\x12\x1a\n" +
+	"\bpriority\x18\a \x01(\x05R\bpriority\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x03\n" +
+	"\x05Event\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12.\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x1a.cfgms.transport.EventTypeR\x04type\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x03 \x01(\tR\tstewardId\x12\x1b\n" +
+	"\ttenant_id\x18\x04 \x01(\tR\btenantId\x128\n" +
+	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x06 \x01(\tR\tcommandId\x12=\n" +
+	"\adetails\x18\a \x03(\v2#.cfgms.transport.Event.DetailsEntryR\adetails\x125\n" +
+	"\bseverity\x18\b \x01(\x0e2\x19.cfgms.transport.SeverityR\bseverity\x1a:\n" +
+	"\fDetailsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc1\x03\n" +
+	"\tHeartbeat\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x126\n" +
+	"\x06status\x18\x03 \x01(\x0e2\x1e.cfgms.transport.StewardStatusR\x06status\x128\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12A\n" +
+	"\ametrics\x18\x05 \x03(\v2'.cfgms.transport.Heartbeat.MetricsEntryR\ametrics\x12\x18\n" +
+	"\aversion\x18\x06 \x01(\tR\aversion\x12\x19\n" +
+	"\bdna_hash\x18\a \x01(\tR\adnaHash\x12'\n" +
+	"\x0factive_sessions\x18\b \x01(\x05R\x0eactiveSessions\x12)\n" +
+	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x1a:\n" +
+	"\fMetricsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x02\n" +
+	"\bResponse\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x02 \x01(\tR\tstewardId\x12\x18\n" +
+	"\asuccess\x18\x03 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\x128\n" +
+	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12@\n" +
+	"\adetails\x18\x06 \x03(\v2&.cfgms.transport.Response.DetailsEntryR\adetails\x1a:\n" +
+	"\fDetailsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xeb\x02\n" +
+	"\vCommandType\x12\x1c\n" +
+	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18COMMAND_TYPE_SYNC_CONFIG\x10\x01\x12\x19\n" +
+	"\x15COMMAND_TYPE_SYNC_DNA\x10\x02\x12\"\n" +
+	"\x1eCOMMAND_TYPE_CONNECT_DATAPLANE\x10\x03\x12\x1d\n" +
+	"\x19COMMAND_TYPE_EXECUTE_TASK\x10\x04\x12\x19\n" +
+	"\x15COMMAND_TYPE_SHUTDOWN\x10\x05\x12 \n" +
+	"\x1cCOMMAND_TYPE_VALIDATE_CONFIG\x10\x06\x12\x1a\n" +
+	"\x16COMMAND_TYPE_RECONNECT\x10\a\x12\x1f\n" +
+	"\x1bCOMMAND_TYPE_EXECUTE_SCRIPT\x10\b\x12\"\n" +
+	"\x1eCOMMAND_TYPE_PUSH_SIGNING_CERT\x10\t\x12$\n" +
+	" COMMAND_TYPE_PUSH_STEWARD_BINARY\x10\n" +
+	"*\x94\x02\n" +
+	"\tEventType\x12\x1a\n" +
+	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +
+	"\x15EVENT_TYPE_DNA_SYNCED\x10\x02\x12\x1d\n" +
+	"\x19EVENT_TYPE_TASK_COMPLETED\x10\x03\x12\x1a\n" +
+	"\x16EVENT_TYPE_TASK_FAILED\x10\x04\x12\x14\n" +
+	"\x10EVENT_TYPE_ERROR\x10\x05\x12\x1f\n" +
+	"\x1bEVENT_TYPE_COMMAND_RECEIVED\x10\x06\x12 \n" +
+	"\x1cEVENT_TYPE_COMMAND_COMPLETED\x10\a\x12\x1d\n" +
+	"\x19EVENT_TYPE_COMMAND_FAILED\x10\b*x\n" +
+	"\bSeverity\x12\x18\n" +
+	"\x14SEVERITY_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rSEVERITY_INFO\x10\x01\x12\x14\n" +
+	"\x10SEVERITY_WARNING\x10\x02\x12\x12\n" +
+	"\x0eSEVERITY_ERROR\x10\x03\x12\x15\n" +
+	"\x11SEVERITY_CRITICAL\x10\x04*\xa3\x01\n" +
+	"\rStewardStatus\x12\x1e\n" +
+	"\x1aSTEWARD_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16STEWARD_STATUS_HEALTHY\x10\x01\x12\x1b\n" +
+	"\x17STEWARD_STATUS_DEGRADED\x10\x02\x12\x18\n" +
+	"\x14STEWARD_STATUS_ERROR\x10\x03\x12\x1f\n" +
+	"\x1bSTEWARD_STATUS_DISCONNECTED\x10\x04B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
 
 var (
 	file_transport_control_proto_rawDescOnce sync.Once
