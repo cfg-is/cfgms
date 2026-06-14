@@ -776,3 +776,24 @@ func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
 		})
 	}
 }
+
+// TestAllowedShellsMatchesExecutorTaxonomy pins the controller allow-list to the
+// steward executor's accepted shells so the two never drift (Issue #1995, root
+// cause B). The unified taxonomy is: bash/sh (Unix), powershell/pwsh/cmd (Windows),
+// with pwsh also valid on Unix.
+func TestAllowedShellsMatchesExecutorTaxonomy(t *testing.T) {
+	want := map[string]bool{
+		string(scriptmodule.ShellBash):       true,
+		string(scriptmodule.ShellSh):         true,
+		string(scriptmodule.ShellPowerShell): true,
+		string(scriptmodule.ShellPwsh):       true,
+		string(scriptmodule.ShellCmd):        true,
+	}
+
+	assert.Equal(t, want, allowedShells,
+		"controller allow-list must match the executor shell taxonomy")
+
+	// Specifically guard the two shells regressed in Issue #1995.
+	assert.True(t, allowedShells["powershell"], "Windows PowerShell 5.1 must be dispatchable")
+	assert.True(t, allowedShells["pwsh"], "PowerShell Core must be dispatchable")
+}

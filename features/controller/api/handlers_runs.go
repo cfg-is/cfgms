@@ -43,11 +43,17 @@ var bannedPatterns = []struct {
 
 // allowedShells is the set of shells accepted by POST /api/v1/runs/command.
 // Any value outside this set is rejected with UNSUPPORTED_SHELL.
+// The set is kept in lockstep with the steward executor's accepted shells
+// (features/modules/script/executor.go). Valid taxonomy per platform:
+//   - Unix:    bash, sh
+//   - Windows: powershell (Windows PowerShell 5.1), pwsh (PowerShell Core), cmd
+//   - pwsh is also valid on Unix (PowerShell Core is cross-platform).
 var allowedShells = map[string]bool{
-	"bash": true,
-	"sh":   true,
-	"pwsh": true,
-	"cmd":  true,
+	"bash":       true,
+	"sh":         true,
+	"powershell": true,
+	"pwsh":       true,
+	"cmd":        true,
 }
 
 // containsBannedPattern returns the pattern name and true if s contains any
@@ -236,7 +242,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowedShells[req.Shell] {
 		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("unsupported shell %q; allowed: bash, sh, pwsh, cmd", logging.SanitizeLogValue(req.Shell)),
+			fmt.Sprintf("unsupported shell %q; allowed: bash, sh, powershell, pwsh, cmd", logging.SanitizeLogValue(req.Shell)),
 			"UNSUPPORTED_SHELL")
 		return
 	}

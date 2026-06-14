@@ -85,6 +85,13 @@ type JobRecord struct {
 	Status      JobStatus  `json:"status"`
 	CreatedAt   time.Time  `json:"created_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
+
+	// Captured execution result, persisted when the dispatcher records a terminal
+	// completion (Issue #1995, root cause D). Output is stdout; the CLI surfaces
+	// Output and ExitCode for `cfg steward exec`.
+	Output   string `json:"output,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
 }
 
 // ExecutionGrant records a per-execution API access grant created at dispatch time.
@@ -106,6 +113,9 @@ type RunStore interface {
 	GetRun(runID string) (*RunRecord, error)
 	ListRunJobs(runID string) ([]*JobRecord, error)
 	UpdateJobStatus(jobID string, status JobStatus, executionID string) error
+	// UpdateJobResult sets the terminal status, executionID, and captured execution
+	// result (stdout/stderr/exit code) for a job (Issue #1995, root cause D).
+	UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error
 	UpdateRunStatus(runID string, status RunStatus) error
 	UpdateRunCounts(runID string, completedJobs, failedJobs int) error
 
@@ -181,7 +191,10 @@ CREATE TABLE IF NOT EXISTS script_run_jobs (
     execution_id  TEXT,
     status        TEXT NOT NULL,
     created_at    DATETIME NOT NULL,
-    completed_at  DATETIME
+    completed_at  DATETIME,
+    output        TEXT,
+    stderr        TEXT,
+    exit_code     INTEGER
 );`
 	const createJobsIndex = `
 CREATE INDEX IF NOT EXISTS idx_srj_run_id ON script_run_jobs(run_id);`
@@ -204,7 +217,74 @@ CREATE INDEX IF NOT EXISTS idx_eg_device ON execution_grants(device_id, executio
 			return fmt.Errorf("run store init: %w", err)
 		}
 	}
+
+	// Idempotent column migration for databases created before the output-capture
+	// columns existed (Issue #1995, root cause D). CREATE TABLE IF NOT EXISTS does
+	// not add columns to a pre-existing table. Detect which columns are already
+	// present via PRAGMA table_info and ADD only the missing ones — no reliance on
+	// driver-specific error-string matching, and no spurious error on fresh DBs.
+	if err := s.migrateJobColumns(); err != nil {
+		return fmt.Errorf("run store init: migrate jobs columns: %w", err)
+	}
 	return nil
+}
+
+// migrateJobColumns adds the output/stderr/exit_code columns to script_run_jobs
+// when they are missing. It inspects the live schema via PRAGMA table_info so it
+// is idempotent across repeated calls and across sqlite driver versions.
+func (s *RunStoreSQL) migrateJobColumns() error {
+	existing, err := s.jobColumns()
+	if err != nil {
+		return err
+	}
+
+	wanted := []struct {
+		name string
+		ddl  string
+	}{
+		{"output", "ALTER TABLE script_run_jobs ADD COLUMN output TEXT"},
+		{"stderr", "ALTER TABLE script_run_jobs ADD COLUMN stderr TEXT"},
+		{"exit_code", "ALTER TABLE script_run_jobs ADD COLUMN exit_code INTEGER"},
+	}
+	for _, c := range wanted {
+		if existing[c.name] {
+			continue
+		}
+		if _, err := s.db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("add column %s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// jobColumns returns the set of column names currently defined on script_run_jobs.
+func (s *RunStoreSQL) jobColumns() (map[string]bool, error) {
+	rows, err := s.db.Query("PRAGMA table_info(script_run_jobs)")
+	if err != nil {
+		return nil, fmt.Errorf("inspect schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols := make(map[string]bool)
+	for rows.Next() {
+		// PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk.
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notnull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return nil, fmt.Errorf("scan schema row: %w", err)
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read schema rows: %w", err)
+	}
+	return cols, nil
 }
 
 // CreateRun persists a new run record. RunID must be unique.
@@ -234,8 +314,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 func (s *RunStoreSQL) CreateJob(j *JobRecord) error {
 	const q = `
 INSERT INTO script_run_jobs
-    (job_id, run_id, device_id, execution_id, status, created_at, completed_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`
+    (job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	var completedAt interface{}
 	if j.CompletedAt != nil {
 		completedAt = *j.CompletedAt
@@ -244,6 +324,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`
 		j.JobID, j.RunID, j.DeviceID,
 		nullableStr(j.ExecutionID),
 		string(j.Status), j.CreatedAt, completedAt,
+		nullableStr(j.Output), nullableStr(j.Stderr), j.ExitCode,
 	)
 	return err
 }
@@ -290,7 +371,7 @@ WHERE run_id = ?`
 // ListRunJobs returns all job records for runID ordered by created_at ASC.
 func (s *RunStoreSQL) ListRunJobs(runID string) ([]*JobRecord, error) {
 	const q = `
-SELECT job_id, run_id, device_id, execution_id, status, created_at, completed_at
+SELECT job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code
 FROM script_run_jobs
 WHERE run_id = ?
 ORDER BY created_at ASC`
@@ -306,9 +387,13 @@ ORDER BY created_at ASC`
 		j := &JobRecord{}
 		var executionID sql.NullString
 		var completedAt sql.NullTime
+		var output sql.NullString
+		var stderr sql.NullString
+		var exitCode sql.NullInt64
 		if err := rows.Scan(
 			&j.JobID, &j.RunID, &j.DeviceID, &executionID,
 			(*string)(&j.Status), &j.CreatedAt, &completedAt,
+			&output, &stderr, &exitCode,
 		); err != nil {
 			return nil, fmt.Errorf("run store scan job: %w", err)
 		}
@@ -317,6 +402,9 @@ ORDER BY created_at ASC`
 			t := completedAt.Time
 			j.CompletedAt = &t
 		}
+		j.Output = output.String
+		j.Stderr = stderr.String
+		j.ExitCode = int(exitCode.Int64)
 		jobs = append(jobs, j)
 	}
 	if err := rows.Err(); err != nil {
@@ -340,6 +428,28 @@ SET status       = ?,
     completed_at = COALESCE(?, completed_at)
 WHERE job_id = ?`
 	_, err := s.db.Exec(q, string(status), executionID, executionID, completedAt, jobID)
+	return err
+}
+
+// UpdateJobResult sets the terminal status, executionID, and captured execution
+// result (stdout/stderr/exit code) for a job (Issue #1995, root cause D).
+// When status is terminal, completed_at is set to the current UTC time.
+func (s *RunStoreSQL) UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error {
+	var completedAt interface{}
+	if status.IsTerminal() {
+		completedAt = time.Now().UTC()
+	}
+	const q = `
+UPDATE script_run_jobs
+SET status       = ?,
+    execution_id = CASE WHEN ? != '' THEN ? ELSE execution_id END,
+    completed_at = COALESCE(?, completed_at),
+    output       = ?,
+    stderr       = ?,
+    exit_code    = ?
+WHERE job_id = ?`
+	_, err := s.db.Exec(q, string(status), executionID, executionID, completedAt,
+		nullableStr(output), nullableStr(stderr), exitCode, jobID)
 	return err
 }
 
@@ -496,12 +606,19 @@ func (m *Manager) CancelRun(_ context.Context, runID string) error {
 // every job in the run is terminal the run transitions to completed, or to
 // failed if any job failed. A run that is already terminal (e.g. cancelled) is
 // left untouched so a late completion callback cannot resurrect it.
-func (m *Manager) RecordJobCompletion(_ context.Context, runID, jobID, executionID string, failed bool) error {
+func (m *Manager) RecordJobCompletion(ctx context.Context, runID, jobID, executionID string, failed bool) error {
+	return m.RecordJobResult(ctx, runID, jobID, executionID, failed, "", "", 0)
+}
+
+// RecordJobResult is RecordJobCompletion with the captured execution result
+// (stdout/stderr/exit code) persisted onto the job record (Issue #1995, root
+// cause D). The dispatcher calls this so `cfg steward exec` can surface output.
+func (m *Manager) RecordJobResult(_ context.Context, runID, jobID, executionID string, failed bool, output, stderr string, exitCode int) error {
 	jobStatus := JobStatusCompleted
 	if failed {
 		jobStatus = JobStatusFailed
 	}
-	if err := m.store.UpdateJobStatus(jobID, jobStatus, executionID); err != nil {
+	if err := m.store.UpdateJobResult(jobID, jobStatus, executionID, output, stderr, exitCode); err != nil {
 		return fmt.Errorf("record job completion: update job %s: %w", jobID, err)
 	}
 

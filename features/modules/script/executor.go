@@ -250,6 +250,16 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), 
 		// #nosec G204 - tmpPath is a temp file created by this process; not user input
 		return exec.CommandContext(ctx, "powershell.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
 
+	case ShellPwsh:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// PowerShell Core (pwsh.exe). Same temp-script / -File pattern as Windows
+		// PowerShell — no -Command string, no inline composition (CLAUDE.md banned patterns).
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "pwsh.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
+
 	case ShellCmd:
 		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.cmd", e.config.Content)
 		if err != nil {
@@ -324,6 +334,18 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), err
 		// #nosec G204 - tmpPath is a temp file created by this process; not user input
 		return exec.CommandContext(ctx, "/bin/sh", tmpPath), cleanup, nil
 
+	case ShellPwsh:
+		// PowerShell Core (pwsh) is cross-platform. Same safe temp-script / -File
+		// pattern as on Windows — no -Command string, no inline composition
+		// (CLAUDE.md banned patterns). Resolved via PATH since the install location
+		// varies across distributions.
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "pwsh", "-NonInteractive", "-File", tmpPath), cleanup, nil
+
 	case ShellPython:
 		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
 		if err != nil {
@@ -364,6 +386,10 @@ func (e *Executor) validateWindowsShell() error {
 		if _, err := exec.LookPath("powershell.exe"); err != nil {
 			return fmt.Errorf("PowerShell is not available: %w", err)
 		}
+	case ShellPwsh:
+		if _, err := exec.LookPath("pwsh.exe"); err != nil {
+			return fmt.Errorf("PowerShell Core (pwsh) is not available: %w", err)
+		}
 	case ShellCmd:
 		if _, err := exec.LookPath("cmd.exe"); err != nil {
 			return fmt.Errorf("command prompt is not available: %w", err)
@@ -393,6 +419,12 @@ func (e *Executor) validateUnixShell() error {
 		shellPath = "/bin/zsh"
 	case ShellSh:
 		shellPath = "/bin/sh"
+	case ShellPwsh:
+		// PowerShell Core has no canonical install path on Unix; resolve via PATH.
+		if _, err := exec.LookPath("pwsh"); err != nil {
+			return fmt.Errorf("PowerShell Core (pwsh) is not available: %w", err)
+		}
+		return nil
 	case ShellPython:
 		shellPath = "/usr/bin/python"
 	case ShellPython3:
