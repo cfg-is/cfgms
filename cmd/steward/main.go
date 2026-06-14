@@ -163,10 +163,22 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 			"operation", "registration_init",
 			"token_prefix", logging.RedactedID(regToken))
 
-		transportCl, err := registerAndConnect(ctx, regToken, logger)
+		// Derive a cancellable context so a pushed binary upgrade can request a
+		// graceful self-exit (the launcher then re-execs the staged binary).
+		// Cancelling runCtx flows into <-runCtx.Done() below, driving the clean
+		// Disconnect+return path — no hard os.Exit. The parent ctx (signal/SCM
+		// stop) still cancels runCtx too. (Issue #2001)
+		runCtx, runCancel := context.WithCancel(ctx)
+		defer runCancel()
+
+		transportCl, err := registerAndConnect(runCtx, regToken, logger)
 		if err != nil {
 			return fmt.Errorf("failed to register with controller: %w", err)
 		}
+
+		// Wire the graceful-shutdown trigger used after a successful
+		// push_steward_binary swap. (Issue #2001)
+		transportCl.SetShutdownFunc(runCancel)
 
 		logger.Info("Steward registered and connected successfully via gRPC transport",
 			"operation", "registration_complete",
@@ -187,8 +199,8 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		// convergence even if DNA publication is briefly unavailable; the
 		// controller will pick up DNA on the next convergence-driven publish
 		// in publishConfigStatus.
-		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(ctx); dnaErr == nil && currentDNA != nil {
-			if pubErr := transportCl.PublishDNAUpdate(ctx, currentDNA.Attributes, "", ""); pubErr != nil {
+		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(runCtx); dnaErr == nil && currentDNA != nil {
+			if pubErr := transportCl.PublishDNAUpdate(runCtx, currentDNA.Attributes, "", ""); pubErr != nil {
 				logger.Warn("Initial DNA publish failed; controller selectors may not find this steward until next config apply",
 					"error", pubErr)
 			} else {
@@ -203,17 +215,18 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		// Check for launcher-written upgrade flag files and emit lifecycle events.
 		// Must run before the heartbeat loop so the controller learns commit/rollback
 		// status on the first heartbeat after a restart. (Issue #1943)
-		checkUpgradeFlagFiles(ctx, defaultCertStoreDir(), transportCl, logger)
+		checkUpgradeFlagFiles(runCtx, defaultCertStoreDir(), transportCl, logger)
 
 		// Start scheduled convergence loop. The initial interval defaults to
 		// 30 minutes. When the controller delivers a cfg, the loop reads
 		// converge_interval from it and resets the ticker accordingly.
 		// sync_config commands from the controller also trigger immediate
 		// convergence as an out-of-band optimization on top of the schedule.
-		transportCl.StartConvergenceLoop(ctx)
+		transportCl.StartConvergenceLoop(runCtx)
 
-		// Wait for context cancellation (signal or SCM stop).
-		<-ctx.Done()
+		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
+		// graceful self-exit request via SetShutdownFunc → runCancel).
+		<-runCtx.Done()
 		logger.Info("Shutdown signal received, disconnecting...",
 			"operation", "steward_shutdown")
 

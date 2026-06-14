@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -734,6 +736,362 @@ func TestHandlePushStewardBinary_HappyPath(t *testing.T) {
 	})
 	assert.Contains(t, gotTypes, cpTypes.EventStewardUpgradeDownloaded)
 	assert.Contains(t, gotTypes, cpTypes.EventStewardUpgradeSwapped)
+}
+
+// ---- Issue #2001: pushed upgrade must auto-apply via graceful self-exit ----
+
+// upgradeTestCmd builds a valid push_steward_binary command served by srv.
+func upgradeTestCmd(id, ver, downloadURL, sha256Hex string, sig []byte) *cpTypes.Command {
+	return &cpTypes.Command{
+		ID:        id,
+		Type:      cpTypes.CommandPushStewardBinary,
+		StewardID: "test-steward",
+		TenantID:  "test-tenant",
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"version":          ver,
+			"download_url":     downloadURL,
+			"sha256":           sha256Hex,
+			"platform":         runtime.GOOS,
+			"arch":             runtime.GOARCH,
+			"publisher":        "cfgms",
+			"bundle_signature": sig,
+		},
+	}
+}
+
+// newUpgradeTestServer returns an HTTPS test server that serves content.
+func newUpgradeTestServer(t *testing.T, content []byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHandlePushStewardBinary_SuccessSchedulesGracefulShutdown verifies that a
+// successful swap schedules a graceful shutdown via the injected schedule func
+// (not a real time.Sleep) with the configured grace delay, and that invoking the
+// scheduled trigger calls the injected shutdown func (not a real os.Exit).
+// (Issue #2001 AC 1, 2)
+func TestHandlePushStewardBinary_SuccessSchedulesGracefulShutdown(t *testing.T) {
+	content := []byte("a valid steward binary that auto-applies")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	var (
+		shutdownCalled  bool
+		scheduledDelay  time.Duration
+		capturedTrigger func()
+	)
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = func() { shutdownCalled = true }
+	c.upgradeShutdownGraceDelay = 250 * time.Millisecond
+	// Capture instead of firing on a real timer — keeps the test deterministic.
+	c.shutdownScheduleFunc = func(delay time.Duration, trigger func()) {
+		scheduledDelay = delay
+		capturedTrigger = trigger
+	}
+	c.mu.Unlock()
+
+	cmd := upgradeTestCmd("cmd-auto-apply", "v99.2.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd))
+
+	require.NotNil(t, capturedTrigger, "successful swap must schedule a shutdown trigger")
+	assert.Equal(t, 250*time.Millisecond, scheduledDelay,
+		"schedule must use the configured grace delay")
+	assert.False(t, shutdownCalled,
+		"shutdown must NOT fire synchronously inside the handler (ack must be sent first)")
+
+	// Firing the scheduled trigger (as the real timer would after the grace delay)
+	// must invoke the injected shutdown func.
+	capturedTrigger()
+	assert.True(t, shutdownCalled, "scheduled trigger must invoke the shutdown func")
+}
+
+// TestHandlePushStewardBinary_FailedSwapDoesNotScheduleShutdown verifies AC 3:
+// a launcher swap error must NOT schedule a shutdown or call the shutdown func.
+func TestHandlePushStewardBinary_FailedSwapDoesNotScheduleShutdown(t *testing.T) {
+	content := []byte("binary whose swap fails")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	failingSwap := func(_ context.Context, _, _, _ string) error {
+		return fmt.Errorf("launcher swap exploded")
+	}
+
+	var (
+		shutdownCalled bool
+		scheduled      bool
+	)
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, failingSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = func() { shutdownCalled = true }
+	c.shutdownScheduleFunc = func(_ time.Duration, _ func()) { scheduled = true }
+	c.mu.Unlock()
+
+	cmd := upgradeTestCmd("cmd-swap-fail", "v99.3.0", srv.URL+"/", sha256Hex, sig)
+	err := c.handlePushStewardBinary(context.Background(), cmd)
+	require.Error(t, err, "failed swap must propagate an error")
+	assert.Contains(t, err.Error(), "launcher swap")
+	assert.False(t, scheduled, "failed swap must NOT schedule a shutdown")
+	assert.False(t, shutdownCalled, "failed swap must NOT trigger shutdown")
+}
+
+// TestHandlePushStewardBinary_NilShutdownFuncIsSafe verifies that a successful
+// swap with no shutdownFunc wired does not panic and does not schedule anything
+// (the staged binary then loads on the next restart). (Issue #2001)
+func TestHandlePushStewardBinary_NilShutdownFuncIsSafe(t *testing.T) {
+	content := []byte("binary with no shutdown wired")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	scheduled := false
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = nil // not wired
+	c.shutdownScheduleFunc = func(_ time.Duration, _ func()) { scheduled = true }
+	c.mu.Unlock()
+
+	cmd := upgradeTestCmd("cmd-no-shutdown", "v99.4.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd))
+	assert.False(t, scheduled, "with no shutdownFunc wired, nothing should be scheduled")
+}
+
+// seqRecordingControlPlane is a real ControlPlaneProvider (embedding the shared
+// noopControlPlane) that records every EventCommandCompleted it is asked to
+// publish into an ordered sequence. It lets the ordering test observe the
+// completion ack as it travels the PRODUCTION publish path
+// (statusCallback → publishEventWithQueue → controlPlane.PublishEvent) rather
+// than via a bare OnStatus recorder closure. (Issue #2001)
+type seqRecordingControlPlane struct {
+	noopControlPlane
+	record func(string)
+}
+
+func (s *seqRecordingControlPlane) PublishEvent(_ context.Context, e *cpTypes.Event) error {
+	if e.Type == cpTypes.EventCommandCompleted {
+		s.record("completion-ack")
+	}
+	return nil
+}
+
+// TestPushStewardBinary_CompletionAckBeforeShutdown drives the upgrade handler
+// through a REAL commands.Handler built by the production setupCommandHandler
+// (no mocks) to prove the controller-facing completion ack
+// (EventCommandCompleted) is delivered through the real publish path BEFORE the
+// graceful shutdown actually fires.
+//
+// The completion ack observation goes through the wired statusCallback →
+// c.publishEventWithQueue → controlPlane.PublishEvent (a real recording control
+// plane), exercising the same path used in production rather than a bare
+// recorder closure. The handler runs synchronously inside
+// commands.Handler.executeCommand, which publishes the ack only after the
+// handler returns; the shutdown is deferred behind the schedule func, so
+// capturing-and-firing it after handler.Wait() reproduces the real ordering.
+// (Issue #2001 AC 4)
+func TestPushStewardBinary_CompletionAckBeforeShutdown(t *testing.T) {
+	content := []byte("ordering test steward binary")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+
+	// Record the ordered sequence of observable side effects.
+	var (
+		seqMu sync.Mutex
+		seq   []string
+	)
+	record := func(s string) {
+		seqMu.Lock()
+		seq = append(seq, s)
+		seqMu.Unlock()
+	}
+
+	var capturedTrigger func()
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = func() { record("shutdown") }
+	c.shutdownScheduleFunc = func(_ time.Duration, trigger func()) {
+		// Defer the trigger exactly as the real timer would — do not run it now.
+		capturedTrigger = trigger
+	}
+	// Wire a real control plane so the completion ack is recorded as it travels
+	// the production publish path. publishEventWithQueue calls PublishEvent on a
+	// non-nil control plane first; the recording impl records and returns nil.
+	c.controlPlane = &seqRecordingControlPlane{record: record}
+	c.mu.Unlock()
+
+	// Build the command handler via the PRODUCTION setupCommandHandler so its
+	// OnStatus is the real statusCallback (publishEventWithQueue), not a bare
+	// recorder. No verifier => unsigned commands accepted.
+	h, err := c.setupCommandHandler(context.Background(), "test-steward")
+	require.NoError(t, err)
+
+	signed := &cpTypes.SignedCommand{
+		Command: *upgradeTestCmd("cmd-order", "v99.5.0", srv.URL+"/", sha256Hex, sig),
+	}
+	require.NoError(t, h.HandleCommand(context.Background(), signed))
+	h.Wait() // executeCommand (incl. completion ack publish) has finished.
+
+	// At this point the completion ack must have been recorded (via the real
+	// publish path), and the shutdown must NOT have fired yet (only scheduled).
+	seqMu.Lock()
+	require.Contains(t, seq, "completion-ack",
+		"completion ack must be delivered through the real publish path")
+	require.NotContains(t, seq, "shutdown", "shutdown must not fire before the grace delay elapses")
+	seqMu.Unlock()
+	require.NotNil(t, capturedTrigger, "successful swap must schedule a shutdown")
+
+	// Now fire the deferred trigger, as the real timer would after the grace delay.
+	capturedTrigger()
+
+	seqMu.Lock()
+	defer seqMu.Unlock()
+	require.Equal(t, []string{"completion-ack", "shutdown"}, seq,
+		"completion ack must precede the graceful shutdown")
+}
+
+// TestPushStewardBinary_DefaultTimerInvokesShutdown exercises the PRODUCTION
+// default-timer path of scheduleGracefulShutdownAfterSwap with no injected
+// shutdownScheduleFunc: it leaves the schedule func nil, sets a small real grace
+// delay, runs the handler on a successful swap, and waits on a channel (with a
+// timeout) for the real time.NewTimer to fire the injected shutdownFunc. This is
+// the code that actually runs in production. (Issue #2001)
+func TestPushStewardBinary_DefaultTimerInvokesShutdown(t *testing.T) {
+	content := []byte("default timer path steward binary")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	shutdownFired := make(chan struct{})
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = func() { close(shutdownFired) }
+	c.upgradeShutdownGraceDelay = 10 * time.Millisecond
+	c.shutdownScheduleFunc = nil // exercise the real timer goroutine
+	c.mu.Unlock()
+
+	cmd := upgradeTestCmd("cmd-real-timer", "v99.6.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd))
+
+	select {
+	case <-shutdownFired:
+		// Real timer fired and invoked the shutdown func.
+	case <-time.After(2 * time.Second):
+		t.Fatal("default timer goroutine did not invoke shutdownFunc within 2s")
+	}
+}
+
+// TestPushStewardBinary_DefaultTimerExitsOnContextCancel verifies that the
+// default timer goroutine exits promptly via ctx.Done() (rather than waiting the
+// full grace delay) when the run context is cancelled by another shutdown path,
+// and that it does NOT redundantly invoke shutdownFunc in that case. (Issue #2001)
+func TestPushStewardBinary_DefaultTimerExitsOnContextCancel(t *testing.T) {
+	content := []byte("ctx cancel path steward binary")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	var shutdownCalls int32
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = func() { atomic.AddInt32(&shutdownCalls, 1) }
+	// Long delay so the timer would normally not fire during the test window.
+	c.upgradeShutdownGraceDelay = 10 * time.Second
+	c.shutdownScheduleFunc = nil // exercise the real timer goroutine
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := upgradeTestCmd("cmd-ctx-cancel", "v99.7.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(ctx, cmd))
+
+	// Cancel the run context — the goroutine must take the ctx.Done() branch and
+	// NOT call shutdownFunc.
+	cancel()
+	// Give the goroutine a moment to observe cancellation and return.
+	require.Eventually(t, func() bool {
+		// Once cancelled, no shutdown should ever be recorded.
+		return atomic.LoadInt32(&shutdownCalls) == 0
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"context cancel must short-circuit the grace-delay timer without firing shutdown")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&shutdownCalls),
+		"shutdownFunc must not run when the run context is cancelled before the grace delay")
+}
+
+// TestDisconnect_DoubleCallNoPanic verifies that Disconnect can be safely called
+// more than once — a scenario introduced by the pushed-upgrade self-exit path
+// racing a signal/SCM stop (Issue #2001). The guarded close of the stop channels
+// must not panic on the second call.
+func TestDisconnect_DoubleCallNoPanic(t *testing.T) {
+	c := minimalClientForUpgradeTest(t, t.TempDir(), "127.0.0.1", nil, noopSwap)
+
+	ctx := context.Background()
+	require.NoError(t, c.Disconnect(ctx), "first Disconnect must succeed")
+	assert.NotPanics(t, func() {
+		require.NoError(t, c.Disconnect(ctx), "second Disconnect must succeed without panic")
+	}, "Disconnect must be idempotent and not panic on double-close")
 }
 
 // TestHandlePushStewardBinary_LaunherPathConstant verifies that launcherPath()

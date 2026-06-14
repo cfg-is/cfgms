@@ -119,6 +119,13 @@ type TransportClient struct {
 	// Connection state — single flag for unified gRPC transport
 	connected bool
 
+	// disconnected guards the one-time close of heartbeatStop/convergenceStop in
+	// Disconnect. A pushed-upgrade graceful self-exit (Issue #2001) adds a second
+	// shutdown trigger path (runCancel → runCtx.Done → Disconnect), so Disconnect
+	// can now legitimately be invoked more than once; closing an already-closed
+	// channel panics, so the close is gated on this flag under c.mu.
+	disconnected bool
+
 	// Heartbeat
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
@@ -174,9 +181,44 @@ type TransportClient struct {
 	// launcher path returned by launcherPath(). Injectable for testing. (Issue #1943)
 	launcherPathOverride string
 
+	// shutdownFunc triggers a graceful shutdown of the steward process. After a
+	// successful push_steward_binary swap the upgrade handler schedules this so
+	// the launcher's supervise loop re-execs the now-current staged binary. In
+	// production it is wired (via SetShutdownFunc) to cancel the steward's root
+	// context, which drives the clean Disconnect+return path in runSteward — NOT
+	// a hard os.Exit. Injectable for testing so unit tests never exit the test
+	// binary. When nil the upgrade handler logs and skips the trigger. (Issue #2001)
+	shutdownFunc func()
+
+	// upgradeShutdownGraceDelay is how long the upgrade handler waits, after the
+	// push_steward_binary handler returns, before invoking shutdownFunc. The delay
+	// gives commands.Handler.executeCommand time to publish the EventCommand
+	// completion ack before the process exits — otherwise the controller could
+	// record the upgrade command as timed-out. A value of 0 (the zero value) means
+	// "use defaultUpgradeShutdownGraceDelay (3s)"; tests that want a small real
+	// timer set an explicit small positive value. Protected by mu. (Issue #2001)
+	upgradeShutdownGraceDelay time.Duration
+
+	// shutdownScheduleFunc schedules trigger to run after delay. When nil the
+	// default real implementation (a timer goroutine) is used. Injectable for
+	// testing so the grace delay is exercised synchronously without time.Sleep
+	// and without spawning detached goroutines. (Issue #2001)
+	shutdownScheduleFunc func(delay time.Duration, trigger func())
+
 	// Logger
 	logger logging.Logger
 }
+
+// defaultUpgradeShutdownGraceDelay is the default grace period between the
+// push_steward_binary handler returning and the graceful shutdown firing.
+//
+// 3s comfortably exceeds the in-process publish of EventCommandCompleted, which
+// is sub-millisecond in tests. It does NOT guarantee the controller has
+// network-acked the event before the process exits; the offline event queue is
+// the durability backstop — if the steward exits before the ack reaches the
+// controller, the queued completion event is redelivered on the next connect
+// (drainOfflineQueue). (Issue #2001)
+const defaultUpgradeShutdownGraceDelay = 3 * time.Second
 
 // TransportConfig holds configuration for the gRPC-over-QUIC transport client.
 type TransportConfig struct {
@@ -1187,6 +1229,18 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 	return nil
 }
 
+// SetShutdownFunc wires the graceful-shutdown trigger used after a successful
+// push_steward_binary swap. In production main.go passes the steward's root
+// context cancel func so a pushed upgrade ends the process cleanly (runSteward
+// then disconnects and returns), letting the launcher re-exec the staged
+// binary. Passing a nil fn disables the auto-apply trigger (the steward would
+// then only pick up the staged binary on the next restart). (Issue #2001)
+func (c *TransportClient) SetShutdownFunc(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.shutdownFunc = fn
+}
+
 // Disconnect closes all gRPC connections to the controller.
 func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.logger.Info("Disconnecting from controller")
@@ -1194,9 +1248,17 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Stop heartbeat and convergence loop
-	close(c.heartbeatStop)
-	close(c.convergenceStop)
+	// Disconnect can be called more than once — e.g. a signal/SCM stop racing a
+	// pushed-upgrade graceful self-exit (Issue #2001). Closing the stop channels
+	// twice would panic, so gate the close on disconnected. Subsequent calls
+	// still tear down the data/control planes (those Close/Stop calls are
+	// idempotent at their own layers) and return cleanly.
+	if !c.disconnected {
+		c.disconnected = true
+		// Stop heartbeat and convergence loop
+		close(c.heartbeatStop)
+		close(c.convergenceStop)
+	}
 
 	// Close data plane session
 	if c.dataPlaneSession != nil {
