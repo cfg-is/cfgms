@@ -21,8 +21,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -202,7 +205,9 @@ func doDispatchUpgrade(server *Server, tenantID, selector, version, platform, ar
 	}
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade", bytes.NewReader(b))
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	// Tenant-scoped (non-admin) caller: principal + tenant injected as the middleware
+	// would for an X-API-Key request (Issue #1999).
+	req = withScopedPrincipal(req, tenantID)
 	rec := httptest.NewRecorder()
 	server.handleDispatchUpgrade(rec, req)
 	return rec
@@ -211,7 +216,7 @@ func doDispatchUpgrade(server *Server, tenantID, selector, version, platform, ar
 // doUpgradeStatus calls handleUpgradeStatus for the given upgrade_id.
 func doUpgradeStatus(server *Server, tenantID, upgradeID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/"+upgradeID, nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	req = withScopedPrincipal(req, tenantID)
 	req = mux.SetURLVars(req, map[string]string{"upgrade_id": upgradeID})
 	rec := httptest.NewRecorder()
 	server.handleUpgradeStatus(rec, req)
@@ -223,7 +228,7 @@ func doUpgradeRollback(server *Server, tenantID, upgradeID, targetVersion string
 	body := rollbackRequest{Version: targetVersion}
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade/"+upgradeID+"/rollback", bytes.NewReader(b))
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	req = withScopedPrincipal(req, tenantID)
 	req = mux.SetURLVars(req, map[string]string{"upgrade_id": upgradeID})
 	rec := httptest.NewRecorder()
 	server.handleUpgradeRollback(rec, req)
@@ -719,7 +724,7 @@ func TestDispatch_InvalidBody(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade",
 		bytes.NewReader([]byte("not-json")))
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+	req = withScopedPrincipal(req, "tenant-a")
 	rec := httptest.NewRecorder()
 	server.handleDispatchUpgrade(rec, req)
 
@@ -762,4 +767,380 @@ func TestDispatch_UpgradeStoreRecordsCanBeReadByStatus(t *testing.T) {
 	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &statusResp))
 	statusData := statusResp.Data.(map[string]interface{})
 	assert.Equal(t, "steward-e2e", statusData["StewardID"])
+}
+
+// --- Admin mTLS empty-tenant tests (Issue #1999) ---
+
+// dispatchUpgradeAsAdmin calls handleDispatchUpgrade with an admin mTLS principal
+// (IsAdmin=true, empty tenant) injected, exactly as the middleware does for an mTLS cert.
+func dispatchUpgradeAsAdmin(server *Server, selector, version, platform, arch string) *httptest.ResponseRecorder {
+	body := dispatchUpgradeRequest{Selector: selector, Version: version, Platform: platform, Arch: arch}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade", bytes.NewReader(b))
+	req = withAdminPrincipal(req)
+	rec := httptest.NewRecorder()
+	server.handleDispatchUpgrade(rec, req)
+	return rec
+}
+
+// statusUpgradeAsAdmin calls handleUpgradeStatus with an admin mTLS principal injected.
+func statusUpgradeAsAdmin(server *Server, upgradeID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/"+upgradeID, nil)
+	req = withAdminPrincipal(req)
+	req = mux.SetURLVars(req, map[string]string{"upgrade_id": upgradeID})
+	rec := httptest.NewRecorder()
+	server.handleUpgradeStatus(rec, req)
+	return rec
+}
+
+// rollbackUpgradeAsAdmin calls handleUpgradeRollback with an admin mTLS principal injected.
+func rollbackUpgradeAsAdmin(server *Server, upgradeID, targetVersion string) *httptest.ResponseRecorder {
+	body := rollbackRequest{Version: targetVersion}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade/"+upgradeID+"/rollback", bytes.NewReader(b))
+	req = withAdminPrincipal(req)
+	req = mux.SetURLVars(req, map[string]string{"upgrade_id": upgradeID})
+	rec := httptest.NewRecorder()
+	server.handleUpgradeRollback(rec, req)
+	return rec
+}
+
+// emptyScopedReq models a NON-admin caller with no tenant (genuine auth failure).
+func emptyScopedReq(req *http.Request) *http.Request { return withScopedPrincipal(req, "") }
+
+// TestDispatch_AdminEmptyTenant_NotUnauthorized verifies that an admin mTLS principal
+// (empty tenant) is NOT rejected with 401 on dispatch; it acts on every matched steward
+// regardless of tenant, using the global (empty-tenant) binary namespace (Issue #1999).
+func TestDispatch_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-x", TenantID: "tenant-x", Status: "online"},
+	}
+	server, upgradeStore := setupUpgradeServer(t, "tenant-x", stewards)
+	// Admins (empty tenant) read the binary from the "default" namespace — the blob store
+	// requires a non-empty tenant, so admin writes/reads fall back to "default" (Issue #1999).
+	publishApprovedBinary(t, server, "default", "v0.5.12", "linux", "amd64")
+
+	rec := dispatchUpgradeAsAdmin(server, "id:steward-x", "v0.5.12", "linux", "amd64")
+
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"admin mTLS principal with empty tenant must not be rejected with 401: %s", rec.Body.String())
+	require.Equal(t, http.StatusAccepted, rec.Code, "admin dispatch must be accepted: %s", rec.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data := resp.Data.(map[string]interface{})
+	upgradeID := data["upgrade_id"].(string)
+	record, err := upgradeStore.GetUpgrade(context.Background(), upgradeID)
+	require.NoError(t, err)
+	assert.Equal(t, "steward-x", record.StewardID)
+	// Admin-dispatched records are attributed to the target steward's tenant.
+	assert.Equal(t, "tenant-x", record.TenantID)
+	assert.Equal(t, "mtls_admin", record.InitiatedBy.AuthMethod)
+}
+
+// TestDispatch_NonAdminEmptyTenant_Unauthorized verifies that a NON-admin principal with
+// no tenant gets 401 from authRunAccess on dispatch, and — critically — that the auth gate
+// PRECEDES the tenant-isolation loop. The only steward belongs to "tenant-a", so if the
+// empty-tenant auth check were removed, execution would fall through to the isolation loop
+// (callerTenantID="" matches no steward) and return 403 CROSS_TENANT instead. Asserting 401
+// AUTHENTICATION_REQUIRED (not 403) pins the ordering: auth before isolation (Issue #1999, B3).
+func TestDispatch_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, _ := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	body := dispatchUpgradeRequest{Selector: "id:steward-1", Version: "v0.5.12", Platform: "linux", Arch: "amd64"}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade", bytes.NewReader(b))
+	req = emptyScopedReq(req)
+	rec := httptest.NewRecorder()
+	server.handleDispatchUpgrade(rec, req)
+
+	// Must be 401 from the auth gate, NOT 403 from the isolation loop further down.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"non-admin empty-tenant must be rejected by authRunAccess (401), before the isolation loop")
+	assert.Contains(t, rec.Body.String(), "AUTHENTICATION_REQUIRED")
+	assert.NotContains(t, rec.Body.String(), "CROSS_TENANT",
+		"401 must precede the isolation loop; a CROSS_TENANT (403) here would mean auth ran after isolation")
+}
+
+// TestUpgradeStatus_AdminEmptyTenant_SeesAnyTenantRecord verifies that an admin mTLS
+// principal can read a record owned by any tenant (no 401, no 403) — Issue #1999.
+func TestUpgradeStatus_AdminEmptyTenant_SeesAnyTenantRecord(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, _ := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	// A tenant-scoped caller creates the record (TenantID=tenant-a).
+	rec := doDispatchUpgrade(server, "tenant-a", "id:steward-1", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	upgradeID := resp.Data.(map[string]interface{})["upgrade_id"].(string)
+
+	// Admin (empty tenant) must be able to view tenant-a's record.
+	statusRec := statusUpgradeAsAdmin(server, upgradeID)
+	require.NotEqual(t, http.StatusUnauthorized, statusRec.Code,
+		"admin mTLS principal with empty tenant must not be rejected with 401 on status")
+	assert.Equal(t, http.StatusOK, statusRec.Code, "admin must see any tenant's record: %s", statusRec.Body.String())
+}
+
+// TestUpgradeStatus_NonAdminEmptyTenant_Unauthorized verifies that a NON-admin caller
+// with no tenant still gets 401 on status (regression guard, Issue #1999).
+func TestUpgradeStatus_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
+	server, _ := setupUpgradeServer(t, "tenant-a", nil)
+	server.upgradeStore = newTestUpgradeStore()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/some-id", nil)
+	req = emptyScopedReq(req)
+	req = mux.SetURLVars(req, map[string]string{"upgrade_id": "some-id"})
+	rec := httptest.NewRecorder()
+	server.handleUpgradeStatus(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "AUTHENTICATION_REQUIRED")
+}
+
+// TestUpgradeStatus_NonAdminCrossTenant_StillForbidden verifies that the existing
+// cross-tenant isolation is preserved for scoped (non-admin) callers (Issue #1999).
+func TestUpgradeStatus_NonAdminCrossTenant_StillForbidden(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, _ := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	rec := doDispatchUpgrade(server, "tenant-a", "id:steward-1", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	upgradeID := resp.Data.(map[string]interface{})["upgrade_id"].(string)
+
+	// tenant-b (scoped non-admin) must still be forbidden from viewing tenant-a's record.
+	statusRec := doUpgradeStatus(server, "tenant-b", upgradeID)
+	assert.Equal(t, http.StatusForbidden, statusRec.Code)
+}
+
+// TestUpgradeRollback_AdminEmptyTenant_NotUnauthorized verifies that an admin mTLS
+// principal can roll back a record owned by any tenant (no 401, no 403). Two distinct
+// namespaces are at play and must not be conflated (Issue #1999):
+//   - The rollback BINARY is fetched from the admin's "default" blob namespace
+//     (handlers_upgrade.go uses installerBlobTenant(callerTenantID), and an admin's caller
+//     tenant is empty → "default"); it is NOT fetched from the original record's tenant.
+//   - The rollback RECORD's TenantID inherits original.TenantID (effectiveTenantID) so
+//     per-tenant status/listing isolation stays consistent.
+func TestUpgradeRollback_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, upgradeStore := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+	// The admin rollback fetches the rollback binary from the admin "default" namespace.
+	publishApprovedBinary(t, server, "default", "v0.5.11", "linux", "amd64")
+
+	// Tenant-scoped caller creates and commits the original upgrade record.
+	rec := doDispatchUpgrade(server, "tenant-a", "id:steward-1", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	upgradeID := resp.Data.(map[string]interface{})["upgrade_id"].(string)
+	require.NoError(t, upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID, business.UpgradeStatusCommitted, ""))
+
+	// Admin (empty tenant) rolls back tenant-a's record.
+	rollbackRec := rollbackUpgradeAsAdmin(server, upgradeID, "v0.5.11")
+	require.NotEqual(t, http.StatusUnauthorized, rollbackRec.Code,
+		"admin mTLS principal with empty tenant must not be rejected with 401 on rollback")
+	assert.Equal(t, http.StatusAccepted, rollbackRec.Code, "admin rollback must be accepted: %s", rollbackRec.Body.String())
+
+	// The rollback record must carry the original record's tenant (not empty).
+	var rbResp APIResponse
+	require.NoError(t, json.Unmarshal(rollbackRec.Body.Bytes(), &rbResp))
+	rbID := rbResp.Data.(map[string]interface{})["upgrade_id"].(string)
+	rbRecord, err := upgradeStore.GetUpgrade(context.Background(), rbID)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-a", rbRecord.TenantID, "admin rollback record must inherit the original record's tenant")
+}
+
+// TestUpgradeRollback_AdminEmptyTenant_BinaryAbsentFromDefault404 pins the actual fetch
+// namespace for an admin rollback: the binary is read from "default", NOT from the original
+// record's tenant. The rollback target binary is published ONLY under the original record's
+// tenant ("tenant-a") and is intentionally absent from "default", so the admin rollback must
+// return 404 — proving the fetch resolves against "default" (Issue #1999).
+func TestUpgradeRollback_AdminEmptyTenant_BinaryAbsentFromDefault404(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, upgradeStore := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+	// Rollback target published ONLY under tenant-a, NOT under "default".
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.11", "linux", "amd64")
+
+	rec := doDispatchUpgrade(server, "tenant-a", "id:steward-1", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	upgradeID := resp.Data.(map[string]interface{})["upgrade_id"].(string)
+	require.NoError(t, upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID, business.UpgradeStatusCommitted, ""))
+
+	// Admin rollback must look in "default" (where v0.5.11 is absent) and 404 — not find
+	// the tenant-a copy. This is the negative proof of the actual fetch namespace.
+	rollbackRec := rollbackUpgradeAsAdmin(server, upgradeID, "v0.5.11")
+	require.NotEqual(t, http.StatusUnauthorized, rollbackRec.Code,
+		"admin auth must pass; this asserts the blob namespace, not auth")
+	assert.Equal(t, http.StatusNotFound, rollbackRec.Code,
+		"admin rollback binary is fetched from \"default\", not the record tenant: %s", rollbackRec.Body.String())
+	assert.Contains(t, rollbackRec.Body.String(), "BINARY_NOT_FOUND")
+}
+
+// TestUpgradeRollback_NonAdminEmptyTenant_Unauthorized verifies that a NON-admin caller
+// with no tenant still gets 401 on rollback (regression guard, Issue #1999).
+func TestUpgradeRollback_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
+	server, _ := setupUpgradeServer(t, "tenant-a", nil)
+	server.upgradeStore = newTestUpgradeStore()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade/some-id/rollback",
+		bytes.NewReader([]byte(`{"version":"v0.5.11"}`)))
+	req = emptyScopedReq(req)
+	req = mux.SetURLVars(req, map[string]string{"upgrade_id": "some-id"})
+	rec := httptest.NewRecorder()
+	server.handleUpgradeRollback(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "AUTHENTICATION_REQUIRED")
+}
+
+// --- B2: end-to-end admin delivery-path round-trip (Issue #1999) ---
+
+// capturingControlPlane is a real controlplaneInterfaces.ControlPlaneProvider that records
+// the SignedCommands dispatched through it (including their params). It is NOT a mock — it
+// has no expectations and satisfies the full provider contract.
+type capturingControlPlane struct {
+	mu       sync.Mutex
+	commands []*controlplaneTypes.SignedCommand
+}
+
+func (c *capturingControlPlane) Name() string      { return "capturing" }
+func (c *capturingControlPlane) IsConnected() bool { return true }
+func (c *capturingControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error {
+	return nil
+}
+func (c *capturingControlPlane) Start(_ context.Context) error { return nil }
+func (c *capturingControlPlane) Stop(_ context.Context) error  { return nil }
+func (c *capturingControlPlane) SendCommand(_ context.Context, cmd *controlplaneTypes.SignedCommand) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commands = append(c.commands, cmd)
+	return nil
+}
+func (c *capturingControlPlane) FanOutCommand(_ context.Context, _ *controlplaneTypes.SignedCommand, _ []string) (*controlplaneTypes.FanOutResult, error) {
+	return nil, fmt.Errorf("FanOutCommand must not be called in this test")
+}
+func (c *capturingControlPlane) SubscribeCommands(_ context.Context, _ string, _ controlplaneInterfaces.CommandHandler) error {
+	return nil
+}
+func (c *capturingControlPlane) PublishEvent(_ context.Context, _ *controlplaneTypes.Event) error {
+	return nil
+}
+func (c *capturingControlPlane) SubscribeEvents(_ context.Context, _ *controlplaneTypes.EventFilter, _ controlplaneInterfaces.EventHandler) error {
+	return nil
+}
+func (c *capturingControlPlane) SendHeartbeat(_ context.Context, _ *controlplaneTypes.Heartbeat) error {
+	return nil
+}
+func (c *capturingControlPlane) SubscribeHeartbeats(_ context.Context, _ controlplaneInterfaces.HeartbeatHandler) error {
+	return nil
+}
+func (c *capturingControlPlane) GetStats(_ context.Context) (*controlplaneTypes.ControlPlaneStats, error) {
+	return &controlplaneTypes.ControlPlaneStats{}, nil
+}
+func (c *capturingControlPlane) Reconnect(_ context.Context) error { return nil }
+
+// downloadURLs returns the download_url param from every captured PushStewardBinary command.
+func (c *capturingControlPlane) downloadURLs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, cmd := range c.commands {
+		if du, ok := cmd.Command.Params["download_url"].(string); ok {
+			out = append(out, du)
+		}
+	}
+	return out
+}
+
+// doGetStewardBinaryPublic calls handleGetStewardBinaryPublic with the given tenant query
+// param (no auth — the public endpoint authenticates via the binary signature steward-side).
+func doGetStewardBinaryPublic(server *Server, version, platform, arch, tenant string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/public/steward-binaries/"+version+"/"+platform+"/"+arch+"?tenant="+tenant, nil)
+	req = mux.SetURLVars(req, map[string]string{"version": version, "platform": platform, "arch": arch})
+	rec := httptest.NewRecorder()
+	server.handleGetStewardBinaryPublic(rec, req)
+	return rec
+}
+
+// TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace exercises the full admin delivery
+// path: admin publish (lands in "default") → admin dispatch (download_url must carry
+// tenant=default, not empty) → public download with ?tenant=default returns those exact bytes.
+// This covers the publish-namespace ↔ dispatch-download-URL ↔ public-download contract that
+// was previously untested (Issue #1999, B2).
+func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-x", TenantID: "tenant-x", Status: "online"},
+	}
+	server, _ := setupUpgradeServer(t, "tenant-x", stewards)
+
+	// Wire a real command publisher backed by a capturing control plane so the dispatch
+	// fan-out goroutine records the download_url it would send to the steward.
+	cp := &capturingControlPlane{}
+	pub, err := commands.New(&commands.Config{
+		ControlPlane: cp,
+		Signer:       nil,
+		Logger:       logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+	server.commandPublisher = pub
+
+	// 1. Admin publishes the steward binary via the publish handler (no manual blob seeding),
+	//    proving the publish handler itself lands the blob in "default" for an admin.
+	content := []byte("cfgms-steward-binary-e2e-admin")
+	fix := newStewardBinaryFixture(t)
+	server.stewardBinaryTrustStore = fix.store
+	sigBase64 := fix.signContent(content)
+	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v0.5.12", "linux", "amd64", sigBase64, content)
+	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())
+
+	// The publish path does not auto-approve; dispatch requires approved_by. Re-publish the
+	// same content with the approved label into "default" so dispatch's approval gate passes.
+	approvedContent := publishApprovedBinary(t, server, "default", "v0.5.12", "linux", "amd64")
+
+	// 2. Admin dispatches the upgrade.
+	rec := dispatchUpgradeAsAdmin(server, "id:steward-x", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code, "admin dispatch must be accepted: %s", rec.Body.String())
+
+	// The dispatch fan-out runs in a background goroutine; wait for the command to land.
+	require.Eventually(t, func() bool {
+		return len(cp.downloadURLs()) > 0
+	}, 2*time.Second, 5*time.Millisecond, "dispatch must publish a PushStewardBinary command")
+
+	// 2a. The download_url must carry tenant=default (not empty), pointing at the public path.
+	urls := cp.downloadURLs()
+	require.Len(t, urls, 1)
+	assert.Contains(t, urls[0], "tenant=default",
+		"admin dispatch download_url must reference the default namespace: %s", urls[0])
+	assert.NotRegexp(t, `tenant=($|&)`, urls[0], "download_url tenant param must not be empty")
+	assert.Contains(t, urls[0], "/api/v1/public/steward-binaries/v0.5.12/linux/amd64",
+		"download_url must target the public download endpoint")
+
+	// 2b. The public download endpoint with ?tenant=default returns the approved binary that
+	//     was published under "default", closing the delivery loop.
+	getRec := doGetStewardBinaryPublic(server, "v0.5.12", "linux", "amd64", "default")
+	require.Equal(t, http.StatusOK, getRec.Code,
+		"public download with tenant=default must return the published binary: %s", getRec.Body.String())
+	assert.Equal(t, approvedContent, getRec.Body.Bytes(),
+		"public download must return the exact bytes published under default")
 }

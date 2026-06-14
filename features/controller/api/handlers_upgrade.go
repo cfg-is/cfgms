@@ -76,12 +76,19 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	// Admin mTLS principals carry global (cross-tenant) scope with an empty tenant
+	// (middleware.go:173); an empty tenant yields an unscoped fleet search and the
+	// per-tenant isolation filter below is skipped for admins. Only a NON-admin caller
+	// with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 	callerUserID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+	// The blob store requires a non-empty tenant; admins (empty tenant) read the binary
+	// from and key the upgrade record under the "default" namespace, matching the publish
+	// path's installerBlobTenant fallback (Issue #1999).
+	blobTenantID := installerBlobTenant(callerTenantID)
 
 	var req dispatchUpgradeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -133,11 +140,17 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce tenant isolation: drop stewards from other tenants, return 403 if none remain.
+	// Enforce tenant isolation for scoped (non-admin) callers: drop stewards from other
+	// tenants, return 403 if none remain. Admin mTLS principals (empty tenant) have global
+	// scope and act on every matched steward (Issue #1999).
 	var tenantStewards []fleet.StewardResult
-	for _, st := range stewards {
-		if st.TenantID == callerTenantID {
-			tenantStewards = append(tenantStewards, st)
+	if principal.IsAdmin {
+		tenantStewards = stewards
+	} else {
+		for _, st := range stewards {
+			if st.TenantID == callerTenantID {
+				tenantStewards = append(tenantStewards, st)
+			}
 		}
 	}
 	if len(tenantStewards) == 0 {
@@ -148,7 +161,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch the approved binary blob.
-	blobKey := stewardBinaryBlobKey(callerTenantID, req.Version, req.Platform, req.Arch)
+	blobKey := stewardBinaryBlobKey(blobTenantID, req.Version, req.Platform, req.Arch)
 	rc, blobMeta, err := s.blobStore.GetBlob(r.Context(), blobKey)
 	if err != nil {
 		if errors.Is(err, blob.ErrBlobNotFound) {
@@ -230,11 +243,22 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Record tenant: scoped callers are bound to their own tenant (== steward tenant by
+		// the isolation filter above). Admins (empty tenant) attribute each record to the
+		// target steward's tenant so per-tenant status/rollback isolation keeps working
+		// (Issue #1999).
+		recordTenantID := callerTenantID
+		authMethod := "api_key"
+		if principal.IsAdmin {
+			recordTenantID = st.TenantID
+			authMethod = "mtls_admin"
+		}
+
 		upgradeID := uuid.New().String()
 		record := &business.UpgradeRecord{
 			ID:        upgradeID,
 			StewardID: st.ID,
-			TenantID:  callerTenantID,
+			TenantID:  recordTenantID,
 			Version:   req.Version,
 			Platform:  req.Platform,
 			Arch:      req.Arch,
@@ -242,8 +266,8 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			Status:    business.UpgradeStatusDispatched,
 			InitiatedBy: business.InitiatedByIdentity{
 				Subject:    callerUserID,
-				TenantID:   callerTenantID,
-				AuthMethod: "api_key",
+				TenantID:   recordTenantID,
+				AuthMethod: authMethod,
 			},
 			Publisher:       publisher,
 			SignatureDigest: sigDigest,
@@ -280,7 +304,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			baseURL = "https://localhost:9080"
 		}
 		downloadURL := fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
-			baseURL, req.Version, req.Platform, req.Arch, url.QueryEscape(callerTenantID))
+			baseURL, req.Version, req.Platform, req.Arch, url.QueryEscape(blobTenantID))
 		params := map[string]interface{}{
 			"version":      req.Version,
 			"download_url": downloadURL,
@@ -368,9 +392,11 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
+	// and may view any tenant's record; only a NON-admin caller with no tenant is a
+	// genuine auth failure (Issue #1999, same pattern as #1990).
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -393,8 +419,9 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant isolation: caller can only view records in their own tenant.
-	if record.TenantID != callerTenantID {
+	// Tenant isolation: scoped (non-admin) callers can only view records in their own
+	// tenant; admin mTLS principals have global access (Issue #1999).
+	if !principal.IsAdmin && record.TenantID != callerTenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
@@ -419,9 +446,11 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
+	// and may roll back any tenant's record; only a NON-admin caller with no tenant is a
+	// genuine auth failure (Issue #1999, same pattern as #1990).
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 	callerUserID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
@@ -443,10 +472,23 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
-	if original.TenantID != callerTenantID {
+	// Tenant isolation: scoped (non-admin) callers can only roll back records in their own
+	// tenant; admin mTLS principals have global access (Issue #1999).
+	if !principal.IsAdmin && original.TenantID != callerTenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
+	// Record tenant: the rollback record is attributed to the original record's tenant for
+	// admins (global scope) and to the caller's tenant for scoped callers (== original tenant
+	// by the isolation check above), so per-tenant status/listing stays consistent (Issue #1999).
+	effectiveTenantID := callerTenantID
+	if principal.IsAdmin {
+		effectiveTenantID = original.TenantID
+	}
+	// Blob namespace: the rollback binary is read from the caller's namespace, the same place
+	// the caller publishes to — scoped callers from their own tenant, admins from "default"
+	// (the blob store requires a non-empty tenant; matches installerBlobTenant) — Issue #1999.
+	rollbackBlobTenant := installerBlobTenant(callerTenantID)
 
 	var req rollbackRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -465,7 +507,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch the rollback binary blob.
-	blobKey := stewardBinaryBlobKey(callerTenantID, req.Version, original.Platform, original.Arch)
+	blobKey := stewardBinaryBlobKey(rollbackBlobTenant, req.Version, original.Platform, original.Arch)
 	rc, blobMeta, err := s.blobStore.GetBlob(r.Context(), blobKey)
 	if err != nil {
 		if errors.Is(err, blob.ErrBlobNotFound) {
@@ -516,11 +558,15 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rollbackAuthMethod := "api_key"
+	if principal.IsAdmin {
+		rollbackAuthMethod = "mtls_admin"
+	}
 	rollbackUpgradeID := uuid.New().String()
 	record := &business.UpgradeRecord{
 		ID:        rollbackUpgradeID,
 		StewardID: original.StewardID,
-		TenantID:  callerTenantID,
+		TenantID:  effectiveTenantID,
 		Version:   req.Version,
 		Platform:  original.Platform,
 		Arch:      original.Arch,
@@ -528,8 +574,8 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		Status:    business.UpgradeStatusDispatched,
 		InitiatedBy: business.InitiatedByIdentity{
 			Subject:    callerUserID,
-			TenantID:   callerTenantID,
-			AuthMethod: "api_key",
+			TenantID:   effectiveTenantID,
+			AuthMethod: rollbackAuthMethod,
 		},
 		Publisher:       publisher,
 		SignatureDigest: sigDigest,
@@ -555,7 +601,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 			baseURL = "https://localhost:9080"
 		}
 		downloadURL := fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
-			baseURL, req.Version, original.Platform, original.Arch, url.QueryEscape(callerTenantID))
+			baseURL, req.Version, original.Platform, original.Arch, url.QueryEscape(rollbackBlobTenant))
 		params := map[string]interface{}{
 			"version":      req.Version,
 			"download_url": downloadURL,

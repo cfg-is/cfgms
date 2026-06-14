@@ -48,6 +48,18 @@ func (s *Server) stewardBinaryTrust() trust.TrustStore {
 	return store
 }
 
+// installerBlobTenant maps a caller tenant to the tenant namespace used for steward-binary
+// blob storage. The blob store requires a non-empty tenant (blob.ErrBlobTenantRequired), so
+// an admin mTLS principal with global scope (empty tenant) writes/reads under the "default"
+// namespace — the same fallback handlers_configs.go uses for admin writes (middleware.go:170,
+// Issue #1999). Scoped (non-admin) callers always carry their own non-empty tenant.
+func installerBlobTenant(callerTenantID string) string {
+	if callerTenantID == "" {
+		return "default"
+	}
+	return callerTenantID
+}
+
 // stewardBinaryBlobKey builds the BlobKey for a steward binary within the steward-binaries namespace.
 // Name format: "{version}-{platform}-{arch}" (e.g. "v0.5.12-linux-amd64").
 // The blob key Name must not contain "/" — the filesystem provider rejects path separators.
@@ -67,11 +79,15 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
+	// and publish into the global namespace; only a NON-admin caller with no tenant is a
+	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
+	_, callerTenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
+	// Admins (empty tenant) store under the "default" namespace; scoped callers under their own.
+	tenantID := installerBlobTenant(callerTenantID)
 
 	vars := mux.Vars(r)
 	version := vars["version"]
@@ -239,11 +255,15 @@ func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
+	// and read from the global namespace; only a NON-admin caller with no tenant is a
+	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
+	_, callerTenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
+	// Admins (empty tenant) read from the "default" namespace; scoped callers from their own.
+	tenantID := installerBlobTenant(callerTenantID)
 
 	vars := mux.Vars(r)
 	version := vars["version"]
