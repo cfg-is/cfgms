@@ -742,7 +742,12 @@ services:
       # Issue #1948: same test publisher key as fleet-controller so E2E upgrade tests
       # can sign binaries with the zero-seed private key and have them verify on the steward.
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    # The shell loop ALWAYS restarts the steward after it exits (no `&& break`),
+    # modelling the production launcher's re-exec-after-self-exit. Issue #2003 makes
+    # a successful pushed-upgrade swap end the process with a clean exit 0 so the
+    # supervisor relaunches the staged binary; here that supervisor is this loop. A
+    # crash or non-zero exit is likewise relaunched, matching launcher supervise.
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN; echo 'steward exited (auto-apply self-exit per #2001/#2003, or crash) — restarting in 2s'; sleep 2; done"]
     volumes:
       - fleet_steward1_data:/app/data
     tmpfs:
@@ -773,7 +778,9 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    # Always-restart loop (no `&& break`) modelling the production launcher's
+    # re-exec-after-self-exit. See fleet-steward-1 above. Issue #2001/#2003.
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN; echo 'steward exited (auto-apply self-exit per #2001/#2003, or crash) — restarting in 2s'; sleep 2; done"]
     volumes:
       - fleet_steward2_data:/app/data
     tmpfs:

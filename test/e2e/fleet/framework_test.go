@@ -283,6 +283,26 @@ func (s *FleetTestSuite) waitForConvergence(t *testing.T, stewardID string, time
 	return false
 }
 
+// waitForConnected polls getStewardConnectionState until the steward reports
+// "connected" or the timeout expires. Issue #2003: a successful pushed upgrade
+// makes the steward self-exit ~3s after the command completes; the supervisor
+// then relaunches it, which re-registers the same identity and reconnects. An
+// instant connection-state check right after upgrade completion is therefore
+// racy (the steward may be mid-restart), so callers must poll for reconnect.
+func (s *FleetTestSuite) waitForConnected(t *testing.T, stewardID string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		state, err := s.getStewardConnectionState(t, stewardID)
+		if err == nil && state == "connected" {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Logf("Steward %s did not return to connected within %v", stewardID, timeout)
+	return false
+}
+
 // getStewardConnectionState returns connection_state from GET /api/v1/stewards/{id}.
 func (s *FleetTestSuite) getStewardConnectionState(t *testing.T, stewardID string) (string, error) {
 	t.Helper()
@@ -413,8 +433,16 @@ func (s *FleetTestSuite) containerStart(t *testing.T, container string, healthTi
 // authoritative local record of convergence and drift events.
 func (s *FleetTestSuite) readStewardLog(t *testing.T, container string) (string, error) {
 	t.Helper()
+	// Concatenate ALL steward log files, not just the newest. Issue #2003: a
+	// successful upgrade now makes the steward self-exit and the supervisor (the
+	// compose restart loop / production launcher) relaunches it. Each process
+	// start opens a fresh timestamped log file (cfgms-<ts>.log), so the upgrade
+	// staging line ("…staged for upgrade…<version>") written by the PRE-restart
+	// process lives in an older file. Reading only the newest log would miss it
+	// and break version assertions across a restart. `cat` with the glob reads
+	// every log in order so the version string is found regardless of rotation.
 	return s.dockerExec(t, container, "sh", "-c",
-		`ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null`)
+		`cat /tmp/cfgms/cfgms-*.log 2>/dev/null`)
 }
 
 const upgradeAPIKey = "cfgms-upgrade-test-key"

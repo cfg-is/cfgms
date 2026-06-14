@@ -146,15 +146,20 @@ func TestFleetStewardUpgradeHappyPath(t *testing.T) {
 	require.Equal(t, "committed", status,
 		"upgrade status must reach 'committed' within 35s (got %q)", status)
 
-	// Verify via steward log that the upgrade version was processed.
+	// Verify via steward log that the upgrade version was processed. readStewardLog
+	// concatenates all log files, so the staging line survives the post-upgrade
+	// self-exit + restart (the restarted process writes to a new log file).
 	require.True(t, suite.waitForStewardVersion(t, "fleet-steward-1", "v0.5.99-test", 10*time.Second),
 		"steward must log v0.5.99-test within 10s of upgrade completion")
 
-	// Steward must still be reachable after the upgrade (steward_id unchanged).
-	state, err := suite.getStewardConnectionState(t, stewardID)
-	require.NoError(t, err, "GET /api/v1/stewards/%s must succeed after upgrade", stewardID)
-	require.Equal(t, "connected", state,
-		"steward must remain connected after upgrade")
+	// Issue #2003: a successful upgrade now makes the steward self-exit ~3s after
+	// the command completes so the supervisor (production: launcher; here: the
+	// compose restart loop) re-execs the staged binary. The restarted steward
+	// re-registers the same identity and reconnects, so an instant connection-state
+	// check is racy — the steward may be mid-restart. Poll for it to return to
+	// "connected" with a margin comfortably past the 3s grace delay + restart time.
+	require.True(t, suite.waitForConnected(t, stewardID, 30*time.Second),
+		"steward must reconnect (same steward_id) within 30s after the auto-apply self-exit + restart")
 }
 
 // TestFleetStewardUpgradeBrokenBinaryRollback publishes a binary with a valid signature,
