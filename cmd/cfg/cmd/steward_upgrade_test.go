@@ -55,22 +55,32 @@ func saveStewardUpgradeGlobals(t *testing.T) {
 	})
 }
 
-// writeUpgradeDispatchResponse writes a canned dispatch 202 response.
-func writeUpgradeDispatchResponse(w http.ResponseWriter, upgradeID string, stewardCount int) {
+// writeEnvelopedResponse mirrors the controller's writeResponse: it wraps the
+// payload in the {"data": {...}, "timestamp": "..."} envelope so test mocks
+// produce the exact shape the real controller returns.
+func writeEnvelopedResponse(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(APIDispatchUpgradeResponse{
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"data":      data,
+		"timestamp": time.Now().UTC(),
+	})
+}
+
+// writeUpgradeDispatchResponse writes a canned dispatch 202 response in the
+// controller envelope shape.
+func writeUpgradeDispatchResponse(w http.ResponseWriter, upgradeID string, stewardCount int) {
+	writeEnvelopedResponse(w, http.StatusAccepted, APIDispatchUpgradeResponse{
 		UpgradeID:    upgradeID,
 		StewardCount: stewardCount,
 		Status:       "accepted",
 	})
 }
 
-// writeUpgradeStatusResponse writes a canned upgrade status response.
+// writeUpgradeStatusResponse writes a canned upgrade status response in the
+// controller envelope shape.
 func writeUpgradeStatusResponse(w http.ResponseWriter, upgradeID string, stewards []APIUpgradeStewardStatus) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(APIUpgradeStatusResponse{
+	writeEnvelopedResponse(w, http.StatusOK, APIUpgradeStatusResponse{
 		UpgradeID: upgradeID,
 		Stewards:  stewards,
 	})
@@ -490,9 +500,7 @@ func TestRunStewardUpgradeRollback_Success(t *testing.T) {
 		stewards := []APIUpgradeStewardStatus{
 			{Device: "device-1", Status: "rolled_back"},
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(APIUpgradeStatusResponse{
+		writeEnvelopedResponse(w, http.StatusOK, APIUpgradeStatusResponse{
 			UpgradeID: "upgrade-rollback-id",
 			Stewards:  stewards,
 		})
@@ -529,9 +537,7 @@ func TestRunStewardUpgradeRollback_WithToVersion(t *testing.T) {
 		stewards := []APIUpgradeStewardStatus{
 			{Device: "device-1", Status: "rolled_back"},
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(APIUpgradeStatusResponse{
+		writeEnvelopedResponse(w, http.StatusOK, APIUpgradeStatusResponse{
 			UpgradeID: "upgrade-tv-id",
 			Stewards:  stewards,
 		})
@@ -555,9 +561,7 @@ func TestRunStewardUpgradeRollback_WithToVersion(t *testing.T) {
 
 func TestRunStewardUpgradeRollback_EmptyResult(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(APIUpgradeStatusResponse{
+		writeEnvelopedResponse(w, http.StatusOK, APIUpgradeStatusResponse{
 			UpgradeID: "upgrade-empty-rollback-id",
 			Stewards:  []APIUpgradeStewardStatus{},
 		})

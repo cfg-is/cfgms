@@ -603,9 +603,16 @@ func (c *APIClient) DispatchUpgrade(ctx context.Context, req *APIDispatchUpgrade
 		return nil, c.parseError(resp)
 	}
 
-	var result APIDispatchUpgradeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIDispatchUpgradeResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode dispatch data: %w", err)
 	}
 	return &result, nil
 }
@@ -634,9 +641,16 @@ func (c *APIClient) GetUpgradeStatusWithHTTPStatus(ctx context.Context, upgradeI
 		return nil, resp.StatusCode, c.parseError(resp)
 	}
 
-	var result APIUpgradeStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIUpgradeStatusResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode status data: %w", err)
 	}
 	return &result, resp.StatusCode, nil
 }
@@ -656,9 +670,16 @@ func (c *APIClient) ListUpgradeStatusBySelector(ctx context.Context, selector st
 		return nil, c.parseError(resp)
 	}
 
-	var result APIUpgradeStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIUpgradeStatusResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode status data: %w", err)
 	}
 	return &result, nil
 }
@@ -680,9 +701,16 @@ func (c *APIClient) RollbackUpgrade(ctx context.Context, upgradeID string, req *
 		return nil, c.parseError(resp)
 	}
 
-	var result APIUpgradeStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIUpgradeStatusResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode rollback data: %w", err)
 	}
 	return &result, nil
 }
