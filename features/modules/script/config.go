@@ -227,9 +227,12 @@ func (c *ScriptConfig) GetManagedFields() []string {
 func (c *ScriptConfig) isShellSupported() bool {
 	switch runtime.GOOS {
 	case "windows":
-		return c.Shell == ShellPowerShell || c.Shell == ShellCmd || c.Shell == ShellPython || c.Shell == ShellPython3
+		// pwsh (PowerShell Core) is cross-platform and valid on Windows alongside
+		// Windows PowerShell 5.1 (powershell).
+		return c.Shell == ShellPowerShell || c.Shell == ShellPwsh || c.Shell == ShellCmd || c.Shell == ShellPython || c.Shell == ShellPython3
 	case "linux", "darwin":
-		return c.Shell == ShellBash || c.Shell == ShellZsh || c.Shell == ShellSh || c.Shell == ShellPython || c.Shell == ShellPython3
+		// pwsh (PowerShell Core) is cross-platform and valid on Unix.
+		return c.Shell == ShellBash || c.Shell == ShellZsh || c.Shell == ShellSh || c.Shell == ShellPwsh || c.Shell == ShellPython || c.Shell == ShellPython3
 	default:
 		return false
 	}

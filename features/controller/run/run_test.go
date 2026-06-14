@@ -603,3 +603,94 @@ func TestManager_Close_NonClosableStore(t *testing.T) {
 	manager := NewManager(closerlessStore{}, nil)
 	require.NoError(t, manager.Close(), "Manager.Close must be a no-op for non-closable store")
 }
+
+// TestRunStore_Init_FreshDB_HasOutputColumns verifies Init on a fresh database
+// creates the output/stderr/exit_code columns (via CREATE TABLE) and that Init is
+// idempotent across repeated calls (Issue #1995 review B2).
+func TestRunStore_Init_FreshDB_HasOutputColumns(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := NewRunStoreSQL(db)
+	require.NoError(t, store.Init(context.Background()), "Init on fresh DB must succeed")
+	// Idempotent: a second Init must not error.
+	require.NoError(t, store.Init(context.Background()), "repeated Init must be idempotent")
+
+	cols, err := store.jobColumns()
+	require.NoError(t, err)
+	assert.True(t, cols["output"], "fresh DB must have output column")
+	assert.True(t, cols["stderr"], "fresh DB must have stderr column")
+	assert.True(t, cols["exit_code"], "fresh DB must have exit_code column")
+}
+
+// TestRunStore_Init_OldSchema_MigratesColumns verifies that Init adds the
+// output/stderr/exit_code columns to a pre-existing jobs table that lacks them
+// (the upgrade-from-old-deployment case), and is idempotent across repeated calls
+// (Issue #1995 review B2).
+func TestRunStore_Init_OldSchema_MigratesColumns(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Create the pre-#1995 jobs table (no output/stderr/exit_code columns).
+	const oldJobs = `
+CREATE TABLE script_run_jobs (
+    job_id        TEXT NOT NULL PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    device_id     TEXT NOT NULL,
+    execution_id  TEXT,
+    status        TEXT NOT NULL,
+    created_at    DATETIME NOT NULL,
+    completed_at  DATETIME
+);`
+	_, err = db.Exec(oldJobs)
+	require.NoError(t, err)
+
+	store := NewRunStoreSQL(db)
+
+	before, err := store.jobColumns()
+	require.NoError(t, err)
+	require.False(t, before["output"], "precondition: old schema must lack output column")
+
+	require.NoError(t, store.Init(context.Background()), "Init must migrate old schema")
+
+	after, err := store.jobColumns()
+	require.NoError(t, err)
+	assert.True(t, after["output"], "migration must add output column")
+	assert.True(t, after["stderr"], "migration must add stderr column")
+	assert.True(t, after["exit_code"], "migration must add exit_code column")
+
+	// Idempotent: running Init again on the now-migrated DB must not error or re-add.
+	require.NoError(t, store.Init(context.Background()), "repeated Init must be idempotent after migration")
+
+	// The migrated columns must be usable end-to-end.
+	require.NoError(t, store.CreateRun(sampleRun("run-mig", "tenant-mig")))
+	require.NoError(t, store.CreateJob(&JobRecord{
+		JobID: "job-mig", RunID: "run-mig", DeviceID: "dev-mig",
+		Status: JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+	require.NoError(t, store.UpdateJobResult("job-mig", JobStatusCompleted, "exec-mig", "hello\n", "", 0))
+
+	jobs, err := store.ListRunJobs("run-mig")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "hello\n", jobs[0].Output)
+	assert.Equal(t, 0, jobs[0].ExitCode)
+}
+
+// TestRunStore_Init_AlreadyMigrated_NoOp verifies that Init on a DB that already
+// has the columns (current-schema fresh DB re-opened) is a no-op and idempotent
+// (Issue #1995 review B2 — must not rely on error-string matching).
+func TestRunStore_Init_AlreadyMigrated_NoOp(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := NewRunStoreSQL(db)
+	require.NoError(t, store.Init(context.Background()))
+
+	// migrateJobColumns called directly must be a clean no-op when columns exist.
+	require.NoError(t, store.migrateJobColumns(), "migrate must be a no-op when columns already exist")
+	require.NoError(t, store.migrateJobColumns(), "migrate must remain idempotent")
+}
