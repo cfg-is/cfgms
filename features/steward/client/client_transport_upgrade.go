@@ -269,7 +269,7 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 	c.logger.Info("Steward binary staged for upgrade; scheduling graceful restart so launcher re-execs new version",
 		"version", logging.SanitizeLogValue(params.Version),
 		"launcher", lPath)
-	c.scheduleGracefulShutdownAfterSwap(ctx)
+	c.scheduleGracefulShutdownAfterSwap()
 	return nil
 }
 
@@ -284,17 +284,25 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 // to run the trigger synchronously and shutdownFunc to a recorder, so no real
 // time.Sleep or process exit occurs.
 //
-// ctx is the command's run context (ultimately derived from runCtx). The default
-// timer goroutine selects on both the grace-delay timer and ctx.Done() so it
-// exits promptly when the process is already shutting down via another path
-// (signal/SCM stop, or a separate runCancel) rather than lingering for the full
-// grace delay. shutdownFunc (runCancel in production) is idempotent — context
-// cancel funcs are safe to call multiple times and only the first has effect.
-func (c *TransportClient) scheduleGracefulShutdownAfterSwap(ctx context.Context) {
+// The default timer goroutine watches the steward's RUN context (shutdownCtx,
+// wired via SetShutdownFunc) for early-exit — NOT the per-command context. The
+// run context is cancelled only when the process is already shutting down via
+// another path (signal/SCM stop, or a separate runCancel), in which case the
+// goroutine exits promptly without firing the redundant trigger rather than
+// lingering for the full grace delay. The per-command context is deliberately
+// NOT used here: executeCommand cancels it (`defer cancel()`) the instant this
+// handler returns — right after the completion ack — which always beats the
+// grace delay and would suppress the auto-apply self-exit entirely (Issue #2003).
+// If no run context is wired (shutdownCtx == nil, e.g. older tests) the goroutine
+// falls back to a plain timer with no early-exit so the trigger still fires.
+// shutdownFunc (runCancel in production) is idempotent — context cancel funcs are
+// safe to call multiple times and only the first has effect.
+func (c *TransportClient) scheduleGracefulShutdownAfterSwap() {
 	c.mu.RLock()
 	shutdown := c.shutdownFunc
 	schedule := c.shutdownScheduleFunc
 	delay := c.upgradeShutdownGraceDelay
+	runCtx := c.shutdownCtx
 	c.mu.RUnlock()
 
 	if shutdown == nil {
@@ -319,16 +327,22 @@ func (c *TransportClient) scheduleGracefulShutdownAfterSwap(ctx context.Context)
 
 	// Default real implementation: fire the trigger once after delay without
 	// blocking the handler (which must return so the completion ack is sent).
-	// Exit early if the run context is cancelled first — the steward is already
+	// Exit early if the RUN context is cancelled first — the steward is already
 	// shutting down, so there is no point holding this goroutine for the full
-	// grace delay.
+	// grace delay. If no run context is wired, fall back to a plain timer so the
+	// trigger still fires (no early-exit). (Issue #2003)
 	go func() {
 		t := time.NewTimer(delay)
 		defer t.Stop()
+		if runCtx == nil {
+			<-t.C
+			trigger()
+			return
+		}
 		select {
 		case <-t.C:
 			trigger()
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			c.logger.Info("Run context cancelled before upgrade grace delay elapsed; skipping redundant shutdown trigger")
 		}
 	}()
