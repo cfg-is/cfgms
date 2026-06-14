@@ -81,7 +81,9 @@ func doPublish(server *Server, version, platform, arch, tenantID, sigBase64 stri
 		rawURL += "?" + q.Encode()
 	}
 	req := httptest.NewRequest(http.MethodPost, rawURL, bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	// A tenant-scoped (non-admin) caller carries both a principal and its tenant, exactly
+	// as authenticationMiddleware injects them for an X-API-Key request (Issue #1999).
+	req = withScopedPrincipal(req, tenantID)
 	req = mux.SetURLVars(req, map[string]string{
 		"version":  version,
 		"platform": platform,
@@ -92,11 +94,32 @@ func doPublish(server *Server, version, platform, arch, tenantID, sigBase64 stri
 	return rec
 }
 
+// withScopedPrincipal injects a non-admin principal bound to tenantID plus the tenant
+// context value, mirroring authenticationMiddleware for an API-key request. An empty
+// tenantID models a non-admin caller with no tenant (a genuine auth failure).
+func withScopedPrincipal(req *http.Request, tenantID string) *http.Request {
+	p := &Principal{ID: "api-key:" + tenantID, IsAdmin: false, TenantID: tenantID}
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+	return req.WithContext(ctx)
+}
+
+// withAdminPrincipal injects an admin mTLS principal (IsAdmin=true, empty tenant) plus
+// the empty tenant context value, mirroring authenticationMiddleware for an mTLS admin
+// cert (middleware.go:173). This is the global-scope path that cannot be reached via an
+// X-API-Key request (Issue #1999).
+func withAdminPrincipal(req *http.Request) *http.Request {
+	p := &Principal{ID: "mtls-admin:cn", Name: "mtls-admin:cn", IsAdmin: true, TenantID: ""}
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, "")
+	return req.WithContext(ctx)
+}
+
 // doGet calls handleGetStewardBinary directly.
 func doGet(server *Server, version, platform, arch, tenantID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/installer/steward-binaries/"+version+"/"+platform+"/"+arch, nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	req = withScopedPrincipal(req, tenantID)
 	req = mux.SetURLVars(req, map[string]string{
 		"version":  version,
 		"platform": platform,
@@ -253,7 +276,7 @@ func TestHandlePublishStewardBinary_ForceOverwrite(t *testing.T) {
 	q.Set("force", "true")
 	rawURL := "/api/v1/installer/steward-binaries/v1.0.0/linux/amd64?" + q.Encode()
 	req := httptest.NewRequest(http.MethodPost, rawURL, bytes.NewReader(newContent))
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "test-tenant"))
+	req = withScopedPrincipal(req, "test-tenant")
 	req = mux.SetURLVars(req, map[string]string{"version": "v1.0.0", "platform": "linux", "arch": "amd64"})
 	rec2 := httptest.NewRecorder()
 	server.handlePublishStewardBinary(rec2, req)
@@ -421,9 +444,8 @@ func TestHandlePublishStewardBinary_LabelsStoredCorrectly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/installer/steward-binaries/v2.0.0/windows/amd64?"+q2.Encode(),
 		bytes.NewReader(content))
-	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "label-tenant")
-	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "admin@example.com")
-	req = req.WithContext(ctx)
+	req = withScopedPrincipal(req, "label-tenant")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.UserIDKey, "admin@example.com"))
 	req = mux.SetURLVars(req, map[string]string{"version": "v2.0.0", "platform": "windows", "arch": "amd64"})
 	rec := httptest.NewRecorder()
 	server.handlePublishStewardBinary(rec, req)
@@ -465,4 +487,89 @@ func TestHandlePublishStewardBinary_LabelsStoredCorrectly(t *testing.T) {
 	got, readErr := io.ReadAll(rc)
 	require.NoError(t, readErr)
 	assert.Equal(t, content, got)
+}
+
+// --- Admin mTLS empty-tenant tests (Issue #1999) ---
+
+// publishWithPrincipal calls handlePublishStewardBinary with the given principal injected
+// into the request context (admin mTLS or scoped non-admin), exactly as the middleware does.
+func publishWithPrincipal(server *Server, principalReq func(*http.Request) *http.Request, version, platform, arch, sigBase64 string, body []byte) *httptest.ResponseRecorder {
+	q := url.Values{}
+	q.Set("signature", sigBase64)
+	rawURL := "/api/v1/installer/steward-binaries/" + version + "/" + platform + "/" + arch + "?" + q.Encode()
+	req := httptest.NewRequest(http.MethodPost, rawURL, bytes.NewReader(body))
+	req = principalReq(req)
+	req = mux.SetURLVars(req, map[string]string{"version": version, "platform": platform, "arch": arch})
+	rec := httptest.NewRecorder()
+	server.handlePublishStewardBinary(rec, req)
+	return rec
+}
+
+// getWithPrincipal calls handleGetStewardBinary with the given principal injected.
+func getWithPrincipal(server *Server, principalReq func(*http.Request) *http.Request, version, platform, arch string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/installer/steward-binaries/"+version+"/"+platform+"/"+arch, nil)
+	req = principalReq(req)
+	req = mux.SetURLVars(req, map[string]string{"version": version, "platform": platform, "arch": arch})
+	rec := httptest.NewRecorder()
+	server.handleGetStewardBinary(rec, req)
+	return rec
+}
+
+// TestPublish_AdminEmptyTenant_NotUnauthorized verifies that an admin mTLS principal
+// (IsAdmin=true, TenantID="") is NOT rejected with 401 on publish — it proceeds to the
+// global (empty-tenant) namespace and succeeds (Issue #1999).
+func TestPublish_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	content := []byte("admin-published steward binary")
+	sigBase64 := fix.signContent(content)
+
+	rec := publishWithPrincipal(server, withAdminPrincipal, "v1.0.0", "linux", "amd64", sigBase64, content)
+
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"admin mTLS principal with empty tenant must not be rejected with 401: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "admin publish must succeed: %s", rec.Body.String())
+}
+
+// TestPublish_NonAdminEmptyTenant_Unauthorized verifies that a NON-admin principal with
+// no tenant still gets 401 on publish (regression guard, Issue #1999).
+func TestPublish_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	content := []byte("scoped-but-tenantless binary")
+	sigBase64 := fix.signContent(content)
+
+	emptyScoped := func(req *http.Request) *http.Request { return withScopedPrincipal(req, "") }
+	rec := publishWithPrincipal(server, emptyScoped, "v1.0.0", "linux", "amd64", sigBase64, content)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "AUTHENTICATION_REQUIRED")
+}
+
+// TestGetStewardBinary_AdminEmptyTenant_NotUnauthorized verifies that an admin mTLS
+// principal can GET from the global (empty-tenant) namespace it published into, without 401.
+func TestGetStewardBinary_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	content := []byte("admin binary for get")
+	sigBase64 := fix.signContent(content)
+
+	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v1.2.3", "darwin", "arm64", sigBase64, content)
+	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())
+
+	getRec := getWithPrincipal(server, withAdminPrincipal, "v1.2.3", "darwin", "arm64")
+	require.NotEqual(t, http.StatusUnauthorized, getRec.Code,
+		"admin mTLS principal with empty tenant must not be rejected with 401 on GET")
+	assert.Equal(t, http.StatusOK, getRec.Code)
+	assert.Equal(t, content, getRec.Body.Bytes())
+}
+
+// TestGetStewardBinary_NonAdminEmptyTenant_Unauthorized verifies that a NON-admin caller
+// with no tenant still gets 401 on the authenticated GET (regression guard, Issue #1999).
+func TestGetStewardBinary_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
+	server, _ := setupStewardBinaryServer(t)
+
+	emptyScoped := func(req *http.Request) *http.Request { return withScopedPrincipal(req, "") }
+	getRec := getWithPrincipal(server, emptyScoped, "v1.0.0", "linux", "amd64")
+
+	assert.Equal(t, http.StatusUnauthorized, getRec.Code)
+	assert.Contains(t, getRec.Body.String(), "AUTHENTICATION_REQUIRED")
 }
