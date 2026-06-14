@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // TestHelperProcess is the canonical Go pattern for testing exec.Cmd-based
@@ -41,6 +43,11 @@ func TestHelperProcess(t *testing.T) {
 	}
 	if marker := os.Getenv("FAKE_STEWARD_MARKER_FILE"); marker != "" {
 		_ = os.WriteFile(marker, []byte("started"), 0o600)
+	}
+	// Issue #2003: record the launcher-managed marker env the launcher set on us
+	// so a test can assert execOnce propagated CFGMS_STEWARD_LAUNCHER_MANAGED=1.
+	if mf := os.Getenv("FAKE_STEWARD_RECORD_MANAGED_FILE"); mf != "" {
+		_ = os.WriteFile(mf, []byte(os.Getenv(version.EnvStewardLauncherManaged)), 0o600)
 	}
 	if sleepMs := os.Getenv("FAKE_STEWARD_SLEEP_MS"); sleepMs != "" {
 		if n, err := strconv.Atoi(sleepMs); err == nil && n > 0 {
@@ -481,5 +488,49 @@ func TestFakeChild_MarkerFileProvesWhichVersionRan(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("marker file not created: %v", err)
+	}
+}
+
+// TestExecOnce_SetsLauncherManagedEnvOnChild verifies the #2003 contract: the
+// launcher marks its steward child with CFGMS_STEWARD_LAUNCHER_MANAGED=1 so the
+// steward knows it is supervised and may self-exit after a pushed-upgrade swap.
+// We run execOnce against the fake-steward helper, which records the value of
+// that env var it actually received, and assert it is "1".
+func TestExecOnce_SetsLauncherManagedEnvOnChild(t *testing.T) {
+	recordFile := filepath.Join(t.TempDir(), "managed")
+
+	// Put the helper knobs in the process environment (execOnce builds the child
+	// env from os.Environ()). Deliberately do NOT pre-set the launcher-managed
+	// marker here — its presence in the recorded value must come from execOnce.
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("FAKE_STEWARD_RECORD_MANAGED_FILE", recordFile)
+	t.Setenv("FAKE_STEWARD_EXIT_CODE", "0")
+	// Guard against a polluted environment: the marker must be unset so any "1"
+	// in the recorded value is attributable to execOnce.
+	if v, ok := os.LookupEnv(version.EnvStewardLauncherManaged); ok && v != "" {
+		_ = os.Unsetenv(version.EnvStewardLauncherManaged)
+		t.Cleanup(func() { _ = os.Setenv(version.EnvStewardLauncherManaged, v) })
+	}
+
+	s := &Supervisor{
+		Layout:    newLayout(t),
+		Stdout:    &bytes.Buffer{},
+		Stderr:    &bytes.Buffer{},
+		ExtraArgs: []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.execOnce(ctx, helperExe(t)); err != nil {
+		t.Fatalf("execOnce returned error: %v", err)
+	}
+
+	got, err := os.ReadFile(recordFile) //nolint:gosec // test temp path
+	if err != nil {
+		t.Fatalf("read recorded managed-env file: %v", err)
+	}
+	if string(got) != "1" {
+		t.Errorf("child saw %s=%q, want \"1\" — execOnce must mark the steward child as launcher-managed (#2003)",
+			version.EnvStewardLauncherManaged, string(got))
 	}
 }

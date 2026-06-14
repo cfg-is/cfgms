@@ -177,8 +177,10 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		}
 
 		// Wire the graceful-shutdown trigger used after a successful
-		// push_steward_binary swap. (Issue #2001)
-		transportCl.SetShutdownFunc(runCancel)
+		// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer
+		// watches the process lifecycle (cancelled only on SCM stop / signal /
+		// runCancel) for early-exit, NOT a per-command context. (Issue #2001, #2003)
+		transportCl.SetShutdownFunc(runCtx, runCancel)
 
 		logger.Info("Steward registered and connected successfully via gRPC transport",
 			"operation", "registration_complete",

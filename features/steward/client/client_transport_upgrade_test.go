@@ -81,6 +81,11 @@ func minimalClientForUpgradeTest(
 		certStoreDir:               certStoreDir,
 		upgradePublisherTrustStore: trustStore,
 		launcherSwapFunc:           swapFn,
+		// Default to launcher-managed so the existing success-path tests continue
+		// to exercise the schedule/self-exit logic. Issue #2003 gates the self-exit
+		// on this flag; tests that specifically verify the bare/standalone path set
+		// it back to false explicitly. (Issue #2003)
+		launcherManaged: true,
 	}
 	return c
 }
@@ -892,6 +897,60 @@ func TestHandlePushStewardBinary_NilShutdownFuncIsSafe(t *testing.T) {
 	assert.False(t, scheduled, "with no shutdownFunc wired, nothing should be scheduled")
 }
 
+// TestHandlePushStewardBinary_LauncherManagedGatesSelfExit verifies the #2003
+// gate: after a SUCCESSFUL launcher swap, the steward schedules its graceful
+// self-exit ONLY when launcher-managed. A bare/standalone steward stages the
+// binary (swap succeeds) but does NOT schedule a shutdown — it keeps running and
+// applies the new binary on its next restart, avoiding downtime / a crash loop.
+func TestHandlePushStewardBinary_LauncherManagedGatesSelfExit(t *testing.T) {
+	cases := []struct {
+		name            string
+		launcherManaged bool
+		wantScheduled   bool
+	}{
+		{name: "launcher-managed schedules self-exit", launcherManaged: true, wantScheduled: true},
+		{name: "standalone stages without self-exit", launcherManaged: false, wantScheduled: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := []byte("launcher-managed gate steward binary " + tc.name)
+			sha256Hex := computeSHA256(content)
+			ts, sign := testPublisher(t, "cfgms")
+			sig := sign(sha256Hex)
+			srv := newUpgradeTestServer(t, content)
+
+			certStoreDir := t.TempDir()
+			fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+			require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+			var (
+				scheduled      bool
+				shutdownCalled bool
+			)
+			c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+			c.mu.Lock()
+			c.transportAddress = "127.0.0.1:4433"
+			c.upgradeAllowDowngrade = true
+			c.upgradeHTTPClient = srv.Client()
+			c.launcherPathOverride = fakeLauncher
+			c.launcherManaged = tc.launcherManaged
+			c.shutdownFunc = func() { shutdownCalled = true }
+			c.shutdownScheduleFunc = func(_ time.Duration, _ func()) { scheduled = true }
+			c.mu.Unlock()
+
+			cmd := upgradeTestCmd("cmd-gate-"+tc.name, "v99.9.0", srv.URL+"/", sha256Hex, sig)
+			// The swap itself must always succeed (binary staged) regardless of the gate.
+			require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd),
+				"successful swap must not error in either mode")
+
+			assert.Equal(t, tc.wantScheduled, scheduled,
+				"schedule must fire iff launcher-managed (managed=%v)", tc.launcherManaged)
+			assert.False(t, shutdownCalled,
+				"shutdown must never fire synchronously inside the handler")
+		})
+	}
+}
+
 // seqRecordingControlPlane is a real ControlPlaneProvider (embedding the shared
 // noopControlPlane) that records every EventCommandCompleted it is asked to
 // publish into an ordered sequence. It lets the ordering test observe the
@@ -1036,9 +1095,11 @@ func TestPushStewardBinary_DefaultTimerInvokesShutdown(t *testing.T) {
 }
 
 // TestPushStewardBinary_DefaultTimerExitsOnContextCancel verifies that the
-// default timer goroutine exits promptly via ctx.Done() (rather than waiting the
-// full grace delay) when the run context is cancelled by another shutdown path,
-// and that it does NOT redundantly invoke shutdownFunc in that case. (Issue #2001)
+// default timer goroutine exits promptly via the RUN context's Done() (rather
+// than waiting the full grace delay) when the process is shutting down via
+// another path, and that it does NOT redundantly invoke shutdownFunc in that
+// case. The early-exit watches the steward's RUN context (wired via
+// SetShutdownFunc), not the per-command context. (Issue #2001, #2003)
 func TestPushStewardBinary_DefaultTimerExitsOnContextCancel(t *testing.T) {
 	content := []byte("ctx cancel path steward binary")
 	sha256Hex := computeSHA256(content)
@@ -1052,32 +1113,99 @@ func TestPushStewardBinary_DefaultTimerExitsOnContextCancel(t *testing.T) {
 
 	var shutdownCalls int32
 	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+
+	// Wire the RUN context (process lifecycle) via the production setter. The
+	// per-command context passed to the handler is deliberately separate.
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	c.SetShutdownFunc(runCtx, func() { atomic.AddInt32(&shutdownCalls, 1) })
+
 	c.mu.Lock()
 	c.transportAddress = "127.0.0.1:4433"
 	c.upgradeAllowDowngrade = true
 	c.upgradeHTTPClient = srv.Client()
 	c.launcherPathOverride = fakeLauncher
-	c.shutdownFunc = func() { atomic.AddInt32(&shutdownCalls, 1) }
-	// Long delay so the timer would normally not fire during the test window.
-	c.upgradeShutdownGraceDelay = 10 * time.Second
+	// SHORT grace delay: if the early-exit were broken, the timer would fire the
+	// shutdown well within the observation window below, so the assertion is not
+	// vacuous — it actively races the timer and the run-ctx cancel must win.
+	const graceDelay = 50 * time.Millisecond
+	c.upgradeShutdownGraceDelay = graceDelay
 	c.shutdownScheduleFunc = nil // exercise the real timer goroutine
 	c.mu.Unlock()
 
-	ctx, cancel := context.WithCancel(context.Background())
 	cmd := upgradeTestCmd("cmd-ctx-cancel", "v99.7.0", srv.URL+"/", sha256Hex, sig)
-	require.NoError(t, c.handlePushStewardBinary(ctx, cmd))
+	require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd))
 
-	// Cancel the run context — the goroutine must take the ctx.Done() branch and
-	// NOT call shutdownFunc.
-	cancel()
-	// Give the goroutine a moment to observe cancellation and return.
-	require.Eventually(t, func() bool {
-		// Once cancelled, no shutdown should ever be recorded.
-		return atomic.LoadInt32(&shutdownCalls) == 0
-	}, 500*time.Millisecond, 10*time.Millisecond,
-		"context cancel must short-circuit the grace-delay timer without firing shutdown")
-	assert.Equal(t, int32(0), atomic.LoadInt32(&shutdownCalls),
-		"shutdownFunc must not run when the run context is cancelled before the grace delay")
+	// Cancel the RUN context immediately after the handler returns — the goroutine
+	// must take the runCtx.Done() branch and NOT call shutdownFunc (a real shutdown
+	// is already underway). This happens at ~t=0, around when the timer is armed.
+	runCancel()
+
+	// Actively probe for 250ms (≫ the 50ms grace delay) that the shutdown trigger
+	// NEVER fires. require.Never re-evaluates the predicate every 10ms across the
+	// whole window, so it is not vacuous the way a single sleep-then-check is: if
+	// the run-ctx early-exit branch were removed, the timer would fire at ~50ms and
+	// require.Never would catch shutdownCalls > 0 well before the window closes.
+	require.Never(t, func() bool {
+		return atomic.LoadInt32(&shutdownCalls) > 0
+	}, 250*time.Millisecond, 10*time.Millisecond,
+		"run-ctx cancel must prevent the shutdown trigger from firing")
+}
+
+// TestPushStewardBinary_FiresWhenCommandCtxCancelledImmediately is the #2003
+// regression test. It reproduces PRODUCTION: commands.Handler.executeCommand
+// runs the handler under a per-command context with `defer cancel()`, so that
+// context is cancelled the instant the handler returns (right after the
+// completion ack) — always far sooner than the grace delay. The auto-apply
+// self-exit MUST still fire because the grace-delay timer watches the RUN
+// context (a long-lived context we never cancel), not the per-command context.
+//
+// This test FAILS against the pre-#2003 code (which selected on the per-command
+// ctx and took the ctx.Done() branch immediately) and PASSES after the fix.
+func TestPushStewardBinary_FiresWhenCommandCtxCancelledImmediately(t *testing.T) {
+	content := []byte("regression 2003 steward binary")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	shutdownFired := make(chan struct{})
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+
+	// RUN context: long-lived, NEVER cancelled in this test (mimics the steward
+	// process staying alive until the grace timer triggers the self-exit).
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	c.SetShutdownFunc(runCtx, func() { close(shutdownFired) })
+
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.upgradeShutdownGraceDelay = 50 * time.Millisecond
+	c.shutdownScheduleFunc = nil // exercise the real timer goroutine
+	c.mu.Unlock()
+
+	// Per-command context, exactly as executeCommand builds it: cancelled the
+	// instant the handler returns.
+	cmdCtx, cmdCancel := context.WithCancel(context.Background())
+	cmd := upgradeTestCmd("cmd-2003-regression", "v99.8.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(cmdCtx, cmd))
+	cmdCancel() // executeCommand's `defer cancel()` — fires right after the handler returns.
+
+	select {
+	case <-shutdownFired:
+		// Correct: the grace timer fired and triggered the self-exit even though
+		// the per-command context was cancelled immediately.
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdownFunc was not invoked after the grace delay; per-command ctx " +
+			"cancellation must NOT suppress the auto-apply self-exit (Issue #2003)")
+	}
 }
 
 // TestDisconnect_DoubleCallNoPanic verifies that Disconnect can be safely called

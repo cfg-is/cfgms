@@ -47,6 +47,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // TransportClient represents the steward client using gRPC-over-QUIC for both
@@ -189,6 +190,29 @@ type TransportClient struct {
 	// a hard os.Exit. Injectable for testing so unit tests never exit the test
 	// binary. When nil the upgrade handler logs and skips the trigger. (Issue #2001)
 	shutdownFunc func()
+
+	// shutdownCtx is the steward's RUN context (process lifecycle). It is cancelled
+	// only on a real shutdown path — SCM stop, OS signal, or runCancel — and is the
+	// context the upgrade grace-delay timer watches for early-exit. It must NOT be a
+	// per-command context: those are cancelled the instant a command handler returns
+	// (executeCommand's `defer cancel()`), which would always win the race against
+	// the grace delay and suppress the auto-apply self-exit. Wired via SetShutdownFunc.
+	// When nil the upgrade handler falls back to a plain timer with no early-exit.
+	// Protected by mu. (Issue #2003)
+	shutdownCtx context.Context
+
+	// launcherManaged reports whether this steward is supervised by a launcher
+	// that will re-exec the staged binary after a graceful exit. It is defaulted
+	// in NewTransportClient from os.Getenv(version.EnvStewardLauncherManaged)=="1"
+	// (the launcher sets that env on its child). After a successful upgrade swap,
+	// the handler self-exits ONLY when this is true; a bare/standalone steward
+	// (dev, fleet-e2e, systemd-without-launcher) stages the binary and keeps
+	// running, applying it on the next restart. Without this gate a bare steward
+	// would self-exit with nothing to re-exec it — downtime, or a crash loop as
+	// the controller redelivers the upgrade on each reconnect. Test-injectable
+	// (set directly), consistent with launcherSwapFunc/shutdownFunc. Protected by
+	// mu. (Issue #2003)
+	launcherManaged bool
 
 	// upgradeShutdownGraceDelay is how long the upgrade handler waits, after the
 	// push_steward_binary handler returns, before invoking shutdownFunc. The delay
@@ -378,7 +402,10 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		certStoreDir:               cfg.CertStoreDir,
 		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
 		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
-		logger:                     cfg.Logger,
+		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
+		// this process (it sets EnvStewardLauncherManaged=1 on its child). (Issue #2003)
+		launcherManaged: os.Getenv(version.EnvStewardLauncherManaged) == "1",
+		logger:          cfg.Logger,
 	}
 
 	return c, nil
@@ -1230,14 +1257,20 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 }
 
 // SetShutdownFunc wires the graceful-shutdown trigger used after a successful
-// push_steward_binary swap. In production main.go passes the steward's root
-// context cancel func so a pushed upgrade ends the process cleanly (runSteward
-// then disconnects and returns), letting the launcher re-exec the staged
-// binary. Passing a nil fn disables the auto-apply trigger (the steward would
-// then only pick up the staged binary on the next restart). (Issue #2001)
-func (c *TransportClient) SetShutdownFunc(fn func()) {
+// push_steward_binary swap. In production main.go passes the steward's RUN
+// context (runCtx) and its cancel func (runCancel) so a pushed upgrade ends the
+// process cleanly (runSteward then disconnects and returns), letting the launcher
+// re-exec the staged binary. Passing a nil fn disables the auto-apply trigger (the
+// steward would then only pick up the staged binary on the next restart).
+//
+// runCtx is stored so the grace-delay timer in scheduleGracefulShutdownAfterSwap
+// can watch the PROCESS lifecycle for early-exit — never the per-command context,
+// which is cancelled the instant a command handler returns and would always
+// suppress the self-exit. (Issue #2001, #2003)
+func (c *TransportClient) SetShutdownFunc(runCtx context.Context, fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.shutdownCtx = runCtx
 	c.shutdownFunc = fn
 }
 

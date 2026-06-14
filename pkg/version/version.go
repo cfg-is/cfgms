@@ -9,6 +9,18 @@ package version
 
 import "fmt"
 
+// EnvStewardLauncherManaged is the environment variable the steward launcher
+// (cmd/cfgms-steward-launcher) sets on its steward child process. When its value
+// is "1" the steward is being supervised by a launcher that will re-exec the
+// staged binary after a graceful exit, so a pushed-upgrade self-exit is safe and
+// expected. When the steward runs bare/standalone (no launcher: dev, fleet-e2e,
+// systemd without launcher) the variable is absent and the steward must NOT
+// self-exit after staging an upgrade — doing so would only cause downtime or a
+// crash loop, since nothing would re-exec the staged binary. Defined here in
+// pkg/version (a leaf utility importing only fmt) so BOTH the launcher and the
+// steward client can reference one constant without an import cycle. (Issue #2003)
+const EnvStewardLauncherManaged = "CFGMS_STEWARD_LAUNCHER_MANAGED"
+
 // Version information set at build time via ldflags.
 // Default values are used when not overridden during build.
 var (
