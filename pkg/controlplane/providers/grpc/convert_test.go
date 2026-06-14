@@ -336,6 +336,12 @@ func TestEventTypeRoundTrip(t *testing.T) {
 	// value, decodes to "" on the far side, and type-routed handlers never fire —
 	// e.g. the dispatcher's script_completed filter, leaving `cfg steward exec`
 	// runs stuck 0/1 (Issue #1997; same class as #1948).
+	//
+	// Guard against drift: if a new event type is added to the convert maps but
+	// not to wireCrossingEventTypes, this list would silently stop being
+	// exhaustive. Pin the slice length to the map size so the omission fails here.
+	require.Len(t, wireCrossingEventTypes, len(eventTypeToProto),
+		"wireCrossingEventTypes is out of sync with eventTypeToProto — add the new type to the slice")
 	for _, et := range wireCrossingEventTypes {
 		t.Run(string(et), func(t *testing.T) {
 			pb, ok := eventTypeToProto[et]
