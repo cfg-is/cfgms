@@ -293,23 +293,56 @@ func TestEventNil(t *testing.T) {
 	assert.Nil(t, eventFromProto(nil))
 }
 
+// wireCrossingEventTypes lists every types.Event* constant that is published over
+// the control plane (steward->controller) and therefore must survive the proto
+// codec with its Type preserved. Each entry was confirmed against a real emit site
+// (steward) and/or a type-routed handler (controller):
+//
+//   - EventConfigApplied, EventDNASynced, EventTaskCompleted, EventTaskFailed,
+//     EventError                                  — pre-existing config/task/error reporting
+//   - EventCommandReceived/Completed/Failed       — command lifecycle (Issue #1948)
+//   - EventScriptCompleted                        — execute_script.go:212; dispatcher.go:158 (Issue #1997)
+//   - EventDNAChanged                             — client_transport.go:991; server.go:1810
+//   - EventRelayRequest                           — script_relay/relay.go:188; api/relay_handler.go:79
+//   - EventStewardUpgradeDownloaded/Swapped/Committed/RolledBack
+//     — client_transport_upgrade.go / PublishUpgradeLifecycleEvent
+//
+// Deliberately EXCLUDED:
+//   - EventStewardUpgradeDispatched — documented as a controller-side label, but it
+//     has no emit site (never passed to PublishEvent/publishEventWithQueue) and is
+//     never serialized over the transport, so it needs no proto enum. If a controller
+//     ever publishes it over the wire, add it here and to the proto enum.
+var wireCrossingEventTypes = []types.EventType{
+	types.EventConfigApplied,
+	types.EventDNASynced,
+	types.EventTaskCompleted,
+	types.EventTaskFailed,
+	types.EventError,
+	types.EventCommandReceived,
+	types.EventCommandCompleted,
+	types.EventCommandFailed,
+	types.EventScriptCompleted,
+	types.EventDNAChanged,
+	types.EventRelayRequest,
+	types.EventStewardUpgradeDownloaded,
+	types.EventStewardUpgradeSwapped,
+	types.EventStewardUpgradeCommitted,
+	types.EventStewardUpgradeRolledBack,
+}
+
 func TestEventTypeRoundTrip(t *testing.T) {
-	// Command lifecycle events must survive the round-trip: the controller's
-	// upgrade-dispatch callback keys off EventCommandCompleted/Failed to advance
-	// the upgrade record from dispatched → committed/failed. A missing mapping
-	// serialises to the zero enum, the controller sees Type="", and the upgrade
-	// hangs in "dispatched" until timeout (Issue #1948).
-	allTypes := []types.EventType{
-		types.EventConfigApplied,
-		types.EventDNASynced,
-		types.EventTaskCompleted,
-		types.EventTaskFailed,
-		types.EventError,
-		types.EventCommandReceived,
-		types.EventCommandCompleted,
-		types.EventCommandFailed,
-	}
-	for _, et := range allTypes {
+	// Every wire-crossing event type must survive the semantic→proto→semantic
+	// round-trip. A type missing from either map serialises to the zero enum
+	// value, decodes to "" on the far side, and type-routed handlers never fire —
+	// e.g. the dispatcher's script_completed filter, leaving `cfg steward exec`
+	// runs stuck 0/1 (Issue #1997; same class as #1948).
+	//
+	// Guard against drift: if a new event type is added to the convert maps but
+	// not to wireCrossingEventTypes, this list would silently stop being
+	// exhaustive. Pin the slice length to the map size so the omission fails here.
+	require.Len(t, wireCrossingEventTypes, len(eventTypeToProto),
+		"wireCrossingEventTypes is out of sync with eventTypeToProto — add the new type to the slice")
+	for _, et := range wireCrossingEventTypes {
 		t.Run(string(et), func(t *testing.T) {
 			pb, ok := eventTypeToProto[et]
 			require.True(t, ok, "event type %q missing from eventTypeToProto", et)
@@ -317,6 +350,61 @@ func TestEventTypeRoundTrip(t *testing.T) {
 				"event type %q maps to the zero enum value", et)
 			result := protoToEventType[pb]
 			assert.Equal(t, et, result)
+		})
+	}
+}
+
+// TestEventFullRoundTrip exercises the actual codec path (eventToProto ->
+// eventFromProto) for every wire-crossing event type and asserts the Type is
+// preserved. This is the guard that would have caught Issue #1997: building an
+// Event{Type: EventScriptCompleted} and running it through the real conversion
+// functions, rather than injecting it directly into a handler.
+func TestEventFullRoundTrip(t *testing.T) {
+	now := time.Now().Truncate(time.Microsecond)
+	for _, et := range wireCrossingEventTypes {
+		t.Run(string(et), func(t *testing.T) {
+			ev := &types.Event{
+				ID:        "evt-" + string(et),
+				Type:      et,
+				StewardID: "steward-1",
+				TenantID:  "root/msp-a/client-1",
+				Timestamp: now,
+				CommandID: "cmd-1",
+				Severity:  "info",
+			}
+			pb := eventToProto(ev)
+			require.NotNil(t, pb)
+			require.NotEqual(t, transportpb.EventType_EVENT_TYPE_UNSPECIFIED, pb.GetType(),
+				"event type %q collapsed to UNSPECIFIED on the wire", et)
+
+			result := eventFromProto(pb)
+			require.NotNil(t, result)
+			assert.Equal(t, et, result.Type,
+				"event type %q did not survive eventToProto->eventFromProto", et)
+		})
+	}
+}
+
+// TestEventTypeProtoDescriptorComplete verifies the embedded proto file
+// descriptor (rawDesc) carries the EventType enum values added for Issue #1997,
+// so String(), gRPC reflection, and protojson render the symbolic name rather
+// than the bare integer.
+func TestEventTypeProtoDescriptorComplete(t *testing.T) {
+	cases := map[transportpb.EventType]string{
+		transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:    "EVENT_TYPE_SCRIPT_COMPLETED",
+		transportpb.EventType_EVENT_TYPE_DNA_CHANGED:         "EVENT_TYPE_DNA_CHANGED",
+		transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:       "EVENT_TYPE_RELAY_REQUEST",
+		transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:  "EVENT_TYPE_UPGRADE_DOWNLOADED",
+		transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:     "EVENT_TYPE_UPGRADE_SWAPPED",
+		transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:   "EVENT_TYPE_UPGRADE_COMMITTED",
+		transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK: "EVENT_TYPE_UPGRADE_ROLLED_BACK",
+	}
+	for et, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, name, et.String())
+			vd := et.Descriptor().Values().ByNumber(et.Number())
+			require.NotNil(t, vd, "enum value %d missing from proto descriptor", et)
+			assert.Equal(t, name, string(vd.Name()))
 		})
 	}
 }
