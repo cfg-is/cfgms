@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // Supervisor exec's the steward and decides what to do when it exits.
@@ -188,6 +190,11 @@ func (s *Supervisor) execOnce(ctx context.Context, exe string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
+	// Mark the child as launcher-managed. The steward gates its pushed-upgrade
+	// self-exit on this marker: it only self-exits (so we re-exec the staged
+	// binary) when supervised by a launcher. A bare/standalone steward must not
+	// self-exit. (Issue #2003)
+	cmd.Env = append(os.Environ(), version.EnvStewardLauncherManaged+"=1")
 	if err := cmd.Start(); err != nil {
 		return err
 	}

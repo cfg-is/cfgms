@@ -47,6 +47,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // TransportClient represents the steward client using gRPC-over-QUIC for both
@@ -199,6 +200,19 @@ type TransportClient struct {
 	// When nil the upgrade handler falls back to a plain timer with no early-exit.
 	// Protected by mu. (Issue #2003)
 	shutdownCtx context.Context
+
+	// launcherManaged reports whether this steward is supervised by a launcher
+	// that will re-exec the staged binary after a graceful exit. It is defaulted
+	// in NewTransportClient from os.Getenv(version.EnvStewardLauncherManaged)=="1"
+	// (the launcher sets that env on its child). After a successful upgrade swap,
+	// the handler self-exits ONLY when this is true; a bare/standalone steward
+	// (dev, fleet-e2e, systemd-without-launcher) stages the binary and keeps
+	// running, applying it on the next restart. Without this gate a bare steward
+	// would self-exit with nothing to re-exec it — downtime, or a crash loop as
+	// the controller redelivers the upgrade on each reconnect. Test-injectable
+	// (set directly), consistent with launcherSwapFunc/shutdownFunc. Protected by
+	// mu. (Issue #2003)
+	launcherManaged bool
 
 	// upgradeShutdownGraceDelay is how long the upgrade handler waits, after the
 	// push_steward_binary handler returns, before invoking shutdownFunc. The delay
@@ -388,7 +402,10 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		certStoreDir:               cfg.CertStoreDir,
 		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
 		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
-		logger:                     cfg.Logger,
+		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
+		// this process (it sets EnvStewardLauncherManaged=1 on its child). (Issue #2003)
+		launcherManaged: os.Getenv(version.EnvStewardLauncherManaged) == "1",
+		logger:          cfg.Logger,
 	}
 
 	return c, nil

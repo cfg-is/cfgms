@@ -266,6 +266,22 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 	// delay the process would exit mid-flight and the controller would record the
 	// upgrade as timed-out. The launcher's startup-window auto-rollback remains
 	// the safety net for a bad pushed binary. (Issue #2001)
+	// Self-exit only when launcher-managed: a successful swap wrote the staged
+	// binary as the launcher's "current", and the launcher will re-exec it after
+	// we exit. A bare/standalone steward (no launcher: dev, fleet-e2e,
+	// systemd-without-launcher) must NOT self-exit — nothing would re-exec the
+	// staged binary, so self-exiting would only cause downtime or a crash loop as
+	// the controller redelivers push_steward_binary on each reconnect. (Issue #2003)
+	c.mu.RLock()
+	launcherManaged := c.launcherManaged
+	c.mu.RUnlock()
+	if !launcherManaged {
+		c.logger.Info("Steward binary staged for upgrade; steward is not launcher-managed, new binary applies on next restart",
+			"version", logging.SanitizeLogValue(params.Version),
+			"launcher", lPath)
+		return nil
+	}
+
 	c.logger.Info("Steward binary staged for upgrade; scheduling graceful restart so launcher re-execs new version",
 		"version", logging.SanitizeLogValue(params.Version),
 		"launcher", lPath)
