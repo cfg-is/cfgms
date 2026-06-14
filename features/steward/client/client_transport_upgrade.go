@@ -257,11 +257,81 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 		return fmt.Errorf("push_steward_binary: launcher swap failed: %w", err)
 	}
 
-	// Step 13: Return nil — the OS service manager restarts the steward.
-	c.logger.Info("Steward binary staged for upgrade; OS service manager will restart",
+	// Step 13: Swap succeeded — the new binary is now the launcher's "current".
+	// Schedule a graceful shutdown so the launcher's supervise loop re-execs the
+	// staged binary. The trigger is DEFERRED behind a short grace delay so it
+	// fires only after commands.Handler.executeCommand has delivered this
+	// command's completion ack to the controller (this handler runs synchronously
+	// inside executeCommand; the ack is published after we return). Without the
+	// delay the process would exit mid-flight and the controller would record the
+	// upgrade as timed-out. The launcher's startup-window auto-rollback remains
+	// the safety net for a bad pushed binary. (Issue #2001)
+	c.logger.Info("Steward binary staged for upgrade; scheduling graceful restart so launcher re-execs new version",
 		"version", logging.SanitizeLogValue(params.Version),
 		"launcher", lPath)
+	c.scheduleGracefulShutdownAfterSwap(ctx)
 	return nil
+}
+
+// scheduleGracefulShutdownAfterSwap arranges for the steward to gracefully exit
+// after the configured grace delay, so the launcher re-execs the freshly-staged
+// binary. It is called only on a SUCCESSFUL launcher swap; failed/aborted swaps
+// return early in handlePushStewardBinary and never reach here. (Issue #2001)
+//
+// The grace delay defers the shutdown until after this command's completion ack
+// has been published (see handlePushStewardBinary step 13). Both the schedule
+// mechanism and the shutdown action are injectable: tests set shutdownScheduleFunc
+// to run the trigger synchronously and shutdownFunc to a recorder, so no real
+// time.Sleep or process exit occurs.
+//
+// ctx is the command's run context (ultimately derived from runCtx). The default
+// timer goroutine selects on both the grace-delay timer and ctx.Done() so it
+// exits promptly when the process is already shutting down via another path
+// (signal/SCM stop, or a separate runCancel) rather than lingering for the full
+// grace delay. shutdownFunc (runCancel in production) is idempotent — context
+// cancel funcs are safe to call multiple times and only the first has effect.
+func (c *TransportClient) scheduleGracefulShutdownAfterSwap(ctx context.Context) {
+	c.mu.RLock()
+	shutdown := c.shutdownFunc
+	schedule := c.shutdownScheduleFunc
+	delay := c.upgradeShutdownGraceDelay
+	c.mu.RUnlock()
+
+	if shutdown == nil {
+		// No trigger wired (e.g. shutdown func not injected). The staged binary
+		// will load on the next restart; log so this is observable.
+		c.logger.Warn("Upgrade staged but no shutdown trigger configured; new binary will load on next restart")
+		return
+	}
+	if delay <= 0 {
+		delay = defaultUpgradeShutdownGraceDelay
+	}
+
+	trigger := func() {
+		c.logger.Info("Grace period elapsed after staged upgrade; triggering graceful shutdown for launcher re-exec")
+		shutdown()
+	}
+
+	if schedule != nil {
+		schedule(delay, trigger)
+		return
+	}
+
+	// Default real implementation: fire the trigger once after delay without
+	// blocking the handler (which must return so the completion ack is sent).
+	// Exit early if the run context is cancelled first — the steward is already
+	// shutting down, so there is no point holding this goroutine for the full
+	// grace delay.
+	go func() {
+		t := time.NewTimer(delay)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			trigger()
+		case <-ctx.Done():
+			c.logger.Info("Run context cancelled before upgrade grace delay elapsed; skipping redundant shutdown trigger")
+		}
+	}()
 }
 
 // controllerEndpointHost extracts the host component from c.transportAddress.
