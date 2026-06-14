@@ -165,6 +165,17 @@ var eventTypeToProto = map[types.EventType]transportpb.EventType{
 	types.EventCommandReceived:  transportpb.EventType_EVENT_TYPE_COMMAND_RECEIVED,
 	types.EventCommandCompleted: transportpb.EventType_EVENT_TYPE_COMMAND_COMPLETED,
 	types.EventCommandFailed:    transportpb.EventType_EVENT_TYPE_COMMAND_FAILED,
+	// Issue #1997: events published steward->controller over the wire. Without these
+	// entries the type collapses to EVENT_TYPE_UNSPECIFIED and decodes to "" on the
+	// controller, so type-routed handlers never fire (e.g. dispatcher script_completed,
+	// server DNA-change handler, relay handler, upgrade lifecycle).
+	types.EventScriptCompleted:          transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED,
+	types.EventDNAChanged:               transportpb.EventType_EVENT_TYPE_DNA_CHANGED,
+	types.EventRelayRequest:             transportpb.EventType_EVENT_TYPE_RELAY_REQUEST,
+	types.EventStewardUpgradeDownloaded: transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED,
+	types.EventStewardUpgradeSwapped:    transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED,
+	types.EventStewardUpgradeCommitted:  transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED,
+	types.EventStewardUpgradeRolledBack: transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK,
 }
 
 // protoToEventType maps proto enum to semantic EventType.
@@ -177,6 +188,14 @@ var protoToEventType = map[transportpb.EventType]types.EventType{
 	transportpb.EventType_EVENT_TYPE_COMMAND_RECEIVED:  types.EventCommandReceived,
 	transportpb.EventType_EVENT_TYPE_COMMAND_COMPLETED: types.EventCommandCompleted,
 	transportpb.EventType_EVENT_TYPE_COMMAND_FAILED:    types.EventCommandFailed,
+	// Issue #1997: reverse mapping for the wire-crossing events added above.
+	transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:    types.EventScriptCompleted,
+	transportpb.EventType_EVENT_TYPE_DNA_CHANGED:         types.EventDNAChanged,
+	transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:       types.EventRelayRequest,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:  types.EventStewardUpgradeDownloaded,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:     types.EventStewardUpgradeSwapped,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:   types.EventStewardUpgradeCommitted,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK: types.EventStewardUpgradeRolledBack,
 }
 
 // severityToProto maps semantic severity string to proto enum.

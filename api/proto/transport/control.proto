@@ -34,6 +34,15 @@ enum EventType {
   EVENT_TYPE_COMMAND_RECEIVED = 6;  // Issue #1948: steward acknowledges a dispatched command
   EVENT_TYPE_COMMAND_COMPLETED = 7; // Issue #1948: command handler succeeded (drives upgrade commit)
   EVENT_TYPE_COMMAND_FAILED = 8;    // Issue #1948: command handler failed (drives upgrade failure)
+  EVENT_TYPE_SCRIPT_COMPLETED = 9;  // Issue #1997: execute_script finished (drives ad-hoc run completion)
+  // Issue #1997: the following events are also published steward->controller over the
+  // wire and were silently collapsing to UNSPECIFIED without an enum value.
+  EVENT_TYPE_DNA_CHANGED = 10;        // steward DNA attributes changed (controller routes to handleDNAEvent)
+  EVENT_TYPE_RELAY_REQUEST = 11;      // steward relays a script's REST call to the controller
+  EVENT_TYPE_UPGRADE_DOWNLOADED = 12; // steward.upgrade.downloaded
+  EVENT_TYPE_UPGRADE_SWAPPED = 13;    // steward.upgrade.swapped
+  EVENT_TYPE_UPGRADE_COMMITTED = 14;  // steward.upgrade.committed
+  EVENT_TYPE_UPGRADE_ROLLED_BACK = 15; // steward.upgrade.rolled_back
 }
 
 // Severity is used by both Event and LogEntry to indicate importance level.

@@ -112,31 +112,54 @@ const (
 	EventType_EVENT_TYPE_COMMAND_RECEIVED  EventType = 6 // Issue #1948: steward acknowledges a dispatched command
 	EventType_EVENT_TYPE_COMMAND_COMPLETED EventType = 7 // Issue #1948: command handler succeeded (drives upgrade commit)
 	EventType_EVENT_TYPE_COMMAND_FAILED    EventType = 8 // Issue #1948: command handler failed (drives upgrade failure)
+	EventType_EVENT_TYPE_SCRIPT_COMPLETED  EventType = 9 // Issue #1997: execute_script finished (drives ad-hoc run completion)
+	// Issue #1997: the following events are also published steward->controller over the
+	// wire and were silently collapsing to UNSPECIFIED without an enum value.
+	EventType_EVENT_TYPE_DNA_CHANGED         EventType = 10 // steward DNA attributes changed (controller routes to handleDNAEvent)
+	EventType_EVENT_TYPE_RELAY_REQUEST       EventType = 11 // steward relays a script's REST call to the controller
+	EventType_EVENT_TYPE_UPGRADE_DOWNLOADED  EventType = 12 // steward.upgrade.downloaded
+	EventType_EVENT_TYPE_UPGRADE_SWAPPED     EventType = 13 // steward.upgrade.swapped
+	EventType_EVENT_TYPE_UPGRADE_COMMITTED   EventType = 14 // steward.upgrade.committed
+	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK EventType = 15 // steward.upgrade.rolled_back
 )
 
 // Enum value maps for EventType.
 var (
 	EventType_name = map[int32]string{
-		0: "EVENT_TYPE_UNSPECIFIED",
-		1: "EVENT_TYPE_CONFIG_APPLIED",
-		2: "EVENT_TYPE_DNA_SYNCED",
-		3: "EVENT_TYPE_TASK_COMPLETED",
-		4: "EVENT_TYPE_TASK_FAILED",
-		5: "EVENT_TYPE_ERROR",
-		6: "EVENT_TYPE_COMMAND_RECEIVED",
-		7: "EVENT_TYPE_COMMAND_COMPLETED",
-		8: "EVENT_TYPE_COMMAND_FAILED",
+		0:  "EVENT_TYPE_UNSPECIFIED",
+		1:  "EVENT_TYPE_CONFIG_APPLIED",
+		2:  "EVENT_TYPE_DNA_SYNCED",
+		3:  "EVENT_TYPE_TASK_COMPLETED",
+		4:  "EVENT_TYPE_TASK_FAILED",
+		5:  "EVENT_TYPE_ERROR",
+		6:  "EVENT_TYPE_COMMAND_RECEIVED",
+		7:  "EVENT_TYPE_COMMAND_COMPLETED",
+		8:  "EVENT_TYPE_COMMAND_FAILED",
+		9:  "EVENT_TYPE_SCRIPT_COMPLETED",
+		10: "EVENT_TYPE_DNA_CHANGED",
+		11: "EVENT_TYPE_RELAY_REQUEST",
+		12: "EVENT_TYPE_UPGRADE_DOWNLOADED",
+		13: "EVENT_TYPE_UPGRADE_SWAPPED",
+		14: "EVENT_TYPE_UPGRADE_COMMITTED",
+		15: "EVENT_TYPE_UPGRADE_ROLLED_BACK",
 	}
 	EventType_value = map[string]int32{
-		"EVENT_TYPE_UNSPECIFIED":       0,
-		"EVENT_TYPE_CONFIG_APPLIED":    1,
-		"EVENT_TYPE_DNA_SYNCED":        2,
-		"EVENT_TYPE_TASK_COMPLETED":    3,
-		"EVENT_TYPE_TASK_FAILED":       4,
-		"EVENT_TYPE_ERROR":             5,
-		"EVENT_TYPE_COMMAND_RECEIVED":  6,
-		"EVENT_TYPE_COMMAND_COMPLETED": 7,
-		"EVENT_TYPE_COMMAND_FAILED":    8,
+		"EVENT_TYPE_UNSPECIFIED":         0,
+		"EVENT_TYPE_CONFIG_APPLIED":      1,
+		"EVENT_TYPE_DNA_SYNCED":          2,
+		"EVENT_TYPE_TASK_COMPLETED":      3,
+		"EVENT_TYPE_TASK_FAILED":         4,
+		"EVENT_TYPE_ERROR":               5,
+		"EVENT_TYPE_COMMAND_RECEIVED":    6,
+		"EVENT_TYPE_COMMAND_COMPLETED":   7,
+		"EVENT_TYPE_COMMAND_FAILED":      8,
+		"EVENT_TYPE_SCRIPT_COMPLETED":    9,
+		"EVENT_TYPE_DNA_CHANGED":         10,
+		"EVENT_TYPE_RELAY_REQUEST":       11,
+		"EVENT_TYPE_UPGRADE_DOWNLOADED":  12,
+		"EVENT_TYPE_UPGRADE_SWAPPED":     13,
+		"EVENT_TYPE_UPGRADE_COMMITTED":   14,
+		"EVENT_TYPE_UPGRADE_ROLLED_BACK": 15,
 	}
 )
 
@@ -857,7 +880,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x1bCOMMAND_TYPE_EXECUTE_SCRIPT\x10\b\x12\"\n" +
 	"\x1eCOMMAND_TYPE_PUSH_SIGNING_CERT\x10\t\x12$\n" +
 	" COMMAND_TYPE_PUSH_STEWARD_BINARY\x10\n" +
-	"*\x94\x02\n" +
+	"*\xf8\x03\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +
@@ -867,7 +890,15 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x10EVENT_TYPE_ERROR\x10\x05\x12\x1f\n" +
 	"\x1bEVENT_TYPE_COMMAND_RECEIVED\x10\x06\x12 \n" +
 	"\x1cEVENT_TYPE_COMMAND_COMPLETED\x10\a\x12\x1d\n" +
-	"\x19EVENT_TYPE_COMMAND_FAILED\x10\b*x\n" +
+	"\x19EVENT_TYPE_COMMAND_FAILED\x10\b\x12\x1f\n" +
+	"\x1bEVENT_TYPE_SCRIPT_COMPLETED\x10\t\x12\x1a\n" +
+	"\x16EVENT_TYPE_DNA_CHANGED\x10\n" +
+	"\x12\x1c\n" +
+	"\x18EVENT_TYPE_RELAY_REQUEST\x10\v\x12!\n" +
+	"\x1dEVENT_TYPE_UPGRADE_DOWNLOADED\x10\f\x12\x1e\n" +
+	"\x1aEVENT_TYPE_UPGRADE_SWAPPED\x10\r\x12 \n" +
+	"\x1cEVENT_TYPE_UPGRADE_COMMITTED\x10\x0e\x12\"\n" +
+	"\x1eEVENT_TYPE_UPGRADE_ROLLED_BACK\x10\x0f*x\n" +
 	"\bSeverity\x12\x18\n" +
 	"\x14SEVERITY_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSEVERITY_INFO\x10\x01\x12\x14\n" +
