@@ -66,6 +66,39 @@ func TestNewControllerService_NoStorage(t *testing.T) {
 	svc.storeDNA(context.Background(), "dev-1", "tenant-a", makeTestDNA("dev-1", nil), "online")
 }
 
+// TestStorageReady_OKWithWorkingStorage: a real-state readiness round-trip
+// succeeds against a live durable store (Issue #2012).
+func TestStorageReady_OKWithWorkingStorage(t *testing.T) {
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), newTestFleetStorage(t))
+	require.NoError(t, svc.StorageReady(context.Background()))
+}
+
+// TestStorageReady_ErrorWithNoStorage: a controller with no durable storage is
+// NOT ready — readiness must surface that rather than masking it (a candidate
+// whose storage failed to initialize must be rejected by the cutover smoketest).
+func TestStorageReady_ErrorWithNoStorage(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	err := svc.StorageReady(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured")
+}
+
+// TestStorageReady_ErrorWhenStoreUnreachable: when the durable store can no
+// longer be round-tripped (here, closed mid-flight to simulate an unreachable
+// backend), readiness fails. This is the real-state signal the old
+// object-presence health check could not produce.
+func TestStorageReady_ErrorWhenStoreUnreachable(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	require.NoError(t, svc.StorageReady(context.Background()))
+
+	// Close the backend; a subsequent round-trip must fail.
+	require.NoError(t, storage.Close())
+	err := svc.StorageReady(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "round-trip failed")
+}
+
 func TestLoadFromStorage_EmptyStorage(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)

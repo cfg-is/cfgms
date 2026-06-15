@@ -9,6 +9,40 @@ import (
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
+// handleReady handles GET /api/v1/ready — the controller's REAL-STATE readiness
+// probe (Issue #2012). Unlike /api/v1/health (object-presence liveness), this
+// round-trips the durable DNA fleet store, so it returns 200 only when the
+// controller can actually serve. The blue/green cutover smoketester uses it to
+// reject a candidate that bound its API port but cannot reach storage.
+// Unauthenticated (registered on the base router) so the probe needs no creds.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ready := ReadinessStatus{
+		Status:    "ready",
+		Version:   version.ShortWithoutPrefix(),
+		Timestamp: time.Now().UTC(),
+		Checks:    make(map[string]string),
+	}
+	statusCode := http.StatusOK
+
+	if s.controllerService == nil {
+		ready.Status = "not_ready"
+		ready.Checks["controller"] = "unavailable"
+		statusCode = http.StatusServiceUnavailable
+	} else if err := s.controllerService.StorageReady(r.Context()); err != nil {
+		// Log the cause server-side for diagnostics; do not leak it in the
+		// response body (no information disclosure).
+		s.logger.Warn("Readiness probe: storage round-trip failed", "error", err)
+		ready.Status = "not_ready"
+		ready.Checks["dna_storage"] = "unavailable"
+		statusCode = http.StatusServiceUnavailable
+	} else {
+		ready.Checks["controller"] = "ok"
+		ready.Checks["dna_storage"] = "ok"
+	}
+
+	s.writeResponse(w, statusCode, ready)
+}
+
 // handleHealth handles GET /api/v1/health
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Create health status

@@ -209,6 +209,37 @@ func (m *Manager) ListAllDeviceIDs(ctx context.Context) ([]string, error) {
 	return sqliteBackend.listAllDeviceIDs(ctx)
 }
 
+// Ping performs a cheap O(1) round-trip to the durable store to confirm it is
+// reachable and queryable. Unlike an object-presence/liveness check, a
+// successful Ping proves the controller can actually talk to its backend — the
+// real-state signal a readiness probe needs (Issue #2012). Used by
+// ControllerService.StorageReady and the blue/green cutover smoketest.
+func (m *Manager) Ping(ctx context.Context) error {
+	// Mirrors the SQLite-only constraint of ListAllDeviceIDs/GetLatestByDeviceID:
+	// the OSS composite DNA backend is SQLite (DefaultConfig). A future
+	// PostgreSQL/file backend rollout must extend this to round-trip that
+	// backend, or readiness (and the cutover smoketest) will hard-fail there.
+	sqliteBackend, ok := m.storage.(*SQLiteBackend)
+	if !ok {
+		return fmt.Errorf("Ping requires SQLite backend")
+	}
+	return sqliteBackend.ping(ctx)
+}
+
+// ping issues a trivial SELECT to confirm the SQLite connection is live and the
+// driver can execute a query. Cheap enough to run on every readiness probe even
+// at fleet scale (no table scan), bounded by the caller's context deadline.
+func (b *SQLiteBackend) ping(ctx context.Context) error {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	var one int
+	if err := b.db.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+		return fmt.Errorf("sqlite ping failed: %w", err)
+	}
+	return nil
+}
+
 // GetLatestByDeviceID returns the most recent DNA record for a device, read
 // directly from the SQL store. Unlike GetLatest, it does not consult the
 // in-memory index, which starts empty after a controller restart — so this is

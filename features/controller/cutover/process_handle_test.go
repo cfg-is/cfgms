@@ -34,8 +34,9 @@ func newTLSTestServer(h http.Handler) *httptest.Server {
 //
 // FAKE_CONTROLLER_API_LISTEN — address to bind an HTTP server on. The
 //
-//	handler responds 200 to /api/v1/health, mirroring the real
-//	controller's healthz contract that HTTPSmoketester probes.
+//	handler responds 200 to /api/v1/ready (and /api/v1/health),
+//	mirroring the real controller's readiness contract that
+//	HTTPSmoketester probes (Issue #2012).
 //
 // FAKE_CONTROLLER_HANG_MS — if set, the process sleeps this many
 //
@@ -68,6 +69,12 @@ func TestHelperProcess(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	// The production smoketester probes /api/v1/ready (Issue #2012); a complete
+	// fake controller must answer it 200 so orchestrator tests that run the real
+	// HTTPSmoketester against this helper pass.
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -348,11 +355,11 @@ func startSmoketestServer(t *testing.T, handler http.Handler) (listenAddr string
 	return srv.Listener.Addr().String(), srv.Close
 }
 
-// TestHTTPSmoketester_HealthyResponse verifies a 200 /api/v1/health unblocks
+// TestHTTPSmoketester_ReadyResponse verifies a 200 /api/v1/ready unblocks
 // the smoketest.
-func TestHTTPSmoketester_HealthyResponse(t *testing.T) {
+func TestHTTPSmoketester_ReadyResponse(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	addr, cleanup := startSmoketestServer(t, mux)
@@ -371,7 +378,7 @@ func TestHTTPSmoketester_HealthyResponse(t *testing.T) {
 // orchestrator surfaces to the operator.
 func TestHTTPSmoketester_5xxResponse_Fails(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	addr, cleanup := startSmoketestServer(t, mux)
@@ -387,11 +394,35 @@ func TestHTTPSmoketester_5xxResponse_Fails(t *testing.T) {
 	assert.Contains(t, err.Error(), "status 500")
 }
 
-// TestHTTPSmoketester_401Accepted covers that auth-required responses
-// pass — they prove the API is alive even without admin creds.
-func TestHTTPSmoketester_401Accepted(t *testing.T) {
+// TestHTTPSmoketester_503NotReady_Fails is the core Issue #2012 guard: a
+// candidate that bound its port but reports NOT ready (storage unreachable ->
+// 503 from /api/v1/ready) must be REJECTED, not promoted. Pre-#2012 the probe
+// hit the object-presence /api/v1/health and a storage-broken candidate could
+// still pass.
+func TestHTTPSmoketester_503NotReady_Fails(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	addr, cleanup := startSmoketestServer(t, mux)
+	defer cleanup()
+
+	smoke := &HTTPSmoketester{
+		ReadyTimeout:   2 * time.Second,
+		RequestTimeout: 2 * time.Second,
+		SkipTLSVerify:  true,
+	}
+	err := smoke.Probe(context.Background(), nil, addr, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 503")
+}
+
+// TestHTTPSmoketester_401Fails confirms readiness now requires a true 200:
+// an auth-walled / non-200 response no longer counts as ready (the readiness
+// endpoint is unauthenticated, so a 401 here means "not the ready signal").
+func TestHTTPSmoketester_401Fails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	})
 	addr, cleanup := startSmoketestServer(t, mux)
@@ -402,7 +433,9 @@ func TestHTTPSmoketester_401Accepted(t *testing.T) {
 		RequestTimeout: 2 * time.Second,
 		SkipTLSVerify:  true,
 	}
-	assert.NoError(t, smoke.Probe(context.Background(), nil, addr, ""))
+	err := smoke.Probe(context.Background(), nil, addr, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 401")
 }
 
 // TestHTTPSmoketester_NoListener_Fails surfaces the right error when

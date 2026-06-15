@@ -372,8 +372,12 @@ func (s *Server) setupRouter() {
 	api.Use(s.authenticationMiddleware)
 	api.Use(s.validationMiddleware)
 
-	// Health check (no auth required)
+	// Health check (no auth required) — liveness / object-presence.
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
+
+	// Readiness probe (no auth required) — real-state: round-trips durable
+	// storage. Used by the blue/green cutover smoketest (Issue #2012).
+	s.router.HandleFunc("/api/v1/ready", s.handleReady).Methods("GET", "OPTIONS")
 
 	// Steward registration (no auth required - uses registration token)
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
