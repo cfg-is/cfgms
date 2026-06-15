@@ -453,11 +453,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// we can inject it as the on-connect hook. The publisher is wired after
 		// commandPublisher is constructed below (breaks the init cycle).
 		connRegistry = registry.NewRegistry()
+		// Issue #2008: compose the admin-registry upsert hook alongside the
+		// signing-rotation hook so every authenticated (re)connect repopulates
+		// ControllerService.s.stewards (which backs cfg steward list/status/exec).
+		// A cert-reuse reconnect never re-runs HTTP registration, so without this
+		// the registry stays empty for a reconnecting steward until a restart.
+		registryConnectHook := service.NewStewardRegistryConnectHook(controllerService, logger)
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
-			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(signingRotationSvc))
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook)
+			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(composite))
 		} else {
-			controlPlane = grpcCP.New(grpcCP.ModeServer)
+			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(registryConnectHook))
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",
