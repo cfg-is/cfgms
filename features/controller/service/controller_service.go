@@ -105,6 +105,25 @@ func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
 	return nil
 }
 
+// StorageReady is the controller's real-state readiness check: a bounded
+// round-trip to the durable DNA fleet store. Unlike an object-presence
+// (liveness) check, a nil return proves the controller can actually reach and
+// query its durable backend — so a candidate that bound its API port but cannot
+// serve from storage is detectable by the blue/green cutover smoketest
+// (Issue #2012). Returns an error when no durable storage is configured or the
+// round-trip fails.
+func (s *ControllerService) StorageReady(ctx context.Context) error {
+	if s.dnaStorage == nil {
+		return fmt.Errorf("dna storage not configured")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := s.dnaStorage.Ping(probeCtx); err != nil {
+		return fmt.Errorf("dna storage round-trip failed: %w", err)
+	}
+	return nil
+}
+
 // AcceptRegistration handles steward registration requests
 func (s *ControllerService) AcceptRegistration(ctx context.Context, req *controller.RegisterRequest) (*controller.RegisterResponse, error) {
 	// Extract tenant information from gRPC metadata
