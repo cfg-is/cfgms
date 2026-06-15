@@ -1,6 +1,6 @@
 # ADR-008: Durable Execution Substrate for the Workflow Engine
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-06-15
 
