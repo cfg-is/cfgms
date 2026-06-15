@@ -9,6 +9,7 @@ package execution
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -185,14 +186,24 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	// For modules that manage filesystem resources (file, directory), use the path
 	// from config as the identifier. Otherwise fall back to the resource name.
+	// For typed module refs (e.g. "hyperv.vm"), this builds the module-internal
+	// typed resourceID (e.g. "vm:m2-test-vm").
 	resourceID := e.getResourceIdentifier(resource)
+
+	// A module ref may carry a resource-type suffix (e.g. "hyperv.vm"). The
+	// bundle component ("hyperv") selects the signed module bundle to load;
+	// the type suffix is resolved into the resourceID by getResourceIdentifier.
+	// Loading MUST use the bundle name only — there is one signed bundle per
+	// module (ADR-006), and the ".vm"/".vswitch"/".snapshot" suffix is a
+	// resource-type selector, not a separate module.
+	bundle, _ := parseModuleRef(resource.Module)
 
 	e.logger.Info("Executing resource configuration",
 		"resource", resource.Name,
 		"resource_id", resourceID,
 		"module", resource.Module)
 
-	module, err := e.factory.CreateModuleInstance(resource.Module)
+	module, err := e.factory.CreateModuleInstance(bundle)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to load module: %v", err)
 		result.ExecutionTime = time.Since(startTime)
@@ -327,13 +338,62 @@ func (e *Executor) createConfigState(configData map[string]interface{}) (modules
 	return &genericConfigState{data: configData}, nil
 }
 
-// getResourceIdentifier returns the appropriate identifier for a module.
-// File/directory/script modules use the "path" config field; others use the resource name.
-func (e *Executor) getResourceIdentifier(resource config.ResourceConfig) string {
-	if path, ok := resource.Config["path"].(string); ok && path != "" {
-		return path
+// parseModuleRef splits a module reference into its bundle and resource-type
+// components on the FIRST ".". A ref without a dot has no resource type:
+//
+//	"hyperv.vm"   -> ("hyperv", "vm")
+//	"hyperv.vswitch" -> ("hyperv", "vswitch")
+//	"directory"   -> ("directory", "")
+//
+// The bundle component names the one signed module bundle to load (ADR-006);
+// the resource-type component is resolved by the steward executor into the
+// module's internal typed resourceID — the bundle is never split.
+func parseModuleRef(module string) (bundle, resourceType string) {
+	idx := strings.IndexByte(module, '.')
+	if idx < 0 {
+		return module, ""
 	}
-	return resource.Name
+	return module[:idx], module[idx+1:]
+}
+
+// getResourceIdentifier returns the module-internal identifier passed to the
+// module's Get/Set for a resource.
+//
+// Rules:
+//   - Untyped module ref (no "." — e.g. "file", "directory", "script"): keep
+//     the legacy behaviour — the "path" config field when set & non-empty,
+//     else the plain resource name. This preserves back-compat for the
+//     filesystem modules that key on a path.
+//   - Typed module ref (e.g. "hyperv.vm"): build the module's typed resourceID
+//     as "<resourceType>:<name>" (e.g. "vm:m2-test-vm"). The plain resource
+//     name stays strictly validated; the type lives in the module field.
+//   - SNAPSHOT compound special-case: the hyperv module's snapshot Get
+//     receives only the resourceID — no config — so the parent VM name must be
+//     self-contained in the id. When resourceType == "snapshot" and config
+//     carries a non-empty "vm_name", build "snapshot:<vm_name>/<name>"
+//     (e.g. "snapshot:m2-test-vm/nightly"). This is the ONLY compound case;
+//     it exists solely because snapshot.Get has no config to read vm_name from.
+func (e *Executor) getResourceIdentifier(resource config.ResourceConfig) string {
+	_, resourceType := parseModuleRef(resource.Module)
+
+	if resourceType == "" {
+		// Untyped module: legacy path/name behaviour (file, directory, script, …).
+		if path, ok := resource.Config["path"].(string); ok && path != "" {
+			return path
+		}
+		return resource.Name
+	}
+
+	// Snapshot is the one resource whose Get needs the parent VM in the id,
+	// because Get receives no config to read vm_name from.
+	if resourceType == "snapshot" {
+		if vmName, ok := resource.Config["vm_name"].(string); ok && vmName != "" {
+			return "snapshot:" + vmName + "/" + resource.Name
+		}
+	}
+
+	// Typed resource: "<type>:<name>" (e.g. "vm:m2-test-vm", "vswitch:m2-test-vsw").
+	return resourceType + ":" + resource.Name
 }
 
 // verifyChanges confirms that the applied configuration matches the desired state.

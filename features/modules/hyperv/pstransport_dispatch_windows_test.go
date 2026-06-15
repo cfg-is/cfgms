@@ -7,6 +7,7 @@ package hyperv
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -78,19 +79,6 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-CreateVSwitchInternal -Name " + quoteArg(psArgs, "Name"))
 	case psCreateVSwitchPrivate:
 		return emit("Cfgms-CreateVSwitchPrivate -Name " + quoteArg(psArgs, "Name"))
-	case psGetVMAttachment:
-		return emit("Cfgms-GetVMAttachment -VMName " + quoteArg(psArgs, "VMName") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
-	case psAttachVMNoAdapterName:
-		return emit("Cfgms-AttachVMDefaultAdapter -VMName " + quoteArg(psArgs, "VMName") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
-	case psAttachVMWithAdapterName:
-		return emit("Cfgms-AttachVMNamedAdapter -VMName " + quoteArg(psArgs, "VMName") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psDetachVM:
-		return emit("Cfgms-DetachVMAdapter -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
 	case psGetSnapshot:
 		return emit("Cfgms-GetSnapshot -VMName " + quoteArg(psArgs, "VMName") +
 			" -Name " + quoteArg(psArgs, "Name"))
@@ -104,7 +92,9 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-RestoreSnapshot -VMName " + quoteArg(psArgs, "VMName") +
 			" -Name " + quoteArg(psArgs, "Name"))
 	}
-	return "", nil
+	// Mirror production ExecutePS: an unknown psCommand is an error, not a
+	// silent success — keeps this test mirror honest to the production contract.
+	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table)")
 }
 
 // TestPSDispatch_VMVerbs covers every VM-lifecycle psXxx constant and asserts
@@ -268,54 +258,6 @@ func TestPSDispatch_SnapshotVerbs(t *testing.T) {
 	}
 }
 
-// TestPSDispatch_VMAttachment covers Get / Add (with and without explicit
-// adapter name) / Remove VM-to-switch network attachment verbs.
-func TestPSDispatch_VMAttachment(t *testing.T) {
-	ctx := context.Background()
-
-	cases := []struct {
-		name      string
-		psCommand string
-		psArgs    map[string]string
-		want      string
-	}{
-		{
-			name:      "Get attachment",
-			psCommand: psGetVMAttachment,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"},
-			want:      "Cfgms-GetVMAttachment -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01'",
-		},
-		{
-			name:      "Attach default adapter",
-			psCommand: psAttachVMNoAdapterName,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"},
-			want:      "Cfgms-AttachVMDefaultAdapter -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01'",
-		},
-		{
-			name:      "Attach named adapter",
-			psCommand: psAttachVMWithAdapterName,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"},
-			want:      "Cfgms-AttachVMNamedAdapter -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01' -Name 'nic-mgmt'",
-		},
-		{
-			name:      "Detach named adapter",
-			psCommand: psDetachVM,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"},
-			want:      "Cfgms-DetachVMAdapter -VMName 'cfgms-t__web-01' -Name 'nic-mgmt'",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tr := &recordingPSTransport{}
-			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
-			require.NoError(t, err)
-			require.Len(t, tr.calls, 1)
-			assert.Equal(t, tc.want, tr.calls[0])
-		})
-	}
-}
-
 // TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
 // psXxx constant defined in vm.go, vswitch.go, and snapshot.go without
 // silently returning an empty expression. This guards against the production
@@ -343,10 +285,6 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psCreateVSwitchInternal", psCreateVSwitchInternal, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psCreateVSwitchPrivate", psCreateVSwitchPrivate, map[string]string{"Name": "cfgms-t__sw01"}},
-		{"psGetVMAttachment", psGetVMAttachment, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
-		{"psAttachVMNoAdapterName", psAttachVMNoAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
-		{"psAttachVMWithAdapterName", psAttachVMWithAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"}},
-		{"psDetachVM", psDetachVM, map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"}},
 		// Snapshot verbs (snapshot.go)
 		{"psGetSnapshot", psGetSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
 		{"psCreateSnapshot", psCreateSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},

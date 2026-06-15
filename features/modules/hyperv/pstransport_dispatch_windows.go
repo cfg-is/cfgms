@@ -70,25 +70,6 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 	case psCreateVSwitchPrivate:
 		return t.run(ctx, "Cfgms-CreateVSwitchPrivate -Name "+quoteArg(psArgs, "Name"))
 
-	// ── VM ↔ VSwitch attachment ─────────────────────────────────────
-	case psGetVMAttachment:
-		return t.run(ctx,
-			"Cfgms-GetVMAttachment -VMName "+quoteArg(psArgs, "VMName")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
-	case psAttachVMNoAdapterName:
-		return t.run(ctx,
-			"Cfgms-AttachVMDefaultAdapter -VMName "+quoteArg(psArgs, "VMName")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
-	case psAttachVMWithAdapterName:
-		return t.run(ctx,
-			"Cfgms-AttachVMNamedAdapter -VMName "+quoteArg(psArgs, "VMName")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-	case psDetachVM:
-		return t.run(ctx,
-			"Cfgms-DetachVMAdapter -VMName "+quoteArg(psArgs, "VMName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-
 	// ── Snapshot ────────────────────────────────────────────────────
 	case psGetSnapshot:
 		return t.run(ctx,

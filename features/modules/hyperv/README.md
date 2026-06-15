@@ -6,7 +6,7 @@ Remote Hyper-V management via WinRM for CFGMS. Manages VMs, snapshots, and virtu
 
 ## Purpose and scope
 
-The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines, manage checkpoints (snapshots), configure virtual switches, and attach VM network adapters — all through an authenticated, TLS-encrypted WinRM connection.
+The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines, manage checkpoints (snapshots), and configure virtual switches — all through an authenticated, TLS-encrypted WinRM connection. A VM's network connection is declared on the VM itself (`switch_name`); the module converges its adapters to match.
 
 The module's scope includes:
 
@@ -14,7 +14,7 @@ The module's scope includes:
 - **VM resize**: update CPU count (`Set-VMProcessor`) and startup memory (`Set-VM -MemoryStartupBytes`) on stopped VMs
 - **Snapshots**: create, restore, and delete Hyper-V checkpoints
 - **Virtual switches**: create and remove External, Internal, and Private vSwitches
-- **VM attachment**: add and remove network adapter-to-switch connections
+- **VM networking**: declared on the VM (`switch_name`); the module connects the VM's adapter to the named switch
 
 Out of scope: Hyper-V role installation, storage pool management, live migration, replication policies. Steward-on-host wiring and controller dispatch wiring are delivered by epic #1790 (see `docs/operations/hyperv-host-onboarding.md`).
 
@@ -44,53 +44,65 @@ VM resource configuration fields (`vm:<name>`):
 
 ## Usage examples
 
+The resource type is selected via the `module` field as `hyperv.<type>`
+(`hyperv.vm`, `hyperv.vswitch`, `hyperv.snapshot`). The `name` field is the
+plain object name (strict `[a-zA-Z0-9_-]`). The steward executor translates
+`module: hyperv.vm` + `name: web-01` into the module's internal `vm:web-01`
+resource ID; snapshots additionally fold `config.vm_name` into the id.
+
 ### Create and start a VM
 
 ```yaml
-resource: vm:web-01
-config:
-  memory_mb: 4096
-  cpu_count: 2
-  vhd_path: C:\VMs\web-01.vhdx
-  switch_name: External
-  generation: 2
-  state: running
+- name: web-01
+  module: hyperv.vm
+  config:
+    memory_mb: 4096
+    cpu_count: 2
+    vhd_path: C:\VMs\web-01.vhdx
+    switch_name: External
+    generation: 2
+    state: running
 ```
 
 ### Stop a VM
 
 ```yaml
-resource: vm:web-01
-config:
-  state: stopped
+- name: web-01
+  module: hyperv.vm
+  config:
+    state: stopped
 ```
 
 ### Resize an existing VM (stop → resize → start)
 
 ```yaml
-resource: vm:web-01
-config:
-  cpu_count: 4
-  memory_mb: 8192
-  state: running
+- name: web-01
+  module: hyperv.vm
+  config:
+    cpu_count: 4
+    memory_mb: 8192
+    state: running
 ```
 
 ### Create a snapshot
 
 ```yaml
-resource: snapshot:web-01/pre-patch
-config:
-  state: present
+- name: pre-patch
+  module: hyperv.snapshot
+  config:
+    vm_name: web-01
+    state: present
 ```
 
 ### Create an external virtual switch
 
 ```yaml
-resource: vswitch:External-Switch
-config:
-  switch_type: external
-  net_adapter_name: Ethernet0
-  state: present
+- name: External-Switch
+  module: hyperv.vswitch
+  config:
+    switch_type: external
+    net_adapter_name: Ethernet0
+    state: present
 ```
 
 ## Known limitations
@@ -179,14 +191,19 @@ m.(modules.Configurable).Configure(cfg)
 
 ## Resource ID Formats
 
-All operations use a typed resource ID string:
+In fleet config, resources select their type via `module: hyperv.<type>` and
+carry a plain `name`. Internally the module's `Get`/`Set` receive a typed
+resource ID string built by the steward executor:
 
-| Format | Operation |
-|--------|-----------|
-| `vm:<name>` | Virtual machine management (create, start, stop, remove) |
-| `snapshot:<vmname>/<snapname>` | Checkpoint management (create, restore, remove) |
-| `vswitch:<name>` | Virtual switch management (create External/Internal/Private, remove) |
-| `vmattach:<vmname>/<adaptername>` | Network adapter attachment (add/remove adapter to switch) |
+| `module` | `name` + config | Internal resource ID | Operation |
+|----------|-----------------|----------------------|-----------|
+| `hyperv.vm` | `name: web-01` | `vm:web-01` | Virtual machine management (create, start, stop, remove) |
+| `hyperv.snapshot` | `name: pre-patch`, `config.vm_name: web-01` | `snapshot:web-01/pre-patch` | Checkpoint management (create, restore, remove) |
+| `hyperv.vswitch` | `name: External-Switch` | `vswitch:External-Switch` | Virtual switch management (create External/Internal/Private, remove) |
+
+VM network connectivity is declarative on the VM via `switch_name` (single
+switch — the common case). Declarative multi-NIC reconciliation is tracked
+in #2021.
 
 ## Tenant-Prefix Naming Convention
 

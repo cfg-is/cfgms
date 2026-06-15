@@ -130,38 +130,6 @@ function Cfgms-CreateVSwitchExternal {
     New-VMSwitch -Name $Name -SwitchType External -NetAdapterName $NetAdapter -AllowManagementOS $AllowManagementOS | Out-Null
 }
 
-# ── VM ↔ VSwitch attachment ───────────────────────────────────────────
-function Cfgms-GetVMAttachment {
-    param(
-        [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$SwitchName
-    )
-    $adapter = Get-VMNetworkAdapter -VMName $VMName -ErrorAction SilentlyContinue |
-        Where-Object { $_.SwitchName -eq $SwitchName } |
-        Select-Object -First 1
-    if (-not $adapter) { Write-Output '{"found":false}'; return }
-    ConvertTo-Json @{ found = $true; AdapterName = $adapter.Name } -Compress
-}
-
-function Cfgms-AttachVMDefaultAdapter {
-    param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$SwitchName)
-    Add-VMNetworkAdapter -VMName $VMName -SwitchName $SwitchName
-}
-
-function Cfgms-AttachVMNamedAdapter {
-    param(
-        [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$SwitchName,
-        [Parameter(Mandatory)][string]$Name
-    )
-    Add-VMNetworkAdapter -VMName $VMName -SwitchName $SwitchName -Name $Name
-}
-
-function Cfgms-DetachVMAdapter {
-    param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name)
-    Remove-VMNetworkAdapter -VMName $VMName -Name $Name
-}
-
 # ── Snapshot ──────────────────────────────────────────────────────────
 function Cfgms-GetSnapshot {
     param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name)

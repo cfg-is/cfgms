@@ -195,7 +195,6 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 //   - "vm:<name>": retrieve VMConfig for the named virtual machine
 //   - "snapshot:<vmName>/<snapName>": retrieve SnapshotConfig for the named checkpoint
 //   - "vswitch:<name>": retrieve VSwitchConfig for the named virtual switch
-//   - "vmattach:<vmName>/<switchName>": retrieve VMAttachmentConfig for the named attachment
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if err := m.checkDetection(ctx); err != nil {
 		if errors.Is(err, ErrHostNotHyperV) {
@@ -221,8 +220,6 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 		return m.getSnapshot(ctx, vmName, snapName)
 	case "vswitch":
 		return m.getVSwitch(ctx, name)
-	case "vmattach":
-		return m.getVMAttachment(ctx, name)
 	default:
 		return nil, modules.ErrNotImplemented
 	}
@@ -233,7 +230,9 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 //   - "vm:<name>": create, update, or delete the named virtual machine
 //   - "snapshot:<vmName>/<snapName>": create, restore, or delete the named checkpoint
 //   - "vswitch:<name>": create or delete the named virtual switch
-//   - "vmattach:<vmName>/<switchName>": attach or detach a VM network adapter
+//
+// VM network connectivity is declarative on the VM via switch_name (single
+// switch — the common case). Multi-NIC reconciliation is tracked in #2021.
 func (m *hypervModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if err := m.checkDetection(ctx); err != nil {
 		if errors.Is(err, ErrHostNotHyperV) {
@@ -264,11 +263,6 @@ func (m *hypervModule) Set(ctx context.Context, resourceID string, config module
 			return modules.ErrNotImplemented
 		}
 		return m.setVSwitch(ctx, resourceID, config)
-	case "vmattach":
-		if config == nil {
-			return modules.ErrNotImplemented
-		}
-		return m.setVMAttachment(ctx, resourceID, config)
 	default:
 		return modules.ErrNotImplemented
 	}
