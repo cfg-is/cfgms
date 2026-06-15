@@ -52,6 +52,7 @@ What becomes easier or harder by making this decision?
 | [005](005-logging-interface-for-transport-providers.md) | Logging Interface for Transport Providers | 2026-05-04 | Accepted |
 | [006](006-module-packaging-and-distribution.md) | Module Packaging and Distribution | 2026-06-05 | Accepted |
 | [007](007-controller-upgrade-and-state-externalization.md) | Controller Upgrade and State Externalization Strategy | 2026-06-15 | Accepted |
+| [008](008-durable-execution-substrate.md) | Durable Execution Substrate for the Workflow Engine | 2026-06-15 | Accepted |
 
 ### Superseded/Deprecated
 
