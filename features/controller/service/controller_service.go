@@ -355,24 +355,175 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		ts = time.Now()
 	}
 
+	// Fast path: the steward is already in the registry. Hold the lock only long
+	// enough to mutate the in-memory entry; never call storage under s.mu.
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if steward, exists := s.stewards[stewardID]; exists {
+		steward.LastHeartbeat = ts
+		if version != "" {
+			steward.Version = version
+		}
+		// Promote registered -> active on the first heartbeat. Leave any other
+		// lifecycle status (e.g. an operator-set state) untouched.
+		if steward.Status == "" || steward.Status == "registered" {
+			steward.Status = "active"
+		}
+		s.mu.Unlock()
+		return true
+	}
+	s.mu.Unlock()
 
-	steward, exists := s.stewards[stewardID]
-	if !exists {
+	// BACKSTOP (Issue #2008): a steward that reconnected via cert-reuse never
+	// re-runs HTTP registration, so it can heartbeat while absent from this
+	// registry (e.g. after a controller restart that warm-loaded nothing for it).
+	// Self-heal by adding it — but ONLY when we can resolve its tenant
+	// authoritatively from durable storage. The tenant drives exec cross-tenant
+	// scoping (api/handlers_runs.go enforceExecTenantScope) and the config storage
+	// location, so fabricating an entry with a wrong or empty tenant is worse than
+	// leaving it absent. When no durable tenant is available we decline here and
+	// let the connect hook (which has the same authoritative lookup) handle it,
+	// preserving the no-fabrication contract.
+	//
+	// The durable lookup is blocking storage I/O, so it runs OUTSIDE s.mu to keep
+	// the whole registry from serializing behind storage at fleet scale (50k+
+	// stewards, amplified under heartbeat flapping).
+	tenantID, dna, ok := s.lookupDurableTenant(stewardID)
+	if !ok {
 		return false
 	}
 
-	steward.LastHeartbeat = ts
-	if version != "" {
-		steward.Version = version
+	// Re-acquire and double-check: a concurrent connect-hook upsert or another
+	// heartbeat may have inserted the steward while the lock was released. Refresh
+	// the existing entry rather than overwriting it.
+	s.mu.Lock()
+	if steward, exists := s.stewards[stewardID]; exists {
+		steward.LastHeartbeat = ts
+		if version != "" {
+			steward.Version = version
+		}
+		if steward.Status == "" || steward.Status == "registered" {
+			steward.Status = "active"
+		}
+		s.mu.Unlock()
+		return true
 	}
-	// Promote registered -> active on the first heartbeat. Leave any other
-	// lifecycle status (e.g. an operator-set state) untouched.
-	if steward.Status == "" || steward.Status == "registered" {
-		steward.Status = "active"
+	s.stewards[stewardID] = &StewardInfo{
+		ID:            stewardID,
+		TenantID:      tenantID,
+		Version:       version,
+		DNA:           dna,
+		LastHeartbeat: ts,
+		Status:        "active",
+		Metrics:       make(map[string]string),
 	}
+	s.mu.Unlock()
+
+	// Persist so the durable record's timestamp is refreshed consistently with
+	// EnsureSteward. storeDNA runs outside s.mu.
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, "active")
 	return true
+}
+
+// EnsureSteward upserts a steward into the in-memory admin registry on an
+// authenticated (re)connect (Issue #2008). It is the PRIMARY fix for the
+// cert-reuse reconnect gap: the steward's normal reconnect reuses its existing
+// certificate and returns WITHOUT calling HTTP /register, so RegisterSteward —
+// the only other live-path writer — never runs. Wired to the gRPC OnConnect hook
+// (server.go), it fires on every successful ControlChannel registration with the
+// mTLS-authenticated CN, making a reconnecting steward visible to
+// list/status/exec without waiting for a second controller restart.
+//
+// Behaviour:
+//   - Absent: add a "active" entry. Tenant is resolved authoritatively from
+//     durable storage; the supplied tenantID is used only as a fallback and is
+//     never preferred over a storage-derived value. DNA is persisted (mirroring
+//     RegisterSteward) so the entry survives a later controller restart.
+//   - Present: refresh LastHeartbeat and promote registered -> active.
+//
+// Idempotent: repeated calls do not duplicate the entry.
+//
+// "Truly new" steward (no durable record AND no supplied tenant): no-op. A
+// genuinely new steward reaches the controller through HTTP registration first,
+// which mints its durable record; declining here avoids creating an entry with
+// an unknown tenant that would corrupt cross-tenant exec scoping.
+func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
+	if stewardID == "" {
+		return
+	}
+	if status == "" {
+		status = "active"
+	}
+	now := time.Now()
+
+	// Resolve the authoritative tenant from durable storage. The storage-derived
+	// tenant always wins over the caller-supplied value, which (for the connect
+	// hook) is empty anyway — the hook only knows the mTLS CN, never a tenant.
+	durableTenant, durableDNA, haveDurable := s.lookupDurableTenant(stewardID)
+	if haveDurable {
+		tenantID = durableTenant
+	}
+
+	s.mu.Lock()
+	if existing, ok := s.stewards[stewardID]; ok {
+		existing.LastHeartbeat = now
+		if existing.Status == "" || existing.Status == "registered" {
+			existing.Status = "active"
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	if !haveDurable && tenantID == "" {
+		// Truly new steward we have no authoritative tenant for: decline rather
+		// than fabricate an entry with an unknown tenant. HTTP registration is
+		// the correct first-contact path and will populate the registry.
+		s.mu.Unlock()
+		s.logger.Debug("EnsureSteward declined: no durable tenant for unknown steward",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		return
+	}
+
+	dna := durableDNA
+	if dna == nil {
+		dna = &common.DNA{Id: stewardID}
+	}
+	s.stewards[stewardID] = &StewardInfo{
+		ID:            stewardID,
+		TenantID:      tenantID,
+		DNA:           dna,
+		LastHeartbeat: now,
+		Status:        status,
+		Metrics:       make(map[string]string),
+	}
+	s.mu.Unlock()
+
+	// Persist so the entry survives a later restart's warm-load, mirroring
+	// RegisterSteward's durable write.
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, status)
+
+	s.logger.Info("Steward ensured in registry on authenticated connect",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"status", logging.SanitizeLogValue(status))
+}
+
+// lookupDurableTenant resolves a steward's authoritative tenant (and last DNA
+// snapshot) from durable storage by stewardID. The tenant comes from the
+// registration-minted DNA record, never from a steward-supplied value, so that
+// cross-tenant exec scoping and config storage paths stay correct (Issue #2008).
+//
+// Returns ok=false when there is no durable backend or no record for the
+// steward; callers must treat that as "tenant unknown" and decline to fabricate
+// a tenant-scoped registry entry.
+func (s *ControllerService) lookupDurableTenant(stewardID string) (tenantID string, dna *common.DNA, ok bool) {
+	if s.dnaStorage == nil {
+		return "", nil, false
+	}
+	record, err := s.dnaStorage.GetLatestByDeviceID(context.Background(), stewardID)
+	if err != nil || record == nil {
+		return "", nil, false
+	}
+	return record.TenantID, record.DNA, true
 }
 
 // RegisterSteward records or updates a steward that registered via the HTTP path.
