@@ -115,6 +115,48 @@ type Server struct {
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 }
 
+// resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
+// store (dna-reports/dna.db) is placed. The result MUST be independent of the
+// process working directory: two controllers of the same deployment may be
+// launched from different CWDs — most importantly the systemd unit
+// (WorkingDirectory=/) versus a blue/green candidate spawned by
+// `cfg controller upgrade run` (inheriting the operator's CWD). If the DNA path
+// were CWD-relative, the candidate would open a DIFFERENT, empty dna.db, warm-
+// load zero stewards, and the steward admin registry (cfg list/status/exec)
+// would be blind to the whole fleet after a cutover. (Issue #2010)
+//
+// Resolution:
+//   - An absolute cfg.DataDir is honored as-is.
+//   - An empty OR relative cfg.DataDir is replaced by a root derived from the
+//     configured durable storage paths (SQLitePath dir, then FlatfileRoot dir),
+//     which are absolute in any real deployment, co-locating the DNA store with
+//     the controller's other durable state.
+//   - As a last resort (no storage paths configured, e.g. minimal tests) the
+//     value is anchored to an absolute path via filepath.Abs so it is at least
+//     deterministic within the process. Note this last-resort anchor is the
+//     process CWD at startup, so true cross-CWD consistency in an all-defaults
+//     deployment still relies on absolute storage paths being configured (every
+//     real deployment, e.g. ctrl-01, sets absolute Storage.SQLitePath).
+func resolveDNADataRoot(cfg *config.Config) string {
+	root := cfg.DataDir
+	if root == "" || !filepath.IsAbs(root) {
+		if cfg.Storage != nil {
+			switch {
+			case cfg.Storage.SQLitePath != "":
+				root = filepath.Dir(cfg.Storage.SQLitePath)
+			case cfg.Storage.FlatfileRoot != "":
+				root = filepath.Dir(cfg.Storage.FlatfileRoot)
+			}
+		}
+	}
+	if !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	return root
+}
+
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cfg == nil {
@@ -193,21 +235,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// controller service (warm-loading the steward registry after a restart)
 	// and the reports engine. (Issue #1572)
 	//
-	// The data root is cfg.DataDir when set; otherwise it is derived from the
-	// configured storage path so the DNA store is always co-located with the
-	// controller's other durable state and isolated per deployment. Falling
-	// back to a bare relative path would put the SQLite file in the process
-	// working directory, where concurrent controllers (and tests) collide.
-	dnaDataRoot := cfg.DataDir
-	if dnaDataRoot == "" {
-		if cfg.Storage.SQLitePath != "" {
-			dnaDataRoot = filepath.Dir(cfg.Storage.SQLitePath)
-		} else if cfg.Storage.FlatfileRoot != "" {
-			dnaDataRoot = filepath.Dir(cfg.Storage.FlatfileRoot)
-		}
-	}
+	// The data root must be an ABSOLUTE, CWD-independent path: two controllers
+	// of the same deployment can be launched from different working directories
+	// (notably the systemd unit vs. a blue/green candidate spawned by
+	// `cfg controller upgrade`), and they must resolve the SAME DNA store or the
+	// candidate comes up with an empty steward registry. See resolveDNADataRoot
+	// and Issue #2010.
 	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(dnaDataRoot, "dna-reports")
+	dnaStorageConfig.DataDir = filepath.Join(resolveDNADataRoot(cfg), "dna-reports")
 	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
