@@ -47,13 +47,16 @@ type hypervModule struct {
 	detResult bool
 	detExpiry time.Time
 
-	// vms is the write-through VM cache. Keys are user-visible VM names
-	// (without the cfgms-<tenantID>__ prefix). Updated on executor success only.
+	// vms is the write-through VM cache. Keys are the exact VM names admins
+	// specify (identical to the host-side names). Updated on executor success
+	// only. The cache is never used as the source of truth for an apply
+	// decision — setVM always reconciles against live host state via getVM.
 	vmsMu sync.RWMutex
 	vms   map[string]VMConfig
 
-	// vswitches is the write-through vSwitch cache. Keys are user-visible switch names
-	// (without the cfgms-<tenantID>__ prefix). Updated on transport success only.
+	// vswitches is the write-through vSwitch cache. Keys are the exact switch
+	// names admins specify (identical to the host-side names). Updated on
+	// transport success only.
 	vswitchesMu sync.RWMutex
 	vswitches   map[string]VSwitchConfig
 }
@@ -112,8 +115,9 @@ func (m *hypervModule) checkDetection(ctx context.Context) error {
 // Optional config keys (all default-driven for the post-#1894 in-host
 // deployment shape):
 //
-//   - tenant_id        — tenant identifier used to namespace host-side VM
-//     names (default "").
+//   - tenant_id        — tenant identifier recorded on audit events and DNA
+//     (default ""). It is NOT used to namespace host-side names: VMs and
+//     switches are created with the exact name the admin specifies.
 //   - steward_id       — audit-trail subject id (default "<tenant>/hyperv").
 //   - audit_manager    — *audit.Manager to record verb invocations.
 //   - transport        — "ps-host" (default) or "winrm". "ps-host" runs the

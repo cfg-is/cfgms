@@ -19,9 +19,8 @@ var (
 	// ErrVMNotFound is returned when a requested VM does not exist on the host.
 	ErrVMNotFound = errors.New("hyperv: VM not found")
 
-	// ErrInvalidVMName is returned when a VM name fails allowlist validation or
-	// contains the reserved __ separator.
-	ErrInvalidVMName = errors.New("hyperv: invalid VM name: must match ^[a-zA-Z0-9_\\-]{1,64}$ and must not contain __")
+	// ErrInvalidVMName is returned when a VM name fails allowlist validation.
+	ErrInvalidVMName = errors.New("hyperv: invalid VM name: must match ^[a-zA-Z0-9_\\-]{1,64}$")
 
 	// ErrInvalidVHDPath is returned when a VHD path is not a valid absolute Windows path.
 	ErrInvalidVHDPath = errors.New("hyperv: invalid VHD path: must be an absolute Windows path (e.g. C:\\VMs\\disk.vhdx)")
@@ -30,8 +29,8 @@ var (
 	ErrInvalidGeneration = errors.New("hyperv: invalid generation: must be 2 (or 0 to accept the default)")
 )
 
-// vmNamePattern is the allowlist for user-supplied VM names.
-// The __ check is enforced separately to produce a more specific error.
+// vmNamePattern is the allowlist for user-supplied VM names. It is an injection
+// safety guard only — the name is used verbatim as the host-side VM name.
 var vmNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 
 // vhdPathPattern validates Windows absolute paths.
@@ -210,11 +209,6 @@ func (c *VMConfig) Validate() error {
 	if !vmNamePattern.MatchString(c.Name) {
 		return ErrInvalidVMName
 	}
-	// __ is the tenant/VM separator — forbidden in user-supplied names to prevent
-	// a tenant from forging a prefix that collides with another tenant's VMs.
-	if strings.Contains(c.Name, "__") {
-		return ErrInvalidVMName
-	}
 	if c.Generation != 0 && c.Generation != 2 {
 		return ErrInvalidGeneration
 	}
@@ -225,7 +219,7 @@ func (c *VMConfig) Validate() error {
 	// guard the standalone vswitch resource applies — so a malformed name can
 	// never reach Add-VMNetworkAdapter even though it travels via ArgumentList.
 	for _, sw := range c.desiredSwitches() {
-		if !switchNamePattern.MatchString(sw) || strings.Contains(sw, "__") {
+		if !switchNamePattern.MatchString(sw) {
 			return ErrInvalidSwitchName
 		}
 	}
@@ -294,32 +288,6 @@ func (c *VMConfig) GetManagedFields() []string {
 	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state"}
 }
 
-// vmHostName constructs the collision-free host-side VM name.
-//
-// The cfgms- prefix and __ separator together make it impossible for a user to
-// construct a VM name that collides with another tenant's VMs:
-//   - __ is forbidden in user-supplied names (Validate enforces this)
-//   - slashes in tenantID are replaced with hyphens to produce a flat prefix
-func vmHostName(tenantID, vmName string) string {
-	return "cfgms-" + strings.ReplaceAll(tenantID, "/", "-") + "__" + vmName
-}
-
-// vmUserName extracts the user-supplied VM name from a host-side prefixed name.
-func vmUserName(tenantID, hostName string) string {
-	prefix := "cfgms-" + strings.ReplaceAll(tenantID, "/", "-") + "__"
-	return strings.TrimPrefix(hostName, prefix)
-}
-
-// hostSwitchName translates a user-supplied SHORT switch name into the host-side
-// cfgms-managed name the vswitch resource created, leaving an empty name (a VM
-// with no declared network) unchanged so New-VM is not handed a bare prefix.
-func (m *hypervModule) hostSwitchName(short string) string {
-	if short == "" {
-		return ""
-	}
-	return vswitchHostName(m.tenantID, short)
-}
-
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
 // $Name is the only parameter; its value is transmitted via ArgumentList.
 //
@@ -380,8 +348,7 @@ const psSetVMProcessor = `Set-VMProcessor -VMName $Name -Count $CPU`
 // Set-VMMemory is not a standard Hyper-V cmdlet; Set-VM with MemoryStartupBytes is used instead.
 const psSetVMMemory = `Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)`
 
-// getVM retrieves the current state of a VM by user-visible name.
-// getVM returns the current state of a VM on the host.
+// getVM returns the current state of a VM on the host, queried by its exact name.
 //
 // Contract (matches the directory/file modules):
 //   - resource exists  → (&VMConfig{State: "running"|"stopped"|..., ...}, nil)
@@ -397,8 +364,7 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 		return nil, ErrVMNotFound
 	}
 
-	hostName := vmHostName(m.tenantID, vmName)
-	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": hostName})
+	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": vmName})
 	if err != nil {
 		return nil, fmt.Errorf("hyperv: get vm %q: %w", vmName, err)
 	}
@@ -415,13 +381,8 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 		return &VMConfig{Name: vmName, State: "absent"}, nil
 	}
 
-	// Strip the host-side prefix to recover the user-visible VM name.
-	returnedHostName, _ := parsed["Name"].(string)
-	userVisibleName := vmName
-	if returnedHostName != "" {
-		userVisibleName = vmUserName(m.tenantID, returnedHostName)
-	}
-	cfg := &VMConfig{Name: userVisibleName}
+	// The host returns the VM by its exact name — no prefix to strip.
+	cfg := &VMConfig{Name: vmName}
 
 	if v, ok := parsed["MemoryStartupBytes"].(float64); ok {
 		cfg.MemoryMB = int64(v) / (1024 * 1024)
@@ -435,19 +396,16 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	if v, ok := parsed["Path"].(string); ok {
 		cfg.VHDPath = v
 	}
-	// Adapter-reported switch names are host-side (cfgms-<tenant>__name); map
-	// them back to the short names the desired config uses so drift comparison
-	// stays short-name vs short-name.
+	// Adapter-reported switch names are the exact names admins specified; the
+	// drift comparison is name vs name with no translation.
 	if v, ok := parsed["SwitchName"].(string); ok {
-		cfg.SwitchName = vswitchUserName(m.tenantID, v)
+		cfg.SwitchName = v
 	}
 	// SwitchNames is the full observed set of connected switches (one per
 	// network adapter). ConvertTo-Json emits an array for 0/2+ elements and
 	// may collapse a single element to a scalar string on some PS versions,
 	// so accept both shapes.
-	for _, s := range parseSwitchNamesJSON(parsed["SwitchNames"]) {
-		cfg.SwitchNames = append(cfg.SwitchNames, vswitchUserName(m.tenantID, s))
-	}
+	cfg.SwitchNames = append(cfg.SwitchNames, parseSwitchNamesJSON(parsed["SwitchNames"])...)
 	// Back-compat: if the host returned no explicit SwitchNames array but did
 	// report a primary SwitchName, treat that as the single-element set.
 	if len(cfg.SwitchNames) == 0 && cfg.SwitchName != "" {
@@ -554,32 +512,31 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// Collapse SwitchName + SwitchNames into the canonical ordered set.
 	cfg.normalizeSwitches()
 
-	// Check cache for VM existence first, bypassing transport for known VMs.
-	m.vmsMu.RLock()
-	cachedVM, inCache := m.vms[vmName]
-	m.vmsMu.RUnlock()
-
+	// ALWAYS read the live host state via getVM as the source of truth for the
+	// reconcile decision — never the in-memory cache. The executor's drift
+	// detection reads the host directly, so the apply path must reconcile against
+	// the same host truth. Using the cache as "current" let SET/delete diverge
+	// silently when the cache went stale (e.g. an adapter added or removed
+	// out-of-band), computing needed actions as no-ops. The write-through cache is
+	// still updated after a successful apply for the benefit of Get, but it is
+	// never the basis for an apply decision.
+	current, err := m.getVM(ctx, vmName)
+	if err != nil {
+		// getVM no longer returns a sentinel for "not found" — absence is
+		// signalled by State=="absent" with err==nil. Any real error here
+		// (module not configured, transport down, malformed response) is
+		// fatal for this Set call.
+		return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
+	}
 	var vmExists bool
 	var currentVM VMConfig
-	if inCache {
+	if current.State != "absent" {
 		vmExists = true
-		currentVM = cachedVM
-	} else {
-		current, err := m.getVM(ctx, vmName)
-		if err != nil {
-			// getVM no longer returns a sentinel for "not found" — absence is
-			// signalled by State=="absent" with err==nil. Any real error here
-			// (module not configured, transport down, malformed response) is
-			// fatal for this Set call.
-			return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
-		}
-		if current.State != "absent" {
-			vmExists = true
-			currentVM = *current
-		}
+		currentVM = *current
 	}
 
-	hostName := vmHostName(m.tenantID, vmName)
+	// The host object name is the exact VM name — no namespacing.
+	hostName := vmName
 
 	// Validate the desired config on BOTH the create and update paths so the
 	// switch-name allowlist (and VM-name / VHD checks) is enforced uniformly:
@@ -601,7 +558,7 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		"MemoryMB":   fmt.Sprintf("%d", cfg.MemoryMB),
 		"CPU":        fmt.Sprintf("%d", cfg.CPUCount),
 		"VHDPath":    cfg.VHDPath,
-		"SwitchName": m.hostSwitchName(cfg.SwitchName),
+		"SwitchName": cfg.SwitchName,
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
@@ -730,8 +687,8 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 // set so the caller's cache write reflects the converged state.
 //
 // Switch names are passed to the connect/disconnect primitives exactly as the
-// VM create path passes them to New-VM -SwitchName (literal, not vswitch-host
-// namespaced) — see the issue's "do not change namespacing" constraint.
+// VM create path passes them to New-VM -SwitchName (the literal name the admin
+// specified — no prefix or suffix is added on the host).
 func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName string, desired, current *VMConfig) error {
 	desiredSet := desired.desiredSwitches()
 	// No network declared on the desired config → leave the VM's adapters
@@ -761,12 +718,11 @@ func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName st
 // connectVMToSwitch connects a new network adapter on the VM to switchName.
 // switchName travels via ArgumentList — never interpolated into script text.
 func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, switchName string) error {
-	// switchName is the user-supplied SHORT name of a cfgms-managed vSwitch;
-	// translate it to the host-side cfgms-<tenant>__name the vswitch resource
-	// created so Add-VMNetworkAdapter finds it.
+	// switchName is the exact switch name the admin specified — used verbatim so
+	// Add-VMNetworkAdapter targets the switch by the name on the host.
 	_, psErr := m.transport.ExecutePS(ctx, psConnectVMNic, map[string]string{
 		"Name":       hostName,
-		"SwitchName": vswitchHostName(m.tenantID, switchName),
+		"SwitchName": switchName,
 	})
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", hostName, psErr)
 	if psErr != nil {
@@ -778,11 +734,11 @@ func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, 
 // disconnectVMFromSwitch removes the network adapter connected to switchName on
 // the VM. switchName travels via ArgumentList — never interpolated.
 func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, vmName, hostName, switchName string) error {
-	// switchName is the short name; the adapter's SwitchName on the host is the
-	// cfgms-<tenant>__name, so translate before the Where-Object match.
+	// switchName is the exact switch name; the adapter's SwitchName on the host is
+	// the same literal name, so it travels verbatim for the Where-Object match.
 	_, psErr := m.transport.ExecutePS(ctx, psDisconnectVMNic, map[string]string{
 		"Name":       hostName,
-		"SwitchName": vswitchHostName(m.tenantID, switchName),
+		"SwitchName": switchName,
 	})
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", hostName, psErr)
 	if psErr != nil {
@@ -836,7 +792,8 @@ func (m *hypervModule) execSetVMMemory(ctx context.Context, vmName, hostName str
 // removeVM deletes a VM from the host.
 // Write-through cache semantics: transport is called first; cache updated on success only.
 func (m *hypervModule) removeVM(ctx context.Context, vmName string) error {
-	hostName := vmHostName(m.tenantID, vmName)
+	// The host object name is the exact VM name — no namespacing.
+	hostName := vmName
 
 	_, psErr := m.transport.ExecutePS(ctx, psRemoveVM, map[string]string{"Name": hostName})
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VM", hostName, psErr)

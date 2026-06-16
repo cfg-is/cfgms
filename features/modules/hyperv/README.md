@@ -26,7 +26,7 @@ The module accepts the following configuration options via `Configure(cfg)`:
 | `winrm_host` | string | Yes | Hostname or IP of the Hyper-V host |
 | `winrm_user_secret` | string | Yes | SecretStore key for the WinRM username |
 | `winrm_pass_secret` | string | Yes | SecretStore key for the WinRM password |
-| `tenant_id` | string | No | Tenant identifier used to namespace host-side resource names |
+| `tenant_id` | string | No | Tenant identifier recorded on audit events and DNA (not used to alter host-side resource names) |
 | `steward_id` | string | No | Steward identifier for audit records (defaults to `<tenantID>/hyperv`) |
 | `audit_manager` | `*audit.Manager` | No | Audit manager for recording Hyper-V operations |
 
@@ -228,21 +228,11 @@ model is the replacement for the removed standalone `vmattach` resource
 module leaves the VM's existing adapters untouched (it never implicitly strips a
 VM down to zero NICs).
 
-## Tenant-Prefix Naming Convention
+## Naming Convention
 
-Resources created by CFGMS use a tenant-prefixed name to prevent collisions across tenants sharing a Hyper-V host:
+Resources are created on the host with the **exact** name specified in the config — CFGMS never adds a prefix or suffix. A VM named `web-01` in the config appears as `web-01` in Hyper-V; a switch named `External` appears as `External`. Admins specify the name they expect to see on the host.
 
-```
-cfgms-<sanitizedTenantID>__<resourceName>
-```
-
-The sanitized tenant ID replaces `/` and other path-unsafe characters with `-`. For example, a VM named `web-01` under tenant `root/msp-a/acme` becomes:
-
-```
-cfgms-root-msp-a-acme__web-01
-```
-
-This prefix is applied consistently by CFGMS before all Hyper-V operations.
+Names are validated against an allowlist (`^[a-zA-Z0-9_\-]{1,64}$` for VMs, `^[a-zA-Z0-9_\- ]{1,64}$` for switches) purely as an injection-safety guard; the validated name is then used verbatim. Because names are not namespaced, operators sharing a single Hyper-V host across tenants must choose non-colliding names themselves.
 
 ## WinRM Connection Details
 

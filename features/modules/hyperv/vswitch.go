@@ -19,9 +19,8 @@ var (
 	// ErrVSwitchNotFound is returned when a requested virtual switch does not exist on the host.
 	ErrVSwitchNotFound = errors.New("hyperv: vswitch not found")
 
-	// ErrInvalidSwitchName is returned when a switch name fails allowlist validation or
-	// contains the reserved __ separator.
-	ErrInvalidSwitchName = errors.New("hyperv: invalid switch name: must match ^[a-zA-Z0-9_\\- ]{1,64}$ and must not contain __")
+	// ErrInvalidSwitchName is returned when a switch name fails allowlist validation.
+	ErrInvalidSwitchName = errors.New("hyperv: invalid switch name: must match ^[a-zA-Z0-9_\\- ]{1,64}$")
 
 	// ErrInvalidSwitchType is returned when SwitchType is not external, internal, or private.
 	ErrInvalidSwitchType = errors.New("hyperv: invalid switch type: must be external, internal, or private")
@@ -34,8 +33,8 @@ var (
 )
 
 // switchNamePattern is the allowlist for user-supplied virtual switch names.
-// Spaces are permitted per Hyper-V virtual switch naming convention.
-// The __ check is enforced separately to produce a more specific error.
+// Spaces are permitted per Hyper-V virtual switch naming convention. It is an
+// injection safety guard only — the name is used verbatim as the host-side name.
 var switchNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\- ]{1,64}$`)
 
 // VSwitchConfig represents the desired state of a Hyper-V virtual switch.
@@ -53,11 +52,6 @@ type VSwitchConfig struct {
 // Sets AllowManagementOS=true for external type (Hyper-V default for external).
 func (c *VSwitchConfig) Validate() error {
 	if !switchNamePattern.MatchString(c.Name) {
-		return ErrInvalidSwitchName
-	}
-	// __ is the tenant/resource separator — forbidden in user-supplied names to prevent
-	// a tenant from forging a prefix that collides with another tenant's switches.
-	if strings.Contains(c.Name, "__") {
 		return ErrInvalidSwitchName
 	}
 	switch c.SwitchType {
@@ -108,25 +102,6 @@ func (c *VSwitchConfig) GetManagedFields() []string {
 	return []string{"name", "switch_type", "net_adapter_name", "allow_management_os", "state"}
 }
 
-// vswitchHostName constructs the collision-free host-side virtual switch name.
-//
-// The cfgms- prefix and __ separator together make it impossible for a user to
-// construct a switch name that collides with another tenant's switches:
-//   - __ is forbidden in user-supplied names (Validate enforces this)
-//   - slashes in tenantID are replaced with hyphens to produce a flat prefix
-func vswitchHostName(tenantID, name string) string {
-	return "cfgms-" + strings.ReplaceAll(tenantID, "/", "-") + "__" + name
-}
-
-// vswitchUserName recovers the user-supplied (short) switch name from a host-side
-// cfgms-namespaced name. A name that lacks the prefix (e.g. a switch not managed
-// by cfgms) is returned unchanged. Used by getVM to map adapter-reported switch
-// names back into the short-name space the desired config is expressed in, so
-// drift comparison stays short-name vs short-name.
-func vswitchUserName(tenantID, hostName string) string {
-	return strings.TrimPrefix(hostName, "cfgms-"+strings.ReplaceAll(tenantID, "/", "-")+"__")
-}
-
 // psGetVSwitch checks whether a virtual switch exists; emits JSON {"found":bool,"SwitchType":"..."}.
 // $Name travels via ArgumentList — never interpolated into the script text.
 const psGetVSwitch = `$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue; if (-not $sw) { Write-Output '{"found":false}'; return }; $result = @{ found=$true; Name=$sw.Name; SwitchType=$sw.SwitchType.ToString() }; ConvertTo-Json $result -Compress`
@@ -154,9 +129,8 @@ func psCreateVSwitchExternal(allowManagementOS bool) string {
 	return `New-VMSwitch -Name $Name -SwitchType External -NetAdapterName $NetAdapter -AllowManagementOS ` + val + ` | Out-Null`
 }
 
-// getVSwitch retrieves the current state of a virtual switch by user-visible name.
-// Returns ErrVSwitchNotFound if the switch does not exist or the transport fails.
-// getVSwitch returns the current state of a virtual switch on the host.
+// getVSwitch returns the current state of a virtual switch on the host, queried
+// by its exact name.
 //
 // Contract (matches the directory/file modules):
 //   - resource exists  → (&VSwitchConfig{State: "present", ...}, nil)
@@ -172,8 +146,7 @@ func (m *hypervModule) getVSwitch(ctx context.Context, switchName string) (*VSwi
 		return nil, ErrVSwitchNotFound
 	}
 
-	hostName := vswitchHostName(m.tenantID, switchName)
-	output, err := m.transport.ExecutePS(ctx, psGetVSwitch, map[string]string{"Name": hostName})
+	output, err := m.transport.ExecutePS(ctx, psGetVSwitch, map[string]string{"Name": switchName})
 	if err != nil {
 		return nil, fmt.Errorf("hyperv: get vswitch %q: %w", switchName, err)
 	}
@@ -252,7 +225,8 @@ func (m *hypervModule) setVSwitch(ctx context.Context, resourceID string, config
 // createVSwitch creates a new virtual switch on the host.
 // Write-through cache semantics: transport is called first; cache updated on success only.
 func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg *VSwitchConfig) error {
-	hostName := vswitchHostName(m.tenantID, switchName)
+	// The host object name is the exact switch name — no namespacing.
+	hostName := switchName
 
 	var (
 		psCmd  string
@@ -294,7 +268,8 @@ func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg
 // removeVSwitch deletes a virtual switch from the host.
 // Write-through cache semantics: transport is called first; cache updated on success only.
 func (m *hypervModule) removeVSwitch(ctx context.Context, switchName string) error {
-	hostName := vswitchHostName(m.tenantID, switchName)
+	// The host object name is the exact switch name — no namespacing.
+	hostName := switchName
 
 	_, psErr := m.transport.ExecutePS(ctx, psRemoveVSwitch, map[string]string{"Name": hostName})
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMSwitch", hostName, psErr)

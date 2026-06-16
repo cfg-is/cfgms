@@ -5,6 +5,7 @@ package hyperv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -26,46 +27,55 @@ func vmModuleWithTransport(transport winrmTransport, tenantID string) *hypervMod
 	}
 }
 
-// ─── vmHostName collision tests ────────────────────────────────────────────────
+// hostVMJSON builds the getVM-shaped JSON the transport returns for call 0 of a
+// setVM, expressing the LIVE host state the reconcile decision is made against
+// (Part 2: host truth, never the cache). state is the desired-config vocabulary
+// ("running"/"stopped"); it is mapped to the Hyper-V State string the host emits.
+func hostVMJSON(name, state string, cpu int, memMB int64) string {
+	hvState := "Off"
+	if state == "running" {
+		hvState = "Running"
+	}
+	return fmt.Sprintf(
+		`{"found":true,"Name":%q,"MemoryStartupBytes":%d,"ProcessorCount":%d,"Generation":2,"Path":"C:\\VMs\\%s.vhdx","SwitchName":"","SwitchNames":[],"State":%q}`,
+		name, memMB*1024*1024, cpu, name, hvState)
+}
 
-// TestVMHostName_NoPrefixCollision verifies that distinct (tenantID, vmName) pairs
-// always produce distinct host-side names, defeating tenant prefix forgery.
-func TestVMHostName_NoPrefixCollision(t *testing.T) {
-	type pair struct {
-		tenantID string
-		vmName   string
-	}
-	cases := []pair{
-		// underscore in tenant vs underscore in vm name
-		{"tenant_a", "foo"},
-		{"tenant", "a_foo"},
-		// hyphen in tenant vs hyphen in vm name
-		{"tenant-a", "b"},
-		{"tenant", "a-b"},
-		// slash in tenant path
-		{"root/msp-a", "foo"},
-	}
+// ─── Exact host-name tests ─────────────────────────────────────────────────────
 
-	seen := make(map[string]pair)
-	for _, c := range cases {
-		host := vmHostName(c.tenantID, c.vmName)
-		if prev, ok := seen[host]; ok {
-			t.Errorf("collision: (%q, %q) and (%q, %q) both produce %q",
-				prev.tenantID, prev.vmName, c.tenantID, c.vmName, host)
-		}
-		seen[host] = c
-	}
+// TestVMHostName_IsExactConfigName verifies that the host-side VM name is the
+// exact name the admin specifies — CFGMS adds no prefix or suffix. This is the
+// founder directive: the actual VM name on the host must equal what is in the cfg.
+func TestVMHostName_IsExactConfigName(t *testing.T) {
+	const tenantID = "root/msp-a"
+	const vmName = "web-01"
+
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, tenantID)
+
+	// state:absent → Remove-VM, which passes only Name in args.
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName,
+		mapConfigState{"name": vmName, "state": "absent"}))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, calls, 1)
+	require.NotEmpty(t, calls[0].args)
+	assert.Equal(t, vmName, calls[0].args[0],
+		"host-side VM name must be the exact config name — no cfgms- prefix or tenant namespacing")
 }
 
 // ─── VMConfig.Validate tests ───────────────────────────────────────────────────
 
-// TestVMConfig_Validate_RejectsDoubleUnderscore verifies that VM names containing
-// __ are rejected — this character sequence is reserved for the tenant separator.
-func TestVMConfig_Validate_RejectsDoubleUnderscore(t *testing.T) {
+// TestVMConfig_Validate_AcceptsDoubleUnderscore verifies that VM names containing
+// __ are now accepted — the underscore is in the allowlist charset and there is
+// no longer a reserved separator (host names are exact, never namespaced).
+func TestVMConfig_Validate_AcceptsDoubleUnderscore(t *testing.T) {
 	cfg := &VMConfig{Name: "my__vm", VHDPath: `C:\VMs\test.vhdx`}
-	err := cfg.Validate()
-	require.Error(t, err, "VM name containing __ must be rejected")
-	assert.ErrorIs(t, err, ErrInvalidVMName)
+	require.NoError(t, cfg.Validate(),
+		"VM name containing __ must be accepted now that names are not namespaced")
 }
 
 // TestVMConfig_Validate_RejectsGen1 verifies that Generation 1 VMs are rejected.
@@ -105,17 +115,16 @@ func TestVMConfig_Validate_RejectsInjectionChars(t *testing.T) {
 
 // ─── Injection defense tests ───────────────────────────────────────────────────
 
-// TestVMInjectionDefense verifies that the prefixed VM name is transmitted as a
+// TestVMInjectionDefense verifies that the (exact) VM name is transmitted as a
 // WinRM ArgumentList parameter, never interpolated into the PowerShell script text.
 // Uses Get("vm:foo") since Get passes only the Name argument, making args[0] the
-// prefixed VM name.
+// exact VM name.
 func TestVMInjectionDefense(t *testing.T) {
 	const tenantID = "acme"
 	const vmName = "webserver"
-	expectedHost := vmHostName(tenantID, vmName)
 
 	transport := &testWinRMTransport{
-		output: `{"found":true,"Name":"` + expectedHost + `","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\webserver.vhdx","SwitchName":"External","State":"Running"}`,
+		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\webserver.vhdx","SwitchName":"External","State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
 
@@ -129,19 +138,19 @@ func TestVMInjectionDefense(t *testing.T) {
 	require.Len(t, calls, 1, "exactly one ExecutePS call expected")
 	call := calls[0]
 
-	// args[0] must be the prefixed host-side name
+	// args[0] must be the exact host-side name
 	require.Len(t, call.args, 1, "only Name should be in psArgs for GetVM")
-	assert.Equal(t, expectedHost, call.args[0], "prefixed VM name must appear in args, not scriptBlock")
+	assert.Equal(t, vmName, call.args[0], "VM name must appear in args, not scriptBlock")
 
-	// script block must NOT contain the prefixed name literal
-	assert.NotContains(t, call.scriptBlock, expectedHost,
-		"prefixed VM name must NOT appear in scriptBlock text — use $Name param reference")
+	// script block must NOT contain the name literal
+	assert.NotContains(t, call.scriptBlock, vmName,
+		"VM name must NOT appear in scriptBlock text — use $Name param reference")
 }
 
 // ─── Set absent tests ──────────────────────────────────────────────────────────
 
 // TestSet_VMAbsent_CallsRemoveVM verifies that Set with state "absent" calls Remove-VM
-// and passes the prefixed VM name as a WinRM argument (not interpolated into the script).
+// and passes the exact VM name as a WinRM argument (not interpolated into the script).
 func TestSet_VMAbsent_CallsRemoveVM(t *testing.T) {
 	transport := &testWinRMTransport{}
 	m := vmModuleWithTransport(transport, "ops")
@@ -165,12 +174,12 @@ func TestSet_VMAbsent_CallsRemoveVM(t *testing.T) {
 	assert.Contains(t, call.scriptBlock, "Remove-VM",
 		"Set with state absent must invoke Remove-VM")
 
-	// prefixed name must appear in args, not script
+	// exact name must appear in args, not script
 	require.NotEmpty(t, call.args)
-	assert.Equal(t, "cfgms-ops__myvm", call.args[0],
-		"prefixed VM name must appear in args[0] for Remove")
-	assert.NotContains(t, call.scriptBlock, "cfgms-ops__myvm",
-		"prefixed name must not be interpolated in scriptBlock")
+	assert.Equal(t, "myvm", call.args[0],
+		"exact VM name must appear in args[0] for Remove")
+	assert.NotContains(t, call.scriptBlock, "myvm",
+		"name must not be interpolated in scriptBlock")
 }
 
 // ─── Get not found tests ───────────────────────────────────────────────────────
@@ -211,10 +220,11 @@ func TestGet_VM_WrapsTransportError(t *testing.T) {
 
 // ─── Tenant isolation tests ────────────────────────────────────────────────────
 
-// TestCrossTenantIsolation_SharedHost verifies that two modules configured for
-// different tenants produce distinct host-side VM names, preventing one tenant
-// from interfering with another tenant's VMs on a shared Hyper-V host.
-func TestCrossTenantIsolation_SharedHost(t *testing.T) {
+// TestExactName_RegardlessOfTenant verifies that the host-side VM name is the
+// exact config name regardless of tenant_id — CFGMS never namespaces. Two modules
+// for different tenants both target the exact name "foo" on the host. (Operators
+// sharing a host across tenants are responsible for choosing non-colliding names.)
+func TestExactName_RegardlessOfTenant(t *testing.T) {
 	transportA := &testWinRMTransport{}
 	transportB := &testWinRMTransport{}
 
@@ -238,25 +248,15 @@ func TestCrossTenantIsolation_SharedHost(t *testing.T) {
 	require.Len(t, callsA, 1)
 	require.Len(t, callsB, 1)
 
-	// Tenant A: host-side name must be cfgms-a__foo
+	// Both tenants must target the exact name "foo" — no prefix.
 	require.NotEmpty(t, callsA[0].args)
-	assert.Equal(t, "cfgms-a__foo", callsA[0].args[0], "tenant A must use cfgms-a__ prefix")
-	assert.NotContains(t, callsA[0].scriptBlock, "cfgms-a__foo",
-		"tenant A prefixed name must not appear in scriptBlock")
-
-	// Tenant B: host-side name must be cfgms-b__foo
+	assert.Equal(t, "foo", callsA[0].args[0], "tenant A must use the exact name")
 	require.NotEmpty(t, callsB[0].args)
-	assert.Equal(t, "cfgms-b__foo", callsB[0].args[0], "tenant B must use cfgms-b__ prefix")
-	assert.NotContains(t, callsB[0].scriptBlock, "cfgms-b__foo",
-		"tenant B prefixed name must not appear in scriptBlock")
+	assert.Equal(t, "foo", callsB[0].args[0], "tenant B must use the exact name")
 
-	// Tenant B's name must not appear in tenant A's scriptBlock (and vice versa)
-	assert.NotContains(t, callsA[0].scriptBlock, "cfgms-b__foo")
-	assert.NotContains(t, callsB[0].scriptBlock, "cfgms-a__foo")
-
-	// The two host-side names must be distinct
-	assert.NotEqual(t, callsA[0].args[0], callsB[0].args[0],
-		"cross-tenant isolation: host-side names must differ")
+	// Injection safety: the name still travels via args, never interpolated.
+	assert.NotContains(t, callsA[0].scriptBlock, "foo")
+	assert.NotContains(t, callsB[0].scriptBlock, "foo")
 }
 
 // ─── VMConfig ConfigState interface tests ─────────────────────────────────────
@@ -447,10 +447,9 @@ func TestSwitchSetDiff(t *testing.T) {
 func TestGet_VM_ReadsMultipleAdapters(t *testing.T) {
 	const tenantID = "prod"
 	const vmName = "app-server"
-	hostName := vmHostName(tenantID, vmName)
 
 	transport := &testWinRMTransport{
-		output: `{"found":true,"Name":"` + hostName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Running"}`,
+		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
 
@@ -469,10 +468,9 @@ func TestGet_VM_ReadsMultipleAdapters(t *testing.T) {
 func TestGet_VM_SingleAdapterScalarSwitchNames(t *testing.T) {
 	const tenantID = "prod"
 	const vmName = "app-server"
-	hostName := vmHostName(tenantID, vmName)
 
 	transport := &testWinRMTransport{
-		output: `{"found":true,"Name":"` + hostName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":"External","State":"Running"}`,
+		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":"External","State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
 
@@ -514,9 +512,9 @@ func TestSetVM_MultiSwitchCreate(t *testing.T) {
 		"third call must connect the additional adapter")
 	// The additional switch name travels as an argument, never in the script.
 	require.NotEmpty(t, calls[2].args)
-	// The switch name is translated to its host-side cfgms-<tenant>__name and
-	// travels via args, never interpolated into the script body.
-	assert.Contains(t, calls[2].args, "cfgms-dev__Mgmt", "additional switch must travel via args, host-namespaced")
+	// The switch name is the EXACT name (no namespacing) and travels via args,
+	// never interpolated into the script body.
+	assert.Contains(t, calls[2].args, "Mgmt", "additional switch must travel via args, exact name")
 	assert.NotContains(t, calls[2].scriptBlock, "Mgmt",
 		"switch name must not be interpolated into the script body")
 }
@@ -525,15 +523,12 @@ func TestSetVM_MultiSwitchCreate(t *testing.T) {
 // from current {External, Mgmt} to desired {External, Storage} connects Storage
 // and disconnects Mgmt, with no New-VM.
 func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
-	transport := &testWinRMTransport{}
-	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{
-		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
-		SwitchName: "External", SwitchNames: stringOrStringList{"External", "Mgmt"},
+	// getVM (call 0) reports the live host: VM exists, stopped, on [External, Mgmt].
+	// Part 2: the reconcile decision is made off this host truth, not the cache.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"foo","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\foo.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Off"}`},
 	}
-	m.vmsMu.Unlock()
+	m := vmModuleWithTransport(transport, "ops")
 
 	cfg := &VMConfig{
 		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
@@ -550,11 +545,11 @@ func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
 		assert.NotContains(t, c.scriptBlock, "New-VM", "reconcile on existing VM must not create")
 		if strings.Contains(c.scriptBlock, "Add-VMNetworkAdapter") {
 			connect = true
-			assert.Contains(t, c.args, "cfgms-ops__Storage")
+			assert.Contains(t, c.args, "Storage", "newly desired switch uses its exact name")
 		}
 		if strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
 			disconnect = true
-			assert.Contains(t, c.args, "cfgms-ops__Mgmt")
+			assert.Contains(t, c.args, "Mgmt", "removed switch uses its exact name")
 		}
 	}
 	assert.True(t, connect, "must connect the newly desired switch")
@@ -564,15 +559,12 @@ func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
 // TestSetVM_MultiSwitch_IdempotentWhenEqual verifies that when the desired set
 // equals the current set, NO network mutation runs (no Add/Remove-VMNetworkAdapter).
 func TestSetVM_MultiSwitch_IdempotentWhenEqual(t *testing.T) {
-	transport := &testWinRMTransport{}
-	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{
-		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
-		SwitchName: "External", SwitchNames: stringOrStringList{"External", "Mgmt"},
+	// getVM (call 0) reports the host already on [External, Mgmt], stopped, with
+	// the desired CPU/memory — fully converged.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"foo","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\foo.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Off"}`},
 	}
-	m.vmsMu.Unlock()
+	m := vmModuleWithTransport(transport, "ops")
 
 	cfg := &VMConfig{
 		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
@@ -584,15 +576,16 @@ func TestSetVM_MultiSwitch_IdempotentWhenEqual(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	// Fully converged desired==current state must issue ZERO host mutations —
-	// asserting Empty makes the idempotency proof real rather than vacuous (the
-	// per-call NotContains loop below is a no-op when calls is empty).
-	assert.Empty(t, calls, "idempotent: zero transport calls expected when desired == current")
+	// Fully converged desired==current state must issue ZERO host MUTATIONS. The
+	// only call is the getVM host-truth read (call 0); no Add/Remove/Stop/Start.
+	require.Len(t, calls, 1, "only the getVM host-truth read should run when desired == current")
 	for _, c := range calls {
 		assert.NotContains(t, c.scriptBlock, "Add-VMNetworkAdapter",
 			"equal switch sets must not connect adapters")
 		assert.NotContains(t, c.scriptBlock, "Remove-VMNetworkAdapter",
 			"equal switch sets must not remove adapters")
+		assert.NotContains(t, c.scriptBlock, "Stop-VM")
+		assert.NotContains(t, c.scriptBlock, "Start-VM")
 	}
 }
 
@@ -613,15 +606,11 @@ func (r rawConfigState) GetManagedFields() []string    { return nil }
 // the adapters. The *VMConfig-based multi-NIC tests bypassed this map parsing,
 // so the list was silently dropped (desired set empty -> reconcile no-op).
 func TestSetVM_ConfigMap_SwitchNameList_Connects(t *testing.T) {
-	transport := &testWinRMTransport{}
-	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{
-		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
-		SwitchName: "hv-int", SwitchNames: stringOrStringList{"hv-int"},
+	// getVM (call 0) reports the host on [hv-int]; desired adds hv-priv.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"foo","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\foo.vhdx","SwitchName":"hv-int","SwitchNames":["hv-int"],"State":"Off"}`},
 	}
-	m.vmsMu.Unlock()
+	m := vmModuleWithTransport(transport, "ops")
 
 	cfg := rawConfigState{m: map[string]interface{}{
 		"memory_mb":   4096,
@@ -637,12 +626,12 @@ func TestSetVM_ConfigMap_SwitchNameList_Connects(t *testing.T) {
 
 	var connectedPriv bool
 	for _, c := range calls {
-		if strings.Contains(c.scriptBlock, "Add-VMNetworkAdapter") && contains(c.args, "cfgms-ops__hv-priv") {
+		if strings.Contains(c.scriptBlock, "Add-VMNetworkAdapter") && contains(c.args, "hv-priv") {
 			connectedPriv = true
 		}
 	}
 	assert.True(t, connectedPriv,
-		"switch_name LIST from the config map must be parsed and connect hv-priv (host-namespaced)")
+		"switch_name LIST from the config map must be parsed and connect hv-priv (exact name)")
 }
 
 func contains(args []interface{}, want string) bool {
@@ -708,10 +697,9 @@ func TestModule_Get_VMPrefix_NoTransport(t *testing.T) {
 func TestGet_VM_ReturnsConfig(t *testing.T) {
 	const tenantID = "prod"
 	const vmName = "app-server"
-	hostName := vmHostName(tenantID, vmName)
 
 	transport := &testWinRMTransport{
-		output: `{"found":true,"Name":"` + hostName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","State":"Running"}`,
+		output: `{"found":true,"Name":"` + vmName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","State":"Running"}`,
 	}
 	m := vmModuleWithTransport(transport, tenantID)
 
@@ -721,7 +709,7 @@ func TestGet_VM_ReturnsConfig(t *testing.T) {
 
 	cfg, ok := state.(*VMConfig)
 	require.True(t, ok, "Get must return *VMConfig")
-	assert.Equal(t, vmName, cfg.Name, "Name must be user-visible (without prefix)")
+	assert.Equal(t, vmName, cfg.Name, "Name must be the exact config name")
 	assert.Equal(t, int64(4096), cfg.MemoryMB, "MemoryMB = MemoryStartupBytes / 1024^2")
 	assert.Equal(t, 4, cfg.CPUCount)
 	assert.Equal(t, 2, cfg.Generation)
@@ -760,21 +748,21 @@ func TestSet_VMCreate(t *testing.T) {
 	require.Len(t, calls, 2)
 	call := calls[1] // New-VM is the second call
 
-	// Script must reference $Name parameter, not literal prefixed name
+	// Script must reference $Name parameter, not the literal name
 	assert.Contains(t, call.scriptBlock, "$Name",
 		"script block must use $Name parameter reference")
-	assert.NotContains(t, call.scriptBlock, "cfgms-dev__test-vm",
-		"prefixed VM name must not appear in scriptBlock")
+	assert.NotContains(t, call.scriptBlock, "test-vm",
+		"VM name must not appear in scriptBlock")
 
-	// Prefixed name must appear somewhere in args
+	// Exact name must appear somewhere in args
 	var found bool
 	for _, arg := range call.args {
-		if arg == "cfgms-dev__test-vm" {
+		if arg == "test-vm" {
 			found = true
 			break
 		}
 	}
-	assert.True(t, found, "prefixed VM name must appear in args")
+	assert.True(t, found, "exact VM name must appear in args")
 }
 
 // ─── VM power state tests ──────────────────────────────────────────────────────
@@ -782,13 +770,11 @@ func TestSet_VMCreate(t *testing.T) {
 // TestSetVM_RunningState_CallsStartVM asserts that Set with state "running" on an
 // existing VM issues Start-VM and does not issue New-VM.
 func TestSetVM_RunningState_CallsStartVM(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the live host: VM exists, stopped, matching CPU/mem.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	// Pre-seed VM cache to simulate existing stopped VM, bypassing getVM transport call.
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{
 		Name:     "foo",
@@ -804,23 +790,21 @@ func TestSetVM_RunningState_CallsStartVM(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1, "cache-seeded VM must produce exactly one transport call (Start-VM)")
-	assert.Contains(t, calls[0].scriptBlock, "Start-VM",
+	require.Len(t, calls, 2, "getVM host-truth read + Start-VM")
+	assert.Contains(t, calls[1].scriptBlock, "Start-VM",
 		"Set with state running must invoke Start-VM")
-	assert.NotContains(t, calls[0].scriptBlock, "New-VM",
+	assert.NotContains(t, calls[1].scriptBlock, "New-VM",
 		"Set with state running on existing VM must not invoke New-VM")
 }
 
 // TestSetVM_StoppedState_CallsStopVM asserts that Set with state "stopped" on an
 // existing VM issues Stop-VM and does not issue New-VM.
 func TestSetVM_StoppedState_CallsStopVM(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the live host: VM exists, running, matching CPU/mem.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	// Pre-seed VM cache to simulate existing running VM.
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{
 		Name:     "foo",
@@ -836,10 +820,10 @@ func TestSetVM_StoppedState_CallsStopVM(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1, "cache-seeded VM must produce exactly one transport call (Stop-VM)")
-	assert.Contains(t, calls[0].scriptBlock, "Stop-VM",
+	require.Len(t, calls, 2, "getVM host-truth read + Stop-VM")
+	assert.Contains(t, calls[1].scriptBlock, "Stop-VM",
 		"Set with state stopped must invoke Stop-VM")
-	assert.NotContains(t, calls[0].scriptBlock, "New-VM",
+	assert.NotContains(t, calls[1].scriptBlock, "New-VM",
 		"Set with state stopped on existing VM must not invoke New-VM")
 }
 
@@ -848,13 +832,11 @@ func TestSetVM_StoppedState_CallsStopVM(t *testing.T) {
 // memory) without issuing New-VM. Because the VM is already stopped, NO Stop-VM
 // is issued (power-state gating): the only calls are the two resize cmdlets.
 func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the live host: VM stopped, 2 CPUs / 4096 MB.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	// Existing VM: 2 CPUs, 4096 MB — already stopped.
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	// Desired: 4 CPUs, 8192 MB — both differ from current.
 	cfg := &VMConfig{
@@ -871,8 +853,8 @@ func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	// Already-stopped VM: no Stop-VM. Exactly Set-VMProcessor + Set-VMMemory.
-	require.Len(t, calls, 2, "resize on already-stopped VM must produce only Set-VMProcessor + Set-VMMemory")
+	// Already-stopped VM: no Stop-VM. getVM read + Set-VMProcessor + Set-VMMemory.
+	require.Len(t, calls, 3, "resize on already-stopped VM: getVM + Set-VMProcessor + Set-VMMemory")
 
 	var scripts []string
 	for _, c := range calls {
@@ -902,13 +884,11 @@ func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 // changed CPU/memory issues Stop-VM → Set-VMProcessor → Set-VMMemory → Start-VM
 // (the resize-while-running path) without issuing New-VM.
 func TestSetVM_RunningState_WithResize(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the live host: VM running, 2 CPUs / 4096 MB.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	// Existing running VM with 2 CPUs, 4096 MB.
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	// Desired: still running, but 4 CPUs and 8192 MB.
 	cfg := &VMConfig{
@@ -925,13 +905,13 @@ func TestSetVM_RunningState_WithResize(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	// Expected sequence: Stop-VM, Set-VMProcessor, Set-VMMemory, Start-VM
-	require.Len(t, calls, 4, "running+resize must produce Stop-VM + Set-VMProcessor + Set-VMMemory + Start-VM")
+	// Expected sequence: getVM, Stop-VM, Set-VMProcessor, Set-VMMemory, Start-VM
+	require.Len(t, calls, 5, "running+resize: getVM + Stop-VM + Set-VMProcessor + Set-VMMemory + Start-VM")
 
-	assert.Contains(t, calls[0].scriptBlock, "Stop-VM", "first call must be Stop-VM")
-	assert.Contains(t, calls[1].scriptBlock, "Set-VMProcessor", "second call must be Set-VMProcessor")
-	assert.Contains(t, calls[2].scriptBlock, "Set-VM", "third call must be Set-VM (memory)")
-	assert.Contains(t, calls[3].scriptBlock, "Start-VM", "fourth call must be Start-VM")
+	assert.Contains(t, calls[1].scriptBlock, "Stop-VM", "must Stop-VM before resize")
+	assert.Contains(t, calls[2].scriptBlock, "Set-VMProcessor", "must Set-VMProcessor")
+	assert.Contains(t, calls[3].scriptBlock, "Set-VM", "must Set-VM (memory)")
+	assert.Contains(t, calls[4].scriptBlock, "Start-VM", "must Start-VM after resize")
 	for _, c := range calls {
 		assert.NotContains(t, c.scriptBlock, "New-VM", "resize on existing VM must not invoke New-VM")
 	}
@@ -945,13 +925,11 @@ func TestSetVM_RunningState_WithResize(t *testing.T) {
 // re-issued Start-VM on every converge, which Hyper-V rejects with "already in
 // the running state".
 func TestSetVM_RunningState_AlreadyRunning_NoStartVM(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the host already running with the desired CPU/memory.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	// Existing VM already running with the exact desired CPU/memory.
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
 	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
@@ -960,7 +938,8 @@ func TestSetVM_RunningState_AlreadyRunning_NoStartVM(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, calls,
+	// Only the getVM host-truth read runs — no power transition.
+	require.Len(t, calls, 1,
 		"desired running + already running + no other drift must issue no power transitions")
 	for _, c := range calls {
 		assert.NotContains(t, c.scriptBlock, "Start-VM")
@@ -971,12 +950,11 @@ func TestSetVM_RunningState_AlreadyRunning_NoStartVM(t *testing.T) {
 // TestSetVM_StoppedState_AlreadyStopped_NoStopVM verifies that re-applying a
 // desired-stopped config to a VM that is ALREADY stopped issues NO Stop-VM.
 func TestSetVM_StoppedState_AlreadyStopped_NoStopVM(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the host already stopped with the desired CPU/memory.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
 	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
@@ -985,7 +963,8 @@ func TestSetVM_StoppedState_AlreadyStopped_NoStopVM(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	assert.Empty(t, calls,
+	// Only the getVM host-truth read runs — no power transition.
+	require.Len(t, calls, 1,
 		"desired stopped + already stopped + no other drift must issue no power transitions")
 	for _, c := range calls {
 		assert.NotContains(t, c.scriptBlock, "Stop-VM")
@@ -997,13 +976,11 @@ func TestSetVM_StoppedState_AlreadyStopped_NoStopVM(t *testing.T) {
 // only suppresses redundant transitions, it must not suppress the stop a resize
 // genuinely needs.
 func TestSetVM_RunningResize_StopResizeStart(t *testing.T) {
-	transport := &testWinRMTransport{}
+	// getVM (call 0) reports the host running, 2 CPUs / 4096 MB.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	// Running VM with 2 CPUs / 4096 MB.
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	// Desired: still running but 4 CPUs / 8192 MB.
 	cfg := &VMConfig{Name: "foo", State: "running", CPUCount: 4, MemoryMB: 8192}
@@ -1013,12 +990,12 @@ func TestSetVM_RunningResize_StopResizeStart(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 4,
-		"running VM resize must produce Stop-VM + Set-VMProcessor + Set-VMMemory + Start-VM")
-	assert.Contains(t, calls[0].scriptBlock, "Stop-VM", "first call must be Stop-VM")
-	assert.Contains(t, calls[1].scriptBlock, "Set-VMProcessor", "second call must be Set-VMProcessor")
-	assert.Contains(t, calls[2].scriptBlock, "Set-VM", "third call must be Set-VM (memory)")
-	assert.Contains(t, calls[3].scriptBlock, "Start-VM", "fourth call must be Start-VM")
+	require.Len(t, calls, 5,
+		"running VM resize: getVM + Stop-VM + Set-VMProcessor + Set-VMMemory + Start-VM")
+	assert.Contains(t, calls[1].scriptBlock, "Stop-VM", "must Stop-VM before resize")
+	assert.Contains(t, calls[2].scriptBlock, "Set-VMProcessor", "must Set-VMProcessor")
+	assert.Contains(t, calls[3].scriptBlock, "Set-VM", "must Set-VM (memory)")
+	assert.Contains(t, calls[4].scriptBlock, "Start-VM", "must Start-VM after resize")
 }
 
 // ─── VM power state failure-mode tests ────────────────────────────────────────
@@ -1026,12 +1003,12 @@ func TestSetVM_RunningResize_StopResizeStart(t *testing.T) {
 // TestSetVM_StartVM_TransportError verifies that a transport failure on Start-VM
 // surfaces an error containing "Start-VM".
 func TestSetVM_StartVM_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: timeout")}
+	// getVM (call 0) succeeds; Start-VM (call 1) fails.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
+		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
 	err := m.Set(context.Background(), "vm:foo", cfg)
@@ -1042,12 +1019,12 @@ func TestSetVM_StartVM_TransportError(t *testing.T) {
 // TestSetVM_StopVM_TransportError verifies that a transport failure on Stop-VM
 // surfaces an error containing "Stop-VM".
 func TestSetVM_StopVM_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: timeout")}
+	// getVM (call 0) succeeds; Stop-VM (call 1) fails.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "running", 2, 4096)},
+		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
 	err := m.Set(context.Background(), "vm:foo", cfg)
@@ -1060,12 +1037,13 @@ func TestSetVM_StopVM_TransportError(t *testing.T) {
 // already stopped, so power-state gating skips Stop-VM and Set-VMProcessor is
 // the first (and failing) call.
 func TestSetVM_SetVMProcessor_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: timeout")}
+	// getVM (call 0) succeeds; Set-VMProcessor (call 1) fails. VM already stopped,
+	// so power-state gating skips Stop-VM and Set-VMProcessor is the first mutation.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
+		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	cfg := &VMConfig{Name: "foo", State: "stopped", CPUCount: 4, MemoryMB: 4096}
 	err := m.Set(context.Background(), "vm:foo", cfg)
@@ -1078,12 +1056,13 @@ func TestSetVM_SetVMProcessor_TransportError(t *testing.T) {
 // stopped (no Stop-VM) and only memory changes, so Set-VMMemory is the first
 // (and failing) call.
 func TestSetVM_SetVMMemory_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: timeout")}
+	// getVM (call 0) succeeds; Set-VMMemory (call 1) fails. VM already stopped and
+	// only memory changes, so Set-VMMemory is the first (and failing) mutation.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("foo", "stopped", 2, 4096)},
+		perCallErrors:  []error{nil, errors.New("winrm: timeout")},
+	}
 	m := vmModuleWithTransport(transport, "ops")
-
-	m.vmsMu.Lock()
-	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
-	m.vmsMu.Unlock()
 
 	// Only memory changes — no CPU resize, so the single resize call is Set-VMMemory.
 	cfg := &VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 8192}

@@ -24,38 +24,27 @@ func vswitchModuleWithTransport(transport winrmTransport, tenantID string) *hype
 	}
 }
 
-// ─── vswitchHostName tests ────────────────────────────────────────────────────
+// ─── Exact host-name tests ─────────────────────────────────────────────────────
 
-// TestVSwitchHostName_Format verifies the returned format matches the spec.
-func TestVSwitchHostName_Format(t *testing.T) {
-	got := vswitchHostName("root/msp-a", "myswitch")
-	assert.Equal(t, "cfgms-root-msp-a__myswitch", got)
-}
+// TestVSwitchHostName_IsExactConfigName verifies that the host-side switch name is
+// the exact name the admin specifies — CFGMS adds no prefix or suffix, regardless
+// of tenant_id. This is the founder directive: the actual switch name on the host
+// must equal what is in the cfg.
+func TestVSwitchHostName_IsExactConfigName(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vswitchModuleWithTransport(transport, "root/msp-a")
 
-// TestVSwitchHostName_NoPrefixCollision verifies that distinct (tenantID, switchName) pairs
-// always produce distinct host-side names, defeating tenant prefix forgery.
-func TestVSwitchHostName_NoPrefixCollision(t *testing.T) {
-	type pair struct {
-		tenantID   string
-		switchName string
-	}
-	cases := []pair{
-		{"tenant_a", "switch"},
-		{"tenant", "a_switch"},
-		{"tenant-a", "b"},
-		{"tenant", "a-b"},
-		{"root/msp-a", "external"},
-	}
+	cfg := &VSwitchConfig{Name: "myswitch", State: "absent"}
+	require.NoError(t, m.Set(context.Background(), "vswitch:myswitch", cfg))
 
-	seen := make(map[string]pair)
-	for _, c := range cases {
-		host := vswitchHostName(c.tenantID, c.switchName)
-		if prev, ok := seen[host]; ok {
-			t.Errorf("collision: (%q, %q) and (%q, %q) both produce %q",
-				prev.tenantID, prev.switchName, c.tenantID, c.switchName, host)
-		}
-		seen[host] = c
-	}
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, calls, 1)
+	require.NotEmpty(t, calls[0].args)
+	assert.Equal(t, "myswitch", calls[0].args[0],
+		"host-side switch name must be the exact config name — no cfgms- prefix or tenant namespacing")
 }
 
 // ─── VSwitchConfig.Validate tests ─────────────────────────────────────────────
@@ -77,13 +66,13 @@ func TestVSwitchConfig_Validate_ExternalRequiresAdapter(t *testing.T) {
 	assert.ErrorIs(t, err, ErrExternalRequiresAdapter)
 }
 
-// TestVSwitchConfig_Validate_RejectsDoubleUnderscore verifies that __ in switch name
-// is rejected — the __ sequence is reserved for the tenant separator.
-func TestVSwitchConfig_Validate_RejectsDoubleUnderscore(t *testing.T) {
+// TestVSwitchConfig_Validate_AcceptsDoubleUnderscore verifies that __ in a switch
+// name is now accepted — the underscore is in the allowlist charset and there is
+// no longer a reserved separator (host names are exact, never namespaced).
+func TestVSwitchConfig_Validate_AcceptsDoubleUnderscore(t *testing.T) {
 	cfg := &VSwitchConfig{Name: "my__switch", SwitchType: "internal"}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidSwitchName)
+	require.NoError(t, cfg.Validate(),
+		"switch name containing __ must be accepted now that names are not namespaced")
 }
 
 // TestVSwitchConfig_Validate_RejectsInvalidSwitchType verifies that unknown types
@@ -189,13 +178,12 @@ func TestVSwitchConfig_YAML(t *testing.T) {
 
 // ─── Injection defense tests ───────────────────────────────────────────────────
 
-// TestVSwitchInjectionDefense verifies that the prefixed switch name is transmitted
+// TestVSwitchInjectionDefense verifies that the (exact) switch name is transmitted
 // as a WinRM ArgumentList parameter during create/delete, never interpolated into the
 // PowerShell script block text. This satisfies the AC test name alias.
 func TestVSwitchInjectionDefense(t *testing.T) {
 	const tenantID = "ops"
 	const switchName = "corp-net"
-	expectedHostName := vswitchHostName(tenantID, switchName)
 
 	transport := &testWinRMTransport{}
 	m := vswitchModuleWithTransport(transport, tenantID)
@@ -211,11 +199,11 @@ func TestVSwitchInjectionDefense(t *testing.T) {
 	require.Len(t, calls, 1, "exactly one ExecutePS call expected for Remove")
 	call := calls[0]
 
-	// Prefixed name must appear in args, not scriptBlock.
+	// Exact name must appear in args, not scriptBlock.
 	require.Len(t, call.args, 1)
-	assert.Equal(t, expectedHostName, call.args[0], "prefixed switch name must be in args[0]")
-	assert.NotContains(t, call.scriptBlock, expectedHostName,
-		"prefixed switch name must NOT appear in scriptBlock text")
+	assert.Equal(t, switchName, call.args[0], "exact switch name must be in args[0]")
+	assert.NotContains(t, call.scriptBlock, switchName,
+		"switch name must NOT appear in scriptBlock text")
 }
 
 // ─── Get not found tests ───────────────────────────────────────────────────────
@@ -271,10 +259,9 @@ func TestGet_VSwitch_NoTransport(t *testing.T) {
 func TestGet_VSwitch_ReturnsConfig(t *testing.T) {
 	const tenantID = "prod"
 	const switchName = "corp-external"
-	hostName := vswitchHostName(tenantID, switchName)
 
 	transport := &testWinRMTransport{
-		output: `{"found":true,"Name":"` + hostName + `","SwitchType":"External"}`,
+		output: `{"found":true,"Name":"` + switchName + `","SwitchType":"External"}`,
 	}
 	m := vswitchModuleWithTransport(transport, tenantID)
 
@@ -284,7 +271,7 @@ func TestGet_VSwitch_ReturnsConfig(t *testing.T) {
 
 	cfg, ok := state.(*VSwitchConfig)
 	require.True(t, ok, "Get must return *VSwitchConfig")
-	assert.Equal(t, switchName, cfg.Name, "Name must be user-visible (without prefix)")
+	assert.Equal(t, switchName, cfg.Name, "Name must be the exact config name")
 	assert.Equal(t, "external", cfg.SwitchType, "SwitchType 'External' must map to 'external'")
 	assert.Equal(t, "present", cfg.State)
 }
@@ -319,10 +306,10 @@ func TestSet_VSwitch_CreateInternal(t *testing.T) {
 		"internal switch creation must include SwitchType Internal")
 
 	require.Len(t, call.args, 1, "only Name should be in psArgs for internal switch")
-	assert.Equal(t, "cfgms-dev__dev-net", call.args[0],
-		"prefixed switch name must be in args[0]")
-	assert.NotContains(t, call.scriptBlock, "cfgms-dev__dev-net",
-		"prefixed name must not appear in scriptBlock")
+	assert.Equal(t, "dev-net", call.args[0],
+		"exact switch name must be in args[0]")
+	assert.NotContains(t, call.scriptBlock, "dev-net",
+		"name must not appear in scriptBlock")
 }
 
 // TestSet_VSwitch_CreateExternal verifies that Set creates an external switch and
@@ -357,11 +344,11 @@ func TestSet_VSwitch_CreateExternal(t *testing.T) {
 
 	// Keys sorted: "Name" < "NetAdapter"
 	require.Len(t, call.args, 2, "Name and NetAdapter should be in psArgs for external switch")
-	assert.Equal(t, "cfgms-ops__corp-net", call.args[0], "prefixed switch name in args[0]")
+	assert.Equal(t, "corp-net", call.args[0], "exact switch name in args[0]")
 	assert.Equal(t, "Ethernet", call.args[1], "adapter name in args[1]")
 
 	// Neither value should appear in the scriptBlock
-	assert.NotContains(t, call.scriptBlock, "cfgms-ops__corp-net")
+	assert.NotContains(t, call.scriptBlock, "corp-net")
 	assert.NotContains(t, call.scriptBlock, "Ethernet")
 }
 
@@ -386,10 +373,10 @@ func TestSet_VSwitch_DeleteAbsent(t *testing.T) {
 		"Set with state absent must invoke Remove-VMSwitch")
 
 	require.Len(t, call.args, 1)
-	assert.Equal(t, "cfgms-ops__old-switch", call.args[0],
-		"prefixed switch name must be in args[0] for Remove")
-	assert.NotContains(t, call.scriptBlock, "cfgms-ops__old-switch",
-		"prefixed name must not be interpolated in scriptBlock")
+	assert.Equal(t, "old-switch", call.args[0],
+		"exact switch name must be in args[0] for Remove")
+	assert.NotContains(t, call.scriptBlock, "old-switch",
+		"name must not be interpolated in scriptBlock")
 }
 
 // TestSet_VSwitch_ValidationRejectsNAT verifies that setVSwitch rejects nat type
@@ -433,11 +420,12 @@ func TestSet_VSwitch_DeleteTransportError(t *testing.T) {
 	assert.Contains(t, err.Error(), "remove vswitch", "error must identify the remove operation")
 }
 
-// ─── Cross-tenant isolation tests ─────────────────────────────────────────────
+// ─── Exact-name-regardless-of-tenant tests ────────────────────────────────────
 
-// TestVSwitchCrossTenantIsolation verifies that two modules for different tenants
-// produce distinct host-side switch names, preventing cross-tenant interference.
-func TestVSwitchCrossTenantIsolation(t *testing.T) {
+// TestVSwitchExactName_RegardlessOfTenant verifies that the host-side switch name
+// is the exact config name regardless of tenant_id — CFGMS never namespaces.
+// (Operators sharing a host across tenants must choose non-colliding names.)
+func TestVSwitchExactName_RegardlessOfTenant(t *testing.T) {
 	transportA := &testWinRMTransport{}
 	transportB := &testWinRMTransport{}
 
@@ -462,11 +450,12 @@ func TestVSwitchCrossTenantIsolation(t *testing.T) {
 	require.Len(t, callsB, 1)
 
 	require.Len(t, callsA[0].args, 1)
-	assert.Equal(t, "cfgms-a__net", callsA[0].args[0])
+	assert.Equal(t, "net", callsA[0].args[0], "tenant A must use the exact name")
 
 	require.Len(t, callsB[0].args, 1)
-	assert.Equal(t, "cfgms-b__net", callsB[0].args[0])
+	assert.Equal(t, "net", callsB[0].args[0], "tenant B must use the exact name")
 
-	assert.NotEqual(t, callsA[0].args[0], callsB[0].args[0],
-		"cross-tenant isolation: host-side switch names must differ")
+	// Injection safety: the name still travels via args, never interpolated.
+	assert.NotContains(t, callsA[0].scriptBlock, "net")
+	assert.NotContains(t, callsB[0].scriptBlock, "net")
 }
