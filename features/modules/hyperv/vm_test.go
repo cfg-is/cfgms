@@ -654,6 +654,26 @@ func contains(args []interface{}, want string) bool {
 	return false
 }
 
+// TestVMConfig_AsMap_SwitchNameReflectsFullSet is the drift-detection
+// regression: AsMap must surface the FULL switch set on the "switch_name"
+// managed field, so the executor's CompareStates detects a removed NIC (a
+// reduced desired set differs from the current full set). Emitting only the
+// primary switch hid un-set from the comparator (live-found on CFG-70-02).
+func TestVMConfig_AsMap_SwitchNameReflectsFullSet(t *testing.T) {
+	// Multi-NIC: switch_name must be the full list, not just the first switch.
+	multi := (&VMConfig{Name: "vm", SwitchNames: stringOrStringList{"a", "b"}}).AsMap()
+	assert.Equal(t, []interface{}{"a", "b"}, multi["switch_name"],
+		"multi-NIC switch_name must reflect the full set so un-set is detectable")
+
+	// Single NIC: a bare string (matches the common config, stays idempotent).
+	single := (&VMConfig{Name: "vm", SwitchName: "a"}).AsMap()
+	assert.Equal(t, "a", single["switch_name"])
+
+	// No network: empty string, not a bare prefix or nil.
+	none := (&VMConfig{Name: "vm"}).AsMap()
+	assert.Equal(t, "", none["switch_name"])
+}
+
 // ─── Module routing tests ──────────────────────────────────────────────────────
 
 // TestModule_Get_UnknownResourceIDReturnsNotImplemented verifies that resource IDs

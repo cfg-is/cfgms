@@ -239,19 +239,38 @@ func (c *VMConfig) Validate() error {
 // convergence logic reconciles against.
 func (c *VMConfig) AsMap() map[string]interface{} {
 	desired := c.desiredSwitches()
-	primary := ""
-	if len(desired) > 0 {
-		primary = desired[0]
-	}
 	return map[string]interface{}{
 		"name":         c.Name,
 		"memory_mb":    c.MemoryMB,
 		"cpu_count":    c.CPUCount,
 		"vhd_path":     c.VHDPath,
-		"switch_name":  primary,
+		"switch_name":  switchNameField(desired),
 		"switch_names": desired,
 		"generation":   c.Generation,
 		"state":        c.State,
+	}
+}
+
+// switchNameField renders the desired switch SET as the value the drift
+// comparator sees for the "switch_name" managed field. It must reflect the FULL
+// set (not just the primary) so removing a switch from a multi-NIC VM is
+// detected as drift — otherwise the executor's "skip Set when unchanged"
+// optimisation never triggers the reconcile that disconnects the adapter.
+// Single switch -> a bare string (matches the common single-NIC user config and
+// keeps it idempotent); multiple -> a []interface{} list (matching the YAML
+// list type a multi-NIC config decodes to, so equal sets compare equal).
+func switchNameField(desired []string) interface{} {
+	switch len(desired) {
+	case 0:
+		return ""
+	case 1:
+		return desired[0]
+	default:
+		out := make([]interface{}, len(desired))
+		for i, s := range desired {
+			out[i] = s
+		}
+		return out
 	}
 }
 
