@@ -85,18 +85,6 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-CreateVSwitchInternal -Name " + quoteArg(psArgs, "Name"))
 	case psCreateVSwitchPrivate:
 		return emit("Cfgms-CreateVSwitchPrivate -Name " + quoteArg(psArgs, "Name"))
-	case psGetSnapshot:
-		return emit("Cfgms-GetSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psCreateSnapshot:
-		return emit("Cfgms-CreateSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psRemoveSnapshot:
-		return emit("Cfgms-RemoveSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psRestoreSnapshot:
-		return emit("Cfgms-RestoreSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
 	}
 	// Mirror production ExecutePS: an unknown psCommand is an error, not a
 	// silent success — keeps this test mirror honest to the production contract.
@@ -249,39 +237,12 @@ func TestPSDispatch_VSwitchVerbs(t *testing.T) {
 	}
 }
 
-// TestPSDispatch_SnapshotVerbs covers the four snapshot verbs.
-func TestPSDispatch_SnapshotVerbs(t *testing.T) {
-	ctx := context.Background()
-	args := map[string]string{"VMName": "cfgms-t__web-01", "Name": "pre-patch"}
-
-	cases := []struct {
-		name      string
-		psCommand string
-		want      string
-	}{
-		{"Get-VMSnapshot", psGetSnapshot, "Cfgms-GetSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-		{"Checkpoint-VM", psCreateSnapshot, "Cfgms-CreateSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-		{"Remove-VMSnapshot", psRemoveSnapshot, "Cfgms-RemoveSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-		{"Restore-VMSnapshot", psRestoreSnapshot, "Cfgms-RestoreSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tr := &recordingPSTransport{}
-			_, err := tr.ExecutePS(ctx, tc.psCommand, args)
-			require.NoError(t, err)
-			require.Len(t, tr.calls, 1)
-			assert.Equal(t, tc.want, tr.calls[0])
-		})
-	}
-}
-
 // TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
-// psXxx constant defined in vm.go, vswitch.go, and snapshot.go without
-// silently returning an empty expression. This guards against the production
-// dispatch switch (pstransport_dispatch_windows.go) and dispatchForTest
-// drifting apart: if a new psXxx const is added in a resource file but not
-// in either switch table, this test fails with an empty-expression assertion.
+// psXxx constant defined in vm.go and vswitch.go without silently returning
+// an empty expression. This guards against the production dispatch switch
+// (pstransport_dispatch_windows.go) and dispatchForTest drifting apart: if a
+// new psXxx const is added in a resource file but not in either switch table,
+// this test fails with an empty-expression assertion.
 func TestDispatch_AllKnownCommands(t *testing.T) {
 	ctx := context.Background()
 
@@ -305,11 +266,6 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psCreateVSwitchInternal", psCreateVSwitchInternal, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psCreateVSwitchPrivate", psCreateVSwitchPrivate, map[string]string{"Name": "cfgms-t__sw01"}},
-		// Snapshot verbs (snapshot.go)
-		{"psGetSnapshot", psGetSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
-		{"psCreateSnapshot", psCreateSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
-		{"psRemoveSnapshot", psRemoveSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
-		{"psRestoreSnapshot", psRestoreSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
 		// Dynamic psCreateVSwitchExternal (vswitch.go) — both AllowManagementOS values
 		{"psCreateVSwitchExternal/true", psCreateVSwitchExternal(true), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
 		{"psCreateVSwitchExternal/false", psCreateVSwitchExternal(false), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},

@@ -29,7 +29,7 @@ import (
 // # Architectural shape
 //
 // Idempotency, drift detection, and operation sequencing all live in Go
-// (vm.go / vswitch.go / snapshot.go). The PS host knows nothing about
+// (vm.go / vswitch.go). The PS host knows nothing about
 // "should this memory change?" or "is the VM running?" — its functions are
 // thin wrappers around single cmdlets, returning either nothing (for
 // effects) or a JSON document (for reads). The Go orchestration decides
@@ -311,7 +311,7 @@ func generatePSNonce() (string, error) {
 // does NOT interpret backslashes or variable references inside single-
 // quoted strings, so single quotes are the safest container for arbitrary
 // argument values. Defense-in-depth: the calling code in vm.go / vswitch.go
-// / snapshot.go already validates these values against a strict allowlist,
+// already validates these values against a strict allowlist,
 // but quoting here means a value that ever slipped past would at worst be
 // passed as a literal string to the cmdlet, never executed as code.
 func quoteForPS(s string) string {

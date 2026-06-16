@@ -331,7 +331,7 @@ func isValidResourceName(name string) bool {
 // bundle and (when present) the type segment must be non-empty.
 //
 // This deliberately accepts the #1903 "module-type convention" (hyperv.vm,
-// hyperv.vswitch, hyperv.snapshot) without touching resource-NAME validation.
+// hyperv.vswitch) without touching resource-NAME validation.
 func isValidModuleName(module string) bool {
 	if module == "" {
 		return false

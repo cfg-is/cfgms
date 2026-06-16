@@ -80,13 +80,12 @@ resources:
   # ── Hyper-V resources (Windows Hyper-V host only) ────────────────────────────
   #
   # Hyper-V resources select their type with the module-type convention:
-  #   module: hyperv.vm | hyperv.vswitch | hyperv.snapshot
+  #   module: hyperv.vm | hyperv.vswitch
   #
   # The `name` is the plain object name (strict [a-zA-Z0-9_-]); the steward
   # executor translates module + name into the module's internal typed resource
-  # ID (vm:<name>, vswitch:<name>, snapshot:<vm_name>/<name>). Relationships are
-  # config properties: a VM's network is declared via `switch_name`; a snapshot's
-  # parent VM via `vm_name`.
+  # ID (vm:<name>, vswitch:<name>). Relationships are config properties: a VM's
+  # network is declared via `switch_name`.
 
   - name: "m2-test-vsw"
     module: "hyperv.vswitch"
@@ -104,9 +103,3 @@ resources:
       switch_name: "m2-test-vsw"   # declarative network — single switch (the common case)
       generation: 2
       state: "running"
-
-  - name: "nightly"
-    module: "hyperv.snapshot"
-    config:
-      vm_name: "m2-test-vm"        # parent VM is a config property, not part of the name
-      state: "present"

@@ -16,8 +16,7 @@ package hyperv
 //   - Each function wraps EXACTLY ONE cmdlet (or a tiny ConvertTo-Json
 //     shaping block around one query). No sequencing, no conditionals
 //     beyond the trivial "did this return nothing?" check, no state
-//     machines. Orchestration logic lives in Go in vm.go / vswitch.go /
-//     snapshot.go.
+//     machines. Orchestration logic lives in Go in vm.go / vswitch.go.
 //   - All parameters are typed and explicit. Get-Help on each function
 //     would produce a sensible signature.
 //   - Get-X functions return JSON via ConvertTo-Json -Compress so the Go
@@ -155,16 +154,4 @@ function Cfgms-CreateVSwitchExternal {
     )
     New-VMSwitch -Name $Name -SwitchType External -NetAdapterName $NetAdapter -AllowManagementOS $AllowManagementOS | Out-Null
 }
-
-# ── Snapshot ──────────────────────────────────────────────────────────
-function Cfgms-GetSnapshot {
-    param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name)
-    $snap = Get-VMSnapshot -VMName $VMName -Name $Name -ErrorAction SilentlyContinue
-    if (-not $snap) { Write-Output '{"found":false}'; return }
-    Write-Output '{"found":true}'
-}
-
-function Cfgms-CreateSnapshot  { param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name) Checkpoint-VM      -VMName $VMName -SnapshotName $Name }
-function Cfgms-RemoveSnapshot  { param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name) Remove-VMSnapshot  -VMName $VMName -Name $Name }
-function Cfgms-RestoreSnapshot { param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name) Restore-VMSnapshot -VMName $VMName -Name $Name -Confirm:$false }
 `

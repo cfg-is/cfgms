@@ -1,5 +1,5 @@
 name: hyperv
-description: Remote Hyper-V management via WinRM — manages VMs, snapshots, and virtual switches on Windows Server hosts
+description: Remote Hyper-V management via WinRM — manages VMs and virtual switches on Windows Server hosts
 version: 0.1.0
 
 publisher: cfgms

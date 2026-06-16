@@ -2,17 +2,16 @@
 
 **Kind:** steward
 
-Remote Hyper-V management via WinRM for CFGMS. Manages VMs, snapshots, and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
+Remote Hyper-V management via WinRM for CFGMS. Manages VMs and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
 
 ## Purpose and scope
 
-The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines, manage checkpoints (snapshots), and configure virtual switches — all through an authenticated, TLS-encrypted WinRM connection. A VM's network connection is declared on the VM itself (`switch_name`); the module converges its adapters to match.
+The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines and configure virtual switches — all through an authenticated, TLS-encrypted WinRM connection. A VM's network connection is declared on the VM itself (`switch_name`); the module converges its adapters to match.
 
 The module's scope includes:
 
 - **VM lifecycle**: create (`New-VM`), start (`Start-VM`), stop (`Stop-VM`), remove (`Remove-VM`)
 - **VM resize**: update CPU count (`Set-VMProcessor`) and startup memory (`Set-VM -MemoryStartupBytes`) on stopped VMs
-- **Snapshots**: create, restore, and delete Hyper-V checkpoints
 - **Virtual switches**: create and remove External, Internal, and Private vSwitches
 - **VM networking**: declared on the VM (`switch_name`); the module connects the VM's adapter to the named switch
 
@@ -45,10 +44,9 @@ VM resource configuration fields (`vm:<name>`):
 ## Usage examples
 
 The resource type is selected via the `module` field as `hyperv.<type>`
-(`hyperv.vm`, `hyperv.vswitch`, `hyperv.snapshot`). The `name` field is the
-plain object name (strict `[a-zA-Z0-9_-]`). The steward executor translates
-`module: hyperv.vm` + `name: web-01` into the module's internal `vm:web-01`
-resource ID; snapshots additionally fold `config.vm_name` into the id.
+(`hyperv.vm`, `hyperv.vswitch`). The `name` field is the plain object name
+(strict `[a-zA-Z0-9_-]`). The steward executor translates `module: hyperv.vm`
++ `name: web-01` into the module's internal `vm:web-01` resource ID.
 
 ### Create and start a VM
 
@@ -82,16 +80,6 @@ resource ID; snapshots additionally fold `config.vm_name` into the id.
     cpu_count: 4
     memory_mb: 8192
     state: running
-```
-
-### Create a snapshot
-
-```yaml
-- name: pre-patch
-  module: hyperv.snapshot
-  config:
-    vm_name: web-01
-    state: present
 ```
 
 ### Create an external virtual switch
@@ -198,7 +186,6 @@ resource ID string built by the steward executor:
 | `module` | `name` + config | Internal resource ID | Operation |
 |----------|-----------------|----------------------|-----------|
 | `hyperv.vm` | `name: web-01` | `vm:web-01` | Virtual machine management (create, start, stop, remove) |
-| `hyperv.snapshot` | `name: pre-patch`, `config.vm_name: web-01` | `snapshot:web-01/pre-patch` | Checkpoint management (create, restore, remove) |
 | `hyperv.vswitch` | `name: External-Switch` | `vswitch:External-Switch` | Virtual switch management (create External/Internal/Private, remove) |
 
 ### VM networking (declarative, multi-NIC)
@@ -294,7 +281,7 @@ go test -tags=integration -run TestHypervIntegration ./features/modules/hyperv/.
 ```
 
 The tests exercise:
-- **`TestHypervIntegration_VMLifecycle`** — create → start → stop → snapshot → restore → remove
+- **`TestHypervIntegration_VMLifecycle`** — create → start → stop → remove
 - **`TestHypervIntegration_VSwitch`** — create external switch → attach adapter → detach → remove
 
 Tests skip automatically if `CFGMS_HYPERV_HOST` is not set; `TestHypervIntegration_VSwitch` also skips if no UP physical network adapter is found on the host.
@@ -321,4 +308,4 @@ The following are **not** managed by this module:
 
 ## Related Hypervisor Modules
 
-A future Proxmox, VMware, or KVM module would be implemented as a separate, independent module — not as an extension of this Hyper-V module. Each hypervisor module follows the same shape: a `New(detector)` constructor, a `Configure` method for connection details, and `Get`/`Set` operations with typed resource IDs (e.g., `vm:<name>`, `snapshot:<vmname>/<snapname>`). Tenant-prefix naming uses the same `cfgms-<sanitizedTenantID>__<resourceName>` convention. Modules do not share code beyond the common `modules.Module` interface — each is platform-specific and ships independently as a copy of this shape, not an extension of it.
+A future Proxmox, VMware, or KVM module would be implemented as a separate, independent module — not as an extension of this Hyper-V module. Each hypervisor module follows the same shape: a `New(detector)` constructor, a `Configure` method for connection details, and `Get`/`Set` operations with typed resource IDs (e.g., `vm:<name>`, `vswitch:<name>`). Tenant-prefix naming uses the same `cfgms-<sanitizedTenantID>__<resourceName>` convention. Modules do not share code beyond the common `modules.Module` interface — each is platform-specific and ships independently as a copy of this shape, not an extension of it.

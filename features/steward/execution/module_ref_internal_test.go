@@ -23,7 +23,6 @@ func TestParseModuleRef(t *testing.T) {
 	}{
 		{"hyperv.vm", "hyperv", "vm"},
 		{"hyperv.vswitch", "hyperv", "vswitch"},
-		{"hyperv.snapshot", "hyperv", "snapshot"},
 		{"directory", "directory", ""},
 		{"file", "file", ""},
 		{"", "", ""},
@@ -42,7 +41,8 @@ func TestParseModuleRef(t *testing.T) {
 }
 
 // TestGetResourceIdentifier_TypedHyperv verifies the typed resourceID construction
-// for the three hyperv shapes, including the snapshot compound special-case.
+// for the hyperv shapes. With snapshot removed (#2021), the typed path is
+// uniformly "<resourceType>:<name>" with no compound id or config folding.
 func TestGetResourceIdentifier_TypedHyperv(t *testing.T) {
 	e := newTestExecutor(t, config.ErrorHandlingConfig{})
 
@@ -68,33 +68,6 @@ func TestGetResourceIdentifier_TypedHyperv(t *testing.T) {
 				Config: map[string]interface{}{"switch_type": "external"},
 			},
 			wantID: "vswitch:m2-test-vsw",
-		},
-		{
-			name: "snapshot with vm_name builds compound snapshot:<vm>/<name>",
-			resource: config.ResourceConfig{
-				Name:   "nightly",
-				Module: "hyperv.snapshot",
-				Config: map[string]interface{}{"vm_name": "m2-test-vm", "state": "present"},
-			},
-			wantID: "snapshot:m2-test-vm/nightly",
-		},
-		{
-			name: "snapshot without vm_name falls back to snapshot:<name>",
-			resource: config.ResourceConfig{
-				Name:   "nightly",
-				Module: "hyperv.snapshot",
-				Config: map[string]interface{}{"state": "present"},
-			},
-			wantID: "snapshot:nightly",
-		},
-		{
-			name: "snapshot with empty vm_name falls back to snapshot:<name>",
-			resource: config.ResourceConfig{
-				Name:   "nightly",
-				Module: "hyperv.snapshot",
-				Config: map[string]interface{}{"vm_name": "", "state": "present"},
-			},
-			wantID: "snapshot:nightly",
 		},
 	}
 

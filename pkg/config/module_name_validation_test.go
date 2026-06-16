@@ -28,10 +28,12 @@ func TestIsValidModuleName_AcceptsBundleAndType(t *testing.T) {
 		{"hyperv", true},
 		{"my-bundle", true},
 		{"my_bundle", true},
-		// bundle.type convention (#1903).
+		// bundle.type convention (#1903). isValidModuleName validates FORMAT
+		// only — any well-formed bundle.type passes regardless of whether the
+		// bundle actually defines that resource type.
 		{"hyperv.vm", true},
 		{"hyperv.vswitch", true},
-		{"hyperv.snapshot", true},
+		{"some-bundle.some-type", true},
 		// Rejected: empty, uppercase, more than one dot, leading/trailing dot,
 		// path separators, injection characters.
 		{"", false},
@@ -81,14 +83,6 @@ func TestValidateConfiguration_AcceptsHypervModuleType(t *testing.T) {
 			Config: map[string]interface{}{
 				"switch_type":      "external",
 				"net_adapter_name": "Ethernet",
-			},
-		},
-		{
-			Name:   "nightly",
-			Module: "hyperv.snapshot",
-			Config: map[string]interface{}{
-				"vm_name": "m2-test-vm",
-				"state":   "present",
 			},
 		},
 	}

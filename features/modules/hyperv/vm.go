@@ -601,13 +601,19 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 
 	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
 	needsMemResize := desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
+	needsResize := needsCPUResize || needsMemResize
 
 	switch state {
 	case "running":
-		if needsCPUResize || needsMemResize {
-			// CPU/memory can only be changed on a stopped VM — stop, resize, then start.
-			if err := m.execStopVM(ctx, vmName, hostName); err != nil {
-				return err
+		if needsResize {
+			// CPU/memory can only be changed on a stopped VM. Stop ONLY IF the
+			// VM is not already stopped, apply the resize, then (re)start below.
+			// Gating on current.State keeps the transition idempotent: a VM that
+			// is already stopped is not issued a redundant Stop-VM.
+			if current.State != "stopped" {
+				if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+					return err
+				}
 			}
 			if needsCPUResize {
 				if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
@@ -619,9 +625,18 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 					return err
 				}
 			}
-		}
-		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
-			return err
+			// A resize always ends with the VM stopped, so the desired running
+			// state requires an unconditional Start-VM here.
+			if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+				return err
+			}
+		} else if current.State != "running" {
+			// No resize needed — only start the VM if it is not already running.
+			// Re-applying a config whose power state already matches issues no
+			// Start-VM (Hyper-V errors "already in the running state" otherwise).
+			if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+				return err
+			}
 		}
 		m.vmsMu.Lock()
 		updated := *current
@@ -630,9 +645,14 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 		m.vmsMu.Unlock()
 
 	case "stopped":
-		if err := m.execStopVM(ctx, vmName, hostName); err != nil {
-			return err
+		// Stop ONLY IF the VM is not already stopped — re-applying a stopped
+		// config on an already-stopped VM issues no Stop-VM.
+		if current.State != "stopped" {
+			if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+				return err
+			}
 		}
+		// The VM is stopped (or was already), so resize can proceed.
 		if needsCPUResize {
 			if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
 				return err

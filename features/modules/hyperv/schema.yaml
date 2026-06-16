@@ -51,33 +51,6 @@ resources:
           - absent
         default: running
 
-  snapshot:
-    description: Hyper-V checkpoint (snapshot) for a virtual machine
-    required:
-      - vm_name
-      - name
-    properties:
-      vm_name:
-        type: string
-        description: Name of the virtual machine that owns this checkpoint
-        pattern: "^[a-zA-Z0-9_\\-]{1,64}$"
-      name:
-        type: string
-        description: Checkpoint name (spaces allowed per Hyper-V convention; no __)
-        pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
-      state:
-        type: string
-        description: >
-          Desired state for the checkpoint.
-          "present" creates the checkpoint if absent.
-          "restored" restores the VM to this checkpoint (write-only: Get returns "present" after restore).
-          "absent" deletes the checkpoint.
-        enum:
-          - present
-          - restored
-          - absent
-        default: present
-
   vswitch:
     description: Hyper-V virtual switch (external, internal, or private)
     required:

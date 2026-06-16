@@ -5,11 +5,10 @@
 // components: the controller's config ValidationManager (the upload gate) and
 // the steward executor's resource-identifier construction (the dispatch path).
 //
-// It builds a fleet config containing all three hyperv shapes (hyperv.vm,
-// hyperv.vswitch, hyperv.snapshot), asserts the controller ACCEPTS it, and
-// asserts the executor builds the exact module-internal resource IDs the
-// hyperv module's Get/Set expect (vm:m2-test-vm, vswitch:m2-test-vsw,
-// snapshot:m2-test-vm/nightly).
+// It builds a fleet config containing the two hyperv shapes (hyperv.vm,
+// hyperv.vswitch), asserts the controller ACCEPTS it, and asserts the executor
+// builds the exact module-internal resource IDs the hyperv module's Get/Set
+// expect (vm:m2-test-vm, vswitch:m2-test-vsw).
 //
 // Real components only: pkgconfig.ValidationManager wired to real test storage,
 // and the production (*Executor).getResourceIdentifier / parseModuleRef. The
@@ -22,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
@@ -58,14 +56,6 @@ func hypervFleetConfig() *stewardconfig.StewardConfig {
 					"net_adapter_name": "Ethernet",
 				},
 			},
-			{
-				Name:   "nightly",
-				Module: "hyperv.snapshot",
-				Config: map[string]interface{}{
-					"vm_name": "m2-test-vm",
-					"state":   "present",
-				},
-			},
 		},
 	}
 }
@@ -98,12 +88,10 @@ func TestHypervModuleTypeConvention_E2E(t *testing.T) {
 	wantIDs := map[string]string{
 		"m2-test-vm":  "vm:m2-test-vm",
 		"m2-test-vsw": "vswitch:m2-test-vsw",
-		"nightly":     "snapshot:m2-test-vm/nightly",
 	}
 	wantBundle := map[string]string{
 		"m2-test-vm":  "hyperv",
 		"m2-test-vsw": "hyperv",
-		"nightly":     "hyperv",
 	}
 
 	for _, r := range cfg.Resources {
@@ -119,10 +107,4 @@ func TestHypervModuleTypeConvention_E2E(t *testing.T) {
 				"module loading must use the bundle component only")
 		})
 	}
-
-	// Belt-and-braces: the snapshot id must be self-contained (vm_name folded
-	// in) because snapshot.Get receives no config to read vm_name from.
-	require.Equal(t, "snapshot:m2-test-vm/nightly",
-		e.getResourceIdentifier(cfg.Resources[2]),
-		"snapshot resource ID must embed the parent VM name")
 }

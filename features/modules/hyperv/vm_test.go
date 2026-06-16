@@ -759,14 +759,15 @@ func TestSetVM_StoppedState_CallsStopVM(t *testing.T) {
 		"Set with state stopped on existing VM must not invoke New-VM")
 }
 
-// TestSetVM_ExistingVM_ResizesViaCmdlets asserts that Set on an existing VM with
-// changed cpu_count and memory_mb issues Set-VMProcessor and Set-VM (for memory)
-// without issuing New-VM.
+// TestSetVM_ExistingVM_ResizesViaCmdlets asserts that Set on an already-stopped VM
+// with changed cpu_count and memory_mb issues Set-VMProcessor and Set-VM (for
+// memory) without issuing New-VM. Because the VM is already stopped, NO Stop-VM
+// is issued (power-state gating): the only calls are the two resize cmdlets.
 func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 	transport := &testWinRMTransport{}
 	m := vmModuleWithTransport(transport, "ops")
 
-	// Existing VM: 2 CPUs, 4096 MB.
+	// Existing VM: 2 CPUs, 4096 MB — already stopped.
 	m.vmsMu.Lock()
 	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
 	m.vmsMu.Unlock()
@@ -786,8 +787,8 @@ func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	// At minimum: Stop-VM + Set-VMProcessor + Set-VMMemory
-	require.GreaterOrEqual(t, len(calls), 3, "resize must produce Stop-VM + Set-VMProcessor + Set-VMMemory calls")
+	// Already-stopped VM: no Stop-VM. Exactly Set-VMProcessor + Set-VMMemory.
+	require.Len(t, calls, 2, "resize on already-stopped VM must produce only Set-VMProcessor + Set-VMMemory")
 
 	var scripts []string
 	for _, c := range calls {
@@ -796,6 +797,7 @@ func TestSetVM_ExistingVM_ResizesViaCmdlets(t *testing.T) {
 
 	for _, s := range scripts {
 		assert.NotContains(t, s, "New-VM", "resize on existing VM must not invoke New-VM")
+		assert.NotContains(t, s, "Stop-VM", "resize on already-stopped VM must not invoke Stop-VM")
 	}
 
 	hasSetVMProcessor := false
@@ -851,6 +853,90 @@ func TestSetVM_RunningState_WithResize(t *testing.T) {
 	}
 }
 
+// ─── VM power-state idempotency tests (Fix B) ─────────────────────────────────
+
+// TestSetVM_RunningState_AlreadyRunning_NoStartVM verifies that re-applying a
+// desired-running config to a VM that is ALREADY running, with no other drift,
+// issues NO Start-VM (and no Stop-VM). Without the current.State gate this
+// re-issued Start-VM on every converge, which Hyper-V rejects with "already in
+// the running state".
+func TestSetVM_RunningState_AlreadyRunning_NoStartVM(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	// Existing VM already running with the exact desired CPU/memory.
+	m.vmsMu.Lock()
+	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
+	m.vmsMu.Unlock()
+
+	cfg := &VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
+	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, calls,
+		"desired running + already running + no other drift must issue no power transitions")
+	for _, c := range calls {
+		assert.NotContains(t, c.scriptBlock, "Start-VM")
+		assert.NotContains(t, c.scriptBlock, "Stop-VM")
+	}
+}
+
+// TestSetVM_StoppedState_AlreadyStopped_NoStopVM verifies that re-applying a
+// desired-stopped config to a VM that is ALREADY stopped issues NO Stop-VM.
+func TestSetVM_StoppedState_AlreadyStopped_NoStopVM(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	m.vmsMu.Lock()
+	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
+	m.vmsMu.Unlock()
+
+	cfg := &VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
+	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, calls,
+		"desired stopped + already stopped + no other drift must issue no power transitions")
+	for _, c := range calls {
+		assert.NotContains(t, c.scriptBlock, "Stop-VM")
+	}
+}
+
+// TestSetVM_RunningResize_StopResizeStart verifies that a CPU/memory resize on a
+// RUNNING VM still performs the full stop → resize → start sequence: the gate
+// only suppresses redundant transitions, it must not suppress the stop a resize
+// genuinely needs.
+func TestSetVM_RunningResize_StopResizeStart(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	// Running VM with 2 CPUs / 4096 MB.
+	m.vmsMu.Lock()
+	m.vms["foo"] = VMConfig{Name: "foo", State: "running", CPUCount: 2, MemoryMB: 4096}
+	m.vmsMu.Unlock()
+
+	// Desired: still running but 4 CPUs / 8192 MB.
+	cfg := &VMConfig{Name: "foo", State: "running", CPUCount: 4, MemoryMB: 8192}
+	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, calls, 4,
+		"running VM resize must produce Stop-VM + Set-VMProcessor + Set-VMMemory + Start-VM")
+	assert.Contains(t, calls[0].scriptBlock, "Stop-VM", "first call must be Stop-VM")
+	assert.Contains(t, calls[1].scriptBlock, "Set-VMProcessor", "second call must be Set-VMProcessor")
+	assert.Contains(t, calls[2].scriptBlock, "Set-VM", "third call must be Set-VM (memory)")
+	assert.Contains(t, calls[3].scriptBlock, "Start-VM", "fourth call must be Start-VM")
+}
+
 // ─── VM power state failure-mode tests ────────────────────────────────────────
 
 // TestSetVM_StartVM_TransportError verifies that a transport failure on Start-VM
@@ -886,12 +972,11 @@ func TestSetVM_StopVM_TransportError(t *testing.T) {
 }
 
 // TestSetVM_SetVMProcessor_TransportError verifies that a transport failure on
-// Set-VMProcessor surfaces an error containing "Set-VMProcessor".
-// Stop-VM (call 0) succeeds; Set-VMProcessor (call 1) injects the error.
+// Set-VMProcessor surfaces an error containing "Set-VMProcessor". The VM is
+// already stopped, so power-state gating skips Stop-VM and Set-VMProcessor is
+// the first (and failing) call.
 func TestSetVM_SetVMProcessor_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{
-		perCallErrors: []error{nil, errors.New("winrm: timeout")},
-	}
+	transport := &testWinRMTransport{execErr: errors.New("winrm: timeout")}
 	m := vmModuleWithTransport(transport, "ops")
 
 	m.vmsMu.Lock()
@@ -905,19 +990,18 @@ func TestSetVM_SetVMProcessor_TransportError(t *testing.T) {
 }
 
 // TestSetVM_SetVMMemory_TransportError verifies that a transport failure on
-// Set-VMMemory surfaces an error containing "Set-VMMemory".
-// Stop-VM (call 0) succeeds; Set-VMMemory (call 1) injects the error.
+// Set-VMMemory surfaces an error containing "Set-VMMemory". The VM is already
+// stopped (no Stop-VM) and only memory changes, so Set-VMMemory is the first
+// (and failing) call.
 func TestSetVM_SetVMMemory_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{
-		perCallErrors: []error{nil, errors.New("winrm: timeout")},
-	}
+	transport := &testWinRMTransport{execErr: errors.New("winrm: timeout")}
 	m := vmModuleWithTransport(transport, "ops")
 
 	m.vmsMu.Lock()
 	m.vms["foo"] = VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096}
 	m.vmsMu.Unlock()
 
-	// Only memory changes — no CPU resize, so second call is Set-VMMemory.
+	// Only memory changes — no CPU resize, so the single resize call is Set-VMMemory.
 	cfg := &VMConfig{Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 8192}
 	err := m.Set(context.Background(), "vm:foo", cfg)
 	require.Error(t, err)
