@@ -302,13 +302,15 @@ func (f *E2ETestFramework) initializeRBAC() error {
 	if err := rbacManager.Initialize(f.ctx); err != nil {
 		return fmt.Errorf("failed to initialize RBAC: %w", err)
 	}
-	// Flush pending audit writes before storageManager.Close() to avoid racing
-	// async writes against flatfile directory cleanup (registered before Close
-	// so addCleanup LIFO runs Flush first).
+	// Stop the audit drain goroutine before storageManager.Close() and tempDir
+	// removal. FlushAudit alone only blocks for queued entries; the drain
+	// goroutine keeps running and can hold stdout/file descriptors past test
+	// exit (manifests as "Test I/O incomplete 1m30s after exiting" on CI).
+	// Registered before Close so addCleanup LIFO runs Close → storage.Close.
 	f.addCleanup(func() error {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return rbacManager.FlushAudit(flushCtx)
+		return rbacManager.Close(closeCtx)
 	})
 
 	// Create test tenants and users
@@ -324,8 +326,15 @@ func (f *E2ETestFramework) initializeRBAC() error {
 func (f *E2ETestFramework) initializeController() error {
 	f.metrics.ComponentStartTimes["controller"] = time.Now()
 
+	// controllerConfig.Config.ListenAddr is the HTTP API bind address.
+	// Before Story #1919, this field was ignored at runtime — the HTTP API
+	// hardcoded 0.0.0.0:9080. The harness then connected to f.config.HTTPPort
+	// (9080) and the mismatch with ControllerPort (8080) was harmless.
+	// Story #1919 made getHTTPListenAddr() honor cfg.ListenAddr, exposing
+	// the harness bug: with ListenAddr set to ControllerPort=8080, registration
+	// to HTTPPort=9080 was hitting nothing. Bind HTTP on HTTPPort to match.
 	config := &controllerConfig.Config{
-		ListenAddr: fmt.Sprintf("localhost:%d", f.config.ControllerPort),
+		ListenAddr: fmt.Sprintf("localhost:%d", f.config.HTTPPort),
 		CertPath:   filepath.Join(f.tempDir, "certs"), // Legacy cert path
 		DataDir:    filepath.Join(f.tempDir, "controller-data"),
 		LogLevel:   "info",

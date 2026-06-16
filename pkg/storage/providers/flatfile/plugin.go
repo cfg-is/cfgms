@@ -24,9 +24,32 @@
 //
 //   - No automatic version history (use git-sync if you want PR-based change management)
 //   - No replication (use PostgreSQL if you need HA)
-//   - Single-writer only (not safe for multiple controllers sharing the same root)
 //   - Atomic writes use temp-file + rename (crash-safe on Linux; Windows rename
 //     across volumes may fail — keep root on a single filesystem)
+//
+// # Concurrency contract (#1919, blue/green substrate)
+//
+// Within ONE process: a sync.RWMutex per store serialises overlapping
+// goroutine writes and lets concurrent readers proceed.
+//
+// Across TWO processes (typical blue/green controller pair):
+//
+//   - Reads are always safe. Every write commits via os.Rename, which is
+//     atomic on the host filesystem (POSIX guarantee on local FS; NTFS
+//     ReplaceFile semantics on Windows). A reader therefore always observes
+//     either the pre-rename file or the post-rename file in full — it
+//     cannot observe a half-written file.
+//   - Concurrent writers are not coordinated across processes. If both
+//     blue and green write the SAME key at the same time, the file content
+//     is whichever process renamed last (last-writer-wins). No corruption,
+//     but no merge semantics either. This is acceptable for blue/green
+//     cutover (only one side is the primary writer at any moment) and is
+//     NOT acceptable for multi-active HA — multi-active HA needs the
+//     database provider (#TBD).
+//
+// The test pkg/storage/providers/flatfile/concurrent_processes_test.go
+// exec's two test subprocesses against the same root directory and proves
+// readers never observe torn files even under sustained write load.
 //
 // # Supported Stores
 //

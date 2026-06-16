@@ -162,7 +162,7 @@ The following files appear accurate and ready for OSS launch:
 - `docs/architecture/hybrid-storage-solution.md` ✅
 - `docs/architecture/modules/interface.md` ✅
 - `docs/architecture/modules/README.md` ✅
-- `docs/architecture/plugin-architecture.md` ✅
+- `docs/architecture/provider-architecture.md` ✅
 - `docs/architecture/rollback-design.md` ✅
 - `docs/architecture/steward-configuration.md` ✅
 - `docs/architecture/template-engine-design.md` ✅
@@ -248,7 +248,7 @@ The following files appear accurate and ready for OSS launch:
 - [Code of Conduct](../CODE_OF_CONDUCT.md) - Community standards
 
 ## Architecture & Design
-- [Plugin Architecture](architecture/plugin-architecture.md)
+- [Provider Architecture](architecture/provider-architecture.md)
 - [Storage Architecture](architecture/git-backend-design.md)
 - [Communication Layer Migration](architecture/communication-layer-migration.md) - Transport architecture
 - [Module System](architecture/modules/README.md)

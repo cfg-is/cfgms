@@ -44,6 +44,19 @@ steward:
     resource_failure: "warn"          # "continue", "warn", or "fail"
     configuration_error: "fail"       # "continue", "warn", or "fail"
 
+  # Module trust policy (steward security posture; same level as script_signing)
+  module_trust:
+    mode: "controller"              # "strict", "controller" (default), or "bypass"
+    additional_publishers:          # only consulted in strict mode
+      - "vendor-a"
+
+# Required module declarations (top-level; resolved by controller on cfg push)
+required_modules:
+  - name: "cfgms/firewall"
+    version: "^1.0.0"
+  - name: "cfgms/package"
+    version: ">=2.0.0"
+
 # Resource configurations
 resources:
   - name: "web-directories"
@@ -146,6 +159,40 @@ resources:
   - `fail`: Stop execution on validation errors (default)
   - `warn`: Log a warning and continue
   - `continue`: Skip invalid configurations, process valid ones
+
+**Module Trust:**
+
+- `module_trust.mode`: Controls how module bundle signatures are verified on the steward.
+  - `controller` (default): The steward accepts any bundle the controller has approved. Trust decisions are delegated to the controller.
+  - `strict`: The steward independently verifies publisher signatures. The CFGMS publisher identity is baked into the steward binary; `additional_publishers` extends the trusted set.
+  - `bypass`: Disables all trust enforcement. Development environments only — never use in production.
+- `module_trust.additional_publishers`: List of publisher identifiers trusted in addition to the baked-in CFGMS publisher identity. Only consulted when `mode` is `strict`. Changing this list requires a steward restart.
+
+### Required Modules Section
+
+The top-level `required_modules:` block declares module bundles that the controller must fetch, verify, and approve before this cfg file can be deployed to stewards. Resolution happens at cfg push time on the controller.
+
+```yaml
+required_modules:
+  - name: "cfgms/firewall"    # full "publisher/name" identifier
+    version: "^1.0.0"         # semver constraint string
+```
+
+**Fields:**
+
+- `name`: Full module identifier in `publisher/name` format (e.g. `cfgms/firewall`).
+- `version`: Semver constraint string (e.g. `^1.0.0`, `>=2.0.0`). The constraint format is parsed and stored as-is; constraint evaluation against exact bundle versions is performed during resolution.
+
+**Resolution behavior on cfg push:**
+
+1. The controller calls `ModuleCache.List()` to find cached entries.
+2. For each `required_modules` entry:
+   - If the module is cached and **approved**: no action needed.
+   - If the module is cached but **pending** or **rejected**: cfg deployment is blocked.
+   - If the module is **not cached**: the controller calls `GitSourceResolver` to fetch the bundle from the configured module source, then calls `ApprovalWorkflow.EvaluateAndStore` to evaluate the bundle against the trust store.
+     - `AutoApprove` (trusted publisher, valid signature): module is approved and deployment continues.
+     - `QueueForReview` (unknown publisher) or `Reject` (invalid signature): cfg deployment is blocked with an error naming the pending module.
+3. If any module is blocked, the push is rejected with: `cfg deployment blocked: module <name>@<version> requires approval before deploying`.
 
 ### Resources Section
 

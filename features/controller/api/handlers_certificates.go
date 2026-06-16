@@ -4,11 +4,106 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// RotateSigningCertRequest is the optional JSON body for the rotate endpoint.
+// OverlapDays uses a pointer so an explicit 0 is distinguishable from an
+// unset field: 0 means "no overlap, retire the old cert immediately"; nil
+// means "use the default overlap window".
+type RotateSigningCertRequest struct {
+	OverlapDays *int `json:"overlap_days,omitempty"`
+	// Force, when true, bypasses the in-progress guard so an operator-initiated
+	// rotation succeeds even when the previous overlap window has not yet
+	// expired. Defaults to false; CLI/UI flows that surface operator intent
+	// should set this to true.
+	Force bool `json:"force,omitempty"`
+}
+
+// defaultRotationOverlapDays is the overlap window applied when the operator
+// does not pass overlap_days in the request body.
+const defaultRotationOverlapDays = 7
+
+// RotateSigningCertResponse is the JSON response from the rotate endpoint.
+type RotateSigningCertResponse struct {
+	OldSerial        string `json:"old_serial"`
+	NewSerial        string `json:"new_serial"`
+	OverlapDays      int    `json:"overlap_days"`
+	StewardsNotified int    `json:"stewards_notified"`
+	OverlapExpiresAt string `json:"overlap_expires_at,omitempty"`
+}
+
+// handleRotateSigningCert handles POST /api/v1/certificates/signing/rotate.
+// Requires mTLS admin cert (IsAdmin=true); non-admin principals are rejected with 403
+// even when rbacService is nil, preventing the RBAC-nil bypass.
+func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request) {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
+	// Explicit IsAdmin guard — must precede any RBAC or rotation logic.
+	// requirePermission skips checks when rbacService is nil (RBAC-nil bypass);
+	// a CA-key operation must NEVER be reachable by a non-admin principal.
+	if !principal.IsAdmin {
+		s.writeErrorResponse(w, http.StatusForbidden, "Admin certificate required", "FORBIDDEN")
+		return
+	}
+
+	if s.signingRotationService == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Signing rotation service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	var req RotateSigningCertRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+			return
+		}
+	}
+
+	overlapDays := defaultRotationOverlapDays
+	if req.OverlapDays != nil {
+		overlapDays = *req.OverlapDays
+		if overlapDays < 0 {
+			s.writeErrorResponse(w, http.StatusBadRequest, "overlap_days must be >= 0", "INVALID_OVERLAP_DAYS")
+			return
+		}
+	}
+
+	result, err := s.signingRotationService.Rotate(r.Context(), principal.CertSerial, overlapDays, req.Force)
+	if err != nil {
+		// A non-forced rotation requested while a previous overlap window is still
+		// open is a client-recoverable conflict, not a server fault: surface 409 so
+		// callers can retry with force=true (or wait for the window to close).
+		if errors.Is(err, cert.ErrSigningRotationInProgress) {
+			s.logger.Warn("Signing certificate rotation rejected: rotation in progress",
+				"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
+			s.writeErrorResponse(w, http.StatusConflict, "Signing rotation already in progress", "ROTATION_IN_PROGRESS")
+			return
+		}
+		s.logger.Error("Signing certificate rotation failed",
+			"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
+			"error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Rotation failed", "ROTATION_ERROR")
+		return
+	}
+
+	s.writeSuccessResponse(w, RotateSigningCertResponse{
+		OldSerial:        result.OldSerial,
+		NewSerial:        result.NewSerial,
+		OverlapDays:      result.OverlapWindowDays,
+		StewardsNotified: result.StewardsNotified,
+		OverlapExpiresAt: result.OverlapExpiresAt,
+	})
+}
 
 // handleListCertificates handles GET /api/v1/certificates
 func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) {

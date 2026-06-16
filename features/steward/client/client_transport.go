@@ -14,9 +14,11 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,8 +44,10 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // TransportClient represents the steward client using gRPC-over-QUIC for both
@@ -69,9 +73,15 @@ type TransportClient struct {
 	certPath string
 
 	// Certificate PEMs (from registration response)
-	caCertPEM      string
-	serverCertPEM  string // Controller's server cert for config signature verification (Story #315)
-	signingCertPEM string // Story #377: Dedicated signing cert (preferred over serverCertPEM)
+	caCertPEM        string
+	serverCertPEM    string     // Controller's server cert for config signature verification (Story #315)
+	signingCertPEMs  []string   // Issue #1816: mutable set of signing certs (rotation support)
+	overlapExpiresAt *time.Time // Issue #1816: rotation overlap deadline for client-side expiry
+
+	// identityPersistFunc is called by the push-signing-cert handler to atomically
+	// persist updated signing cert PEMs before in-memory state is updated (Issue #1816).
+	// If nil, persistence is skipped and the cert is learned in memory only.
+	identityPersistFunc func(signingCertPEMs []string, overlapExpiresAt *time.Time) error
 
 	// certManager provides on-demand client certificate loading per TLS handshake (Issue #920).
 	// When non-nil, GetClientCertificate is used instead of static PEM certs.
@@ -110,6 +120,13 @@ type TransportClient struct {
 	// Connection state — single flag for unified gRPC transport
 	connected bool
 
+	// disconnected guards the one-time close of heartbeatStop/convergenceStop in
+	// Disconnect. A pushed-upgrade graceful self-exit (Issue #2001) adds a second
+	// shutdown trigger path (runCancel → runCtx.Done → Disconnect), so Disconnect
+	// can now legitimately be invoked more than once; closing an already-closed
+	// channel panics, so the close is gated on this flag under c.mu.
+	disconnected bool
+
 	// Heartbeat
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
@@ -121,15 +138,111 @@ type TransportClient struct {
 	// Issue #419: drained in order after a successful reconnect.
 	offlineQueue *OfflineQueue
 
+	// secretStore is the steward's secret store, retained here so that
+	// InitializeConfigExecutor can pass it to the unified Executor's default
+	// factory. Modules implementing SecretStoreInjectable (e.g. hyperv) need
+	// the store wired into the factory before Configure runs. Without this,
+	// every controller-pushed config that touches a hyperv resource fails
+	// with `hyperv: secret store must be injected before Configure`.
+	secretStore secretsif.SecretStore
+
 	// DNA state for hash-based sync (Issue #418).
 	// dnaMu guards currentDNAHash and lastPublishedDNA.
 	dnaMu            sync.RWMutex
 	currentDNAHash   string            // SHA-256 hash of most-recently observed DNA
 	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
 
+	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
+	// downloads binaries to a subdirectory here. (Issue #1943)
+	certStoreDir string
+
+	// revokedVersions is the controller-supplied list of revoked steward versions.
+	// Protected by revokedVersionsMu. Updated via SetRevokedVersions. (Issue #1943)
+	revokedVersionsMu sync.RWMutex
+	revokedVersions   []string
+
+	// upgradeAllowDowngrade permits installing a version ≤ the running version.
+	// From steward.cfg upgrade.allow_downgrade. Protected by mu. (Issue #1943)
+	upgradeAllowDowngrade bool
+
+	// launcherSwapFunc is the function invoked to call the launcher swap subcommand.
+	// When nil the default exec.CommandContext implementation is used. Injectable
+	// for testing so tests do not require the launcher binary on disk. (Issue #1943)
+	launcherSwapFunc func(ctx context.Context, launcherPath, version, binaryPath string) error
+
+	// upgradePublisherTrustStore, when non-nil, overrides CFGMSPublisherIdentity()
+	// in the signature verification step. Injectable for testing. (Issue #1943)
+	upgradePublisherTrustStore trust.TrustStore
+
+	// upgradeHTTPClient, when non-nil, overrides the default mTLS HTTP client
+	// used by the upgrade download step. Injectable for testing. (Issue #1943)
+	upgradeHTTPClient *http.Client
+
+	// launcherPathOverride, when non-empty, overrides the compile-time constant
+	// launcher path returned by launcherPath(). Injectable for testing. (Issue #1943)
+	launcherPathOverride string
+
+	// shutdownFunc triggers a graceful shutdown of the steward process. After a
+	// successful push_steward_binary swap the upgrade handler schedules this so
+	// the launcher's supervise loop re-execs the now-current staged binary. In
+	// production it is wired (via SetShutdownFunc) to cancel the steward's root
+	// context, which drives the clean Disconnect+return path in runSteward — NOT
+	// a hard os.Exit. Injectable for testing so unit tests never exit the test
+	// binary. When nil the upgrade handler logs and skips the trigger. (Issue #2001)
+	shutdownFunc func()
+
+	// shutdownCtx is the steward's RUN context (process lifecycle). It is cancelled
+	// only on a real shutdown path — SCM stop, OS signal, or runCancel — and is the
+	// context the upgrade grace-delay timer watches for early-exit. It must NOT be a
+	// per-command context: those are cancelled the instant a command handler returns
+	// (executeCommand's `defer cancel()`), which would always win the race against
+	// the grace delay and suppress the auto-apply self-exit. Wired via SetShutdownFunc.
+	// When nil the upgrade handler falls back to a plain timer with no early-exit.
+	// Protected by mu. (Issue #2003)
+	shutdownCtx context.Context
+
+	// launcherManaged reports whether this steward is supervised by a launcher
+	// that will re-exec the staged binary after a graceful exit. It is defaulted
+	// in NewTransportClient from os.Getenv(version.EnvStewardLauncherManaged)=="1"
+	// (the launcher sets that env on its child). After a successful upgrade swap,
+	// the handler self-exits ONLY when this is true; a bare/standalone steward
+	// (dev, fleet-e2e, systemd-without-launcher) stages the binary and keeps
+	// running, applying it on the next restart. Without this gate a bare steward
+	// would self-exit with nothing to re-exec it — downtime, or a crash loop as
+	// the controller redelivers the upgrade on each reconnect. Test-injectable
+	// (set directly), consistent with launcherSwapFunc/shutdownFunc. Protected by
+	// mu. (Issue #2003)
+	launcherManaged bool
+
+	// upgradeShutdownGraceDelay is how long the upgrade handler waits, after the
+	// push_steward_binary handler returns, before invoking shutdownFunc. The delay
+	// gives commands.Handler.executeCommand time to publish the EventCommand
+	// completion ack before the process exits — otherwise the controller could
+	// record the upgrade command as timed-out. A value of 0 (the zero value) means
+	// "use defaultUpgradeShutdownGraceDelay (3s)"; tests that want a small real
+	// timer set an explicit small positive value. Protected by mu. (Issue #2001)
+	upgradeShutdownGraceDelay time.Duration
+
+	// shutdownScheduleFunc schedules trigger to run after delay. When nil the
+	// default real implementation (a timer goroutine) is used. Injectable for
+	// testing so the grace delay is exercised synchronously without time.Sleep
+	// and without spawning detached goroutines. (Issue #2001)
+	shutdownScheduleFunc func(delay time.Duration, trigger func())
+
 	// Logger
 	logger logging.Logger
 }
+
+// defaultUpgradeShutdownGraceDelay is the default grace period between the
+// push_steward_binary handler returning and the graceful shutdown firing.
+//
+// 3s comfortably exceeds the in-process publish of EventCommandCompleted, which
+// is sub-millisecond in tests. It does NOT guarantee the controller has
+// network-acked the event before the process exits; the offline event queue is
+// the durability backstop — if the steward exits before the ack reaches the
+// controller, the queued completion event is redelivered on the next connect
+// (drainOfflineQueue). (Issue #2001)
+const defaultUpgradeShutdownGraceDelay = 3 * time.Second
 
 // TransportConfig holds configuration for the gRPC-over-QUIC transport client.
 type TransportConfig struct {
@@ -153,9 +266,19 @@ type TransportConfig struct {
 	// Story #315: Used to verify configurations signed by the controller
 	ServerCertPEM string
 
-	// SigningCertPEM is the controller's dedicated signing certificate PEM (Story #377)
-	// When present, preferred over ServerCertPEM for config signature verification
+	// SigningCertPEM is the controller's dedicated signing certificate PEM (Story #377).
+	// When present and SigningCertPEMs is empty, it seeds the runtime signingCertPEMs slice
+	// in NewTransportClient for backward compatibility. Registration call sites need not change.
 	SigningCertPEM string
+
+	// SigningCertPEMs is the mutable set of signing certs (Issue #1816).
+	// When non-empty, takes precedence over SigningCertPEM for seeding signingCertPEMs.
+	SigningCertPEMs []string
+
+	// IdentityPersistFunc is called by the push-signing-cert handler to atomically
+	// persist updated signing cert PEMs before the in-memory state is updated (Issue #1816).
+	// If nil, persistence is skipped (cert learned in memory only).
+	IdentityPersistFunc func(signingCertPEMs []string, overlapExpiresAt *time.Time) error
 
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
@@ -201,6 +324,21 @@ type TransportConfig struct {
 	// encryption key across restarts (Issue #920). May be nil.
 	SecretStore secretsif.SecretStore
 
+	// CertStoreDir is the on-disk cert/identity directory used by the upgrade
+	// handler to download and stage new steward binaries. When empty the upgrade
+	// handler returns an error. (Issue #1943)
+	CertStoreDir string
+
+	// UpgradeAllowDowngrade, when true, permits the upgrade handler to install a
+	// steward version older than or equal to the currently running version.
+	// Mirrors steward.cfg upgrade.allow_downgrade. (Issue #1943)
+	UpgradeAllowDowngrade bool
+
+	// UpgradePublisherTrustStore, when non-nil, overrides CFGMSPublisherIdentity()
+	// during steward binary signature verification. Intended for test environments
+	// only — production deployments leave this nil. (Issue #1948)
+	UpgradePublisherTrustStore trust.TrustStore
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -235,24 +373,39 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		return nil, fmt.Errorf("failed to initialize offline queue: %w", err)
 	}
 
+	// Seed signingCertPEMs from the multi-cert field if provided; otherwise
+	// fall back to the singular SigningCertPEM for backward compatibility.
+	signingCertPEMs := cfg.SigningCertPEMs
+	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
+		signingCertPEMs = []string{cfg.SigningCertPEM}
+	}
+
 	c := &TransportClient{
-		heartbeatInterval:     heartbeatInterval,
-		rng:                   rng,
-		heartbeatStop:         make(chan struct{}),
-		convergenceStop:       make(chan struct{}),
-		convergeInterval:      30 * time.Minute,
-		convergeIntervalCh:    make(chan struct{}, 1),
-		transportAddress:      cfg.ControllerURL,
-		certPath:              cfg.TLSCertPath,
-		caCertPEM:             cfg.CACertPEM,
-		serverCertPEM:         cfg.ServerCertPEM,
-		signingCertPEM:        cfg.SigningCertPEM,
-		certManager:           cfg.CertManager,
-		offlineQueue:          offlineQueue,
-		commandReplayWindow:   cfg.SignedCommandReplayWindow,
-		commandMaxParamsBytes: cfg.SignedCommandMaxParamsBytes,
-		scriptSigning:         cfg.ScriptSigning,
-		logger:                cfg.Logger,
+		heartbeatInterval:          heartbeatInterval,
+		rng:                        rng,
+		heartbeatStop:              make(chan struct{}),
+		convergenceStop:            make(chan struct{}),
+		convergeInterval:           30 * time.Minute,
+		convergeIntervalCh:         make(chan struct{}, 1),
+		transportAddress:           cfg.ControllerURL,
+		certPath:                   cfg.TLSCertPath,
+		caCertPEM:                  cfg.CACertPEM,
+		serverCertPEM:              cfg.ServerCertPEM,
+		signingCertPEMs:            signingCertPEMs,
+		certManager:                cfg.CertManager,
+		offlineQueue:               offlineQueue,
+		commandReplayWindow:        cfg.SignedCommandReplayWindow,
+		commandMaxParamsBytes:      cfg.SignedCommandMaxParamsBytes,
+		scriptSigning:              cfg.ScriptSigning,
+		identityPersistFunc:        cfg.IdentityPersistFunc,
+		secretStore:                cfg.SecretStore,
+		certStoreDir:               cfg.CertStoreDir,
+		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
+		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
+		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
+		// this process (it sets EnvStewardLauncherManaged=1 on its child). (Issue #2003)
+		launcherManaged: os.Getenv(version.EnvStewardLauncherManaged) == "1",
+		logger:          cfg.Logger,
 	}
 
 	return c, nil
@@ -263,8 +416,9 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 // Uses the unified execution engine (all 7 modules, Get→Compare→Set→Verify).
 func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 	execCfg := &execution.ExecutorConfig{
-		TenantID: tenantID,
-		Logger:   c.logger,
+		TenantID:    tenantID,
+		Logger:      c.logger,
+		SecretStore: c.secretStore,
 	}
 	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
@@ -593,6 +747,18 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// Register execute_script handler — dispatches controller-sent scripts through
 	// the script module executor and publishes EventScriptCompleted (Issue #1669).
 	handler.RegisterExecuteScriptHandler()
+
+	// Register push_signing_cert handler — controller pushes current signing cert on connect
+	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
+	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handlePushSigningCert(ctx, cmd)
+	})
+
+	// Register push_steward_binary handler — controller pushes a new steward binary.
+	// The handler downloads, verifies, and stages the binary via the launcher. (Issue #1943)
+	handler.RegisterHandler(cpTypes.CommandPushStewardBinary, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handlePushStewardBinary(ctx, cmd)
+	})
 
 	return handler, nil
 }
@@ -1090,6 +1256,24 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 	return nil
 }
 
+// SetShutdownFunc wires the graceful-shutdown trigger used after a successful
+// push_steward_binary swap. In production main.go passes the steward's RUN
+// context (runCtx) and its cancel func (runCancel) so a pushed upgrade ends the
+// process cleanly (runSteward then disconnects and returns), letting the launcher
+// re-exec the staged binary. Passing a nil fn disables the auto-apply trigger (the
+// steward would then only pick up the staged binary on the next restart).
+//
+// runCtx is stored so the grace-delay timer in scheduleGracefulShutdownAfterSwap
+// can watch the PROCESS lifecycle for early-exit — never the per-command context,
+// which is cancelled the instant a command handler returns and would always
+// suppress the self-exit. (Issue #2001, #2003)
+func (c *TransportClient) SetShutdownFunc(runCtx context.Context, fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.shutdownCtx = runCtx
+	c.shutdownFunc = fn
+}
+
 // Disconnect closes all gRPC connections to the controller.
 func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.logger.Info("Disconnecting from controller")
@@ -1097,9 +1281,17 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Stop heartbeat and convergence loop
-	close(c.heartbeatStop)
-	close(c.convergenceStop)
+	// Disconnect can be called more than once — e.g. a signal/SCM stop racing a
+	// pushed-upgrade graceful self-exit (Issue #2001). Closing the stop channels
+	// twice would panic, so gate the close on disconnected. Subsequent calls
+	// still tear down the data/control planes (those Close/Stop calls are
+	// idempotent at their own layers) and return cleanly.
+	if !c.disconnected {
+		c.disconnected = true
+		// Stop heartbeat and convergence loop
+		close(c.heartbeatStop)
+		close(c.convergenceStop)
+	}
 
 	// Close data plane session
 	if c.dataPlaneSession != nil {
@@ -1154,6 +1346,47 @@ func (c *TransportClient) SetTenantID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tenantID = id
+}
+
+// SetRevokedVersions updates the cached list of revoked steward versions received
+// from the controller. The upgrade handler checks this list before invoking the
+// launcher swap. (Issue #1943)
+func (c *TransportClient) SetRevokedVersions(versions []string) {
+	c.revokedVersionsMu.Lock()
+	defer c.revokedVersionsMu.Unlock()
+	c.revokedVersions = make([]string, len(versions))
+	copy(c.revokedVersions, versions)
+}
+
+// PublishUpgradeLifecycleEvent emits a single upgrade lifecycle event (committed
+// or rolled-back) detected from launcher-written flag files on startup. Called by
+// cmd/steward/main.go's checkUpgradeFlagFiles. (Issue #1943)
+func (c *TransportClient) PublishUpgradeLifecycleEvent(ctx context.Context, eventType, version string) error {
+	c.mu.RLock()
+	sid := c.stewardID
+	tid := c.tenantID
+	c.mu.RUnlock()
+
+	var et cpTypes.EventType
+	switch eventType {
+	case string(cpTypes.EventStewardUpgradeCommitted):
+		et = cpTypes.EventStewardUpgradeCommitted
+	case string(cpTypes.EventStewardUpgradeRolledBack):
+		et = cpTypes.EventStewardUpgradeRolledBack
+	default:
+		return fmt.Errorf("unknown upgrade lifecycle event type %q", eventType)
+	}
+
+	return c.publishEventWithQueue(ctx, &cpTypes.Event{
+		ID:        fmt.Sprintf("evt_upg_lc_%d", time.Now().UnixNano()),
+		Type:      et,
+		StewardID: sid,
+		TenantID:  tid,
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"version": version,
+		},
+	})
 }
 
 // createTLSConfig creates a TLS configuration for gRPC-over-QUIC with mTLS.
@@ -1255,26 +1488,175 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// handlePushSigningCert processes a COMMAND_TYPE_PUSH_SIGNING_CERT command from the
+// controller. It validates the pushed cert, persists it atomically (persist-before-ack),
+// then updates the in-memory signing cert set and rebuilds the MultiVerifier (Issue #1816).
+func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.Command) error {
+	c.logger.Info("Received push_signing_cert command", "command_id", cmd.ID)
+
+	// Extract cert_pem (base64-encoded PEM) from params.
+	certPEMB64, ok := cmd.Params["cert_pem"].(string)
+	if !ok || certPEMB64 == "" {
+		return fmt.Errorf("push_signing_cert: missing or empty cert_pem param")
+	}
+
+	// Decode base64 → PEM bytes.
+	pemBytes, err := decodeBase64(certPEMB64)
+	if err != nil {
+		return fmt.Errorf("push_signing_cert: decode cert_pem: %w", err)
+	}
+
+	// Parse and validate the cert.
+	x509Cert, err := cert.ParseCertificateFromPEM(pemBytes)
+	if err != nil {
+		return fmt.Errorf("push_signing_cert: parse cert: %w", err)
+	}
+	if time.Now().After(x509Cert.NotAfter) {
+		return fmt.Errorf("push_signing_cert: pushed cert is expired (NotAfter=%s)", x509Cert.NotAfter.Format(time.RFC3339))
+	}
+	hasCodeSigning := false
+	for _, eku := range x509Cert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageCodeSigning {
+			hasCodeSigning = true
+			break
+		}
+	}
+	if !hasCodeSigning {
+		return fmt.Errorf("push_signing_cert: cert missing ExtKeyUsageCodeSigning")
+	}
+
+	// Parse optional overlap_expires_at (RFC3339).
+	var overlapExpiresAt *time.Time
+	if raw, ok := cmd.Params["overlap_expires_at"].(string); ok && raw != "" {
+		t, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			return fmt.Errorf("push_signing_cert: parse overlap_expires_at %q: %w", raw, parseErr)
+		}
+		overlapExpiresAt = &t
+	}
+
+	// Build updated cert PEMs slice: retire_old=true replaces; otherwise append.
+	retireOld, _ := cmd.Params["retire_old"].(bool)
+
+	c.mu.RLock()
+	existing := make([]string, len(c.signingCertPEMs))
+	copy(existing, c.signingCertPEMs)
+	c.mu.RUnlock()
+
+	var newPEMs []string
+	newPEMStr := string(pemBytes)
+	if retireOld {
+		newPEMs = []string{newPEMStr}
+	} else {
+		newPEMs = append(existing, newPEMStr)
+	}
+
+	// Persist BEFORE updating in-memory state (persist-before-ack).
+	// If persist fails, return error — controller will retry.
+	if c.identityPersistFunc != nil {
+		if err := c.identityPersistFunc(newPEMs, overlapExpiresAt); err != nil {
+			return fmt.Errorf("push_signing_cert: persist identity: %w", err)
+		}
+	}
+
+	// Update in-memory state under lock only after successful persistence.
+	c.mu.Lock()
+	c.signingCertPEMs = newPEMs
+	c.overlapExpiresAt = overlapExpiresAt
+	c.mu.Unlock()
+
+	// Resolve the applied cert's serial for the log. Prefer the controller-supplied
+	// "serial" param (exact controller-side string form); fall back to the parsed
+	// cert's serial so the serial is always recorded even for older controllers or
+	// pushes that omit the param.
+	appliedSerial, _ := cmd.Params["serial"].(string)
+	if appliedSerial == "" {
+		appliedSerial = x509Cert.SerialNumber.String()
+	}
+
+	c.logger.Info("Signing cert push applied",
+		"command_id", cmd.ID,
+		"serial", appliedSerial,
+		"cert_count", len(newPEMs),
+		"retire_old", retireOld)
+	return nil
+}
+
+// decodeBase64 decodes a standard base64-encoded string, accepting both padded
+// and unpadded variants.
+func decodeBase64(s string) ([]byte, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		b, err = base64.RawStdEncoding.DecodeString(s)
+	}
+	return b, err
+}
+
 // buildVerifierOnDemand constructs a config/command signature verifier from the
 // controller's certificate PEMs stored in the client. Returns nil when no
 // certificate is available — callers treat a nil verifier as "skip verification".
+//
+// When signingCertPEMs contains multiple entries (rotation overlap window), a
+// MultiVerifier is returned so either cert can verify a signature. When
+// overlapExpiresAt is set and in the past, only the newest cert is included.
 //
 // The verifier is NOT cached (Issue #920 removes the configVerifier field).
 // The cost is trivial — each call parses a PEM block and builds a verifier struct.
 func (c *TransportClient) buildVerifierOnDemand() signature.Verifier {
 	c.mu.RLock()
-	signingCertPEM := c.signingCertPEM
+	signingCertPEMs := make([]string, len(c.signingCertPEMs))
+	copy(signingCertPEMs, c.signingCertPEMs)
+	overlapAt := c.overlapExpiresAt
 	serverCertPEM := c.serverCertPEM
 	caCertPEM := c.caCertPEM
 	certPath := c.certPath
 	c.mu.RUnlock()
 
+	// Build verifier from the signing cert set when available.
+	if len(signingCertPEMs) > 0 {
+		// Client-side overlap expiry: when the overlap window has passed, drop all
+		// but the most recently pushed cert to close the replay-attack window.
+		activePEMs := signingCertPEMs
+		if overlapAt != nil && time.Now().After(*overlapAt) && len(signingCertPEMs) > 1 {
+			activePEMs = signingCertPEMs[len(signingCertPEMs)-1:]
+		}
+
+		if len(activePEMs) == 1 {
+			verifier, err := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: []byte(activePEMs[0])})
+			if err != nil {
+				c.logger.Warn("Failed to create signing cert verifier", "error", err)
+				return nil
+			}
+			c.logger.Debug("Signing cert verifier built", "key_fingerprint", verifier.KeyFingerprint())
+			return verifier
+		}
+
+		// Multiple active certs — build MultiVerifier for OR-semantics during overlap window.
+		var certs []*x509.Certificate
+		for _, pem := range activePEMs {
+			x509Cert, parseErr := cert.ParseCertificateFromPEM([]byte(pem))
+			if parseErr != nil {
+				c.logger.Warn("Failed to parse signing cert PEM for verifier", "error", parseErr)
+				continue
+			}
+			certs = append(certs, x509Cert)
+		}
+		if len(certs) == 0 {
+			return nil
+		}
+		mv, err := signature.NewMultiVerifier(certs)
+		if err != nil {
+			c.logger.Warn("Failed to create multi-signing-cert verifier", "error", err)
+			return nil
+		}
+		c.logger.Debug("Multi-signing-cert verifier built", "cert_count", len(certs), "key_fingerprint", mv.KeyFingerprint())
+		return mv
+	}
+
+	// Legacy fallback paths (serverCertPEM, disk signing.crt, caCertPEM).
 	var certPEM []byte
 
 	switch {
-	case signingCertPEM != "":
-		certPEM = []byte(signingCertPEM)
-		c.logger.Debug("Using dedicated signing certificate for signature verification")
 	case serverCertPEM != "":
 		certPEM = []byte(serverCertPEM)
 		c.logger.Debug("Using server certificate for signature verification")

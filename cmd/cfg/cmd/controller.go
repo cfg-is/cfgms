@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,9 @@ var (
 	healthFormat          string
 	controllerTLSCACert   string
 	controllerTLSInsecure bool
+
+	// signing-cert rotate flags
+	signingCertOverlapDays int
 )
 
 // controllerCmd represents the controller command
@@ -88,6 +92,47 @@ Examples:
 	RunE: runControllerMetrics,
 }
 
+// signingCertCmd groups signing-certificate management operations.
+var signingCertCmd = &cobra.Command{
+	Use:   "signing-cert",
+	Short: "Signing certificate management",
+	Long: `Manage the controller signing certificate used to sign config and DNA payloads.
+
+The signing certificate is a CodeSigning-EKU certificate minted by the controller CA.
+Stewards pin this certificate at registration and reject payloads signed by a different key.
+
+Subcommands:
+  rotate    Rotate the signing certificate with a configurable overlap window`,
+}
+
+// signingCertRotateCmd triggers a signing-cert rotation.
+var signingCertRotateCmd = &cobra.Command{
+	Use:   "rotate",
+	Short: "Rotate the controller signing certificate",
+	Long: `Rotate the signing certificate and notify connected stewards.
+
+Rotation replaces the active signing certificate and starts an overlap window
+during which configs signed by either the old or the new certificate are accepted.
+Stewards that are offline during rotation receive the new certificate via
+refresh-on-connect when they reconnect.
+
+The --overlap-days flag sets the length of the overlap window (default: 30 days).
+For fleets where stewards may be offline for extended periods, set --overlap-days
+to a value that exceeds the expected maximum offline duration. With refresh-on-connect
+enabled, overlap expiry is a defense-in-depth parameter rather than a hard deadline.
+
+Examples:
+  # Rotate with the default 30-day overlap window
+  cfg controller signing-cert rotate
+
+  # Rotate with a 14-day overlap window
+  cfg controller signing-cert rotate --overlap-days 14
+
+  # Expire the old certificate immediately (test environments only)
+  cfg controller signing-cert rotate --overlap-days 0`,
+	RunE: runSigningCertRotate,
+}
+
 func init() {
 	// Controller command flags
 	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
@@ -98,9 +143,17 @@ func init() {
 
 	_ = controllerCmd.MarkPersistentFlagRequired("url")
 
+	// signing-cert rotate flags
+	signingCertRotateCmd.Flags().IntVar(&signingCertOverlapDays, "overlap-days", 30,
+		"Days the old signing certificate remains valid after rotation (default: 30)")
+
+	// signing-cert subcommand tree
+	signingCertCmd.AddCommand(signingCertRotateCmd)
+
 	// Add subcommands
 	controllerCmd.AddCommand(controllerStatusCmd)
 	controllerCmd.AddCommand(controllerMetricsCmd)
+	controllerCmd.AddCommand(signingCertCmd)
 }
 
 // getControllerClient creates an API client using bundle auth (mTLS) when available,
@@ -366,6 +419,65 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	return nil
+}
+
+// signingCertRotateRequest is the JSON body for POST /api/v1/certificates/signing/rotate.
+type signingCertRotateRequest struct {
+	OverlapDays int `json:"overlap_days"`
+}
+
+// signingCertRotateResult holds the fields returned by the rotation endpoint.
+type signingCertRotateResult struct {
+	OldSerial        string `json:"old_serial"`
+	NewSerial        string `json:"new_serial"`
+	OverlapDays      int    `json:"overlap_days"`
+	StewardsNotified int    `json:"stewards_notified"`
+}
+
+func runSigningCertRotate(cmd *cobra.Command, args []string) error {
+	if signingCertOverlapDays < 0 {
+		return fmt.Errorf("--overlap-days must be >= 0 (got %d)", signingCertOverlapDays)
+	}
+
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	reqBody, err := json.Marshal(signingCertRotateRequest{OverlapDays: signingCertOverlapDays})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), "POST", "/api/v1/certificates/signing/rotate", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to call rotation API: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			fmt.Printf("Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("rotation failed: %s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var apiResp struct {
+		Data signingCertRotateResult `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse rotation response: %w", err)
+	}
+
+	result := apiResp.Data
+	fmt.Printf("Signing certificate rotated successfully\n\n")
+	fmt.Printf("Old serial:        %s\n", result.OldSerial)
+	fmt.Printf("New serial:        %s\n", result.NewSerial)
+	fmt.Printf("Overlap days:      %d\n", result.OverlapDays)
+	fmt.Printf("Stewards notified: %d\n", result.StewardsNotified)
 	return nil
 }
 

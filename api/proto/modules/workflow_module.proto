@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.modules.v1;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/modules";
+
+import "modules/module.proto";
+
+// WorkflowModuleService is the gRPC contract for controller-side workflow
+// modules.  It mirrors ModuleService but replaces the host_runtime field in
+// HandshakeRequest with tenant and auth context, since workflow modules run
+// inside the controller and operate on behalf of a tenant.
+service WorkflowModuleService {
+  // Handshake establishes the module session with tenant and auth context.
+  rpc Handshake(WorkflowHandshakeRequest) returns (WorkflowHandshakeResponse);
+
+  // Get retrieves the current configuration state for a resource.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Set applies a desired configuration state to a resource.
+  rpc Set(SetRequest) returns (SetResponse);
+
+  // Test checks whether a resource is in compliance with a desired state
+  // without applying any changes.
+  rpc Test(TestRequest) returns (TestResponse);
+
+  // Shutdown requests the module process to exit cleanly.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+// WorkflowHandshakeRequest is sent by the workflow engine to initiate a
+// module session.  It carries tenant and auth context instead of host_runtime.
+message WorkflowHandshakeRequest {
+  string module_name    = 1;
+  string module_version = 2;
+  string publisher      = 3;
+  // tenant_id scopes the module session to a specific tenant.
+  string tenant_id      = 4;
+  // auth_token carries the controller-issued credential for the module.
+  string auth_token     = 5;
+}
+
+// WorkflowHandshakeResponse is returned by the module with its capability declaration.
+message WorkflowHandshakeResponse {
+  // capabilities lists the resource types or feature flags the module supports.
+  repeated string capabilities    = 1;
+  // behavioral_envelope_yaml is the YAML-serialised BehavioralEnvelope for
+  // this module, as defined in ModuleMetadata.
+  string behavioral_envelope_yaml = 2;
+}
+
+// GetRequest, GetResponse, SetRequest, SetResponse, TestRequest, TestResponse,
+// ShutdownRequest, and ShutdownResponse are shared with ModuleService and are
+// defined in module.proto (same package).

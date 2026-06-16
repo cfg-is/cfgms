@@ -107,6 +107,11 @@ type Provider struct {
 	// the approval-gate epic (#1690–#1698).
 	approvalChecker StewardApprovalChecker
 
+	// onConnectHook is called after a steward successfully registers, before the
+	// receive loop begins. Nil means no-op (default). Injected via WithOnConnectHook
+	// for refresh-on-connect cert delivery (Issue #1817).
+	onConnectHook StewardOnConnectHook
+
 	// Subscription handlers (client mode)
 	commandHandler interfaces.CommandHandler
 
@@ -1110,6 +1115,17 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// finally errors. Unregistering by ID would evict the live new connection;
 	// UnregisterConn only removes this exact connection if it is still current.
 	defer s.provider.registry.UnregisterConn(conn)
+
+	// Issue #1817: fire the on-connect hook after successful registration, before
+	// the receive loop, so the refresh push reaches the steward before any
+	// controller-originated commands begin flowing. Fail-open: a missed refresh is
+	// recoverable via the overlap window; refusing the stream is not.
+	if s.provider.onConnectHook != nil {
+		if hookErr := s.provider.onConnectHook.OnConnect(stream.Context(), stewardID); hookErr != nil {
+			s.provider.logger.Warn("on-connect hook error, steward continues (fail-open)",
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", hookErr)
+		}
+	}
 
 	s.provider.logger.Info("steward connected to ControlChannel", "steward_id", logging.SanitizeLogValue(stewardID), "remote_addr", logging.SanitizeLogValue(p.Addr.String()))
 

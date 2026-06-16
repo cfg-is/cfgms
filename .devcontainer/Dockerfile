@@ -5,7 +5,7 @@
 # Build: docker build -t cfg-agent:latest -f .devcontainer/Dockerfile .
 # Rebuild weekly to refresh Trivy DB: docker build --no-cache -t cfg-agent:latest -f .devcontainer/Dockerfile .
 
-FROM golang:1.26.3-bookworm
+FROM golang:1.26.4-bookworm
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Node.js 22 (required by Claude Code — Debian Bookworm ships Node 18 which
 # lacks Array.with() and other APIs used since Claude Code 2.1.79)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
@@ -33,27 +33,27 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Go-based security and quality tools
 # Versions MUST match .github/workflows/dependency-pin-check.yml
-RUN go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1 \
+RUN go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1 \
     && go install honnef.co/go/tools/cmd/staticcheck@2026.1 \
     && go install github.com/zricethezav/gitleaks/v8@v8.30.1 \
     && go install github.com/google/go-licenses/v2@v2.0.1 \
     && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
        | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
 
-# Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.70.0 is the
+# Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.71.0 is the
 # post-incident clean release. We download the project's release archive and
 # verify its SHA-256 against a pinned value before extraction, rather than
 # piping the trivy main branch's install.sh through `sh` (whose contents are
 # fetched at install time and can be tampered with). See
 # docs/runbooks/trivy-rollback.md for rollback procedure.
 RUN set -eu; \
-    TRIVY_VERSION='v0.70.0'; \
-    TRIVY_SHA256='8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9'; \
+    TRIVY_VERSION='v0.71.0'; \
+    TRIVY_SHA256='30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814'; \
     ARCHIVE="trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz"; \
     curl -sSfL -o "/tmp/${ARCHIVE}" \
       "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/${ARCHIVE}"; \
@@ -64,7 +64,7 @@ RUN set -eu; \
 
 # Nancy (Go dependency scanner)
 RUN GOPATH=$(go env GOPATH) \
-    && curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64" \
+    && curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64" \
        -o "$GOPATH/bin/nancy" \
     && chmod +x "$GOPATH/bin/nancy"
 
@@ -108,6 +108,10 @@ ENV CFGMS_AGENT_MODE=true
 ENV TRIVY_CACHE_DIR=/home/agent/.cache/trivy
 ENV GOMODCACHE=/home/agent/go/pkg/mod
 ENV GOFLAGS=-modcacherw
+
+# Not a long-running service; health checks are not applicable for on-demand
+# agent containers. HEALTHCHECK NONE suppresses the Trivy DS-0026 advisory.
+HEALTHCHECK NONE
 
 USER agent
 WORKDIR /workspace

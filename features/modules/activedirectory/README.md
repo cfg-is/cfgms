@@ -1,5 +1,7 @@
 # Active Directory Module (System Context)
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The Active Directory module provides secure, credential-free integration with local Active Directory domains using Windows system context APIs. This module is designed to run on Windows stewards that are members of an Active Directory domain, leveraging the system service account for authentication and authorization.

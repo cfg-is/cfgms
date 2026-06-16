@@ -6,6 +6,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	crand "crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -20,9 +23,12 @@ import (
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
@@ -157,10 +163,24 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 			"operation", "registration_init",
 			"token_prefix", logging.RedactedID(regToken))
 
-		transportCl, err := registerAndConnect(ctx, regToken, logger)
+		// Derive a cancellable context so a pushed binary upgrade can request a
+		// graceful self-exit (the launcher then re-execs the staged binary).
+		// Cancelling runCtx flows into <-runCtx.Done() below, driving the clean
+		// Disconnect+return path — no hard os.Exit. The parent ctx (signal/SCM
+		// stop) still cancels runCtx too. (Issue #2001)
+		runCtx, runCancel := context.WithCancel(ctx)
+		defer runCancel()
+
+		transportCl, err := registerAndConnect(runCtx, regToken, logger)
 		if err != nil {
 			return fmt.Errorf("failed to register with controller: %w", err)
 		}
+
+		// Wire the graceful-shutdown trigger used after a successful
+		// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer
+		// watches the process lifecycle (cancelled only on SCM stop / signal /
+		// runCancel) for early-exit, NOT a per-command context. (Issue #2001, #2003)
+		transportCl.SetShutdownFunc(runCtx, runCancel)
 
 		logger.Info("Steward registered and connected successfully via gRPC transport",
 			"operation", "registration_complete",
@@ -171,15 +191,44 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 			"operation", "steward_mode",
 			"mode", "grpc_transport")
 
+		// Collect and publish DNA so the controller's steward record carries
+		// `os`, `hostname`, `arch`, etc. — selectors like `os:windows` and
+		// `cfg steward run-command --target …` depend on the controller
+		// having received a non-empty DNA snapshot. Without this one-shot
+		// publish, the controller's steward record stays at its registration-
+		// time defaults (empty DNA) and every selector matches zero stewards.
+		// Failures are non-fatal — the steward stays usable for config
+		// convergence even if DNA publication is briefly unavailable; the
+		// controller will pick up DNA on the next convergence-driven publish
+		// in publishConfigStatus.
+		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(runCtx); dnaErr == nil && currentDNA != nil {
+			if pubErr := transportCl.PublishDNAUpdate(runCtx, currentDNA.Attributes, "", ""); pubErr != nil {
+				logger.Warn("Initial DNA publish failed; controller selectors may not find this steward until next config apply",
+					"error", pubErr)
+			} else {
+				logger.Info("Initial DNA snapshot published",
+					"attribute_count", len(currentDNA.Attributes))
+			}
+		} else if dnaErr != nil {
+			logger.Warn("DNA collection failed at startup; controller selectors may match no stewards until DNA is collected later",
+				"error", dnaErr)
+		}
+
+		// Check for launcher-written upgrade flag files and emit lifecycle events.
+		// Must run before the heartbeat loop so the controller learns commit/rollback
+		// status on the first heartbeat after a restart. (Issue #1943)
+		checkUpgradeFlagFiles(runCtx, defaultCertStoreDir(), transportCl, logger)
+
 		// Start scheduled convergence loop. The initial interval defaults to
 		// 30 minutes. When the controller delivers a cfg, the loop reads
 		// converge_interval from it and resets the ticker accordingly.
 		// sync_config commands from the controller also trigger immediate
 		// convergence as an out-of-band optimization on top of the schedule.
-		transportCl.StartConvergenceLoop(ctx)
+		transportCl.StartConvergenceLoop(runCtx)
 
-		// Wait for context cancellation (signal or SCM stop).
-		<-ctx.Done()
+		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
+		// graceful self-exit request via SetShutdownFunc → runCancel).
+		<-runCtx.Done()
 		logger.Info("Shutdown signal received, disconnecting...",
 			"operation", "steward_shutdown")
 
@@ -237,6 +286,9 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
 	var regToken, caCertPath, fingerprint string
+	var hyperv bool
+	var winrmUser string
+	var winrmPassStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -254,9 +306,14 @@ Install is idempotent: running it again updates the binary and restarts the serv
 
 For controllers with a private CA, pass --ca-cert and --fingerprint to perform
 fingerprint-verified trust-on-first-use (TOFU) of the controller CA certificate.
-The fingerprint is printed by the controller during --init.`,
+The fingerprint is printed by the controller during --init.
+
+Hyper-V host install (Windows only):
+  Use --hyperv to configure WinRM HTTPS, firewall rules, and a service account.
+  The WinRM password is read from stdin (--winrm-pass-stdin) or auto-generated.
+  The --winrm-pass flag does NOT exist — plaintext argv passwords are prohibited.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, caCertPath, fingerprint)
+			return runInstall(regToken, caCertPath, fingerprint, hyperv, winrmUser, winrmPassStdin)
 		},
 	}
 
@@ -264,6 +321,11 @@ The fingerprint is printed by the controller during --init.`,
 	_ = cmd.MarkFlagRequired("regtoken")
 	cmd.Flags().StringVar(&caCertPath, "ca-cert", "", "Path to controller CA certificate PEM file (private-CA deployments)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
+	cmd.Flags().BoolVar(&hyperv, "hyperv", false, "Configure Hyper-V host: generate WinRM TLS cert, bind listener to loopback, create service account (Windows only)")
+	cmd.Flags().StringVar(&winrmUser, "winrm-user", "cfgms-hyperv", "Local account name for WinRM access (used only with --hyperv)")
+	cmd.Flags().BoolVar(&winrmPassStdin, "winrm-pass-stdin", false, "Read WinRM password from stdin; if not set, a 32-char password is auto-generated (used only with --hyperv)")
+	// --winrm-pass (plaintext argv) is intentionally NOT registered — F2 constraint:
+	// passwords must never appear in argv (visible to process-list tools and event logs).
 
 	return cmd
 }
@@ -302,7 +364,7 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, caCertPath, fingerprint string) error {
+func runInstall(regToken, caCertPath, fingerprint string, hyperv bool, winrmUser string, winrmPassStdin bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -325,7 +387,82 @@ func runInstall(regToken, caCertPath, fingerprint string) error {
 			"  Linux/macOS: re-run with sudo")
 	}
 
-	return mgr.Install(regToken, caCertPEM, fingerprint)
+	if !hyperv {
+		return mgr.Install(regToken, caCertPEM, fingerprint)
+	}
+
+	// Hyper-V install path: type-assert to HyperVInstaller.
+	hi, ok := mgr.(service.HyperVInstaller)
+	if !ok {
+		return fmt.Errorf("--hyperv is not supported on this platform (requires Windows with Hyper-V role installed)")
+	}
+
+	winrmPass, autoGenerated, err := resolveWinRMPassword(winrmPassStdin)
+	if err != nil {
+		return err
+	}
+
+	if err := hi.InstallHyperV(regToken, caCertPEM, fingerprint, winrmUser, winrmPass); err != nil {
+		return err
+	}
+
+	if autoGenerated {
+		fmt.Println()
+		fmt.Print(autoGeneratedPasswordNotice())
+	}
+
+	return nil
+}
+
+// autoGeneratedPasswordNotice returns the operator-facing notice printed after
+// install when the WinRM password was auto-generated. The notice MUST NOT
+// contain the password value itself — per CodeQL go/clear-text-logging
+// (CWE-312/532) and the story's "must not appear in stdout, stderr, event
+// log, or transcript" constraint, the password value is only ever placed in
+// the secret store, never written to a stream the operator could pipe into a
+// log or transcript. Operators retrieve the value from the secret store.
+func autoGeneratedPasswordNotice() string {
+	return "A WinRM password was auto-generated and stored in the secret store under key 'hyperv/winrm_pass'.\n" +
+		"Retrieve it from the secret store if needed — the value is intentionally not printed.\n"
+}
+
+// resolveWinRMPassword reads the WinRM password from stdin or auto-generates one.
+// Returns the password, whether it was auto-generated, and any error.
+func resolveWinRMPassword(fromStdin bool) (password string, autoGenerated bool, err error) {
+	if fromStdin {
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			pass := scanner.Text()
+			if pass == "" {
+				return "", false, fmt.Errorf("--winrm-pass-stdin: password cannot be empty")
+			}
+			return pass, false, nil
+		}
+		if scanErr := scanner.Err(); scanErr != nil {
+			return "", false, fmt.Errorf("failed to read password from stdin: %w", scanErr)
+		}
+		return "", false, fmt.Errorf("--winrm-pass-stdin: stdin is empty")
+	}
+
+	pass, genErr := generateRandomPassword(32)
+	if genErr != nil {
+		return "", false, fmt.Errorf("failed to generate WinRM password: %w", genErr)
+	}
+	return pass, true, nil
+}
+
+// generateRandomPassword generates a cryptographically random alphanumeric password.
+// Uses crypto/rand for secure entropy.
+func generateRandomPassword(length int) (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	if _, err := crand.Read(b); err != nil {
+		return "", err
+	}
+	for i := range b {
+		b[i] = chars[int(b[i])%len(chars)]
+	}
+	return string(b), nil
 }
 
 // runUninstall performs the uninstall operation for the current platform.
@@ -429,7 +566,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "")
+		return runInstall(token, "", "", false, "", false)
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -592,16 +729,18 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		logger.Info("Steward identity persisted for restart reuse", "steward_id", identity.StewardID)
 	}
 
-	// Optionally load the local steward config to apply custom replay window and
-	// params-size limits. If no config file is found (the common case when the
-	// steward is purely controller-managed), defaults apply in commands.Handler.
+	// Optionally load the local steward config to apply custom replay window,
+	// params-size limits, and upgrade policy. If no config file is found (the
+	// common case when the steward is purely controller-managed), defaults apply.
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var scriptSigning stewardconfig.ScriptSigningConfig
+	var upgradeAllowDowngrade bool
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		scriptSigning = cfg.Steward.ScriptSigning
+		upgradeAllowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
@@ -619,7 +758,22 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		ScriptSigning:               scriptSigning,
+		CertStoreDir:                certStoreDir,
+		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
+		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		Logger:                      logger,
+		IdentityPersistFunc: func(pems []string, at *time.Time) error {
+			cur, loadErr := loadIdentity(certStoreDir)
+			if loadErr != nil {
+				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
+			}
+			if cur == nil {
+				return fmt.Errorf("persist signing cert: identity not found")
+			}
+			cur.SigningCertPEMs = pems
+			cur.OverlapExpiresAt = at
+			return saveIdentity(certStoreDir, *cur)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport client: %w", err)
@@ -671,7 +825,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	// Without a controller server/signing cert the steward would reconnect but
 	// silently reject every signed command, so treat an identity record that
 	// lacks both as unusable and fall back to HTTP re-registration.
-	if id.ServerCertPEM == "" && id.SigningCertPEM == "" {
+	if id.ServerCertPEM == "" && id.SigningCertPEM == "" && len(id.SigningCertPEMs) == 0 {
 		return nil, fmt.Errorf("stored identity missing controller server/signing certificate; cannot verify signed commands")
 	}
 
@@ -708,9 +862,11 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
+	var upgradeAllowDowngradeReconnect bool
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
+		upgradeAllowDowngradeReconnect = cfg.Steward.Upgrade.AllowDowngrade
 	}
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
@@ -718,12 +874,28 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		RegistrationToken:           token,
 		CACertPEM:                   id.CACertPEM,
 		ServerCertPEM:               id.ServerCertPEM,
-		SigningCertPEM:              id.SigningCertPEM,
+		SigningCertPEM:              id.SigningCertPEM,  // backward compat seed; seeded into SigningCertPEMs in NewTransportClient when SigningCertPEMs is empty
+		SigningCertPEMs:             id.SigningCertPEMs, // Issue #1816: mutable rotation set
 		CertManager:                 certMgr,
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		CertStoreDir:                certStoreDir,
+		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
+		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		Logger:                      logger,
+		IdentityPersistFunc: func(pems []string, at *time.Time) error {
+			cur, loadErr := loadIdentity(certStoreDir)
+			if loadErr != nil {
+				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
+			}
+			if cur == nil {
+				return fmt.Errorf("persist signing cert: identity not found")
+			}
+			cur.SigningCertPEMs = pems
+			cur.OverlapExpiresAt = at
+			return saveIdentity(certStoreDir, *cur)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport client: %w", err)
@@ -751,6 +923,37 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
 
 	return transportClient, nil
+}
+
+// buildTestPublisherTrustStore reads CFGMS_TEST_STEWARD_PUBLISHER_KEY from the
+// environment. When set, it returns a trust.TrustStore seeded with the
+// base64-encoded Ed25519 public key so E2E upgrade tests can sign binaries with
+// the corresponding known private key. Returns nil when the env var is absent or
+// the key is malformed — the caller falls back to CFGMSPublisherIdentity().
+// This path is never reachable in production because CFGMS_TEST_STEWARD_PUBLISHER_KEY
+// is only set in ephemeral test environments.
+func buildTestPublisherTrustStore(logger logging.Logger) trust.TrustStore {
+	pubKeyBase64 := os.Getenv("CFGMS_TEST_STEWARD_PUBLISHER_KEY")
+	if pubKeyBase64 == "" {
+		return nil
+	}
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKeyBase64)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		if logger != nil {
+			logger.Warn("CFGMS_TEST_STEWARD_PUBLISHER_KEY is set but malformed; ignoring")
+		}
+		return nil
+	}
+	ts := trust.NewInMemoryTrustStore()
+	_ = ts.AddPublisher(trust.PublisherIdentity{
+		Name:      "cfgms",
+		PublicKey: pubKeyBytes,
+		Algorithm: "ed25519",
+	})
+	if logger != nil {
+		logger.Info("Test mode: overriding steward binary publisher trust store (Issue #1948)")
+	}
+	return ts
 }
 
 // hasValidClientCert reports whether certs contains at least one non-expired client certificate.
@@ -843,4 +1046,78 @@ func defaultCertStoreDir() string {
 	default:
 		return "/var/lib/cfgms/steward/certs"
 	}
+}
+
+// upgradeEventPublisher is the minimal interface required by checkUpgradeFlagFiles
+// to emit upgrade lifecycle events. Satisfied by *client.TransportClient.
+type upgradeEventPublisher interface {
+	GetStewardID() string
+	GetTenantID() string
+}
+
+// checkUpgradeFlagFiles reads launcher-written flag files in certStoreDir and
+// emits the corresponding upgrade lifecycle events, then deletes each file.
+//
+// Flag files written by the launcher after a supervised restart:
+//   - certStoreDir/upgrade-committed: new version passed its startup window.
+//   - certStoreDir/upgrade-rolled-back: launcher auto-rolled-back to previous version.
+//
+// Each file's content is the version string (e.g. "v1.2.3\n") so the event
+// carries the version. Missing or unreadable files are silently ignored.
+// (Issue #1943)
+func checkUpgradeFlagFiles(ctx context.Context, certStoreDir string, tc upgradeEventPublisher, logger logging.Logger) {
+	files := []struct {
+		name      string
+		eventType string
+	}{
+		{"upgrade-committed", string(cpTypes.EventStewardUpgradeCommitted)},
+		{"upgrade-rolled-back", string(cpTypes.EventStewardUpgradeRolledBack)},
+	}
+
+	for _, f := range files {
+		flagPath := filepath.Join(certStoreDir, f.name)
+		raw, err := os.ReadFile(flagPath) //#nosec G304 -- certStoreDir is from defaultCertStoreDir()
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logger.Warn("Could not read upgrade flag file",
+					"path", flagPath, "error", err.Error())
+			}
+			continue
+		}
+		version := strings.TrimSpace(string(raw))
+		logger.Info("Upgrade flag file detected",
+			"flag", f.name, "version", version)
+
+		// Emit the event before deleting the flag so a crash between the two
+		// results in re-emitting on the next start (idempotent from the
+		// controller's perspective) rather than silently losing the event.
+		if pubErr := publishUpgradeLifecycleEvent(ctx, tc, f.eventType, version, logger); pubErr != nil {
+			logger.Warn("Failed to publish upgrade lifecycle event",
+				"event_type", f.eventType, "error", pubErr.Error())
+		}
+
+		if delErr := os.Remove(flagPath); delErr != nil && !os.IsNotExist(delErr) {
+			logger.Warn("Failed to delete upgrade flag file",
+				"path", flagPath, "error", delErr.Error())
+		}
+	}
+}
+
+// publishUpgradeLifecycleEvent emits a single upgrade lifecycle event via the
+// transport client's control plane. Returns an error if the publish fails.
+func publishUpgradeLifecycleEvent(ctx context.Context, tc upgradeEventPublisher, eventType, version string, logger logging.Logger) error {
+	// TransportClient embeds publishEventWithQueue but that method is unexported.
+	// Cast to the concrete type — main.go is in the same binary and this cast
+	// is safe because main always creates a *client.TransportClient.
+	type eventPublisher interface {
+		upgradeEventPublisher
+		PublishUpgradeLifecycleEvent(ctx context.Context, eventType, version string) error
+	}
+	if ep, ok := tc.(eventPublisher); ok {
+		return ep.PublishUpgradeLifecycleEvent(ctx, eventType, version)
+	}
+	// Fallback: log the event locally when the interface is not satisfied.
+	logger.Info("Upgrade lifecycle event (no control plane publish)",
+		"event_type", eventType, "version", version)
+	return nil
 }

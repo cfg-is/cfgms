@@ -163,11 +163,11 @@ func TestCertificateTypeString(t *testing.T) {
 		expected string
 	}{
 		{CertificateTypeCA, "CA"},
-		{CertificateTypeServer, "Server"},
 		{CertificateTypeClient, "Client"},
 		{CertificateTypePublicAPI, "PublicAPI"},
 		{CertificateTypeInternalServer, "InternalServer"},
 		{CertificateTypeConfigSigning, "ConfigSigning"},
+		{CertificateType(1), "Unknown"}, // formerly CertificateTypeServer, now reserved/removed
 		{CertificateType(99), "Unknown"},
 	}
 

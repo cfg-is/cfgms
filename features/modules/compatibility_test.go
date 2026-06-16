@@ -19,6 +19,8 @@ func TestDefaultCompatibilityMatrix_RecordCompatibility(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -117,6 +119,8 @@ func TestDefaultCompatibilityMatrix_GetCompatibility(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -158,6 +162,8 @@ func TestDefaultCompatibilityMatrix_UpdateCompatibility(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -203,6 +209,8 @@ func TestDefaultCompatibilityMatrix_RemoveCompatibility(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -255,6 +263,8 @@ func TestDefaultCompatibilityMatrix_CheckCrossModuleCompatibility(t *testing.T) 
 			Name:        module.name,
 			Version:     module.version,
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -352,6 +362,8 @@ func TestDefaultCompatibilityMatrix_FindCompatibleVersionSet(t *testing.T) {
 				Name:        moduleName,
 				Version:     version,
 				Description: "Test module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			require.NoError(t, registry.RegisterVersion(metadata))
 		}
@@ -410,11 +422,15 @@ func TestDefaultCompatibilityMatrix_BreakingChangeAnalysis(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	metadata2 := &ModuleMetadata{
 		Name:        "test-module",
 		Version:     "2.0.0",
 		Description: "Test module v2",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
@@ -496,6 +512,8 @@ func TestDefaultCompatibilityMatrix_APIChanges(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.1.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -552,6 +570,8 @@ func TestDefaultCompatibilityMatrix_CompatibilityQueries(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -588,9 +608,9 @@ func TestDefaultCompatibilityMatrix_IsCompatible(t *testing.T) {
 	matrix := NewDefaultCompatibilityMatrix(registry)
 
 	// Register test versions
-	metadata1 := &ModuleMetadata{Name: "module-a", Version: "1.0.0", Description: "Test"}
-	metadata2 := &ModuleMetadata{Name: "module-a", Version: "1.1.0", Description: "Test"}
-	metadata3 := &ModuleMetadata{Name: "module-b", Version: "2.0.0", Description: "Test"}
+	metadata1 := &ModuleMetadata{Name: "module-a", Version: "1.0.0", Description: "Test", Publisher: "cfgms", Executors: []string{"steward"}}
+	metadata2 := &ModuleMetadata{Name: "module-a", Version: "1.1.0", Description: "Test", Publisher: "cfgms", Executors: []string{"steward"}}
+	metadata3 := &ModuleMetadata{Name: "module-b", Version: "2.0.0", Description: "Test", Publisher: "cfgms", Executors: []string{"steward"}}
 
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
@@ -696,6 +716,8 @@ func TestDefaultCompatibilityMatrix_GetMatrixStatus(t *testing.T) {
 				Name:        module.name,
 				Version:     module.version,
 				Description: "Test module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			require.NoError(t, registry.RegisterVersion(metadata))
 
@@ -839,6 +861,8 @@ func BenchmarkCompatibilityMatrix_RecordCompatibility(b *testing.B) {
 			Name:        fmt.Sprintf("bench-module-%d", i),
 			Version:     "1.0.0",
 			Description: "Benchmark module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		_ = registry.RegisterVersion(metadata) // Ignore error in test setup
 	}

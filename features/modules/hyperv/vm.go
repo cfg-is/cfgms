@@ -1,0 +1,474 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package hyperv
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
+)
+
+var (
+	// ErrVMNotFound is returned when a requested VM does not exist on the host.
+	ErrVMNotFound = errors.New("hyperv: VM not found")
+
+	// ErrInvalidVMName is returned when a VM name fails allowlist validation or
+	// contains the reserved __ separator.
+	ErrInvalidVMName = errors.New("hyperv: invalid VM name: must match ^[a-zA-Z0-9_\\-]{1,64}$ and must not contain __")
+
+	// ErrInvalidVHDPath is returned when a VHD path is not a valid absolute Windows path.
+	ErrInvalidVHDPath = errors.New("hyperv: invalid VHD path: must be an absolute Windows path (e.g. C:\\VMs\\disk.vhdx)")
+
+	// ErrInvalidGeneration is returned when a VM generation other than 2 (or 0/unset) is specified.
+	ErrInvalidGeneration = errors.New("hyperv: invalid generation: must be 2 (or 0 to accept the default)")
+)
+
+// vmNamePattern is the allowlist for user-supplied VM names.
+// The __ check is enforced separately to produce a more specific error.
+var vmNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
+
+// vhdPathPattern validates Windows absolute paths.
+var vhdPathPattern = regexp.MustCompile(`^[A-Za-z]:\\.*`)
+
+// VMConfig represents the desired state of a Hyper-V virtual machine.
+type VMConfig struct {
+	Name       string `yaml:"name"`
+	MemoryMB   int64  `yaml:"memory_mb"`
+	CPUCount   int    `yaml:"cpu_count"`
+	VHDPath    string `yaml:"vhd_path"`
+	SwitchName string `yaml:"switch_name"`
+	Generation int    `yaml:"generation"`
+	// State is the desired lifecycle: "running", "stopped", or "absent" (delete).
+	State string `yaml:"state,omitempty"`
+}
+
+// Validate checks all VMConfig fields against their respective constraints.
+func (c *VMConfig) Validate() error {
+	if !vmNamePattern.MatchString(c.Name) {
+		return ErrInvalidVMName
+	}
+	// __ is the tenant/VM separator — forbidden in user-supplied names to prevent
+	// a tenant from forging a prefix that collides with another tenant's VMs.
+	if strings.Contains(c.Name, "__") {
+		return ErrInvalidVMName
+	}
+	if c.Generation != 0 && c.Generation != 2 {
+		return ErrInvalidGeneration
+	}
+	if c.VHDPath != "" && !vhdPathPattern.MatchString(c.VHDPath) {
+		return ErrInvalidVHDPath
+	}
+	return nil
+}
+
+// AsMap implements modules.ConfigState.
+func (c *VMConfig) AsMap() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        c.Name,
+		"memory_mb":   c.MemoryMB,
+		"cpu_count":   c.CPUCount,
+		"vhd_path":    c.VHDPath,
+		"switch_name": c.SwitchName,
+		"generation":  c.Generation,
+		"state":       c.State,
+	}
+}
+
+// ToYAML serializes the configuration to YAML.
+func (c *VMConfig) ToYAML() ([]byte, error) {
+	return yaml.Marshal(c)
+}
+
+// FromYAML deserializes YAML data into the configuration.
+func (c *VMConfig) FromYAML(data []byte) error {
+	return yaml.Unmarshal(data, c)
+}
+
+// GetManagedFields returns the list of fields this configuration manages.
+func (c *VMConfig) GetManagedFields() []string {
+	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state"}
+}
+
+// vmHostName constructs the collision-free host-side VM name.
+//
+// The cfgms- prefix and __ separator together make it impossible for a user to
+// construct a VM name that collides with another tenant's VMs:
+//   - __ is forbidden in user-supplied names (Validate enforces this)
+//   - slashes in tenantID are replaced with hyphens to produce a flat prefix
+func vmHostName(tenantID, vmName string) string {
+	return "cfgms-" + strings.ReplaceAll(tenantID, "/", "-") + "__" + vmName
+}
+
+// vmUserName extracts the user-supplied VM name from a host-side prefixed name.
+func vmUserName(tenantID, hostName string) string {
+	prefix := "cfgms-" + strings.ReplaceAll(tenantID, "/", "-") + "__"
+	return strings.TrimPrefix(hostName, prefix)
+}
+
+// psGetVM is the script block passed to ExecutePS for VM retrieval.
+// $Name is the only parameter; its value is transmitted via ArgumentList.
+//
+// Path is read from Get-VMHardDiskDrive (the path of the first attached
+// hard disk), not Get-VM.Path which is the VM configuration directory.
+// VMConfig.VHDPath stores the disk path; conflating it with the config
+// directory caused #1887 B1 verification to flag 2-changed drift on
+// every successful create.
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; SwitchName=if ($adapter) { $adapter.SwitchName } else { "" }; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress`
+
+// psCreateVM is the script block passed to ExecutePS for VM creation.
+// All user-supplied values are transmitted via ArgumentList — none are
+// interpolated into the script text.
+//
+// Notes:
+//   - New-VM does NOT accept -ProcessorCount (real PS pitfall surfaced by
+//     the #1887 live-validation B1 bucket — previously masked because
+//     WinRM was broken and this command never actually ran). CPU count
+//     is set with a separate Set-VMProcessor call after the VM exists.
+//     A newly created Generation-2 VM defaults to 1 vCPU which we only
+//     resize if the desired count differs.
+//   - -NewVHDPath also requires -NewVHDSizeBytes; the cmdlet doesn't
+//     auto-default a size. Hardcoded to 64 GB here (matches Hyper-V
+//     Manager's default new-VM size and is the minimum sensible value
+//     for any Server 2022/2025 guest). The schema does not currently
+//     expose vhd_size_gb; future #1887 follow-up should add it.
+const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation 2 | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
+
+// psRemoveVM is the script block passed to ExecutePS for VM deletion.
+// $Name is the only parameter; its value is transmitted via ArgumentList.
+const psRemoveVM = `Remove-VM -Name $Name -Force`
+
+// psStartVM starts a VM that already exists on the host.
+const psStartVM = `Start-VM -Name $Name`
+
+// psStopVM stops a running VM (Force prevents interactive confirmation).
+const psStopVM = `Stop-VM -Name $Name -Force`
+
+// psSetVMProcessor updates the virtual processor count on an existing VM.
+const psSetVMProcessor = `Set-VMProcessor -VMName $Name -Count $CPU`
+
+// psSetVMMemory updates the startup memory on an existing VM.
+// Set-VMMemory is not a standard Hyper-V cmdlet; Set-VM with MemoryStartupBytes is used instead.
+const psSetVMMemory = `Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)`
+
+// getVM retrieves the current state of a VM by user-visible name.
+// getVM returns the current state of a VM on the host.
+//
+// Contract (matches the directory/file modules):
+//   - resource exists  → (&VMConfig{State: "running"|"stopped"|..., ...}, nil)
+//   - resource absent  → (&VMConfig{Name, State: "absent"}, nil)
+//   - module not ready → (nil, ErrVMNotFound)
+//   - transport failed → (nil, wrapped error)
+//
+// Returning state:"absent" rather than an error lets the unified executor
+// detect drift against a desired state:"present"/"running" config and
+// proceed to Set, instead of treating "absent" as a fatal Get failure.
+func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, error) {
+	if m.transport == nil {
+		return nil, ErrVMNotFound
+	}
+
+	hostName := vmHostName(m.tenantID, vmName)
+	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": hostName})
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: get vm %q: %w", vmName, err)
+	}
+
+	var parsed map[string]interface{}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
+		return nil, fmt.Errorf("hyperv: parse get-vm response for %q: %w", vmName, jsonErr)
+	}
+
+	found, _ := parsed["found"].(bool)
+	if !found {
+		// Absent is a valid current state — the executor compares this against
+		// the desired state and calls Set to create the resource when needed.
+		return &VMConfig{Name: vmName, State: "absent"}, nil
+	}
+
+	// Strip the host-side prefix to recover the user-visible VM name.
+	returnedHostName, _ := parsed["Name"].(string)
+	userVisibleName := vmName
+	if returnedHostName != "" {
+		userVisibleName = vmUserName(m.tenantID, returnedHostName)
+	}
+	cfg := &VMConfig{Name: userVisibleName}
+
+	if v, ok := parsed["MemoryStartupBytes"].(float64); ok {
+		cfg.MemoryMB = int64(v) / (1024 * 1024)
+	}
+	if v, ok := parsed["ProcessorCount"].(float64); ok {
+		cfg.CPUCount = int(v)
+	}
+	if v, ok := parsed["Generation"].(float64); ok {
+		cfg.Generation = int(v)
+	}
+	if v, ok := parsed["Path"].(string); ok {
+		cfg.VHDPath = v
+	}
+	if v, ok := parsed["SwitchName"].(string); ok {
+		cfg.SwitchName = v
+	}
+	if v, ok := parsed["State"].(string); ok {
+		switch v {
+		case "Running":
+			cfg.State = "running"
+		case "Off":
+			cfg.State = "stopped"
+		default:
+			cfg.State = strings.ToLower(v)
+		}
+	}
+
+	// Write-through: update cache on successful read
+	m.vmsMu.Lock()
+	m.vms[vmName] = *cfg
+	m.vmsMu.Unlock()
+
+	return cfg, nil
+}
+
+// setVM applies the desired VM configuration.
+// Write-through cache semantics: transport is called first; cache updated on success only.
+//
+// Dispatch logic:
+//   - state == "absent"                 → removeVM
+//   - VM exists in cache or on host:
+//     state == "running"               → Start-VM (with optional stop/resize/start if resize needed)
+//     state == "stopped"               → Stop-VM (with optional resize after)
+//   - VM not found:
+//     state == "running"               → New-VM, then Start-VM
+//     state == "stopped"               → New-VM (Hyper-V starts VMs in Off state by default)
+func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	if m.transport == nil {
+		return modules.ErrNotImplemented
+	}
+
+	// Extract VM name from resource ID "vm:<name>"
+	parts := strings.SplitN(resourceID, ":", 2)
+	if len(parts) != 2 {
+		return modules.ErrNotImplemented
+	}
+	vmName := parts[1]
+
+	configMap := config.AsMap()
+	state, _ := configMap["state"].(string)
+
+	if state == "absent" {
+		return m.removeVM(ctx, vmName)
+	}
+
+	cfg := &VMConfig{Name: vmName}
+	if v, ok := configMap["memory_mb"].(int64); ok {
+		cfg.MemoryMB = v
+	} else if v, ok := configMap["memory_mb"].(int); ok {
+		cfg.MemoryMB = int64(v)
+	}
+	if v, ok := configMap["cpu_count"].(int); ok {
+		cfg.CPUCount = v
+	}
+	if v, ok := configMap["vhd_path"].(string); ok {
+		cfg.VHDPath = v
+	}
+	if v, ok := configMap["switch_name"].(string); ok {
+		cfg.SwitchName = v
+	}
+	if v, ok := configMap["generation"].(int); ok {
+		cfg.Generation = v
+	}
+	cfg.State = state
+
+	// Also handle *VMConfig passed directly
+	if vc, ok := config.(*VMConfig); ok {
+		*cfg = *vc
+		cfg.Name = vmName
+	}
+
+	// Check cache for VM existence first, bypassing transport for known VMs.
+	m.vmsMu.RLock()
+	cachedVM, inCache := m.vms[vmName]
+	m.vmsMu.RUnlock()
+
+	var vmExists bool
+	var currentVM VMConfig
+	if inCache {
+		vmExists = true
+		currentVM = cachedVM
+	} else {
+		current, err := m.getVM(ctx, vmName)
+		if err != nil {
+			// getVM no longer returns a sentinel for "not found" — absence is
+			// signalled by State=="absent" with err==nil. Any real error here
+			// (module not configured, transport down, malformed response) is
+			// fatal for this Set call.
+			return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
+		}
+		if current.State != "absent" {
+			vmExists = true
+			currentVM = *current
+		}
+	}
+
+	hostName := vmHostName(m.tenantID, vmName)
+
+	if vmExists {
+		return m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state)
+	}
+
+	// VM does not exist — create it.
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
+	psArgs := map[string]string{
+		"Name":       hostName,
+		"MemoryMB":   fmt.Sprintf("%d", cfg.MemoryMB),
+		"CPU":        fmt.Sprintf("%d", cfg.CPUCount),
+		"VHDPath":    cfg.VHDPath,
+		"SwitchName": cfg.SwitchName,
+	}
+
+	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
+	}
+
+	if state == "running" {
+		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+	}
+
+	// Write-through: update cache on success
+	cfgCopy := *cfg
+	cfgCopy.Name = vmName
+	m.vmsMu.Lock()
+	m.vms[vmName] = cfgCopy
+	m.vmsMu.Unlock()
+
+	return nil
+}
+
+// applyVMState transitions an existing VM to the desired power state, applying
+// CPU/memory resize when the desired values differ from current.
+func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
+	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
+	needsMemResize := desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
+
+	switch state {
+	case "running":
+		if needsCPUResize || needsMemResize {
+			// CPU/memory can only be changed on a stopped VM — stop, resize, then start.
+			if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+				return err
+			}
+			if needsCPUResize {
+				if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
+					return err
+				}
+			}
+			if needsMemResize {
+				if err := m.execSetVMMemory(ctx, vmName, hostName, desired.MemoryMB); err != nil {
+					return err
+				}
+			}
+		}
+		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+		m.vmsMu.Lock()
+		updated := *current
+		updated.State = "running"
+		m.vms[vmName] = updated
+		m.vmsMu.Unlock()
+
+	case "stopped":
+		if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+		if needsCPUResize {
+			if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
+				return err
+			}
+		}
+		if needsMemResize {
+			if err := m.execSetVMMemory(ctx, vmName, hostName, desired.MemoryMB); err != nil {
+				return err
+			}
+		}
+		m.vmsMu.Lock()
+		updated := *current
+		updated.State = "stopped"
+		m.vms[vmName] = updated
+		m.vmsMu.Unlock()
+	}
+
+	return nil
+}
+
+func (m *hypervModule) execStartVM(ctx context.Context, vmName, hostName string) error {
+	_, psErr := m.transport.ExecutePS(ctx, psStartVM, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Start-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Start-VM %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+func (m *hypervModule) execStopVM(ctx context.Context, vmName, hostName string) error {
+	_, psErr := m.transport.ExecutePS(ctx, psStopVM, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Stop-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Stop-VM %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+func (m *hypervModule) execSetVMProcessor(ctx context.Context, vmName, hostName string, cpuCount int) error {
+	_, psErr := m.transport.ExecutePS(ctx, psSetVMProcessor, map[string]string{
+		"Name": hostName,
+		"CPU":  fmt.Sprintf("%d", cpuCount),
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMProcessor", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Set-VMProcessor %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+func (m *hypervModule) execSetVMMemory(ctx context.Context, vmName, hostName string, memoryMB int64) error {
+	_, psErr := m.transport.ExecutePS(ctx, psSetVMMemory, map[string]string{
+		"Name":     hostName,
+		"MemoryMB": fmt.Sprintf("%d", memoryMB),
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMMemory", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: Set-VMMemory %q: %w", vmName, psErr)
+	}
+	return nil
+}
+
+// removeVM deletes a VM from the host.
+// Write-through cache semantics: transport is called first; cache updated on success only.
+func (m *hypervModule) removeVM(ctx context.Context, vmName string) error {
+	hostName := vmHostName(m.tenantID, vmName)
+
+	_, psErr := m.transport.ExecutePS(ctx, psRemoveVM, map[string]string{"Name": hostName})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VM", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: remove VM %q: %w", vmName, psErr)
+	}
+
+	m.vmsMu.Lock()
+	delete(m.vms, vmName)
+	m.vmsMu.Unlock()
+
+	return nil
+}

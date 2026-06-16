@@ -374,17 +374,17 @@ resources:
 
 ### How It Works
 
-The workflow engine hosts **cloud modules** that implement the same Get/Set contract as steward modules, but execute against external APIs instead of local system state:
+The workflow engine hosts **workflow modules** that implement the same Get/Set contract as steward modules, but execute against external APIs instead of local system state. The M365 family (auth, conditional-access, intune-policy, entra-group, entra-admin-unit, entra-user, entra-application) lives at `features/workflow/modules/m365/` and is the first set of these.
 
-1. **Get** — Query the cloud API for current resource state (e.g., read current conditional access policies from Entra ID)
+1. **Get** — Query the external API for current resource state (e.g., read current conditional access policies from Entra ID)
 2. **Compare** — Engine compares current state against desired state from the cfg
-3. **Set** — If drifted, call the cloud API to converge (e.g., create/update the policy)
+3. **Set** — If drifted, call the external API to converge (e.g., create/update the policy)
 
-This means cloud resources get the same convergence loop as local resources — scheduled re-checks detect drift (someone changed a policy in the portal), and the controller corrects it.
+This means externally-managed resources get the same convergence loop as local resources — scheduled re-checks detect drift (someone changed a policy in the portal), and the controller corrects it.
 
-### Event Hooks for Cloud Resources
+### Event Hooks for Workflow-Managed Resources
 
-Cloud modules can register monitors using platform-native mechanisms:
+Workflow modules can register monitors using platform-native mechanisms:
 
 - **Log ingestion** — consume audit logs from M365, Azure, AWS to detect changes in near-real-time
 - **Webhook receivers** — receive change notifications from cloud platforms
@@ -771,3 +771,85 @@ The REST API is the admin interface to the controller. All operations are authen
 | **HA** | Cluster status, leader info, node list |
 | **Workflows** | Create, trigger, monitor workflows |
 | **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |
+| **Modules** | List cached modules, approve queued bundles |
+
+---
+
+## Module Cache and Approval Workflow
+
+The controller fetches module bundles from configured git sources, verifies publisher signatures, assigns an approval decision, and stages approved bundles in a content-addressed on-disk cache.
+
+### Cache Filesystem Layout
+
+Bundles are stored at:
+
+```
+<data_dir>/module-cache/<publisher>/<name>/<version>/<content_hash>/
+    manifest.yaml      — module metadata (ModuleMetadata)
+    binaries.yaml      — os-arch → relative binary path index
+    signatures.yaml    — publisher signatures
+    content_hash.txt   — original content hash (pre-path-sanitization)
+    approval.yaml      — current approval state
+```
+
+The `<content_hash>` directory name is a path-safe transformation of the bundle's SHA-256 content hash. Standard base64 characters (`/`, `+`, `=`) are replaced with filesystem-safe equivalents; the original hash is preserved in `content_hash.txt` and returned by all cache operations.
+
+**Idempotency:** `Put()` with the same content hash is a no-op. `Put()` with a different hash at the same `(publisher, name, version)` returns `ErrContentAddressConflict`.
+
+### Git Source Resolver
+
+`GitSourceResolver` maps `module_sources:` config blocks to git clone URLs:
+
+```yaml
+module_sources:
+  cfgms:
+    type: git
+    base: https://modules.example.com/cfgms
+```
+
+For a reference like `cfgms/hyperv@0.2.1`, the clone URL is `<base>/<name>` (e.g. `https://modules.example.com/cfgms/hyperv`). Clones use `--depth 1` for minimal network and disk usage. Publisher, name, and version components are validated to reject path traversal sequences before use.
+
+### Approval State Machine
+
+Each bundle in the cache has one of three approval states:
+
+```
+                    ┌─────────────────┐
+  Trusted publisher │                 │
+  + valid signature │  auto-approve   │──────────────┐
+                    └─────────────────┘              │
+                                                     ▼
+  [bundle arrives]──►  evaluate()  ──► pending ──► approved
+                                          │
+                    Unknown publisher     │  (admin Approve())
+                                          │
+                    ┌─────────────────┐   │
+  Signature fails   │                 │   │
+  (tampered bundle) │     reject      │◄──┘ (only from pending)
+                    └─────────────────┘
+                          ▼
+                       rejected
+```
+
+**`ApprovalWorkflow.Evaluate(bundle, store)` rules:**
+
+| Condition | Decision |
+|-----------|----------|
+| Publisher in trust store AND signature passes `VerifyBundleSignature` | `AutoApprove` |
+| Publisher NOT in trust store | `QueueForReview` |
+| Publisher in trust store but signature fails | `Reject` |
+
+**Default trust list:** `["cfgms"]` (seeded from `pkg/modules/trust.CFGMSPublisherIdentity()`).
+
+### `cfg module` CLI
+
+```
+cfg module list [--tenant <tenant-path>] [--status pending|approved|rejected]
+cfg module approve <publisher>/<name>@<version>
+```
+
+`cfg module list` calls `GET /api/v1/modules` with optional `?tenant=...&status=...` query parameters and renders a tabular summary of publisher, name, version, approval status, and (truncated) content hash.
+
+`cfg module approve` calls `POST /api/v1/modules/<publisher>/<name>/<version>/approve`, which invokes `ApprovalWorkflow.Approve()` server-side. Only bundles in `pending` state can be approved; an error is returned for bundles that are already approved or rejected.
+
+Admin mTLS authentication (via admin bundle file) is required for both commands, following the same auth pattern as `cfg registration approve`.

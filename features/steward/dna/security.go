@@ -52,45 +52,15 @@ func (g *GenericSecurityCollector) CollectCertificates(_ context.Context, attrib
 	return nil
 }
 
-// Platform-specific collector types (implementations in separate files)
+// Platform-specific collector types — implementations live in per-platform files.
+// Follow the hardware.go pattern: only struct declarations here; all methods in
+// security_linux.go, security_windows.go, and security_darwin.go.
 
 // WindowsSecurityCollector handles Windows-specific security collection
 type WindowsSecurityCollector struct{}
 
-func (w *WindowsSecurityCollector) CollectUsers(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectUsers(ctx, attributes)
-}
-
-func (w *WindowsSecurityCollector) CollectGroups(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectGroups(ctx, attributes)
-}
-
-func (w *WindowsSecurityCollector) CollectPermissions(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectPermissions(ctx, attributes)
-}
-
-func (w *WindowsSecurityCollector) CollectCertificates(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectCertificates(ctx, attributes)
-}
-
 // LinuxSecurityCollector handles Linux-specific security collection
 type LinuxSecurityCollector struct{}
-
-func (l *LinuxSecurityCollector) CollectUsers(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectUsers(ctx, attributes)
-}
-
-func (l *LinuxSecurityCollector) CollectGroups(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectGroups(ctx, attributes)
-}
-
-func (l *LinuxSecurityCollector) CollectPermissions(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectPermissions(ctx, attributes)
-}
-
-func (l *LinuxSecurityCollector) CollectCertificates(ctx context.Context, attributes map[string]string) error {
-	return (&GenericSecurityCollector{}).CollectCertificates(ctx, attributes)
-}
 
 // DarwinSecurityCollector handles macOS-specific security collection
 type DarwinSecurityCollector struct{}

@@ -14,6 +14,14 @@ import (
 	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
 
+// testModule is a minimal real implementation of Module for registration tests.
+type testModule struct{ moduleName string }
+
+func (m *testModule) Name() string                                      { return m.moduleName }
+func (m *testModule) Get(_ context.Context, _ string) (string, error)   { return "", nil }
+func (m *testModule) Set(_ context.Context, _, _ string) error          { return nil }
+func (m *testModule) Test(_ context.Context, _, _ string) (bool, error) { return true, nil }
+
 func TestControllerCreation(t *testing.T) {
 	// Create a test logger
 	logger := testutil.NewMockLogger(true)
@@ -187,30 +195,25 @@ func TestModuleRegistration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ctrl.Close() })
 
-	// Create mock modules
-	moduleA := testutil.NewMockModule("moduleA")
-	moduleB := testutil.NewMockModule("moduleB")
-
 	// Register the first module
-	err = ctrl.RegisterModule(moduleA)
+	err = ctrl.RegisterModule(&testModule{moduleName: "moduleA"})
 	assert.NoError(t, err)
 
 	// Register the second module
-	err = ctrl.RegisterModule(moduleB)
+	err = ctrl.RegisterModule(&testModule{moduleName: "moduleB"})
 	assert.NoError(t, err)
 
 	// Try to register a duplicate module
-	duplicateModule := testutil.NewMockModule("moduleA")
-	err = ctrl.RegisterModule(duplicateModule)
+	err = ctrl.RegisterModule(&testModule{moduleName: "moduleA"})
 	assert.Error(t, err)
 	assert.Equal(t, ErrModuleExists, err)
 
-	// Get a registered module
-	_, err = ctrl.GetModule("moduleA")
+	// Verify typed lookup still works for registered modules.
+	_, err = ctrl.GetModuleTyped("moduleA")
 	assert.NoError(t, err)
 
-	// Get a non-existent module
-	_, err = ctrl.GetModule("nonExistentModule")
+	// GetModuleTyped returns ErrModuleNotFound for non-existent modules.
+	_, err = ctrl.GetModuleTyped("nonExistentModule")
 	assert.Error(t, err)
 	assert.Equal(t, ErrModuleNotFound, err)
 }

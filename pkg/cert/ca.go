@@ -296,7 +296,7 @@ func (ca *CA) GenerateServerCertificate(config *ServerCertConfig) (*Certificate,
 	fingerprint := ca.calculateFingerprint(certDER)
 
 	return &Certificate{
-		Type:           CertificateTypeServer,
+		Type:           CertificateTypePublicAPI,
 		CommonName:     config.CommonName,
 		SerialNumber:   serialNumber.String(),
 		CreatedAt:      template.NotBefore,

@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26.3-alpine3.23 AS builder
+FROM golang:1.26.4-alpine3.23 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -22,6 +22,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
     -ldflags="-s -w -X main.ControllerURL=${STEWARD_CONTROLLER_URL}" \
     -o steward ./cmd/steward
 
+# Build the steward launcher (Issue #1948: required for upgrade swap in fleet E2E tests)
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags="-s -w" \
+    -o cfgms-launcher ./cmd/cfgms-steward-launcher
+
 # Final stage - Debian bookworm-slim for fleet testing
 FROM debian:bookworm-slim
 
@@ -39,8 +44,12 @@ RUN groupadd -g 1001 cfgms && \
 # Set working directory
 WORKDIR /app
 
-# Copy binary from builder
+# Copy steward binary from builder
 COPY --from=builder /src/steward .
+
+# Install launcher at the hard-coded path the upgrade handler expects (Issue #1948).
+# /usr/local/bin is owned by root; the cfgms user can exec but not write it.
+COPY --from=builder /src/cfgms-launcher /usr/local/bin/cfgms-launcher
 
 # Pre-create the steward's certificate store directory and hand it to the
 # cfgms user. defaultCertStoreDir() resolves to /var/lib/cfgms/steward/certs on
@@ -50,8 +59,17 @@ COPY --from=builder /src/steward .
 # registration aborts with "client mode requires 'tls_config' in config".
 RUN mkdir -p /var/lib/cfgms/steward/certs
 
+# Pre-create the launcher's install root (/opt/cfgms) so the upgrade swap command
+# can stage new binaries without root. defaultRoot() returns /opt/cfgms on Linux;
+# the cfgms user cannot create it at runtime because /opt is root-owned. (Issue #1948)
+RUN mkdir -p /opt/cfgms && chown cfgms:cfgms /opt/cfgms
+
 # Change ownership
 RUN chown -R cfgms:cfgms /app /var/lib/cfgms
+
+# Steward is a long-running daemon. pgrep is available via procps (installed above).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -x steward || exit 1
 
 # Switch to non-root user
 USER cfgms

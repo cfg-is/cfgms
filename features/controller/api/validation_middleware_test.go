@@ -3,11 +3,14 @@
 package api
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/security"
 )
@@ -41,9 +44,9 @@ func TestValidateRequestHeaders_ContentType(t *testing.T) {
 		{"yaml", "application/yaml", false},
 		{"x-yaml", "application/x-yaml", false},
 		{"text yaml", "text/yaml", false},
+		{"octet-stream binary upload", "application/octet-stream", false},
 		{"empty", "", false},
 		{"unsupported xml", "application/xml", true},
-		{"unsupported octet-stream", "application/octet-stream", true},
 	}
 
 	for _, tc := range cases {
@@ -62,4 +65,58 @@ func TestValidateRequestHeaders_ContentType(t *testing.T) {
 				"content type %q: unexpected content-type validation outcome", tc.contentType)
 		})
 	}
+}
+
+// TestValidateRequestBody_OctetStreamBypassesSizeLimit verifies that binary
+// uploads larger than the 10MB JSON-body cap pass validation. The installer
+// artifact upload endpoint accepts ~30MB steward binaries, and the validation
+// middleware must not buffer them in memory.
+func TestValidateRequestBody_OctetStreamBypassesSizeLimit(t *testing.T) {
+	s := &Server{}
+
+	// Build a body larger than the 10MB JSON cap.
+	bigBody := bytes.Repeat([]byte{0xAB}, 12*1024*1024)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64",
+		bytes.NewReader(bigBody))
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	validator := security.NewEnhancedValidator(nil)
+	result := &security.ValidationResult{Valid: true}
+
+	err := s.validateRequestBody(validator, result, req)
+	require.NoError(t, err)
+	assert.True(t, result.Valid, "octet-stream upload must pass body validation, got errors: %+v", result.Errors)
+
+	// The body must still be readable downstream (validation must not consume it).
+	downstream, readErr := io.ReadAll(req.Body)
+	require.NoError(t, readErr)
+	assert.Len(t, downstream, len(bigBody), "request body must remain intact for handler streaming")
+}
+
+// TestValidateRequestBody_JSONStillSizeCapped verifies that JSON bodies remain
+// subject to the 10MB cap — the octet-stream bypass is scoped to binary uploads.
+func TestValidateRequestBody_JSONStillSizeCapped(t *testing.T) {
+	s := &Server{}
+
+	bigBody := bytes.Repeat([]byte{'x'}, 12*1024*1024)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards",
+		bytes.NewReader(bigBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	validator := security.NewEnhancedValidator(nil)
+	result := &security.ValidationResult{Valid: true}
+
+	err := s.validateRequestBody(validator, result, req)
+	require.NoError(t, err)
+	assert.False(t, result.Valid, "JSON body >10MB must trigger validation error")
+
+	foundSize := false
+	for _, e := range result.Errors {
+		if e.Rule == "max_size" {
+			foundSize = true
+			break
+		}
+	}
+	assert.True(t, foundSize, "expected max_size rule violation; got %+v", result.Errors)
 }

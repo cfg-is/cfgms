@@ -32,6 +32,10 @@ ENV CFGMS_TEST_HTTP_ADDR="https://controller-standalone:9080" \
     CFGMS_TEST_MQTT_ADDR="ssl://controller-standalone:8883" \
     CFGMS_TEST_QUIC_ADDR="controller-standalone:4433"
 
+# Not a long-running service; this container is used as a CI test harness
+# and exits after running the test suite. HEALTHCHECK NONE is intentional.
+HEALTHCHECK NONE
+
 # Switch to non-root user
 # Note: Docker socket access is granted at runtime via --group-add flag
 USER testuser

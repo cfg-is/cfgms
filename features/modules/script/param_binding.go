@@ -95,3 +95,12 @@ func SecretEnvVarName(shell ShellType, paramName string) string {
 		return upper
 	}
 }
+
+// ParamEnvVarName returns the environment variable name for a resolved literal param.
+// Literal params always use the CFGMS_PARAM_<PARAM_UPPER> namespace on all platforms
+// to prevent shadowing standard environment variables (e.g., a param named "path"
+// would otherwise overwrite PATH). The shell parameter is accepted for API symmetry
+// with SecretEnvVarName; the namespace is platform-invariant.
+func ParamEnvVarName(_ ShellType, paramName string) string {
+	return "CFGMS_PARAM_" + strings.ToUpper(paramName)
+}

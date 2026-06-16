@@ -7,16 +7,34 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/config/diff"
 )
+
+// errDifferencesFound is returned by runConfigDiff when the two configs differ.
+// The cobra RunE handler converts this to os.Exit(1) without printing an error message,
+// matching the conventional diff exit code 1 = "differences exist".
+var errDifferencesFound = errors.New("configurations differ")
+
+// secretKeyPatterns are case-insensitive substrings that mark a config key as sensitive.
+var secretKeyPatterns = []string{"token", "secret", "password", "credential", "api_key"}
+
+// rollbackPollInterval is the delay between status poll requests.
+// Tests may override this to zero to avoid sleeping.
+var rollbackPollInterval = 2 * time.Second
 
 var (
 	configUploadStewardID   string
@@ -41,6 +59,15 @@ var (
 
 	// Deployments command flags
 	configDeploymentsJSON bool
+
+	// Diff command flags
+	configDiffJSON           bool
+	configDiffIncludeSecrets bool
+
+	// Rollback command flags
+	configRollbackTo     string
+	configRollbackDryRun bool
+	configRollbackJSON   bool
 )
 
 var configCmd = &cobra.Command{
@@ -101,6 +128,36 @@ Examples:
 	RunE: runConfigDeployments,
 }
 
+var configDiffCmd = &cobra.Command{
+	Use:   "diff <steward-id> <new-cfg.yaml>",
+	Short: "Diff local config against the config stored on the controller",
+	Long: `Show what would change if <new-cfg.yaml> were uploaded to <steward-id>.
+
+Fetches the config currently stored for the steward from the controller, then
+diffs it against the local file using the same semantic engine as 'cfg diff'.
+No mutation occurs.
+
+Secret-bearing keys (those whose names contain token, secret, password,
+credential, or api_key) are replaced with *** in the comparison by default.
+Pass --include-secrets to show raw values.
+
+Exit code is 1 when there are differences, 0 when configs are identical or
+no config is stored for the steward.
+
+Examples:
+  cfg config diff steward-abc123 new-config.yaml
+  cfg config diff steward-abc123 new-config.yaml --json
+  cfg config diff steward-abc123 new-config.yaml --include-secrets`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		err := runConfigDiff(cmd, args)
+		if errors.Is(err, errDifferencesFound) {
+			os.Exit(1)
+		}
+		return err
+	},
+}
+
 var configUploadCmd = &cobra.Command{
 	Use:   "upload <file>",
 	Short: "Upload a YAML config to a steward",
@@ -121,6 +178,27 @@ Examples:
   cfg config upload fleet-config.yaml --steward steward-abc123 --url=https://ctrl.example.com:9080`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigUpload,
+}
+
+var configRollbackCmd = &cobra.Command{
+	Use:   "rollback <steward-id>",
+	Short: "Roll back a steward's configuration to a previous version",
+	Long: `Restore a previous configuration version for a steward.
+
+When --to is specified, executes (or previews with --dry-run) the rollback.
+If --to is omitted, lists available rollback points for the steward and exits.
+
+Status codes returned by the server:
+  412 - Rollback requires approval via the approval workflow
+  409 - Another rollback is already in progress for this steward
+  400 - Request rejected (e.g. cross-tenant version mismatch)
+
+Examples:
+  cfg config rollback steward-abc123 --to abc1234567890
+  cfg config rollback steward-abc123 --to abc1234567890 --dry-run
+  cfg config rollback steward-abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runConfigRollback,
 }
 
 func init() {
@@ -161,11 +239,30 @@ func init() {
 	configDeploymentsCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	configDeploymentsCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 
+	// Diff command flags
+	configDiffCmd.Flags().BoolVar(&configDiffJSON, "json", false, "Emit JSON diff format instead of human-readable text")
+	configDiffCmd.Flags().BoolVar(&configDiffIncludeSecrets, "include-secrets", false, "Include raw secret values (skips redaction of token/secret/password/credential/api_key keys)")
+	configDiffCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configDiffCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
+	configDiffCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	configDiffCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+
+	// Rollback command flags
+	configRollbackCmd.Flags().StringVar(&configRollbackTo, "to", "", "Version (commit SHA) to roll back to; omit to list available rollback points")
+	configRollbackCmd.Flags().BoolVar(&configRollbackDryRun, "dry-run", false, "Preview the rollback without executing (calls /rollback/preview)")
+	configRollbackCmd.Flags().BoolVar(&configRollbackJSON, "json", false, "Emit raw JSON instead of human-readable output")
+	configRollbackCmd.Flags().StringVar(&configAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
+	configRollbackCmd.Flags().StringVar(&configAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
+	configRollbackCmd.Flags().StringVar(&configTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	configRollbackCmd.Flags().BoolVar(&configTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+
 	configCmd.AddCommand(configUploadCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configDeleteCmd)
 	configCmd.AddCommand(configDeploymentsCmd)
+	configCmd.AddCommand(configDiffCmd)
+	configCmd.AddCommand(configRollbackCmd)
 }
 
 func getConfigClient() (*APIClient, error) {
@@ -545,4 +642,406 @@ func runConfigDeployments(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// redactSecrets replaces values for keys matching secretKeyPatterns with "***".
+// Recurses into nested maps and slices so secrets inside resources[] are also redacted.
+func redactSecrets(config map[string]interface{}) {
+	for key, value := range config {
+		keyLower := strings.ToLower(key)
+		isSecret := false
+		for _, pattern := range secretKeyPatterns {
+			if strings.Contains(keyLower, pattern) {
+				isSecret = true
+				break
+			}
+		}
+		if isSecret {
+			config[key] = "***"
+		} else {
+			redactSecretsInValue(value)
+		}
+	}
+}
+
+// redactSecretsInValue recurses into maps and slices to find and redact secret keys.
+func redactSecretsInValue(v interface{}) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		redactSecrets(val)
+	case []interface{}:
+		for _, elem := range val {
+			redactSecretsInValue(elem)
+		}
+	}
+}
+
+func runConfigDiff(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+	newCfgPath := args[1]
+
+	// Validate local file exists before making any network call
+	if _, err := os.Stat(newCfgPath); os.IsNotExist(err) {
+		return fmt.Errorf("file not found: %s", newCfgPath)
+	}
+
+	client, err := getConfigAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/stewards/" + stewardID + "/config"
+	resp, err := client.doRequest(context.Background(), "GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Printf("No config stored for steward %s. Upload a config first.\n", stewardID)
+		return nil
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return client.parseError(resp)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp struct {
+		Data struct {
+			Config map[string]interface{} `json:"config"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	configData := apiResp.Data.Config
+	if !configDiffIncludeSecrets {
+		redactSecrets(configData)
+	}
+
+	yamlBytes, err := yaml.Marshal(configData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config to YAML: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "cfgms-diff-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	// #nosec G302 - 0700 is correct for a traversable private temp directory; the execute bit is required
+	if err := os.Chmod(tempDir, 0700); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return fmt.Errorf("failed to set temp dir permissions: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	tempFile := filepath.Join(tempDir, "server-config.yaml")
+	// #nosec G306 - explicit 0600 matches security requirement for temp config files
+	if err := os.WriteFile(tempFile, yamlBytes, 0600); err != nil {
+		return fmt.Errorf("failed to write temp config: %w", err)
+	}
+
+	semanticAnalyzer := diff.NewDefaultSemanticAnalyzer()
+	impactAnalyzer := diff.NewDefaultImpactAnalyzer()
+	exporter := diff.NewDefaultExporter()
+	engine := diff.NewDefaultEngine(semanticAnalyzer, impactAnalyzer, exporter)
+
+	fromRef, err := createConfigurationReference(tempFile)
+	if err != nil {
+		return fmt.Errorf("failed to create from reference: %w", err)
+	}
+
+	toRef, err := createConfigurationReference(newCfgPath)
+	if err != nil {
+		return fmt.Errorf("failed to create to reference: %w", err)
+	}
+
+	diffOptions := diff.DiffOptions{
+		IgnoreWhitespace: false,
+		IgnoreComments:   false,
+		IgnoreOrder:      false,
+		ContextLines:     3,
+		SemanticDiff:     true,
+		ImpactAnalysis:   true,
+	}
+
+	result, err := engine.Compare(context.Background(), *fromRef, *toRef, diffOptions)
+	if err != nil {
+		return fmt.Errorf("comparison failed: %w", err)
+	}
+
+	exportFormat := diff.ExportFormatText
+	if configDiffJSON {
+		exportFormat = diff.ExportFormatJSON
+	}
+
+	exportOptions := diff.ExportOptions{
+		Format:          exportFormat,
+		IncludeSummary:  true,
+		IncludeMetadata: false,
+		IncludeContext:  true,
+		ColorizeOutput:  true,
+		LineNumbers:     false,
+	}
+
+	outputBytes, err := engine.Export(context.Background(), result, exportOptions)
+	if err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	fmt.Print(string(outputBytes))
+
+	if result.Summary.TotalChanges > 0 {
+		return errDifferencesFound
+	}
+
+	return nil
+}
+
+// apiRollbackPoint mirrors the server-side RollbackPoint for JSON decoding.
+type apiRollbackPoint struct {
+	CommitSHA   string    `json:"commit_sha"`
+	Timestamp   time.Time `json:"timestamp"`
+	Author      string    `json:"author"`
+	Message     string    `json:"message"`
+	RiskLevel   string    `json:"risk_level"`
+	CanRollback bool      `json:"can_rollback"`
+}
+
+// apiRollbackOperation mirrors the server-side RollbackOperation for JSON decoding.
+type apiRollbackOperation struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+func runConfigRollback(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getConfigAPIClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	// If --to is not provided, list available rollback points and exit 0.
+	if configRollbackTo == "" {
+		return runListRollbackPoints(client, stewardID)
+	}
+
+	// --dry-run: call preview endpoint and print diff.
+	if configRollbackDryRun {
+		return runPreviewRollback(client, stewardID, configRollbackTo)
+	}
+
+	// Execute rollback and poll for completion.
+	return runExecuteRollback(client, stewardID, configRollbackTo)
+}
+
+func runListRollbackPoints(client *APIClient, stewardID string) error {
+	path := "/api/v1/rollback/points?target_type=steward&target_id=" + url.QueryEscape(stewardID)
+	resp, err := client.doRequest(context.Background(), "GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to list rollback points: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return client.parseError(resp)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if configRollbackJSON {
+		_, err := os.Stdout.Write(bodyBytes)
+		return err
+	}
+
+	var apiResp struct {
+		RollbackPoints []apiRollbackPoint `json:"rollback_points"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(apiResp.RollbackPoints) == 0 {
+		fmt.Printf("No rollback points available for steward %s\n", stewardID)
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "COMMIT SHA\tTIMESTAMP\tAUTHOR\tRISK\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, p := range apiResp.RollbackPoints {
+		msg := p.Message
+		if len(msg) > 60 {
+			msg = msg[:57] + "..."
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			p.CommitSHA,
+			p.Timestamp.Format(time.RFC3339),
+			p.Author,
+			p.RiskLevel,
+			msg,
+		); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+func runPreviewRollback(client *APIClient, stewardID, version string) error {
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"target_type": "steward",
+		"target_id":   stewardID,
+		"rollback_to": version,
+		"dry_run":     true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), "POST", "/api/v1/rollback/preview", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to preview rollback: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return client.parseError(resp)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if configRollbackJSON {
+		_, err := os.Stdout.Write(bodyBytes)
+		return err
+	}
+
+	var apiResp struct {
+		Preview map[string]interface{} `json:"preview"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	fmt.Printf("Rollback preview for steward %s to version %s:\n\n", stewardID, version)
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(apiResp.Preview)
+}
+
+func runExecuteRollback(client *APIClient, stewardID, version string) error {
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"target_type": "steward",
+		"target_id":   stewardID,
+		"rollback_to": version,
+		"dry_run":     false,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), "POST", "/api/v1/rollback/execute", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to execute rollback: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusPreconditionFailed: // 412
+		fmt.Fprintln(os.Stderr, "Rollback requires approval. Use the approval workflow.")
+		return fmt.Errorf("rollback requires approval (HTTP 412)")
+	case http.StatusConflict: // 409
+		fmt.Fprintln(os.Stderr, "Another rollback is already in progress for this steward.")
+		return fmt.Errorf("rollback already in progress (HTTP 409)")
+	case http.StatusBadRequest: // 400
+		var errResp map[string]interface{}
+		if json.Unmarshal(bodyBytes, &errResp) == nil {
+			if code, ok := errResp["code"].(string); ok && code == "CROSS_TENANT_ROLLBACK" {
+				return fmt.Errorf("rollback rejected: version does not belong to this steward tenant")
+			}
+		}
+		return fmt.Errorf("API error (status 400): %s", strings.TrimSpace(string(bodyBytes)))
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("API error (status %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	var executeResp struct {
+		Rollback apiRollbackOperation `json:"rollback"`
+	}
+	if err := json.Unmarshal(bodyBytes, &executeResp); err != nil {
+		return fmt.Errorf("failed to decode execute response: %w", err)
+	}
+
+	rollbackID := executeResp.Rollback.ID
+	if rollbackID == "" {
+		return fmt.Errorf("server returned rollback operation without an ID")
+	}
+
+	fmt.Printf("Rollback initiated (id: %s). Waiting for completion...\n", rollbackID)
+
+	// Poll for completion with 60s timeout.
+	deadline := time.Now().Add(60 * time.Second)
+	statusPath := "/api/v1/rollback/" + url.PathEscape(rollbackID) + "/status"
+
+	for time.Now().Before(deadline) {
+		time.Sleep(rollbackPollInterval)
+
+		statusResp, err := client.doRequest(context.Background(), "GET", statusPath, nil)
+		if err != nil {
+			return fmt.Errorf("failed to poll rollback status: %w", err)
+		}
+		statusBody, readErr := io.ReadAll(statusResp.Body)
+		_ = statusResp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("failed to read status response: %w", readErr)
+		}
+
+		if statusResp.StatusCode < 200 || statusResp.StatusCode >= 300 {
+			return fmt.Errorf("API error polling status (status %d): %s", statusResp.StatusCode, strings.TrimSpace(string(statusBody)))
+		}
+
+		var statusResult struct {
+			Rollback struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"rollback"`
+		}
+		if err := json.Unmarshal(statusBody, &statusResult); err != nil {
+			return fmt.Errorf("failed to decode status response: %w", err)
+		}
+
+		status := statusResult.Rollback.Status
+		switch status {
+		case "completed":
+			fmt.Printf("Rollback completed successfully (steward: %s, version: %s)\n", stewardID, version)
+			return nil
+		case "failed":
+			return fmt.Errorf("rollback failed (id: %s)", rollbackID)
+		case "cancelled":
+			return fmt.Errorf("rollback was cancelled (id: %s)", rollbackID)
+		}
+		// Still pending/in_progress — keep polling
+	}
+
+	return fmt.Errorf("timeout waiting for rollback completion (id: %s)", rollbackID)
 }

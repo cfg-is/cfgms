@@ -49,6 +49,7 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(regcodeCmd)
 	rootCmd.AddCommand(tokenCmd)
+	rootCmd.AddCommand(tenantCmd)
 	rootCmd.AddCommand(registrationCmd)
 	rootCmd.AddCommand(controllerCmd)
 	rootCmd.AddCommand(traceCmd)
@@ -56,6 +57,8 @@ func init() {
 	rootCmd.AddCommand(stewardCmd)
 	rootCmd.AddCommand(workflowCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(installerCmd)
+	rootCmd.AddCommand(moduleCmd)
 }
 
 // versionCmd represents the version command

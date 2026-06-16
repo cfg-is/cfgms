@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/features/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

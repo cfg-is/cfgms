@@ -465,6 +465,256 @@ func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path s
 	return c.httpClient.Do(req)
 }
 
+// APITenantCreateRequest is the request body for POST /api/v1/tenants.
+type APITenantCreateRequest struct {
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	ParentID string `json:"parent_id,omitempty"`
+}
+
+// APITenantResponse represents a tenant returned by the controller API.
+type APITenantResponse struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	ParentID    string            `json:"parent_id,omitempty"`
+	Status      string            `json:"status"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	CreatedAt   string            `json:"created_at"`
+	UpdatedAt   string            `json:"updated_at"`
+}
+
+// ErrTenantAlreadyExists is returned by CreateTenantViaAPI when the server responds HTTP 409.
+var ErrTenantAlreadyExists = fmt.Errorf("tenant already exists")
+
+// CreateTenantViaAPI creates a tenant via the controller REST API.
+// Returns ErrTenantAlreadyExists when the server responds HTTP 409 (idempotent callers
+// should treat that as success and exit 0).
+func (c *APIClient) CreateTenantViaAPI(ctx context.Context, req *APITenantCreateRequest) (*APITenantResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/tenants", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusConflict {
+		return nil, ErrTenantAlreadyExists
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var tenant APITenantResponse
+	if err := json.Unmarshal(envelope.Data, &tenant); err != nil {
+		return nil, fmt.Errorf("failed to decode tenant data: %w", err)
+	}
+	return &tenant, nil
+}
+
+// GetTenantViaAPI retrieves a tenant by ID via the controller REST API.
+func (c *APIClient) GetTenantViaAPI(ctx context.Context, tenantID string) (*APITenantResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+tenantID, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("tenant not found: %s", tenantID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var tenant APITenantResponse
+	if err := json.Unmarshal(envelope.Data, &tenant); err != nil {
+		return nil, fmt.Errorf("failed to decode tenant data: %w", err)
+	}
+	return &tenant, nil
+}
+
+// APIDispatchUpgradeRequest is the request body for POST /api/v1/stewards/upgrade.
+type APIDispatchUpgradeRequest struct {
+	Selector string `json:"selector"`
+	Version  string `json:"version"`
+	Platform string `json:"platform,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+}
+
+// APIDispatchUpgradeResponse is the response from POST /api/v1/stewards/upgrade.
+type APIDispatchUpgradeResponse struct {
+	UpgradeID    string `json:"upgrade_id"`
+	StewardCount int    `json:"steward_count"`
+	Status       string `json:"status"`
+}
+
+// APIUpgradeStewardStatus represents per-steward upgrade status within an upgrade record.
+type APIUpgradeStewardStatus struct {
+	Device      string `json:"device"`
+	Status      string `json:"status"`
+	Version     string `json:"version,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+// APIUpgradeStatusResponse is the response from GET /api/v1/stewards/upgrade/{id}
+// and from GET /api/v1/stewards/upgrade?selector=<selector>.
+type APIUpgradeStatusResponse struct {
+	UpgradeID string                    `json:"upgrade_id"`
+	Stewards  []APIUpgradeStewardStatus `json:"stewards"`
+}
+
+// APIRollbackRequest is the optional request body for POST /api/v1/stewards/upgrade/{id}/rollback.
+type APIRollbackRequest struct {
+	ToVersion string `json:"to_version,omitempty"`
+}
+
+// DispatchUpgrade calls POST /api/v1/stewards/upgrade and returns the dispatch result.
+func (c *APIClient) DispatchUpgrade(ctx context.Context, req *APIDispatchUpgradeRequest) (*APIDispatchUpgradeResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/upgrade", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIDispatchUpgradeResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode dispatch data: %w", err)
+	}
+	return &result, nil
+}
+
+// GetUpgradeStatus calls GET /api/v1/stewards/upgrade/{id} and returns the status.
+func (c *APIClient) GetUpgradeStatus(ctx context.Context, upgradeID string) (*APIUpgradeStatusResponse, error) {
+	result, _, err := c.GetUpgradeStatusWithHTTPStatus(ctx, upgradeID)
+	return result, err
+}
+
+// GetUpgradeStatusWithHTTPStatus calls GET /api/v1/stewards/upgrade/{id} and
+// returns the parsed status, the raw HTTP status code, and any transport error.
+// The caller may inspect the HTTP status code before deciding whether to retry or abort.
+func (c *APIClient) GetUpgradeStatusWithHTTPStatus(ctx context.Context, upgradeID string) (*APIUpgradeStatusResponse, int, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, resp.StatusCode, fmt.Errorf("upgrade status request failed with status %d", resp.StatusCode)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode, c.parseError(resp)
+	}
+
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIUpgradeStatusResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode status data: %w", err)
+	}
+	return &result, resp.StatusCode, nil
+}
+
+// ListUpgradeStatusBySelector calls GET /api/v1/stewards/upgrade?selector=<selector>
+// to retrieve the most recent upgrade status per steward matching the selector.
+func (c *APIClient) ListUpgradeStatusBySelector(ctx context.Context, selector string) (*APIUpgradeStatusResponse, error) {
+	path := "/api/v1/stewards/upgrade?selector=" + url.QueryEscape(selector)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIUpgradeStatusResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode status data: %w", err)
+	}
+	return &result, nil
+}
+
+// RollbackUpgrade calls POST /api/v1/stewards/upgrade/{id}/rollback.
+func (c *APIClient) RollbackUpgrade(ctx context.Context, upgradeID string, req *APIRollbackRequest) (*APIUpgradeStatusResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID)+"/rollback", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, c.parseError(resp)
+	}
+
+	// Unwrap APIResponse envelope: {"data": {...}, "timestamp": "..."}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIUpgradeStatusResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode rollback data: %w", err)
+	}
+	return &result, nil
+}
+
 // parseError extracts error message from HTTP response
 func (c *APIClient) parseError(resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)

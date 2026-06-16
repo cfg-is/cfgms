@@ -20,6 +20,7 @@ import (
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ExecutorConfig holds configuration for creating an Executor.
@@ -46,6 +47,13 @@ type ExecutorConfig struct {
 	// Defaults to DriftModeApply (current behavior) when not set.
 	// Thread from controller-delivered cfg via SetDriftMode; never from local files.
 	DriftMode config.DriftMode
+
+	// SecretStore is the steward's secret store. When non-nil, NewExecutor injects
+	// it into the default factory it creates so that modules implementing
+	// SecretStoreInjectable (e.g. hyperv) receive the store before Configure runs.
+	// Ignored when Factory is supplied — callers wiring their own factory are
+	// responsible for injecting the secret store themselves.
+	SecretStore secretsif.SecretStore
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -81,6 +89,14 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		// Empty registry — all 7 built-in modules are loaded on demand by the factory
 		f = factory.New(discovery.ModuleRegistry{}, defaultErrCfg, cfg.Logger)
 		errCfg = defaultErrCfg
+		// Wire the secret store into the auto-created factory so modules that
+		// implement SecretStoreInjectable (e.g. hyperv) receive it before
+		// Configure runs. Without this, controller-connected stewards see
+		// `secret store must be injected before Configure` on every secret-
+		// using resource.
+		if cfg.SecretStore != nil {
+			f.SetSecretStore(cfg.SecretStore)
+		}
 	}
 	if comp == nil {
 		comp = stewardtesting.NewStateComparator()
@@ -245,7 +261,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	e.logger.Info("Configuration drift detected",
 		"resource", resource.Name,
-		"changes_required", len(stateDiff.ChangedFields))
+		"changes_required", len(stateDiff.ChangedFields),
+		"changed_fields", stateDiff.GetChangedFieldNames(),
+		"added_fields", stateDiff.GetAddedFieldNames(),
+		"removed_fields", stateDiff.GetRemovedFieldNames())
 
 	// Tag the event type for upstream telemetry before invoking the handler.
 	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
@@ -328,7 +347,11 @@ func (e *Executor) verifyChanges(ctx context.Context, module modules.Module,
 
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
 	if driftDetected {
-		e.logger.Debug("Verification found remaining drift",
+		// Promoted from Debug → Info: when a Set passes but verification
+		// still finds drift, operators need to know WHAT failed to apply
+		// without rebuilding the steward in debug mode. The fields are
+		// already structured so they don't clutter normal output.
+		e.logger.Info("Verification found remaining drift",
 			"changed_fields", stateDiff.GetChangedFieldNames(),
 			"added_fields", stateDiff.GetAddedFieldNames(),
 			"removed_fields", stateDiff.GetRemovedFieldNames(),

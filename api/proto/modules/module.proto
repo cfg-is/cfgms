@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.modules.v1;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/modules";
+
+// ModuleService is the gRPC contract for steward/outpost out-of-process modules.
+// Each module binary implements this service; the steward runtime dials it over
+// a local socket and calls these RPCs to drive the module lifecycle.
+service ModuleService {
+  // Handshake establishes the module session and exchanges capability metadata.
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  // Get retrieves the current configuration state for a resource.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Set applies a desired configuration state to a resource.
+  rpc Set(SetRequest) returns (SetResponse);
+
+  // Test checks whether a resource is in compliance with a desired state
+  // without applying any changes.
+  rpc Test(TestRequest) returns (TestResponse);
+
+  // Shutdown requests the module process to exit cleanly.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+// HandshakeRequest is sent by the host runtime to initiate a module session.
+message HandshakeRequest {
+  string module_name    = 1;
+  string module_version = 2;
+  string publisher      = 3;
+  // host_runtime identifies the runtime environment: "steward" or "outpost".
+  string host_runtime   = 4;
+}
+
+// HandshakeResponse is returned by the module with its capability declaration.
+message HandshakeResponse {
+  // capabilities lists the resource types or feature flags the module supports.
+  repeated string capabilities    = 1;
+  // behavioral_envelope_yaml is the YAML-serialised BehavioralEnvelope for
+  // this module, as defined in ModuleMetadata.
+  string behavioral_envelope_yaml = 2;
+}
+
+// GetRequest identifies the resource whose current state should be returned.
+message GetRequest {
+  string resource_id = 1;
+}
+
+// GetResponse carries the current configuration state as YAML-serialised ConfigState.
+message GetResponse {
+  string config_data = 1;
+}
+
+// SetRequest asks the module to apply a desired configuration state.
+message SetRequest {
+  string resource_id = 1;
+  string config_data = 2;
+}
+
+// SetResponse reports the outcome of a Set operation.
+message SetResponse {
+  bool   applied = 1;
+  string error   = 2;
+}
+
+// TestRequest asks the module to evaluate compliance without applying changes.
+message TestRequest {
+  string resource_id = 1;
+  string config_data = 2;
+}
+
+// TestResponse reports the compliance result and a human-readable diff.
+message TestResponse {
+  bool   in_compliance = 1;
+  string diff          = 2;
+}
+
+// ShutdownRequest asks the module to exit cleanly.
+message ShutdownRequest {}
+
+// ShutdownResponse acknowledges the shutdown request.
+message ShutdownResponse {}

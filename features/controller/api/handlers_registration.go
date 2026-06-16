@@ -326,9 +326,9 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		ServerCert:       string(serverCert),
 	}
 
-	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
-		signingCertPEM, err := s.certManager.GetSigningCertificate()
-		if err == nil && len(signingCertPEM) > 0 {
+	// Always provide the dedicated signing certificate (separated architecture is mandatory)
+	if s.certManager != nil {
+		if signingCertPEM, sigErr := s.certManager.GetSigningCertificate(); sigErr == nil && len(signingCertPEM) > 0 {
 			resp.SigningCert = string(signingCertPEM)
 			resp.ServerCert = string(signingCertPEM)
 		}
@@ -675,17 +675,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp.CACert = string(caCert)
 	resp.ServerCert = string(serverCert) // For config signature verification (backward compat)
 
-	// Story #377: In separated mode, also provide the dedicated signing certificate
-	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() && s.certManager != nil {
-		signingCertPEM, err := s.certManager.GetSigningCertificate()
-		if err == nil && len(signingCertPEM) > 0 {
+	// Always provide the dedicated signing certificate (separated architecture is mandatory)
+	if s.certManager != nil {
+		signingCertPEM, sigErr := s.certManager.GetSigningCertificate()
+		if sigErr == nil && len(signingCertPEM) > 0 {
 			resp.SigningCert = string(signingCertPEM)
 			resp.ServerCert = string(signingCertPEM)
 			s.logger.Info("Providing dedicated signing certificate to steward",
 				"steward_id", stewardID)
 		} else {
 			s.logger.Warn("Failed to get signing certificate for registration response",
-				"error", err, "steward_id", stewardID)
+				"error", sigErr, "steward_id", stewardID)
 		}
 	}
 

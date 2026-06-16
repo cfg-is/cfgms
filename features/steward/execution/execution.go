@@ -110,10 +110,30 @@ func (g *genericConfigState) Validate() error {
 }
 
 func (g *genericConfigState) GetManagedFields() []string {
-	// Exclude identifier fields that aren't part of the actual configuration state
+	// Exclude fields that aren't part of the actual configuration state:
+	//   - identifier fields (path, name) — used to select the resource, not
+	//     compared as state.
+	//   - module-operational keys (transport, tenant_id, steward_id,
+	//     audit_manager, and winrm_* credential pointers) — consumed by the
+	//     module's Configure to wire its transport/identity; never reported
+	//     by a module's Get response, so leaving them in the comparison
+	//     produces false-positive drift on every convergence cycle (the
+	//     desired state has them, the current state can't).
+	//
+	// These keys are pan-module by convention: any module that needs to be
+	// told how to talk to its backend (the hyperv module needs `transport`
+	// and `tenant_id`; future modules may add their own) plumbs them in
+	// through resource.config and consumes them at Configure-time only.
 	excludedFields := map[string]bool{
-		"path": true, // path is the resourceID, not a state field
-		"name": true, // name is a resource identifier
+		"path":              true, // resourceID, not state
+		"name":              true, // resource identifier
+		"transport":         true, // module operational: which client to use
+		"tenant_id":         true, // module operational: namespace prefix
+		"steward_id":        true, // module operational: audit subject
+		"audit_manager":     true, // module operational: pointer, never serialised
+		"winrm_host":        true, // module operational: WinRM endpoint
+		"winrm_user_secret": true, // module operational: SecretStore key
+		"winrm_pass_secret": true, // module operational: SecretStore key
 	}
 
 	fields := make([]string, 0, len(g.data))

@@ -23,6 +23,14 @@ on:
   # with `github.event`-supplied fields, which are GitHub-controlled.
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  # `merge_group` is required so the `CLA signature check` context — which is
+  # listed in the develop branch ruleset's required_status_checks — actually
+  # reports on each merge candidate the queue builds. Without it the queue
+  # sits at AWAITING_CHECKS forever waiting for a context no workflow emits.
+  # Verification is a no-op on merge_group: every PR in the candidate already
+  # passed CLA at pull_request_target time, and the merge queue doesn't change
+  # PR authorship — there's nothing new to verify.
+  merge_group:
 
 permissions:
   contents: read
@@ -32,16 +40,26 @@ jobs:
   cla-check:
     name: CLA signature check
     runs-on: ubuntu-latest
-    if: ${{ !github.event.pull_request.draft }}
+    # On pull_request_target: skip drafts. On merge_group: always run (the step
+    # below short-circuits to success; there's no `draft` field on the event).
+    if: ${{ github.event_name != 'pull_request_target' || !github.event.pull_request.draft }}
     timeout-minutes: 5
     steps:
+      - name: Merge-queue short-circuit
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "::notice::Each PR in this merge candidate already passed CLA at pull_request_target time."
+          echo "::notice::The merge queue doesn't introduce new authors, so no re-verification is needed."
+
       - name: Checkout default branch
+        if: github.event_name == 'pull_request_target'
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: develop
           persist-credentials: false
 
       - name: Verify CLA signature
+        if: github.event_name == 'pull_request_target'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}

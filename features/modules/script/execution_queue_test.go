@@ -951,3 +951,69 @@ func TestCancelTerminalStateEntry(t *testing.T) {
 	err = queue.CancelExecution("device-001", "exec-001")
 	assert.Error(t, err, "cancelling a completed entry must return an error")
 }
+
+// TestPrepareExecutionForDevice_InlineContentFromMetadata verifies Issue #1995
+// root cause A: an ad-hoc (inline) execution carries no ScriptRef/ScriptID, so
+// PrepareExecutionForDevice must resolve the literal script body from
+// Metadata["inline_script_content"] rather than leaving ScriptContent empty.
+func TestPrepareExecutionForDevice_InlineContentFromMetadata(t *testing.T) {
+	monitor := NewExecutionMonitor()
+	keyManager := NewEphemeralKeyManager()
+	defer keyManager.Stop()
+
+	// A repo is wired but must NOT be consulted for inline runs (no scriptRef).
+	repo := newTestScriptRepo()
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080", nil, repo, 0)
+	defer queue.Stop()
+
+	const inlineBody = "Write-Output 'hello from inline'"
+	execution := &QueuedExecution{
+		ExecutionID: "exec-inline-1",
+		Shell:       ShellPwsh,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"inline_script_content": inlineBody,
+		},
+	}
+	require.NoError(t, queue.QueueExecution("device-001", execution))
+
+	dequeued, err := queue.DequeueForDevice("device-001")
+	require.NoError(t, err)
+	require.Len(t, dequeued, 1)
+
+	prepared, err := queue.PrepareExecutionForDevice(context.Background(), "device-001", "tenant-001", dequeued[0])
+	require.NoError(t, err)
+	assert.Equal(t, inlineBody, prepared.ScriptContent,
+		"inline content must be resolved from Metadata when scriptRef is empty")
+	assert.Empty(t, prepared.ScriptVersion, "inline content has no repository version")
+}
+
+// TestPrepareExecutionForDevice_LibraryScriptUnchanged verifies that the library
+// (scriptRef != "") path still resolves content from the repository and is NOT
+// affected by the inline fallback (Issue #1995 regression guard).
+func TestPrepareExecutionForDevice_LibraryScriptUnchanged(t *testing.T) {
+	monitor := NewExecutionMonitor()
+	keyManager := NewEphemeralKeyManager()
+	defer keyManager.Stop()
+
+	repo := newTestScriptRepo()
+	repo.scripts["script-lib"] = testScript("script-lib", "echo from-repo")
+	queue := NewExecutionQueue(monitor, keyManager, 1*time.Hour, "https://localhost:8080", nil, repo, 0)
+	defer queue.Stop()
+
+	// A library execution that ALSO has stray inline metadata must prefer the repo.
+	execution := newQueuedExec("exec-lib-1", "script-lib")
+	execution.Metadata = map[string]interface{}{
+		"inline_script_content": "echo SHOULD-NOT-BE-USED",
+	}
+	require.NoError(t, queue.QueueExecution("device-002", execution))
+
+	dequeued, err := queue.DequeueForDevice("device-002")
+	require.NoError(t, err)
+	require.Len(t, dequeued, 1)
+
+	prepared, err := queue.PrepareExecutionForDevice(context.Background(), "device-002", "tenant-001", dequeued[0])
+	require.NoError(t, err)
+	assert.Equal(t, "echo from-repo", prepared.ScriptContent,
+		"library script must resolve from the repository, ignoring inline metadata")
+}

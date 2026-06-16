@@ -68,6 +68,11 @@ func (m *Manager) WithAuditManager(a *audit.Manager) *Manager {
 
 // CreateTenant creates a new tenant with validation and RBAC setup
 func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*business.TenantData, error) {
+	// When an explicit ID is provided without a name, use the ID as the display name.
+	if req.ID != "" && req.Name == "" {
+		req.Name = req.ID
+	}
+
 	// Validate the request
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
@@ -80,8 +85,14 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		}
 	}
 
-	// Generate tenant ID from name
+	// Generate tenant ID from name, or use the explicit ID when provided
 	tenantID := m.generateTenantID(req.Name)
+	if req.ID != "" {
+		if err := validateExplicitTenantID(req.ID); err != nil {
+			return nil, fmt.Errorf("invalid explicit tenant ID: %w", err)
+		}
+		tenantID = req.ID
+	}
 
 	// Create tenant object
 	now := time.Now()
@@ -364,4 +375,23 @@ func (m *Manager) generateTenantID(name string) string {
 	// Add timestamp suffix to ensure uniqueness
 	timestamp := time.Now().Unix()
 	return fmt.Sprintf("%s-%d", id, timestamp)
+}
+
+// k8sNameRegex matches Kubernetes-compatible DNS label names per RFC 1123.
+var k8sNameRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// validateExplicitTenantID validates a caller-supplied tenant ID against
+// Kubernetes RFC 1123 DNS label rules: lowercase alphanumeric and hyphens only,
+// no leading/trailing hyphens, max 63 characters.
+func validateExplicitTenantID(id string) error {
+	if id == "" {
+		return fmt.Errorf("tenant ID cannot be empty")
+	}
+	if len(id) > 63 {
+		return fmt.Errorf("tenant ID must be 63 characters or less (Kubernetes DNS label limit), got %d", len(id))
+	}
+	if !k8sNameRegex.MatchString(id) {
+		return fmt.Errorf("tenant ID %q is not Kubernetes-compatible: must contain only lowercase alphanumeric characters and hyphens, must not start or end with a hyphen", id)
+	}
+	return nil
 }

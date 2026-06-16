@@ -116,9 +116,9 @@ func (s *DetailedIntegrationTestSuite) TestMTLSAuthentication() {
 	s.NoError(err, "Should be able to query CA certificates")
 	s.NotEmpty(caCerts, "CA certificate should be present")
 
-	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeServer)
-	s.NoError(err, "Should be able to query server certificates")
-	s.NotEmpty(serverCerts, "Server certificate should be present")
+	serverCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeInternalServer)
+	s.NoError(err, "Should be able to query internal server certificates")
+	s.NotEmpty(serverCerts, "Internal server certificate should be present")
 
 	clientCerts, err := s.env.GetCertificateInfo(cert.CertificateTypeClient)
 	s.NoError(err, "Should be able to query client certificates")
@@ -134,52 +134,23 @@ func (s *DetailedIntegrationTestSuite) TestMTLSAuthentication() {
 	}
 }
 
-// TestConfigurationRetrieval validates that steward can retrieve configuration from controller
-func (s *DetailedIntegrationTestSuite) TestConfigurationRetrieval() {
-	// This test will verify configuration retrieval once the API is implemented
-	s.T().Skip("Configuration retrieval API not yet implemented")
-
-	// Future implementation:
-	// 1. Start both components
-	// 2. Send configuration to controller
-	// 3. Verify steward receives and processes configuration
-	// 4. Check for configuration application logs
-}
-
-// TestErrorHandlingAndResilience validates error handling in various failure scenarios
+// TestErrorHandlingAndResilience validates that the controller survives a start/stop/start cycle.
 func (s *DetailedIntegrationTestSuite) TestErrorHandlingAndResilience() {
-	// Test 1: Normal startup and shutdown
+	// Cycle 1: normal startup and shutdown
 	s.env.Start()
-	time.Sleep(200 * time.Millisecond)
 	s.env.Stop()
 
-	// Test 2: Wait between cycles to avoid resource conflicts
-	time.Sleep(100 * time.Millisecond)
+	// Cycle 2: restart after clean stop
 	s.env.Reset()
 	s.env.Start()
-	time.Sleep(200 * time.Millisecond)
 	s.env.Stop()
 
-	// Verify no panic or fatal errors occurred
+	// Verify no panic or fatal errors occurred across both cycles
 	errorLogs := s.env.Logger.GetLogs("error")
 	for _, log := range errorLogs {
-		// Allow specific expected errors but fail on panics or fatal errors
 		s.NotContains(log.Message, "panic")
 		s.NotContains(log.Message, "fatal")
 	}
-}
-
-// TestMultipleStewardScenarios validates handling of multiple steward connections
-func (s *DetailedIntegrationTestSuite) TestMultipleStewardScenarios() {
-	// This test is complex as it requires multiple steward instances
-	// For now, we'll test single steward resilience
-	s.T().Skip("Multiple steward testing requires more complex test infrastructure")
-
-	// Future implementation:
-	// 1. Create multiple TestEnv instances with different steward IDs
-	// 2. Start controller once and multiple stewards
-	// 3. Verify all stewards can register and communicate
-	// 4. Test steward disconnection and reconnection scenarios
 }
 
 func TestDetailedIntegration(t *testing.T) {

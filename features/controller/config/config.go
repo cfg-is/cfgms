@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
@@ -66,6 +67,13 @@ func expandEnvWithDefaults(content string) string {
 	return os.ExpandEnv(result)
 }
 
+// BlobStorageConfig holds configuration for the blob storage backend (Issue #1702).
+type BlobStorageConfig struct {
+	// Root is the filesystem directory where installer artifacts are stored.
+	// Defaults to <DataDir>/installers when not explicitly set.
+	Root string `yaml:"root"`
+}
+
 // Config holds the controller configuration
 type Config struct {
 	// Controller listen address
@@ -104,6 +112,9 @@ type Config struct {
 	// Default: /etc/cfgms/admin.bundle.yaml (Linux) or %ProgramData%\cfgms\admin.bundle.yaml (Windows).
 	// Mode 0600, daemon-user-owned. Contains the admin mTLS cert, key, CA, and controller URL.
 	AdminBundlePath string `yaml:"admin_bundle_path,omitempty"`
+
+	// BlobStorage configures the blob storage backend for installer artifacts (Issue #1702).
+	BlobStorage BlobStorageConfig `yaml:"blob_storage,omitempty"`
 }
 
 // RegistrationConfig holds registration approval workflow settings.
@@ -188,11 +199,9 @@ type CertificateConfig struct {
 	// Server certificate configuration (used when generating certificates)
 	Server *ServerCertificateConfig `yaml:"server"`
 
-	// Story #377: Three-certificate architecture
-
-	// Architecture selects the certificate deployment mode: "unified" (default) or "separated"
-	// Unified: Single CertificateTypeServer for all purposes (backward compatible)
-	// Separated: Purpose-specific certs (public API, internal mTLS, config signing)
+	// Architecture is parsed from YAML to detect legacy "unified" values and reject them.
+	// Separated architecture is mandatory; do not set this field in new configurations.
+	// Setting it to "unified" causes ValidateCertificateArchitecture to return an error.
 	Architecture string `yaml:"architecture"`
 
 	// SigningCertValidityDays is the validity for config signing certificates (default: 1095 = 3 years)
@@ -399,7 +408,7 @@ func (t *TransportConfig) Validate() error {
 
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
-	return &Config{
+	cfg := &Config{
 		ListenAddr:  "127.0.0.1:8080",
 		ExternalURL: "https://localhost:8080", // Default external URL
 		CertPath:    "certs/",
@@ -454,6 +463,8 @@ func DefaultConfig() *Config {
 			IdleTimeout:     Duration(5 * time.Minute),
 		},
 	}
+	cfg.BlobStorage.Root = filepath.Join(cfg.DataDir, "installers")
+	return cfg
 }
 
 // findConfigFile searches for the controller configuration file using the following priority:
@@ -606,7 +617,8 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Certificate.Server.Organization = serverOrg
 	}
 
-	// Story #377: Three-certificate architecture environment variables
+	// CFGMS_CERT_ARCHITECTURE: parsed for legacy detection only.
+	// Setting to "unified" triggers a startup error at ValidateCertificateArchitecture.
 	if certArch := os.Getenv("CFGMS_CERT_ARCHITECTURE"); certArch != "" {
 		cfg.Certificate.Architecture = certArch
 	}
@@ -732,31 +744,49 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Logging.Component = component
 	}
 
-	// Transport configuration environment variables
-	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" && cfg.Transport != nil {
+	// Transport configuration environment variables.
+	//
+	// If the config file omitted the `transport:` section entirely, cfg.Transport
+	// is nil at this point. Previously each env var was guarded with
+	// `&& cfg.Transport != nil`, which silently dropped the env-var override
+	// when the section was missing. That violated the documented precedence
+	// (env > cfg > default) and was caught by the Issue #1919 review.
+	// Materialise the struct on first use so env vars apply consistently.
+	ensureTransport := func() {
+		if cfg.Transport == nil {
+			cfg.Transport = &TransportConfig{}
+		}
+	}
+
+	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" {
+		ensureTransport()
 		cfg.Transport.ListenAddr = transportListenAddr
 	}
 
-	if transportUseCertManager := os.Getenv("CFGMS_TRANSPORT_USE_CERT_MANAGER"); transportUseCertManager != "" && cfg.Transport != nil {
+	if transportUseCertManager := os.Getenv("CFGMS_TRANSPORT_USE_CERT_MANAGER"); transportUseCertManager != "" {
 		if val, err := strconv.ParseBool(transportUseCertManager); err == nil {
+			ensureTransport()
 			cfg.Transport.UseCertManager = val
 		}
 	}
 
-	if transportMaxConns := os.Getenv("CFGMS_TRANSPORT_MAX_CONNECTIONS"); transportMaxConns != "" && cfg.Transport != nil {
+	if transportMaxConns := os.Getenv("CFGMS_TRANSPORT_MAX_CONNECTIONS"); transportMaxConns != "" {
 		if val, err := strconv.Atoi(transportMaxConns); err == nil {
+			ensureTransport()
 			cfg.Transport.MaxConnections = val
 		}
 	}
 
-	if transportKeepalive := os.Getenv("CFGMS_TRANSPORT_KEEPALIVE_PERIOD"); transportKeepalive != "" && cfg.Transport != nil {
+	if transportKeepalive := os.Getenv("CFGMS_TRANSPORT_KEEPALIVE_PERIOD"); transportKeepalive != "" {
 		if dur, err := time.ParseDuration(transportKeepalive); err == nil {
+			ensureTransport()
 			cfg.Transport.KeepalivePeriod = Duration(dur)
 		}
 	}
 
-	if transportIdleTimeout := os.Getenv("CFGMS_TRANSPORT_IDLE_TIMEOUT"); transportIdleTimeout != "" && cfg.Transport != nil {
+	if transportIdleTimeout := os.Getenv("CFGMS_TRANSPORT_IDLE_TIMEOUT"); transportIdleTimeout != "" {
 		if dur, err := time.ParseDuration(transportIdleTimeout); err == nil {
+			ensureTransport()
 			cfg.Transport.IdleTimeout = Duration(dur)
 		}
 	}
@@ -836,9 +866,19 @@ func (lc *LoggingConfig) ToLoggingManagerConfig() *loggingPkg.LoggingConfig {
 	}
 }
 
-// IsSeparatedArchitecture returns true if the certificate architecture is "separated"
-func (cc *CertificateConfig) IsSeparatedArchitecture() bool {
-	return cc != nil && cc.Architecture == "separated"
+// ValidateCertificateArchitecture returns an error if the config explicitly requests
+// the removed unified-mode architecture. Separated architecture is mandatory.
+// See docs/security/certificate-architecture.md.
+func (cc *CertificateConfig) ValidateCertificateArchitecture() error {
+	if cc != nil && cc.Architecture == "unified" {
+		return fmt.Errorf(
+			"certificate architecture \"unified\" is no longer supported; " +
+				"separated architecture is mandatory; " +
+				"remove 'architecture: unified' from your configuration; " +
+				"see docs/security/certificate-architecture.md#migrating-from-unified-mode",
+		)
+	}
+	return nil
 }
 
 // GetPublicAPISource returns the public API certificate source, defaulting to "internal"

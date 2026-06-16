@@ -2,6 +2,8 @@ name: activedirectory
 version: "1.0.0"
 description: "Local Active Directory integration module using Windows system context for secure, credential-free AD management on domain controllers"
 
+publisher: cfgms
+
 # Supported execution environments
 executors:
   - steward  # Local AD management using Windows system context APIs
@@ -73,13 +75,6 @@ supported_operations:
     - update_group
     - delete_group
 
-# Dependencies
-dependencies:
-  system:
-    windows:
-      - "Active Directory Domain Services"
-      - "Windows Management Framework"
-
 # Health checks
 health_checks:
   - name: "system_context"
@@ -96,7 +91,7 @@ monitoring:
     - "ad_local_request_duration_seconds"
     - "ad_local_errors_total"
     - "ad_dna_collection_status"
-  
+
 # Security considerations
 security:
   sensitive_fields: []  # No stored credentials

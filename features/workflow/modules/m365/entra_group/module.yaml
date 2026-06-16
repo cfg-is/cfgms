@@ -1,0 +1,23 @@
+name: m365-entra-group
+version: 0.1.0
+description: >
+  Desired-state management of Microsoft Entra ID (Azure AD) groups via the
+  Microsoft Graph API. Manages security and Microsoft 365 groups,
+  membership, and group settings as named resources.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set

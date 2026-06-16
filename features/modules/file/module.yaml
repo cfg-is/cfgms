@@ -1,14 +1,17 @@
 name: file
-version: 0.1.0
+version: 0.2.0
 description: >
-  Manages file resources on the system.
-  Supports reading, writing, and validating file contents.
+  Manages file, directory, and symlink resources on the system.
+  Supports reading, writing, and validating file contents (type: file),
+  creating and managing directories with ownership and permissions
+  (type: directory), and stub support for symlinks (type: symlink,
+  returns ErrNotImplemented in v1).
+
+publisher: cfgms
 
 # Supported execution environments
 executors:
-  - steward  # Local file management on steward systems
-
-dependencies: []
+  - steward  # Local resource management on steward systems
 
 requirements:
   os: [windows, linux, darwin]
@@ -27,5 +30,5 @@ security:
   ports: []
 
 documentation:
-  api: "docs/api.md"
-  examples: "docs/examples/" 
+  api: "docs/modules/file.md"
+  examples: "docs/modules/file.md"

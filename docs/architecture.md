@@ -47,28 +47,57 @@ Proxy cache component that:
 
 ## Module System
 
-All resource management is performed through modules that implement a standard interface:
+All resource management is performed through modules — out-of-process gRPC binaries that implement a standard contract. The steward (or workflow engine) spawns each module binary as a child process over a local socket. Modules are distributed as publisher-signed bundles cached at the controller; stewards pull bundles from the controller rather than from external registries.
 
-```go
-type Module interface {
-    Get(ctx context.Context, resourceID string) (ConfigState, error)
-    Set(ctx context.Context, resourceID string, config ConfigState) error
-}
-```
+For the full module packaging architecture, see [ADR-006](architecture/decisions/006-module-packaging-and-distribution.md).
+
+### Three module kinds
+
+Every module commits to exactly one kind, declared via `executors:` in `module.yaml`:
+
+| Kind | Where it runs | What it manages |
+|------|--------------|-----------------|
+| `steward` | Endpoint agent | Local device resources (files, packages, firewall, services) |
+| `outpost` | Steward host acting as a proxy | Remote LAN devices that cannot run a steward (switches, printers, IoT) |
+| `workflow` | Controller workflow engine | Cloud and SaaS APIs (M365, identity providers, ticketing) |
+
+Cross-kind modules are not supported. The same logical resource on different host kinds is implemented as separate modules.
+
+### Four execution paths on a steward
+
+Every byte of code that runs on a steward arrives through exactly one of these paths:
+
+1. **Modules** — publisher-signed bundle spawned as a child process, communicates via gRPC
+2. **Scripts** — operator-authored script staged to disk and executed via OS process (publisher-signed)
+3. **Inline cfg CLI** — admin mTLS-signed payload, end-to-end *(separate epic)*
+4. **Remote shell** — interactive admin session *(separate epic)*
+
+### Three trust modes
+
+The steward verifies module bundles according to the `module_trust.mode` setting in `hostname.cfg`:
+
+| Mode | Verification | When to use |
+|------|-------------|-------------|
+| `controller` | Steward accepts the controller's attestation (default) | Standard managed deployments |
+| `strict` | Steward independently verifies the publisher signature against compiled-in keys | Regulated environments, highest-value modules |
+| `bypass` | Signature verification skipped | Development only; never production |
+
+Publisher public keys are baked into the steward binary at build time and cannot be changed via `cfg push`. See [distribution.md](architecture/modules/distribution.md) for the full trust and signing model.
 
 **Key Features:**
 
 - **ConfigState Interface**: Efficient field-level comparison without marshal/unmarshal overhead
 - **System-Level Testing**: Steward automatically compares current vs desired state
 - **Managed Fields**: Only specified fields are modified, others left unchanged
-- **Extensible Design**: Easy addition of new resource types
+- **Out-of-process isolation**: A module crash cannot corrupt steward state
 
 **Available Modules:**
 
-- `directory` - Directory creation and permissions
-- `file` - File content and attributes
+- `file` - File content, directory creation, and permissions
 - `firewall` - Firewall rules and policies  
 - `package` - Software package management
+- `service` - OS service state management
+- `script` - Cross-platform script execution (file-based)
 
 ## Operational Modes
 

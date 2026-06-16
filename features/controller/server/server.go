@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,10 +60,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
@@ -111,6 +113,48 @@ type Server struct {
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
+}
+
+// resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
+// store (dna-reports/dna.db) is placed. The result MUST be independent of the
+// process working directory: two controllers of the same deployment may be
+// launched from different CWDs — most importantly the systemd unit
+// (WorkingDirectory=/) versus a blue/green candidate spawned by
+// `cfg controller upgrade run` (inheriting the operator's CWD). If the DNA path
+// were CWD-relative, the candidate would open a DIFFERENT, empty dna.db, warm-
+// load zero stewards, and the steward admin registry (cfg list/status/exec)
+// would be blind to the whole fleet after a cutover. (Issue #2010)
+//
+// Resolution:
+//   - An absolute cfg.DataDir is honored as-is.
+//   - An empty OR relative cfg.DataDir is replaced by a root derived from the
+//     configured durable storage paths (SQLitePath dir, then FlatfileRoot dir),
+//     which are absolute in any real deployment, co-locating the DNA store with
+//     the controller's other durable state.
+//   - As a last resort (no storage paths configured, e.g. minimal tests) the
+//     value is anchored to an absolute path via filepath.Abs so it is at least
+//     deterministic within the process. Note this last-resort anchor is the
+//     process CWD at startup, so true cross-CWD consistency in an all-defaults
+//     deployment still relies on absolute storage paths being configured (every
+//     real deployment, e.g. ctrl-01, sets absolute Storage.SQLitePath).
+func resolveDNADataRoot(cfg *config.Config) string {
+	root := cfg.DataDir
+	if root == "" || !filepath.IsAbs(root) {
+		if cfg.Storage != nil {
+			switch {
+			case cfg.Storage.SQLitePath != "":
+				root = filepath.Dir(cfg.Storage.SQLitePath)
+			case cfg.Storage.FlatfileRoot != "":
+				root = filepath.Dir(cfg.Storage.FlatfileRoot)
+			}
+		}
+	}
+	if !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	return root
 }
 
 // New creates a new server instance
@@ -191,21 +235,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// controller service (warm-loading the steward registry after a restart)
 	// and the reports engine. (Issue #1572)
 	//
-	// The data root is cfg.DataDir when set; otherwise it is derived from the
-	// configured storage path so the DNA store is always co-located with the
-	// controller's other durable state and isolated per deployment. Falling
-	// back to a bare relative path would put the SQLite file in the process
-	// working directory, where concurrent controllers (and tests) collide.
-	dnaDataRoot := cfg.DataDir
-	if dnaDataRoot == "" {
-		if cfg.Storage.SQLitePath != "" {
-			dnaDataRoot = filepath.Dir(cfg.Storage.SQLitePath)
-		} else if cfg.Storage.FlatfileRoot != "" {
-			dnaDataRoot = filepath.Dir(cfg.Storage.FlatfileRoot)
-		}
-	}
+	// The data root must be an ABSOLUTE, CWD-independent path: two controllers
+	// of the same deployment can be launched from different working directories
+	// (notably the systemd unit vs. a blue/green candidate spawned by
+	// `cfg controller upgrade`), and they must resolve the SAME DNA store or the
+	// candidate comes up with an empty steward registry. See resolveDNADataRoot
+	// and Issue #2010.
 	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(dnaDataRoot, "dna-reports")
+	dnaStorageConfig.DataDir = filepath.Join(resolveDNADataRoot(cfg), "dna-reports")
 	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
@@ -255,54 +292,55 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
 		}
 
-		// Story #377: Boot migration for separated certificate architecture
-		if cfg.Certificate.IsSeparatedArchitecture() {
-			logger.Info("Certificate architecture: separated — ensuring purpose-specific certificates")
-			internalCfg := &cert.ServerCertConfig{
-				CommonName:   "cfgms-internal",
-				DNSNames:     []string{"localhost", "cfgms-internal", "controller-standalone"},
-				IPAddresses:  []string{"127.0.0.1", "0.0.0.0"},
-				ValidityDays: 365,
-			}
-			if cfg.Certificate.Internal != nil {
-				if cfg.Certificate.Internal.CommonName != "" {
-					internalCfg.CommonName = cfg.Certificate.Internal.CommonName
-				}
-				if len(cfg.Certificate.Internal.DNSNames) > 0 {
-					internalCfg.DNSNames = cfg.Certificate.Internal.DNSNames
-				}
-				if len(cfg.Certificate.Internal.IPAddresses) > 0 {
-					internalCfg.IPAddresses = cfg.Certificate.Internal.IPAddresses
-				}
-			}
-			if cfg.Certificate.InternalCertValidityDays > 0 {
-				internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
-			}
-
-			signingCfg := &cert.SigningCertConfig{
-				CommonName:   "cfgms-config-signer",
-				ValidityDays: 1095,
-				KeySize:      4096,
-			}
-			if cfg.Certificate.Signing != nil {
-				if cfg.Certificate.Signing.CommonName != "" {
-					signingCfg.CommonName = cfg.Certificate.Signing.CommonName
-				}
-				if cfg.Certificate.Signing.Organization != "" {
-					signingCfg.Organization = cfg.Certificate.Signing.Organization
-				}
-			}
-			if cfg.Certificate.SigningCertValidityDays > 0 {
-				signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
-			}
-
-			if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
-				return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
-			}
-			logger.Info("Separated certificates ensured (internal mTLS + config signing)")
-		} else {
-			logger.Info("Certificate architecture: unified (default)")
+		// Reject legacy unified-mode config and block on legacy cert types in store
+		if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
+			return nil, err
 		}
+		if err := certManager.CheckForLegacyCertificates(); err != nil {
+			return nil, err
+		}
+
+		// Ensure purpose-specific certificates exist (idempotent first-boot generation).
+		// initialization.TransportCertSANs merges transport defaults, operator-configured
+		// SANs (server + internal blocks), and CFGMS_EXTERNAL_HOSTNAME so stewards can
+		// verify the cert by external hostname. Shared with initialization.Run so that
+		// --init mints the cert with the same SAN set this startup path would generate.
+		logger.Info("Ensuring separated certificates (internal mTLS + config signing)...")
+		dnsNames, ipAddresses := initialization.TransportCertSANs(cfg)
+		internalCfg := &cert.ServerCertConfig{
+			CommonName:   "cfgms-internal",
+			DNSNames:     dnsNames,
+			IPAddresses:  ipAddresses,
+			ValidityDays: 365,
+		}
+		if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
+			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+		}
+		if cfg.Certificate.InternalCertValidityDays > 0 {
+			internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+		}
+
+		signingCfg := &cert.SigningCertConfig{
+			CommonName:   "cfgms-config-signer",
+			ValidityDays: 1095,
+			KeySize:      4096,
+		}
+		if cfg.Certificate.Signing != nil {
+			if cfg.Certificate.Signing.CommonName != "" {
+				signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+			}
+			if cfg.Certificate.Signing.Organization != "" {
+				signingCfg.Organization = cfg.Certificate.Signing.Organization
+			}
+		}
+		if cfg.Certificate.SigningCertValidityDays > 0 {
+			signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+		}
+
+		if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+			return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
+		}
+		logger.Info("Separated certificates ensured (internal mTLS + config signing)")
 
 		// Create certificate provisioning service
 		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
@@ -434,6 +472,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// re-used by the data plane config handler so both consumers share the same key.
 	var hoistedSigner signature.Signer
 	var hoistedSignerCertSerial string
+	// signingRotationSvc is hoisted so it can be wired to both the gRPC on-connect hook
+	// and the HTTP API rotate endpoint (Issue #1816).
+	var signingRotationSvc *service.SigningRotationService
 	if cfg.Transport != nil && certManager != nil {
 		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
 
@@ -442,9 +483,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
 		}
 
-		// Initialize CP provider (shared gRPC server created fresh in Start)
+		// Initialize CP provider (shared gRPC server created fresh in Start).
+		// Issue #1817: Create the signing rotation service before the provider so
+		// we can inject it as the on-connect hook. The publisher is wired after
+		// commandPublisher is constructed below (breaks the init cycle).
 		connRegistry = registry.NewRegistry()
-		controlPlane = grpcCP.New(grpcCP.ModeServer)
+		// Issue #2008: compose the admin-registry upsert hook alongside the
+		// signing-rotation hook so every authenticated (re)connect repopulates
+		// ControllerService.s.stewards (which backs cfg steward list/status/exec).
+		// A cert-reuse reconnect never re-runs HTTP registration, so without this
+		// the registry stays empty for a reconnecting steward until a restart.
+		registryConnectHook := service.NewStewardRegistryConnectHook(controllerService, logger)
+		if certManager != nil {
+			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook)
+			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(composite))
+		} else {
+			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(registryConnectHook))
+		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",
 			"addr":       cfg.Transport.ListenAddr,
@@ -466,7 +522,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// caches the controller's signing certificate at registration (and
 		// restores it from disk on a cert-reuse reconnect) and rejects any
 		// command or config signed by a different key. The gRPC server
-		// certificate must never be used as the signer: GetCertificatesByType
+		// certificate must never be used as the signer: listing certs by type
 		// returns every Server-typed cert newest-first, and the controller owns
 		// more than one (gRPC transport + HTTP API), so that selection is not
 		// stable across restarts. EnsureSigningCertificate is idempotent — it
@@ -475,9 +531,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			if ensureErr := certManager.EnsureSigningCertificate(nil); ensureErr != nil {
 				logger.Warn("Failed to ensure config signing certificate", "error", ensureErr)
 			}
-			signerCerts, scErr := certManager.GetCertificatesByType(cert.CertificateTypeConfigSigning)
-			if scErr == nil && len(signerCerts) > 0 {
-				hoistedSignerCertSerial = signerCerts[0].SerialNumber
+			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+			if scErr == nil {
+				hoistedSignerCertSerial = signerCert.SerialNumber
 				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true)
 				if exportErr == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
 					var signerErr error
@@ -567,6 +623,54 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Heartbeat monitoring service initialized successfully")
 
+		// Issue #1986: bridge control-plane heartbeats into the steward registry
+		// the API serves. heartbeat.Service tracks liveness in its own in-memory
+		// map but never updates ControllerService, so GET /api/v1/stewards/{id}
+		// would report a last_seen frozen at registration time and a status stuck
+		// at "registered" even while the steward heartbeats. Register a second
+		// heartbeat handler that advances the registry via RecordHeartbeat.
+		//
+		// The same handler carries Layer-3 instrumentation: it records the
+		// controller-side receipt cadence per steward and warns when a gap exceeds
+		// the expected steward interval, so intermittent heartbeat loss is
+		// observable without changing log levels.
+		if controllerService != nil {
+			var heartbeatGapTracker sync.Map // stewardID -> time.Time (last receipt)
+			const heartbeatGapWarnThreshold = 45 * time.Second
+			if subErr := controlPlane.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
+				if hb == nil {
+					return nil
+				}
+				recorded := controllerService.RecordHeartbeat(hb.StewardID, hb.Version, hb.Timestamp)
+
+				now := time.Now()
+				if prev, ok := heartbeatGapTracker.Load(hb.StewardID); ok {
+					gap := now.Sub(prev.(time.Time))
+					if gap > heartbeatGapWarnThreshold {
+						logger.Warn("Steward heartbeat receipt gap exceeded expected interval (Issue #1986 Layer 3)",
+							"steward_id", logging.SanitizeLogValue(hb.StewardID),
+							"gap", gap.Round(time.Millisecond),
+							"recorded", recorded)
+					} else {
+						logger.Debug("heartbeat received",
+							"steward_id", logging.SanitizeLogValue(hb.StewardID),
+							"gap", gap.Round(time.Millisecond),
+							"recorded", recorded)
+					}
+				} else {
+					logger.Debug("heartbeat received (first)",
+						"steward_id", logging.SanitizeLogValue(hb.StewardID),
+						"recorded", recorded)
+				}
+				heartbeatGapTracker.Store(hb.StewardID, now)
+				return nil
+			}); subErr != nil {
+				logger.Warn("Failed to register steward-registry heartbeat bridge", "error", subErr)
+			} else {
+				logger.Info("Steward-registry heartbeat bridge registered (Issue #1986)")
+			}
+		}
+
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
@@ -578,6 +682,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
 		}
 		logger.Info("Command publisher initialized successfully", "signing_enabled", hoistedSigner != nil)
+
+		// Issue #1817: Wire the publisher into the signing rotation service now
+		// that it is available. The service was created before the provider to
+		// break the init cycle (hook → provider → publisher → provider).
+		if signingRotationSvc != nil {
+			signingRotationSvc.SetPublisher(commandPublisher)
+			logger.Info("Signing rotation service wired (refresh-on-connect enabled)")
+		}
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
@@ -602,15 +714,44 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Initialize config handler for data plane configuration sync (Story #362)
-	// Re-uses the hoisted signer so both config and command signing use the same key.
 	var configHandler *controllerTransport.ConfigHandler
 	var signerCertSerial string // Story #378: Track cert serial for registration handler
 	if dataPlane != nil {
-		// Use the signer hoisted above (nil when certManager absent or export failed).
+		// Story #378: registration handler reports the boot signer serial.
 		signerCertSerial = hoistedSignerCertSerial
-		configHandler = controllerTransport.NewConfigHandler(configService, logger, hoistedSigner).
+
+		// Config signing must always use the CURRENT signing certificate, not the
+		// one captured at boot. After a signing-cert rotation with a short (or zero)
+		// overlap window, stewards retire the old cert; a boot-pinned signer would
+		// keep signing configs with the retired cert and every steward would reject
+		// the payload (Issue #1816 fleet-e2e OfflinePastWindow). The DynamicSigner
+		// resolves the live signing serial per sign and rebuilds the underlying
+		// signer only when that serial changes (once per rotation). The command
+		// publisher deliberately keeps the boot signer: the steward's command
+		// verifier is a connect-time snapshot, so push_signing_cert commands must
+		// stay verifiable with the cert the steward already holds at connect.
+		configSigner := hoistedSigner
+		if certManager != nil {
+			cm := certManager
+			configSigner = signature.NewDynamicSigner(func() (string, func() (signature.SigningKeyExport, error), error) {
+				current, err := cm.GetCurrentCertForPurpose(cert.PurposeSigning)
+				if err != nil {
+					return "", nil, err
+				}
+				serial := current.SerialNumber
+				return serial, func() (signature.SigningKeyExport, error) {
+					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true)
+					if exportErr != nil {
+						return signature.SigningKeyExport{}, exportErr
+					}
+					return signature.SigningKeyExport{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}, nil
+				}, nil
+			})
+		}
+
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, configSigner).
 			WithControllerService(controllerService)
-		logger.Debug("Config handler initialized for data plane", "signing_enabled", hoistedSigner != nil)
+		logger.Debug("Config handler initialized for data plane", "signing_enabled", configSigner != nil)
 	}
 
 	// Initialize health collectors (Story #417, #517)
@@ -643,6 +784,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Health collectors initialized (Story #417)")
 	}
 
+	// Initialize installer artifact blob store (Issue #1702).
+	// Default BlobStorage.Root when not explicitly configured (e.g. in tests or
+	// minimal configs that rely on the storage path for co-location).
+	blobRoot := cfg.BlobStorage.Root
+	if blobRoot == "" {
+		if cfg.Storage.FlatfileRoot != "" {
+			blobRoot = filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
+		} else if cfg.Storage.SQLitePath != "" {
+			blobRoot = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+		}
+	}
+	installerBlobStore, blobErr := blob.CreateBlobStoreFromConfig("filesystem",
+		map[string]interface{}{"root": blobRoot})
+	if blobErr != nil {
+		return nil, fmt.Errorf("failed to initialize installer blob store: %w", blobErr)
+	}
+	logger.Info("Installer artifact blob store initialized", "root", blobRoot)
+
 	// Initialize HTTP API server
 	httpServer, err := api.New(
 		cfg,
@@ -662,6 +821,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		auditManager,                  // Issue #775: registration audit events
 		commandPublisher,              // Issue #1319: fan-out config push to active stewards
 		storageManager.GetPushStore(), // Issue #1320: durable push-state for HA failover
+		installerBlobStore,            // Issue #1702: installer artifact storage
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
@@ -669,10 +829,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Issue #1948: Wire in-memory upgrade store so the dispatch/status endpoints
+	// are operational. A durable SQLite-backed store is a follow-up; for the
+	// OSS composite deployment the in-memory store is sufficient because upgrade
+	// records are short-lived (< 60s) and not required to survive a controller restart.
+	httpServer.SetUpgradeStore(memoryprovider.NewUpgradeStore())
+	logger.Info("In-memory upgrade store wired to HTTP API server (Issue #1948)")
+
 	// Wire the shared connection registry into the API server so
 	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
 	if connRegistry != nil {
 		httpServer.SetRegistry(connRegistry)
+	}
+
+	// Issue #1816: Wire signing rotation service so the rotate endpoint is available.
+	if signingRotationSvc != nil {
+		signingRotationSvc.SetControllerService(controllerService)
+		httpServer.SetSigningRotationService(signingRotationSvc)
+		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
 	}
 
 	// Issue #1696: Wire durable pending registration store for status poll endpoint.
@@ -1020,10 +1194,16 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logg
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
 // Returns nil, nil on failure so the controller starts without workflow support rather than failing.
 func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger logging.Logger) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
-	// Create a minimal module factory for the workflow engine.
-	// The controller does not load steward modules directly; the factory is
-	// required by the engine constructor but not exercised during REST API use.
-	moduleFactory := workflow.NewNullModuleFactory()
+	// Workflow module factory: looks up controller-kind module bundles by
+	// name in the controller's module cache (#1883) and (eventually) fork/
+	// execs them as workflow-kind module subprocesses connected over the
+	// WorkflowModuleClient gRPC contract (#1881).
+	//
+	// The cache is wired in once a controller-side ModuleCache instance is
+	// available; until then we pass nil and the factory surfaces
+	// "no cache backing" on any module instantiation. REST-only deployments
+	// (which never resolve modules through the engine) are unaffected.
+	moduleFactory := workflow.NewWorkflowModuleFactory(nil)
 
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil)
 
@@ -1636,115 +1816,15 @@ func initializeHAManager(logger logging.Logger, storageManager *interfaces.Stora
 	return haManager, nil
 }
 
-// grpcControlPlaneServerSANs returns the DNS names and IP addresses to embed in
-// the generated gRPC control-plane server certificate.
-//
-// It starts from the transport defaults (localhost / loopback) and merges in
-// any operator-configured server SANs (certificate.server.dns_names and
-// certificate.server.ip_addresses) plus CFGMS_EXTERNAL_HOSTNAME. Without this,
-// a steward dialing the controller by its external hostname fails mTLS
-// verification because the generated certificate omits that name. The
-// CFGMS_EXTERNAL_HOSTNAME value is classified as an IP SAN when it parses as an
-// IP literal and as a DNS SAN otherwise. Duplicates are removed and ordering is
-// deterministic.
-func grpcControlPlaneServerSANs(cfg *config.Config) (dnsNames, ipAddresses []string) {
-	dnsNames = []string{"localhost", "cfgms-grpc-server", "controller-standalone"}
-	ipAddresses = []string{"127.0.0.1", "0.0.0.0"}
-
-	if cfg != nil && cfg.Certificate != nil && cfg.Certificate.Server != nil {
-		dnsNames = append(dnsNames, cfg.Certificate.Server.DNSNames...)
-		ipAddresses = append(ipAddresses, cfg.Certificate.Server.IPAddresses...)
-	}
-
-	if hostname := strings.TrimSpace(os.Getenv("CFGMS_EXTERNAL_HOSTNAME")); hostname != "" {
-		if net.ParseIP(hostname) != nil {
-			ipAddresses = append(ipAddresses, hostname)
-		} else {
-			dnsNames = append(dnsNames, hostname)
-		}
-	}
-
-	return dedupeSANs(dnsNames), dedupeSANs(ipAddresses)
-}
-
-// dedupeSANs returns the input slice with empty strings dropped and duplicates
-// removed, preserving first-seen order.
-func dedupeSANs(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
-}
-
 // buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
-//
-// Uses the certificate manager to load or generate the server certificate and CA, then creates
-// a mTLS config with the ALPN identifier required by the gRPC-over-QUIC transport layer.
-// In separated architecture mode, uses CertificateTypeInternalServer for mTLS separation.
-// Generates a server certificate on first boot if none exists.
+// Uses GetCurrentCertForPurpose(PurposeTransport) to resolve the InternalServer certificate.
+// EnsureSeparatedCertificates guarantees the cert exists before this function is called.
 func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manager, logger logging.Logger) (*tls.Config, error) {
-	separated := cfg.Certificate != nil && cfg.Certificate.IsSeparatedArchitecture()
-	certType := cert.CertificateTypeServer
-	if separated {
-		certType = cert.CertificateTypeInternalServer
+	serverCert, err := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load gRPC control plane transport certificate: %w", err)
 	}
-
-	var serverCertPEM, serverKeyPEM []byte
-
-	// Try to load existing certificate; generate one on first boot if none exists
-	serverCerts, err := certManager.GetCertificatesByType(certType)
-	if err != nil || len(serverCerts) == 0 {
-		if separated {
-			// Also check base server type as fallback in separated mode
-			serverCerts, err = certManager.GetCertificatesByType(cert.CertificateTypeServer)
-		}
-	}
-
-	if err != nil || len(serverCerts) == 0 {
-		// First boot: generate server certificate for gRPC control plane.
-		// SANs merge the transport defaults with any operator-configured server
-		// SANs and CFGMS_EXTERNAL_HOSTNAME so a steward connecting by the
-		// controller's external hostname can verify the certificate.
-		logger.Info("Generating gRPC control plane server certificate")
-		dnsNames, ipAddresses := grpcControlPlaneServerSANs(cfg)
-		certCfg := &cert.ServerCertConfig{
-			CommonName:   "cfgms-grpc-server",
-			Organization: "CFGMS",
-			DNSNames:     dnsNames,
-			IPAddresses:  ipAddresses,
-			ValidityDays: 365,
-		}
-		var generatedCert *cert.Certificate
-		if separated {
-			generatedCert, err = certManager.GenerateInternalServerCertificate(certCfg)
-		} else {
-			generatedCert, err = certManager.GenerateServerCertificate(certCfg)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate gRPC control plane server certificate: %w", err)
-		}
-		serverCertPEM = generatedCert.CertificatePEM
-		serverKeyPEM = generatedCert.PrivateKeyPEM
-		logger.Info("gRPC control plane server certificate generated", "serial", generatedCert.SerialNumber)
-	} else {
-		// Load existing certificate
-		serial := serverCerts[0].SerialNumber
-		serverCertPEM, serverKeyPEM, err = certManager.ExportCertificate(serial, true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to export gRPC control plane server certificate: %w", err)
-		}
-		logger.Info("gRPC control plane using existing server certificate", "serial", serial)
-	}
+	logger.Info("gRPC control plane using transport certificate", "serial", serverCert.SerialNumber)
 
 	caCertPEM, err := certManager.GetCACertificate()
 	if err != nil {
@@ -1752,7 +1832,7 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 	}
 
 	// Build mTLS server config using pkg/cert helper
-	tlsConfig, err := cert.CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM, tls.VersionTLS13)
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caCertPEM, tls.VersionTLS13)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC control plane TLS config: %w", err)
 	}

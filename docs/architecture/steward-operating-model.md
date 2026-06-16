@@ -122,6 +122,65 @@ Controller-side logging captures both the drift event and convergence result reg
 
 Modules are the code packages that manage resources. Each resource block in the cfg references a module by name and provides module-specific configuration.
 
+### Stdlib Modules
+
+The six stdlib modules (`file`, `service`, `package`, `script`, `firewall`, `patch`) ship as out-of-process gRPC binaries bundled in the steward installer. They use the same module contract as third-party modules — publisher-signed bundles, verified by the runtime at load time, invoked via `CFGMS_MODULE_SOCKET`. There are no compiled-in modules; stdlib is governance (installer payload), not implementation.
+
+Because they are part of the installer payload, the stdlib modules load at steward startup without any network access to the controller — a steward can converge against locally-cached cfg using the stdlib set even when the controller is unreachable. The `directory` resource is no longer a separate module: it is the `file` module's `type: directory` variant.
+
+Installer bundling:
+- **Linux** (tar.gz): binaries at `usr/local/lib/cfgms/modules/cfgms-module-<name>`, copied by `install.sh`
+- **macOS** (.pkg): binaries at `/usr/local/lib/cfgms/modules/cfgms-module-<name>`, included in the pkg payload
+- **Windows** (MSI): binaries at `C:\Program Files\CFGMS\modules\cfgms-module-<name>.exe`, included via WiX components
+
+### Module Trust Modes
+
+The steward verifies module bundle signatures according to the `module_trust.mode` field in `steward.cfg`:
+
+| Mode | Verification | When to use |
+|------|-------------|-------------|
+| **`controller`** (default) | None — the steward accepts any bundle the controller has approved | Normal deployment; trust is delegated to the controller |
+| **`strict`** | Steward independently verifies Ed25519 signatures against its local trust set: the CFGMS publisher identity baked in at build time, plus any publishers listed in `additional_publishers` | High-security environments where a compromised controller must not be able to push arbitrary code to stewards |
+| **`bypass`** | None — no verification | Development and testing only |
+
+In `strict` mode, the trusted publisher set is:
+1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push.
+2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (v1: by name only; key material lookup from a durable trust store is future work).
+
+**Threat model invariant**: a compromised controller cannot push arbitrary modules to stewards running in `strict` mode — the steward rejects any bundle whose publisher key is not in its local trust set, regardless of controller approval.
+
+### Module Runtime Lifecycle
+
+Out-of-process module binaries are managed by the steward module runtime. Each module runs in a separate process connected over a local socket:
+
+**Startup sequence (per module):**
+
+1. `starting` — runtime fork/execs the module binary; passes the socket path via `CFGMS_MODULE_SOCKET` environment variable
+2. `ready` — runtime polls the socket until the module process starts listening, then dials gRPC and calls `Handshake`
+3. `running` — module is operating normally; the steward holds an active `StewardModuleClient` gRPC session
+
+**Socket paths:**
+- Unix: `${runtime_dir}/sockets/cfgms-module-<name>-<id>.sock` — sockets live in a steward-private directory created mode 0700; the mode is re-asserted on each start. Socket file permissions are the module-channel trust boundary: the gRPC channel carries no per-caller credentials, so access is controlled solely by the directory owner bit.
+- Windows: `\\.\pipe\cfgms-module-<name>-<id>` — Windows enforces per-user pipe ACLs at the kernel level.
+
+**Shutdown sequence:**
+
+1. `stopping` — runtime sends the `Shutdown` RPC; module should exit cleanly
+2. `stopped` — if the module has not exited within **10 seconds** after the `Shutdown` RPC, the runtime kills the process; socket file is removed
+
+Trust verification (in `strict` mode) is performed **before** fork/exec. If the bundle fails trust verification, `Start()` returns `ErrPublisherNotTrusted` and no process is started.
+
+### Four Execution Paths
+
+Every byte of code that runs on a steward arrives through exactly one of these paths (see ADR-006 for full details):
+
+| Path | Trust anchor | Notes |
+|------|-------------|-------|
+| **Modules** | Publisher-signed bundle | gRPC module invoked to enforce cfg |
+| **Scripts** | Publisher-signed; cfg-content staged to disk with recorded hash | `<interpreter> -File <path>` against on-disk file |
+| **Inline cfg CLI commands** | Admin mTLS-signed payload, end-to-end | Separate epic |
+| **Remote shell** | Interactive admin session | Separate epic |
+
 ### Module Contract
 
 Every module implements the `Module` interface:
@@ -147,7 +206,7 @@ Some resources don't have a feasible event-source (no OS-level watcher, no vendo
 Current adoption (as of v0.9.x):
 
 - **Implemented**: none
-- **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `directory`, `script`, `firewall`, `package`, `patch`
+- **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `script`, `firewall`, `package`, `patch`
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
 

@@ -1149,6 +1149,10 @@ func TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk(t *testing.T
 	})
 	require.NoError(t, err)
 
+	// Separated architecture is mandatory: ensure purpose-specific certs exist
+	// before buildGRPCControlPlaneTLSConfig is called (mirrors the real boot sequence).
+	require.NoError(t, certManager.EnsureSeparatedCertificates(nil, nil))
+
 	cfg := &config.Config{
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,

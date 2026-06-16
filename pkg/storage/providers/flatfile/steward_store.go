@@ -59,8 +59,9 @@ func (s *FlatFileStewardStore) readSteward(stewardID string) (*business.StewardR
 	if err != nil {
 		return nil, err
 	}
-	// #nosec G304 — path is validated by safeJoin
-	raw, err := os.ReadFile(path)
+	// path is validated by safeJoin; readFile retries Windows sharing
+	// violations from concurrent writers.
+	raw, err := readFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, business.ErrStewardNotFound
@@ -161,8 +162,9 @@ func (s *FlatFileStewardStore) readAllStewards() ([]*business.StewardRecord, err
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		// #nosec G304 — path is rooted at s.stewardDir()
-		raw, err := os.ReadFile(path)
+		// path is rooted at s.stewardDir(); readFile retries Windows
+		// sharing violations from concurrent writers.
+		raw, err := readFile(path)
 		if err != nil {
 			continue // skip unreadable files
 		}

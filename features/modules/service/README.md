@@ -1,5 +1,7 @@
 # Service Module
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The Service Module provides idempotent configuration management for OS services.

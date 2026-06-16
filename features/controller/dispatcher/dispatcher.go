@@ -74,6 +74,10 @@ type Dispatcher struct {
 // interface rather than importing the run package directly.
 type RunCompletionSink interface {
 	RecordJobCompletion(ctx context.Context, runID, jobID, executionID string, failed bool) error
+	// RecordJobResult records the terminal completion together with the captured
+	// execution result (stdout/stderr/exit code) so `cfg steward exec` can surface
+	// output (Issue #1995, root cause D).
+	RecordJobResult(ctx context.Context, runID, jobID, executionID string, failed bool, output, stderr string, exitCode int) error
 }
 
 // GrantManager creates and consumes per-execution relay grants (Issue #1675).
@@ -143,10 +147,17 @@ func (d *Dispatcher) SetGrantManager(gm GrantManager) {
 	d.grantManager = gm
 }
 
-// Start begins the polling loop and subscribes to EventScriptCompleted events.
+// Start begins the polling loop and subscribes to script terminal events.
+// It subscribes to both EventScriptCompleted (success/non-zero exit) and
+// EventCommandFailed (executor error before a result is produced) so a failed
+// execution still records a terminal completion and releases the device lock
+// (Issue #1995, root cause C).
 func (d *Dispatcher) Start(ctx context.Context) error {
 	filter := &controlplaneTypes.EventFilter{
-		EventTypes: []controlplaneTypes.EventType{controlplaneTypes.EventScriptCompleted},
+		EventTypes: []controlplaneTypes.EventType{
+			controlplaneTypes.EventScriptCompleted,
+			controlplaneTypes.EventCommandFailed,
+		},
 	}
 	if err := d.controlPlane.SubscribeEvents(ctx, filter, d.handleCompletionEvent); err != nil {
 		return fmt.Errorf("dispatcher: subscribe events: %w", err)
@@ -409,14 +420,22 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 // execution_id field alone is never trusted, preventing a compromised steward
 // from acknowledging another device's execution.
 func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlplaneTypes.Event) error {
-	if event.Type != controlplaneTypes.EventScriptCompleted {
+	// Both terminal event types are handled here (Issue #1995, root cause C):
+	//   - EventScriptCompleted: the executor ran and produced a result.
+	//   - EventCommandFailed:   the executor failed before producing a result
+	//     (e.g. unsupported shell, temp-file error). Treated as a terminal FAILED
+	//     completion so the run advances and the device lock is released.
+	if event.Type != controlplaneTypes.EventScriptCompleted &&
+		event.Type != controlplaneTypes.EventCommandFailed {
 		return nil
 	}
+	commandFailed := event.Type == controlplaneTypes.EventCommandFailed
 
 	// StewardID is set by the control plane from the mTLS peer certificate.
 	deviceID := event.StewardID
 	if deviceID == "" {
-		d.logger.Warn("Received script_completed event with empty steward_id — ignoring")
+		d.logger.Warn("Received script terminal event with empty steward_id — ignoring",
+			"event_type", string(event.Type))
 		return nil
 	}
 
@@ -425,14 +444,18 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		executionID, _ = event.Details["execution_id"].(string)
 	}
 	if executionID == "" {
-		d.logger.Warn("Received script_completed event with no execution_id",
+		d.logger.Warn("Received script terminal event with no execution_id",
+			"event_type", string(event.Type),
 			"device_id", logging.SanitizeLogValue(deviceID))
 		return nil
 	}
 
-	// Determine completion state from exit code in event details.
+	// Determine completion state. A command_failed event is always terminal-failed.
+	// A script_completed event is failed only when the exit code is non-zero.
 	state := script.QueueStateCompleted
-	if event.Details != nil {
+	if commandFailed {
+		state = script.QueueStateFailed
+	} else if event.Details != nil {
 		if exitCode, ok := event.Details["exit_code"].(float64); ok && exitCode != 0 {
 			state = script.QueueStateFailed
 		}
@@ -444,11 +467,25 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		if ec, ok := event.Details["exit_code"].(float64); ok {
 			result.ExitCode = int(ec)
 		}
-		if stdout, ok := event.Details["stdout"].(string); ok {
+		// The steward emits stdout_preview/stderr_preview (execute_script.go);
+		// accept the bare stdout/stderr keys too for forward compatibility
+		// (Issue #1995, root cause D — key alignment).
+		if stdout, ok := event.Details["stdout_preview"].(string); ok {
+			result.Stdout = stdout
+		} else if stdout, ok := event.Details["stdout"].(string); ok {
 			result.Stdout = stdout
 		}
-		if stderr, ok := event.Details["stderr"].(string); ok {
+		if stderr, ok := event.Details["stderr_preview"].(string); ok {
 			result.Stderr = stderr
+		} else if stderr, ok := event.Details["stderr"].(string); ok {
+			result.Stderr = stderr
+		}
+		// On a command_failed event there is no result; surface the error string
+		// as stderr so the CLI shows why the execution failed.
+		if commandFailed && result.Stderr == "" {
+			if errStr, ok := event.Details["error"].(string); ok {
+				result.Stderr = errStr
+			}
 		}
 		if durMs, ok := event.Details["duration_ms"].(float64); ok {
 			result.Duration = time.Duration(durMs) * time.Millisecond
@@ -477,69 +514,83 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	// Determine whether to retry before acknowledging, so we hold the full QE.
 	shouldRetry := state == script.QueueStateFailed && isIdempotent && retryCount < 1
 
+	// AcknowledgeCompletion moves the queue entry out of the active set. A failure
+	// here (e.g. the entry was already evicted by a dispatch-timeout sweep) must NOT
+	// prevent run/job tracking from advancing — otherwise the job would be stuck
+	// pending forever even though the device lock is released, reproducing the very
+	// stall this handler exists to fix (Issue #1995, root cause B3). The run-sink
+	// update and grant consumption below therefore run regardless of ack success.
 	if err := d.queue.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
-		d.logger.Error("Failed to acknowledge completion",
+		d.logger.Error("Failed to acknowledge completion; recording terminal outcome anyway",
 			"device_id", logging.SanitizeLogValue(deviceID),
 			"execution_id", executionID,
 			"error", err)
-		// Still release the lock to prevent permanent stall.
 	} else {
 		d.logger.Info("Script execution completed",
 			"device_id", logging.SanitizeLogValue(deviceID),
 			"execution_id", executionID,
 			"state", state)
+	}
 
-		if shouldRetry && origQE != nil {
-			// Re-queue the idempotent execution with an incremented retry count.
-			// The run/job tracking record is NOT advanced yet — it will be updated
-			// when the retry completes (success or second failure).
-			retryMeta := make(map[string]interface{}, len(origQE.Metadata))
-			for k, v := range origQE.Metadata {
-				retryMeta[k] = v
-			}
-			retryMeta["retry_count"] = retryCount + 1
-
-			retryQE := &script.QueuedExecution{
-				ExecutionID:   uuid.New().String(),
-				ScriptID:      origQE.ScriptID,
-				ScriptVersion: origQE.ScriptVersion,
-				ScriptRef:     origQE.ScriptRef,
-				Shell:         origQE.Shell,
-				Parameters:    origQE.Parameters,
-				Timeout:       origQE.Timeout,
-				Metadata:      retryMeta,
-			}
-			if err := d.queue.QueueExecution(deviceID, retryQE); err != nil {
-				d.logger.Error("Failed to re-queue idempotent execution after failure",
-					"device_id", logging.SanitizeLogValue(deviceID),
-					"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
-					"error", err)
-			} else {
-				d.logger.Info("Re-queued idempotent execution after failure",
-					"device_id", logging.SanitizeLogValue(deviceID),
-					"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID))
-			}
+	if shouldRetry && origQE != nil {
+		// Re-queue the idempotent execution with an incremented retry count.
+		// The run/job tracking record is NOT advanced yet — it will be updated
+		// when the retry completes (success or second failure).
+		retryMeta := make(map[string]interface{}, len(origQE.Metadata))
+		for k, v := range origQE.Metadata {
+			retryMeta[k] = v
 		}
+		retryMeta["retry_count"] = retryCount + 1
 
-		// Advance run/job tracking only when not retrying. On retry, the job
-		// remains in-progress until the retry execution reaches a terminal state.
-		if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
-			if err := d.runSink.RecordJobCompletion(ctx, runID, jobID, executionID, state == script.QueueStateFailed); err != nil {
-				d.logger.Error("Failed to record job completion in run store",
-					"device_id", logging.SanitizeLogValue(deviceID),
-					"execution_id", logging.SanitizeLogValue(executionID),
-					"run_id", logging.SanitizeLogValue(runID),
-					"error", err)
-			}
+		retryQE := &script.QueuedExecution{
+			ExecutionID:   uuid.New().String(),
+			ScriptID:      origQE.ScriptID,
+			ScriptVersion: origQE.ScriptVersion,
+			ScriptRef:     origQE.ScriptRef,
+			Shell:         origQE.Shell,
+			Parameters:    origQE.Parameters,
+			Timeout:       origQE.Timeout,
+			Metadata:      retryMeta,
 		}
+		if err := d.queue.QueueExecution(deviceID, retryQE); err != nil {
+			d.logger.Error("Failed to re-queue idempotent execution after failure",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
+				"error", err)
+		} else {
+			d.logger.Info("Re-queued idempotent execution after failure",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID))
+		}
+	}
 
-		// Issue #1675: consume the relay grant on execution completion so further
-		// relay requests return 403. Best-effort — a failure must not stall dispatch.
-		if d.grantManager != nil {
-			if err := d.grantManager.ConsumeGrant(executionID); err != nil {
-				d.logger.Debug("ConsumeGrant: no grant for execution (inline or no API scope)",
-					"execution_id", logging.SanitizeLogValue(executionID))
-			}
+	// Advance run/job tracking only when not retrying. On retry, the job remains
+	// in-progress until the retry execution reaches a terminal state. This runs
+	// even when AcknowledgeCompletion failed so the job cannot be stuck pending.
+	if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
+		var output, stderr string
+		var exitCode int
+		if result != nil {
+			output = result.Stdout
+			stderr = result.Stderr
+			exitCode = result.ExitCode
+		}
+		if err := d.runSink.RecordJobResult(ctx, runID, jobID, executionID,
+			state == script.QueueStateFailed, output, stderr, exitCode); err != nil {
+			d.logger.Error("Failed to record job completion in run store",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"run_id", logging.SanitizeLogValue(runID),
+				"error", err)
+		}
+	}
+
+	// Issue #1675: consume the relay grant on execution completion so further
+	// relay requests return 403. Best-effort — a failure must not stall dispatch.
+	if d.grantManager != nil {
+		if err := d.grantManager.ConsumeGrant(executionID); err != nil {
+			d.logger.Debug("ConsumeGrant: no grant for execution (inline or no API scope)",
+				"execution_id", logging.SanitizeLogValue(executionID))
 		}
 	}
 

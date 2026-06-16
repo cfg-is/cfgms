@@ -158,6 +158,33 @@ func applyExecutionContext(ctx context.Context, config *ScriptConfig, cmd *exec.
 	return cmd, username, cleanup, nil
 }
 
+// buildCmdExeCommand constructs a cmd.exe /c <path> command using
+// SysProcAttr.CmdLine to bypass Go's argv-encoding layer.
+//
+// When %TEMP% resolves to a user-profile directory that contains a space
+// (e.g. C:\Users\John Smith\AppData\Local\Temp\), Go wraps the path in
+// double-quotes via EscapeArg when building the argv string, which is correct.
+// However, cmd.exe /c applies its own quote-stripping before locating the
+// batch file: it strips the outermost double-quotes from the remainder of the
+// line, leaving a bare unquoted path that fails for spaced directories.
+// Setting CmdLine directly passes the quoted path intact, bypassing that
+// stripping.
+//
+// The CmdLine contains cmd.exe /c <file-path> — a file path, never inline
+// script content. This satisfies the same constraint as the argv form and
+// does not introduce banned patterns.
+func buildCmdExeCommand(ctx context.Context, tmpPath string) *exec.Cmd {
+	// #nosec G204 - tmpPath is a temp file created by this process; not user input
+	cmd := exec.CommandContext(ctx, "cmd.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		// EscapeArg double-quotes tmpPath when it contains spaces, producing
+		// cmd.exe /c "C:\path with spaces\file.cmd". cmd.exe /c interprets the
+		// quoted token as the batch-file path and executes it correctly.
+		CmdLine: fmt.Sprintf("cmd.exe /c %s", syscall.EscapeArg(tmpPath)),
+	}
+	return cmd
+}
+
 // ResolveExecutionUID is not applicable on Windows: process identity is
 // SID-based, not POSIX UID-based, and the relay named pipe is access-controlled
 // via an explicit DACL rather than file ownership. It always returns -1, which

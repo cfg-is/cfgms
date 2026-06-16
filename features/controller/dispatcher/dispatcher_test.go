@@ -110,6 +110,56 @@ func (p *testControlPlane) injectCompletion(ctx context.Context, deviceID, execu
 	return h(ctx, event)
 }
 
+// injectCompletionWithOutput simulates a steward publishing EventScriptCompleted
+// with the stdout_preview/stderr_preview keys the steward actually emits
+// (execute_script.go), used to verify output capture (Issue #1995, root cause D).
+func (p *testControlPlane) injectCompletionWithOutput(ctx context.Context, deviceID, executionID string, exitCode int, stdout, stderr string) error {
+	p.mu.Lock()
+	h := p.eventHandler
+	p.mu.Unlock()
+
+	if h == nil {
+		return fmt.Errorf("no event handler registered")
+	}
+	event := &controlplaneTypes.Event{
+		ID:        "evt-" + executionID,
+		Type:      controlplaneTypes.EventScriptCompleted,
+		StewardID: deviceID,
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"execution_id":   executionID,
+			"exit_code":      float64(exitCode),
+			"stdout_preview": stdout,
+			"stderr_preview": stderr,
+			"duration_ms":    float64(100),
+		},
+	}
+	return h(ctx, event)
+}
+
+// injectCommandFailed simulates a steward publishing EventCommandFailed, which it
+// emits when the executor fails before producing a result (execute_script.go).
+func (p *testControlPlane) injectCommandFailed(ctx context.Context, deviceID, executionID, errMsg string) error {
+	p.mu.Lock()
+	h := p.eventHandler
+	p.mu.Unlock()
+
+	if h == nil {
+		return fmt.Errorf("no event handler registered")
+	}
+	event := &controlplaneTypes.Event{
+		ID:        "evt-fail-" + executionID,
+		Type:      controlplaneTypes.EventCommandFailed,
+		StewardID: deviceID,
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"execution_id": executionID,
+			"error":        errMsg,
+		},
+	}
+	return h(ctx, event)
+}
+
 // sentCount returns how many commands were recorded.
 func (p *testControlPlane) sentCount() int {
 	p.mu.Lock()
@@ -900,6 +950,252 @@ func TestDispatcher_NonIdempotentScript_FailureImmediatelyMarksJobFailed(t *test
 
 	// Confirm no re-queue occurred.
 	assert.Equal(t, 1, cp.sentCount(), "non-idempotent failure must not re-queue")
+}
+
+// TestDispatcher_CommandFailedMarksRunFailedAndReleasesLock verifies Issue #1995
+// root cause C: an EventCommandFailed (executor error before a result) is handled
+// as a terminal FAILED completion — the run transitions to failed AND the per-device
+// lock is released so a subsequent queued execution to the same device dispatches.
+func TestDispatcher_CommandFailedMarksRunFailedAndReleasesLock(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-cmdfail-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-cmdfail", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-cmdfail", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	// Second execution has its OWN real run + job so its completion path UPDATEs a
+	// real row — otherwise the lock-release-enables-next-dispatch claim would pass
+	// against phantom data (Issue #1995 review B4).
+	const runID2 = "run-cmdfail-2"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID2, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-second", RunID: runID2, DeviceID: "device-1",
+		ExecutionID: "exec-second", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	repo := newTestScriptRepo()
+	repo.addScript("script-cf-a", "#!/bin/bash\necho hi")
+	repo.addScript("script-cf-b", "#!/bin/bash\necho bye")
+	q := newTestQueue(t, repo)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue two distinct executions to the SAME device. Only the first can dispatch
+	// while the per-device lock is held; the second proves the lock was released.
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-cmdfail", "script-cf-a", runID, "job-cmdfail")))
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-second", "script-cf-b", runID2, "job-second")))
+
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond,
+		"first execution must dispatch")
+	// While the lock is held, the second execution must NOT have dispatched yet.
+	require.Equal(t, 1, cp.sentCount(), "second execution must wait for the device lock")
+
+	// Steward reports the executor failed before producing a result.
+	require.NoError(t, cp.injectCommandFailed(context.Background(), "device-1", "exec-cmdfail",
+		"unsupported shell on Windows: pwsh"))
+
+	// The run transitions to failed (not stuck 0/1).
+	require.Eventually(t, func() bool {
+		r, err := manager.GetRun(context.Background(), runID)
+		return err == nil && r.Status == run.RunStatusFailed && r.FailedJobs == 1
+	}, 2*time.Second, 10*time.Millisecond, "command_failed must drive the run to failed")
+
+	// The device lock was released → the second execution dispatches automatically.
+	require.Eventually(t, func() bool { return cp.sentCount() >= 2 }, 2*time.Second, 10*time.Millisecond,
+		"device lock must be released so the next execution dispatches")
+
+	// Complete the second execution and assert ITS run/job reaches a terminal state
+	// end-to-end — proving the lock release genuinely enabled the next dispatch.
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-second", 0))
+	require.Eventually(t, func() bool {
+		r, err := manager.GetRun(context.Background(), runID2)
+		return err == nil && r.Status == run.RunStatusCompleted && r.CompletedJobs == 1
+	}, 2*time.Second, 10*time.Millisecond, "second run must reach completed after dispatch")
+
+	secondJobs, err := store.ListRunJobs(runID2)
+	require.NoError(t, err)
+	require.Len(t, secondJobs, 1)
+	assert.Equal(t, run.JobStatusCompleted, secondJobs[0].Status,
+		"second job must reach a terminal state (not stuck pending)")
+
+	// The failed job carries the error text as stderr for the CLI.
+	jobs, err := store.ListRunJobs(runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, run.JobStatusFailed, jobs[0].Status)
+	assert.Contains(t, jobs[0].Stderr, "unsupported shell",
+		"command_failed error text must be persisted as stderr")
+}
+
+// TestDispatcher_AcknowledgeFailureStillRecordsJob verifies Issue #1995 review B3:
+// when AcknowledgeCompletion fails, the run/job tracking must STILL advance to a
+// terminal state (not stuck pending) and the device lock must be released so the
+// next execution dispatches. A completion event for an execution that was never
+// dispatched (still in the queued state) makes the store's AcknowledgeCompletion
+// fail with "expected dispatched", while the metadata remains discoverable via
+// PeekForDevice — exactly the realistic stall this restructure guards against.
+func TestDispatcher_AcknowledgeFailureStillRecordsJob(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-ackfail-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-ackfail", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-ackfail", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	// Second run/job to prove the lock was released and the next dispatch proceeds.
+	const runID2 = "run-ackfail-2"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID2, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-ackfail-next", RunID: runID2, DeviceID: "device-1",
+		ExecutionID: "exec-ackfail-next", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue the execution but do NOT dispatch it (no OnHeartbeat) — it stays in the
+	// queued state, so AcknowledgeCompletion will reject the completion.
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-ackfail", "script-a", runID, "job-ackfail")))
+	require.Equal(t, 0, cp.sentCount(), "execution must not be dispatched yet")
+
+	// Inject completion → store.AcknowledgeCompletion fails (state != dispatched),
+	// but the job result must still be recorded.
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-ackfail", 0))
+
+	require.Eventually(t, func() bool {
+		jobs, err := store.ListRunJobs(runID)
+		return err == nil && len(jobs) == 1 && jobs[0].Status.IsTerminal()
+	}, 2*time.Second, 10*time.Millisecond,
+		"job must reach a terminal state even when AcknowledgeCompletion fails (not stuck pending)")
+
+	jobs, err := store.ListRunJobs(runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, run.JobStatusCompleted, jobs[0].Status)
+
+	// Lock was released: a freshly queued + heartbeat-triggered execution dispatches.
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-ackfail-next", "script-b", runID2, "job-ackfail-next")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond,
+		"device lock must not be stuck after an AcknowledgeCompletion failure")
+}
+
+// TestDispatcher_ScriptCompletedSuccessPathStillWorks confirms the existing
+// EventScriptCompleted success path still records success and releases the lock
+// after adding EventCommandFailed handling (Issue #1995 regression guard).
+func TestDispatcher_ScriptCompletedSuccessPathStillWorks(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-success-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-ok", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-ok", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-ok", "script-ok-a", runID, "job-ok")))
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-next", "script-ok-b", "run-next", "job-next")))
+
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, cp.injectCompletion(context.Background(), "device-1", "exec-ok", 0))
+	require.Eventually(t, func() bool {
+		r, err := manager.GetRun(context.Background(), runID)
+		return err == nil && r.Status == run.RunStatusCompleted && r.CompletedJobs == 1
+	}, 2*time.Second, 10*time.Millisecond, "successful completion must drive the run to completed")
+
+	// Lock released → next execution dispatches.
+	require.Eventually(t, func() bool { return cp.sentCount() >= 2 }, 2*time.Second, 10*time.Millisecond)
+}
+
+// TestDispatcher_OutputThreadedToJobRecord verifies Issue #1995 root cause D:
+// stdout/exit code from the steward's stdout_preview keys are persisted onto the
+// job record and surfaced via the run/job read path.
+func TestDispatcher_OutputThreadedToJobRecord(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-output-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-out", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-out", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-out", "script-abc", runID, "job-out")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, cp.injectCompletionWithOutput(context.Background(), "device-1", "exec-out", 0,
+		"CFG-70-02\n", ""))
+
+	require.Eventually(t, func() bool {
+		jobs, err := manager.ListRunJobs(context.Background(), runID)
+		return err == nil && len(jobs) == 1 && jobs[0].Status == run.JobStatusCompleted
+	}, 2*time.Second, 10*time.Millisecond)
+
+	jobs, err := manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "CFG-70-02\n", jobs[0].Output, "stdout_preview must be persisted as Output")
+	assert.Equal(t, 0, jobs[0].ExitCode)
 }
 
 // mustOpenMemDB opens an in-memory SQLite database closed via t.Cleanup.

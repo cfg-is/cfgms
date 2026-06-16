@@ -38,9 +38,9 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	acme_module "github.com/cfgis/cfgms/features/modules/acme"
-	"github.com/cfgis/cfgms/features/modules/directory"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
+	"github.com/cfgis/cfgms/features/modules/hyperv"
 	package_module "github.com/cfgis/cfgms/features/modules/package"
 	"github.com/cfgis/cfgms/features/modules/patch"
 	"github.com/cfgis/cfgms/features/modules/script"
@@ -166,11 +166,14 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 }
 
 // builtinModuleConstructors maps module names to their zero-argument constructors.
+// The "directory" name is retained as an alias for the merged file module so that
+// existing cfg files using type: directory continue to work without migration.
 var builtinModuleConstructors = map[string]func() modules.Module{
 	"acme":      func() modules.Module { return acme_module.New() },
-	"directory": func() modules.Module { return directory.New() },
+	"directory": func() modules.Module { return file.New() }, // merged into file module (type: directory)
 	"file":      func() modules.Module { return file.New() },
 	"firewall":  func() modules.Module { return firewall.New() },
+	"hyperv":    func() modules.Module { return hyperv.New(hyperv.NewDefaultDetector()) },
 	"package":   func() modules.Module { return package_module.New() },
 	"patch":     func() modules.Module { return patch.New() },
 	"script":    func() modules.Module { return script.New() },

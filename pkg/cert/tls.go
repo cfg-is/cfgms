@@ -121,6 +121,18 @@ func CreateBasicTLSConfig(certPEM, keyPEM []byte, minVersion uint16) (*tls.Confi
 	}, nil
 }
 
+// CreateProbeClientTLSConfig creates a minimal TLS config for unauthenticated
+// liveness probing. insecureSkipVerify must be true only when the probe target
+// uses a self-signed cert and server identity is not required (e.g. cutover
+// smoketests that confirm the API process is alive, not that it is authentic).
+// MinVersion is always TLS 1.2.
+func CreateProbeClientTLSConfig(insecureSkipVerify bool) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: insecureSkipVerify, // #nosec G402 -- intentional for unauthenticated liveness probing
+		MinVersion:         tls.VersionTLS12,   // #nosec G402 -- TLS 1.2 minimum enforced
+	}
+}
+
 // CreateOnDemandClientTLSConfig creates a client TLS config that fetches the client
 // certificate on every TLS handshake via the Manager, enabling transparent rotation.
 // When caCertPEM is non-empty it is used for server verification; otherwise system roots apply.

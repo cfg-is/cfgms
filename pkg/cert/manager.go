@@ -49,6 +49,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -76,6 +77,7 @@ type Manager struct {
 	renewer    *Renewer
 	config     *ManagerConfig
 	revocation *revocationStore
+	rotateMu   sync.Mutex // serialises RotateSigningCertificate calls
 }
 
 // NewManager creates a new certificate manager
@@ -250,7 +252,7 @@ func (m *Manager) GenerateInternalServerCertificate(config *ServerCertConfig) (*
 // Idempotent: safe to call on every startup. Only generates certs that don't exist yet.
 func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, signingCfg *SigningCertConfig) error {
 	// Check for existing internal server certificate
-	internalCerts, err := m.store.GetCertificatesByType(CertificateTypeInternalServer)
+	internalCerts, err := m.store.getCertificatesByType(CertificateTypeInternalServer)
 	if err != nil {
 		return fmt.Errorf("failed to check for internal server certificates: %w", err)
 	}
@@ -270,7 +272,7 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 	}
 
 	// Check for existing config signing certificate
-	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := m.store.getCertificatesByType(CertificateTypeConfigSigning)
 	if err != nil {
 		return fmt.Errorf("failed to check for config signing certificates: %w", err)
 	}
@@ -302,7 +304,7 @@ func (m *Manager) EnsureSeparatedCertificates(internalCfg *ServerCertConfig, sig
 // certificate, which may be regenerated per boot. When signingCfg is nil, a
 // default 1095-day RSA-4096 signing certificate is generated.
 func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error {
-	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	signingCerts, err := m.store.getCertificatesByType(CertificateTypeConfigSigning)
 	if err != nil {
 		return fmt.Errorf("failed to check for config signing certificates: %w", err)
 	}
@@ -323,29 +325,180 @@ func (m *Manager) EnsureSigningCertificate(signingCfg *SigningCertConfig) error 
 	return nil
 }
 
-// GetSigningCertificate returns the newest valid config signing certificate PEM (public only)
+// RotateSigningCertificate generates a new ConfigSigning certificate and atomically
+// transitions the lifecycle cursor, making the new cert active and keeping the old
+// one valid for the overlap window so in-flight verifications are not disrupted.
+//
+// Returns an error if a rotation is already in progress (RotatingSerial is set and
+// still within the overlap window). Concurrent callers are serialised; the second
+// caller will fail with "rotation already in progress" once the first completes.
+func (m *Manager) RotateSigningCertificate(overlapWindowDays int) (*Certificate, error) {
+	return m.rotateSigningCertificate(overlapWindowDays, false)
+}
+
+// ForceRotateSigningCertificate behaves like RotateSigningCertificate but bypasses
+// the in-progress guard. Used by operator-initiated rotations to recover when the
+// previous overlap window has not yet expired but a fresh rotation is required.
+// The in-progress RotatingSerial in the cursor is cleared atomically before the
+// new cert is generated and the cursor is re-transitioned.
+func (m *Manager) ForceRotateSigningCertificate(overlapWindowDays int) (*Certificate, error) {
+	return m.rotateSigningCertificate(overlapWindowDays, true)
+}
+
+func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*Certificate, error) {
+	m.rotateMu.Lock()
+	defer m.rotateMu.Unlock()
+
+	cursor, err := loadSigningCursor(m.store.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("load signing cursor: %w", err)
+	}
+
+	if cursor != nil && cursor.RotatingSerial != "" {
+		if force {
+			// Clear in-progress state so the cursor transition proceeds as if the
+			// previous overlap had already closed. The just-cleared cursor is then
+			// re-read by transitionSigningCursor inside the same rotateMu critical
+			// section, so the bypass is atomic with respect to other rotations.
+			cursor.RotatingSerial = ""
+			if err := saveSigningCursor(m.store.basePath, cursor); err != nil {
+				return nil, fmt.Errorf("clear signing cursor for force rotate: %w", err)
+			}
+		} else {
+			overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
+			if time.Since(cursor.RotatedAt) < overlapDuration {
+				return nil, fmt.Errorf(
+					"%w: rotating serial %q is still within %d-day overlap window (rotated %s ago)",
+					ErrSigningRotationInProgress,
+					cursor.RotatingSerial,
+					cursor.OverlapWindowDays,
+					time.Since(cursor.RotatedAt).Truncate(time.Second),
+				)
+			}
+		}
+	}
+
+	newCert, err := m.ca.GenerateSigningCertificate(&SigningCertConfig{
+		CommonName:   "cfgms-config-signer",
+		ValidityDays: 1095,
+		KeySize:      4096,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate signing certificate: %w", err)
+	}
+
+	if err := m.store.StoreCertificate(newCert); err != nil {
+		return nil, fmt.Errorf("store signing certificate: %w", err)
+	}
+
+	if err := transitionSigningCursor(m.store, m.store.basePath, newCert.SerialNumber, overlapWindowDays); err != nil {
+		return nil, fmt.Errorf("transition signing cursor: %w", err)
+	}
+
+	return newCert, nil
+}
+
+// purposeToType maps a CertificatePurpose to its underlying CertificateType.
+func purposeToType(p CertificatePurpose) (CertificateType, error) {
+	switch p {
+	case PurposeTransport:
+		return CertificateTypeInternalServer, nil
+	case PurposeAPI:
+		return CertificateTypePublicAPI, nil
+	case PurposeSigning:
+		return CertificateTypeConfigSigning, nil
+	case PurposeClient:
+		return CertificateTypeClient, nil
+	default:
+		return 0, fmt.Errorf("unknown certificate purpose: %d", p)
+	}
+}
+
+// GetCurrentCertForPurpose returns the current (newest valid) certificate for the
+// given purpose. Returns an error if no valid certificate exists. Presentation and
+// signing paths use this method; verification/trust paths use
+// GetAllValidCertificatesForPurpose instead.
+func (m *Manager) GetCurrentCertForPurpose(purpose CertificatePurpose) (*Certificate, error) {
+	certType, err := purposeToType(purpose)
+	if err != nil {
+		return nil, err
+	}
+
+	certs, err := m.store.getCertificatesByType(certType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve certificates for purpose %s: %w", purpose, err)
+	}
+
+	// getCertificatesByType returns newest-first; return the first valid one.
+	for _, info := range certs {
+		if info.IsValid {
+			c, cerr := m.store.GetCertificate(info.SerialNumber)
+			if cerr != nil {
+				continue
+			}
+			return c, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no valid certificate found for purpose %s", purpose)
+}
+
+// GetAllValidCertificatesForPurpose returns all currently valid certificates for
+// the given purpose, newest first. Verification and trust paths use this method
+// to accept all valid certs during rotation overlap windows.
+func (m *Manager) GetAllValidCertificatesForPurpose(purpose CertificatePurpose) ([]*CertificateInfo, error) {
+	certType, err := purposeToType(purpose)
+	if err != nil {
+		return nil, err
+	}
+
+	certs, err := m.store.getCertificatesByType(certType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve certificates for purpose %s: %w", purpose, err)
+	}
+
+	var valid []*CertificateInfo
+	for _, info := range certs {
+		if info.IsValid {
+			valid = append(valid, info)
+		}
+	}
+	return valid, nil
+}
+
+// CheckForLegacyCertificates returns an error if the certificate store contains
+// any certificates with the removed unified-mode type (integer value 1, formerly
+// CertificateTypeServer). Their presence indicates a pre-migration deployment.
+// See docs/security/certificate-architecture.md#migrating-from-unified-mode.
+func (m *Manager) CheckForLegacyCertificates() error {
+	const legacyServerType = CertificateType(1)
+	legacy, err := m.store.getCertificatesByType(legacyServerType)
+	if err != nil {
+		return fmt.Errorf("failed to scan for legacy certificates: %w", err)
+	}
+	if len(legacy) > 0 {
+		return fmt.Errorf(
+			"startup blocked: found %d legacy unified-mode certificate(s) (type=1, "+
+				"formerly CertificateTypeServer) in the certificate store; "+
+				"this deployment predates the separated-architecture requirement; "+
+				"wipe the certificate store and re-run 'controller --init'; "+
+				"see docs/security/certificate-architecture.md#migrating-from-unified-mode",
+			len(legacy),
+		)
+	}
+	return nil
+}
+
+// GetSigningCertificate returns the current config signing certificate PEM (public only)
 func (m *Manager) GetSigningCertificate() ([]byte, error) {
-	signingCerts, err := m.store.GetCertificatesByType(CertificateTypeConfigSigning)
+	c, err := m.GetCurrentCertForPurpose(PurposeSigning)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve signing certificates: %w", err)
+		return nil, fmt.Errorf("no config signing certificate found: %w", err)
 	}
-
-	if len(signingCerts) == 0 {
-		return nil, fmt.Errorf("no config signing certificate found")
-	}
-
-	// Get the full certificate data (use first valid one)
-	certInfo := signingCerts[0]
-	cert, err := m.store.GetCertificate(certInfo.SerialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve signing certificate data: %w", err)
-	}
-
-	if len(cert.CertificatePEM) == 0 {
+	if len(c.CertificatePEM) == 0 {
 		return nil, fmt.Errorf("signing certificate PEM data is empty")
 	}
-
-	return cert.CertificatePEM, nil
+	return c.CertificatePEM, nil
 }
 
 // GetCertificate retrieves a certificate by serial number
@@ -356,11 +509,6 @@ func (m *Manager) GetCertificate(serialNumber string) (*Certificate, error) {
 // ListCertificates returns all certificates
 func (m *Manager) ListCertificates() ([]*CertificateInfo, error) {
 	return m.store.ListCertificates()
-}
-
-// GetCertificatesByType returns certificates of a specific type
-func (m *Manager) GetCertificatesByType(certType CertificateType) ([]*CertificateInfo, error) {
-	return m.store.GetCertificatesByType(certType)
 }
 
 // GetCertificateByCommonName retrieves certificates by common name
@@ -527,7 +675,7 @@ type ManagerStats struct {
 // Each call reads the current certificate from the store so cert rotations are picked
 // up automatically — no explicit notification needed.
 func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, error) {
-	clientCerts, err := m.store.GetCertificatesByType(CertificateTypeClient)
+	clientCerts, err := m.store.getCertificatesByType(CertificateTypeClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve client certificates: %w", err)
 	}
@@ -535,7 +683,7 @@ func (m *Manager) GetClientCertificate(_ context.Context) (*tls.Certificate, err
 		return nil, fmt.Errorf("no client certificate found in store")
 	}
 
-	// GetCertificatesByType returns newest-first.
+	// getCertificatesByType returns newest-first.
 	certInfo := clientCerts[0]
 	c, err := m.store.GetCertificate(certInfo.SerialNumber)
 	if err != nil {
@@ -579,4 +727,50 @@ func (m *Manager) IsRevoked(serial string) bool {
 // ListRevoked returns all revocation entries for auditing and --list output.
 func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
 	return m.revocation.allEntries(), nil
+}
+
+// GetAllValidSigningCertificates returns the set of certificates that are valid
+// for verifying config signatures right now. It uses GetAllValidCertificatesForPurpose
+// as the source list, then filters by the signing cursor state:
+//   - CurrentSerial is always included (if valid).
+//   - RotatingSerial is included only while still within its overlap window.
+//   - If no cursor file exists (no rotation in progress) all valid signing certs are returned.
+func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
+	all, err := m.GetAllValidCertificatesForPurpose(PurposeSigning)
+	if err != nil {
+		return nil, err
+	}
+
+	cursor, err := loadSigningCursor(m.store.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load signing cursor: %w", err)
+	}
+
+	if cursor == nil {
+		return all, nil
+	}
+
+	allowed := make(map[string]bool, 2)
+	allowed[cursor.CurrentSerial] = true
+
+	if cursor.RotatingSerial != "" {
+		overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
+		if time.Since(cursor.RotatedAt) < overlapDuration {
+			allowed[cursor.RotatingSerial] = true
+		}
+	}
+
+	result := make([]*CertificateInfo, 0, len(all))
+	for _, info := range all {
+		if allowed[info.SerialNumber] {
+			result = append(result, info)
+		}
+	}
+	return result, nil
+}
+
+// GetSigningCursorState returns the current signing cursor, or nil if no rotation
+// has been initiated. Use this to inspect lifecycle state without modifying it.
+func (m *Manager) GetSigningCursorState() (*SigningCertCursor, error) {
+	return loadSigningCursor(m.store.basePath)
 }

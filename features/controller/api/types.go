@@ -195,6 +195,16 @@ type HealthStatus struct {
 	Services  map[string]string `json:"services"`
 }
 
+// ReadinessStatus represents the controller's real-state readiness (Issue #2012).
+// Distinct from HealthStatus (object-presence liveness): a "ready" status means
+// the controller round-tripped its durable storage and can actually serve.
+type ReadinessStatus struct {
+	Status    string            `json:"status"` // "ready" | "not_ready"
+	Version   string            `json:"version"`
+	Timestamp time.Time         `json:"timestamp"`
+	Checks    map[string]string `json:"checks"`
+}
+
 // ConfigPushResponse is returned by POST /api/v1/config/push on acceptance.
 type ConfigPushResponse struct {
 	PushID   string    `json:"push_id"`

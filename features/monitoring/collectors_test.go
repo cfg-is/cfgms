@@ -42,8 +42,10 @@ func TestCPUMetricsCollection_NoError(t *testing.T) {
 		}
 	}()
 
-	// Wait for at least two resource collection ticks (20ms × 3 = 60ms margin)
-	time.Sleep(60 * time.Millisecond)
+	// Wait for resource metrics to be populated (20ms interval; 2s ceiling tolerates heavy test-suite load)
+	require.Eventually(t, func() bool {
+		return monitor.GetResourceMetrics().CPUCores > 0
+	}, 2*time.Second, 10*time.Millisecond, "collectResourceMetrics must have run at least once")
 
 	metrics := monitor.GetResourceMetrics()
 	assert.Greater(t, metrics.CPUCores, 0, "CPUCores must be populated from runtime.NumCPU()")

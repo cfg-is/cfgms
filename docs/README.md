@@ -18,7 +18,7 @@ If you're new to the project, start with these essential documents:
 ### Core Architecture
 
 - [Architecture Document](architecture.md) - Detailed architecture documentation
-- [Plugin Architecture](architecture/plugin-architecture.md) - Extensible module system design
+- [Provider Architecture](architecture/provider-architecture.md) - Pluggable provider system design
 - [Git Backend Design](architecture/git-backend-design.md) - GitOps storage backend
 - [Storage Architecture](architecture/storage-architecture.md) - Five-type storage taxonomy (ADR-003)
 - [Communication Layer Migration](architecture/communication-layer-migration.md) - Transport architecture (gRPC-over-QUIC)

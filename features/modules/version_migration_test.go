@@ -23,6 +23,8 @@ func TestDefaultVersionMigrator_CanMigrate(t *testing.T) {
 			Name:        "test-module",
 			Version:     version,
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 	}
@@ -120,6 +122,8 @@ func TestDefaultVersionMigrator_GetMigrationPath(t *testing.T) {
 			Name:        "test-module",
 			Version:     version,
 			Description: "Test module",
+			Publisher:   "cfgms",
+			Executors:   []string{"steward"},
 		}
 		require.NoError(t, registry.RegisterVersion(metadata))
 	}
@@ -213,11 +217,15 @@ func TestDefaultVersionMigrator_ValidateMigrationPath(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	metadata2 := &ModuleMetadata{
 		Name:        "test-module",
 		Version:     "1.1.0",
 		Description: "Test module v1.1.0",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
@@ -315,11 +323,15 @@ func TestDefaultVersionMigrator_ExecuteMigration(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	metadata2 := &ModuleMetadata{
 		Name:        "test-module",
 		Version:     "1.1.0",
 		Description: "Test module v1.1.0",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
@@ -417,11 +429,15 @@ func TestDefaultVersionMigrator_GetMigrationStatus(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	metadata2 := &ModuleMetadata{
 		Name:        "test-module",
 		Version:     "1.1.0",
 		Description: "Test module v1.1.0",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
@@ -476,6 +492,8 @@ func TestDefaultVersionMigrator_ListActiveMigrations(t *testing.T) {
 				Name:        fmt.Sprintf("test-module-%d", i),
 				Version:     []string{"1.0.0", "1.1.0"}[version],
 				Description: "Test module",
+				Publisher:   "cfgms",
+				Executors:   []string{"steward"},
 			}
 			require.NoError(t, registry.RegisterVersion(metadata))
 		}
@@ -568,11 +586,15 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 		Name:        "test-module",
 		Version:     "1.0.0",
 		Description: "Test module",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	metadata2 := &ModuleMetadata{
 		Name:        "test-module",
 		Version:     "1.0.1",
 		Description: "Test module v1.0.1",
+		Publisher:   "cfgms",
+		Executors:   []string{"steward"},
 	}
 	require.NoError(t, registry.RegisterVersion(metadata1))
 	require.NoError(t, registry.RegisterVersion(metadata2))
@@ -644,8 +666,8 @@ func TestDefaultVersionMigrator_RollbackMigration(t *testing.T) {
 func TestWaitForMigration(t *testing.T) {
 	t.Run("returns nil when migration completes successfully", func(t *testing.T) {
 		registry := NewDefaultModuleVersionRegistry()
-		require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "wm", Version: "1.0.0", Description: "v1"}))
-		require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "wm", Version: "2.0.0", Description: "v2"}))
+		require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "wm", Version: "1.0.0", Description: "v1", Publisher: "cfgms", Executors: []string{"steward"}}))
+		require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "wm", Version: "2.0.0", Description: "v2", Publisher: "cfgms", Executors: []string{"steward"}}))
 		migrator := NewDefaultVersionMigrator(registry)
 
 		path, err := migrator.GetMigrationPath("wm", "1.0.0", "2.0.0")
@@ -998,8 +1020,8 @@ func newStepRegistry(t *testing.T) (*DefaultModuleVersionRegistry, *DefaultVersi
 	t.Helper()
 	registry := NewDefaultModuleVersionRegistry()
 	migrator := NewDefaultVersionMigrator(registry)
-	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "1.0.0", Description: "v1"}))
-	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "2.0.0", Description: "v2"}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "1.0.0", Description: "v1", Publisher: "cfgms", Executors: []string{"steward"}}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "2.0.0", Description: "v2", Publisher: "cfgms", Executors: []string{"steward"}}))
 	return registry, migrator
 }
 
@@ -1458,7 +1480,7 @@ func TestExecuteStep_Cleanup(t *testing.T) {
 
 func TestExecuteStep_StructuredError(t *testing.T) {
 	registry := NewDefaultModuleVersionRegistry()
-	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "2.0.0", Description: "v2"}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "mod", Version: "2.0.0", Description: "v2", Publisher: "cfgms", Executors: []string{"steward"}}))
 	migrator := NewDefaultVersionMigrator(registry)
 
 	// Only toVersion is installed; fromVersion missing → validation must fail
@@ -1482,8 +1504,8 @@ func TestExecuteStep_AllStepTypesDispatch(t *testing.T) {
 	// End-to-end: run a full high-complexity migration and assert every step type
 	// reaches a real implementation (StepStatusCompleted, non-empty output).
 	registry := NewDefaultModuleVersionRegistry()
-	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "e2e", Version: "1.0.0", Description: "v1"}))
-	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "e2e", Version: "2.0.0", Description: "v2"}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "e2e", Version: "1.0.0", Description: "v1", Publisher: "cfgms", Executors: []string{"steward"}}))
+	require.NoError(t, registry.RegisterVersion(&ModuleMetadata{Name: "e2e", Version: "2.0.0", Description: "v2", Publisher: "cfgms", Executors: []string{"steward"}}))
 	migrator := NewDefaultVersionMigrator(registry)
 
 	path, err := migrator.GetMigrationPath("e2e", "1.0.0", "2.0.0")
@@ -1521,8 +1543,8 @@ func BenchmarkMigrationPath_Generation(b *testing.B) {
 	migrator := NewDefaultVersionMigrator(registry)
 
 	// Register test versions
-	metadata1 := &ModuleMetadata{Name: "bench-module", Version: "1.0.0", Description: "Bench"}
-	metadata2 := &ModuleMetadata{Name: "bench-module", Version: "2.0.0", Description: "Bench"}
+	metadata1 := &ModuleMetadata{Name: "bench-module", Version: "1.0.0", Description: "Bench", Publisher: "cfgms", Executors: []string{"steward"}}
+	metadata2 := &ModuleMetadata{Name: "bench-module", Version: "2.0.0", Description: "Bench", Publisher: "cfgms", Executors: []string{"steward"}}
 	_ = registry.RegisterVersion(metadata1) // Ignore error in benchmark setup
 	_ = registry.RegisterVersion(metadata2) // Ignore error in benchmark setup
 

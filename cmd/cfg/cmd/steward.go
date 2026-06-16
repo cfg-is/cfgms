@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -30,6 +31,17 @@ var (
 	stewardTLSCACert        string
 	stewardTLSInsecure      bool
 	stewardStatusJSONOutput bool
+	stewardDNAAttribute     string
+	stewardDNAJSONOutput    bool
+	stewardModulesJSON      bool
+)
+
+var (
+	stewardLogsTail   int
+	stewardLogsSince  string
+	stewardLogsLevel  string
+	stewardLogsModule string
+	stewardLogsJSON   bool
 )
 
 // stewardCmd is the parent command for steward subcommands.
@@ -75,6 +87,15 @@ var (
 	stewardRunResultDevice string
 )
 
+// Package-level vars for steward exec (single-steward ad-hoc run). Declared
+// separately from run-command vars so the two commands cannot share state.
+var (
+	stewardExecCommand    string
+	stewardExecShell      string
+	stewardExecTimeout    time.Duration
+	stewardExecJSONOutput bool
+)
+
 // runWaitPollInterval is the delay between status polls in the --wait loop.
 // Overridable in tests to avoid real sleeps.
 var runWaitPollInterval = 5 * time.Second
@@ -114,6 +135,35 @@ Examples:
 	RunE: runRunCommand,
 }
 
+var stewardExecCmd = &cobra.Command{
+	Use:   "exec <steward-id>",
+	Short: "Execute an ad-hoc command on a single steward",
+	Long: `Sign and submit an inline command to a single named steward and display the result.
+
+The argument is the steward ID to target. The command is submitted as a signed
+inline script and the controller dispatches it exclusively to that steward.
+The CLI blocks until the job reaches a terminal state or the timeout elapses.
+
+Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
+
+The --shell flag is required. Allowed values: bash, sh, pwsh (cmd on Windows as fallback).
+
+Output is capped at 64 KB in the CLI display. If the output exceeds the cap a
+truncation warning is printed to stderr.
+
+Examples:
+  # Run a command on a specific steward with 30-second timeout
+  cfg steward exec steward-abc123 --command "hostname" --shell bash --timeout 30s
+
+  # Run a script file on a steward
+  cfg steward exec steward-abc123 --command ./scripts/check.sh --shell bash
+
+  # Output as JSON
+  cfg steward exec steward-abc123 --command "uptime" --shell bash --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRunCommandSingle,
+}
+
 var stewardRunStatusCmd = &cobra.Command{
 	Use:   "run-status <run-id>",
 	Short: "Show status of a run",
@@ -150,6 +200,95 @@ Examples:
 	RunE: runRunCancel,
 }
 
+// stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
+var stewardLogsCmd = &cobra.Command{
+	Use:   "logs <id>",
+	Short: "Pull recent log entries from a steward",
+	Long: `Pull recent log entries from the controller's log-pull endpoint for a steward.
+
+Note: Log pull is not yet available. Collect logs directly from the steward host.
+
+Examples:
+  cfg steward logs <steward-id>
+  cfg steward logs <steward-id> --tail 50 --level WARN
+  cfg steward logs <steward-id> --since 1h --module file`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardLogs,
+}
+
+func runStewardLogs(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	v := url.Values{}
+	v.Set("tail", fmt.Sprintf("%d", stewardLogsTail))
+	if stewardLogsSince != "" {
+		v.Set("since", stewardLogsSince)
+	}
+	if stewardLogsLevel != "" {
+		v.Set("level", stewardLogsLevel)
+	}
+	if stewardLogsModule != "" {
+		v.Set("module", stewardLogsModule)
+	}
+	path := "/api/v1/stewards/" + stewardID + "/logs?" + v.Encode()
+
+	resp, err := client.Get(context.Background(), path)
+	if err != nil {
+		return fmt.Errorf("failed to fetch logs: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+
+	if resp.StatusCode == http.StatusNotImplemented {
+		fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if stewardLogsJSON {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Lines []struct {
+			Timestamp string `json:"timestamp"`
+			Level     string `json:"level"`
+			Module    string `json:"module"`
+			Message   string `json:"message"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	for _, line := range apiResp.Lines {
+		fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+	}
+	return nil
+}
+
 func init() {
 	stewardListCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardListCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -161,6 +300,13 @@ func init() {
 	stewardStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardStatusCmd.Flags().BoolVar(&stewardStatusJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
+
+	stewardDNACmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardDNACmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardDNACmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardDNACmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardDNACmd.Flags().StringVar(&stewardDNAAttribute, "attribute", "", "Return a single attribute value by key (for scripted probes)")
+	stewardDNACmd.Flags().BoolVar(&stewardDNAJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	// run-script flags
 	stewardRunScriptCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
@@ -187,6 +333,16 @@ func init() {
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
 	stewardRunCommandCmd.Flags().DurationVar(&stewardRunWaitTimeout, "wait-timeout", 5*time.Minute, "Maximum time to wait when --wait is set")
 
+	// exec flags (single-steward ad-hoc run)
+	stewardExecCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardExecCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardExecCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardExecCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
+	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, pwsh)")
+	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", 30*time.Second, "Maximum time to wait for job completion")
+	stewardExecCmd.Flags().BoolVar(&stewardExecJSONOutput, "json", false, "Emit JSON job record instead of plain output")
+
 	// run-status flags
 	stewardRunStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardRunStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -206,13 +362,60 @@ func init() {
 	stewardRunCancelCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCancelCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 
+	// modules flags
+	stewardModulesCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardModulesCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardModulesCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardModulesCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardModulesCmd.Flags().BoolVar(&stewardModulesJSON, "json", false, "Emit JSON output instead of human-readable text")
+
+	// logs flags
+	stewardLogsCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardLogsCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardLogsCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardLogsCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardLogsCmd.Flags().IntVar(&stewardLogsTail, "tail", 100, "Number of log lines to return (1-1000)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsSince, "since", "", "Return logs from this duration ago (e.g. 1h, 30m)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsLevel, "level", "", "Filter by log level (DEBUG, INFO, WARN, ERROR)")
+	stewardLogsCmd.Flags().StringVar(&stewardLogsModule, "module", "", "Filter by module name")
+	stewardLogsCmd.Flags().BoolVar(&stewardLogsJSON, "json", false, "Emit raw JSON output instead of human-readable text")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
+	stewardCmd.AddCommand(stewardDNACmd)
+	stewardCmd.AddCommand(stewardModulesCmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
+	stewardCmd.AddCommand(stewardExecCmd)
 	stewardCmd.AddCommand(stewardRunStatusCmd)
 	stewardCmd.AddCommand(stewardRunResultCmd)
 	stewardCmd.AddCommand(stewardRunCancelCmd)
+	stewardCmd.AddCommand(stewardLogsCmd)
+
+	// upgrade subcommands
+	stewardUpgradeCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardUpgradeCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardUpgradeCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeVersion, "version", "", "Target steward version (required)")
+	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradePlatform, "platform", "", "Target platform (e.g. linux, windows; auto-detected if omitted)")
+	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeArch, "arch", "", "Target architecture (e.g. amd64, arm64; auto-detected if omitted)")
+	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeWait, "wait", false, "Block until all stewards reach a terminal state")
+	stewardUpgradeCmd.Flags().DurationVar(&stewardUpgradeWaitTimeout, "wait-timeout", 2*time.Minute, "Maximum time to wait when --wait is set")
+
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardUpgradeStatusCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to query directly")
+
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to roll back")
+	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeToVersion, "to-version", "", "Target version to roll back to (optional; used with --upgrade-id)")
+
+	stewardCmd.AddCommand(stewardUpgradeCmd)
+	stewardUpgradeCmd.AddCommand(stewardUpgradeStatusCmd)
+	stewardUpgradeCmd.AddCommand(stewardUpgradeRollbackCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,
@@ -280,6 +483,139 @@ Examples:
   cfg steward status <steward-id> --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardStatus,
+}
+
+// stewardDNACmd shows the DNA snapshot for a single steward.
+var stewardDNACmd = &cobra.Command{
+	Use:   "dna <id>",
+	Short: "Show DNA snapshot for a steward",
+	Long: `Display the most recent DNA snapshot for a steward registered with the controller.
+
+Use --attribute to retrieve a single dotted-path attribute value for scripted probes.
+Use --json to write the raw API response body to stdout.
+
+Examples:
+  # Show full DNA in human-readable form
+  cfg steward dna <steward-id>
+
+  # Show DNA as raw JSON
+  cfg steward dna <steward-id> --json
+
+  # Retrieve a single attribute value (exits non-zero if not present)
+  cfg steward dna <steward-id> --attribute os`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardDNA,
+}
+
+// stewardDNAInfo is a local representation of the DNA snapshot returned by the API.
+type stewardDNAInfo struct {
+	Hostname     string            `json:"hostname"`
+	OS           string            `json:"os"`
+	Architecture string            `json:"architecture"`
+	CollectedAt  string            `json:"collected_at"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+}
+
+func runStewardDNA(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/stewards/" + stewardID + "/dna"
+	if stewardDNAAttribute != "" {
+		path += "?attribute=" + url.QueryEscape(stewardDNAAttribute)
+	}
+
+	resp, err := client.Get(context.Background(), path)
+	if err != nil {
+		return fmt.Errorf("failed to fetch steward DNA: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		if stewardDNAAttribute != "" {
+			return fmt.Errorf("attribute %q not found for steward %s", stewardDNAAttribute, stewardID)
+		}
+		return fmt.Errorf("steward %s not found or has no DNA snapshot", stewardID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Single attribute: the handler returns {"value":"<val>"} directly (no data wrapper).
+	if stewardDNAAttribute != "" {
+		var attrResp struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(body, &attrResp); err != nil {
+			return fmt.Errorf("failed to parse attribute response: %w", err)
+		}
+		fmt.Println(attrResp.Value)
+		return nil
+	}
+
+	if stewardDNAJSONOutput {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Data stewardDNAInfo `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	d := apiResp.Data
+	fmt.Printf("Hostname:      %s\n", d.Hostname)
+	fmt.Printf("OS:            %s\n", d.OS)
+	if d.Architecture != "" {
+		fmt.Printf("Architecture:  %s\n", d.Architecture)
+	}
+	if d.CollectedAt != "" {
+		fmt.Printf("CollectedAt:   %s\n", d.CollectedAt)
+	}
+	for k, v := range d.Attributes {
+		fmt.Printf("%s=%s\n", k, v)
+	}
+	return nil
+}
+
+// stewardModulesCmd lists modules currently loaded by a named steward.
+var stewardModulesCmd = &cobra.Command{
+	Use:   "modules <id>",
+	Short: "List modules loaded by a steward",
+	Long: `Display the modules currently loaded by a named steward.
+
+Retrieves module data from the steward's DNA attributes reported to the controller.
+When the steward does not report module data, a 501 response is returned and the
+command exits 0 with an informational message.
+
+Examples:
+  # List modules using admin bundle (mTLS auto-discovery)
+  cfg steward modules <steward-id>
+
+  # List modules with explicit URL
+  cfg steward modules <steward-id> --url=https://controller.example.com
+
+  # Output raw JSON
+  cfg steward modules <steward-id> --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardModules,
 }
 
 // stewardStatusInfo is a local representation of a steward detail from the API response.
@@ -370,6 +706,80 @@ func runStewardStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runStewardModules(cmd *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID+"/modules")
+	if err != nil {
+		return fmt.Errorf("failed to fetch steward modules: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+
+	if resp.StatusCode == http.StatusNotImplemented {
+		fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if stewardModulesJSON {
+		_, err := os.Stdout.Write(body)
+		return err
+	}
+
+	var apiResp struct {
+		Data struct {
+			Modules []struct {
+				Name    string `json:"name"`
+				Version string `json:"version,omitempty"`
+			} `json:"modules"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(apiResp.Data.Modules) == 0 {
+		fmt.Println("No modules loaded.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "NAME\tVERSION"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "----\t-------"); err != nil {
+		return err
+	}
+	for _, m := range apiResp.Data.Modules {
+		if _, err := fmt.Fprintf(w, "%s\t%s\n", m.Name, m.Version); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
 func runStewardList(cmd *cobra.Command, args []string) error {
 	client, err := getStewardClient()
 	if err != nil {
@@ -453,6 +863,8 @@ type runJobRecord struct {
 	DeviceID    string `json:"device_id"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Status      string `json:"status"`
+	Output      string `json:"output,omitempty"`
+	ExitCode    int    `json:"exit_code,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +993,133 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(runID)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// exec (single-steward ad-hoc run)
+// ---------------------------------------------------------------------------
+
+// execCLIOutputCap is the maximum bytes of job output the CLI displays.
+// If the output exceeds this cap, a truncation warning is printed to stderr.
+const execCLIOutputCap = 64 * 1024
+
+func runRunCommandSingle(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	if stewardExecCommand == "" {
+		return fmt.Errorf("--command is required")
+	}
+	if stewardExecShell == "" {
+		return fmt.Errorf("--shell is required")
+	}
+
+	content, err := readCommandContent(stewardExecCommand)
+	if err != nil {
+		return err
+	}
+
+	sig, err := signCommandContent(content)
+	if err != nil {
+		return err
+	}
+
+	timeout := stewardExecTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	reqBody := map[string]interface{}{
+		"target":    "id:" + stewardID,
+		"content":   base64.StdEncoding.EncodeToString(content),
+		"shell":     stewardExecShell,
+		"signature": sig,
+	}
+
+	bodyJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to encode request: %w", err)
+	}
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("failed to submit command: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	var apiResp struct {
+		Data struct {
+			RunID string `json:"run_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	runID := apiResp.Data.RunID
+	fmt.Printf("Run ID: %s\n", runID)
+
+	if err := waitForRun(context.Background(), client, runID, timeout); err != nil {
+		return err
+	}
+
+	return fetchAndDisplayExecOutput(client, runID, stewardID)
+}
+
+// fetchAndDisplayExecOutput retrieves job records for runID and prints the output
+// for the job targeting stewardID. Applies the 64 KB CLI display cap.
+func fetchAndDisplayExecOutput(client *APIClient, runID, stewardID string) error {
+	resp, err := client.Get(context.Background(), "/api/v1/runs/"+runID+"/jobs")
+	if err != nil {
+		return fmt.Errorf("failed to fetch job output: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to get job results: %s - %s", resp.Status, string(body))
+	}
+
+	var apiResp struct {
+		Data []runJobRecord `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse job results: %w", err)
+	}
+
+	if stewardExecJSONOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(apiResp.Data)
+	}
+
+	for _, job := range apiResp.Data {
+		if job.DeviceID != stewardID {
+			continue
+		}
+		output := job.Output
+		if len(output) > execCLIOutputCap {
+			fmt.Fprintf(os.Stderr, "warning: output truncated at 64 KB\n")
+			output = output[:execCLIOutputCap]
+		}
+		fmt.Printf("Exit code: %d\n", job.ExitCode)
+		if output != "" {
+			fmt.Print(output)
+		}
+		return nil
+	}
+
+	fmt.Println("No output returned for steward", stewardID)
 	return nil
 }
 
@@ -788,17 +1327,29 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 	}, nil
 }
 
-// parsePrivKeyFromPEM decodes a PEM block and parses a PKCS#8 private key.
+// parsePrivKeyFromPEM decodes a PEM block and parses a private key in any of
+// the three formats `controller --init` may have emitted: PKCS#8 (modern
+// default), PKCS#1 RSA (legacy "RSA PRIVATE KEY"), or SEC1 EC ("EC PRIVATE
+// KEY"). Tries them in order; returns the first that succeeds.
+//
+// Earlier versions only tried PKCS#8, which left every admin bundle minted
+// before the controller switched its key emitter unable to sign run-command
+// requests (surfaced via the #1887 #1852 validation session).
 func parsePrivKeyFromPEM(pemData string) (interface{}, error) {
 	block, _ := pem.Decode([]byte(pemData))
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block found in key data")
 	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
+	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return key, nil
 	}
-	return key, nil
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("parse private key: not PKCS#8, PKCS#1, or SEC1")
 }
 
 // fetchRunRecord calls GET /api/v1/runs/{runID} and returns the parsed record.

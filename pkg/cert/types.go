@@ -51,15 +51,14 @@ type CertificateType int
 const (
 	// CertificateTypeCA represents a Certificate Authority certificate
 	CertificateTypeCA CertificateType = 0
-	// CertificateTypeServer represents a server certificate (unified mode - all purposes)
-	CertificateTypeServer CertificateType = 1
-	// CertificateTypeClient represents a client certificate
+	// CertificateTypeClient represents a client certificate for steward mTLS
 	CertificateTypeClient CertificateType = 2
 
-	// Three-certificate architecture types (Story #377)
-	// Explicit values prevent iota reordering from corrupting stored metadata.json
+	// Explicit values prevent iota reordering from corrupting stored metadata.json.
+	// Integer value 1 (formerly CertificateTypeServer) is reserved; its presence in
+	// a store triggers a startup-blocking error (see Manager.CheckForLegacyCertificates).
 
-	// CertificateTypePublicAPI is for HTTPS REST API only (external-facing)
+	// CertificateTypePublicAPI is for the HTTPS REST API (external-facing)
 	CertificateTypePublicAPI CertificateType = 3
 	// CertificateTypeInternalServer is for gRPC-over-QUIC mutual TLS (internal)
 	CertificateTypeInternalServer CertificateType = 4
@@ -72,8 +71,6 @@ func (ct CertificateType) String() string {
 	switch ct {
 	case CertificateTypeCA:
 		return "CA"
-	case CertificateTypeServer:
-		return "Server"
 	case CertificateTypeClient:
 		return "Client"
 	case CertificateTypePublicAPI:
@@ -82,6 +79,42 @@ func (ct CertificateType) String() string {
 		return "InternalServer"
 	case CertificateTypeConfigSigning:
 		return "ConfigSigning"
+	default:
+		return "Unknown"
+	}
+}
+
+// CertificatePurpose identifies the intended use of a certificate. Callers pass
+// a purpose to GetCurrentCertForPurpose or GetAllValidCertificatesForPurpose
+// rather than referencing the underlying CertificateType directly.
+type CertificatePurpose int
+
+const (
+	// PurposeTransport is for the gRPC-over-QUIC internal mTLS transport.
+	// Maps to CertificateTypeInternalServer.
+	PurposeTransport CertificatePurpose = iota
+	// PurposeAPI is for the HTTP REST API (public-facing).
+	// Maps to CertificateTypePublicAPI.
+	PurposeAPI
+	// PurposeSigning is for config/DNA signing (CodeSigning EKU).
+	// Maps to CertificateTypeConfigSigning.
+	PurposeSigning
+	// PurposeClient is for steward mTLS client certificates.
+	// Maps to CertificateTypeClient.
+	PurposeClient
+)
+
+// String returns the string representation of the certificate purpose
+func (p CertificatePurpose) String() string {
+	switch p {
+	case PurposeTransport:
+		return "Transport"
+	case PurposeAPI:
+		return "API"
+	case PurposeSigning:
+		return "Signing"
+	case PurposeClient:
+		return "Client"
 	default:
 		return "Unknown"
 	}

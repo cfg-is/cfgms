@@ -71,18 +71,16 @@ func (r *Renewer) RenewCertificate(serialNumber string, config interface{}) (*Ce
 	var newCert *Certificate
 
 	switch existingCert.Type {
-	case CertificateTypeServer:
+	case CertificateTypePublicAPI:
 		serverConfig, ok := config.(*ServerCertConfig)
 		if !ok {
-			// Create default config based on existing certificate
 			serverConfig = &ServerCertConfig{
 				CommonName:   existingCert.CommonName,
-				Organization: "CFGMS", // Default organization
-				ValidityDays: 365,     // Default validity
-				KeySize:      2048,    // Default key size
+				Organization: "CFGMS",
+				ValidityDays: 365,
+				KeySize:      2048,
 			}
 
-			// Try to extract additional information from the existing certificate
 			if existingCert.CertificatePEM != nil {
 				if cert, err := ParseCertificateFromPEM(existingCert.CertificatePEM); err == nil {
 					serverConfig.DNSNames = cert.DNSNames
@@ -98,7 +96,7 @@ func (r *Renewer) RenewCertificate(serialNumber string, config interface{}) (*Ce
 
 		newCert, err = r.ca.GenerateServerCertificate(serverConfig)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate new server certificate: %w", err)
+			return nil, fmt.Errorf("failed to generate new public API certificate: %w", err)
 		}
 
 	case CertificateTypeClient:
@@ -182,9 +180,6 @@ func (r *Renewer) RenewCertificate(serialNumber string, config interface{}) (*Ce
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate new signing certificate: %w", err)
 		}
-
-	case CertificateTypePublicAPI:
-		return nil, fmt.Errorf("public API certificates are externally managed and cannot be renewed through this method")
 
 	case CertificateTypeCA:
 		return nil, fmt.Errorf("CA certificate renewal is not supported through this method")

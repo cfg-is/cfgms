@@ -443,7 +443,12 @@ services:
       # Unified gRPC-over-QUIC transport (Story #515: replaces separate MQTT+QUIC)
       CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
       CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
-      # HTTP API uses default port 9080 (no override needed)
+      # HTTP API listen address. Story #1919 routed getHTTPListenAddr()
+      # through cfg.ListenAddr — DefaultConfig() now defaults to
+      # 127.0.0.1:8080 (loopback only, secure-by-default). Docker
+      # network sandbox already constrains exposure, so explicitly opt
+      # this container into 0.0.0.0:9080 (matches controller-east).
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
       # Storage Configuration
       CFGMS_STORAGE_PROVIDER: "database"
       CFGMS_DB_HOST: "timescaledb-test"  # Share database with HA cluster
@@ -684,9 +689,28 @@ services:
       # instead of "localhost:4433". Without this the steward connects to its
       # own loopback, fails the gRPC-over-QUIC handshake, and exits 1.
       CFGMS_EXTERNAL_HOSTNAME: "fleet-controller"
+      # Same Story #1919 rationale as controller-standalone: getHTTPListenAddr()
+      # now respects cfg.ListenAddr, and DefaultConfig() defaults to the secure
+      # 127.0.0.1:8080 loopback. The mounted controller.cfg sets ListenAddr
+      # implicitly via legacy mqtt/quic fields that no longer drive HTTP bind.
+      # Explicitly opt the fleet container into 0.0.0.0:9080 so stewards on the
+      # cfgms-fleet network can reach the registration endpoint.
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
       CFGMS_LOG_LEVEL: "info"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+      # Issue #1709: seed installer API key for E2E install-package flow test.
+      # Issue #1948: seed upgrade test API key for E2E fleet upgrade tests.
+      CFGMS_SEED_TEST_API_KEYS: "1"
+      CFGMS_API_KEY_INSTALLER: "installer-test-key"
+      CFGMS_API_KEY_UPGRADE_TEST: "cfgms-upgrade-test-key"
+      # Issue #1948: ExternalURL used by dispatch handler to build steward download URLs.
+      # Must match the hostname reachable by fleet stewards on the cfgms-fleet network.
+      CFGMS_EXTERNAL_URL: "https://fleet-controller:9080"
+      # Issue #1948: Test Ed25519 publisher key (public key from zero-seed).
+      # Allows E2E upgrade tests to sign binaries with the known zero-seed private key.
+      # Active only when CFGMS_SEED_TEST_API_KEYS=1.
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
@@ -703,26 +727,6 @@ services:
     profiles:
       - fleet
 
-  # Publishes ONLY the controller's public CA certificate (ca.crt) into a
-  # steward-readable volume. Stewards must never mount the controller's cert
-  # directory — it also contains ca.key, the CA private key, which a steward
-  # must never see. This one-shot service is the harness stand-in for a real
-  # deployment, where the steward installer carries only the public ca.crt:
-  # it copies exactly that one file and exits. See Issue #1572.
-  fleet-ca-extract:
-    image: alpine:3.20
-    depends_on:
-      fleet-controller:
-        condition: service_healthy
-    volumes:
-      - fleet_controller_certs:/src:ro
-      - fleet_ca_dist:/dist
-    command: ["sh", "-c", "mkdir -p /dist/ca && cp /src/ca/ca.crt /dist/ca/ca.crt && chmod 0644 /dist/ca/ca.crt && echo 'fleet-ca-extract: published ca.crt'"]
-    networks:
-      - cfgms-fleet
-    profiles:
-      - fleet
-
   fleet-steward-1:
     container_name: fleet-steward-1
     build:
@@ -732,21 +736,20 @@ services:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
     environment:
       CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_a"
-      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+      # Issue #1948: same test publisher key as fleet-controller so E2E upgrade tests
+      # can sign binaries with the zero-seed private key and have them verify on the steward.
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward1_data:/app/data
-      - fleet_ca_dist:/app/controller-certs:ro
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       fleet-controller:
         condition: service_healthy
-      fleet-ca-extract:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
       interval: 10s
@@ -766,21 +769,18 @@ services:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
     environment:
       CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_b"
-      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward2_data:/app/data
-      - fleet_ca_dist:/app/controller-certs:ro
     tmpfs:
       - /test-workspace:uid=1001,gid=1001,mode=0755,exec
     depends_on:
       fleet-controller:
         condition: service_healthy
-      fleet-ca-extract:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
       interval: 10s
@@ -889,10 +889,6 @@ volumes:
     # CA must persist across container restarts (no tmpfs)
     # Stewards hold client certs issued by this CA — cert validity requires persistence
     # Mounted by the controller only — never by stewards (holds ca.key).
-  fleet_ca_dist:
-    driver: local
-    # Holds ONLY the controller's public ca.crt, published by fleet-ca-extract.
-    # This is what stewards mount — never fleet_controller_certs.
   fleet_steward1_data:
     driver: local
     driver_opts:

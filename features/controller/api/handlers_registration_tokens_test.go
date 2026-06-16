@@ -102,6 +102,7 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 		auditMgr, // Issue #775: registration audit events
 		nil,      // No command publisher for basic tests
 		nil,      // No push store for basic tests
+		nil,      // No blob store for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

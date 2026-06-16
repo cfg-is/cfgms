@@ -222,7 +222,7 @@ check-architecture:
 - **Architecture Compliance**: Commit `157bf9b` (Add central provider compliance checks)
 - **Documentation**: Commit `e76e63a` (Add central provider documentation and validation helper)
 - **Pluggable by Default**: Commit `2e8c8dd` (Establish pluggable by default principle)
-- **Related Architecture**: `docs/architecture/plugin-architecture.md`
+- **Related Architecture**: `docs/architecture/provider-architecture.md`
 
 ## Lessons Learned
 

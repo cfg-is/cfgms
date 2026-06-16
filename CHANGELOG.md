@@ -7,7 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-06-15
+
+Stable snapshot promoted to `main`. Bundles the controller in-place upgrade work (now proven
+live), the steward fleet-upgrade system, installer distribution, Hyper-V host onboarding, real
+DNA collectors, and architecture decisions ADR-006/007/008. See
+[`docs/product/roadmap.md`](docs/product/roadmap.md) for the full narrative.
+
+### Added
+
+- **Controller upgrade & state externalization** — smoketest-gated in-place restart upgrade
+  (real-state `/api/v1/ready` gate, keep-previous-binary rollback) and the GA host/container
+  blue-green target; documented in ADR-007 (Epic #2014).
+- **Steward fleet upgrade system** — `push_steward_binary` command handler (Issue #1943),
+  selector-based steward upgrade dispatch API with tenant isolation (Issue #1945),
+  `cfg steward upgrade/status/rollback` CLI (Issue #1947), `UpgradeStore` interface for upgrade
+  state (Issue #1941), and fleet steward upgrade integration tests (Issue #1948).
+- **Installer distribution** — multi-platform installer artifact upload and storage API
+  (Issues #1702, #1704), `cfg installer upload`/`download-url` commands (Issue #1705),
+  Linux `install.sh` with interactive fingerprint TOFU (Issue #1708), and a fleet
+  install-package docker-compose harness (Issue #1709).
+- **Hyper-V host onboarding** — Start-VM/Stop-VM/Set-VM lifecycle module (Issue #1842),
+  `install-hyperv-host.ps1` orchestrator (Issue #1854), and onboarding runbook (Issue #1855).
+- **Real DNA collectors** — Linux and Windows security collectors (Issue #1939) and network
+  collectors (Issue #1946).
+- **cfg CLI additions** — `cfg config diff` against live steward config (Issue #1938),
+  `cfg config rollback` (Issue #1942), `cfg steward dna` with `--attribute` filter (Issue #1933),
+  `cfg steward logs` + controller log-pull API (Issue #1937), `cfg steward modules` endpoint and
+  command (Issue #1949), and `cfg steward exec` for single-steward ad-hoc runs (Issue #1934).
+- **Control-plane protocol** — `execute_script` command (Issue #1992) and `script_completed`
+  plus wire-crossing events (Issue #1997) added to the proto enums; `CommandPushStewardBinary`
+  and `EventStewardUpgrade*` constants (Issue #1940).
+- **Architecture decisions** — ADR-006 module packaging and distribution (Issue #1879),
+  ADR-008 durable execution substrate for the workflow engine.
+
+### Changed
+
+- Container images add `HEALTHCHECK` and `--no-install-recommends`; CI hardened with
+  `persist-credentials: false` and action SHA pinning. `.gitattributes` forces LF on shell
+  scripts and Go sources.
+
 ### Removed
+
 - **BREAKING**: The `git` storage provider has been removed (Issue #664). Existing git-backed
   deployments must migrate to the OSS composite (flatfile + SQLite) using
   `cfg storage migrate --from git --to flatfile` before upgrading. The controller now rejects

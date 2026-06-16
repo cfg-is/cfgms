@@ -123,6 +123,7 @@ Modules are organized by execution environment and category:
 - **Network Infrastructure Modules**: Remote system management
   - ssh_file/ - Remote file management via SSH
   - rest_api/ - Generic REST API management
+  - hyperv/ - Remote Hyper-V VM, snapshot, and vswitch management via WinRM
 
 ### **SaaS Steward Modules** (API-Based Management)
 - **Microsoft 365 Modules**: M365 API management

@@ -205,8 +205,8 @@ func (fs *FileStore) GetCertificateByCommonName(commonName string) ([]*Certifica
 	return results, nil
 }
 
-// GetCertificatesByType retrieves certificates by type
-func (fs *FileStore) GetCertificatesByType(certType CertificateType) ([]*CertificateInfo, error) {
+// getCertificatesByType retrieves certificates by type (package-private; external callers use Manager.GetCurrentCertForPurpose or Manager.GetAllValidCertificatesForPurpose)
+func (fs *FileStore) getCertificatesByType(certType CertificateType) ([]*CertificateInfo, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 

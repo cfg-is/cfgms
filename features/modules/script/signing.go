@@ -68,9 +68,10 @@ type ModuleSigningConfig struct {
 // signature verification. This avoids a build-tag split on the shared dispatch function.
 var windowsAuthenticodeVerifier func(content []byte, sig *ScriptSignature, cfg ModuleSigningConfig) error
 
-// isPowerShellScript reports whether the shell type is a PowerShell variant.
+// isPowerShellScript reports whether the shell type is a PowerShell variant
+// (Windows PowerShell 5.1 or PowerShell Core).
 func isPowerShellScript(shell ShellType) bool {
-	return shell == ShellPowerShell
+	return shell == ShellPowerShell || shell == ShellPwsh
 }
 
 // verifyScriptSignature selects the appropriate verification method based on platform,

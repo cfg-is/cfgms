@@ -13,31 +13,103 @@ CFGMS uses a module-based architecture where all resource management tasks are p
 
 ```
 modules/
-├── directory/
-│   ├── module.yaml          # Module metadata
-│   └── module.go           # Implementation
 ├── file/
-│   ├── module.yaml
+│   ├── module.yaml          # Module metadata (covers file, directory, symlink types)
 │   └── implementation.go
-└── firewall/
+├── firewall/
+│   ├── module.yaml
+│   └── module.go
+└── script/
     ├── module.yaml
-    └── module.go
+    └── implementation.go
 ```
 
 **Required Files:**
 
-- `module.yaml` - Module metadata (name, version, description)
+- `module.yaml` - Module metadata (name, version, description, publisher, executors)
 - `*.go` - Implementation that implements the `Module` interface with `ConfigState`
+
+## Module Manifest Fields
+
+Every `module.yaml` must include the following fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Unique module identifier |
+| `version` | string | yes | Semantic version (e.g. `1.0.0`) |
+| `description` | string | no | Human-readable description |
+| `publisher` | string | yes | Module publisher (e.g. `cfgms`) |
+| `executors` | list | yes | Exactly one executor: `steward`, `outpost`, or `controller` |
+| `kind` | — | derived | Derived from `executors[0]`; never set in YAML (see below) |
+| `behavioral_envelope` | object | no | Runtime behavior declaration for security auditing |
+
+### Executor values and derived `kind`
+
+The `executors` field must contain exactly one element. `kind` is computed at parse time and never stored in YAML:
+
+| `executors[0]` | Derived `kind` | Where the module runs |
+|----------------|----------------|-----------------------|
+| `steward` | `steward` | Endpoint agent (local resources) |
+| `outpost` | `outpost` | Proxy/network probe component |
+| `controller` | `workflow` | Central controller (SaaS operations) |
+
+### `behavioral_envelope` sub-fields
+
+| Sub-field | Type | Description |
+|-----------|------|-------------|
+| `shells_out_to` | list | Shells or interpreters the module invokes |
+| `writes_paths` | list | File-system paths the module writes |
+| `reads_paths` | list | File-system paths the module reads |
+| `network_egress` | list | External hosts/ports the module connects to |
+| `lolbin_usage_justification` | string | Why a living-off-the-land binary is needed |
 
 ## Available Modules
 
-- `directory` - Directory creation and permissions
-- `file` - File content and attributes
+**Stdlib** (shipped in the steward installer, all `executors: [steward]`):
+
+- `file` - File content, directory creation, and permissions (`type: file` / `type: directory` / `type: symlink`)
 - `firewall` - Firewall rules and policies
 - `package` - Software package management
+- `patch` - OS patch management (Windows Update COM API on Windows; stub on other platforms)
+- `script` - Cross-platform script execution (file-based, no inline eval)
+- `service` - OS service state management
+
+**Non-stdlib steward modules:**
+
 - `acme` - ACME/Let's Encrypt certificate management
-- `activedirectory` - Active Directory integration
-- `m365/*` - Microsoft 365 modules (auth, conditional access, Entra groups/users/apps/admin units, Intune policy, GDAP)
+- `activedirectory` - Local Active Directory integration (steward)
+- `hyperv` - In-host Hyper-V management via a persistent PowerShell host subprocess (steward kind; runs on the Hyper-V host itself)
+
+**Outpost modules:**
+
+- `network_activedirectory` - Network-based AD integration via LDAP (outpost)
+
+**Workflow modules:**
+
+- `m365/*` (workflow kind, hosted by the controller workflow engine, at `features/workflow/modules/m365/`) - Microsoft 365 modules: `auth`, `conditional_access`, `entra_admin_unit`, `entra_application`, `entra_group`, `entra_user`, `intune_policy`. The `gdap/` and `graph/` directories under the same parent are shared support packages, not module roots.
+
+## Script Module — Parameter Environment Variables
+
+Script parameters are injected into the child process environment only (the steward process environment is never modified). Two namespaces are used:
+
+| Type | Env var name | Example |
+|------|-------------|---------|
+| Literal param | `CFGMS_PARAM_<NAME_UPPER>` | `path` → `CFGMS_PARAM_PATH` |
+| Secret-store param | `CFGMS_SECRET_<NAME_UPPER>` (PowerShell/CMD) or `<NAME_UPPER>` (Unix shells) | `dbPass` → `CFGMS_SECRET_DBPASS` / `DBPASS` |
+
+The `CFGMS_PARAM_` prefix prevents a literal param from silently overwriting a standard environment variable (e.g., a param named `path` becomes `CFGMS_PARAM_PATH`, not `PATH`). Scripts read params via the namespaced name:
+
+```bash
+# bash/sh/zsh — literal param named "install_path"
+echo "$CFGMS_PARAM_INSTALL_PATH"
+```
+
+```powershell
+# PowerShell — literal param named "install_path"
+Write-Output $env:CFGMS_PARAM_INSTALL_PATH
+```
+
+Secret params on Windows use `CFGMS_SECRET_` to avoid logging the value via Event 4688 command-line auditing. On Unix shells, secrets use a bare uppercase name (`<NAME_UPPER>`) following the 12-factor convention.
 
 ## Documentation
 

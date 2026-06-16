@@ -6,11 +6,11 @@ description: >
   configuration via the native service manager (systemd on Linux, SCM on Windows,
   launchd on macOS).
 
+publisher: cfgms
+
 # Supported execution environments
 executors:
   - steward  # Local service management on steward systems
-
-dependencies: []
 
 requirements:
   os: [windows, linux, darwin]

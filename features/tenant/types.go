@@ -23,7 +23,8 @@ const (
 
 // TenantRequest represents a request to create or update a tenant
 type TenantRequest struct {
-	Name        string            `json:"name"`
+	ID          string            `json:"id,omitempty"`
+	Name        string            `json:"name,omitempty"`
 	Description string            `json:"description,omitempty"`
 	ParentID    string            `json:"parent_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`

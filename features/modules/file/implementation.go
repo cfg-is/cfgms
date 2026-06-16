@@ -16,12 +16,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
-// fileModule implements the Module interface for file management
+// fileModule implements the Module interface for file, directory, and symlink management.
 type fileModule struct {
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
 	// configuredBasePath is populated by Set() from the operator's AllowedBasePath YAML field.
-	// It has no default — Get() returns ErrAllowedBasePathRequired until Set() is called.
+	// It has no default — Get() returns ErrAllowedBasePathRequired until Set() or Configure() is called.
 	configuredBasePath string
 }
 
@@ -47,10 +47,12 @@ func (m *fileModule) Configure(config modules.ConfigState) error {
 	return nil
 }
 
-// Get returns the current configuration of the file.
+// Get returns the current state of the resource at resourceID.
 //
-// If the file does not exist, returns a FileConfig with State: "absent".
-// This allows the execution engine to detect that the file needs to be created.
+// The returned FileConfig reflects the on-disk type:
+//   - Regular file → Type "file" with content, permissions, ownership
+//   - Directory    → Type "directory" with permissions, ownership
+//   - Absent       → State "absent"
 func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if resourceID == "" {
 		return nil, modules.ErrInvalidResourceID
@@ -69,32 +71,43 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 	info, err := os.Stat(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File doesn't exist - return state: absent
 			return &FileConfig{
-				State: "absent",
+				State:           "absent",
+				AllowedBasePath: m.configuredBasePath,
 			}, nil
 		}
 		return nil, err
 	}
 
+	if info.IsDir() {
+		return m.getDirectory(cleanPath, resourceID)
+	}
+	return m.getFile(cleanPath, resourceID)
+}
+
+func (m *fileModule) getFile(cleanPath, resourceID string) (modules.ConfigState, error) {
 	content, err := security.SecureReadFile(m.configuredBasePath, resourceID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get owner and group (cross-platform)
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+
 	owner, group, err := getFileOwnership(info)
 	if err != nil {
 		return nil, err
 	}
 
-	// Read Windows ACL; nil on non-Windows platforms.
 	aclData, err := getFileACL(cleanPath)
 	if err != nil {
 		return nil, err
 	}
 
-	config := &FileConfig{
+	return &FileConfig{
+		Type:            "file",
 		State:           "present",
 		Content:         string(content),
 		Permissions:     getFilePermissions(info),
@@ -102,67 +115,52 @@ func (m *fileModule) Get(ctx context.Context, resourceID string) (modules.Config
 		Group:           group,
 		AllowedBasePath: m.configuredBasePath,
 		WindowsACL:      aclData,
-	}
-
-	return config, nil
+	}, nil
 }
 
-// Set updates the file content and attributes
-func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
-	// Get effective logger (injected or fallback)
-	logger := m.GetEffectiveLogger(logging.ForModule("file"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+func (m *fileModule) getDirectory(cleanPath, resourceID string) (modules.ConfigState, error) {
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return nil, err
+	}
 
-	logger.InfoCtx(ctx, "Starting file configuration",
-		"operation", "file_set",
-		"resource_id", resourceID,
-		"tenant_id", tenantID,
-		"resource_type", "file")
+	perms := getFilePermissions(info)
+
+	ownerName, groupName, err := getFileOwnership(info)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get directory ownership: %w", err)
+	}
+
+	aclData, err := getFileACL(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("getDirectoryACL: %w", err)
+	}
+
+	return &FileConfig{
+		Type:            "directory",
+		State:           "present",
+		Path:            resourceID,
+		Permissions:     perms,
+		Owner:           ownerName,
+		Group:           groupName,
+		AllowedBasePath: m.configuredBasePath,
+		WindowsACL:      aclData,
+	}, nil
+}
+
+// Set creates or updates the resource described by config at resourceID.
+// Dispatches to the file, directory, or symlink implementation based on config.Type.
+func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if resourceID == "" {
 		return modules.ErrInvalidResourceID
 	}
-
 	if config == nil {
 		return modules.ErrInvalidInput
 	}
 
-	// Convert ConfigState to FileConfig
 	configMap := config.AsMap()
-	fileConfig := &FileConfig{}
+	fileConfig := extractFileConfig(configMap)
 
-	if state, ok := configMap["state"].(string); ok {
-		fileConfig.State = state
-	}
-	if content, ok := configMap["content"].(string); ok {
-		fileConfig.Content = content
-	}
-	// Support both "permissions" and "mode" field names for flexibility
-	if perms, ok := configMap["permissions"].(int); ok {
-		fileConfig.Permissions = perms
-	} else if mode, ok := configMap["mode"].(string); ok {
-		// Parse mode as octal string (e.g., "0644")
-		var modeInt int
-		_, err := fmt.Sscanf(mode, "%o", &modeInt)
-		if err == nil {
-			fileConfig.Permissions = modeInt
-		}
-	} else if mode, ok := configMap["mode"].(int); ok {
-		fileConfig.Permissions = mode
-	}
-	if owner, ok := configMap["owner"].(string); ok {
-		fileConfig.Owner = owner
-	}
-	if group, ok := configMap["group"].(string); ok {
-		fileConfig.Group = group
-	}
-	if basePath, ok := configMap["allowed_base_path"].(string); ok {
-		fileConfig.AllowedBasePath = basePath
-	}
-	if aclData, ok := configMap["windows_acl"].(*modules.WindowsACL); ok {
-		fileConfig.WindowsACL = aclData
-	}
-
-	// AllowedBasePath must be validated before any OS call, including os.Remove in the absent branch.
 	if fileConfig.AllowedBasePath == "" || !filepath.IsAbs(fileConfig.AllowedBasePath) {
 		return ErrAllowedBasePathRequired
 	}
@@ -173,12 +171,76 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 	}
 	m.configuredBasePath = fileConfig.AllowedBasePath
 
-	// Handle state: absent - delete the file
+	switch fileConfig.resolvedType() {
+	case "symlink":
+		return modules.ErrNotImplemented
+	case "directory":
+		return m.setDirectory(ctx, resourceID, cleanPath, fileConfig)
+	default: // "file"
+		return m.setFile(ctx, resourceID, cleanPath, fileConfig)
+	}
+}
+
+// extractFileConfig builds a FileConfig from the config map produced by AsMap().
+func extractFileConfig(configMap map[string]interface{}) *FileConfig {
+	fc := &FileConfig{}
+
+	if v, ok := configMap["type"].(string); ok {
+		fc.Type = v
+	}
+	if v, ok := configMap["state"].(string); ok {
+		fc.State = v
+	}
+	if v, ok := configMap["content"].(string); ok {
+		fc.Content = v
+	}
+	if v, ok := configMap["permissions"].(int); ok {
+		fc.Permissions = v
+	} else if v, ok := configMap["mode"].(string); ok {
+		var modeInt int
+		if _, err := fmt.Sscanf(v, "%o", &modeInt); err == nil {
+			fc.Permissions = modeInt
+		}
+	} else if v, ok := configMap["mode"].(int); ok {
+		fc.Permissions = v
+	}
+	if v, ok := configMap["owner"].(string); ok {
+		fc.Owner = v
+	}
+	if v, ok := configMap["group"].(string); ok {
+		fc.Group = v
+	}
+	if v, ok := configMap["allowed_base_path"].(string); ok {
+		fc.AllowedBasePath = v
+	}
+	if v, ok := configMap["windows_acl"].(*modules.WindowsACL); ok {
+		fc.WindowsACL = v
+	}
+	if v, ok := configMap["path"].(string); ok {
+		fc.Path = v
+	}
+	if v, ok := configMap["recursive"].(bool); ok {
+		fc.Recursive = v
+	}
+
+	return fc
+}
+
+// setFile writes or removes a regular file.
+func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, fileConfig *FileConfig) error {
+	logger := m.GetEffectiveLogger(logging.ForModule("file"))
+	tenantID := logging.ExtractTenantFromContext(ctx)
+
+	logger.InfoCtx(ctx, "Starting file configuration",
+		"operation", "file_set",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "file")
+
 	if fileConfig.State == "absent" {
 		// #nosec G304 -- path validated by security.ValidateAndCleanPath above
 		if err := os.Remove(cleanPath); err != nil {
 			if os.IsNotExist(err) {
-				// File already doesn't exist - desired state achieved
 				logger.InfoCtx(ctx, "File already absent",
 					"operation", "file_set",
 					"resource_id", resourceID,
@@ -199,18 +261,26 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		return nil
 	}
 
-	// Platform-specific permissions handling
-	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
-		return fmt.Errorf("unix-style permissions are not supported on this platform (NTFS uses ACLs); remove the permissions field from your configuration")
+	// Reject out-of-range values before any platform-specific handling so that
+	// invalid inputs (e.g. 9999) are caught on all platforms.
+	if fileConfig.Permissions != 0 && (fileConfig.Permissions < 0 || fileConfig.Permissions > 0777) {
+		return ErrInvalidPermissions
 	}
 
-	// Apply default permissions only when windows_acl is not set; avoids a false mutual-exclusion
-	// error in Validate() when the operator omits both fields.
+	// Unix permission bits are not enforced on NTFS. Reject them explicitly rather than
+	// silently dropping a security-relevant field — Windows targets use windows_acl.
+	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
+		logger.ErrorCtx(ctx, "unix-style permissions are not supported on this platform",
+			"operation", "file_set",
+			"resource_id", resourceID,
+			"error_code", "PERMISSIONS_NOT_SUPPORTED")
+		return ErrPermissionsNotSupportedOnPlatform
+	}
+
 	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {
 		fileConfig.Permissions = int(defaultFileMode())
 	}
 
-	// Validate configuration for present state
 	if err := fileConfig.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "File configuration validation failed",
 			"operation", "file_set",
@@ -219,71 +289,14 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 			"error_details", err.Error())
 		return err
 	}
-
-	// Write file with content
-	// Validate permissions are within os.FileMode range
-	if fileConfig.Permissions < 0 || fileConfig.Permissions > 0777 {
-		return modules.ErrInvalidInput
-	}
 	if err := security.SecureWriteFileWithPerms(fileConfig.AllowedBasePath, resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
 	}
 
-	// Set owner and group if specified
-	if fileConfig.Owner != "" || fileConfig.Group != "" {
-		switch runtime.GOOS {
-		case "linux", "darwin":
-			// Get UID and GID for the specified owner and group
-			var uid, gid = -1, -1
-			if fileConfig.Owner != "" {
-				userInfo, err := user.Lookup(fileConfig.Owner)
-				if err != nil {
-					return err
-				}
-				parsedUID, err := strconv.Atoi(userInfo.Uid)
-				if err != nil {
-					return fmt.Errorf("failed to parse UID %q: %w", userInfo.Uid, err)
-				}
-				uid = parsedUID
-			}
-			if fileConfig.Group != "" {
-				groupInfo, err := user.LookupGroup(fileConfig.Group)
-				if err != nil {
-					return err
-				}
-				parsedGID, err := strconv.Atoi(groupInfo.Gid)
-				if err != nil {
-					return fmt.Errorf("failed to parse GID %q: %w", groupInfo.Gid, err)
-				}
-				gid = parsedGID
-			}
-
-			// Change owner and group
-			// #nosec G304 -- path validated by security.ValidateAndCleanPath above
-			if err := os.Chown(cleanPath, uid, gid); err != nil {
-				return err
-			}
-		case "windows":
-			// Windows doesn't support chown in the same way as Unix
-			// We'll just verify the owner exists
-			if fileConfig.Owner != "" {
-				_, err := user.Lookup(fileConfig.Owner)
-				if err != nil {
-					return err
-				}
-			}
-		default:
-			// Unsupported platform
-			logger.ErrorCtx(ctx, "Unsupported platform for file ownership",
-				"operation", "file_set",
-				"resource_id", resourceID,
-				"error_code", "UNSUPPORTED_PLATFORM",
-				"platform", runtime.GOOS)
-			return modules.ErrUnsupportedPlatform
-		}
+	if err := setOwnership(ctx, cleanPath, fileConfig.Owner, fileConfig.Group, logger, resourceID); err != nil {
+		return err
 	}
 
-	// Apply Windows ACL if specified (platform stub returns nil on non-Windows).
 	if fileConfig.WindowsACL != nil {
 		if err := setFileACL(cleanPath, fileConfig.WindowsACL); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
@@ -303,4 +316,175 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 		"status", "completed")
 
 	return nil
+}
+
+// setDirectory creates or updates a directory.
+func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath string, fileConfig *FileConfig) error {
+	logger := m.GetEffectiveLogger(logging.ForModule("file"))
+	tenantID := logging.ExtractTenantFromContext(ctx)
+
+	logger.InfoCtx(ctx, "Starting directory configuration",
+		"operation", "directory_set",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "directory")
+
+	if fileConfig.State == "absent" {
+		return fmt.Errorf("directory deletion is not supported: %w", modules.ErrNotImplemented)
+	}
+
+	// Reject out-of-range values before any platform-specific handling.
+	if fileConfig.Permissions != 0 && (fileConfig.Permissions < 0 || fileConfig.Permissions > 0777) {
+		return ErrInvalidPermissions
+	}
+
+	// Unix permission bits are not enforced on NTFS. Reject them explicitly rather than
+	// silently dropping a security-relevant field — Windows targets use windows_acl.
+	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
+		logger.ErrorCtx(ctx, "unix-style permissions are not supported on this platform",
+			"operation", "directory_set",
+			"resource_id", resourceID,
+			"error_code", "PERMISSIONS_NOT_SUPPORTED")
+		return ErrPermissionsNotSupportedOnPlatform
+	}
+
+	if fileConfig.Permissions == 0 && fileConfig.WindowsACL == nil {
+		fileConfig.Permissions = int(defaultDirectoryMode())
+	}
+
+	if err := fileConfig.Validate(); err != nil {
+		logger.ErrorCtx(ctx, "Directory configuration validation failed",
+			"operation", "directory_set",
+			"resource_id", resourceID,
+			"error_code", "CONFIG_VALIDATION_FAILED",
+			"error_details", err.Error())
+		return err
+	}
+	fileMode := os.FileMode(fileConfig.Permissions)
+
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat path: %w", err)
+		}
+		if fileConfig.Recursive {
+			if err := os.MkdirAll(cleanPath, fileMode); err != nil {
+				return fmt.Errorf("failed to create directory: %w", err)
+			}
+		} else {
+			parent := filepath.Dir(cleanPath)
+			if _, err := os.Stat(parent); err != nil {
+				if os.IsNotExist(err) {
+					return ErrRecursiveRequired
+				}
+				return fmt.Errorf("failed to stat parent directory: %w", err)
+			}
+			if err := os.Mkdir(cleanPath, fileMode); err != nil {
+				return fmt.Errorf("failed to create directory: %w", err)
+			}
+		}
+	} else if !info.IsDir() {
+		return ErrNotADirectory
+	}
+
+	if platformSupportsPermissions() {
+		if err := os.Chmod(cleanPath, fileMode); err != nil {
+			return fmt.Errorf("failed to set permissions: %w", err)
+		}
+	}
+
+	if err := setOwnership(ctx, cleanPath, fileConfig.Owner, fileConfig.Group, logger, resourceID); err != nil {
+		return err
+	}
+
+	if fileConfig.WindowsACL != nil {
+		if err := setFileACL(cleanPath, fileConfig.WindowsACL); err != nil {
+			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
+				"operation", "directory_set",
+				"resource_id", resourceID,
+				"error_code", "WINDOWS_ACL_FAILED",
+				"error_details", err.Error())
+			return fmt.Errorf("setDirectoryACL: %w", err)
+		}
+	}
+
+	logger.InfoCtx(ctx, "Directory configuration completed successfully",
+		"operation", "directory_set",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "directory",
+		"path", cleanPath,
+		"permissions", fmt.Sprintf("0%o", fileConfig.Permissions),
+		"status", "completed")
+
+	return nil
+}
+
+// setOwnership applies the owner and group to cleanPath. No-op when both are empty.
+func setOwnership(ctx context.Context, cleanPath, owner, group string, logger logging.Logger, resourceID string) error {
+	if owner == "" && group == "" {
+		return nil
+	}
+
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		uid, gid := -1, -1
+		if owner != "" {
+			u, err := user.Lookup(owner)
+			if err != nil {
+				return ErrInvalidOwner
+			}
+			parsedUID, err := strconv.Atoi(u.Uid)
+			if err != nil {
+				return fmt.Errorf("failed to parse UID for owner %q: %w", owner, err)
+			}
+			uid = parsedUID
+		}
+		if group != "" {
+			g, err := user.LookupGroup(group)
+			if err != nil {
+				return ErrInvalidGroup
+			}
+			parsedGID, err := strconv.Atoi(g.Gid)
+			if err != nil {
+				return fmt.Errorf("failed to parse GID for group %q: %w", group, err)
+			}
+			gid = parsedGID
+		}
+		// #nosec G304 -- cleanPath validated by security.ValidateAndCleanPath before this call
+		if err := os.Chown(cleanPath, uid, gid); err != nil {
+			logger.ErrorCtx(ctx, "Failed to set ownership",
+				"resource_id", resourceID,
+				"error_code", "OWNERSHIP_FAILED",
+				"path", cleanPath,
+				"owner", owner,
+				"group", group,
+				"error_details", err.Error())
+			return fmt.Errorf("failed to set ownership: %w", err)
+		}
+
+	case "windows":
+		if owner != "" {
+			if _, err := user.Lookup(owner); err != nil {
+				return ErrInvalidOwner
+			}
+		}
+
+	default:
+		logger.ErrorCtx(ctx, "Unsupported platform for ownership",
+			"resource_id", resourceID,
+			"error_code", "UNSUPPORTED_PLATFORM",
+			"platform", runtime.GOOS)
+		return modules.ErrUnsupportedPlatform
+	}
+
+	return nil
+}
+
+// defaultDirectoryMode returns the default directory mode for this platform.
+func defaultDirectoryMode() os.FileMode {
+	if platformSupportsPermissions() {
+		return 0755
+	}
+	return 0777
 }

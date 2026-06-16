@@ -265,19 +265,6 @@ func (c *Controller) ListModules() []string {
 	return modules
 }
 
-// GetModule returns a module by name (for ModuleRegistry interface)
-func (c *Controller) GetModule(name string) (interface{}, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	module, exists := c.modules[name]
-	if !exists {
-		return nil, ErrModuleNotFound
-	}
-
-	return module, nil
-}
-
 // GetModuleTyped returns a module by name with proper typing
 func (c *Controller) GetModuleTyped(name string) (Module, error) {
 	c.mu.RLock()
@@ -288,17 +275,5 @@ func (c *Controller) GetModuleTyped(name string) (Module, error) {
 		return nil, ErrModuleNotFound
 	}
 
-	return module, nil
-}
-
-// ExecuteModuleOperation executes an operation on a module
-func (c *Controller) ExecuteModuleOperation(ctx context.Context, moduleName, operation string, params map[string]interface{}) (interface{}, error) {
-	module, err := c.GetModule(moduleName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Design decision: module interface is injected at controller startup; this comment block describes the expected call site pattern, not a missing implementation.
-	c.logger.Info("Executing module operation", "module", moduleName, "operation", operation)
 	return module, nil
 }

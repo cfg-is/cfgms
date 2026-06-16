@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -202,7 +204,28 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, apiStewardInfo)
 }
 
+// dnaAttributeDenylist contains glob-style patterns (case-insensitive substring match)
+// for attribute keys that must never be returned via ?attribute=<key>. 404 is returned
+// rather than 403 to avoid disclosing whether a sensitive attribute exists.
+var dnaAttributeDenylist = []string{"token", "secret", "password", "credential", "api_key"}
+
+// dnaAttributeMaxLen is the maximum accepted length for the ?attribute= query parameter.
+const dnaAttributeMaxLen = 128
+
+// isDNAAttributeDenylisted reports whether key matches any denylist pattern (case-insensitive).
+// Returns the matched pattern for logging, or "" when not matched.
+func isDNAAttributeDenylisted(key string) string {
+	lower := strings.ToLower(key)
+	for _, pattern := range dnaAttributeDenylist {
+		if strings.Contains(lower, pattern) {
+			return pattern
+		}
+	}
+	return ""
+}
+
 // handleGetStewardDNA handles GET /api/v1/stewards/{id}/dna
+// Optional query parameter: ?attribute=<key> returns a single attribute value.
 func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -212,6 +235,28 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 		return
+	}
+
+	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
+	// principals have TenantID="" meaning no scope restriction.
+	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		info, ok := s.controllerService.GetStewardInfo(stewardID)
+		stewardTenant := ""
+		if ok {
+			stewardTenant = info.TenantID
+		}
+		// Allow access when caller's tenant equals or is a hierarchical ancestor of the
+		// steward's tenant (e.g. "root/msp-a" can read "root/msp-a/client-1" stewards).
+		// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
+		sameTenant := stewardTenant == callerTenant
+		ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+		if !ok || (!sameTenant && !ancestorTenant) {
+			// 404 instead of 403 to avoid disclosing steward existence across tenants.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
 	}
 
 	// Create gRPC request
@@ -231,6 +276,28 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	dnaInfo := DNAFromProto(dnaResp)
 	if dnaInfo == nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "DNA not found for steward", "DNA_NOT_FOUND")
+		return
+	}
+
+	// Handle optional ?attribute=<key> filter.
+	attrKey := r.URL.Query().Get("attribute")
+	if attrKey != "" {
+		if len(attrKey) > dnaAttributeMaxLen {
+			s.writeErrorResponse(w, http.StatusBadRequest, "attribute key too long", "ATTRIBUTE_KEY_TOO_LONG")
+			return
+		}
+		if matched := isDNAAttributeDenylisted(attrKey); matched != "" {
+			s.logger.Info("attribute key matches denylist; returning 404", "matched_pattern", matched)
+			s.writeErrorResponse(w, http.StatusNotFound, "attribute not found", "DNA_ATTRIBUTE_REDACTED")
+			return
+		}
+		val, ok := dnaInfo.Attributes[attrKey]
+		if !ok {
+			s.logger.Info("DNA attribute not found", "steward_id", stewardIDForLog, "attribute", logging.SanitizeLogValue(attrKey))
+			s.writeErrorResponse(w, http.StatusNotFound, "attribute not found", "DNA_ATTRIBUTE_NOT_FOUND")
+			return
+		}
+		s.respondJSON(w, http.StatusOK, map[string]string{"value": val})
 		return
 	}
 
@@ -382,6 +449,37 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"tenant_id", tenantIDForLog,
 		"resource_count", len(config.Resources))
 
+	// Issue #1884: resolve required_modules: against the controller module cache
+	// before storing the configuration. When the module subsystem is wired, any
+	// declared module that is not cached + approved must block the deployment.
+	// Dependencies are nil-tolerant so deployments without the module subsystem
+	// (and tests that exercise unrelated paths) continue to function unchanged.
+	s.mu.RLock()
+	cacheLister := s.moduleCacheLister
+	bundleResolver := s.moduleBundleResolver
+	bundleApprover := s.moduleBundleApprover
+	trustStore := s.moduleTrustStore
+	s.mu.RUnlock()
+	if len(config.RequiredModules) > 0 &&
+		cacheLister != nil && bundleResolver != nil &&
+		bundleApprover != nil && trustStore != nil {
+		if err := resolution.ResolveCfgRequiredModules(
+			r.Context(),
+			config.RequiredModules,
+			cacheLister,
+			bundleResolver,
+			bundleApprover,
+			trustStore,
+		); err != nil {
+			s.logger.Warn("cfg deployment blocked by required_modules resolution",
+				"steward_id", stewardIDForLog,
+				"tenant_id", tenantIDForLog,
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), "REQUIRED_MODULE_NOT_APPROVED")
+			return
+		}
+	}
+
 	// Store configuration using V2 durable config service
 	if err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, &config); err != nil {
 		s.logger.Error("Failed to store configuration",
@@ -516,6 +614,148 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	s.logger.Info("Configuration deleted", "steward_id", stewardIDForLog)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetStewardModules handles GET /api/v1/stewards/{id}/modules.
+// Returns a 501 placeholder when the steward has no modules.loaded DNA attribute.
+func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	stewardInfo, exists := s.controllerService.GetStewardInfo(stewardID)
+	if !exists {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	// Cross-tenant check: the caller's tenant must be a prefix of or equal to the
+	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
+	// mTLS admin principals have empty TenantID (global access), so check is skipped for them.
+	adminPrincipal := s.extractAdminPrincipal(r)
+	var callerTenantID string
+	if adminPrincipal != nil {
+		callerTenantID = adminPrincipal.TenantID
+	} else {
+		callerTenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
+	}
+	if callerTenantID != "" {
+		tenantMatch := stewardInfo.TenantID == callerTenantID ||
+			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
+		if !tenantMatch {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	// Check DNA for modules.loaded attribute.
+	if stewardInfo.DNA == nil || stewardInfo.DNA.Attributes == nil {
+		s.logger.Info("Modules unavailable: steward DNA has no attributes", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotImplemented,
+			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"MODULES_UNAVAILABLE")
+		return
+	}
+
+	modulesRaw, ok := stewardInfo.DNA.Attributes["modules.loaded"]
+	if !ok {
+		s.logger.Info("Modules unavailable: modules.loaded attribute absent", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotImplemented,
+			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
+			"MODULES_UNAVAILABLE")
+		return
+	}
+
+	type moduleEntry struct {
+		Name string `json:"name"`
+	}
+	parts := strings.Split(modulesRaw, ",")
+	modules := make([]moduleEntry, 0, len(parts))
+	for _, name := range parts {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			modules = append(modules, moduleEntry{Name: name})
+		}
+	}
+
+	s.logger.Info("Fetched steward loaded modules", "steward_id", stewardIDForLog, "count", len(modules))
+	s.writeSuccessResponse(w, map[string]interface{}{"modules": modules})
+}
+
+// handleGetStewardLogs handles GET /api/v1/stewards/{id}/logs.
+// Validates the steward exists and the query parameters, then returns 501 until a
+// log-pull transport is wired. The follow-up story must implement per-tenant ACL
+// gating, secret redaction via logging.SanitizeLogValue, and documented pagination caps.
+func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if stewardID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	q := r.URL.Query()
+
+	// Parse and validate tail (default 100, max 1000).
+	tail := 100
+	if tailStr := q.Get("tail"); tailStr != "" {
+		v, err := strconv.Atoi(tailStr)
+		if err != nil || v < 1 || v > 1000 {
+			s.writeErrorResponse(w, http.StatusBadRequest, "tail must be an integer between 1 and 1000", "INVALID_PARAMETER")
+			return
+		}
+		tail = v
+	}
+
+	// Validate since is a parseable Go duration.
+	since := q.Get("since")
+	if since != "" {
+		if _, err := time.ParseDuration(since); err != nil {
+			s.writeErrorResponse(w, http.StatusBadRequest, "since must be a valid Go duration (e.g. 1h, 30m)", "INVALID_PARAMETER")
+			return
+		}
+	}
+
+	// Validate level is one of the four allowed values.
+	level := q.Get("level")
+	if level != "" && level != "DEBUG" && level != "INFO" && level != "WARN" && level != "ERROR" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "level must be DEBUG, INFO, WARN, or ERROR", "INVALID_PARAMETER")
+		return
+	}
+
+	// Cap module at 128 characters.
+	module := q.Get("module")
+	if len(module) > 128 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "module parameter exceeds maximum length of 128 characters", "INVALID_PARAMETER")
+		return
+	}
+
+	s.logger.Debug("Steward log pull request",
+		"steward_id", stewardIDForLog,
+		"tail", tail,
+		"since", logging.SanitizeLogValue(since),
+		"level", logging.SanitizeLogValue(level),
+		"module", logging.SanitizeLogValue(module),
+	)
+
+	_, exists := s.controllerService.GetStewardInfo(stewardID)
+	if !exists {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	s.respondJSON(w, http.StatusNotImplemented, map[string]string{
+		"code":    "LOGS_UNAVAILABLE",
+		"message": "steward log pull not yet supported; collect logs directly from the steward host",
+	})
 }
 
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective

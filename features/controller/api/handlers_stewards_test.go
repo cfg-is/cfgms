@@ -651,3 +651,498 @@ func TestHandleGetStewardConfig_InsufficientPermission(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// ---- handleGetStewardDNA attribute tests ----
+
+// registerTestStewardWithDNA adds a steward with the given DNA attributes and returns its ID.
+// The optional tenantID parameter overrides the default "test-tenant".
+func registerTestStewardWithDNA(t *testing.T, server *Server, attrs map[string]string, tenantID string) string {
+	t.Helper()
+	if tenantID == "" {
+		tenantID = "test-tenant"
+	}
+	req := &controller.RegisterRequest{
+		Version: "v1.0",
+		InitialDna: &common.DNA{
+			Id:         "dna-" + attrs["hostname"],
+			Attributes: attrs,
+		},
+	}
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	resp, err := server.controllerService.AcceptRegistration(ctx, req)
+	require.NoError(t, err)
+	return resp.StewardId
+}
+
+// TestHandleGetStewardDNA_Attribute verifies that the handler returns {"value":"<val>"}
+// when ?attribute=<key> is present, the key exists in the DNA, and the key is not denylisted.
+func TestHandleGetStewardDNA_Attribute(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-dna"})
+
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "attr-host", "os": "linux", "custom.key": "myvalue",
+	}, "test-tenant")
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna?attribute=custom.key", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "myvalue", resp["value"])
+}
+
+// TestHandleGetStewardDNA_AttributeNotFound verifies 404 with DNA_ATTRIBUTE_NOT_FOUND
+// when the key is not present in the DNA attributes.
+func TestHandleGetStewardDNA_AttributeNotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-dna"})
+
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "notfound-host", "os": "linux",
+	}, "test-tenant")
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna?attribute=nonexistent.key", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "DNA_ATTRIBUTE_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetStewardDNA_AttributeDenylistRedaction verifies that attribute keys matching
+// sensitive patterns (*token*, *secret*, *password*, *credential*, *api_key*) return HTTP 404
+// with code DNA_ATTRIBUTE_REDACTED, even when the key exists in the DNA.
+func TestHandleGetStewardDNA_AttributeDenylistRedaction(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-dna"})
+
+	// Register a steward with sensitive attributes present in DNA.
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname":        "denylist-host",
+		"os":              "linux",
+		"auth_token":      "supersecret",
+		"api_secret":      "topsecret",
+		"user_password":   "hunter2",
+		"user_credential": "cred123",
+		"service_api_key": "key456",
+	}, "test-tenant")
+
+	denylisted := []string{
+		"auth_token",      // matches *token*
+		"api_secret",      // matches *secret*
+		"user_password",   // matches *password*
+		"user_credential", // matches *credential*
+		"service_api_key", // matches *api_key*
+	}
+
+	for _, key := range denylisted {
+		t.Run(key, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna?attribute="+key, nil)
+			req.Header.Set("X-API-Key", apiKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusNotFound, rec.Code, "expected 404 for denylisted key %q", key)
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+			assert.Equal(t, "DNA_ATTRIBUTE_REDACTED", errResp.Error.Code,
+				"expected DNA_ATTRIBUTE_REDACTED for key %q", key)
+		})
+	}
+}
+
+// TestHandleGetStewardDNA_RejectsCrossTenant verifies that an API key scoped to tenant-a
+// cannot read DNA for a steward registered in tenant-b. The response must be HTTP 404
+// (not 403) to avoid disclosing steward existence across tenants.
+func TestHandleGetStewardDNA_RejectsCrossTenant(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Steward registered in tenant-b.
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "cross-tenant-host", "os": "linux",
+	}, "tenant-b")
+
+	// API key scoped to tenant-a (cannot read tenant-b stewards).
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-dna"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant DNA read must return 404, not 403")
+}
+
+// TestHandleGetStewardDNA_RejectsPrefixCollision verifies that "tenant-a" cannot access
+// a steward in "tenant-abc" despite the raw string prefix matching. The "/" separator
+// boundary must be checked so "tenant-a" only grants access to "tenant-a" or "tenant-a/*".
+func TestHandleGetStewardDNA_RejectsPrefixCollision(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Steward in "tenant-abc" — must NOT be visible to "tenant-a" caller.
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "collision-host", "os": "linux",
+	}, "tenant-abc")
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-dna"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "prefix-collision tenant must return 404")
+}
+
+// TestHandleGetStewardDNA_InternalError verifies that a GetStewardDNA service error
+// returns HTTP 500 with code INTERNAL_ERROR. The handler is called directly (bypassing
+// auth middleware) with an empty TenantID so the cross-tenant guard is skipped, and
+// the steward ID does not exist in the service - causing GetStewardDNA to return an error.
+func TestHandleGetStewardDNA_InternalError(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Call handler directly: empty TenantID skips cross-tenant check; non-existent steward
+	// causes GetStewardDNA to return an error, exercising the INTERNAL_ERROR path.
+	req := httptest.NewRequest("GET", "/api/v1/stewards/ghost-steward/dna", nil)
+	req = withTenant(req, "")
+	req = withVars(req, map[string]string{"id": "ghost-steward"})
+	rec := httptest.NewRecorder()
+
+	server.handleGetStewardDNA(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+}
+
+// TestHandleGetStewardDNA_DNANotFound verifies HTTP 404 with code DNA_NOT_FOUND when
+// the steward is registered but its DNA field is nil. GetStewardInfo returns a pointer
+// to the live StewardInfo struct, so setting DNA = nil directly produces the condition.
+func TestHandleGetStewardDNA_DNANotFound(t *testing.T) {
+	server := setupTestServer(t)
+
+	require.NoError(t, server.controllerService.RegisterSteward("no-dna-steward", "test-tenant", "addr-1", "registered"))
+
+	// Null out the DNA via the pointer returned by GetStewardInfo so GetStewardDNA
+	// returns nil,nil — exercising the DNA_NOT_FOUND response path.
+	info, ok := server.controllerService.GetStewardInfo("no-dna-steward")
+	require.True(t, ok)
+	info.DNA = nil
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/no-dna-steward/dna", nil)
+	req = withTenant(req, "test-tenant")
+	req = withVars(req, map[string]string{"id": "no-dna-steward"})
+	rec := httptest.NewRecorder()
+
+	server.handleGetStewardDNA(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "DNA_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetStewardDNA_AttributeKeyTooLong verifies HTTP 400 with code
+// ATTRIBUTE_KEY_TOO_LONG when ?attribute= exceeds 128 characters.
+func TestHandleGetStewardDNA_AttributeKeyTooLong(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-dna"})
+
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "toolong-host", "os": "linux",
+	}, "test-tenant")
+
+	longKey := strings.Repeat("a", 129)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna?attribute="+longKey, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "ATTRIBUTE_KEY_TOO_LONG", errResp.Error.Code)
+}
+
+// ---- handleGetStewardModules tests (from develop) ----
+
+// TestHandleGetStewardModules_StewardNotFound verifies 404 for an unknown steward ID.
+func TestHandleGetStewardModules_StewardNotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetStewardModules_ReturnsNotImplemented verifies 501 + MODULES_UNAVAILABLE
+// for a known steward with no module DNA and a tenant-authorized admin.
+func TestHandleGetStewardModules_ReturnsNotImplemented(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "no-modules-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MODULES_UNAVAILABLE", errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "steward does not report loaded modules")
+}
+
+// TestHandleGetStewardModules_Returns200WithModules verifies that a steward with a
+// modules.loaded DNA attribute returns 200 with the parsed module list.
+func TestHandleGetStewardModules_Returns200WithModules(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "modules-host", "os": "linux",
+		"modules.loaded": "file, service, package",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Modules []struct {
+				Name string `json:"name"`
+			} `json:"modules"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Modules, 3)
+	assert.Equal(t, "file", resp.Data.Modules[0].Name)
+	assert.Equal(t, "service", resp.Data.Modules[1].Name)
+	assert.Equal(t, "package", resp.Data.Modules[2].Name)
+}
+
+// TestHandleGetStewardModules_InvalidStewardID verifies 400 for a malformed steward ID.
+// Dots and colons fail identifierRegex (^[a-zA-Z0-9_-]+$) and are caught by
+// the validation middleware, which returns VALIDATION_ERROR.
+func TestHandleGetStewardModules_InvalidStewardID(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/steward.invalid:id/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleGetStewardModules_InsufficientPermission verifies 403 when the caller
+// lacks steward:read-modules permission.
+func TestHandleGetStewardModules_InsufficientPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestHandleGetStewardModules_RejectsCrossTenant verifies HTTP 404 (not 403) when
+// the caller's tenant_path is NOT a prefix of the steward's tenant_path.
+func TestHandleGetStewardModules_RejectsCrossTenant(t *testing.T) {
+	server := setupTestServer(t)
+	// Caller is in "other-tenant"; the steward is in "test-tenant".
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-modules"}, "other-tenant", 5*time.Minute)
+
+	// Register a steward under "test-tenant" (the default for registerTestSteward).
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "cross-tenant-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// Must be 404, not 403, to avoid existence disclosure across tenant boundaries.
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// ---- handleGetStewardLogs tests (from develop) ----
+
+// TestHandleGetStewardLogs_ReturnsNotImplemented verifies that GET /api/v1/stewards/{id}/logs
+// returns 501 with LOGS_UNAVAILABLE error code for a valid steward ID.
+func TestHandleGetStewardLogs_ReturnsNotImplemented(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-test-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, "LOGS_UNAVAILABLE", body["code"])
+}
+
+// TestHandleGetStewardLogs_StewardNotFound verifies that GET /api/v1/stewards/{id}/logs
+// returns 404 when the steward ID is not found.
+func TestHandleGetStewardLogs_StewardNotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/nonexistent-steward/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleGetStewardLogs_InsufficientPermission verifies 403 when the caller
+// lacks steward:read-logs permission.
+func TestHandleGetStewardLogs_InsufficientPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/any-steward/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidTailParameter verifies 400 for out-of-range tail value.
+func TestHandleGetStewardLogs_InvalidTailParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?tail=9999", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidSinceParameter verifies 400 for non-parseable duration.
+func TestHandleGetStewardLogs_InvalidSinceParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?since=notaduration", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidLevelParameter verifies 400 for unknown log level.
+func TestHandleGetStewardLogs_InvalidLevelParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?level=TRACE", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleGetStewardLogs_InvalidModuleParameter verifies 400 for module name exceeding 128 chars.
+func TestHandleGetStewardLogs_InvalidModuleParameter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "logs-validation-host", "os": "linux",
+	})
+
+	longModule := strings.Repeat("x", 129)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?module="+longModule, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// TestHandleCreateAPIKey_AcceptsStewardReadLogs verifies that steward:read-logs is a
+// registered permission and can be granted via handleCreateAPIKey. Without this entry in
+// knownPermissions, operators cannot mint keys that reach the logs endpoint.
+func TestHandleCreateAPIKey_AcceptsStewardReadLogs(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Call handleCreateAPIKey directly with the steward:read-logs permission.
+	body := []byte(`{"name":"logs-key","permissions":["steward:read-logs"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/api-keys", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := req.Context()
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, "test-tenant")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleCreateAPIKey(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "steward:read-logs must be a known permission")
+}

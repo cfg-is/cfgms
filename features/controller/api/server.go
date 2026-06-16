@@ -4,7 +4,9 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
@@ -35,9 +38,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -45,54 +50,63 @@ import (
 
 // Server represents the REST API server component of the controller
 type Server struct {
-	mu                      sync.RWMutex
-	cfg                     *config.Config
-	logger                  logging.Logger
-	httpServer              *http.Server
-	router                  *mux.Router
-	controllerService       *service.ControllerService
-	configService           *service.ConfigurationServiceV2
-	certProvisioningService *service.CertificateProvisioningService
-	rbacService             *service.RBACService
-	certManager             *cert.Manager
-	tenantManager           *tenant.Manager
-	rbacManager             *rbac.Manager
-	systemMonitor           *monitoring.SystemMonitor
-	healthCollector         *health.Collector
-	haManager               *ha.Manager
-	apiKeys                 map[string]*APIKey                // In-memory cache for fast lookup
-	secretStore             secretsif.SecretStore             // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore  registration.Store                // Registration token store for steward registration
-	corsConfig              *CORSConfig                       // CORS configuration
-	signerCertSerial        string                            // Story #378: Serial of cert used for config signing
-	authDefense             *authdefense.AuthDefenseSystem    // Story #380: Three-tier auth defense
-	rollbackManager         rollback.RollbackManager          // Story #416: Rollback system
-	reportsHandler          *reportapi.Handler                // Story #416: Reports engine
-	workflowHandler         *WorkflowHandler                  // Story #414: Workflow engine REST API
-	approvalHook            RegistrationApprovalHook          // Issue #422: Registration approval hook
-	fleetQuery              fleet.FleetQuery                  // Issue #603: Single query path for device filtering
-	gitSyncWebhookHandler   http.Handler                      // Issue #666: git-sync webhook endpoint (optional)
-	auditManager            *audit.Manager                    // Issue #775: registration audit events
-	scriptTracker           script.ExecutionTracker           // Issue #708: durable execution audit records
-	scriptAuditLogger       *script.AuditLogger               // Issue #708: in-memory execution metrics
-	scriptMonitor           *script.ExecutionMonitor          // Issue #708: active execution tracking
-	scriptRepo              script.ScriptRepository           // Issue #1670: git-backed script library
-	privilegeStore          cfgconfig.ConfigStore             // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus        leaderStatus                      // Issue #1318: leader check for config push (nil = leader)
-	commandPublisher        *commands.Publisher               // Issue #1319: fan-out config push to active stewards
-	pushStore               business.PushStore                // Issue #1320: durable push-state persistence for HA failover
-	registry                registry.Registry                 // Issue #1323: active steward connection registry
-	mountPointValidator     MountPointValidator               // Issue #1396: config source connection test
-	configSourceSecretStore secretsif.SecretStore             // Issue #1396: secrets for config source validator
-	configSourceRateLimits  sync.Map                          // Issue #1396: per-tenant rate-limit counters
-	pendingStore            business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
-	ipTrustStore            business.IPTrustStore             // Issue #1698: operator IP-trust management
-	runManager              *controllerrun.Manager            // Issue #1673: run/job/execution model
-	runExecutionQueue       *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
-	trustedProxies          []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
-	stopCleanup             chan struct{}                     // signals startAPIKeyCleanup to exit
-	cleanupDone             chan struct{}                     // closed when cleanup goroutine exits
-	closeOnce               sync.Once                         // idempotent Close
+	mu                             sync.RWMutex
+	cfg                            *config.Config
+	logger                         logging.Logger
+	httpServer                     *http.Server
+	router                         *mux.Router
+	controllerService              *service.ControllerService
+	configService                  *service.ConfigurationServiceV2
+	certProvisioningService        *service.CertificateProvisioningService
+	rbacService                    *service.RBACService
+	certManager                    *cert.Manager
+	tenantManager                  *tenant.Manager
+	rbacManager                    *rbac.Manager
+	systemMonitor                  *monitoring.SystemMonitor
+	healthCollector                *health.Collector
+	haManager                      *ha.Manager
+	apiKeys                        map[string]*APIKey                // In-memory cache for fast lookup
+	secretStore                    secretsif.SecretStore             // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore         registration.Store                // Registration token store for steward registration
+	corsConfig                     *CORSConfig                       // CORS configuration
+	signerCertSerial               string                            // Story #378: Serial of cert used for config signing
+	authDefense                    *authdefense.AuthDefenseSystem    // Story #380: Three-tier auth defense
+	rollbackManager                rollback.RollbackManager          // Story #416: Rollback system
+	reportsHandler                 *reportapi.Handler                // Story #416: Reports engine
+	workflowHandler                *WorkflowHandler                  // Story #414: Workflow engine REST API
+	approvalHook                   RegistrationApprovalHook          // Issue #422: Registration approval hook
+	fleetQuery                     fleet.FleetQuery                  // Issue #603: Single query path for device filtering
+	gitSyncWebhookHandler          http.Handler                      // Issue #666: git-sync webhook endpoint (optional)
+	auditManager                   *audit.Manager                    // Issue #775: registration audit events
+	scriptTracker                  script.ExecutionTracker           // Issue #708: durable execution audit records
+	scriptAuditLogger              *script.AuditLogger               // Issue #708: in-memory execution metrics
+	scriptMonitor                  *script.ExecutionMonitor          // Issue #708: active execution tracking
+	scriptRepo                     script.ScriptRepository           // Issue #1670: git-backed script library
+	privilegeStore                 cfgconfig.ConfigStore             // Issue #1670: controller-side script privilege metadata
+	pushLeaderStatus               leaderStatus                      // Issue #1318: leader check for config push (nil = leader)
+	commandPublisher               *commands.Publisher               // Issue #1319: fan-out config push to active stewards
+	pushStore                      business.PushStore                // Issue #1320: durable push-state persistence for HA failover
+	registry                       registry.Registry                 // Issue #1323: active steward connection registry
+	mountPointValidator            MountPointValidator               // Issue #1396: config source connection test
+	configSourceSecretStore        secretsif.SecretStore             // Issue #1396: secrets for config source validator
+	configSourceRateLimits         sync.Map                          // Issue #1396: per-tenant rate-limit counters
+	pendingStore                   business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
+	ipTrustStore                   business.IPTrustStore             // Issue #1698: operator IP-trust management
+	runManager                     *controllerrun.Manager            // Issue #1673: run/job/execution model
+	runExecutionQueue              *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies                 []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	blobStore                      blob.BlobStore                    // Issue #1702: installer artifact storage
+	signingRotationService         *service.SigningRotationService   // Issue #1816: signing cert rotation endpoint
+	moduleCacheLister              resolution.CacheLister            // Issue #1884: controller module cache for required_modules resolution
+	moduleBundleResolver           resolution.BundleResolver         // Issue #1884: git source resolver for uncached modules
+	moduleBundleApprover           resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
+	moduleTrustStore               trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
+	stewardBinaryTrustStore        trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
+	testAutoApproveStewardBinaries bool                              // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
+	upgradeStore                   business.UpgradeStore             // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
+	stopCleanup                    chan struct{}                     // signals startAPIKeyCleanup to exit
+	cleanupDone                    chan struct{}                     // closed when cleanup goroutine exits
+	closeOnce                      sync.Once                         // idempotent Close
 }
 
 // APIKey represents an API key for external authentication
@@ -138,6 +152,7 @@ func New(
 	auditManager *audit.Manager, // Issue #775: registration audit events
 	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
 	pushStore business.PushStore, // Issue #1320: durable push-state persistence for HA failover
+	blobStore blob.BlobStore, // Issue #1702: installer artifact storage
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -186,6 +201,7 @@ func New(
 		auditManager:            auditManager,             // Issue #775: registration audit events
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
+		blobStore:               blobStore,                // Issue #1702: installer artifact storage
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -228,6 +244,46 @@ func New(
 					Permissions: []string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
 					TenantID:    "default",
 				}
+			}
+		}
+
+		// Issue #1709: installer key uses a separate block (not the EAST/CENTRAL/WEST loop)
+		// because it requires different permissions and must upload under the "root" tenant
+		// so the public download endpoint (which always looks up tenant "root") can find it.
+		if keyVal := os.Getenv("CFGMS_API_KEY_INSTALLER"); keyVal != "" {
+			server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+				Key:         keyVal,
+				Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
+				TenantID:    "root",
+			}
+		}
+
+		// Issue #1948: upgrade test key — publishes + dispatches under the fleet-child-a
+		// tenant so E2E upgrade tests target real fleet stewards without requiring a
+		// manual API key creation step in every test run.
+		if keyVal := os.Getenv("CFGMS_API_KEY_UPGRADE_TEST"); keyVal != "" {
+			server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+				Key:         keyVal,
+				Permissions: []string{"installer:publish:steward", "installer:dispatch:steward", "installer:read"},
+				TenantID:    "fleet-root/fleet-child-a",
+			}
+		}
+
+		// Issue #1948: override the steward binary trust store with a test Ed25519 key,
+		// and enable auto-approval so published binaries can be dispatched immediately.
+		// Both are only active when CFGMS_SEED_TEST_API_KEYS=1 — never in production.
+		if pubKeyBase64 := os.Getenv("CFGMS_TEST_STEWARD_PUBLISHER_KEY"); pubKeyBase64 != "" {
+			pubKeyBytes, decErr := base64.StdEncoding.DecodeString(pubKeyBase64)
+			if decErr == nil && len(pubKeyBytes) == ed25519.PublicKeySize {
+				testTrust := trust.NewInMemoryTrustStore()
+				_ = testTrust.AddPublisher(trust.PublisherIdentity{
+					Name:      "cfgms",
+					PublicKey: pubKeyBytes,
+					Algorithm: "ed25519",
+				})
+				server.stewardBinaryTrustStore = testTrust
+				server.testAutoApproveStewardBinaries = true
+				logger.Info("Test mode: steward binary trust store overridden with test key; auto-approve enabled (Issue #1948)")
 			}
 		}
 	}
@@ -316,8 +372,12 @@ func (s *Server) setupRouter() {
 	api.Use(s.authenticationMiddleware)
 	api.Use(s.validationMiddleware)
 
-	// Health check (no auth required)
+	// Health check (no auth required) — liveness / object-presence.
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
+
+	// Readiness probe (no auth required) — real-state: round-trips durable
+	// storage. Used by the blue/green cutover smoketest (Issue #2012).
+	s.router.HandleFunc("/api/v1/ready", s.handleReady).Methods("GET", "OPTIONS")
 
 	// Steward registration (no auth required - uses registration token)
 	s.router.HandleFunc("/api/v1/register", s.handleRegister).Methods("POST", "OPTIONS")
@@ -335,6 +395,7 @@ func (s *Server) setupRouter() {
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
 	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
+	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
 
 	// Configuration management endpoints
@@ -376,6 +437,7 @@ func (s *Server) setupRouter() {
 	certs := api.PathPrefix("/certificates").Subrouter()
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
 	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
+	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
 
 	// RBAC management endpoints
 	rbac := api.PathPrefix("/rbac").Subrouter()
@@ -442,14 +504,54 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
 	stewards.Handle("/{id}/compliance/report", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardComplianceReport))).Methods("GET")
 
+	// Module inventory endpoint (Issue #1949)
+	stewards.Handle("/{id}/modules", s.requirePermission("steward", "read-modules")(http.HandlerFunc(s.handleGetStewardModules))).Methods("GET")
+
 	// System-wide compliance endpoints
 	compliance := api.PathPrefix("/compliance").Subrouter()
 	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
 
-	// Tenant config-source management endpoints (Issue #1396)
+	// Tenant management endpoints (Issue #1396, Issue #1848)
 	tenants := api.PathPrefix("/tenants").Subrouter()
+	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
+	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+
+	// Installer artifact management endpoints (Issue #1702).
+	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
+	installer := api.PathPrefix("/installer/artifacts").Subrouter()
+	installer.Handle("", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleListInstallerArtifacts))).Methods("GET")
+	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "upload")(http.HandlerFunc(s.handleUploadInstallerArtifact))).Methods("PUT")
+	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
+	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
+
+	// Steward binary publish/get endpoints (Issue #1944).
+	// Distinct from the installer artifact namespace; blobs live under "steward-binaries".
+	stewardBinaries := api.PathPrefix("/installer/steward-binaries").Subrouter()
+	stewardBinaries.Handle("/{version}/{platform}/{arch}",
+		s.requirePermission("installer", "publish:steward")(http.HandlerFunc(s.handlePublishStewardBinary))).Methods("POST")
+	stewardBinaries.Handle("/{version}/{platform}/{arch}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetStewardBinary))).Methods("GET")
+
+	// Steward upgrade dispatch endpoints (Issue #1945).
+	// Always registered — handlers return 503 when upgradeStore is nil (nil-safe by design).
+	stewardUpgrade := api.PathPrefix("/stewards/upgrade").Subrouter()
+	stewardUpgrade.Handle("",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleDispatchUpgrade))).Methods("POST")
+	stewardUpgrade.Handle("/{upgrade_id}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleUpgradeStatus))).Methods("GET")
+	stewardUpgrade.Handle("/{upgrade_id}/rollback",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleUpgradeRollback))).Methods("POST")
+
+	// Installer package download — public, no auth required (Issue #1704).
+	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
+	s.router.HandleFunc("/api/v1/installer/download/{platform}/{arch}", s.handleDownloadInstallPackage).Methods("GET")
+
+	// Steward binary public download — no auth required (Issue #1948).
+	// The binary's Ed25519 signature authenticates content at the steward side.
+	// Steward mTLS certs lack the admin marker required by the authenticated GET endpoint.
+	s.router.HandleFunc("/api/v1/public/steward-binaries/{version}/{platform}/{arch}", s.handleGetStewardBinaryPublic).Methods("GET")
 
 	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
 	// run manager is not wired (transport-disabled deployments).
@@ -471,8 +573,28 @@ func (s *Server) setupRouter() {
 
 	// Rollback management endpoints (Story #416)
 	if s.rollbackManager != nil {
-		rollbackHandler := NewRollbackHandler(s.rollbackManager)
+		// Read the principal from the request context (set by authenticationMiddleware)
+		// so both mTLS admin principals and scoped API-key principals are evaluated.
+		rollbackPrincipalExtractor := func(r *http.Request) *Principal {
+			p, _ := r.Context().Value(principalContextKey).(*Principal)
+			return p
+		}
+		// Resolve the steward's registered tenant from the controller registry.
+		// This is the authoritative cross-tenant check — it cannot be bypassed by
+		// the caller supplying a fabricated steward_tenant_path in the request body.
+		stewardTenantLookup := func(stewardID string) string {
+			if s.controllerService != nil {
+				if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
+					return info.TenantID
+				}
+			}
+			return ""
+		}
+		rollbackHandler := NewRollbackHandler(s.rollbackManager, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
 		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
+		// Require config/rollback permission for all rollback endpoints — same gate pattern
+		// as every other mutating endpoint in this server.
+		rollbackRouter.Use(s.requirePermission("config", "rollback"))
 		rollbackHandler.RegisterRoutes(rollbackRouter)
 		s.logger.Info("Rollback API routes registered")
 	}
@@ -763,12 +885,75 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.ipTrustStore = store
 }
 
-// getHTTPListenAddr determines the HTTP listen address.
-// HTTP port defaults to 9080; override with CFGMS_HTTP_LISTEN_ADDR.
+// SetUpgradeStore wires the durable UpgradeStore used by the steward upgrade
+// dispatch endpoint (Issue #1945). When nil, POST /api/v1/stewards/upgrade
+// returns 503. No silent in-memory fallback.
+func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upgradeStore = store
+}
+
+// SetSigningRotationService wires the signing rotation service for the
+// POST /api/v1/certificates/signing/rotate endpoint (Issue #1816).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signingRotationService = svc
+}
+
+// SetModuleResolution wires the controller-side module resolution dependencies
+// used by handleUpdateStewardConfig to enforce required_modules: on cfg push
+// (Issue #1884). When all four are non-nil, a cfg upload that declares
+// required_modules is blocked with HTTP 422 until every listed module is cached
+// and approved. When any dependency is nil the cfg upload proceeds without
+// module resolution — required_modules: is parsed and stored but not enforced.
+// This nil-tolerant wiring keeps existing deployments and tests that do not yet
+// run the module subsystem unaffected.
+func (s *Server) SetModuleResolution(
+	cache resolution.CacheLister,
+	resolver resolution.BundleResolver,
+	approver resolution.BundleApprover,
+	store trust.TrustStore,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moduleCacheLister = cache
+	s.moduleBundleResolver = resolver
+	s.moduleBundleApprover = approver
+	s.moduleTrustStore = store
+}
+
+// getHTTPListenAddr determines the HTTP listen address with the
+// precedence established by Story #1919:
+//
+//	CLI flag --listen-api-addr (already applied to cfg.ListenAddr by
+//	cmd/controller/main.go's applyListenOverrides) >
+//	env var CFGMS_HTTP_LISTEN_ADDR >
+//	cfg file listen_addr >
+//	built-in default 0.0.0.0:9080.
+//
+// The CLI flag and env var are both applied to cfg.ListenAddr before
+// the server starts (the env var by config.LoadWithPath, the CLI flag
+// by main's applyListenOverrides), so reading cfg.ListenAddr here
+// honours both. The env-var-direct fast path is retained for callers
+// that bypass cfg (none in the regular startup flow, but defensive).
 func (s *Server) getHTTPListenAddr() string {
-	// If environment variable is set, use it
+	// If environment variable is set explicitly and cfg didn't reflect it,
+	// honour it. This is a safety net — config.LoadWithPath already pulls
+	// CFGMS_HTTP_LISTEN_ADDR into cfg.ListenAddr, so this branch only
+	// fires for non-config-managed callers (none today).
 	if addr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); addr != "" {
 		return addr
+	}
+
+	// cfg.ListenAddr carries the resolved CLI flag / env var / cfg-file
+	// value from controller startup. This is what makes the blue/green
+	// substrate work: a green controller spawned with --listen-api-addr
+	// :9081 actually binds on :9081 instead of the default :9080.
+	if s.cfg != nil && s.cfg.ListenAddr != "" {
+		return s.cfg.ListenAddr
 	}
 
 	// Default to port 9080 for HTTP API (gRPC typically on 8080)
@@ -805,16 +990,12 @@ func (s *Server) setupTLS() (*tls.Config, error) {
 
 // setupManagedTLS configures TLS using managed certificates.
 func (s *Server) setupManagedTLS() (*tls.Config, error) {
-	// Story #377: In separated mode with external source, load from disk
-	if s.cfg.Certificate != nil && s.cfg.Certificate.IsSeparatedArchitecture() {
-		if s.cfg.Certificate.GetPublicAPISource() == "external" {
-			return s.setupExternalPublicAPICert()
-		}
-		// separated + internal: generate/use a PublicAPI cert type
-		// Falls through to standard managed TLS (uses same cert generation logic)
+	// External source: load API cert from disk (e.g., certbot/Let's Encrypt)
+	if s.cfg.Certificate != nil && s.cfg.Certificate.GetPublicAPISource() == "external" {
+		return s.setupExternalPublicAPICert()
 	}
 
-	// Get server certificate (reuse the same logic as gRPC server)
+	// Internal source: use or generate a purpose-scoped PublicAPI certificate
 	serverCert, err := s.getServerCertificate()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server certificate: %w", err)
@@ -911,39 +1092,23 @@ func (s *Server) setupLegacyTLS() (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// getServerCertificate gets or generates a server certificate (reused from gRPC server logic)
+// getServerCertificate returns the current public API certificate (PurposeAPI).
+// Falls back to generating a new PublicAPI cert if none exists and cert management is enabled.
 func (s *Server) getServerCertificate() (*cert.Certificate, error) {
-	// Look for existing server certificate by common name
-	certificates, err := s.certManager.GetCertificateByCommonName(s.cfg.Certificate.Server.CommonName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search for existing certificates: %w", err)
+	apiCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeAPI)
+	if err == nil {
+		s.logger.Info("Using existing API certificate for HTTP server",
+			"serial", apiCert.SerialNumber,
+			"expires", apiCert.ExpiresAt.Format("2006-01-02"))
+		return apiCert, nil
 	}
 
-	// Check if we have a valid certificate
-	for _, certInfo := range certificates {
-		if certInfo.Type == cert.CertificateTypeServer && certInfo.IsValid && !certInfo.NeedsRenewal {
-			// Load the full certificate
-			fullCert, err := s.certManager.GetCertificate(certInfo.SerialNumber)
-			if err != nil {
-				s.logger.Warn("Failed to load existing certificate, will generate new one",
-					"serial", certInfo.SerialNumber, "error", err)
-				continue
-			}
-
-			s.logger.Info("Using existing server certificate for HTTP server",
-				"common_name", certInfo.CommonName,
-				"serial", certInfo.SerialNumber,
-				"expires", certInfo.ExpiresAt.Format("2006-01-02"))
-			return fullCert, nil
-		}
-	}
-
-	// Generate new server certificate if certificate lifecycle management is enabled
+	// No valid cert found — generate if cert management is enabled
 	if !s.cfg.Certificate.EnableCertManagement {
-		return nil, fmt.Errorf("no valid server certificate found and certificate lifecycle management is disabled")
+		return nil, fmt.Errorf("no valid API certificate found and certificate lifecycle management is disabled")
 	}
 
-	s.logger.Info("Generating new server certificate for HTTP server",
+	s.logger.Info("Generating new API certificate for HTTP server",
 		"common_name", s.cfg.Certificate.Server.CommonName)
 
 	serverConfig := &cert.ServerCertConfig{
@@ -956,11 +1121,10 @@ func (s *Server) getServerCertificate() (*cert.Certificate, error) {
 
 	serverCert, err := s.certManager.GenerateServerCertificate(serverConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate server certificate: %w", err)
+		return nil, fmt.Errorf("failed to generate API certificate: %w", err)
 	}
 
-	s.logger.Info("Generated new server certificate for HTTP server",
-		"common_name", serverCert.CommonName,
+	s.logger.Info("Generated new API certificate for HTTP server",
 		"serial", serverCert.SerialNumber,
 		"expires", serverCert.ExpiresAt.Format("2006-01-02"))
 

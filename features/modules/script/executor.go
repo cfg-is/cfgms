@@ -67,8 +67,8 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	// Env var naming by binding type:
 	//   secret-store  → SecretEnvVarName(): CFGMS_SECRET_<PARAM> on Windows (avoids
 	//                   Event 4688 cmdline logging), <PARAM> on Unix (12-factor)
-	//   literal       → strings.ToUpper(param.Name) on all platforms — no secret
-	//                   prefix because the value is not a credential
+	//   literal       → ParamEnvVarName(): CFGMS_PARAM_<PARAM> on all platforms —
+	//                   namespaced to prevent shadowing standard env vars (e.g. PATH)
 	var secretEnvEntries []string
 	if len(e.secretBindings) > 0 {
 		resolved, err := ResolveSecretBindings(ctx, e.secretStore, e.secretBindings)
@@ -81,7 +81,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 			if param.IsSecret {
 				envKey = SecretEnvVarName(e.config.Shell, param.Name)
 			} else {
-				envKey = strings.ToUpper(param.Name)
+				envKey = ParamEnvVarName(e.config.Shell, param.Name)
 			}
 			secretEnvEntries = append(secretEnvEntries, fmt.Sprintf("%s=%s", envKey, param.Value))
 		}
@@ -91,11 +91,13 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 	defer cancel()
 
-	// Build command based on shell type and platform
-	cmd, err := e.buildCommand(timeoutCtx)
+	// Build command based on shell type and platform. cleanup removes the temp
+	// script file after execution completes.
+	cmd, cleanup, err := e.buildCommand(timeoutCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build command: %w", err)
 	}
+	defer cleanup()
 
 	// Apply execution context: may replace cmd with a sudo wrapper (Unix) or attach a
 	// user token (Windows). This must happen before Dir/Env are set so those values
@@ -197,73 +199,171 @@ func hashScriptContent(content string) string {
 	return fmt.Sprintf("%x", hash[:8]) // First 8 bytes for logging
 }
 
-// buildCommand creates the appropriate command for the shell type and platform
-func (e *Executor) buildCommand(ctx context.Context) (*exec.Cmd, error) {
+// buildCommand creates the appropriate command for the shell type and platform.
+// The returned cleanup function removes any temporary script file created; callers
+// must call it after the command has finished executing.
+func (e *Executor) buildCommand(ctx context.Context) (*exec.Cmd, func(), error) {
 	switch runtime.GOOS {
 	case "windows":
 		return e.buildWindowsCommand(ctx)
 	case "linux", "darwin":
 		return e.buildUnixCommand(ctx)
 	default:
-		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		return nil, func() {}, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 }
 
-// buildWindowsCommand creates commands for Windows platforms
-func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, error) {
+// writeTempScript writes content to a temp file with the given name pattern and
+// returns the path and a cleanup function that removes the file.
+func writeTempScript(pattern, content string) (string, func(), error) {
+	noop := func() {}
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", noop, fmt.Errorf("create temp script: %w", err)
+	}
+	tmpPath := f.Name()
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return "", noop, fmt.Errorf("write temp script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", noop, fmt.Errorf("close temp script: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	return tmpPath, cleanup, nil
+}
+
+// buildWindowsCommand creates commands for Windows platforms.
+// Scripts are staged to a temp file and executed by file path — no inline content
+// is passed to the interpreter, eliminating -ExecutionPolicy Bypass, -Command <string>,
+// and python -c <string> injection vectors.
+func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), error) {
+	noop := func() {}
 	switch e.config.Shell {
 	case ShellPowerShell:
-		// Use PowerShell with appropriate execution policy
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "powershell.exe",
-			"-ExecutionPolicy", "Bypass",
-			"-NonInteractive",
-			"-Command", e.config.Content), nil
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "powershell.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
+
+	case ShellPwsh:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// PowerShell Core (pwsh.exe). Same temp-script / -File pattern as Windows
+		// PowerShell — no -Command string, no inline composition (CLAUDE.md banned patterns).
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "pwsh.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
 
 	case ShellCmd:
-		// Use Command Prompt
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "cmd.exe", "/c", e.config.Content), nil
-
-	case ShellPython, ShellPython3:
-		// Use Python interpreter
-		pythonCmd := "python"
-		if e.config.Shell == ShellPython3 {
-			pythonCmd = "python3"
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.cmd", e.config.Content)
+		if err != nil {
+			return nil, noop, err
 		}
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
+		// buildCmdExeCommand (executor_windows.go) sets SysProcAttr.CmdLine so that
+		// the path is quoted before cmd.exe /c sees it. This is required when %TEMP%
+		// contains a space (e.g. a user-profile directory under logged_in_user context).
+		return buildCmdExeCommand(ctx, tmpPath), cleanup, nil
+
+	case ShellPython:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "python.exe", tmpPath), cleanup, nil
+
+	case ShellPython3:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "python3.exe", tmpPath), cleanup, nil
 
 	default:
-		return nil, fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)
+		return nil, noop, fmt.Errorf("unsupported shell on Windows: %s", e.config.Shell)
 	}
 }
 
-// buildUnixCommand creates commands for Unix-like platforms (Linux/macOS)
-func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, error) {
+// buildUnixCommand creates commands for Unix-like platforms (Linux/macOS).
+// Scripts are staged to a temp file and executed by file path — no inline content
+// is passed via -c flags, eliminating the bash -c <string> injection vector.
+func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), error) {
+	noop := func() {}
+
+	writeExec := func(pattern string) (string, func(), error) {
+		tmpPath, cleanup, err := writeTempScript(pattern, e.config.Content)
+		if err != nil {
+			return "", noop, err
+		}
+		if err := os.Chmod(tmpPath, 0700); err != nil {
+			cleanup()
+			return "", noop, fmt.Errorf("chmod temp script: %w", err)
+		}
+		return tmpPath, cleanup, nil
+	}
+
 	switch e.config.Shell {
 	case ShellBash:
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "/bin/bash", "-c", e.config.Content), nil
+		tmpPath, cleanup, err := writeExec("cfgms-script-*")
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/bin/bash", tmpPath), cleanup, nil
 
 	case ShellZsh:
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "/bin/zsh", "-c", e.config.Content), nil
+		tmpPath, cleanup, err := writeExec("cfgms-script-*")
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/bin/zsh", tmpPath), cleanup, nil
 
 	case ShellSh:
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, "/bin/sh", "-c", e.config.Content), nil
-
-	case ShellPython, ShellPython3:
-		pythonCmd := "/usr/bin/python"
-		if e.config.Shell == ShellPython3 {
-			pythonCmd = "/usr/bin/python3"
+		tmpPath, cleanup, err := writeExec("cfgms-script-*")
+		if err != nil {
+			return nil, noop, err
 		}
-		// #nosec G204 - CMS requires script execution for configuration management
-		return exec.CommandContext(ctx, pythonCmd, "-c", e.config.Content), nil
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/bin/sh", tmpPath), cleanup, nil
+
+	case ShellPwsh:
+		// PowerShell Core (pwsh) is cross-platform. Same safe temp-script / -File
+		// pattern as on Windows — no -Command string, no inline composition
+		// (CLAUDE.md banned patterns). Resolved via PATH since the install location
+		// varies across distributions.
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "pwsh", "-NonInteractive", "-File", tmpPath), cleanup, nil
+
+	case ShellPython:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/usr/bin/python", tmpPath), cleanup, nil
+
+	case ShellPython3:
+		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
+		if err != nil {
+			return nil, noop, err
+		}
+		// #nosec G204 - tmpPath is a temp file created by this process; not user input
+		return exec.CommandContext(ctx, "/usr/bin/python3", tmpPath), cleanup, nil
 
 	default:
-		return nil, fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)
+		return nil, noop, fmt.Errorf("unsupported shell on Unix: %s", e.config.Shell)
 	}
 }
 
@@ -285,6 +385,10 @@ func (e *Executor) validateWindowsShell() error {
 	case ShellPowerShell:
 		if _, err := exec.LookPath("powershell.exe"); err != nil {
 			return fmt.Errorf("PowerShell is not available: %w", err)
+		}
+	case ShellPwsh:
+		if _, err := exec.LookPath("pwsh.exe"); err != nil {
+			return fmt.Errorf("PowerShell Core (pwsh) is not available: %w", err)
 		}
 	case ShellCmd:
 		if _, err := exec.LookPath("cmd.exe"); err != nil {
@@ -315,6 +419,12 @@ func (e *Executor) validateUnixShell() error {
 		shellPath = "/bin/zsh"
 	case ShellSh:
 		shellPath = "/bin/sh"
+	case ShellPwsh:
+		// PowerShell Core has no canonical install path on Unix; resolve via PATH.
+		if _, err := exec.LookPath("pwsh"); err != nil {
+			return fmt.Errorf("PowerShell Core (pwsh) is not available: %w", err)
+		}
+		return nil
 	case ShellPython:
 		shellPath = "/usr/bin/python"
 	case ShellPython3:

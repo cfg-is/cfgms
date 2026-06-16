@@ -27,16 +27,22 @@ const sigParamKey = "__sig"
 // stewards. The corresponding Go constants were removed (Issue #831); unknown types received
 // over the wire map to the zero value and are ignored by handlers.
 var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
-	types.CommandSyncConfig: transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
-	types.CommandSyncDNA:    transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
-	types.CommandReconnect:  transportpb.CommandType_COMMAND_TYPE_RECONNECT,
+	types.CommandSyncConfig:        transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
+	types.CommandSyncDNA:           transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
+	types.CommandReconnect:         transportpb.CommandType_COMMAND_TYPE_RECONNECT,
+	types.CommandExecuteScript:     transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT,
+	types.CommandPushSigningCert:   transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT,
+	types.CommandPushStewardBinary: transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY,
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
 var protoToCommandType = map[transportpb.CommandType]types.CommandType{
-	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG: types.CommandSyncConfig,
-	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:    types.CommandSyncDNA,
-	transportpb.CommandType_COMMAND_TYPE_RECONNECT:   types.CommandReconnect,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG:         types.CommandSyncConfig,
+	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:            types.CommandSyncDNA,
+	transportpb.CommandType_COMMAND_TYPE_RECONNECT:           types.CommandReconnect,
+	transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT:      types.CommandExecuteScript,
+	transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT:   types.CommandPushSigningCert,
+	transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: types.CommandPushStewardBinary,
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {
@@ -151,20 +157,45 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 
 // eventTypeToProto maps semantic EventType to proto enum.
 var eventTypeToProto = map[types.EventType]transportpb.EventType{
-	types.EventConfigApplied: transportpb.EventType_EVENT_TYPE_CONFIG_APPLIED,
-	types.EventDNASynced:     transportpb.EventType_EVENT_TYPE_DNA_SYNCED,
-	types.EventTaskCompleted: transportpb.EventType_EVENT_TYPE_TASK_COMPLETED,
-	types.EventTaskFailed:    transportpb.EventType_EVENT_TYPE_TASK_FAILED,
-	types.EventError:         transportpb.EventType_EVENT_TYPE_ERROR,
+	types.EventConfigApplied:    transportpb.EventType_EVENT_TYPE_CONFIG_APPLIED,
+	types.EventDNASynced:        transportpb.EventType_EVENT_TYPE_DNA_SYNCED,
+	types.EventTaskCompleted:    transportpb.EventType_EVENT_TYPE_TASK_COMPLETED,
+	types.EventTaskFailed:       transportpb.EventType_EVENT_TYPE_TASK_FAILED,
+	types.EventError:            transportpb.EventType_EVENT_TYPE_ERROR,
+	types.EventCommandReceived:  transportpb.EventType_EVENT_TYPE_COMMAND_RECEIVED,
+	types.EventCommandCompleted: transportpb.EventType_EVENT_TYPE_COMMAND_COMPLETED,
+	types.EventCommandFailed:    transportpb.EventType_EVENT_TYPE_COMMAND_FAILED,
+	// Issue #1997: events published steward->controller over the wire. Without these
+	// entries the type collapses to EVENT_TYPE_UNSPECIFIED and decodes to "" on the
+	// controller, so type-routed handlers never fire (e.g. dispatcher script_completed,
+	// server DNA-change handler, relay handler, upgrade lifecycle).
+	types.EventScriptCompleted:          transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED,
+	types.EventDNAChanged:               transportpb.EventType_EVENT_TYPE_DNA_CHANGED,
+	types.EventRelayRequest:             transportpb.EventType_EVENT_TYPE_RELAY_REQUEST,
+	types.EventStewardUpgradeDownloaded: transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED,
+	types.EventStewardUpgradeSwapped:    transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED,
+	types.EventStewardUpgradeCommitted:  transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED,
+	types.EventStewardUpgradeRolledBack: transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK,
 }
 
 // protoToEventType maps proto enum to semantic EventType.
 var protoToEventType = map[transportpb.EventType]types.EventType{
-	transportpb.EventType_EVENT_TYPE_CONFIG_APPLIED: types.EventConfigApplied,
-	transportpb.EventType_EVENT_TYPE_DNA_SYNCED:     types.EventDNASynced,
-	transportpb.EventType_EVENT_TYPE_TASK_COMPLETED: types.EventTaskCompleted,
-	transportpb.EventType_EVENT_TYPE_TASK_FAILED:    types.EventTaskFailed,
-	transportpb.EventType_EVENT_TYPE_ERROR:          types.EventError,
+	transportpb.EventType_EVENT_TYPE_CONFIG_APPLIED:    types.EventConfigApplied,
+	transportpb.EventType_EVENT_TYPE_DNA_SYNCED:        types.EventDNASynced,
+	transportpb.EventType_EVENT_TYPE_TASK_COMPLETED:    types.EventTaskCompleted,
+	transportpb.EventType_EVENT_TYPE_TASK_FAILED:       types.EventTaskFailed,
+	transportpb.EventType_EVENT_TYPE_ERROR:             types.EventError,
+	transportpb.EventType_EVENT_TYPE_COMMAND_RECEIVED:  types.EventCommandReceived,
+	transportpb.EventType_EVENT_TYPE_COMMAND_COMPLETED: types.EventCommandCompleted,
+	transportpb.EventType_EVENT_TYPE_COMMAND_FAILED:    types.EventCommandFailed,
+	// Issue #1997: reverse mapping for the wire-crossing events added above.
+	transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:    types.EventScriptCompleted,
+	transportpb.EventType_EVENT_TYPE_DNA_CHANGED:         types.EventDNAChanged,
+	transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:       types.EventRelayRequest,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:  types.EventStewardUpgradeDownloaded,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:     types.EventStewardUpgradeSwapped,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:   types.EventStewardUpgradeCommitted,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK: types.EventStewardUpgradeRolledBack,
 }
 
 // severityToProto maps semantic severity string to proto enum.

@@ -12,9 +12,10 @@ import "time"
 
 // StewardConfig represents the complete steward configuration.
 type StewardConfig struct {
-	Steward   StewardSettings   `yaml:"steward" json:"steward"`
-	Resources []ResourceConfig  `yaml:"resources" json:"resources"`
-	Modules   map[string]string `yaml:"modules,omitempty" json:"modules,omitempty"`
+	Steward         StewardSettings   `yaml:"steward" json:"steward"`
+	Resources       []ResourceConfig  `yaml:"resources" json:"resources"`
+	Modules         map[string]string `yaml:"modules,omitempty" json:"modules,omitempty"`
+	RequiredModules []RequiredModule  `yaml:"required_modules,omitempty" json:"required_modules,omitempty"`
 }
 
 // StewardSettings contains steward-specific configuration options.
@@ -34,6 +35,9 @@ type StewardSettings struct {
 	// Child tenants may only tighten (not loosen) the inherited policy.
 	ScriptSigning ScriptSigningConfig `yaml:"script_signing,omitempty"`
 
+	// ModuleTrust configures module trust policy and additional trusted publishers.
+	ModuleTrust ModuleTrustConfig `yaml:"module_trust,omitempty"`
+
 	// SignedCommandReplayWindow is the maximum age of an accepted command timestamp.
 	SignedCommandReplayWindow time.Duration `yaml:"signed_command_replay_window,omitempty"`
 
@@ -43,6 +47,16 @@ type StewardSettings struct {
 	// DriftMode controls how the steward responds to detected configuration drift.
 	// Must be sourced exclusively from the controller-delivered cfg.
 	DriftMode DriftMode `yaml:"drift_mode,omitempty"`
+
+	// Upgrade configures the steward upgrade policy. (Issue #1943)
+	Upgrade UpgradeConfig `yaml:"upgrade,omitempty"`
+}
+
+// UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)
+type UpgradeConfig struct {
+	// AllowDowngrade permits installing a version older than or equal to the
+	// running version. Disabled by default to prevent accidental rollbacks.
+	AllowDowngrade bool `yaml:"allow_downgrade,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.
@@ -136,3 +150,40 @@ const (
 	ActionFail     ErrorAction = "fail"
 	ActionWarn     ErrorAction = "warn"
 )
+
+// ModuleTrustMode defines how the steward verifies module bundles.
+type ModuleTrustMode string
+
+const (
+	// ModuleTrustModeStrict requires the steward to independently verify publisher
+	// signatures, consulting AdditionalPublishers in addition to baked-in identities.
+	ModuleTrustModeStrict ModuleTrustMode = "strict"
+
+	// ModuleTrustModeController delegates trust decisions to the controller (default).
+	// The steward accepts any bundle the controller has approved.
+	ModuleTrustModeController ModuleTrustMode = "controller"
+
+	// ModuleTrustModeBypass disables all trust enforcement. Development use only.
+	ModuleTrustModeBypass ModuleTrustMode = "bypass"
+)
+
+// ModuleTrustConfig configures module trust policy for the steward.
+// Placed alongside ScriptSigning as steward security posture configuration.
+type ModuleTrustConfig struct {
+	// Mode controls how module bundle signatures are verified.
+	// Valid values: "strict", "controller" (default), "bypass".
+	Mode ModuleTrustMode `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// AdditionalPublishers lists publisher identifiers trusted in addition to
+	// the CFGMS publisher identity baked into the steward binary.
+	// Only consulted when Mode is "strict".
+	AdditionalPublishers []string `yaml:"additional_publishers,omitempty" json:"additional_publishers,omitempty"`
+}
+
+// RequiredModule declares a module bundle that must be present and approved in
+// the controller cache before this cfg file can be deployed to stewards.
+// Name is the full "publisher/name" identifier; Version is a semver constraint.
+type RequiredModule struct {
+	Name    string `yaml:"name" json:"name"`
+	Version string `yaml:"version" json:"version"`
+}

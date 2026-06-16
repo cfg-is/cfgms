@@ -253,3 +253,112 @@ func TestGetConfiguredModules_EmptyResources(t *testing.T) {
 	cfg := StewardConfig{}
 	assert.Empty(t, GetConfiguredModules(cfg))
 }
+
+// --- RequiredModules parsing ---
+
+// [REQUIRED TEST] cfg file with required_modules parses all fields correctly.
+func TestStewardConfig_RequiredModules_ParsesCorrectly(t *testing.T) {
+	cfg := StewardConfig{
+		RequiredModules: []RequiredModule{
+			{Name: "cfgms/firewall", Version: "^1.0.0"},
+		},
+	}
+	assert.Len(t, cfg.RequiredModules, 1)
+	assert.Equal(t, "cfgms/firewall", cfg.RequiredModules[0].Name)
+	assert.Equal(t, "^1.0.0", cfg.RequiredModules[0].Version)
+}
+
+func TestStewardConfig_RequiredModules_Empty(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ID: "s1", Mode: ModeStandalone}}
+	assert.Empty(t, cfg.RequiredModules)
+	assert.NoError(t, ValidateConfiguration(cfg))
+}
+
+// --- ModuleTrustConfig parsing ---
+
+// [REQUIRED TEST] module_trust with strict mode and additional_publishers parses correctly.
+func TestStewardSettings_ModuleTrust_StrictMode_ParsesCorrectly(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:   "s1",
+			Mode: ModeStandalone,
+			ModuleTrust: ModuleTrustConfig{
+				Mode:                 ModuleTrustModeStrict,
+				AdditionalPublishers: []string{"vendor-a"},
+			},
+		},
+	}
+	assert.Equal(t, ModuleTrustModeStrict, cfg.Steward.ModuleTrust.Mode)
+	assert.Equal(t, []string{"vendor-a"}, cfg.Steward.ModuleTrust.AdditionalPublishers)
+	assert.NoError(t, ValidateConfiguration(cfg))
+}
+
+func TestStewardSettings_ModuleTrust_ControllerMode_Valid(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:          "s1",
+			Mode:        ModeStandalone,
+			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeController},
+		},
+	}
+	assert.NoError(t, ValidateConfiguration(cfg))
+}
+
+func TestStewardSettings_ModuleTrust_BypassMode_Valid(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:          "s1",
+			Mode:        ModeStandalone,
+			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeBypass},
+		},
+	}
+	assert.NoError(t, ValidateConfiguration(cfg))
+}
+
+func TestStewardSettings_ModuleTrust_EmptyMode_Valid(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:   "s1",
+			Mode: ModeStandalone,
+		},
+	}
+	assert.NoError(t, ValidateConfiguration(cfg))
+}
+
+// [REQUIRED TEST] module_trust with invalid mode returns a validation error.
+func TestStewardSettings_ModuleTrust_InvalidMode_ReturnsError(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:   "s1",
+			Mode: ModeStandalone,
+			ModuleTrust: ModuleTrustConfig{
+				Mode: ModuleTrustMode("invalid_value"),
+			},
+		},
+	}
+	err := ValidateConfiguration(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "module_trust")
+	assert.Contains(t, err.Error(), "invalid_value")
+}
+
+// --- ValidateModuleTrustConfig ---
+
+func TestValidateModuleTrustConfig_ValidModes(t *testing.T) {
+	for _, mode := range []ModuleTrustMode{
+		ModuleTrustModeStrict,
+		ModuleTrustModeController,
+		ModuleTrustModeBypass,
+		"",
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			assert.NoError(t, ValidateModuleTrustConfig(ModuleTrustConfig{Mode: mode}))
+		})
+	}
+}
+
+func TestValidateModuleTrustConfig_InvalidMode(t *testing.T) {
+	err := ValidateModuleTrustConfig(ModuleTrustConfig{Mode: "bogus"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bogus")
+}

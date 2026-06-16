@@ -393,3 +393,189 @@ func TestRunControllerMetrics_APIError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "API request failed")
 }
+
+func newSigningCertRotateServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/certificates/signing/rotate" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			OverlapDays int `json:"overlap_days"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"old_serial":        "abc123",
+				"new_serial":        "def456",
+				"overlap_days":      req.OverlapDays,
+				"stewards_notified": 2,
+			},
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestRunSigningCertRotate_Success(t *testing.T) {
+	server := newSigningCertRotateServer(t)
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	origOverlap := signingCertOverlapDays
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+		signingCertOverlapDays = origOverlap
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+	signingCertOverlapDays = 30
+
+	output := captureStdout(t, func() {
+		err := runSigningCertRotate(signingCertRotateCmd, nil)
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "rotated successfully")
+	assert.Contains(t, output, "abc123")
+	assert.Contains(t, output, "def456")
+	assert.Contains(t, output, "30")
+	assert.Contains(t, output, "2")
+}
+
+func TestRunSigningCertRotate_OverlapDaysFlag(t *testing.T) {
+	var receivedOverlap int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/certificates/signing/rotate", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			OverlapDays int `json:"overlap_days"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		receivedOverlap = req.OverlapDays
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"old_serial":        "old",
+				"new_serial":        "new",
+				"overlap_days":      req.OverlapDays,
+				"stewards_notified": 0,
+			},
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	capServer := httptest.NewServer(mux)
+	defer capServer.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	origOverlap := signingCertOverlapDays
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+		signingCertOverlapDays = origOverlap
+	})
+
+	healthURL = capServer.URL
+	controllerTLSInsecure = true
+	signingCertOverlapDays = 14
+
+	err := runSigningCertRotate(signingCertRotateCmd, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 14, receivedOverlap, "--overlap-days value must be sent in request body")
+}
+
+func TestRunSigningCertRotate_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"code":"INTERNAL","message":"rotation failed"}}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := runSigningCertRotate(signingCertRotateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation failed")
+}
+
+func TestRunSigningCertRotate_MalformedResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-valid-json{{"))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := runSigningCertRotate(signingCertRotateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse rotation response")
+}
+
+func TestRunSigningCertRotate_NegativeOverlapDaysRejected(t *testing.T) {
+	origOverlap := signingCertOverlapDays
+	t.Cleanup(func() { signingCertOverlapDays = origOverlap })
+	signingCertOverlapDays = -1
+
+	// We set no server URL so getControllerClient would fail, but the bounds
+	// check should fire first.
+	origURL := healthURL
+	t.Cleanup(func() { healthURL = origURL })
+	healthURL = "https://controller.example.com"
+
+	err := runSigningCertRotate(signingCertRotateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overlap-days")
+}
+
+func TestSigningCertCmd_SubcommandsRegistered(t *testing.T) {
+	var found bool
+	for _, sub := range controllerCmd.Commands() {
+		if sub.Use == "signing-cert" {
+			found = true
+			var rotateFound bool
+			for _, rsub := range sub.Commands() {
+				if rsub.Use == "rotate" {
+					rotateFound = true
+				}
+			}
+			assert.True(t, rotateFound, "signing-cert must have a rotate subcommand")
+		}
+	}
+	assert.True(t, found, "controllerCmd must have a signing-cert subcommand")
+}
+
+func TestSigningCertRotateCmd_OverlapDaysFlagRegistered(t *testing.T) {
+	f := signingCertRotateCmd.Flags().Lookup("overlap-days")
+	require.NotNil(t, f, "--overlap-days flag must be registered on signing-cert rotate")
+	assert.Equal(t, "30", f.DefValue, "--overlap-days default must be 30")
+}

@@ -308,14 +308,24 @@ func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID
 	var resolvedContent string
 	var resolvedVersion string
 
-	if q.scriptRepo != nil && scriptRef != "" {
-		pinVersion := execution.ScriptVersion // empty = resolve latest
-		script, err := q.scriptRepo.Get(scriptRef, pinVersion)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, err)
+	if scriptRef != "" {
+		// Library script: resolve the latest (or pinned) content from the repository.
+		if q.scriptRepo != nil {
+			pinVersion := execution.ScriptVersion // empty = resolve latest
+			script, err := q.scriptRepo.Get(scriptRef, pinVersion)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, err)
+			}
+			resolvedContent = script.Content
+			resolvedVersion = script.Metadata.Version.String()
 		}
-		resolvedContent = script.Content
-		resolvedVersion = script.Metadata.Version.String()
+	} else if execution.Metadata != nil {
+		// Inline (ad-hoc) execution: SynthesizeCommandRun threads the literal script
+		// body through Metadata["inline_script_content"] because there is no scriptRef
+		// to look up in the repository (Issue #1995, root cause A).
+		if inline, ok := execution.Metadata["inline_script_content"].(string); ok {
+			resolvedContent = inline
+		}
 	}
 
 	prepared := &PreparedExecution{

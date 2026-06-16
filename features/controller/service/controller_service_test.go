@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,6 +64,39 @@ func TestNewControllerService_NoStorage(t *testing.T) {
 	assert.NotNil(t, svc)
 	// storeDNA with nil storage should be a no-op
 	svc.storeDNA(context.Background(), "dev-1", "tenant-a", makeTestDNA("dev-1", nil), "online")
+}
+
+// TestStorageReady_OKWithWorkingStorage: a real-state readiness round-trip
+// succeeds against a live durable store (Issue #2012).
+func TestStorageReady_OKWithWorkingStorage(t *testing.T) {
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), newTestFleetStorage(t))
+	require.NoError(t, svc.StorageReady(context.Background()))
+}
+
+// TestStorageReady_ErrorWithNoStorage: a controller with no durable storage is
+// NOT ready — readiness must surface that rather than masking it (a candidate
+// whose storage failed to initialize must be rejected by the cutover smoketest).
+func TestStorageReady_ErrorWithNoStorage(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	err := svc.StorageReady(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured")
+}
+
+// TestStorageReady_ErrorWhenStoreUnreachable: when the durable store can no
+// longer be round-tripped (here, closed mid-flight to simulate an unreachable
+// backend), readiness fails. This is the real-state signal the old
+// object-presence health check could not produce.
+func TestStorageReady_ErrorWhenStoreUnreachable(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	require.NoError(t, svc.StorageReady(context.Background()))
+
+	// Close the backend; a subsequent round-trip must fail.
+	require.NoError(t, storage.Close())
+	err := svc.StorageReady(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "round-trip failed")
 }
 
 func TestLoadFromStorage_EmptyStorage(t *testing.T) {
@@ -131,6 +165,63 @@ func TestLoadFromStorage_LiveStewardNotOverwritten(t *testing.T) {
 	// The live entry should be preserved
 	assert.Equal(t, "tenant-live", info.TenantID)
 	assert.Equal(t, "online", info.Status)
+}
+
+// TestRecordHeartbeat_AdvancesRegistryAndPromotes proves the Issue #1986 fix:
+// a control-plane heartbeat advances the API-served registry's LastHeartbeat and
+// promotes a freshly-registered steward to "active". Without RecordHeartbeat the
+// registry is frozen at the warm-loaded StoredAt and status never leaves
+// "registered" even while the steward heartbeats.
+func TestRecordHeartbeat_AdvancesRegistryAndPromotes(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	registeredAt := time.Now().Add(-72 * time.Hour)
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{
+		ID:            "dev-1",
+		TenantID:      "tenant-a",
+		LastHeartbeat: registeredAt,
+		Status:        "registered",
+		Metrics:       make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	beat := time.Now()
+	ok := svc.RecordHeartbeat("dev-1", "v0.5.0-dev", beat)
+	require.True(t, ok, "heartbeat for a known steward must be recorded")
+
+	info, found := svc.GetStewardInfo("dev-1")
+	require.True(t, found)
+	assert.WithinDuration(t, beat, info.LastHeartbeat, time.Millisecond,
+		"last_seen must advance to the heartbeat timestamp, not stay at registration time")
+	assert.Equal(t, "active", info.Status, "first heartbeat must promote registered -> active")
+	assert.Equal(t, "v0.5.0-dev", info.Version, "heartbeat must populate the reported version")
+}
+
+// TestRecordHeartbeat_ZeroTimestampFallsBackToNow ensures a heartbeat carrying no
+// timestamp still advances last_seen rather than zeroing it.
+func TestRecordHeartbeat_ZeroTimestampFallsBackToNow(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{ID: "dev-1", Status: "active", LastHeartbeat: time.Now().Add(-time.Hour)}
+	svc.mu.Unlock()
+
+	before := time.Now()
+	ok := svc.RecordHeartbeat("dev-1", "", time.Time{})
+	require.True(t, ok)
+
+	info, _ := svc.GetStewardInfo("dev-1")
+	assert.False(t, info.LastHeartbeat.Before(before), "zero ts must fall back to now, not zero out last_seen")
+}
+
+// TestRecordHeartbeat_UnknownStewardReturnsFalse ensures heartbeats for stewards
+// this controller does not know about are reported (not silently created).
+func TestRecordHeartbeat_UnknownStewardReturnsFalse(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ok := svc.RecordHeartbeat("ghost", "v1", time.Now())
+	assert.False(t, ok, "heartbeat for an unknown steward must return false")
+	_, found := svc.GetStewardInfo("ghost")
+	assert.False(t, found, "RecordHeartbeat must not fabricate a registry entry")
 }
 
 func TestStoreDNA_WriteOnSync(t *testing.T) {
@@ -392,4 +483,216 @@ func TestRegisterSteward_FieldsPopulated(t *testing.T) {
 	assert.Equal(t, "registered", info.Status)
 	assert.True(t, !info.LastHeartbeat.Before(before))
 	assert.True(t, !info.LastHeartbeat.After(after))
+}
+
+// --- Issue #2008: registry repopulation on cert-reuse reconnect / restart ---
+
+// TestEnsureSteward_AddsAbsentStewardWithDurableTenant proves the PRIMARY fix:
+// a steward that reconnects via cert-reuse (no fresh HTTP registration) is added
+// to the admin registry on the authenticated connect, with its tenant resolved
+// authoritatively from durable storage.
+func TestEnsureSteward_AddsAbsentStewardWithDurableTenant(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	// Seed durable storage as if the steward had registered in a previous run.
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+
+	// Fresh service WITHOUT warm-load: the steward is absent from the registry,
+	// exactly the cert-reuse reconnect gap.
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	_, found := svc.GetStewardInfo("dev-1")
+	require.False(t, found, "precondition: steward must be absent before the connect hook fires")
+
+	// Connect hook supplies only the mTLS CN and an empty tenant.
+	svc.EnsureSteward("dev-1", "", "active")
+
+	info, ok := svc.GetStewardInfo("dev-1")
+	require.True(t, ok, "EnsureSteward must add the absent steward")
+	assert.Equal(t, "active", info.Status)
+	assert.Equal(t, "tenant-a", info.TenantID, "tenant must come from durable storage, not the empty hook value")
+	assert.NotNil(t, info.DNA)
+}
+
+// TestEnsureSteward_IgnoresCallerTenantWhenDurableExists proves a steward-supplied
+// tenant can never override the authoritative storage-derived tenant.
+func TestEnsureSteward_IgnoresCallerTenantWhenDurableExists(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-real", Status: "registered"}))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	// A hostile/incorrect tenant is passed in; storage must win.
+	svc.EnsureSteward("dev-1", "tenant-attacker", "active")
+
+	info, ok := svc.GetStewardInfo("dev-1")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-real", info.TenantID, "durable tenant must override any caller-supplied tenant")
+}
+
+// TestEnsureSteward_RefreshesExistingWithoutDuplicating proves idempotence: an
+// already-present entry is refreshed (LastHeartbeat advanced, registered->active)
+// rather than duplicated.
+func TestEnsureSteward_RefreshesExistingWithoutDuplicating(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	old := time.Now().Add(-time.Hour)
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{
+		ID:            "dev-1",
+		TenantID:      "tenant-a",
+		LastHeartbeat: old,
+		Status:        "registered",
+		Metrics:       make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	svc.EnsureSteward("dev-1", "", "active")
+
+	assert.Equal(t, 1, svc.GetStewardCount(), "existing steward must not be duplicated")
+	info, ok := svc.GetStewardInfo("dev-1")
+	require.True(t, ok)
+	assert.Equal(t, "active", info.Status, "registered must be promoted to active on reconnect")
+	assert.True(t, info.LastHeartbeat.After(old), "LastHeartbeat must be refreshed")
+	assert.Equal(t, "tenant-a", info.TenantID, "tenant must be preserved")
+}
+
+// TestEnsureSteward_TrulyNewStewardNoOp proves the safe behaviour for a steward
+// with no durable record and no supplied tenant: EnsureSteward declines rather
+// than fabricating an entry with an unknown tenant (HTTP registration is the
+// correct first-contact path).
+func TestEnsureSteward_TrulyNewStewardNoOp(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	svc.EnsureSteward("brand-new", "", "active")
+
+	_, found := svc.GetStewardInfo("brand-new")
+	assert.False(t, found, "a steward with no durable tenant must not be fabricated")
+	assert.Equal(t, 0, svc.GetStewardCount())
+}
+
+// TestEnsureSteward_SurvivesControllerRestart proves the upserted entry is
+// persisted to durable storage so a later restart's warm-load finds it.
+func TestEnsureSteward_SurvivesControllerRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	// Run 1: seed registration record, then a reconnecting steward is ensured.
+	mgr1 := openFleetStorageAt(t, dataDir)
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	require.NoError(t, mgr1.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	svc1.EnsureSteward("dev-1", "", "active")
+	info1, ok := svc1.GetStewardInfo("dev-1")
+	require.True(t, ok)
+	assert.Equal(t, "active", info1.Status)
+	require.NoError(t, mgr1.Close())
+
+	// Run 2: simulated restart — fresh manager + service, warm-load from disk.
+	mgr2 := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr2.Close() })
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+	require.NoError(t, svc2.LoadFromStorage(ctx))
+
+	info2, ok := svc2.GetStewardInfo("dev-1")
+	require.True(t, ok, "ensured steward must survive a controller restart via warm-load")
+	assert.Equal(t, "tenant-a", info2.TenantID)
+	assert.Equal(t, "active", info2.Status, "persisted status must round-trip as active across restart")
+	assert.NotNil(t, info2.DNA, "DNA must round-trip across restart")
+}
+
+// TestEnsureSteward_ConcurrentCallsNoDuplicate proves the check-and-insert under
+// s.mu serializes concurrent connect-hook upserts: many simultaneous
+// EnsureSteward calls for the same steward produce exactly one registry entry
+// (no TOCTOU duplicate) carrying the durable tenant.
+func TestEnsureSteward_ConcurrentCallsNoDuplicate(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			svc.EnsureSteward("dev-1", "", "active")
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, 1, svc.GetStewardCount(), "concurrent EnsureSteward must not duplicate the entry")
+	info, ok := svc.GetStewardInfo("dev-1")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-a", info.TenantID)
+	assert.Equal(t, "active", info.Status)
+}
+
+// TestRecordHeartbeat_BackstopAddsAbsentStewardWithDurableTenant proves the
+// BACKSTOP: a heartbeat from a steward absent in the registry self-heals within
+// one beat when a durable tenant is resolvable.
+func TestRecordHeartbeat_BackstopAddsAbsentStewardWithDurableTenant(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	_, found := svc.GetStewardInfo("dev-1")
+	require.False(t, found, "precondition: steward absent before heartbeat")
+
+	beat := time.Now()
+	ok := svc.RecordHeartbeat("dev-1", "v1", beat)
+	require.True(t, ok, "backstop must record the heartbeat for an absent-but-known steward")
+
+	info, found := svc.GetStewardInfo("dev-1")
+	require.True(t, found, "backstop must add the absent steward")
+	assert.Equal(t, "active", info.Status)
+	assert.Equal(t, "tenant-a", info.TenantID, "tenant must be durable-derived, not steward-supplied")
+	assert.WithinDuration(t, beat, info.LastHeartbeat, time.Millisecond)
+}
+
+// TestRecordHeartbeat_BackstopDeclinesWithoutDurableTenant proves the
+// no-fabrication contract is preserved when no durable tenant exists: rather
+// than guessing a tenant, RecordHeartbeat returns false and leaves repopulation
+// to the connect hook / HTTP registration.
+func TestRecordHeartbeat_BackstopDeclinesWithoutDurableTenant(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	ok := svc.RecordHeartbeat("ghost", "v1", time.Now())
+	assert.False(t, ok, "no durable tenant -> must not fabricate a tenant-scoped entry")
+	_, found := svc.GetStewardInfo("ghost")
+	assert.False(t, found)
+}
+
+// TestRecordHeartbeat_BackstopRefreshesExisting proves the backstop does not
+// duplicate or disturb an already-present entry.
+func TestRecordHeartbeat_BackstopRefreshesExisting(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	require.NoError(t, svc.LoadFromStorage(ctx))
+	require.Equal(t, 1, svc.GetStewardCount())
+
+	beat := time.Now()
+	ok := svc.RecordHeartbeat("dev-1", "v2", beat)
+	require.True(t, ok)
+
+	assert.Equal(t, 1, svc.GetStewardCount(), "existing steward must not be duplicated by the backstop")
+	info, _ := svc.GetStewardInfo("dev-1")
+	assert.Equal(t, "active", info.Status)
+	assert.Equal(t, "v2", info.Version)
 }

@@ -1,5 +1,7 @@
 # File Module
 
+**Kind:** steward
+
 ## Purpose and scope
 
 The File Module provides configuration management capabilities for file resources. It implements the core Module interface (Get/Set/Test) to manage file content and attributes.

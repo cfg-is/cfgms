@@ -10,6 +10,7 @@ var knownPermissions = map[string]bool{
 	"steward:list":            true,
 	"steward:read":            true,
 	"steward:read-dna":        true,
+	"steward:read-logs":       true,
 	"steward:auth-refresh":    true,
 	"steward:read-config":     true,
 	"steward:write-config":    true,
@@ -17,6 +18,7 @@ var knownPermissions = map[string]bool{
 	"steward:read-scripts":    true,
 	"steward:execute-scripts": true,
 	"steward:read-compliance": true,
+	"steward:read-modules":    true,
 	"steward:delete-config":   true,
 	// Config management
 	"config:list":             true,
@@ -26,6 +28,7 @@ var knownPermissions = map[string]bool{
 	// Certificate management
 	"certificate:list":      true,
 	"certificate:provision": true,
+	"certificate:rotate":    true,
 	// RBAC
 	"rbac:list-permissions": true,
 	"rbac:read-permission":  true,
@@ -50,6 +53,8 @@ var knownPermissions = map[string]bool{
 	"registration:list-pending": true,
 	"registration:approve":      true,
 	"registration:deny":         true,
+	// IP-trust management (Issue #1698)
+	"registration:manage-ip-trust": true,
 	// Monitoring
 	"monitoring:read-health":            true,
 	"monitoring:read-metrics":           true,
@@ -68,6 +73,15 @@ var knownPermissions = map[string]bool{
 	"tenant:manage": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,
+	// Installer artifact management (Issue #1702)
+	"installer:upload": true,
+	"installer:read":   true,
+	"installer:delete": true,
+	// Steward binary publishing (Issue #1944)
+	"installer:publish:steward": true,
+	// Steward upgrade dispatch and approval (Issue #1945)
+	"installer:dispatch:steward": true,
+	"installer:approve:steward":  true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

@@ -118,7 +118,6 @@ func (sm *SystemMonitor) collectResourceMetrics(ctx context.Context) {
 	defer span.End()
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	// Collect memory statistics
 	var memStats runtime.MemStats
@@ -142,19 +141,16 @@ func (sm *SystemMonitor) collectResourceMetrics(ctx context.Context) {
 	sm.resourceMetrics.CPUCores = runtime.NumCPU()
 	sm.resourceMetrics.CollectedAt = time.Now()
 
-	// Release the lock before checking alerts to avoid deadlock with emitEvent
-	sm.mu.Unlock()
-
-	// Check for resource alerts (this may call emitEvent which needs RLock)
-	sm.checkResourceAlerts(ctx)
-
-	// Re-acquire lock for the defer statement
-	sm.mu.Lock()
-
 	sm.logger.DebugCtx(ctx, "Resource metrics collected",
 		"memory_used_mb", sm.resourceMetrics.MemoryUsedBytes/1024/1024,
 		"memory_usage_percent", sm.resourceMetrics.MemoryUsagePercent,
 		"goroutines", sm.resourceMetrics.Goroutines)
+
+	// Release the lock before checking alerts to avoid deadlock with emitEvent.
+	sm.mu.Unlock()
+
+	// Check for resource alerts (this may call emitEvent which needs RLock).
+	sm.checkResourceAlerts(ctx)
 }
 
 // checkResourceAlerts checks if any resource thresholds are exceeded.

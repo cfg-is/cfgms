@@ -121,7 +121,7 @@ func TestGetConfiguration_ValidSignature(t *testing.T) {
 
 	tc := &TransportClient{
 		dataPlaneSession: &configTransferSession{transfer: transfer},
-		signingCertPEM:   certPEM,
+		signingCertPEMs:  []string{certPEM},
 		logger:           newTestLogger(t),
 	}
 
@@ -154,7 +154,7 @@ func TestGetConfiguration_TamperedData_ReturnsDataLoss(t *testing.T) {
 
 	tc := &TransportClient{
 		dataPlaneSession: &configTransferSession{transfer: tampered},
-		signingCertPEM:   certPEM,
+		signingCertPEMs:  []string{certPEM},
 		logger:           newTestLogger(t),
 	}
 
@@ -173,7 +173,7 @@ func TestGetConfiguration_SkipsVerification_WhenNoCert(t *testing.T) {
 	payload := []byte("config payload — no cert configured")
 	transfer := signedTransfer(t, signer, payload)
 
-	// No signingCertPEM / serverCertPEM / caCertPEM / certPath configured.
+	// No signingCertPEMs / serverCertPEM / caCertPEM / certPath configured.
 	tc := &TransportClient{
 		dataPlaneSession: &configTransferSession{transfer: transfer},
 		logger:           newTestLogger(t),
@@ -199,7 +199,7 @@ func TestGetConfiguration_SkipsVerification_WhenEmptySignature(t *testing.T) {
 
 	tc := &TransportClient{
 		dataPlaneSession: &configTransferSession{transfer: transfer},
-		signingCertPEM:   certPEM,
+		signingCertPEMs:  []string{certPEM},
 		logger:           newTestLogger(t),
 	}
 

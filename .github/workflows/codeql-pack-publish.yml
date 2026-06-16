@@ -82,14 +82,29 @@ jobs:
           # exists; that's expected idempotent behavior. Bumping the version
           # in qlpack.yml is the trigger for a new publish.
           #
+          # GitHub runs `shell: bash` with `-e`, so a non-zero `codeql pack
+          # publish` (notably the "already exists" case) aborts this step
+          # before the classification below ever runs — which is why this
+          # workflow went red on every develop push that didn't bump the
+          # version. Drop `-e` around the publish and capture the output so we
+          # can tolerate "already exists" while still failing loudly on a real
+          # publish error (a silent `exit 0` would mask those).
+          #
           # --registries-auth-stdin expects a comma-separated list of
           # `<registry_url>=<token>` pairs (NOT JSON, despite docs in some
           # places suggesting otherwise — CodeQL CLI 2.25.5 strictly rejects
           # JSON with "Registry authentication must be a comma-separated...").
-          printf '%s' "https://containers.ghcr.io/v2/=$GITHUB_TOKEN" \
-            | codeql pack publish --registries-auth-stdin .github/codeql/extensions
+          set +e
+          out=$(printf '%s' "https://containers.ghcr.io/v2/=$GITHUB_TOKEN" \
+            | codeql pack publish --registries-auth-stdin .github/codeql/extensions 2>&1)
           status=$?
-          if [ $status -ne 0 ]; then
-            echo "::notice::pack publish exited $status — likely version already exists in registry (idempotent re-publish)"
+          set -e
+          echo "$out"
+          if [ "$status" -eq 0 ]; then
+            echo "::notice::Published a new CodeQL extension pack version."
+          elif printf '%s\n' "$out" | grep -q "already exists"; then
+            echo "::notice::Pack version already exists in the registry — no-op. Bump 'version:' in .github/codeql/extensions/qlpack.yml to publish model changes."
+          else
+            echo "::error::codeql pack publish failed (exit $status) — see output above."
+            exit 1
           fi
-          exit 0

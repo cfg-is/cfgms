@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -26,6 +26,7 @@ STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CO
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
+STEWARD_LAUNCHER_BINARY=cfgms-steward-launcher
 CONTROLLER_BINARY=controller
 CLI_BINARY=cfg
 CERT_MANAGER_BINARY=cert-manager
@@ -84,14 +85,33 @@ proto-gen: check-proto-grpc-tools
 		$(TRANSPORT_PROTO_FILES)
 	@echo "Done. Generated files in $(TRANSPORT_PROTO_DIR)/"
 
+# Module proto files requiring gRPC service generation
+MODULES_PROTO_DIR=api/proto/modules
+MODULES_PROTO_FILES=$(shell find $(MODULES_PROTO_DIR) -name "*.proto")
+
+# Generate Go code from module proto files including gRPC service stubs.
+# Generates both message code (*.pb.go) and gRPC stubs (*_grpc.pb.go) for the
+# modules package. IMPORTANT: This is the authoritative target for module protos.
+.PHONY: proto-gen-modules
+proto-gen-modules: check-proto-grpc-tools
+	@echo "Generating module proto files (messages + gRPC services)..."
+	@protoc $(PROTO_INCLUDES) \
+		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+		$(MODULES_PROTO_FILES)
+	@echo "Done. Generated files in $(MODULES_PROTO_DIR)/"
+
 # Build all binaries
 .PHONY: build
-build: fix-git-bare build-steward build-controller build-cli build-cert-manager
+build: fix-git-bare build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
 
 # Build individual binaries
-.PHONY: build-steward build-controller build-cli build-cert-manager
+.PHONY: build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
 build-steward:
 	go build ${STEWARD_BUILD_FLAGS} -o bin/${STEWARD_BINARY} ./cmd/steward
+
+build-steward-launcher:
+	go build ${GO_BUILD_FLAGS} -o bin/${STEWARD_LAUNCHER_BINARY} ./cmd/cfgms-steward-launcher
 
 build-controller:
 	go build ${GO_BUILD_FLAGS} -o bin/${CONTROLLER_BINARY} ./cmd/controller
@@ -101,6 +121,17 @@ build-cli:
 
 build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
+
+# Stdlib module binaries (out-of-process gRPC binaries bundled in the steward installer)
+STDLIB_MODULES := file service package script firewall patch
+
+.PHONY: build-stdlib-modules
+build-stdlib-modules:
+	@echo "Building stdlib module binaries..."
+	@for module in $(STDLIB_MODULES); do \
+		echo "  Building cfgms-module-$$module..."; \
+		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/$$module/cmd || exit 1; \
+	done
 
 # Cross-platform build targets
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
@@ -119,6 +150,7 @@ build-cross-platform:
 		echo "  Building for $$GOOS/$$GOARCH..."; \
 		mkdir -p $$OUTDIR; \
 		go build ${STEWARD_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_BINARY}$$EXT ./cmd/steward && \
+		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${STEWARD_LAUNCHER_BINARY}$$EXT ./cmd/cfgms-steward-launcher && \
 		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CONTROLLER_BINARY}$$EXT ./cmd/controller && \
 		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CLI_BINARY}$$EXT ./cmd/cfg && \
 		go build ${GO_BUILD_FLAGS} -o $$OUTDIR/${CERT_MANAGER_BINARY}$$EXT ./cmd/cert-manager || exit 1; \
@@ -140,6 +172,7 @@ build-cross-validate:
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
 		ERROR_LOG=$$(mktemp); \
 		if go build ${STEWARD_BUILD_FLAGS} -o /dev/null ./cmd/steward 2>$$ERROR_LOG && \
+		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfgms-steward-launcher 2>>$$ERROR_LOG && \
 		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/controller 2>>$$ERROR_LOG && \
 		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cfg 2>>$$ERROR_LOG && \
 		   go build ${GO_BUILD_FLAGS} -o /dev/null ./cmd/cert-manager 2>>$$ERROR_LOG; then \
@@ -231,6 +264,22 @@ build-pkg-darwin:
 	@bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)"
 	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
 
+# Run Linux install.sh tests (Story #1708)
+test-install-sh:
+	@echo "🐧 Testing build/linux/install.sh"
+	@echo "=================================="
+	@bash build/linux/install_test.sh
+	@echo "✅ Linux install.sh tests passed"
+
+# Run Hyper-V host install script Pester tests (Story #1854).
+# Windows CI only — pwsh + Pester 5 required. NOT included in test-complete
+# (same precedent as test-install-sh). Run manually on Windows CI runner.
+test-install-hyperv-ps1:
+	@echo "🪟 Testing scripts/install-hyperv-host.ps1"
+	@echo "============================================"
+	@pwsh -NonInteractive -File scripts/install-hyperv-host_test.ps1
+	@echo "✅ Hyper-V install script tests passed"
+
 # Smart test - core modules + changed modules only
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
@@ -317,10 +366,10 @@ test-watch:
 # SMART TESTING SYSTEM
 
 # Core modules for smoke testing (always tested)
-CORE_MODULES := file directory script
+CORE_MODULES := file script
 
 # All modules for change detection
-ALL_MODULES := file directory script firewall package patch m365 activedirectory network_activedirectory
+ALL_MODULES := file script firewall package patch m365 activedirectory network_activedirectory
 
 # Detect changed modules using git diff
 CHANGED_MODULES = $(shell \
@@ -787,7 +836,7 @@ test-data-consistency:
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
-	@echo "📦 Installing Nancy v1.2.0..."
+	@echo "📦 Installing Nancy v2.0.0..."
 	@echo "============================="
 	@if command -v nancy >/dev/null 2>&1; then \
 		echo "✅ Nancy is already installed: $$(nancy --version)"; \
@@ -805,16 +854,16 @@ install-nancy:
 	case "$$os" in \
 		linux) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
 			fi ;; \
 		darwin) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
 			elif [ "$$arch" = "arm64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
@@ -836,10 +885,10 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy v0.70.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
+		echo "Install trivy v0.71.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
 		echo "and NEVER use @latest:"; \
-		echo "  ./.github/scripts/install-trivy.sh v0.70.0 \\"; \
-		echo "    8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"; \
+		echo "  ./.github/scripts/install-trivy.sh v0.71.0 \\"; \
+		echo "    30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814"; \
 		echo ""; \
 		echo "Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
 		echo "Rollback procedure: docs/runbooks/trivy-rollback.md"; \
@@ -864,25 +913,25 @@ security-deps:
 	@if ! command -v nancy >/dev/null 2>&1; then \
 		echo "❌ Error: nancy is not installed"; \
 		echo ""; \
-		echo "Install nancy (v1.2.0) for your platform:"; \
+		echo "Install nancy (v2.0.0) for your platform:"; \
 		echo ""; \
 		echo "🚀 Quick Install (recommended):"; \
 		echo "  make install-nancy"; \
 		echo ""; \
 		echo "📥 Manual Install - Linux (amd64):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-linux-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Intel):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Apple Silicon):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-darwin-arm64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🪟 Manual Install - Windows (PowerShell):"; \
-		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v1.2.0/nancy-v1.2.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
+		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
 		echo "  Move-Item nancy.exe \$$(go env GOPATH)\\bin\\nancy.exe"; \
 		echo ""; \
 		echo "📦 Package Managers:"; \
@@ -913,7 +962,7 @@ security-gosec:
 		echo "❌ Error: gosec is not installed"; \
 		echo ""; \
 		echo "Install gosec using Go:"; \
-		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1"; \
+		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1"; \
 		echo ""; \
 		echo "For more info: https://github.com/securego/gosec"; \
 		exit 1; \

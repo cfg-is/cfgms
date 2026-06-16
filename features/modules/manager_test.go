@@ -286,14 +286,16 @@ func TestModuleLifecycleManager_StartStopAllModules(t *testing.T) {
 	baseModule := &mockLifecycleModule{
 		health: HealthStatus{Status: HealthStateHealthy, Timestamp: time.Now()},
 	}
-	baseMetadata := &ModuleMetadata{Name: "base", Version: "1.0.0"}
+	baseMetadata := &ModuleMetadata{Name: "base", Version: "1.0.0", Publisher: "cfgms", Executors: []string{"steward"}}
 
 	appModule := &mockLifecycleModule{
 		health: HealthStatus{Status: HealthStateHealthy, Timestamp: time.Now()},
 	}
 	appMetadata := &ModuleMetadata{
-		Name:    "app",
-		Version: "1.0.0",
+		Name:      "app",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
 		ModuleDependencies: []ModuleDependency{
 			{Name: "base", Version: "1.0.0"},
 		},

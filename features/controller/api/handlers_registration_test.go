@@ -98,6 +98,7 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 		auditMgr,
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
+		nil, // No blob store for basic tests
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

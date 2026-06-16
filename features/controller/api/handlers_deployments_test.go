@@ -71,6 +71,7 @@ func setupDeploymentServer(t *testing.T) (*Server, business.PushStore) {
 		auditMgr,
 		nil,       // No command publisher needed
 		pushStore, // Real push store
+		nil,       // No blob store needed
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
