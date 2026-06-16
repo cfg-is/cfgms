@@ -207,6 +207,10 @@ func TestReconcile_Delete_RemovesVMByExactName(t *testing.T) {
 	require.Len(t, removes, 1, "state:absent must issue Remove-VM")
 	assert.True(t, argsContain(removes[0], "web-01"), "Remove-VM must target the exact VM name")
 	assert.NotContains(t, removes[0].scriptBlock, "web-01", "name must travel via args, not the script")
+	// Hyper-V refuses to remove a non-Off VM (and the connected switch stays "in
+	// use"), so the delete script hard-powers-off a running VM before removing it.
+	assert.Contains(t, removes[0].scriptBlock, "Stop-VM", "delete must stop a running VM before Remove-VM")
+	assert.Contains(t, removes[0].scriptBlock, "-TurnOff", "delete uses a hard power-off")
 }
 
 // TestReconcile_PowerIdempotent_NoStartWhenAlreadyRunning drives desired:running

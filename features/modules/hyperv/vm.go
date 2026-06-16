@@ -316,9 +316,12 @@ const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-no
 //     expose vhd_size_gb; future #1887 follow-up should add it.
 const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation 2 | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
 
-// psRemoveVM is the script block passed to ExecutePS for VM deletion.
-// $Name is the only parameter; its value is transmitted via ArgumentList.
-const psRemoveVM = `Remove-VM -Name $Name -Force`
+// psRemoveVM deletes a VM. Hyper-V refuses to remove a VM that is not Off
+// ("the operation cannot be performed while the object is in its current
+// state"), which in turn keeps any connected vSwitch "in use" and blocks its
+// deletion — so a running VM is hard-powered-off first, then removed. A no-op
+// when the VM is already gone. $Name travels via ArgumentList.
+const psRemoveVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if ($vm) { if ($vm.State -ne 'Off') { Stop-VM -Name $Name -Force -TurnOff }; Remove-VM -Name $Name -Force }`
 
 // psConnectVMNic connects a NEW network adapter on the VM to the named switch.
 // Both $Name (host-side VM name) and $SwitchName travel via ArgumentList —
