@@ -140,7 +140,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 	}
 
 	s.logger.Info("signing-cert rotation",
-		"operator_serial", operatorSerial,
+		"operator_serial", logging.SanitizeLogValue(operatorSerial),
 		"old_serial", oldSerial,
 		"new_serial", newCert.SerialNumber,
 		"overlap_days", overlapDays,
