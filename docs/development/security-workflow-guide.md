@@ -61,6 +61,7 @@ CodeQL cannot see our runtime validators, so it raises false positives where a v
 
 - **Pack source**: `.github/codeql/extensions/` — `qlpack.yml` (`cfg-is/cfgms-go-extensions`) plus `models/*.model.yml`.
 - **Publish requirement**: the pack is referenced *by name* from `.github/codeql/codeql-config.yml` (`packs:`) and **must be published to the ghcr.io CodeQL pack registry** by `.github/workflows/codeql-pack-publish.yml`. **Local-path pack references are not supported by the codeql-action** — a model file on disk does nothing until the pack is republished.
+- **Bump the version (REQUIRED for every model change)**: editing a `models/*.yml` does nothing on its own. `codeql pack publish` refuses to overwrite an existing `<name>@<version>` and no-ops (`"already exists"`); the publish workflow treats that as a green no-op. You **must bump `version:` in `.github/codeql/extensions/qlpack.yml`** in the same change, or the registry keeps serving the old pack and your model stays inert (it will still *bundle* fine, masking the problem).
 - **Already modeled**: `safeJoin` (path-injection), `SanitizeLogValue` + `RedactedID` (log-injection / clear-text-logging).
 
 Decision path for a CodeQL alert:
