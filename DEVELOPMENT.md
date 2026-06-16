@@ -63,6 +63,20 @@ This guide provides instructions for setting up a local CFGMS development enviro
   go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
   ```
 
+- **Serena MCP server** - Semantic code navigation/editing for Claude Code. The
+  server config ships with the repo in `.mcp.json` (project scope), but the
+  runtime is per-machine: install [`uv`](https://docs.astral.sh/uv/), then
+  approve the server on first interactive `claude` launch.
+  ```bash
+  # Install uv (provides uvx, which fetches/runs Serena on demand)
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  # Confirm Claude Code sees the project-scoped server, then approve it
+  claude mcp list   # shows: serena ... (pending approval until you run `claude`)
+  ```
+  No manual `claude mcp add` is needed — `.mcp.json` is committed. Serena
+  auto-manages the language servers it needs (e.g. `gopls` for this repo).
+
 ### System Requirements
 
 **For Building**:
