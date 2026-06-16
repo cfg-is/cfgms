@@ -82,6 +82,7 @@ Stewards run on hosts that may be compromised. Admin accounts may be phished or 
 - SQL injection prevention (parameterized queries only)
 - No information disclosure in error messages
 - Use `logging.SanitizeLogValue()` for HTTP params, URL paths, headers
+- **CodeQL findings:** genuine bug → fix the code; false positive → extend the in-repo data-extension pack `.github/codeql/extensions/` (republished to ghcr.io by `codeql-pack-publish.yml` — local-path packs are unsupported, and this is **not** the upstream `github/codeql` repo). Heuristic-source FPs that can't be modeled → dismiss with justification. See [security-workflow-guide](docs/development/security-workflow-guide.md#5-codeql---semantic-code-analysis).
 
 ### Documentation
 

@@ -95,7 +95,7 @@ jobs:
         skip-setup-trivy: true
 
     - name: Upload Trivy results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4
+      uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
       if: always()
       with:
         sarif_file: 'trivy-controller-results.sarif'
@@ -184,7 +184,7 @@ jobs:
         skip-setup-trivy: true
 
     - name: Upload Trivy results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4
+      uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
       if: always()
       with:
         sarif_file: 'trivy-steward-results.sarif'
