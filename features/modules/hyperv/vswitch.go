@@ -106,9 +106,11 @@ func (c *VSwitchConfig) GetManagedFields() []string {
 // $Name travels via ArgumentList — never interpolated into the script text.
 const psGetVSwitch = `$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue; if (-not $sw) { Write-Output '{"found":false}'; return }; $result = @{ found=$true; Name=$sw.Name; SwitchType=$sw.SwitchType.ToString() }; ConvertTo-Json $result -Compress`
 
-// psRemoveVSwitch removes a virtual switch by host-side name.
-// $Name travels via ArgumentList — never interpolated into the script text.
-const psRemoveVSwitch = `Remove-VMSwitch -Name $Name -Force`
+// psRemoveVSwitch removes a virtual switch by host-side name. Guarded so a
+// removal of an already-absent switch is a clean no-op rather than an
+// ObjectNotFound error (mirrors psRemoveVM's existence guard — keeps the
+// delete path idempotent under retries/races). $Name travels via ArgumentList.
+const psRemoveVSwitch = `$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue; if ($sw) { Remove-VMSwitch -Name $Name -Force }`
 
 // psCreateVSwitchInternal creates an internal virtual switch.
 // $Name travels via ArgumentList — never interpolated into the script text.

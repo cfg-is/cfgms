@@ -285,6 +285,64 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 	}
 }
 
+// TestPreamble_RemoveVMStopsRunningVMFirst guards the regression that shipped
+// in v0.5.13: psRemoveVM (vm.go) carried the stop-then-remove guard, but the
+// Windows runtime never executes that const — the dispatcher maps psRemoveVM
+// to the Cfgms-RemoveVM function in psHostPreamble, which was still the old
+// un-guarded `Remove-VM -Name $Name -Force`. Result: deleting a running VM
+// failed live ("the operation cannot be performed while the object is in its
+// current state"), and its connected vSwitch stayed busy and could not be
+// removed either. The dispatch tests above only assert the SYNTHESISED call
+// string, never the function body, so they stayed green. This test asserts the
+// preamble function actually powers a running VM off before removing it, with
+// Stop-VM ordered before Remove-VM.
+func TestPreamble_RemoveVMStopsRunningVMFirst(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-RemoveVM")
+
+	assert.Contains(t, body, "Stop-VM",
+		"Cfgms-RemoveVM must power off a running VM before deleting it")
+	assert.Contains(t, body, "-TurnOff",
+		"Cfgms-RemoveVM must hard power-off (-TurnOff), matching psRemoveVM")
+	assert.Contains(t, body, "$vm.State -ne 'Off'",
+		"Cfgms-RemoveVM must only stop the VM when it is not already Off")
+	assert.Contains(t, body, "Remove-VM",
+		"Cfgms-RemoveVM must still remove the VM")
+
+	stopIdx := strings.Index(body, "Stop-VM")
+	removeIdx := strings.Index(body, "Remove-VM")
+	require.NotEqual(t, -1, stopIdx)
+	require.NotEqual(t, -1, removeIdx)
+	assert.Less(t, stopIdx, removeIdx,
+		"Stop-VM must be ordered before Remove-VM, otherwise the running VM blocks its own deletion")
+}
+
+// preambleFunctionBody extracts the body of a `function <name> { ... }` block
+// from psHostPreamble, balancing braces so nested blocks (if/foreach) are
+// included. It fails the test if the function is not found.
+func preambleFunctionBody(t *testing.T, name string) string {
+	t.Helper()
+	marker := "function " + name
+	start := strings.Index(psHostPreamble, marker)
+	require.NotEqual(t, -1, start, "function %s not found in psHostPreamble", name)
+	open := strings.Index(psHostPreamble[start:], "{")
+	require.NotEqual(t, -1, open, "no opening brace for function %s", name)
+	open += start
+	depth := 0
+	for i := open; i < len(psHostPreamble); i++ {
+		switch psHostPreamble[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return psHostPreamble[open : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces for function %s in psHostPreamble", name)
+	return ""
+}
+
 // TestQuoteForPS_SingleQuoteEscapes verifies the WQL-style single-quote
 // doubling for embedded apostrophes. The hyperv module's name allowlist
 // rejects apostrophes for resource names, but the quoting layer must still

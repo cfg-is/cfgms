@@ -17,6 +17,10 @@ package hyperv
 //     shaping block around one query). No sequencing, no conditionals
 //     beyond the trivial "did this return nothing?" check, no state
 //     machines. Orchestration logic lives in Go in vm.go / vswitch.go.
+//     Two deliberate exceptions: Cfgms-GetVM (multi-query JSON shaping) and
+//     Cfgms-RemoveVM (stop-then-remove is a single host-atomic delete, not
+//     Go orchestration — Hyper-V cannot delete a running VM). Both mirror
+//     their psXxx const exactly.
 //   - All parameters are typed and explicit. Get-Help on each function
 //     would produce a sensible signature.
 //   - Get-X functions return JSON via ConvertTo-Json -Compress so the Go
@@ -95,7 +99,23 @@ function Cfgms-CreateVM {
     }
 }
 
-function Cfgms-RemoveVM     { param([Parameter(Mandatory)][string]$Name) Remove-VM -Name $Name -Force }
+# Cfgms-RemoveVM mirrors psRemoveVM in vm.go: Hyper-V refuses to remove a VM
+# that is not Off ("the operation cannot be performed while the object is in
+# its current state"), and a running VM also keeps any connected vSwitch "in
+# use" and blocks ITS deletion — so a running VM is hard-powered-off first,
+# then removed. A no-op when the VM is already gone. This is (with Cfgms-GetVM)
+# one of the two functions that intentionally wraps more than one cmdlet: the
+# stop+remove is a single host-atomic delete, not orchestration that belongs
+# in Go. Keep it byte-for-byte equivalent to psRemoveVM — the dispatcher maps
+# psRemoveVM here, so divergence silently ships the old un-guarded behavior.
+function Cfgms-RemoveVM {
+    param([Parameter(Mandatory)][string]$Name)
+    $vm = Get-VM -Name $Name -ErrorAction SilentlyContinue
+    if ($vm) {
+        if ($vm.State -ne 'Off') { Stop-VM -Name $Name -Force -TurnOff }
+        Remove-VM -Name $Name -Force
+    }
+}
 function Cfgms-StartVM      { param([Parameter(Mandatory)][string]$Name) Start-VM -Name $Name }
 function Cfgms-StopVM       { param([Parameter(Mandatory)][string]$Name) Stop-VM  -Name $Name -Force }
 
@@ -142,7 +162,15 @@ function Cfgms-GetVSwitch {
     } -Compress
 }
 
-function Cfgms-RemoveVSwitch         { param([Parameter(Mandatory)][string]$Name) Remove-VMSwitch -Name $Name -Force }
+# Cfgms-RemoveVSwitch mirrors psRemoveVSwitch: removing an already-absent
+# switch is a clean no-op (Remove-VMSwitch otherwise throws ObjectNotFound).
+# Keep it byte-for-byte equivalent to psRemoveVSwitch — the dispatcher maps
+# psRemoveVSwitch here.
+function Cfgms-RemoveVSwitch {
+    param([Parameter(Mandatory)][string]$Name)
+    $sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue
+    if ($sw) { Remove-VMSwitch -Name $Name -Force }
+}
 function Cfgms-CreateVSwitchInternal { param([Parameter(Mandatory)][string]$Name) New-VMSwitch -Name $Name -SwitchType Internal | Out-Null }
 function Cfgms-CreateVSwitchPrivate  { param([Parameter(Mandatory)][string]$Name) New-VMSwitch -Name $Name -SwitchType Private  | Out-Null }
 
