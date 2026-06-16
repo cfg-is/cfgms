@@ -514,7 +514,9 @@ func TestSetVM_MultiSwitchCreate(t *testing.T) {
 		"third call must connect the additional adapter")
 	// The additional switch name travels as an argument, never in the script.
 	require.NotEmpty(t, calls[2].args)
-	assert.Contains(t, calls[2].args, "Mgmt", "additional switch must travel via args")
+	// The switch name is translated to its host-side cfgms-<tenant>__name and
+	// travels via args, never interpolated into the script body.
+	assert.Contains(t, calls[2].args, "cfgms-dev__Mgmt", "additional switch must travel via args, host-namespaced")
 	assert.NotContains(t, calls[2].scriptBlock, "Mgmt",
 		"switch name must not be interpolated into the script body")
 }
@@ -548,11 +550,11 @@ func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
 		assert.NotContains(t, c.scriptBlock, "New-VM", "reconcile on existing VM must not create")
 		if strings.Contains(c.scriptBlock, "Add-VMNetworkAdapter") {
 			connect = true
-			assert.Contains(t, c.args, "Storage")
+			assert.Contains(t, c.args, "cfgms-ops__Storage")
 		}
 		if strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
 			disconnect = true
-			assert.Contains(t, c.args, "Mgmt")
+			assert.Contains(t, c.args, "cfgms-ops__Mgmt")
 		}
 	}
 	assert.True(t, connect, "must connect the newly desired switch")

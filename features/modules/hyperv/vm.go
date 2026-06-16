@@ -291,6 +291,16 @@ func vmUserName(tenantID, hostName string) string {
 	return strings.TrimPrefix(hostName, prefix)
 }
 
+// hostSwitchName translates a user-supplied SHORT switch name into the host-side
+// cfgms-managed name the vswitch resource created, leaving an empty name (a VM
+// with no declared network) unchanged so New-VM is not handed a bare prefix.
+func (m *hypervModule) hostSwitchName(short string) string {
+	if short == "" {
+		return ""
+	}
+	return vswitchHostName(m.tenantID, short)
+}
+
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
 // $Name is the only parameter; its value is transmitted via ArgumentList.
 //
@@ -406,14 +416,19 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	if v, ok := parsed["Path"].(string); ok {
 		cfg.VHDPath = v
 	}
+	// Adapter-reported switch names are host-side (cfgms-<tenant>__name); map
+	// them back to the short names the desired config uses so drift comparison
+	// stays short-name vs short-name.
 	if v, ok := parsed["SwitchName"].(string); ok {
-		cfg.SwitchName = v
+		cfg.SwitchName = vswitchUserName(m.tenantID, v)
 	}
 	// SwitchNames is the full observed set of connected switches (one per
 	// network adapter). ConvertTo-Json emits an array for 0/2+ elements and
 	// may collapse a single element to a scalar string on some PS versions,
 	// so accept both shapes.
-	cfg.SwitchNames = parseSwitchNamesJSON(parsed["SwitchNames"])
+	for _, s := range parseSwitchNamesJSON(parsed["SwitchNames"]) {
+		cfg.SwitchNames = append(cfg.SwitchNames, vswitchUserName(m.tenantID, s))
+	}
 	// Back-compat: if the host returned no explicit SwitchNames array but did
 	// report a primary SwitchName, treat that as the single-element set.
 	if len(cfg.SwitchNames) == 0 && cfg.SwitchName != "" {
@@ -558,7 +573,7 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		"MemoryMB":   fmt.Sprintf("%d", cfg.MemoryMB),
 		"CPU":        fmt.Sprintf("%d", cfg.CPUCount),
 		"VHDPath":    cfg.VHDPath,
-		"SwitchName": cfg.SwitchName,
+		"SwitchName": m.hostSwitchName(cfg.SwitchName),
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
@@ -718,9 +733,12 @@ func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName st
 // connectVMToSwitch connects a new network adapter on the VM to switchName.
 // switchName travels via ArgumentList — never interpolated into script text.
 func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, switchName string) error {
+	// switchName is the user-supplied SHORT name of a cfgms-managed vSwitch;
+	// translate it to the host-side cfgms-<tenant>__name the vswitch resource
+	// created so Add-VMNetworkAdapter finds it.
 	_, psErr := m.transport.ExecutePS(ctx, psConnectVMNic, map[string]string{
 		"Name":       hostName,
-		"SwitchName": switchName,
+		"SwitchName": vswitchHostName(m.tenantID, switchName),
 	})
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", hostName, psErr)
 	if psErr != nil {
@@ -732,9 +750,11 @@ func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, 
 // disconnectVMFromSwitch removes the network adapter connected to switchName on
 // the VM. switchName travels via ArgumentList — never interpolated.
 func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, vmName, hostName, switchName string) error {
+	// switchName is the short name; the adapter's SwitchName on the host is the
+	// cfgms-<tenant>__name, so translate before the Where-Object match.
 	_, psErr := m.transport.ExecutePS(ctx, psDisconnectVMNic, map[string]string{
 		"Name":       hostName,
-		"SwitchName": switchName,
+		"SwitchName": vswitchHostName(m.tenantID, switchName),
 	})
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", hostName, psErr)
 	if psErr != nil {

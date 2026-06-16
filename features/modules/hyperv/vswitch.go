@@ -118,6 +118,15 @@ func vswitchHostName(tenantID, name string) string {
 	return "cfgms-" + strings.ReplaceAll(tenantID, "/", "-") + "__" + name
 }
 
+// vswitchUserName recovers the user-supplied (short) switch name from a host-side
+// cfgms-namespaced name. A name that lacks the prefix (e.g. a switch not managed
+// by cfgms) is returned unchanged. Used by getVM to map adapter-reported switch
+// names back into the short-name space the desired config is expressed in, so
+// drift comparison stays short-name vs short-name.
+func vswitchUserName(tenantID, hostName string) string {
+	return strings.TrimPrefix(hostName, "cfgms-"+strings.ReplaceAll(tenantID, "/", "-")+"__")
+}
+
 // psGetVSwitch checks whether a virtual switch exists; emits JSON {"found":bool,"SwitchType":"..."}.
 // $Name travels via ArgumentList — never interpolated into the script text.
 const psGetVSwitch = `$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue; if (-not $sw) { Write-Output '{"found":false}'; return }; $result = @{ found=$true; Name=$sw.Name; SwitchType=$sw.SwitchType.ToString() }; ConvertTo-Json $result -Compress`
