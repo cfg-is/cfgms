@@ -38,7 +38,7 @@ VM resource configuration fields (`vm:<name>`):
 | `memory_mb` | integer | Yes (create) | Startup memory in MiB |
 | `cpu_count` | integer | Yes (create) | Number of virtual processors |
 | `vhd_path` | string | Yes (create) | Absolute Windows path to VHD/VHDX |
-| `switch_name` | string | Yes (create) | Virtual switch name |
+| `switch_name` | string or list | Yes (create) | The VM's full desired network. One switch name (back-compat) or a list of switch names (multi-NIC). Converged declaratively. |
 | `generation` | integer | No | VM generation (must be 2 or omitted) |
 | `state` | string | No | Desired state: `running`, `stopped`, or `absent` |
 
@@ -201,9 +201,45 @@ resource ID string built by the steward executor:
 | `hyperv.snapshot` | `name: pre-patch`, `config.vm_name: web-01` | `snapshot:web-01/pre-patch` | Checkpoint management (create, restore, remove) |
 | `hyperv.vswitch` | `name: External-Switch` | `vswitch:External-Switch` | Virtual switch management (create External/Internal/Private, remove) |
 
-VM network connectivity is declarative on the VM via `switch_name` (single
-switch — the common case). Declarative multi-NIC reconciliation is tracked
-in #2021.
+### VM networking (declarative, multi-NIC)
+
+A VM's full desired network is declared on the VM itself via `switch_name`,
+which accepts either a single switch name (the common case) or a list:
+
+```yaml
+# Single NIC (back-compat — behaves exactly as before)
+- name: web-01
+  module: hyperv.vm
+  config:
+    switch_name: External
+    # ...
+
+# Multi-NIC — one adapter per switch in the list
+- name: db-01
+  module: hyperv.vm
+  config:
+    switch_name:
+      - External
+      - Storage
+    # ...
+```
+
+On every convergence the module reads all of the VM's network adapters and
+reconciles them to the desired set:
+
+- a switch in the list with no connected adapter → a new adapter is connected
+  (`Add-VMNetworkAdapter`);
+- a connected adapter on a switch not in the list → that adapter is removed
+  (`Remove-VMNetworkAdapter`);
+- when the connected set already equals the desired set, no PowerShell mutation
+  runs and drift reports no network change (idempotent).
+
+At create time `New-VM -SwitchName <first>` connects the primary adapter and
+each additional switch in the list connects one more adapter. This declarative
+model is the replacement for the removed standalone `vmattach` resource
+(detach / multi-NIC / reattach — #1903, #2021). If `switch_name` is omitted the
+module leaves the VM's existing adapters untouched (it never implicitly strips a
+VM down to zero NICs).
 
 ## Tenant-Prefix Naming Convention
 

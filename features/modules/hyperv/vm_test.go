@@ -322,6 +322,274 @@ func TestVMConfig_Validate_AcceptsValidConfig(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+// ─── Declarative multi-NIC (switch_name list) parse tests (#2021) ─────────────
+
+// TestVMConfig_SwitchName_AcceptsSingleString verifies the back-compat path:
+// a single switch_name string materialises a one-element desired set and keeps
+// SwitchName populated for the New-VM primary-adapter path.
+func TestVMConfig_SwitchName_AcceptsSingleString(t *testing.T) {
+	cfg := &VMConfig{}
+	require.NoError(t, cfg.FromYAML([]byte("name: web-01\nswitch_name: External\n")))
+	assert.Equal(t, "External", cfg.SwitchName, "single string must populate primary SwitchName")
+	assert.Equal(t, []string{"External"}, cfg.desiredSwitches(),
+		"single switch_name string must yield a one-element desired set")
+}
+
+// TestVMConfig_SwitchName_AcceptsList verifies that switch_name as a YAML list
+// materialises the full ordered desired set with the first element as primary.
+func TestVMConfig_SwitchName_AcceptsList(t *testing.T) {
+	cfg := &VMConfig{}
+	require.NoError(t, cfg.FromYAML([]byte("name: web-01\nswitch_name:\n  - External\n  - Mgmt\n")))
+	assert.Equal(t, "External", cfg.SwitchName, "first list element must become primary SwitchName")
+	assert.Equal(t, []string{"External", "Mgmt"}, cfg.desiredSwitches(),
+		"switch_name list must yield the full ordered desired set")
+}
+
+// TestVMConfig_DesiredSwitches_DedupesAndDropsEmpty verifies that the desired
+// set is de-duplicated and empty entries are dropped, preserving first-seen order.
+func TestVMConfig_DesiredSwitches_DedupesAndDropsEmpty(t *testing.T) {
+	cfg := &VMConfig{SwitchName: "External", SwitchNames: stringOrStringList{"External", "", "Mgmt", "Mgmt"}}
+	assert.Equal(t, []string{"External", "Mgmt"}, cfg.desiredSwitches())
+}
+
+// TestVMConfig_SwitchName_YAMLRoundTripSingle verifies a single switch_name
+// round-trips as a bare scalar (not a one-element list).
+func TestVMConfig_SwitchName_YAMLRoundTripSingle(t *testing.T) {
+	cfg := &VMConfig{Name: "web-01", SwitchName: "External"}
+	data, err := cfg.ToYAML()
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "switch_name: External",
+		"single switch must serialise as a bare scalar for back-compat")
+}
+
+// TestVMConfig_SwitchName_YAMLRoundTripList verifies a multi-switch config
+// round-trips through YAML preserving the full set.
+func TestVMConfig_SwitchName_YAMLRoundTripList(t *testing.T) {
+	cfg := &VMConfig{Name: "web-01", SwitchNames: stringOrStringList{"External", "Mgmt"}}
+	data, err := cfg.ToYAML()
+	require.NoError(t, err)
+
+	decoded := &VMConfig{}
+	require.NoError(t, decoded.FromYAML(data))
+	assert.Equal(t, []string{"External", "Mgmt"}, decoded.desiredSwitches())
+}
+
+// TestVMConfig_Validate_RejectsBadSwitchInList verifies that a malformed switch
+// name anywhere in the desired set is rejected before any PS call.
+func TestVMConfig_Validate_RejectsBadSwitchInList(t *testing.T) {
+	cfg := &VMConfig{
+		Name:        "web-01",
+		VHDPath:     `C:\VMs\web-01.vhdx`,
+		SwitchNames: stringOrStringList{"External", "'; Remove-VMSwitch; '"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidSwitchName)
+}
+
+// ─── Convergence diff logic tests (#2021) ─────────────────────────────────────
+
+// TestSwitchSetDiff verifies the pure desired-vs-current reconcile planner:
+// correct connect/disconnect actions and idempotence when the sets are equal.
+func TestSwitchSetDiff(t *testing.T) {
+	cases := []struct {
+		name           string
+		desired        []string
+		current        []string
+		wantConnect    []string
+		wantDisconnect []string
+	}{
+		{
+			name:    "equal sets are idempotent (no actions)",
+			desired: []string{"External", "Mgmt"},
+			current: []string{"External", "Mgmt"},
+		},
+		{
+			name:        "add one switch connects one adapter",
+			desired:     []string{"External", "Mgmt"},
+			current:     []string{"External"},
+			wantConnect: []string{"Mgmt"},
+		},
+		{
+			name:           "remove one switch disconnects one adapter",
+			desired:        []string{"External"},
+			current:        []string{"External", "Mgmt"},
+			wantDisconnect: []string{"Mgmt"},
+		},
+		{
+			name:           "swap switch connects new and disconnects old",
+			desired:        []string{"External", "Storage"},
+			current:        []string{"External", "Mgmt"},
+			wantConnect:    []string{"Storage"},
+			wantDisconnect: []string{"Mgmt"},
+		},
+		{
+			name:        "empty current connects all desired in order",
+			desired:     []string{"External", "Mgmt"},
+			current:     nil,
+			wantConnect: []string{"External", "Mgmt"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connect, disconnect := switchSetDiff(tc.desired, tc.current)
+			assert.Equal(t, tc.wantConnect, connect, "toConnect mismatch")
+			assert.Equal(t, tc.wantDisconnect, disconnect, "toDisconnect mismatch")
+		})
+	}
+}
+
+// ─── getVM multi-adapter read tests (#2021) ───────────────────────────────────
+
+// TestGet_VM_ReadsMultipleAdapters verifies getVM surfaces every connected
+// switch (not just the first adapter) in the observed desired set.
+func TestGet_VM_ReadsMultipleAdapters(t *testing.T) {
+	const tenantID = "prod"
+	const vmName = "app-server"
+	hostName := vmHostName(tenantID, vmName)
+
+	transport := &testWinRMTransport{
+		output: `{"found":true,"Name":"` + hostName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":["External","Mgmt"],"State":"Running"}`,
+	}
+	m := vmModuleWithTransport(transport, tenantID)
+
+	state, err := m.Get(context.Background(), "vm:"+vmName)
+	require.NoError(t, err)
+
+	cfg, ok := state.(*VMConfig)
+	require.True(t, ok)
+	assert.Equal(t, "External", cfg.SwitchName, "primary switch is the first adapter")
+	assert.Equal(t, []string{"External", "Mgmt"}, cfg.desiredSwitches(),
+		"getVM must read all adapters' switches into the observed set")
+}
+
+// TestGet_VM_SingleAdapterScalarSwitchNames verifies tolerance for the PS
+// ConvertTo-Json single-element collapse (SwitchNames as a bare string).
+func TestGet_VM_SingleAdapterScalarSwitchNames(t *testing.T) {
+	const tenantID = "prod"
+	const vmName = "app-server"
+	hostName := vmHostName(tenantID, vmName)
+
+	transport := &testWinRMTransport{
+		output: `{"found":true,"Name":"` + hostName + `","MemoryStartupBytes":4294967296,"ProcessorCount":4,"Generation":2,"Path":"C:\\VMs\\app-server.vhdx","SwitchName":"External","SwitchNames":"External","State":"Running"}`,
+	}
+	m := vmModuleWithTransport(transport, tenantID)
+
+	state, err := m.Get(context.Background(), "vm:"+vmName)
+	require.NoError(t, err)
+	cfg := state.(*VMConfig)
+	assert.Equal(t, []string{"External"}, cfg.desiredSwitches())
+}
+
+// ─── setVM network reconcile tests (#2021) ────────────────────────────────────
+
+// TestSetVM_MultiSwitchCreate verifies that creating a VM with two desired
+// switches issues New-VM (first switch) plus one Add-VMNetworkAdapter for the
+// second switch.
+func TestSetVM_MultiSwitchCreate(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := vmModuleWithTransport(transport, "dev")
+
+	cfg := &VMConfig{
+		Name:        "multinic",
+		MemoryMB:    4096,
+		CPUCount:    2,
+		VHDPath:     `C:\VMs\multinic.vhdx`,
+		SwitchNames: stringOrStringList{"External", "Mgmt"},
+		Generation:  2,
+		State:       "stopped",
+	}
+
+	require.NoError(t, m.Set(context.Background(), "vm:multinic", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// getVM (not-found) + New-VM + one Add-VMNetworkAdapter for the 2nd switch.
+	require.Len(t, calls, 3)
+	assert.Contains(t, calls[1].scriptBlock, "New-VM", "second call must be New-VM")
+	assert.Contains(t, calls[2].scriptBlock, "Add-VMNetworkAdapter",
+		"third call must connect the additional adapter")
+	// The additional switch name travels as an argument, never in the script.
+	require.NotEmpty(t, calls[2].args)
+	assert.Contains(t, calls[2].args, "Mgmt", "additional switch must travel via args")
+	assert.NotContains(t, calls[2].scriptBlock, "Mgmt",
+		"switch name must not be interpolated into the script body")
+}
+
+// TestSetVM_MultiSwitch_AddsAndRemovesAdapters verifies the UPDATE reconcile:
+// from current {External, Mgmt} to desired {External, Storage} connects Storage
+// and disconnects Mgmt, with no New-VM.
+func TestSetVM_MultiSwitch_AddsAndRemovesAdapters(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	m.vmsMu.Lock()
+	m.vms["foo"] = VMConfig{
+		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
+		SwitchName: "External", SwitchNames: stringOrStringList{"External", "Mgmt"},
+	}
+	m.vmsMu.Unlock()
+
+	cfg := &VMConfig{
+		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
+		SwitchNames: stringOrStringList{"External", "Storage"},
+	}
+	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	var connect, disconnect bool
+	for _, c := range calls {
+		assert.NotContains(t, c.scriptBlock, "New-VM", "reconcile on existing VM must not create")
+		if strings.Contains(c.scriptBlock, "Add-VMNetworkAdapter") {
+			connect = true
+			assert.Contains(t, c.args, "Storage")
+		}
+		if strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
+			disconnect = true
+			assert.Contains(t, c.args, "Mgmt")
+		}
+	}
+	assert.True(t, connect, "must connect the newly desired switch")
+	assert.True(t, disconnect, "must disconnect the no-longer-desired switch")
+}
+
+// TestSetVM_MultiSwitch_IdempotentWhenEqual verifies that when the desired set
+// equals the current set, NO network mutation runs (no Add/Remove-VMNetworkAdapter).
+func TestSetVM_MultiSwitch_IdempotentWhenEqual(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	m.vmsMu.Lock()
+	m.vms["foo"] = VMConfig{
+		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
+		SwitchName: "External", SwitchNames: stringOrStringList{"External", "Mgmt"},
+	}
+	m.vmsMu.Unlock()
+
+	cfg := &VMConfig{
+		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
+		SwitchNames: stringOrStringList{"External", "Mgmt"},
+	}
+	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	for _, c := range calls {
+		assert.NotContains(t, c.scriptBlock, "Add-VMNetworkAdapter",
+			"equal switch sets must not connect adapters")
+		assert.NotContains(t, c.scriptBlock, "Remove-VMNetworkAdapter",
+			"equal switch sets must not remove adapters")
+	}
+}
+
 // ─── Module routing tests ──────────────────────────────────────────────────────
 
 // TestModule_Get_UnknownResourceIDReturnsNotImplemented verifies that resource IDs

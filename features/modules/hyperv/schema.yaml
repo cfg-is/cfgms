@@ -20,8 +20,23 @@ resources:
         type: string
         description: Absolute Windows path to the VHD/VHDX file (e.g. C:\\VMs\\disk.vhdx)
       switch_name:
-        type: string
-        description: Virtual switch name to connect the VM's network adapter
+        description: >
+          The VM's FULL desired network, declared on the VM. Accepts either a
+          single virtual switch name (string — the common case, back-compat) or
+          a list of switch names (multi-NIC). On convergence the module
+          reconciles the VM's network adapters so that exactly one adapter is
+          connected to each switch in the set: a switch added to the set
+          connects a new adapter; a switch removed from the set removes the
+          adapter on it. Idempotent — when the connected set already equals the
+          desired set, no change is made. This is the declarative replacement
+          for the removed standalone vmattach resource (#1903, #2021).
+        oneOf:
+          - type: string
+            pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
+          - type: array
+            items:
+              type: string
+              pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
       generation:
         type: integer
         description: VM generation (must be 2 or omitted for default)

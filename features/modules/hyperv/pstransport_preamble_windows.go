@@ -39,7 +39,11 @@ function Cfgms-GetVM {
     param([Parameter(Mandatory)][string]$Name)
     $vm = Get-VM -Name $Name -ErrorAction SilentlyContinue
     if (-not $vm) { Write-Output '{"found":false}'; return }
-    $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Read ALL network adapters and the switch each is connected to. SwitchNames
+    # is the full observed set the declarative multi-NIC reconcile (#2021) diffs
+    # against; SwitchName (the first) is kept for the single-NIC back-compat path.
+    $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue)
+    $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ })
     # $vm.Path is the VM CONFIGURATION directory, not the VHD file. The
     # module's VMConfig.VHDPath stores the path to the virtual disk; read
     # it from Get-VMHardDiskDrive.Path (the first attached disk is the
@@ -61,10 +65,11 @@ function Cfgms-GetVM {
         ProcessorCount     = [int]$vm.ProcessorCount
         Generation         = [int]$vm.Generation
         Path               = if ($disk) { $disk.Path } else { '' }
-        SwitchName         = if ($adapter) { $adapter.SwitchName } else { '' }
+        SwitchName         = if ($switchNames.Count -gt 0) { $switchNames[0] } else { '' }
+        SwitchNames        = $switchNames
         State              = $vm.State.ToString()
     }
-    ConvertTo-Json $result -Compress
+    ConvertTo-Json $result -Compress -Depth 4
 }
 
 # ── VM lifecycle ──────────────────────────────────────────────────────
@@ -103,6 +108,27 @@ function Cfgms-SetVMProcessor {
 function Cfgms-SetVMMemory {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$MemoryMB)
     Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)
+}
+
+# ── VM network reconcile (declarative multi-NIC, #2021) ────────────────
+# Connect/disconnect primitives driven by the VM's desired switch set in
+# vm.go reconcileNetwork — NOT a standalone resource. Resurrected from the
+# injection-safe Add/Remove-VMNetworkAdapter logic of the removed vmattach
+# resource (#1903). Each wraps exactly one cmdlet; orchestration is in Go.
+function Cfgms-ConnectVMNic {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SwitchName)
+    Add-VMNetworkAdapter -VMName $Name -SwitchName $SwitchName
+}
+
+function Cfgms-DisconnectVMNic {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SwitchName)
+    # Remove the first adapter sitting on the switch being dropped from the
+    # desired set. Selecting by SwitchName keeps the primitive purely
+    # declarative — no stored adapter name to track.
+    $a = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue |
+        Where-Object { $_.SwitchName -eq $SwitchName } |
+        Select-Object -First 1
+    if ($a) { Remove-VMNetworkAdapter -VMNetworkAdapter $a }
 }
 
 # ── VSwitch read + lifecycle ──────────────────────────────────────────

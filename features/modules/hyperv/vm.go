@@ -38,15 +38,171 @@ var vmNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 var vhdPathPattern = regexp.MustCompile(`^[A-Za-z]:\\.*`)
 
 // VMConfig represents the desired state of a Hyper-V virtual machine.
+//
+// Networking is declarative: switch_name is the FULL desired network of the
+// VM and accepts either a single switch name (string — the common case,
+// back-compat) or a list of switch names (multi-NIC). On convergence the
+// module reconciles the VM's network adapters so that exactly one adapter is
+// connected to each switch in the desired set; switches added to the set
+// connect a new adapter, switches removed from the set remove the adapter.
+//
+// SwitchName holds the primary (first) desired switch for back-compat: the
+// New-VM create path connects the first adapter to it, and getVM populates it
+// from the first adapter for the single-NIC drift comparison. SwitchNames
+// holds the FULL desired/observed set. Both are populated by FromYAML /
+// AsMap so a single switch_name string behaves exactly as before.
 type VMConfig struct {
-	Name       string `yaml:"name"`
-	MemoryMB   int64  `yaml:"memory_mb"`
-	CPUCount   int    `yaml:"cpu_count"`
-	VHDPath    string `yaml:"vhd_path"`
-	SwitchName string `yaml:"switch_name"`
-	Generation int    `yaml:"generation"`
+	Name        string             `yaml:"name"`
+	MemoryMB    int64              `yaml:"memory_mb"`
+	CPUCount    int                `yaml:"cpu_count"`
+	VHDPath     string             `yaml:"vhd_path"`
+	SwitchName  string             `yaml:"-"`
+	SwitchNames stringOrStringList `yaml:"switch_name"`
+	Generation  int                `yaml:"generation"`
 	// State is the desired lifecycle: "running", "stopped", or "absent" (delete).
 	State string `yaml:"state,omitempty"`
+}
+
+// stringOrStringList is a YAML scalar-or-sequence: switch_name may be a single
+// string ("External") or a list (["External","Mgmt"]). It always materialises
+// as a []string so the convergence code works with one shape. Marshalling
+// emits a bare string when there is exactly one element (round-trips the
+// common single-switch case) and a sequence otherwise.
+type stringOrStringList []string
+
+// UnmarshalYAML accepts either a scalar string or a sequence of strings.
+func (s *stringOrStringList) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var single string
+		if err := value.Decode(&single); err != nil {
+			return err
+		}
+		if single == "" {
+			*s = nil
+			return nil
+		}
+		*s = stringOrStringList{single}
+		return nil
+	case yaml.SequenceNode:
+		var list []string
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*s = stringOrStringList(list)
+		return nil
+	default:
+		return fmt.Errorf("hyperv: switch_name must be a string or a list of strings")
+	}
+}
+
+// MarshalYAML emits a bare string for the single-switch case (back-compat
+// round-trip) and a sequence otherwise.
+func (s stringOrStringList) MarshalYAML() (interface{}, error) {
+	if len(s) == 1 {
+		return s[0], nil
+	}
+	return []string(s), nil
+}
+
+// desiredSwitches returns the full, ordered, de-duplicated desired network of
+// the VM. It unions the back-compat primary SwitchName (if set) with the
+// SwitchNames list, preserving first-seen order. This is the canonical desired
+// set the convergence logic reconciles against; an empty result means "no
+// network declared" (the VM keeps whatever adapters it has — we never strip
+// a VM down to zero NICs implicitly).
+func (c *VMConfig) desiredSwitches() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	add(c.SwitchName)
+	for _, n := range c.SwitchNames {
+		add(n)
+	}
+	return out
+}
+
+// normalizeSwitches collapses SwitchName + SwitchNames into the canonical form:
+// SwitchNames holds the full ordered de-duplicated set and SwitchName holds the
+// first element (back-compat primary). Idempotent.
+func (c *VMConfig) normalizeSwitches() {
+	desired := c.desiredSwitches()
+	c.SwitchNames = stringOrStringList(desired)
+	if len(desired) > 0 {
+		c.SwitchName = desired[0]
+	} else {
+		c.SwitchName = ""
+	}
+}
+
+// parseSwitchNamesJSON normalises the SwitchNames field from a parsed Get-VM
+// JSON response into a []string. ConvertTo-Json renders a PowerShell array as
+// a JSON array, but a single-element array can collapse to a bare string on
+// some PS versions; an empty array becomes null. All three shapes are handled.
+// Duplicate and empty entries are dropped, preserving first-seen order.
+func parseSwitchNamesJSON(v interface{}) stringOrStringList {
+	var raw []string
+	switch t := v.(type) {
+	case string:
+		if t != "" {
+			raw = []string{t}
+		}
+	case []interface{}:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				raw = append(raw, s)
+			}
+		}
+	}
+	seen := make(map[string]struct{}, len(raw))
+	var out stringOrStringList
+	for _, s := range raw {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// switchSetDiff computes, for a desired set vs a current set of switch names,
+// which switches need a new adapter connected (toConnect) and which connected
+// adapters sit on a switch no longer desired (toDisconnect). Order of the
+// desired set is preserved in toConnect. When desired == current both slices
+// are empty (idempotent — no PS mutation runs).
+func switchSetDiff(desired, current []string) (toConnect, toDisconnect []string) {
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, d := range desired {
+		desiredSet[d] = struct{}{}
+	}
+	currentSet := make(map[string]struct{}, len(current))
+	for _, c := range current {
+		currentSet[c] = struct{}{}
+	}
+	for _, d := range desired {
+		if _, ok := currentSet[d]; !ok {
+			toConnect = append(toConnect, d)
+		}
+	}
+	for _, c := range current {
+		if _, ok := desiredSet[c]; !ok {
+			toDisconnect = append(toDisconnect, c)
+		}
+	}
+	return toConnect, toDisconnect
 }
 
 // Validate checks all VMConfig fields against their respective constraints.
@@ -65,30 +221,53 @@ func (c *VMConfig) Validate() error {
 	if c.VHDPath != "" && !vhdPathPattern.MatchString(c.VHDPath) {
 		return ErrInvalidVHDPath
 	}
+	// Every desired switch name must satisfy the switch allowlist — the same
+	// guard the standalone vswitch resource applies — so a malformed name can
+	// never reach Add-VMNetworkAdapter even though it travels via ArgumentList.
+	for _, sw := range c.desiredSwitches() {
+		if !switchNamePattern.MatchString(sw) || strings.Contains(sw, "__") {
+			return ErrInvalidSwitchName
+		}
+	}
 	return nil
 }
 
 // AsMap implements modules.ConfigState.
+//
+// switch_name carries the primary (first) desired switch for back-compat;
+// switch_names carries the FULL desired/observed set ([]string) that the
+// convergence logic reconciles against.
 func (c *VMConfig) AsMap() map[string]interface{} {
+	desired := c.desiredSwitches()
+	primary := ""
+	if len(desired) > 0 {
+		primary = desired[0]
+	}
 	return map[string]interface{}{
-		"name":        c.Name,
-		"memory_mb":   c.MemoryMB,
-		"cpu_count":   c.CPUCount,
-		"vhd_path":    c.VHDPath,
-		"switch_name": c.SwitchName,
-		"generation":  c.Generation,
-		"state":       c.State,
+		"name":         c.Name,
+		"memory_mb":    c.MemoryMB,
+		"cpu_count":    c.CPUCount,
+		"vhd_path":     c.VHDPath,
+		"switch_name":  primary,
+		"switch_names": desired,
+		"generation":   c.Generation,
+		"state":        c.State,
 	}
 }
 
 // ToYAML serializes the configuration to YAML.
 func (c *VMConfig) ToYAML() ([]byte, error) {
+	c.normalizeSwitches()
 	return yaml.Marshal(c)
 }
 
 // FromYAML deserializes YAML data into the configuration.
 func (c *VMConfig) FromYAML(data []byte) error {
-	return yaml.Unmarshal(data, c)
+	if err := yaml.Unmarshal(data, c); err != nil {
+		return err
+	}
+	c.normalizeSwitches()
+	return nil
 }
 
 // GetManagedFields returns the list of fields this configuration manages.
@@ -120,7 +299,7 @@ func vmUserName(tenantID, hostName string) string {
 // VMConfig.VHDPath stores the disk path; conflating it with the config
 // directory caused #1887 B1 verification to flag 2-changed drift on
 // every successful create.
-const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; SwitchName=if ($adapter) { $adapter.SwitchName } else { "" }; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress`
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress -Depth 4`
 
 // psCreateVM is the script block passed to ExecutePS for VM creation.
 // All user-supplied values are transmitted via ArgumentList — none are
@@ -143,6 +322,21 @@ const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -Ne
 // psRemoveVM is the script block passed to ExecutePS for VM deletion.
 // $Name is the only parameter; its value is transmitted via ArgumentList.
 const psRemoveVM = `Remove-VM -Name $Name -Force`
+
+// psConnectVMNic connects a NEW network adapter on the VM to the named switch.
+// Both $Name (host-side VM name) and $SwitchName travel via ArgumentList —
+// never interpolated into the script text. This is the declarative connect
+// primitive used by reconcileNetwork; it resurrects the injection-safe
+// Add-VMNetworkAdapter logic from the removed vmattach resource (#1903) but is
+// driven by the VM's desired switch set rather than a standalone resource.
+const psConnectVMNic = `Add-VMNetworkAdapter -VMName $Name -SwitchName $SwitchName`
+
+// psDisconnectVMNic removes the (first) network adapter connected to the named
+// switch on the VM. Both values travel via ArgumentList — never interpolated.
+// Selecting by SwitchName (rather than a stored adapter name) keeps the
+// primitive driven purely by the declarative desired set: removing a switch
+// from the set removes the adapter sitting on it.
+const psDisconnectVMNic = `$a = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Where-Object { $_.SwitchName -eq $SwitchName } | Select-Object -First 1; if ($a) { Remove-VMNetworkAdapter -VMNetworkAdapter $a }`
 
 // psStartVM starts a VM that already exists on the host.
 const psStartVM = `Start-VM -Name $Name`
@@ -215,6 +409,16 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	if v, ok := parsed["SwitchName"].(string); ok {
 		cfg.SwitchName = v
 	}
+	// SwitchNames is the full observed set of connected switches (one per
+	// network adapter). ConvertTo-Json emits an array for 0/2+ elements and
+	// may collapse a single element to a scalar string on some PS versions,
+	// so accept both shapes.
+	cfg.SwitchNames = parseSwitchNamesJSON(parsed["SwitchNames"])
+	// Back-compat: if the host returned no explicit SwitchNames array but did
+	// report a primary SwitchName, treat that as the single-element set.
+	if len(cfg.SwitchNames) == 0 && cfg.SwitchName != "" {
+		cfg.SwitchNames = stringOrStringList{cfg.SwitchName}
+	}
 	if v, ok := parsed["State"].(string); ok {
 		switch v {
 		case "Running":
@@ -279,6 +483,20 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	if v, ok := configMap["switch_name"].(string); ok {
 		cfg.SwitchName = v
 	}
+	// switch_names carries the full desired set (multi-NIC). AsMap emits it as
+	// []string; tolerate []interface{} for callers that build the map by hand.
+	switch sn := configMap["switch_names"].(type) {
+	case []string:
+		cfg.SwitchNames = stringOrStringList(sn)
+	case stringOrStringList:
+		cfg.SwitchNames = sn
+	case []interface{}:
+		for _, e := range sn {
+			if s, ok := e.(string); ok {
+				cfg.SwitchNames = append(cfg.SwitchNames, s)
+			}
+		}
+	}
 	if v, ok := configMap["generation"].(int); ok {
 		cfg.Generation = v
 	}
@@ -289,6 +507,9 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		*cfg = *vc
 		cfg.Name = vmName
 	}
+
+	// Collapse SwitchName + SwitchNames into the canonical ordered set.
+	cfg.normalizeSwitches()
 
 	// Check cache for VM existence first, bypassing transport for known VMs.
 	m.vmsMu.RLock()
@@ -340,6 +561,16 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
 	}
 
+	// New-VM -SwitchName connected the first desired switch (cfg.SwitchName).
+	// Connect one additional adapter for every remaining switch in the desired
+	// set so a multi-NIC declaration materialises all adapters at create time.
+	desired := cfg.desiredSwitches()
+	for _, sw := range desired[min(1, len(desired)):] {
+		if err := m.connectVMToSwitch(ctx, vmName, hostName, sw); err != nil {
+			return err
+		}
+	}
+
 	if state == "running" {
 		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
 			return err
@@ -359,6 +590,15 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 // applyVMState transitions an existing VM to the desired power state, applying
 // CPU/memory resize when the desired values differ from current.
 func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
+	// Reconcile the VM's network adapters to the desired switch set before any
+	// power-state change. Add-VMNetworkAdapter / Remove-VMNetworkAdapter both
+	// operate on running and stopped VMs, so ordering relative to start/stop
+	// does not matter. reconcileNetwork mutates current.SwitchNames in place so
+	// the cache write at the end of this function reflects the converged set.
+	if err := m.reconcileNetwork(ctx, vmName, hostName, desired, current); err != nil {
+		return err
+	}
+
 	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
 	needsMemResize := desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
 
@@ -410,6 +650,70 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 		m.vmsMu.Unlock()
 	}
 
+	return nil
+}
+
+// reconcileNetwork converges the VM's connected switches to desired.desiredSwitches().
+// It connects an adapter for each desired switch that has no adapter and removes
+// the adapter for each connected switch no longer desired. When the sets are
+// equal it issues NO PowerShell mutation (idempotent — drift reports no network
+// change). On success it rewrites current.SwitchNames/SwitchName to the desired
+// set so the caller's cache write reflects the converged state.
+//
+// Switch names are passed to the connect/disconnect primitives exactly as the
+// VM create path passes them to New-VM -SwitchName (literal, not vswitch-host
+// namespaced) — see the issue's "do not change namespacing" constraint.
+func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName string, desired, current *VMConfig) error {
+	desiredSet := desired.desiredSwitches()
+	// No network declared on the desired config → leave the VM's adapters
+	// untouched (never implicitly strip a VM to zero NICs).
+	if len(desiredSet) == 0 {
+		return nil
+	}
+
+	toConnect, toDisconnect := switchSetDiff(desiredSet, current.desiredSwitches())
+	for _, sw := range toConnect {
+		if err := m.connectVMToSwitch(ctx, vmName, hostName, sw); err != nil {
+			return err
+		}
+	}
+	for _, sw := range toDisconnect {
+		if err := m.disconnectVMFromSwitch(ctx, vmName, hostName, sw); err != nil {
+			return err
+		}
+	}
+
+	// Reflect the converged set on current so the cache write is accurate.
+	current.SwitchNames = stringOrStringList(desiredSet)
+	current.SwitchName = desiredSet[0]
+	return nil
+}
+
+// connectVMToSwitch connects a new network adapter on the VM to switchName.
+// switchName travels via ArgumentList — never interpolated into script text.
+func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, switchName string) error {
+	_, psErr := m.transport.ExecutePS(ctx, psConnectVMNic, map[string]string{
+		"Name":       hostName,
+		"SwitchName": switchName,
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: connect VM %q to switch %q: %w", vmName, switchName, psErr)
+	}
+	return nil
+}
+
+// disconnectVMFromSwitch removes the network adapter connected to switchName on
+// the VM. switchName travels via ArgumentList — never interpolated.
+func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, vmName, hostName, switchName string) error {
+	_, psErr := m.transport.ExecutePS(ctx, psDisconnectVMNic, map[string]string{
+		"Name":       hostName,
+		"SwitchName": switchName,
+	})
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", hostName, psErr)
+	if psErr != nil {
+		return fmt.Errorf("hyperv: disconnect VM %q from switch %q: %w", vmName, switchName, psErr)
+	}
 	return nil
 }
 

@@ -71,6 +71,12 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psSetVMMemory:
 		return emit("Cfgms-SetVMMemory -Name " + quoteArg(psArgs, "Name") +
 			" -MemoryMB " + intArg(psArgs, "MemoryMB"))
+	case psConnectVMNic:
+		return emit("Cfgms-ConnectVMNic -Name " + quoteArg(psArgs, "Name") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+	case psDisconnectVMNic:
+		return emit("Cfgms-DisconnectVMNic -Name " + quoteArg(psArgs, "Name") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
 	case psGetVSwitch:
 		return emit("Cfgms-GetVSwitch -Name " + quoteArg(psArgs, "Name"))
 	case psRemoveVSwitch:
@@ -156,6 +162,18 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 			psCommand: psSetVMMemory,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "8192"},
 			want:      "Cfgms-SetVMMemory -Name 'cfgms-t__web-01' -MemoryMB 8192",
+		},
+		{
+			name:      "Connect-VMNic",
+			psCommand: psConnectVMNic,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"},
+			want:      "Cfgms-ConnectVMNic -Name 'cfgms-t__web-01' -SwitchName 'External'",
+		},
+		{
+			name:      "Disconnect-VMNic",
+			psCommand: psDisconnectVMNic,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "Mgmt"},
+			want:      "Cfgms-DisconnectVMNic -Name 'cfgms-t__web-01' -SwitchName 'Mgmt'",
 		},
 	}
 
@@ -280,6 +298,8 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psStopVM", psStopVM, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psSetVMProcessor", psSetVMProcessor, map[string]string{"Name": "cfgms-t__web-01", "CPU": "2"}},
 		{"psSetVMMemory", psSetVMMemory, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048"}},
+		{"psConnectVMNic", psConnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
+		{"psDisconnectVMNic", psDisconnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},

@@ -60,6 +60,16 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 			"Cfgms-SetVMMemory -Name "+quoteArg(psArgs, "Name")+
 				" -MemoryMB "+intArg(psArgs, "MemoryMB"))
 
+	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
+	case psConnectVMNic:
+		return t.run(ctx,
+			"Cfgms-ConnectVMNic -Name "+quoteArg(psArgs, "Name")+
+				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
+	case psDisconnectVMNic:
+		return t.run(ctx,
+			"Cfgms-DisconnectVMNic -Name "+quoteArg(psArgs, "Name")+
+				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
+
 	// ── VSwitch ─────────────────────────────────────────────────────
 	case psGetVSwitch:
 		return t.run(ctx, "Cfgms-GetVSwitch -Name "+quoteArg(psArgs, "Name"))
