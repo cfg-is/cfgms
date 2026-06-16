@@ -77,6 +77,7 @@ certs/
 .claude/settings.local.json
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/scratch/
 
 # Test/development storage data
 features/controller/**/data/
