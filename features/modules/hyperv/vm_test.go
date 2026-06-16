@@ -596,6 +596,64 @@ func TestSetVM_MultiSwitch_IdempotentWhenEqual(t *testing.T) {
 	}
 }
 
+// rawConfigState is a minimal ConfigState backed by a plain map — exactly the
+// shape the steward executor hands the module (config.AsMap), as opposed to a
+// *VMConfig. Used to exercise setVM's config-map parsing path.
+type rawConfigState struct{ m map[string]interface{} }
+
+func (r rawConfigState) AsMap() map[string]interface{} { return r.m }
+func (r rawConfigState) ToYAML() ([]byte, error)       { return nil, nil }
+func (r rawConfigState) FromYAML([]byte) error         { return nil }
+func (r rawConfigState) Validate() error               { return nil }
+func (r rawConfigState) GetManagedFields() []string    { return nil }
+
+// TestSetVM_ConfigMap_SwitchNameList_Connects is the regression for the
+// live-found bug: when the desired config arrives as a generic map (the real
+// executor path) with switch_name as a LIST, setVM must parse it and reconcile
+// the adapters. The *VMConfig-based multi-NIC tests bypassed this map parsing,
+// so the list was silently dropped (desired set empty -> reconcile no-op).
+func TestSetVM_ConfigMap_SwitchNameList_Connects(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	m.vmsMu.Lock()
+	m.vms["foo"] = VMConfig{
+		Name: "foo", State: "stopped", CPUCount: 2, MemoryMB: 4096,
+		SwitchName: "hv-int", SwitchNames: stringOrStringList{"hv-int"},
+	}
+	m.vmsMu.Unlock()
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"state":       "stopped",
+		"switch_name": []interface{}{"hv-int", "hv-priv"}, // LIST via the map path
+	}}
+	require.NoError(t, m.Set(context.Background(), "vm:foo", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	var connectedPriv bool
+	for _, c := range calls {
+		if strings.Contains(c.scriptBlock, "Add-VMNetworkAdapter") && contains(c.args, "cfgms-ops__hv-priv") {
+			connectedPriv = true
+		}
+	}
+	assert.True(t, connectedPriv,
+		"switch_name LIST from the config map must be parsed and connect hv-priv (host-namespaced)")
+}
+
+func contains(args []interface{}, want string) bool {
+	for _, a := range args {
+		if s, ok := a.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
 // ─── Module routing tests ──────────────────────────────────────────────────────
 
 // TestModule_Get_UnknownResourceIDReturnsNotImplemented verifies that resource IDs

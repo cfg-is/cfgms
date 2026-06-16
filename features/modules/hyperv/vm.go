@@ -495,23 +495,32 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	if v, ok := configMap["vhd_path"].(string); ok {
 		cfg.VHDPath = v
 	}
-	if v, ok := configMap["switch_name"].(string); ok {
-		cfg.SwitchName = v
-	}
-	// switch_names carries the full desired set (multi-NIC). AsMap emits it as
-	// []string; tolerate []interface{} for callers that build the map by hand.
-	switch sn := configMap["switch_names"].(type) {
-	case []string:
-		cfg.SwitchNames = stringOrStringList(sn)
-	case stringOrStringList:
-		cfg.SwitchNames = sn
-	case []interface{}:
-		for _, e := range sn {
-			if s, ok := e.(string); ok {
-				cfg.SwitchNames = append(cfg.SwitchNames, s)
+	// switch_name (the user-facing key) accepts a single string OR a list of
+	// switch names. The desired config arrives here as a generic config map
+	// (config.AsMap), so parse BOTH shapes into the desired set — the
+	// stringOrStringList YAML unmarshal only runs when the module decodes its
+	// own YAML, not on this executor-supplied map. switch_names (plural) is also
+	// accepted as an alias for callers that build the map via VMConfig.AsMap.
+	parseSwitches := func(v interface{}) {
+		switch sn := v.(type) {
+		case string:
+			if sn != "" {
+				cfg.SwitchNames = append(cfg.SwitchNames, sn)
+			}
+		case []string:
+			cfg.SwitchNames = append(cfg.SwitchNames, sn...)
+		case stringOrStringList:
+			cfg.SwitchNames = append(cfg.SwitchNames, sn...)
+		case []interface{}:
+			for _, e := range sn {
+				if s, ok := e.(string); ok {
+					cfg.SwitchNames = append(cfg.SwitchNames, s)
+				}
 			}
 		}
 	}
+	parseSwitches(configMap["switch_name"])
+	parseSwitches(configMap["switch_names"])
 	if v, ok := configMap["generation"].(int); ok {
 		cfg.Generation = v
 	}
