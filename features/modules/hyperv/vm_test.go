@@ -582,6 +582,10 @@ func TestSetVM_MultiSwitch_IdempotentWhenEqual(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
+	// Fully converged desired==current state must issue ZERO host mutations —
+	// asserting Empty makes the idempotency proof real rather than vacuous (the
+	// per-call NotContains loop below is a no-op when calls is empty).
+	assert.Empty(t, calls, "idempotent: zero transport calls expected when desired == current")
 	for _, c := range calls {
 		assert.NotContains(t, c.scriptBlock, "Add-VMNetworkAdapter",
 			"equal switch sets must not connect adapters")

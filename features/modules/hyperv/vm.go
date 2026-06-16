@@ -538,14 +538,20 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 
 	hostName := vmHostName(m.tenantID, vmName)
 
+	// Validate the desired config on BOTH the create and update paths so the
+	// switch-name allowlist (and VM-name / VHD checks) is enforced uniformly:
+	// the update path now routes switch names to Add/Remove-VMNetworkAdapter,
+	// so a malformed name must be rejected before reconcileNetwork, not only on
+	// create (defense-in-depth, even though values also travel via ArgumentList).
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
 	if vmExists {
 		return m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state)
 	}
 
 	// VM does not exist — create it.
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
 
 	psArgs := map[string]string{
 		"Name":       hostName,
