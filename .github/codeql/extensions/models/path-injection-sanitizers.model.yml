@@ -39,3 +39,20 @@ extensions:
     data:
       - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
       - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "Argument[1]", "ReturnValue[0]", "value", "manual"]
+
+  # Durable upgrade: barrierModel (CodeQL >=2.25.2) marks safeJoin's cleaned
+  # return value as a path-injection barrier directly, rather than relying on
+  # summaryModel(kind=value) to suppress propagation (which the log-injection
+  # model notes is unreliable on some flow paths — e.g. json.Decode field
+  # selections). Kept ALONGSIDE the summaryModel entries above so this is purely
+  # additive: if the barrierModel kind/format needs adjustment, protection does
+  # not regress. Format mirrors log-injection-sanitizers.model.yml:
+  #   [package, type, subtypes, name, signature, ext, output, kind, provenance]
+  # NOTE: the exact barrierModel tuple/kind must be confirmed by the CodeQL CI
+  # run (it cannot be fully verified locally); see the path-injection FP notes
+  # in docs/development/security-workflow-guide.md.
+  - addsTo:
+      pack: codeql/go-all
+      extensible: barrierModel
+    data:
+      - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "ReturnValue[0]", "path-injection", "manual"]

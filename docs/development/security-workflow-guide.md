@@ -48,6 +48,27 @@ The CFGMS security workflow integrates four complementary security scanning tool
 - **Blocking**: No (code quality focus)
 - **SARIF Support**: Limited (JSON output converted)
 
+### 5. CodeQL - Semantic Code Analysis
+
+- **Purpose**: Deep semantic / data-flow analysis (taint tracking) for vulnerability classes like path-injection (CWE-22), log-injection (CWE-117), and clear-text logging (CWE-312)
+- **Scope**: Whole-program data flow, run in GitHub Actions (`codeql-analysis.yml`)
+- **Blocking**: Findings post as PR review threads; main's ruleset requires thread resolution, so they gate release PRs in practice
+- **SARIF Support**: Native (results land in the Security → Code scanning tab)
+
+#### Custom models & false positives (IMPORTANT)
+
+CodeQL cannot see our runtime validators, so it raises false positives where a value is actually sanitized. We correct this with a **CodeQL data-extension pack**, not by editing the upstream `github/codeql` repo:
+
+- **Pack source**: `.github/codeql/extensions/` — `qlpack.yml` (`cfg-is/cfgms-go-extensions`) plus `models/*.model.yml`.
+- **Publish requirement**: the pack is referenced *by name* from `.github/codeql/codeql-config.yml` (`packs:`) and **must be published to the ghcr.io CodeQL pack registry** by `.github/workflows/codeql-pack-publish.yml`. **Local-path pack references are not supported by the codeql-action** — a model file on disk does nothing until the pack is republished.
+- **Already modeled**: `safeJoin` (path-injection), `SanitizeLogValue` + `RedactedID` (log-injection / clear-text-logging).
+
+Decision path for a CodeQL alert:
+
+1. **Genuine bug** → fix the code (e.g. wrap operator-supplied values in `logging.SanitizeLogValue`).
+2. **False positive with a real, value-returning sanitizer** (e.g. `safeJoin`) → add/extend a model. Prefer **`barrierModel`** (kind = the sink kind, e.g. `path-injection`; CodeQL ≥ 2.25.2) over the older **`summaryModel(kind=value)`**, which is unreliable on some flow paths. Verify the exact `barrierModel` tuple format against `github/codeql:go/ql/lib/ext/` — the format is finicky and CI is the only reliable verification (CodeQL can't be modeled-and-tested purely locally).
+3. **False positive from a guard-style validator** (returns only `error`, e.g. blobstore `validateKey`/`validateKeyComponent`) or a **heuristic source** (CodeQL flagging a variable *named* `*SecretKey` that holds a SecretStore key *reference*, not a value) → data extensions can't cleanly model these; **dismiss the alert with justification** (or refactor to a value-returning sanitizer that *can* be modeled).
+
 ## Local Development Workflow
 
 ### Prerequisites
