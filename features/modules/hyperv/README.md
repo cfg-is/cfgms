@@ -2,19 +2,18 @@
 
 **Kind:** steward
 
-Remote Hyper-V management via WinRM for CFGMS. Manages VMs, snapshots, and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
+Remote Hyper-V management via WinRM for CFGMS. Manages VMs and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
 
 ## Purpose and scope
 
-The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines, manage checkpoints (snapshots), configure virtual switches, and attach VM network adapters — all through an authenticated, TLS-encrypted WinRM connection.
+The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines and configure virtual switches — all through an authenticated, TLS-encrypted WinRM connection. A VM's network connection is declared on the VM itself (`switch_name`); the module converges its adapters to match.
 
 The module's scope includes:
 
 - **VM lifecycle**: create (`New-VM`), start (`Start-VM`), stop (`Stop-VM`), remove (`Remove-VM`)
 - **VM resize**: update CPU count (`Set-VMProcessor`) and startup memory (`Set-VM -MemoryStartupBytes`) on stopped VMs
-- **Snapshots**: create, restore, and delete Hyper-V checkpoints
 - **Virtual switches**: create and remove External, Internal, and Private vSwitches
-- **VM attachment**: add and remove network adapter-to-switch connections
+- **VM networking**: declared on the VM (`switch_name`); the module connects the VM's adapter to the named switch
 
 Out of scope: Hyper-V role installation, storage pool management, live migration, replication policies. Steward-on-host wiring and controller dispatch wiring are delivered by epic #1790 (see `docs/operations/hyperv-host-onboarding.md`).
 
@@ -27,7 +26,7 @@ The module accepts the following configuration options via `Configure(cfg)`:
 | `winrm_host` | string | Yes | Hostname or IP of the Hyper-V host |
 | `winrm_user_secret` | string | Yes | SecretStore key for the WinRM username |
 | `winrm_pass_secret` | string | Yes | SecretStore key for the WinRM password |
-| `tenant_id` | string | No | Tenant identifier used to namespace host-side resource names |
+| `tenant_id` | string | No | Tenant identifier recorded on audit events and DNA (not used to alter host-side resource names) |
 | `steward_id` | string | No | Steward identifier for audit records (defaults to `<tenantID>/hyperv`) |
 | `audit_manager` | `*audit.Manager` | No | Audit manager for recording Hyper-V operations |
 
@@ -38,59 +37,60 @@ VM resource configuration fields (`vm:<name>`):
 | `memory_mb` | integer | Yes (create) | Startup memory in MiB |
 | `cpu_count` | integer | Yes (create) | Number of virtual processors |
 | `vhd_path` | string | Yes (create) | Absolute Windows path to VHD/VHDX |
-| `switch_name` | string | Yes (create) | Virtual switch name |
+| `switch_name` | string or list | Yes (create) | The VM's full desired network. One switch name (back-compat) or a list of switch names (multi-NIC). Converged declaratively. |
 | `generation` | integer | No | VM generation (must be 2 or omitted) |
 | `state` | string | No | Desired state: `running`, `stopped`, or `absent` |
 
 ## Usage examples
 
+The resource type is selected via the `module` field as `hyperv.<type>`
+(`hyperv.vm`, `hyperv.vswitch`). The `name` field is the plain object name
+(strict `[a-zA-Z0-9_-]`). The steward executor translates `module: hyperv.vm`
++ `name: web-01` into the module's internal `vm:web-01` resource ID.
+
 ### Create and start a VM
 
 ```yaml
-resource: vm:web-01
-config:
-  memory_mb: 4096
-  cpu_count: 2
-  vhd_path: C:\VMs\web-01.vhdx
-  switch_name: External
-  generation: 2
-  state: running
+- name: web-01
+  module: hyperv.vm
+  config:
+    memory_mb: 4096
+    cpu_count: 2
+    vhd_path: C:\VMs\web-01.vhdx
+    switch_name: External
+    generation: 2
+    state: running
 ```
 
 ### Stop a VM
 
 ```yaml
-resource: vm:web-01
-config:
-  state: stopped
+- name: web-01
+  module: hyperv.vm
+  config:
+    state: stopped
 ```
 
 ### Resize an existing VM (stop → resize → start)
 
 ```yaml
-resource: vm:web-01
-config:
-  cpu_count: 4
-  memory_mb: 8192
-  state: running
-```
-
-### Create a snapshot
-
-```yaml
-resource: snapshot:web-01/pre-patch
-config:
-  state: present
+- name: web-01
+  module: hyperv.vm
+  config:
+    cpu_count: 4
+    memory_mb: 8192
+    state: running
 ```
 
 ### Create an external virtual switch
 
 ```yaml
-resource: vswitch:External-Switch
-config:
-  switch_type: external
-  net_adapter_name: Ethernet0
-  state: present
+- name: External-Switch
+  module: hyperv.vswitch
+  config:
+    switch_type: external
+    net_adapter_name: Ethernet0
+    state: present
 ```
 
 ## Known limitations
@@ -179,30 +179,60 @@ m.(modules.Configurable).Configure(cfg)
 
 ## Resource ID Formats
 
-All operations use a typed resource ID string:
+In fleet config, resources select their type via `module: hyperv.<type>` and
+carry a plain `name`. Internally the module's `Get`/`Set` receive a typed
+resource ID string built by the steward executor:
 
-| Format | Operation |
-|--------|-----------|
-| `vm:<name>` | Virtual machine management (create, start, stop, remove) |
-| `snapshot:<vmname>/<snapname>` | Checkpoint management (create, restore, remove) |
-| `vswitch:<name>` | Virtual switch management (create External/Internal/Private, remove) |
-| `vmattach:<vmname>/<adaptername>` | Network adapter attachment (add/remove adapter to switch) |
+| `module` | `name` + config | Internal resource ID | Operation |
+|----------|-----------------|----------------------|-----------|
+| `hyperv.vm` | `name: web-01` | `vm:web-01` | Virtual machine management (create, start, stop, remove) |
+| `hyperv.vswitch` | `name: External-Switch` | `vswitch:External-Switch` | Virtual switch management (create External/Internal/Private, remove) |
 
-## Tenant-Prefix Naming Convention
+### VM networking (declarative, multi-NIC)
 
-Resources created by CFGMS use a tenant-prefixed name to prevent collisions across tenants sharing a Hyper-V host:
+A VM's full desired network is declared on the VM itself via `switch_name`,
+which accepts either a single switch name (the common case) or a list:
 
+```yaml
+# Single NIC (back-compat — behaves exactly as before)
+- name: web-01
+  module: hyperv.vm
+  config:
+    switch_name: External
+    # ...
+
+# Multi-NIC — one adapter per switch in the list
+- name: db-01
+  module: hyperv.vm
+  config:
+    switch_name:
+      - External
+      - Storage
+    # ...
 ```
-cfgms-<sanitizedTenantID>__<resourceName>
-```
 
-The sanitized tenant ID replaces `/` and other path-unsafe characters with `-`. For example, a VM named `web-01` under tenant `root/msp-a/acme` becomes:
+On every convergence the module reads all of the VM's network adapters and
+reconciles them to the desired set:
 
-```
-cfgms-root-msp-a-acme__web-01
-```
+- a switch in the list with no connected adapter → a new adapter is connected
+  (`Add-VMNetworkAdapter`);
+- a connected adapter on a switch not in the list → that adapter is removed
+  (`Remove-VMNetworkAdapter`);
+- when the connected set already equals the desired set, no PowerShell mutation
+  runs and drift reports no network change (idempotent).
 
-This prefix is applied consistently by CFGMS before all Hyper-V operations.
+At create time `New-VM -SwitchName <first>` connects the primary adapter and
+each additional switch in the list connects one more adapter. This declarative
+model is the replacement for the removed standalone `vmattach` resource
+(detach / multi-NIC / reattach — #1903, #2021). If `switch_name` is omitted the
+module leaves the VM's existing adapters untouched (it never implicitly strips a
+VM down to zero NICs).
+
+## Naming Convention
+
+Resources are created on the host with the **exact** name specified in the config — CFGMS never adds a prefix or suffix. A VM named `web-01` in the config appears as `web-01` in Hyper-V; a switch named `External` appears as `External`. Admins specify the name they expect to see on the host.
+
+Names are validated against an allowlist (`^[a-zA-Z0-9_\-]{1,64}$` for VMs, `^[a-zA-Z0-9_\- ]{1,64}$` for switches) purely as an injection-safety guard; the validated name is then used verbatim. Because names are not namespaced, operators sharing a single Hyper-V host across tenants must choose non-colliding names themselves.
 
 ## WinRM Connection Details
 
@@ -241,7 +271,7 @@ go test -tags=integration -run TestHypervIntegration ./features/modules/hyperv/.
 ```
 
 The tests exercise:
-- **`TestHypervIntegration_VMLifecycle`** — create → start → stop → snapshot → restore → remove
+- **`TestHypervIntegration_VMLifecycle`** — create → start → stop → remove
 - **`TestHypervIntegration_VSwitch`** — create external switch → attach adapter → detach → remove
 
 Tests skip automatically if `CFGMS_HYPERV_HOST` is not set; `TestHypervIntegration_VSwitch` also skips if no UP physical network adapter is found on the host.
@@ -268,4 +298,4 @@ The following are **not** managed by this module:
 
 ## Related Hypervisor Modules
 
-A future Proxmox, VMware, or KVM module would be implemented as a separate, independent module — not as an extension of this Hyper-V module. Each hypervisor module follows the same shape: a `New(detector)` constructor, a `Configure` method for connection details, and `Get`/`Set` operations with typed resource IDs (e.g., `vm:<name>`, `snapshot:<vmname>/<snapname>`). Tenant-prefix naming uses the same `cfgms-<sanitizedTenantID>__<resourceName>` convention. Modules do not share code beyond the common `modules.Module` interface — each is platform-specific and ships independently as a copy of this shape, not an extension of it.
+A future Proxmox, VMware, or KVM module would be implemented as a separate, independent module — not as an extension of this Hyper-V module. Each hypervisor module follows the same shape: a `New(detector)` constructor, a `Configure` method for connection details, and `Get`/`Set` operations with typed resource IDs (e.g., `vm:<name>`, `vswitch:<name>`). Tenant-prefix naming uses the same `cfgms-<sanitizedTenantID>__<resourceName>` convention. Modules do not share code beyond the common `modules.Module` interface — each is platform-specific and ships independently as a copy of this shape, not an extension of it.

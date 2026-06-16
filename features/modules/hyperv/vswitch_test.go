@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cfgis/cfgms/features/modules"
 )
 
 // vswitchModuleWithTransport creates a hypervModule wired with the given transport
@@ -26,38 +24,27 @@ func vswitchModuleWithTransport(transport winrmTransport, tenantID string) *hype
 	}
 }
 
-// ─── vswitchHostName tests ────────────────────────────────────────────────────
+// ─── Exact host-name tests ─────────────────────────────────────────────────────
 
-// TestVSwitchHostName_Format verifies the returned format matches the spec.
-func TestVSwitchHostName_Format(t *testing.T) {
-	got := vswitchHostName("root/msp-a", "myswitch")
-	assert.Equal(t, "cfgms-root-msp-a__myswitch", got)
-}
+// TestVSwitchHostName_IsExactConfigName verifies that the host-side switch name is
+// the exact name the admin specifies — CFGMS adds no prefix or suffix, regardless
+// of tenant_id. This is the founder directive: the actual switch name on the host
+// must equal what is in the cfg.
+func TestVSwitchHostName_IsExactConfigName(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vswitchModuleWithTransport(transport, "root/msp-a")
 
-// TestVSwitchHostName_NoPrefixCollision verifies that distinct (tenantID, switchName) pairs
-// always produce distinct host-side names, defeating tenant prefix forgery.
-func TestVSwitchHostName_NoPrefixCollision(t *testing.T) {
-	type pair struct {
-		tenantID   string
-		switchName string
-	}
-	cases := []pair{
-		{"tenant_a", "switch"},
-		{"tenant", "a_switch"},
-		{"tenant-a", "b"},
-		{"tenant", "a-b"},
-		{"root/msp-a", "external"},
-	}
+	cfg := &VSwitchConfig{Name: "myswitch", State: "absent"}
+	require.NoError(t, m.Set(context.Background(), "vswitch:myswitch", cfg))
 
-	seen := make(map[string]pair)
-	for _, c := range cases {
-		host := vswitchHostName(c.tenantID, c.switchName)
-		if prev, ok := seen[host]; ok {
-			t.Errorf("collision: (%q, %q) and (%q, %q) both produce %q",
-				prev.tenantID, prev.switchName, c.tenantID, c.switchName, host)
-		}
-		seen[host] = c
-	}
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, calls, 1)
+	require.NotEmpty(t, calls[0].args)
+	assert.Equal(t, "myswitch", calls[0].args[0],
+		"host-side switch name must be the exact config name — no cfgms- prefix or tenant namespacing")
 }
 
 // ─── VSwitchConfig.Validate tests ─────────────────────────────────────────────
@@ -79,13 +66,13 @@ func TestVSwitchConfig_Validate_ExternalRequiresAdapter(t *testing.T) {
 	assert.ErrorIs(t, err, ErrExternalRequiresAdapter)
 }
 
-// TestVSwitchConfig_Validate_RejectsDoubleUnderscore verifies that __ in switch name
-// is rejected — the __ sequence is reserved for the tenant separator.
-func TestVSwitchConfig_Validate_RejectsDoubleUnderscore(t *testing.T) {
+// TestVSwitchConfig_Validate_AcceptsDoubleUnderscore verifies that __ in a switch
+// name is now accepted — the underscore is in the allowlist charset and there is
+// no longer a reserved separator (host names are exact, never namespaced).
+func TestVSwitchConfig_Validate_AcceptsDoubleUnderscore(t *testing.T) {
 	cfg := &VSwitchConfig{Name: "my__switch", SwitchType: "internal"}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidSwitchName)
+	require.NoError(t, cfg.Validate(),
+		"switch name containing __ must be accepted now that names are not namespaced")
 }
 
 // TestVSwitchConfig_Validate_RejectsInvalidSwitchType verifies that unknown types
@@ -189,86 +176,14 @@ func TestVSwitchConfig_YAML(t *testing.T) {
 	assert.Equal(t, original, decoded)
 }
 
-// ─── VMAttachmentConfig.Validate tests ───────────────────────────────────────
-
-// TestVMAttachmentConfig_Validate_AcceptsValid verifies a well-formed config passes.
-func TestVMAttachmentConfig_Validate_AcceptsValid(t *testing.T) {
-	cfg := &VMAttachmentConfig{VMName: "myvm", SwitchName: "ext-sw", AdapterName: "NIC1"}
-	require.NoError(t, cfg.Validate())
-}
-
-// TestVMAttachmentConfig_Validate_AcceptsEmptyAdapterName verifies that an empty
-// adapter name is accepted — it means Hyper-V assigns the name.
-func TestVMAttachmentConfig_Validate_AcceptsEmptyAdapterName(t *testing.T) {
-	cfg := &VMAttachmentConfig{VMName: "myvm", SwitchName: "ext-sw"}
-	require.NoError(t, cfg.Validate())
-}
-
-// TestVMAttachmentConfig_Validate_RejectsInvalidVMName verifies that VM names with
-// injection characters are rejected.
-func TestVMAttachmentConfig_Validate_RejectsInvalidVMName(t *testing.T) {
-	cfg := &VMAttachmentConfig{VMName: "vm__bad", SwitchName: "sw"}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidVMName)
-}
-
-// TestVMAttachmentConfig_Validate_RejectsInvalidSwitchName verifies that switch names
-// with injection characters are rejected.
-func TestVMAttachmentConfig_Validate_RejectsInvalidSwitchName(t *testing.T) {
-	cfg := &VMAttachmentConfig{VMName: "myvm", SwitchName: "sw__bad"}
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidSwitchName)
-}
-
 // ─── Injection defense tests ───────────────────────────────────────────────────
 
-// TestAttachVM_PassesNamesAsParameters verifies that the prefixed VM name and switch
-// name are transmitted as WinRM ArgumentList parameters, never interpolated into the
-// PowerShell script text.
-//
-// Also known as TestVSwitchInjectionDefense.
-func TestAttachVM_PassesNamesAsParameters(t *testing.T) {
-	const tenantID = "acme"
-	const vmName = "webserver"
-	const switchName = "external"
-
-	expectedVMHost := vmHostName(tenantID, vmName)
-	expectedSwitchHost := vswitchHostName(tenantID, switchName)
-
-	transport := &testWinRMTransport{}
-	m := vswitchModuleWithTransport(transport, tenantID)
-
-	err := m.attachVMToSwitch(context.Background(), vmName, switchName, "")
-	require.NoError(t, err)
-
-	transport.mu.Lock()
-	calls := transport.calls
-	transport.mu.Unlock()
-
-	require.Len(t, calls, 1, "exactly one ExecutePS call expected")
-	call := calls[0]
-
-	// Both prefixed names must appear in args, not scriptBlock.
-	// Keys sorted: "SwitchName" < "VMName", so args[0]=hostSwitchName, args[1]=hostVMName.
-	require.Len(t, call.args, 2, "SwitchName and VMName must both be in psArgs")
-	assert.Equal(t, expectedSwitchHost, call.args[0], "switch host name must be args[0] (key 'SwitchName')")
-	assert.Equal(t, expectedVMHost, call.args[1], "VM host name must be args[1] (key 'VMName')")
-
-	assert.NotContains(t, call.scriptBlock, expectedVMHost,
-		"prefixed VM name must NOT appear in scriptBlock text")
-	assert.NotContains(t, call.scriptBlock, expectedSwitchHost,
-		"prefixed switch name must NOT appear in scriptBlock text")
-}
-
-// TestVSwitchInjectionDefense verifies that the prefixed switch name is transmitted
+// TestVSwitchInjectionDefense verifies that the (exact) switch name is transmitted
 // as a WinRM ArgumentList parameter during create/delete, never interpolated into the
 // PowerShell script block text. This satisfies the AC test name alias.
 func TestVSwitchInjectionDefense(t *testing.T) {
 	const tenantID = "ops"
 	const switchName = "corp-net"
-	expectedHostName := vswitchHostName(tenantID, switchName)
 
 	transport := &testWinRMTransport{}
 	m := vswitchModuleWithTransport(transport, tenantID)
@@ -284,74 +199,11 @@ func TestVSwitchInjectionDefense(t *testing.T) {
 	require.Len(t, calls, 1, "exactly one ExecutePS call expected for Remove")
 	call := calls[0]
 
-	// Prefixed name must appear in args, not scriptBlock.
+	// Exact name must appear in args, not scriptBlock.
 	require.Len(t, call.args, 1)
-	assert.Equal(t, expectedHostName, call.args[0], "prefixed switch name must be in args[0]")
-	assert.NotContains(t, call.scriptBlock, expectedHostName,
-		"prefixed switch name must NOT appear in scriptBlock text")
-}
-
-// TestEmptyAdapterName_OmitsNameParam verifies that AttachVMToSwitch with an empty
-// AdapterName produces a scriptBlock without a -Name parameter and that args does
-// not include an empty-string element for the adapter name.
-func TestEmptyAdapterName_OmitsNameParam(t *testing.T) {
-	transport := &testWinRMTransport{}
-	m := vswitchModuleWithTransport(transport, "t")
-
-	err := m.attachVMToSwitch(context.Background(), "myvm", "myswitch", "")
-	require.NoError(t, err)
-
-	transport.mu.Lock()
-	calls := transport.calls
-	transport.mu.Unlock()
-
-	require.Len(t, calls, 1)
-	call := calls[0]
-
-	// scriptBlock must NOT contain -Name
-	assert.NotContains(t, call.scriptBlock, "-Name",
-		"empty AdapterName must produce scriptBlock without -Name parameter")
-
-	// args must have exactly 2 entries (SwitchName and VMName) — no empty-string Name arg
-	require.Len(t, call.args, 2,
-		"empty AdapterName must produce exactly 2 args (SwitchName, VMName)")
-
-	// None of the args should be an empty string
-	for i, arg := range call.args {
-		assert.NotEqual(t, "", arg, "args[%d] must not be an empty string", i)
-	}
-}
-
-// TestNonEmptyAdapterName_IncludesNameParam verifies that AttachVMToSwitch with a
-// non-empty AdapterName includes -Name in the scriptBlock and the adapter name in args.
-func TestNonEmptyAdapterName_IncludesNameParam(t *testing.T) {
-	const adapterName = "NIC-1"
-
-	transport := &testWinRMTransport{}
-	m := vswitchModuleWithTransport(transport, "t")
-
-	err := m.attachVMToSwitch(context.Background(), "myvm", "myswitch", adapterName)
-	require.NoError(t, err)
-
-	transport.mu.Lock()
-	calls := transport.calls
-	transport.mu.Unlock()
-
-	require.Len(t, calls, 1)
-	call := calls[0]
-
-	// scriptBlock must contain -Name
-	assert.Contains(t, call.scriptBlock, "-Name",
-		"non-empty AdapterName must include -Name parameter in scriptBlock")
-
-	// args must have 3 entries: Name, SwitchName, VMName (sorted order)
-	require.Len(t, call.args, 3, "3 args expected: Name, SwitchName, VMName (sorted)")
-	// Keys sorted: "Name" < "SwitchName" < "VMName"
-	assert.Equal(t, adapterName, call.args[0], "adapter name must be args[0] (key 'Name')")
-
-	// Adapter name must not appear in scriptBlock text
-	assert.NotContains(t, call.scriptBlock, adapterName,
-		"adapter name must NOT be embedded in scriptBlock — must be in args")
+	assert.Equal(t, switchName, call.args[0], "exact switch name must be in args[0]")
+	assert.NotContains(t, call.scriptBlock, switchName,
+		"switch name must NOT appear in scriptBlock text")
 }
 
 // ─── Get not found tests ───────────────────────────────────────────────────────
@@ -407,10 +259,9 @@ func TestGet_VSwitch_NoTransport(t *testing.T) {
 func TestGet_VSwitch_ReturnsConfig(t *testing.T) {
 	const tenantID = "prod"
 	const switchName = "corp-external"
-	hostName := vswitchHostName(tenantID, switchName)
 
 	transport := &testWinRMTransport{
-		output: `{"found":true,"Name":"` + hostName + `","SwitchType":"External"}`,
+		output: `{"found":true,"Name":"` + switchName + `","SwitchType":"External"}`,
 	}
 	m := vswitchModuleWithTransport(transport, tenantID)
 
@@ -420,7 +271,7 @@ func TestGet_VSwitch_ReturnsConfig(t *testing.T) {
 
 	cfg, ok := state.(*VSwitchConfig)
 	require.True(t, ok, "Get must return *VSwitchConfig")
-	assert.Equal(t, switchName, cfg.Name, "Name must be user-visible (without prefix)")
+	assert.Equal(t, switchName, cfg.Name, "Name must be the exact config name")
 	assert.Equal(t, "external", cfg.SwitchType, "SwitchType 'External' must map to 'external'")
 	assert.Equal(t, "present", cfg.State)
 }
@@ -455,10 +306,10 @@ func TestSet_VSwitch_CreateInternal(t *testing.T) {
 		"internal switch creation must include SwitchType Internal")
 
 	require.Len(t, call.args, 1, "only Name should be in psArgs for internal switch")
-	assert.Equal(t, "cfgms-dev__dev-net", call.args[0],
-		"prefixed switch name must be in args[0]")
-	assert.NotContains(t, call.scriptBlock, "cfgms-dev__dev-net",
-		"prefixed name must not appear in scriptBlock")
+	assert.Equal(t, "dev-net", call.args[0],
+		"exact switch name must be in args[0]")
+	assert.NotContains(t, call.scriptBlock, "dev-net",
+		"name must not appear in scriptBlock")
 }
 
 // TestSet_VSwitch_CreateExternal verifies that Set creates an external switch and
@@ -493,11 +344,11 @@ func TestSet_VSwitch_CreateExternal(t *testing.T) {
 
 	// Keys sorted: "Name" < "NetAdapter"
 	require.Len(t, call.args, 2, "Name and NetAdapter should be in psArgs for external switch")
-	assert.Equal(t, "cfgms-ops__corp-net", call.args[0], "prefixed switch name in args[0]")
+	assert.Equal(t, "corp-net", call.args[0], "exact switch name in args[0]")
 	assert.Equal(t, "Ethernet", call.args[1], "adapter name in args[1]")
 
 	// Neither value should appear in the scriptBlock
-	assert.NotContains(t, call.scriptBlock, "cfgms-ops__corp-net")
+	assert.NotContains(t, call.scriptBlock, "corp-net")
 	assert.NotContains(t, call.scriptBlock, "Ethernet")
 }
 
@@ -522,10 +373,10 @@ func TestSet_VSwitch_DeleteAbsent(t *testing.T) {
 		"Set with state absent must invoke Remove-VMSwitch")
 
 	require.Len(t, call.args, 1)
-	assert.Equal(t, "cfgms-ops__old-switch", call.args[0],
-		"prefixed switch name must be in args[0] for Remove")
-	assert.NotContains(t, call.scriptBlock, "cfgms-ops__old-switch",
-		"prefixed name must not be interpolated in scriptBlock")
+	assert.Equal(t, "old-switch", call.args[0],
+		"exact switch name must be in args[0] for Remove")
+	assert.NotContains(t, call.scriptBlock, "old-switch",
+		"name must not be interpolated in scriptBlock")
 }
 
 // TestSet_VSwitch_ValidationRejectsNAT verifies that setVSwitch rejects nat type
@@ -543,185 +394,6 @@ func TestSet_VSwitch_ValidationRejectsNAT(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 	assert.Empty(t, calls, "transport must not be called when validation rejects the input")
-}
-
-// ─── VMAttach module routing tests ────────────────────────────────────────────
-
-// TestSet_VMAttach_NoTransport verifies that setVMAttachment returns ErrNotImplemented
-// when the module has no transport configured.
-func TestSet_VMAttach_NoTransport(t *testing.T) {
-	m := &hypervModule{
-		executor:  &stubHypervExecutor{},
-		vms:       make(map[string]VMConfig),
-		vswitches: make(map[string]VSwitchConfig),
-		detector:  &fakeDetector{result: true},
-	}
-	cfg := &VMAttachmentConfig{VMName: "myvm", SwitchName: "sw", State: "present"}
-	err := m.Set(context.Background(), "vmattach:myvm/sw", cfg)
-	assert.ErrorIs(t, err, modules.ErrNotImplemented)
-}
-
-// TestGet_VMAttach_NoTransport verifies that getVMAttachment returns ErrVSwitchNotFound
-// when the module has no transport configured.
-func TestGet_VMAttach_NoTransport(t *testing.T) {
-	m := &hypervModule{
-		executor:  &stubHypervExecutor{},
-		vms:       make(map[string]VMConfig),
-		vswitches: make(map[string]VSwitchConfig),
-		detector:  &fakeDetector{result: true},
-	}
-	_, err := m.Get(context.Background(), "vmattach:myvm/myswitch")
-	assert.ErrorIs(t, err, ErrVSwitchNotFound)
-}
-
-// TestSet_VMAttach_RejectsInjectionPayloads verifies that injection payloads in
-// the vmName or switchName portion of the resource ID are rejected before any WinRM call.
-func TestSet_VMAttach_RejectsInjectionPayloads(t *testing.T) {
-	type testCase struct {
-		resourceID string
-		desc       string
-	}
-	cases := []testCase{
-		{"vmattach:'; Remove-VM -Force; '/safe", "single-quote injection in vmName"},
-		{"vmattach:myvm/'; Remove-VMSwitch; '", "single-quote injection in switchName"},
-		{"vmattach:$(Remove-VM)/safe", "subexpression injection in vmName"},
-		{"vmattach:myvm/$(Remove-VMSwitch)", "subexpression injection in switchName"},
-		{"vmattach:vm__evil/switch", "double-underscore in vmName"},
-		{"vmattach:myvm/switch__evil", "double-underscore in switchName"},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.desc, func(t *testing.T) {
-			transport := &testWinRMTransport{}
-			m := vswitchModuleWithTransport(transport, "t")
-
-			cfg := &VMAttachmentConfig{State: "present"}
-			err := m.Set(context.Background(), tc.resourceID, cfg)
-			require.Error(t, err, "injection payload %q must be rejected", tc.resourceID)
-
-			transport.mu.Lock()
-			calls := transport.calls
-			transport.mu.Unlock()
-			assert.Empty(t, calls, "transport must not be called when validation rejects the input")
-		})
-	}
-}
-
-// ─── Set vmattach happy-path and error-path tests ─────────────────────────────
-
-// TestSet_VMAttach_Present_RoutesCorrectly verifies that m.Set with vmattach resource ID
-// and state "present" routes to attachVMToSwitch via the module's public Set interface.
-func TestSet_VMAttach_Present_RoutesCorrectly(t *testing.T) {
-	transport := &testWinRMTransport{}
-	m := vswitchModuleWithTransport(transport, "prod")
-
-	cfg := &VMAttachmentConfig{
-		VMName:      "appserver",
-		SwitchName:  "corp-net",
-		AdapterName: "Management",
-		State:       "present",
-	}
-
-	err := m.Set(context.Background(), "vmattach:appserver/corp-net", cfg)
-	require.NoError(t, err)
-
-	transport.mu.Lock()
-	calls := transport.calls
-	transport.mu.Unlock()
-
-	require.Len(t, calls, 1, "exactly one ExecutePS call expected for attach")
-	call := calls[0]
-
-	assert.Contains(t, call.scriptBlock, "Add-VMNetworkAdapter",
-		"Set with state present must invoke Add-VMNetworkAdapter")
-	assert.Contains(t, call.scriptBlock, "-Name",
-		"non-empty AdapterName must include -Name in the script")
-}
-
-// TestSet_VMAttach_Absent_CallsDetach verifies that Set with state "absent" routes
-// to detachVMFromSwitch via the module's public Set interface.
-func TestSet_VMAttach_Absent_CallsDetach(t *testing.T) {
-	transport := &testWinRMTransport{}
-	m := vswitchModuleWithTransport(transport, "ops")
-
-	cfg := &VMAttachmentConfig{
-		VMName:      "myvm",
-		SwitchName:  "corp-net",
-		AdapterName: "NIC-1",
-		State:       "absent",
-	}
-
-	err := m.Set(context.Background(), "vmattach:myvm/corp-net", cfg)
-	require.NoError(t, err)
-
-	transport.mu.Lock()
-	calls := transport.calls
-	transport.mu.Unlock()
-
-	require.Len(t, calls, 1, "exactly one ExecutePS call expected for detach")
-	call := calls[0]
-
-	assert.Contains(t, call.scriptBlock, "Remove-VMNetworkAdapter",
-		"Set with state absent must invoke Remove-VMNetworkAdapter")
-
-	// Prefixed VM name must appear in args, not scriptBlock
-	require.NotEmpty(t, call.args)
-	var foundVMName bool
-	for _, arg := range call.args {
-		if arg == "cfgms-ops__myvm" {
-			foundVMName = true
-		}
-	}
-	assert.True(t, foundVMName, "prefixed VM name must appear in args")
-	assert.NotContains(t, call.scriptBlock, "cfgms-ops__myvm",
-		"prefixed VM name must not be interpolated in scriptBlock")
-}
-
-// TestSet_VMAttach_Absent_TransportError verifies that transport errors from
-// detachVMFromSwitch are surfaced as wrapped errors.
-func TestSet_VMAttach_Absent_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
-	m := vswitchModuleWithTransport(transport, "t")
-
-	cfg := &VMAttachmentConfig{
-		VMName:      "myvm",
-		SwitchName:  "corp-net",
-		AdapterName: "NIC-1",
-		State:       "absent",
-	}
-
-	err := m.Set(context.Background(), "vmattach:myvm/corp-net", cfg)
-	require.Error(t, err, "transport error must be surfaced")
-	assert.Contains(t, err.Error(), "detach adapter", "error must identify the detach operation")
-}
-
-// TestSet_VMAttach_Present_TransportError verifies that transport failures from
-// attachVMToSwitch are surfaced as wrapped errors, not silently swallowed.
-func TestSet_VMAttach_Present_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
-	m := vswitchModuleWithTransport(transport, "t")
-
-	cfg := &VMAttachmentConfig{
-		VMName:     "myvm",
-		SwitchName: "myswitch",
-		State:      "present",
-	}
-
-	err := m.Set(context.Background(), "vmattach:myvm/myswitch", cfg)
-	require.Error(t, err, "transport error must be surfaced from attachVMToSwitch")
-	assert.Contains(t, err.Error(), "attach VM", "error must identify the attach operation")
-}
-
-// TestGet_VMAttachment_TransportError verifies that transport errors from
-// getVMAttachment are surfaced as ErrVSwitchNotFound.
-func TestGet_VMAttachment_TransportError(t *testing.T) {
-	transport := &testWinRMTransport{execErr: errors.New("winrm: connection refused")}
-	m := vswitchModuleWithTransport(transport, "t")
-
-	_, err := m.Get(context.Background(), "vmattach:myvm/myswitch")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVSwitchNotFound)
 }
 
 // TestSet_VSwitch_CreateTransportError verifies that transport failures in createVSwitch
@@ -748,68 +420,12 @@ func TestSet_VSwitch_DeleteTransportError(t *testing.T) {
 	assert.Contains(t, err.Error(), "remove vswitch", "error must identify the remove operation")
 }
 
-// ─── VMAttachmentConfig interface tests ───────────────────────────────────────
+// ─── Exact-name-regardless-of-tenant tests ────────────────────────────────────
 
-// TestVMAttachmentConfig_AsMap verifies that AsMap includes all configuration fields.
-func TestVMAttachmentConfig_AsMap(t *testing.T) {
-	cfg := &VMAttachmentConfig{
-		VMName:      "my-vm",
-		SwitchName:  "ext-sw",
-		AdapterName: "NIC-1",
-		State:       "present",
-	}
-	m := cfg.AsMap()
-	assert.Equal(t, "my-vm", m["vm_name"])
-	assert.Equal(t, "ext-sw", m["switch_name"])
-	assert.Equal(t, "NIC-1", m["adapter_name"])
-	assert.Equal(t, "present", m["state"])
-}
-
-// TestVMAttachmentConfig_YAML verifies round-trip YAML serialization.
-func TestVMAttachmentConfig_YAML(t *testing.T) {
-	original := &VMAttachmentConfig{
-		VMName:      "roundtrip-vm",
-		SwitchName:  "corp-net",
-		AdapterName: "Management",
-		State:       "present",
-	}
-	data, err := original.ToYAML()
-	require.NoError(t, err)
-
-	decoded := &VMAttachmentConfig{}
-	require.NoError(t, decoded.FromYAML(data))
-	assert.Equal(t, original, decoded)
-}
-
-// TestGet_VMAttachment_ReturnsConfig verifies that getVMAttachment returns a properly
-// mapped VMAttachmentConfig when the transport reports the adapter is found.
-func TestGet_VMAttachment_ReturnsConfig(t *testing.T) {
-	const tenantID = "prod"
-	const vmName = "appserver"
-	const switchName = "corp-net"
-
-	transport := &testWinRMTransport{
-		output: `{"found":true,"AdapterName":"NIC-1"}`,
-	}
-	m := vswitchModuleWithTransport(transport, tenantID)
-
-	state, err := m.Get(context.Background(), "vmattach:"+vmName+"/"+switchName)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-
-	cfg, ok := state.(*VMAttachmentConfig)
-	require.True(t, ok, "Get must return *VMAttachmentConfig")
-	assert.Equal(t, vmName, cfg.VMName)
-	assert.Equal(t, switchName, cfg.SwitchName)
-	assert.Equal(t, "NIC-1", cfg.AdapterName)
-	assert.Equal(t, "present", cfg.State)
-}
-
-// ─── Cross-tenant isolation tests ─────────────────────────────────────────────
-
-// TestVSwitchCrossTenantIsolation verifies that two modules for different tenants
-// produce distinct host-side switch names, preventing cross-tenant interference.
-func TestVSwitchCrossTenantIsolation(t *testing.T) {
+// TestVSwitchExactName_RegardlessOfTenant verifies that the host-side switch name
+// is the exact config name regardless of tenant_id — CFGMS never namespaces.
+// (Operators sharing a host across tenants must choose non-colliding names.)
+func TestVSwitchExactName_RegardlessOfTenant(t *testing.T) {
 	transportA := &testWinRMTransport{}
 	transportB := &testWinRMTransport{}
 
@@ -834,11 +450,12 @@ func TestVSwitchCrossTenantIsolation(t *testing.T) {
 	require.Len(t, callsB, 1)
 
 	require.Len(t, callsA[0].args, 1)
-	assert.Equal(t, "cfgms-a__net", callsA[0].args[0])
+	assert.Equal(t, "net", callsA[0].args[0], "tenant A must use the exact name")
 
 	require.Len(t, callsB[0].args, 1)
-	assert.Equal(t, "cfgms-b__net", callsB[0].args[0])
+	assert.Equal(t, "net", callsB[0].args[0], "tenant B must use the exact name")
 
-	assert.NotEqual(t, callsA[0].args[0], callsB[0].args[0],
-		"cross-tenant isolation: host-side switch names must differ")
+	// Injection safety: the name still travels via args, never interpolated.
+	assert.NotContains(t, callsA[0].scriptBlock, "net")
+	assert.NotContains(t, callsB[0].scriptBlock, "net")
 }

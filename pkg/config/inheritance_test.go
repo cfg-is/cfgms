@@ -247,3 +247,70 @@ func TestResolveConfiguration_PropagatesDriftModeFromParent(t *testing.T) {
 	assert.NotNil(t, effective.Sources["steward.drift_mode"],
 		"inheritance source for drift_mode must be recorded")
 }
+
+func resourceNames(resources []stewardconfig.ResourceConfig) []string {
+	names := make([]string, len(resources))
+	for i, r := range resources {
+		names[i] = r.Name
+	}
+	return names
+}
+
+// TestApplyConfigurationWithSource_PreservesResourceOrder pins that resource
+// declaration order survives inheritance merging. The order is load-bearing for
+// dependency chains: the steward executor applies resources in slice order, so a
+// vSwitch must come before the VM that attaches to it (create) and a VM must come
+// before its vSwitch (delete — Hyper-V refuses to remove an in-use switch).
+// Rebuilding the slice from a Go map (the prior implementation) randomised the
+// order and made those chains fail intermittently. Eight resources make a
+// stale-map regression astronomically unlikely to pass by chance (1/8!).
+func TestApplyConfigurationWithSource_PreservesResourceOrder(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+	src := &InheritanceSource{Source: "test"}
+
+	declared := []string{"sw-a", "sw-b", "vm-1", "vm-2", "vm-3", "vm-4", "vm-5", "vm-6"}
+	resources := make([]stewardconfig.ResourceConfig, len(declared))
+	for i, name := range declared {
+		resources[i] = stewardconfig.ResourceConfig{Name: name, Module: "hyperv.vm"}
+	}
+
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{Resources: resources}, src)
+
+	assert.Equal(t, declared, resourceNames(effective.Config.Resources),
+		"resource declaration order must be preserved through inheritance merging")
+}
+
+// TestApplyConfigurationWithSource_OverrideKeepsPositionAppendsNew verifies the
+// declarative-merge semantics under order preservation: a later layer that
+// overrides an existing resource replaces it IN PLACE (keeping the base
+// position), while genuinely new resources append in declaration order.
+func TestApplyConfigurationWithSource_OverrideKeepsPositionAppendsNew(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	// Base layer (e.g. parent tenant): switch then VM.
+	base := &stewardconfig.StewardConfig{Resources: []stewardconfig.ResourceConfig{
+		{Name: "sw-a", Module: "hyperv.vswitch"},
+		{Name: "vm-1", Module: "hyperv.vm"},
+	}}
+	ir.applyConfigurationWithSource(effective, base, &InheritanceSource{Source: "base"})
+
+	// Child layer: overrides vm-1 and adds a new vm-2.
+	child := &stewardconfig.StewardConfig{Resources: []stewardconfig.ResourceConfig{
+		{Name: "vm-1", Module: "hyperv.vm", Config: map[string]interface{}{"cpu_count": 4}},
+		{Name: "vm-2", Module: "hyperv.vm"},
+	}}
+	ir.applyConfigurationWithSource(effective, child, &InheritanceSource{Source: "child"})
+
+	assert.Equal(t, []string{"sw-a", "vm-1", "vm-2"}, resourceNames(effective.Config.Resources),
+		"override must keep the base position; new resources append")
+	// The override must have taken effect (child value), not the base.
+	var vm1 stewardconfig.ResourceConfig
+	for _, r := range effective.Config.Resources {
+		if r.Name == "vm-1" {
+			vm1 = r
+		}
+	}
+	assert.Equal(t, 4, vm1.Config["cpu_count"], "child layer must override the base resource in place")
+}

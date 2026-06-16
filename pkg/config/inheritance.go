@@ -254,22 +254,35 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		}
 	}
 
-	// Apply resources using declarative merging (named resources replace entirely)
-	resourceMap := make(map[string]stewardconfig.ResourceConfig)
-	for _, resource := range effective.Config.Resources {
-		resourceMap[resource.Name] = resource
+	// Apply resources using declarative merging (named resources replace
+	// entirely), PRESERVING declaration order. Inter-resource ordering is
+	// load-bearing for dependency chains: a vSwitch must be created before the
+	// VM that attaches to it, and on teardown the VM must be deleted before its
+	// vSwitch (Hyper-V refuses to remove a switch still in use by a running VM).
+	// The steward executor applies resources in slice order, so rebuilding the
+	// slice from a Go map here (whose iteration order is randomised) made those
+	// chains converge in a non-deterministic order and fail intermittently —
+	// e.g. a delete cycle attempting Remove-VMSwitch before the VM was removed.
+	// A child config that overrides a base resource keeps the base resource's
+	// position; genuinely new resources append in declaration order.
+	indexByName := make(map[string]int, len(effective.Config.Resources)+len(config.Resources))
+	merged := make([]stewardconfig.ResourceConfig, 0, len(effective.Config.Resources)+len(config.Resources))
+	upsert := func(resource stewardconfig.ResourceConfig) {
+		if i, ok := indexByName[resource.Name]; ok {
+			merged[i] = resource // override in place, preserving position
+			return
+		}
+		indexByName[resource.Name] = len(merged)
+		merged = append(merged, resource)
 	}
-
+	for _, resource := range effective.Config.Resources {
+		upsert(resource)
+	}
 	for _, resource := range config.Resources {
-		resourceMap[resource.Name] = resource
+		upsert(resource)
 		effective.Sources[fmt.Sprintf("resource.%s", resource.Name)] = source
 	}
-
-	// Convert map back to slice
-	effective.Config.Resources = make([]stewardconfig.ResourceConfig, 0, len(resourceMap))
-	for _, resource := range resourceMap {
-		effective.Config.Resources = append(effective.Config.Resources, resource)
-	}
+	effective.Config.Resources = merged
 
 	// Apply steward settings
 	if config.Steward.ID != "" {

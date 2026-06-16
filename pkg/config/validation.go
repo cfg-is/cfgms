@@ -267,7 +267,13 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 			})
 		}
 
-		// Validate module name
+		// Validate module name. The module field selects a bundle and may carry
+		// an optional resource-type suffix as "<bundle>.<type>" (e.g.
+		// "hyperv.vm") — the steward executor resolves the suffix into the
+		// module's internal typed resource ID. The format permits lowercase
+		// letters, digits, '_', '-', and at most a single '.' separating the
+		// bundle from the resource type. Resource-NAME validation
+		// (isValidResourceName) is intentionally NOT loosened by this.
 		if resource.Module == "" {
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
@@ -275,6 +281,15 @@ func (vm *ValidationManager) validateResources(result *ValidationResult, config 
 				Message: "Module name is required",
 				Code:    "MISSING_MODULE_NAME",
 				Level:   "error",
+			})
+		} else if !isValidModuleName(resource.Module) {
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Field:      fmt.Sprintf("resources[%d].module", i),
+				Message:    fmt.Sprintf("Invalid module name format: %s", resource.Module),
+				Code:       "INVALID_MODULE_NAME",
+				Level:      "error",
+				Suggestion: "Module names must be lowercase bundle or bundle.type (letters, digits, '-', '_', and a single '.')",
 			})
 		}
 
@@ -307,6 +322,45 @@ func isValidResourceName(name string) bool {
 	}
 
 	return true
+}
+
+// isValidModuleName checks a resource's module field. A module value is a
+// lowercase bundle name, optionally followed by a single resource-type suffix
+// after a "." — e.g. "directory", "hyperv", "hyperv.vm". Permitted characters
+// are lowercase letters, digits, '-', '_', and at most one '.'. Both the
+// bundle and (when present) the type segment must be non-empty.
+//
+// This deliberately accepts the #1903 "module-type convention" (hyperv.vm,
+// hyperv.vswitch) without touching resource-NAME validation.
+func isValidModuleName(module string) bool {
+	if module == "" {
+		return false
+	}
+
+	dotSeen := false
+	segmentLen := 0
+	for _, char := range module {
+		switch {
+		case char == '.':
+			if dotSeen {
+				return false // more than one '.' is not allowed
+			}
+			if segmentLen == 0 {
+				return false // empty bundle segment before '.'
+			}
+			dotSeen = true
+			segmentLen = 0
+		case (char >= 'a' && char <= 'z') ||
+			(char >= '0' && char <= '9') ||
+			char == '-' || char == '_':
+			segmentLen++
+		default:
+			return false
+		}
+	}
+
+	// Trailing '.' (empty type segment) is invalid.
+	return segmentLen > 0
 }
 
 // ValidateConfigurationEntry validates a configuration entry for storage

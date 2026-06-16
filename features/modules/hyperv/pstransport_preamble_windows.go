@@ -16,8 +16,11 @@ package hyperv
 //   - Each function wraps EXACTLY ONE cmdlet (or a tiny ConvertTo-Json
 //     shaping block around one query). No sequencing, no conditionals
 //     beyond the trivial "did this return nothing?" check, no state
-//     machines. Orchestration logic lives in Go in vm.go / vswitch.go /
-//     snapshot.go.
+//     machines. Orchestration logic lives in Go in vm.go / vswitch.go.
+//     Two deliberate exceptions: Cfgms-GetVM (multi-query JSON shaping) and
+//     Cfgms-RemoveVM (stop-then-remove is a single host-atomic delete, not
+//     Go orchestration — Hyper-V cannot delete a running VM). Both mirror
+//     their psXxx const exactly.
 //   - All parameters are typed and explicit. Get-Help on each function
 //     would produce a sensible signature.
 //   - Get-X functions return JSON via ConvertTo-Json -Compress so the Go
@@ -39,7 +42,11 @@ function Cfgms-GetVM {
     param([Parameter(Mandatory)][string]$Name)
     $vm = Get-VM -Name $Name -ErrorAction SilentlyContinue
     if (-not $vm) { Write-Output '{"found":false}'; return }
-    $adapter = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Read ALL network adapters and the switch each is connected to. SwitchNames
+    # is the full observed set the declarative multi-NIC reconcile (#2021) diffs
+    # against; SwitchName (the first) is kept for the single-NIC back-compat path.
+    $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue)
+    $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ })
     # $vm.Path is the VM CONFIGURATION directory, not the VHD file. The
     # module's VMConfig.VHDPath stores the path to the virtual disk; read
     # it from Get-VMHardDiskDrive.Path (the first attached disk is the
@@ -61,10 +68,11 @@ function Cfgms-GetVM {
         ProcessorCount     = [int]$vm.ProcessorCount
         Generation         = [int]$vm.Generation
         Path               = if ($disk) { $disk.Path } else { '' }
-        SwitchName         = if ($adapter) { $adapter.SwitchName } else { '' }
+        SwitchName         = if ($switchNames.Count -gt 0) { $switchNames[0] } else { '' }
+        SwitchNames        = $switchNames
         State              = $vm.State.ToString()
     }
-    ConvertTo-Json $result -Compress
+    ConvertTo-Json $result -Compress -Depth 4
 }
 
 # ── VM lifecycle ──────────────────────────────────────────────────────
@@ -91,7 +99,23 @@ function Cfgms-CreateVM {
     }
 }
 
-function Cfgms-RemoveVM     { param([Parameter(Mandatory)][string]$Name) Remove-VM -Name $Name -Force }
+# Cfgms-RemoveVM mirrors psRemoveVM in vm.go: Hyper-V refuses to remove a VM
+# that is not Off ("the operation cannot be performed while the object is in
+# its current state"), and a running VM also keeps any connected vSwitch "in
+# use" and blocks ITS deletion — so a running VM is hard-powered-off first,
+# then removed. A no-op when the VM is already gone. This is (with Cfgms-GetVM)
+# one of the two functions that intentionally wraps more than one cmdlet: the
+# stop+remove is a single host-atomic delete, not orchestration that belongs
+# in Go. Keep it byte-for-byte equivalent to psRemoveVM — the dispatcher maps
+# psRemoveVM here, so divergence silently ships the old un-guarded behavior.
+function Cfgms-RemoveVM {
+    param([Parameter(Mandatory)][string]$Name)
+    $vm = Get-VM -Name $Name -ErrorAction SilentlyContinue
+    if ($vm) {
+        if ($vm.State -ne 'Off') { Stop-VM -Name $Name -Force -TurnOff }
+        Remove-VM -Name $Name -Force
+    }
+}
 function Cfgms-StartVM      { param([Parameter(Mandatory)][string]$Name) Start-VM -Name $Name }
 function Cfgms-StopVM       { param([Parameter(Mandatory)][string]$Name) Stop-VM  -Name $Name -Force }
 
@@ -103,6 +127,27 @@ function Cfgms-SetVMProcessor {
 function Cfgms-SetVMMemory {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$MemoryMB)
     Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)
+}
+
+# ── VM network reconcile (declarative multi-NIC, #2021) ────────────────
+# Connect/disconnect primitives driven by the VM's desired switch set in
+# vm.go reconcileNetwork — NOT a standalone resource. Resurrected from the
+# injection-safe Add/Remove-VMNetworkAdapter logic of the removed vmattach
+# resource (#1903). Each wraps exactly one cmdlet; orchestration is in Go.
+function Cfgms-ConnectVMNic {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SwitchName)
+    Add-VMNetworkAdapter -VMName $Name -SwitchName $SwitchName
+}
+
+function Cfgms-DisconnectVMNic {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SwitchName)
+    # Remove the first adapter sitting on the switch being dropped from the
+    # desired set. Selecting by SwitchName keeps the primitive purely
+    # declarative — no stored adapter name to track.
+    $a = Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue |
+        Where-Object { $_.SwitchName -eq $SwitchName } |
+        Select-Object -First 1
+    if ($a) { Remove-VMNetworkAdapter -VMNetworkAdapter $a }
 }
 
 # ── VSwitch read + lifecycle ──────────────────────────────────────────
@@ -117,7 +162,15 @@ function Cfgms-GetVSwitch {
     } -Compress
 }
 
-function Cfgms-RemoveVSwitch         { param([Parameter(Mandatory)][string]$Name) Remove-VMSwitch -Name $Name -Force }
+# Cfgms-RemoveVSwitch mirrors psRemoveVSwitch: removing an already-absent
+# switch is a clean no-op (Remove-VMSwitch otherwise throws ObjectNotFound).
+# Keep it byte-for-byte equivalent to psRemoveVSwitch — the dispatcher maps
+# psRemoveVSwitch here.
+function Cfgms-RemoveVSwitch {
+    param([Parameter(Mandatory)][string]$Name)
+    $sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue
+    if ($sw) { Remove-VMSwitch -Name $Name -Force }
+}
 function Cfgms-CreateVSwitchInternal { param([Parameter(Mandatory)][string]$Name) New-VMSwitch -Name $Name -SwitchType Internal | Out-Null }
 function Cfgms-CreateVSwitchPrivate  { param([Parameter(Mandatory)][string]$Name) New-VMSwitch -Name $Name -SwitchType Private  | Out-Null }
 
@@ -129,48 +182,4 @@ function Cfgms-CreateVSwitchExternal {
     )
     New-VMSwitch -Name $Name -SwitchType External -NetAdapterName $NetAdapter -AllowManagementOS $AllowManagementOS | Out-Null
 }
-
-# ── VM ↔ VSwitch attachment ───────────────────────────────────────────
-function Cfgms-GetVMAttachment {
-    param(
-        [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$SwitchName
-    )
-    $adapter = Get-VMNetworkAdapter -VMName $VMName -ErrorAction SilentlyContinue |
-        Where-Object { $_.SwitchName -eq $SwitchName } |
-        Select-Object -First 1
-    if (-not $adapter) { Write-Output '{"found":false}'; return }
-    ConvertTo-Json @{ found = $true; AdapterName = $adapter.Name } -Compress
-}
-
-function Cfgms-AttachVMDefaultAdapter {
-    param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$SwitchName)
-    Add-VMNetworkAdapter -VMName $VMName -SwitchName $SwitchName
-}
-
-function Cfgms-AttachVMNamedAdapter {
-    param(
-        [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$SwitchName,
-        [Parameter(Mandatory)][string]$Name
-    )
-    Add-VMNetworkAdapter -VMName $VMName -SwitchName $SwitchName -Name $Name
-}
-
-function Cfgms-DetachVMAdapter {
-    param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name)
-    Remove-VMNetworkAdapter -VMName $VMName -Name $Name
-}
-
-# ── Snapshot ──────────────────────────────────────────────────────────
-function Cfgms-GetSnapshot {
-    param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name)
-    $snap = Get-VMSnapshot -VMName $VMName -Name $Name -ErrorAction SilentlyContinue
-    if (-not $snap) { Write-Output '{"found":false}'; return }
-    Write-Output '{"found":true}'
-}
-
-function Cfgms-CreateSnapshot  { param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name) Checkpoint-VM      -VMName $VMName -SnapshotName $Name }
-function Cfgms-RemoveSnapshot  { param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name) Remove-VMSnapshot  -VMName $VMName -Name $Name }
-function Cfgms-RestoreSnapshot { param([Parameter(Mandatory)][string]$VMName, [Parameter(Mandatory)][string]$Name) Restore-VMSnapshot -VMName $VMName -Name $Name -Confirm:$false }
 `

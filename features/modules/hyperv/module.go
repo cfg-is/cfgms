@@ -47,13 +47,16 @@ type hypervModule struct {
 	detResult bool
 	detExpiry time.Time
 
-	// vms is the write-through VM cache. Keys are user-visible VM names
-	// (without the cfgms-<tenantID>__ prefix). Updated on executor success only.
+	// vms is the write-through VM cache. Keys are the exact VM names admins
+	// specify (identical to the host-side names). Updated on executor success
+	// only. The cache is never used as the source of truth for an apply
+	// decision — setVM always reconciles against live host state via getVM.
 	vmsMu sync.RWMutex
 	vms   map[string]VMConfig
 
-	// vswitches is the write-through vSwitch cache. Keys are user-visible switch names
-	// (without the cfgms-<tenantID>__ prefix). Updated on transport success only.
+	// vswitches is the write-through vSwitch cache. Keys are the exact switch
+	// names admins specify (identical to the host-side names). Updated on
+	// transport success only.
 	vswitchesMu sync.RWMutex
 	vswitches   map[string]VSwitchConfig
 }
@@ -112,8 +115,9 @@ func (m *hypervModule) checkDetection(ctx context.Context) error {
 // Optional config keys (all default-driven for the post-#1894 in-host
 // deployment shape):
 //
-//   - tenant_id        — tenant identifier used to namespace host-side VM
-//     names (default "").
+//   - tenant_id        — tenant identifier recorded on audit events and DNA
+//     (default ""). It is NOT used to namespace host-side names: VMs and
+//     switches are created with the exact name the admin specifies.
 //   - steward_id       — audit-trail subject id (default "<tenant>/hyperv").
 //   - audit_manager    — *audit.Manager to record verb invocations.
 //   - transport        — "ps-host" (default) or "winrm". "ps-host" runs the
@@ -193,9 +197,7 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 // Get returns the current Hyper-V resource configuration.
 // Supported resource ID prefixes:
 //   - "vm:<name>": retrieve VMConfig for the named virtual machine
-//   - "snapshot:<vmName>/<snapName>": retrieve SnapshotConfig for the named checkpoint
 //   - "vswitch:<name>": retrieve VSwitchConfig for the named virtual switch
-//   - "vmattach:<vmName>/<switchName>": retrieve VMAttachmentConfig for the named attachment
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if err := m.checkDetection(ctx); err != nil {
 		if errors.Is(err, ErrHostNotHyperV) {
@@ -213,16 +215,8 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 	switch prefix {
 	case "vm":
 		return m.getVM(ctx, name)
-	case "snapshot":
-		vmName, snapName, ok := splitSnapshotName(name)
-		if !ok {
-			return nil, modules.ErrNotImplemented
-		}
-		return m.getSnapshot(ctx, vmName, snapName)
 	case "vswitch":
 		return m.getVSwitch(ctx, name)
-	case "vmattach":
-		return m.getVMAttachment(ctx, name)
 	default:
 		return nil, modules.ErrNotImplemented
 	}
@@ -231,9 +225,10 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 // Set applies the desired Hyper-V resource configuration.
 // Supported resource ID prefixes:
 //   - "vm:<name>": create, update, or delete the named virtual machine
-//   - "snapshot:<vmName>/<snapName>": create, restore, or delete the named checkpoint
 //   - "vswitch:<name>": create or delete the named virtual switch
-//   - "vmattach:<vmName>/<switchName>": attach or detach a VM network adapter
+//
+// VM network connectivity is declarative on the VM via switch_name (single
+// switch — the common case). Multi-NIC reconciliation is tracked in #2021.
 func (m *hypervModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if err := m.checkDetection(ctx); err != nil {
 		if errors.Is(err, ErrHostNotHyperV) {
@@ -254,21 +249,11 @@ func (m *hypervModule) Set(ctx context.Context, resourceID string, config module
 			return modules.ErrNotImplemented
 		}
 		return m.setVM(ctx, resourceID, config)
-	case "snapshot":
-		if config == nil {
-			return modules.ErrNotImplemented
-		}
-		return m.setSnapshot(ctx, resourceID, config)
 	case "vswitch":
 		if config == nil {
 			return modules.ErrNotImplemented
 		}
 		return m.setVSwitch(ctx, resourceID, config)
-	case "vmattach":
-		if config == nil {
-			return modules.ErrNotImplemented
-		}
-		return m.setVMAttachment(ctx, resourceID, config)
 	default:
 		return modules.ErrNotImplemented
 	}

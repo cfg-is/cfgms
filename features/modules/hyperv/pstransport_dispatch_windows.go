@@ -12,17 +12,17 @@ import (
 )
 
 // ExecutePS satisfies the winrmTransport interface. Pattern-matches the
-// incoming psCommand against the known psXxx const set from vm.go,
-// vswitch.go, and snapshot.go and dispatches the equivalent Cfgms-* verb
-// over the persistent PS host.
+// incoming psCommand against the known psXxx const set from vm.go and
+// vswitch.go and dispatches the equivalent Cfgms-* verb over the
+// persistent PS host.
 //
 // Unknown psCommand strings return an error rather than silently no-op'ing.
 // We don't fall back to WinRM here — the wholesale-WinRM-fallback model
 // from earlier #1887 drafts assumed WinRM worked; in this codebase it's
 // reliably broken on the same-host deployment shape (see #1852 F16–F21).
-// If a future verb gets added in vm.go/vswitch.go/snapshot.go without a
-// matching Cfgms-* function, that's a build-time omission, not a runtime
-// graceful degradation candidate.
+// If a future verb gets added in vm.go/vswitch.go without a matching
+// Cfgms-* function, that's a build-time omission, not a runtime graceful
+// degradation candidate.
 func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
 	// External vSwitch creation is the one psCommand that's built by a
 	// function (psCreateVSwitchExternal) rather than declared as a const,
@@ -60,6 +60,16 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 			"Cfgms-SetVMMemory -Name "+quoteArg(psArgs, "Name")+
 				" -MemoryMB "+intArg(psArgs, "MemoryMB"))
 
+	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
+	case psConnectVMNic:
+		return t.run(ctx,
+			"Cfgms-ConnectVMNic -Name "+quoteArg(psArgs, "Name")+
+				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
+	case psDisconnectVMNic:
+		return t.run(ctx,
+			"Cfgms-DisconnectVMNic -Name "+quoteArg(psArgs, "Name")+
+				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
+
 	// ── VSwitch ─────────────────────────────────────────────────────
 	case psGetVSwitch:
 		return t.run(ctx, "Cfgms-GetVSwitch -Name "+quoteArg(psArgs, "Name"))
@@ -69,43 +79,6 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx, "Cfgms-CreateVSwitchInternal -Name "+quoteArg(psArgs, "Name"))
 	case psCreateVSwitchPrivate:
 		return t.run(ctx, "Cfgms-CreateVSwitchPrivate -Name "+quoteArg(psArgs, "Name"))
-
-	// ── VM ↔ VSwitch attachment ─────────────────────────────────────
-	case psGetVMAttachment:
-		return t.run(ctx,
-			"Cfgms-GetVMAttachment -VMName "+quoteArg(psArgs, "VMName")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
-	case psAttachVMNoAdapterName:
-		return t.run(ctx,
-			"Cfgms-AttachVMDefaultAdapter -VMName "+quoteArg(psArgs, "VMName")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
-	case psAttachVMWithAdapterName:
-		return t.run(ctx,
-			"Cfgms-AttachVMNamedAdapter -VMName "+quoteArg(psArgs, "VMName")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-	case psDetachVM:
-		return t.run(ctx,
-			"Cfgms-DetachVMAdapter -VMName "+quoteArg(psArgs, "VMName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-
-	// ── Snapshot ────────────────────────────────────────────────────
-	case psGetSnapshot:
-		return t.run(ctx,
-			"Cfgms-GetSnapshot -VMName "+quoteArg(psArgs, "VMName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-	case psCreateSnapshot:
-		return t.run(ctx,
-			"Cfgms-CreateSnapshot -VMName "+quoteArg(psArgs, "VMName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-	case psRemoveSnapshot:
-		return t.run(ctx,
-			"Cfgms-RemoveSnapshot -VMName "+quoteArg(psArgs, "VMName")+
-				" -Name "+quoteArg(psArgs, "Name"))
-	case psRestoreSnapshot:
-		return t.run(ctx,
-			"Cfgms-RestoreSnapshot -VMName "+quoteArg(psArgs, "VMName")+
-				" -Name "+quoteArg(psArgs, "Name"))
 	}
 
 	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table); add a Cfgms-* function and a case here")
@@ -129,7 +102,7 @@ func (t *psHostTransport) dispatchCreateVSwitchExternal(ctx context.Context, psC
 // quoteArg returns the named psArgs value PS-quoted (single quotes,
 // doubled-up internal single quotes). Missing keys return an empty quoted
 // string so the generated invocation still parses; the upstream
-// vm.go/vswitch.go/snapshot.go callers always populate every key required
+// vm.go/vswitch.go callers always populate every key required
 // by the verb they're invoking, so an empty here would itself indicate a
 // caller bug — but we don't try to detect it here because the existing
 // const-based call sites already validate the inputs.

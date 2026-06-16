@@ -114,7 +114,7 @@ func newFakeAuditManager(t *testing.T) (*audit.Manager, *fakeAuditStore) {
 // TestAuditRecordHypervOp_NilSafe verifies that a nil audit manager does not panic.
 func TestAuditRecordHypervOp_NilSafe(t *testing.T) {
 	// Must not panic — nil mgr is the default for lightweight edge stewards.
-	recordHypervOp(context.Background(), nil, "tenant-1", "steward-1", "host-1", "New-VM", "cfgms-tenant-1__vm1", nil)
+	recordHypervOp(context.Background(), nil, "tenant-1", "steward-1", "host-1", "New-VM", "vm1", nil)
 }
 
 // TestAuditRecordHypervOp_NoRawPS verifies that Details contains no raw PowerShell
@@ -123,7 +123,7 @@ func TestAuditRecordHypervOp_NoRawPS(t *testing.T) {
 	mgr, store := newFakeAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
-	recordHypervOp(context.Background(), mgr, "tenant-1", "steward-1", "host-1", "New-VM", "cfgms-tenant-1__vm1", nil)
+	recordHypervOp(context.Background(), mgr, "tenant-1", "steward-1", "host-1", "New-VM", "vm1", nil)
 
 	require.NoError(t, mgr.Flush(context.Background()))
 	entries := store.captured()
@@ -154,7 +154,7 @@ func TestAuditRecordHypervOp_ErrorPath(t *testing.T) {
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	opErr := errors.New("VM creation failed: disk quota exceeded")
-	recordHypervOp(context.Background(), mgr, "tenant-1", "steward-1", "host-1", "New-VM", "cfgms-tenant-1__vm1", opErr)
+	recordHypervOp(context.Background(), mgr, "tenant-1", "steward-1", "host-1", "New-VM", "vm1", opErr)
 
 	require.NoError(t, mgr.Flush(context.Background()))
 	entries := store.captured()
@@ -179,7 +179,7 @@ func TestAuditLog_VMOperation(t *testing.T) {
 	stewardID := "steward-a"
 	host := "winhost.example.com"
 	verb := "New-VM"
-	resourceID := vmHostName(tenantID, "myvm") // cfgms-tenant-a__myvm
+	resourceID := "myvm" // exact VM name — no namespacing
 
 	recordHypervOp(context.Background(), mgr, tenantID, stewardID, host, verb, resourceID, nil)
 
