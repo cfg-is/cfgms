@@ -122,6 +122,21 @@ genuinely no nearby code is at risk of being touched.>
 
 (Use "None" only if the story genuinely does not change product shape. See "Documentation & Tests Currency" rule below.)
 
+## Environment
+
+(Optional — omit for ordinary Linux-buildable work, which is the default. Add it
+only when the story needs a specific OS execution environment to build or
+live-test — e.g. native Windows or macOS behavior that a Linux container can't
+exercise. Recognized values: `windows`, `macos`, `linux`. A `windows`/`macos`
+story is routed off the Linux orchestrator to a host that serves that
+environment — see Self-Dispatch Mode in `.claude/agents/po.md` §7. If unsure,
+omit it.)
+
+```
+## Environment
+windows
+```
+
 ## Reference Implementation
 
 - <Pointers to existing patterns in the codebase to follow>

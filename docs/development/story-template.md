@@ -39,6 +39,13 @@ None
 
 <Use "None — no product-shape change" with justification only if the story genuinely doesn't change observable shape. See ba.md "Documentation & Tests Currency" rule.>
 
+## Environment
+
+<Optional. Omit for ordinary Linux-buildable work (the default). Add only when the
+story needs a specific OS execution environment — `windows`, `macos`, or `linux` —
+to build or live-test behavior a Linux container can't exercise. Routes the story
+off the Linux orchestrator to a host serving that environment (see po.md §7).>
+
 ## Reference Implementation
 
 - <Pointer to existing pattern in the codebase to follow, with file:line>

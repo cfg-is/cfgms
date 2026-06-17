@@ -104,6 +104,13 @@ Display sections in this order. **Omit any section with zero items.**
 
 **Section 3: ACTIVE MILESTONE** — current roadmap milestone, open item count, blockers.
 
+**Section 3.5: WINDOWS QUEUE** — Ready stories whose required execution
+environment this host cannot serve. In a cron context read `windows_queue` from
+the preflight output; for the interactive dashboard (no preflight run) use
+`gh issue list --repo cfg-is/cfgms --label needs-windows --state open`. These are
+held, not dispatched, on the Linux orchestrator; they are worked on the Windows
+host via Self-Dispatch Mode (§7). Omit if empty.
+
 **Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories.
 
 **Section 5: PIPELINE DEPTH** — counts by stage (epics, drafts, ready, fix, review).
@@ -450,6 +457,20 @@ Find stories with project status `Ready` that are not `In Progress`. Before disp
 
 Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
 
+**Execution-environment routing (multi-host).** The preflight filters dispatch by
+this host's capabilities (`CFGMS_PO_HOST_CAPS`, default `linux`). A story whose
+required execution environment isn't in this host's caps gets `action: "hold"`
+with a `route` hint (e.g. `route: "windows"`) — it is **not** container-dispatched
+here. On the Linux orchestrator, windows-tagged stories therefore stay held and
+appear in the dashboard's Windows queue (§1.2); the Windows host picks them up via
+Self-Dispatch Mode (§7). Because each host works a **disjoint slice by
+environment**, two cron loops on different hosts can run out of phase without ever
+claiming the same story — no distributed lock is required. The per-story claim
+(`po-act.sh dispatch` flips `Ready → In Progress` *before* clone/launch) is the
+backstop that also protects against overlapping cycles on a single host. A story's
+required env comes from a `## Environment` body section and/or a `needs-<env>`
+label (see Reference: Story Body Conventions).
+
 For each story the preflight recommends dispatching:
 ```bash
 ./.claude/scripts/po-act.sh dispatch <ITEM_ID>
@@ -652,6 +673,64 @@ When the founder asks about a specific issue or PR:
 
 -----
 
+## 7. Self-Dispatch Mode (no-docker, in-session)
+
+Triggered by `/po work`. For a host whose `CFGMS_PO_HOST_CAPS` names a non-default
+execution environment (e.g. a Windows host with `CFGMS_PO_HOST_CAPS=windows`),
+this mode lets the **local session** work that host's tagged stories natively —
+no docker container, because a Linux container can't provide a Windows execution
+environment. Stories are worked **one at a time, in-process**.
+
+**Why no distributed lock is needed.** The orchestrator (Linux, docker dispatch)
+and this host serve **disjoint execution-environment slices**, so the two cron
+loops never select the same story even when out of phase. The only required
+guard is claiming each story (`Ready → In Progress`) **before** working it —
+`po-act.sh claim` does this with the same status check the docker path uses.
+
+### Loop
+
+1. **Preflight** with this host's caps already set in the environment:
+   ```bash
+   ./.claude/scripts/po-act.sh preflight
+   ```
+   Read `windows_queue` (or, generally, `dispatch_recommendations` entries with
+   `action: "dispatch"` — under this host's caps, its environment's stories
+   become dispatchable while `linux` stories are held). Also honor the
+   `dispatch_blocked` code-health gate exactly as §4.0 (don't start work on a
+   broken `develop`).
+
+2. **Pick the first eligible story** (ascending order — same ordering the
+   preflight uses).
+
+3. **Claim it** before doing any work:
+   ```bash
+   ./.claude/scripts/po-act.sh claim <ITEM_ID>
+   ```
+   - `CLAIMED:<item>` → proceed.
+   - `CLAIM_LOST:<item>` → another host/cycle took it (or it left Ready); skip to
+     the next story. Never work an unclaimed story.
+
+4. **Work it locally in this session** — run the standard dev workflow against the
+   claimed story: `/story-start <NUM>` → implement (TDD, real components, no
+   mocks) → validation gates (`make test-complete`) → `/story-complete` (opens a
+   PR targeting `develop`). This runs natively on the host, so Windows-only
+   build/test paths are exercised for real.
+
+5. **Next.** Repeat 2–4 until no eligible stories remain for this host's caps,
+   then idle. Re-invoked each tick via `/loop /po work`.
+
+**Scope.** This host only **produces** PRs for its environment's stories. Review,
+fix-cycle, merge-queue, and decomposition stay with the Linux orchestrator
+(host-agnostic; they run fine in Linux containers). Exception: a `Fix` cycle on a
+PR whose story is windows-required cannot be auto-fixed in a Linux container —
+it must be picked up the same way (work it in this session). Until that routing
+is automated, treat a windows-required PR in `Fix` as manual pickup.
+
+**Idempotency.** Same as §4.2 — never work a story that isn't `Ready` at claim
+time; the `claim` guard enforces this.
+
+-----
+
 ## Reference: Sub-Issue GraphQL Operations
 
 ### Create sub-issue link
@@ -712,6 +791,26 @@ Every file the story will touch listed in either backtick-quoted form (`` `path/
 
 If the section is present but contains no recognizable file paths, `parse_warnings` is set. Do not write prose-only file lists like "all controller package files".
 
+### `## Environment` (optional)
+
+Declares the execution environment the story must run in, for multi-host routing.
+Recognized values (first match wins, case-insensitive): `windows`, `macos`,
+`linux`. **Absent ⇒ `linux`** (the default; most stories omit this section). The
+parser only looks for the keyword in the section text, so `Requires a Windows
+host for live testing` resolves to `windows`.
+
+```
+## Environment
+windows
+```
+
+A `windows`/`macos` story is held by the Linux orchestrator (not container-
+dispatched) and worked on a host that serves that environment via Self-Dispatch
+Mode (§7). Equivalent to applying the `needs-windows` / `needs-macos` GitHub label
+— the label is the ergonomic way to tag an existing **issue**; the body section is
+the way to tag a project **draft** (which has no labels). Either signal suffices;
+the label wins if both are present.
+
 ### When the parser disagrees with you
 
 The parser is strict on purpose — it's a gate, not a lint. If a story body looks valid to a human but produces a `parse_warning`, normalize the body to match the parser rather than relaxing the gate. The cost of a body edit is one second; the cost of a held story is a wasted cycle.
@@ -726,7 +825,7 @@ Work queue is managed via GitHub Projects V2 (see `scripts/project-queue.sh` and
 |----------------|---------|
 | Draft | Story awaiting Tech Lead review |
 | Ready | Story approved — eligible for dispatch |
-| In Progress | Dev agent container running |
+| In Progress | Claimed and being worked — a dev agent container (orchestrator) or a self-dispatch session (§7). Set at claim time, before any work starts. |
 | Reviewing | PR under acceptance review (container-gated, no label) |
 | Fix | PR failed QA — fix agent dispatched |
 | Failed | Dev agent failed, draft PR created |
@@ -739,3 +838,5 @@ GitHub issue labels still in use:
 | `epic` | Top-level epic issue |
 | `story` | Story sub-issue of an epic |
 | `high-priority` | Escalation tracking issue requiring founder attention |
+| `needs-windows` | Story requires a Windows execution environment — held by the Linux orchestrator, worked via Self-Dispatch Mode (§7) on a Windows host. Equivalent to a `## Environment: windows` body section. |
+| `needs-macos` | Story requires a macOS execution environment (reserved; same routing as `needs-windows`). |
