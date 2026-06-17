@@ -286,6 +286,8 @@ Each step sets project status `Blocked` on unrecoverable failure and continues t
 
 **Priority order (cap-constrained):** in-flight work is processed before new work. The 7-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
 
+Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of the container cap, since they do not consume container slots.
+
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `Draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
 
@@ -295,6 +297,45 @@ Remove stale agent containers and clones. Run:
 ./.claude/scripts/agent-dispatch.sh cleanup-stale
 ```
 This finds containers whose stories are closed, have project status `Failed`, or project status `Blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
+
+**Step 1.6 — Dependency pin refresh (cron + cycle):**
+
+The `dependency-pin-check` GitHub Actions workflow appends a `## Weekly Pin Check — <date>` comment (authored by `github-actions`) to a long-lived issue labelled `dependency-pins` whenever a pinned tool/toolchain has a newer upstream release. This step turns that signal into dispatchable bump stories by running the `refresh-pins` skill — which researches every pin against upstream, applies the cooldown + CVE policy, and creates one Draft `story,dependencies` issue per pin that should bump. Those drafts are then promoted by the Tech Lead pass (Step 2) in this same cycle.
+
+Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-docker self-dispatch hosts do not run §4 steps. It needs no Docker (just `gh`/`curl`/`WebFetch`), so the remote `po-cron` trigger can run it too.
+
+**Idempotency gate (do this BEFORE invoking the skill — the skill does a full network sweep, so don't run it every cycle):**
+
+1. Find the open pin-check issue:
+   ```bash
+   gh issue list --repo cfg-is/cfgms --label dependency-pins --state open \
+     --json number --jq '.[0].number'
+   ```
+   If none, skip the step.
+
+2. Compare the latest automated weekly-check comment against the last time this step processed one. Both are read from the issue's comments — the marker is an HTML comment `<!-- po-pin-refresh -->` this step posts after a run:
+   ```bash
+   gh issue view <PIN_ISSUE> --repo cfg-is/cfgms --json comments --jq '{
+     latest_check: ([.comments[] | select(.author.login=="github-actions") | select(.body|test("Weekly Pin Check")) | .createdAt] | last // ""),
+     last_processed: ([.comments[] | select(.body|test("po-pin-refresh")) | .createdAt] | last // "")
+   }'
+   ```
+   Run the skill only if `latest_check` is non-empty AND (`last_processed` is empty OR `latest_check > last_processed`) — ISO-8601 UTC strings compare lexicographically. Otherwise report "pins current (last processed <last_processed>)" and skip.
+
+3. Run the skill (empty args = sweep every pin; it is itself idempotent and will comment on, not duplicate, any bump story that already exists):
+   ```
+   Skill: refresh-pins
+   ```
+
+4. After it returns, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported:
+   ```bash
+   ./.claude/scripts/po-act.sh log <PIN_ISSUE> - <<'EOF'
+   <!-- po-pin-refresh -->
+   Processed weekly pin check via refresh-pins. Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Drafts enter the Tech Lead queue (Step 2).
+   EOF
+   ```
+
+Include the skill's headline (bumping / holding / up-to-date counts + story numbers) in the cycle summary's pipeline-depth section.
 
 **Step 2 — Tech Lead pass (legacy only):**
 Handles `Draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `Ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
