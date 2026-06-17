@@ -77,7 +77,7 @@ func TestHeartbeatService_StewardOfflineThreshold_60s(t *testing.T) {
 
 	// Simulate 59 s of silence — must NOT trigger offline (under threshold).
 	svc.mu.Lock()
-	svc.stewards["steward-offline-test"].LastHeartbeat = time.Now().Add(-59 * time.Second)
+	svc.stewards["steward-offline-test"].receivedAt = time.Now().Add(-59 * time.Second)
 	svc.stewards["steward-offline-test"].Healthy = true
 	svc.mu.Unlock()
 
@@ -90,7 +90,7 @@ func TestHeartbeatService_StewardOfflineThreshold_60s(t *testing.T) {
 
 	// Simulate 61 s of silence — must trigger offline (over threshold).
 	svc.mu.Lock()
-	svc.stewards["steward-offline-test"].LastHeartbeat = time.Now().Add(-61 * time.Second)
+	svc.stewards["steward-offline-test"].receivedAt = time.Now().Add(-61 * time.Second)
 	svc.stewards["steward-offline-test"].Healthy = true
 	svc.mu.Unlock()
 
@@ -184,7 +184,7 @@ func TestHeartbeatService_TrustEvaluator_CalledOnStale(t *testing.T) {
 
 	// Force the last-heartbeat timestamp past the stale threshold.
 	svc.mu.Lock()
-	svc.stewards[stewardID].LastHeartbeat = time.Now().Add(-61 * time.Second)
+	svc.stewards[stewardID].receivedAt = time.Now().Add(-61 * time.Second)
 	svc.stewards[stewardID].Healthy = true
 	svc.mu.Unlock()
 
@@ -220,10 +220,64 @@ func TestHeartbeatService_TrustEvaluator_NilIsNoop(t *testing.T) {
 
 	// Trigger stale detection — must not panic.
 	svc.mu.Lock()
-	svc.stewards[stewardID].LastHeartbeat = time.Now().Add(-61 * time.Second)
+	svc.stewards[stewardID].receivedAt = time.Now().Add(-61 * time.Second)
 	svc.stewards[stewardID].Healthy = true
 	svc.mu.Unlock()
 
 	assert.NotPanics(t, svc.checkStaleHeartbeats,
 		"nil TrustEvaluator must not cause a panic")
+}
+
+// TestHeartbeatService_StalenessUsesReceiptTime_NotStewardClock is the Issue #2037
+// regression test. Staleness must be measured against the controller's receipt
+// time, never the steward-supplied heartbeat timestamp. A steward whose clock is
+// skewed far into the past (e.g. NTP drift) sends heartbeats stamped with an old
+// timestamp, but if the controller is receiving them on time the steward is NOT
+// offline. On the pre-fix code (which aged status.LastHeartbeat against now) this
+// steward flapped to "timeout" on every check despite arriving on schedule.
+func TestHeartbeatService_StalenessUsesReceiptTime_NotStewardClock(t *testing.T) {
+	svc, cp := newTestService(t, func(cfg *Config) {
+		cfg.StewardOfflineTimeout = 60 * time.Second
+	})
+	ctx := context.Background()
+
+	const stewardID = "steward-skewed-clock"
+
+	// The steward's clock is 90s behind the controller (> the 60s offline
+	// timeout). It stamps the heartbeat with its own (old) time, but the
+	// controller receives it right now.
+	skewedSendTime := time.Now().Add(-90 * time.Second)
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID,
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: skewedSendTime,
+	}))
+
+	// A stale check immediately after receipt must NOT mark the steward offline:
+	// only ~0s have elapsed since the controller received the heartbeat.
+	svc.checkStaleHeartbeats()
+
+	status, ok := svc.GetStatus(stewardID)
+	require.True(t, ok)
+	assert.True(t, status.Healthy,
+		"steward with a skewed-old send timestamp but fresh receipt must stay healthy (Issue #2037)")
+
+	// The reported send time is preserved for observability (steward clock),
+	// while staleness is governed by the controller receipt time.
+	assert.WithinDuration(t, skewedSendTime, status.LastHeartbeat, time.Second,
+		"LastHeartbeat must still report the steward-supplied send time")
+
+	// Sanity: once the controller has genuinely not received a heartbeat for
+	// longer than the timeout, it IS marked offline — regardless of send time.
+	svc.mu.Lock()
+	svc.stewards[stewardID].receivedAt = time.Now().Add(-61 * time.Second)
+	svc.stewards[stewardID].Healthy = true
+	svc.mu.Unlock()
+
+	svc.checkStaleHeartbeats()
+
+	status, ok = svc.GetStatus(stewardID)
+	require.True(t, ok)
+	assert.False(t, status.Healthy,
+		"steward must be marked offline after 61s with no receipt")
 }

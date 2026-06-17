@@ -21,13 +21,25 @@ import (
 
 // StewardStatus represents the current status of a steward.
 type StewardStatus struct {
-	StewardID      string
+	StewardID string
+	// LastHeartbeat is the steward-supplied send time (steward clock) from the
+	// most recent heartbeat. It is reported for observability ONLY and must NOT
+	// be used for staleness detection — see receivedAt. Trusting a steward-
+	// asserted timestamp for the controller's own liveness accounting is unsound
+	// under clock skew, delivery latency, or a compromised steward.
 	LastHeartbeat  time.Time
 	Status         string
 	Healthy        bool
 	Metrics        map[string]string
 	MissedBeats    int
 	ConnectedSince time.Time
+
+	// receivedAt is the controller's wall-clock time when the most recent
+	// heartbeat was received. Staleness is measured against this (not the
+	// steward-supplied LastHeartbeat) so offline detection is purely controller-
+	// local and immune to clock skew and steward-supplied-time manipulation
+	// (Issue #2037).
+	receivedAt time.Time
 
 	// DNAHash is the most-recently reported DNA hash from the steward heartbeat.
 	// Empty when the steward has not yet sent a DNA hash (older steward versions).
@@ -238,8 +250,11 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 
 	previouslyHealthy := status.Healthy
 
-	// Update status
+	// Update status. LastHeartbeat records the steward-supplied send time for
+	// observability; receivedAt records the controller receipt time and is the
+	// authoritative basis for staleness detection (Issue #2037).
 	status.LastHeartbeat = hb.Timestamp
+	status.receivedAt = time.Now()
 	status.Status = string(hb.Status)
 
 	// Convert metrics from map[string]interface{} to map[string]string
@@ -326,7 +341,9 @@ func (s *Service) checkStaleHeartbeats() {
 	now := time.Now()
 	for stewardID, status := range s.stewards {
 		if status.Healthy {
-			timeSinceLastBeat := now.Sub(status.LastHeartbeat)
+			// Measure staleness against the controller receipt time (Issue #2037),
+			// never the steward-supplied LastHeartbeat, which may be skewed.
+			timeSinceLastBeat := now.Sub(status.receivedAt)
 			if timeSinceLastBeat > s.stewardOfflineTimeout {
 				// Mark as unhealthy
 				status.Healthy = false
@@ -335,7 +352,8 @@ func (s *Service) checkStaleHeartbeats() {
 
 				s.logger.Warn("Steward heartbeat timeout",
 					"steward_id", stewardID,
-					"last_heartbeat", status.LastHeartbeat,
+					"last_received", status.receivedAt,
+					"last_heartbeat_reported", status.LastHeartbeat,
 					"timeout", timeSinceLastBeat)
 
 				if s.onStatusChange != nil {
