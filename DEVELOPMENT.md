@@ -71,11 +71,17 @@ This guide provides instructions for setting up a local CFGMS development enviro
   # Install uv (provides uvx, which fetches/runs Serena on demand)
   curl -LsSf https://astral.sh/uv/install.sh | sh
 
+  # Install the Go language server Serena drives for this repo. It must be on
+  # PATH (go install drops it in $(go env GOPATH)/bin) BEFORE Serena starts;
+  # Serena does not install it for you and silently disables symbol tools if
+  # it is missing.
+  go install golang.org/x/tools/gopls@latest
+
   # Confirm Claude Code sees the project-scoped server, then approve it
   claude mcp list   # shows: serena ... (pending approval until you run `claude`)
   ```
-  No manual `claude mcp add` is needed — `.mcp.json` is committed. Serena
-  auto-manages the language servers it needs (e.g. `gopls` for this repo).
+  No manual `claude mcp add` is needed — `.mcp.json` is committed (it pins
+  `--project .` so the repo auto-activates on launch).
 
 ### System Requirements
 
