@@ -334,6 +334,12 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    Processed weekly pin check via refresh-pins. Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Drafts enter the Tech Lead queue (Step 2).
    EOF
    ```
+   If the marker post fails (network, etc.), the next cycle re-sweeps the same
+   check — harmless, because `refresh-pins` is idempotent (it comments on, never
+   duplicates, an existing bump story); the only cost is one redundant network
+   sweep. If `gh issue list` ever returns more than one open `dependency-pins`
+   issue, treat that as an anomaly and process the most recently updated one (the
+   label is meant for a single long-lived issue).
 
 Include the skill's headline (bumping / holding / up-to-date counts + story numbers) in the cycle summary's pipeline-depth section.
 
