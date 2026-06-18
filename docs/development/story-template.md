@@ -41,10 +41,12 @@ None
 
 ## Environment
 
-<Optional. Omit for ordinary Linux-buildable work (the default). Add only when the
-story needs a specific OS execution environment — `windows`, `macos`, or `linux` —
-to build or live-test behavior a Linux container can't exercise. Routes the story
-off the Linux orchestrator to a host serving that environment (see po.md §7).>
+<Optional. Omit for ordinary Linux-buildable work (the default). Set `windows`
+(or `macos`) when the story needs that host's environment: (1) native OS behavior
+a Linux container can't build/live-test, OR (2) full end-to-end deployment tests
+and troubleshooting — the Windows host runs the Linux-controller + Linux/Windows-
+minion matrix that a container can't. Routes the story off the Linux orchestrator
+to a host serving that environment (see po.md §7).>
 
 ## Reference Implementation
 

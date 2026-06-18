@@ -811,6 +811,14 @@ Mode (§7). Equivalent to applying the `needs-windows` / `needs-macos` GitHub la
 the way to tag a project **draft** (which has no labels). Either signal suffices;
 the label wins if both are present.
 
+**When to tag `windows`.** Two cases, not just OS-native code:
+1. **Native Windows/macOS behavior** a Linux container can't build or live-test.
+2. **Full end-to-end deployment tests and troubleshooting.** The Windows host is
+   the e2e lab — it runs the complete deployment matrix (a Linux controller with
+   Linux *or* Windows minions/stewards), which a Linux container can't. Route e2e
+   fleet/deployment validation and reproduce-on-real-hardware troubleshooting to
+   `windows` even when the changed code is Linux-buildable.
+
 ### When the parser disagrees with you
 
 The parser is strict on purpose — it's a gate, not a lint. If a story body looks valid to a human but produces a `parse_warning`, normalize the body to match the parser rather than relaxing the gate. The cost of a body edit is one second; the cost of a held story is a wasted cycle.
@@ -838,5 +846,5 @@ GitHub issue labels still in use:
 | `epic` | Top-level epic issue |
 | `story` | Story sub-issue of an epic |
 | `high-priority` | Escalation tracking issue requiring founder attention |
-| `needs-windows` | Story requires a Windows execution environment — held by the Linux orchestrator, worked via Self-Dispatch Mode (§7) on a Windows host. Equivalent to a `## Environment: windows` body section. |
+| `needs-windows` | Story requires the Windows host — native Windows code OR full e2e deployment testing / troubleshooting (the Windows host runs the Linux-controller + Linux/Windows-minion matrix). Held by the Linux orchestrator, worked via Self-Dispatch Mode (§7). Equivalent to a `## Environment: windows` body section. |
 | `needs-macos` | Story requires a macOS execution environment (reserved; same routing as `needs-windows`). |

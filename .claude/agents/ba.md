@@ -124,13 +124,21 @@ genuinely no nearby code is at risk of being touched.>
 
 ## Environment
 
-(Optional — omit for ordinary Linux-buildable work, which is the default. Add it
-only when the story needs a specific OS execution environment to build or
-live-test — e.g. native Windows or macOS behavior that a Linux container can't
-exercise. Recognized values: `windows`, `macos`, `linux`. A `windows`/`macos`
-story is routed off the Linux orchestrator to a host that serves that
-environment — see Self-Dispatch Mode in `.claude/agents/po.md` §7. If unsure,
-omit it.)
+(Optional — omit for ordinary Linux-buildable work, which is the default.
+Recognized values: `windows`, `macos`, `linux`. Set `windows` when the story
+needs the Windows host's execution environment. That covers two cases:
+
+1. **Native OS behavior** a Linux container can't build or live-test — Windows
+   (or macOS) APIs, registry, services, installer/MSI, etc.
+2. **Full end-to-end deployment tests and troubleshooting** — the Windows host
+   runs the complete deployment matrix (a Linux controller with Linux *or*
+   Windows minions/stewards), so e2e fleet/deployment validation and
+   reproduce-on-real-hardware troubleshooting belong there even when the code is
+   Linux-buildable. A Linux container can't exercise the Windows-minion side.
+
+A `windows`/`macos` story is routed off the Linux orchestrator to a host that
+serves that environment — see Self-Dispatch Mode in `.claude/agents/po.md` §7. If
+the story is a pure Linux unit/integration change, omit the section.)
 
 ```
 ## Environment
