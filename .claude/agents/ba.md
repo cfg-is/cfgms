@@ -122,6 +122,29 @@ genuinely no nearby code is at risk of being touched.>
 
 (Use "None" only if the story genuinely does not change product shape. See "Documentation & Tests Currency" rule below.)
 
+## Environment
+
+(Optional — omit for ordinary Linux-buildable work, which is the default.
+Recognized values: `windows`, `macos`, `linux`. Set `windows` when the story
+needs the Windows host's execution environment. That covers two cases:
+
+1. **Native OS behavior** a Linux container can't build or live-test — Windows
+   (or macOS) APIs, registry, services, installer/MSI, etc.
+2. **Full end-to-end deployment tests and troubleshooting** — the Windows host
+   runs the complete deployment matrix (a Linux controller with Linux *or*
+   Windows minions/stewards), so e2e fleet/deployment validation and
+   reproduce-on-real-hardware troubleshooting belong there even when the code is
+   Linux-buildable. A Linux container can't exercise the Windows-minion side.
+
+A `windows`/`macos` story is routed off the Linux orchestrator to a host that
+serves that environment — see Self-Dispatch Mode in `.claude/agents/po.md` §7. If
+the story is a pure Linux unit/integration change, omit the section.)
+
+```
+## Environment
+windows
+```
+
 ## Reference Implementation
 
 - <Pointers to existing patterns in the codebase to follow>

@@ -39,6 +39,15 @@ None
 
 <Use "None — no product-shape change" with justification only if the story genuinely doesn't change observable shape. See ba.md "Documentation & Tests Currency" rule.>
 
+## Environment
+
+<Optional. Omit for ordinary Linux-buildable work (the default). Set `windows`
+(or `macos`) when the story needs that host's environment: (1) native OS behavior
+a Linux container can't build/live-test, OR (2) full end-to-end deployment tests
+and troubleshooting — the Windows host runs the Linux-controller + Linux/Windows-
+minion matrix that a container can't. Routes the story off the Linux orchestrator
+to a host serving that environment (see po.md §7).>
+
 ## Reference Implementation
 
 - <Pointer to existing pattern in the codebase to follow, with file:line>

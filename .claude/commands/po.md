@@ -3,7 +3,7 @@ name: po
 description: Product Owner — pipeline dashboard, intent capture, and autonomous orchestration
 parameters:
   - name: subcommand
-    description: "Optional: 'status' (default), 'intent <topic>', 'next', 'cron', 'cycle', 'decompose [<epic#>]', or 'plan [<epic#>]'"
+    description: "Optional: 'status' (default), 'intent <topic>', 'next', 'cron', 'cycle', 'work', 'decompose [<epic#>]', or 'plan [<epic#>]'"
     required: false
 ---
 
@@ -17,7 +17,7 @@ Two execution paths depending on `$ARGUMENTS`. The dividing line is whether the 
 
 ### Path A — team-relevant args (run inline in the main session)
 
-If `$ARGUMENTS` starts with any of `cron`, `cycle`, `decompose`, or `plan`, do **NOT** spawn the PO as a subagent. Instead, execute directly in the main session.
+If `$ARGUMENTS` starts with any of `cron`, `cycle`, `work`, `decompose`, or `plan`, do **NOT** spawn the PO as a subagent. Instead, execute directly in the main session.
 
 **Why:** A subagent cannot reliably spawn nested subagents (Acceptance Reviewer, BA, Tech Lead, Planning Team) — its `tools:` field is restricted (no `TeamCreate`, `TeamDelete`, `SendMessage`), and its bash commands trigger approval prompts despite `mode: auto`. Running inline gives the cycle full Agent-tool access and the parent session's allow list. Documented in memory `feedback_po_run_inline.md`.
 
@@ -25,8 +25,9 @@ If `$ARGUMENTS` starts with any of `cron`, `cycle`, `decompose`, or `plan`, do *
 
 | Args | Action |
 |------|--------|
-| `cron` | Pipeline Cycle (§4) — **skip Step 7 (Planning Team)**. Autonomous; cheap; runs every interval. |
+| `cron` | Pipeline Cycle (§4) — **skip Step 7 (Planning Team)**. Autonomous; cheap; runs every interval. Dispatches via docker containers (orchestrator role). |
 | `cycle` | Pipeline Cycle (§4) — **including Step 7**. Manual; full cycle on demand. |
+| `work` | Self-Dispatch Mode (§7) — **no docker**. The local session claims and works this host's tagged stories one at a time, in-process. For a host (e.g. Windows) whose `CFGMS_PO_HOST_CAPS` names a non-default execution environment. Pace via `/loop /po work`. |
 | `decompose [<epic#>]` | Run §4.1 Step 7 (Planning Team) only — for the named epic, or every `epic` with no sub-issues if no number is given. |
 | `plan [<epic#>]` | Alias for `decompose`. |
 
