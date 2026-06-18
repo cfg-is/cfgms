@@ -689,8 +689,11 @@ guard is claiming each story (`Ready → In Progress`) **before** working it —
 
 ### Loop
 
-1. **Preflight** with this host's caps already set in the environment:
+1. **Preflight** with this host's caps already set in the environment.
+   `CFGMS_PO_HOST_CAPS` must be **exported in the shell before** this call — the
+   preflight reads it to compute which stories are dispatchable here:
    ```bash
+   export CFGMS_PO_HOST_CAPS=windows   # set once per shell/session on this host
    ./.claude/scripts/po-act.sh preflight
    ```
    Read `windows_queue` (or, generally, `dispatch_recommendations` entries with

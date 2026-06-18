@@ -185,7 +185,12 @@ except Exception: print('')" 2>/dev/null || echo "")
     fi
 
     # Phase 4 — now do the work. Roll the claim back to Ready on any failure so a
-    # later cycle (or another host) can retry.
+    # later cycle (or another host) can retry. The ERR trap covers the steps that
+    # run under `set -e` (check-conflicts, create-clone); without it a clone/conflict
+    # failure would exit with the story stuck In Progress. The docker-run failure is
+    # handled explicitly in the LAUNCH_FAILED branch below (it runs inside an `if`
+    # condition, which `set -e`/ERR does not trap).
+    trap 'rc=$?; bash "$PROJECT_QUEUE" update-field "$item_id" status "Ready" >/dev/null 2>&1 || true; echo "ROLLED_BACK:${item_id} -> Ready (dispatch failed before launch, rc=$rc)"; exit "$rc"' ERR
     if [[ "$arg" =~ ^[0-9]+$ ]]; then
       "$DISPATCH" check-conflicts "$story" >/dev/null
       "$DISPATCH" create-clone "$story" | tail -1
@@ -224,8 +229,10 @@ except Exception: print('')" 2>/dev/null || echo "")
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${first_arg}" 2>&1); then
+      trap - ERR
       echo "LAUNCHED:${first_arg}:${container_id}"
     else
+      trap - ERR
       echo "LAUNCH_FAILED:${first_arg}:${container_id}"
       rm -rf "$clone_path"
       echo "CLEANED:clone:${clone_path}"

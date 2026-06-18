@@ -43,6 +43,7 @@ def check(desc, got, want):
 check("env body 'windows'", m.detect_required_env("windows", []), "windows")
 check("env body 'Windows 11 host'", m.detect_required_env("Windows 11 host", []), "windows")
 check("env body 'macos'", m.detect_required_env("macos", []), "macos")
+check("env body 'darwin' alias", m.detect_required_env("build on a darwin runner", []), "macos")
 check("env body 'linux'", m.detect_required_env("linux", []), "linux")
 check("env body None -> linux", m.detect_required_env(None, []), "linux")
 check("env body empty -> linux", m.detect_required_env("", []), "linux")

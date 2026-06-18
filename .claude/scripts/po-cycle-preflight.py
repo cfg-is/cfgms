@@ -1731,7 +1731,9 @@ def main():
     out["host_caps"] = sorted(caps)
     # Ready stories whose required env this host cannot serve — surfaced so the
     # dashboard can show the cross-host backlog (e.g. the Windows queue) and so a
-    # self-dispatch host can pick up exactly its slice.
+    # self-dispatch host can pick up exactly its slice. Intentionally windows-only
+    # for now (macos routing is reserved — see the needs-macos label); add a
+    # parallel macos_queue here if/when a macOS host comes online.
     out["windows_queue"] = [
         {"number": s["number"], "item_id": s.get("item_id", ""), "title": s["title"]}
         for s in ready_parsed
