@@ -80,9 +80,9 @@ A controller restart or a slow install simply resumes from the recorded state.
 
 `source.iso` is a path on the Hyper-V host (e.g. on a CSV). Getting the ISO there is **not** this module's concern — an operator stages it, or a declarative `file` module resource does. This ADR adds **no** controller blob store, large-object transfer, or ISO distribution path. (Centralized ISO distribution may be revisited later; it is not required for the capability.)
 
-### 5. Answer-file delivery via a secondary ISO; gen1 + gen2
+### 5. Answer-file delivery via a host-native secondary VHDX; gen1 + gen2
 
-The unattended answer file is delivered on a **secondary ISO** attached as a second DVD drive. This is the one delivery method that works on **both** Gen1 and Gen2 VMs (Gen2 has no floppy controller). **The install ISO is never repacked/re-signed** (a known cfg-lab failure with signed UEFI boot media). Gen2 secure-boot template is selected by `os_family` (`MicrosoftWindows` vs `MicrosoftUEFICertificateAuthority`); Gen1 has no secure boot.
+The unattended answer file is delivered on a **secondary VHDX seed disk** attached to the VM, built on the host with **native cmdlets only** — `New-VHD` + `Mount-VHD` + `Format-Volume` + copy — then detached at `finalizing`. This was chosen over a secondary ISO because building an ISO on the host requires `oscdimg` (Windows ADK), which is **not present on a stock Hyper-V host** (verified absent on cfg-lab; `New-VHD`/`Format-Volume`/`Mount-VHD` are present as part of the Hyper-V + Storage roles the host already runs). A VHDX seed therefore adds **no host dependency and no new Go module** (a pure-Go ISO builder was the alternative, rejected to avoid the dependency). It works on **both Gen1 and Gen2** (no floppy needed). Windows Setup auto-discovers `autounattend.xml` from attached media; debian-installer reads `preseed.cfg` from the labeled seed volume. **The install ISO is never repacked/re-signed** (a known cfg-lab failure with signed UEFI boot media). Gen2 secure-boot template is selected by `os_family` (`MicrosoftWindows` vs `MicrosoftUEFICertificateAuthority`); Gen1 has no secure boot.
 
 ### 6. Cross-OS unattended model
 
@@ -100,6 +100,8 @@ A profile (`profile://<name>`) is a stored config object (ADR-003 taxonomy) desc
 ### 8. Enrollment reuses the existing steward-deploy mechanism; `ready` = steward registration
 
 First boot installs and enrolls the steward exactly as a normal steward deployment does (regtoken / mTLS bundle). The VM reaches **`ready` when its steward registers with the controller** — closing bare-hypervisor → installed-OS → registered-steward → managed-endpoint in a single converge.
+
+**Where completion is observed.** Steward registration is a **controller-side** fact, but the `hyperv` module runs on the *host's* steward, which cannot see the controller's registry. Therefore the host-side module advances the VM only as far as `finalizing` (OS installed, seed detached, first boot underway); the transition to `ready` is determined **controller-side** by correlating a newly-registered steward to the provisioned VM via a **correlation identity** baked into the rendered profile (e.g. the expected steward hostname/enrollment label). The provisioning record carries this correlation value so the controller can flip the resource to `ready` (or to `failed` on `completion.timeout`). Decomposition must place the completion check on the controller side, not as a host-side poll of the controller.
 
 **Tradeoff accepted for v1:** a shared/long-lived enrollment secret may sit on the seed media during install. **Future hardening** (separate work): controller-rendered per-VM, single-use, short-TTL enrollment tokens, with seed media detached and the token consumed at first check-in.
 
