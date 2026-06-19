@@ -54,6 +54,7 @@ What becomes easier or harder by making this decision?
 | [007](007-controller-upgrade-and-state-externalization.md) | Controller Upgrade and State Externalization Strategy | 2026-06-15 | Accepted |
 | [008](008-durable-execution-substrate.md) | Durable Execution Substrate for the Workflow Engine | 2026-06-15 | Accepted |
 | [009](009-hyperv-vm-provisioning-from-install-media.md) | Hyper-V VM Provisioning from Install Media (ISO → Managed Endpoint) | 2026-06-18 | Accepted |
+| [010](010-steward-side-provisioning-enrollment.md) | Steward-Side Provisioning Enrollment — Controller-Supplied Join Token, IP-Trust Admission, Media Cleanup | 2026-06-19 | Accepted |
 
 ### Superseded/Deprecated
 
