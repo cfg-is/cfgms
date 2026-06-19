@@ -79,3 +79,27 @@ The port-swap orchestrator (`features/controller/cutover`, `cfg controller upgra
 - **App-level port-swap blue/green (epic #1917)** — rejected as the production path: complex, fragile against shared local mutable state, never achieved graceful drain, and superseded by host/container blue/green once state is externalized. Frozen, not deleted.
 - **Long-lived supervisor daemon for true zero-downtime on a single host** — rejected for now: significant engineering for overlapped handoff (complicated by QUIC/UDP and shared-WAL storage), and unnecessary given zero-downtime is not a current requirement and the GA host-level model delivers near-zero downtime anyway.
 - **Plain restart with no smoketest** — rejected: a broken new binary could take down the controller with no gate; the readiness smoketest plus keep-previous-binary rollback is a small, high-value addition.
+
+---
+
+## Addendum (2026-06-19): Two Deployment Models
+
+**Decision:** The upgrade strategy splits by deployment model. The original framing of state externalization, portable CA, and stable endpoint as single-controller GA blue/green enablers is superseded.
+
+### Single shared-nothing controller
+
+The deployment target for self-hosted and small-scale operators is a **single shared-nothing controller**: no external database, no shared storage, no load balancer. The supported upgrade path for this model is **in-place restart only** — the smoketest-gated restart described in Decision §1 above (tracked under #2015).
+
+Host-level blue/green and host-to-host state migration are **non-goals** for this model. There is no shared state to migrate and no second host to shift traffic to; the complexity of enabling those patterns is not justified by the deployment's operational profile.
+
+### SaaS cluster
+
+The deployment target for the managed SaaS offering is **cluster-by-default**: shared Postgres for the DNA/fleet store, shared blob storage for config and audit, and a shared key vault for the CA. In this model, blue/green is a **rolling cluster upgrade** — add a new node on the new version, drain the old node, decommission it — which is the standard pattern for any stateless-process cluster backed by shared durable storage. This is tracked under epic #2051.
+
+### Reframing of prior enablers
+
+The three enablers called out in Decision §2 (state externalization #2016, vault-sourced CA #2018, stable LB endpoint #2017) are **SaaS-cluster foundations** that make the rolling-cluster upgrade possible. They are not single-controller blue/green enablers. Implementing them on a single shared-nothing controller would add complexity with no operational benefit for that deployment model.
+
+### App-level port-swap orchestrator
+
+The app-level port-swap orchestrator (`features/controller/cutover`, `cfg controller upgrade run`, epic #2019) remains **frozen and experimental**. It is not the supported path for either deployment model. The supported single-controller upgrade path is in-place restart (Decision §1, #2015); the supported SaaS upgrade path is rolling cluster upgrade (#2051). The orchestrator may be removed once the restart-gated path is the documented default.
