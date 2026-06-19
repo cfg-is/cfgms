@@ -77,6 +77,12 @@ type EnrollConfig struct {
 	// CorrelationLabel ties the provisioned VM back to a provisioning request for
 	// the controller-side completion reconciler (sibling story S8).
 	CorrelationLabel string `yaml:"correlation_label,omitempty"`
+	// UseSetupComplete selects the file-staged SetupComplete.cmd enrollment
+	// fallback for Windows guests (ADR-009 §6). When false (default) the Windows
+	// path relies on the signed .ppkg applied at first logon for enrollment; when
+	// true a SetupComplete.cmd carrying a single declared-path cfgms-steward
+	// enroll invocation is rendered instead. Linux guests ignore this field.
+	UseSetupComplete bool `yaml:"use_setup_complete,omitempty"`
 }
 
 // UnattendProfile is the operator-authored, stored-config definition of an
@@ -135,11 +141,18 @@ type ProfileVars struct {
 	// SecretStore at render time.
 	EnrollToken string
 	// CorrelationID ties the rendered answer file back to the VM's provisioning
-	// record. The Linux preseed template (#2046) substitutes it as the
-	// enrollment hostname/label ({{ .CorrelationID }}) so the controller-side
-	// completion reconciler (#2050) can match the registered steward's mTLS CN
-	// to this VM.
+	// record (ADR-009 §8). The controller-side completion reconciler (#2050)
+	// matches a registered steward's mTLS CN against this value to flip the
+	// provisioning record to ready. The Linux preseed template (#2046)
+	// substitutes it as the enrollment hostname/label ({{ .CorrelationID }});
+	// the Windows autounattend template (#2047) substitutes it into an innocuous
+	// field (e.g. RegisteredOrganization) and uses it as the steward enrollment
+	// label.
 	CorrelationID string
+	// ProductEdition is the Windows Server edition/product image name selected in
+	// the autounattend image-install step (e.g. "Windows Server 2025 Standard
+	// (Desktop Experience)"). Ignored by non-Windows profiles.
+	ProductEdition string
 	// BundleURL is the enrollment-bundle URL the answer file's first-boot enroll
 	// step pulls the steward package from ({{ .BundleURL }}). It is supplied by
 	// the caller from the profile's Enroll config; it is not a secret.
@@ -202,17 +215,19 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 	}
 
 	data := struct {
-		VMName        string
-		OSFamily      string
-		EnrollToken   string
-		CorrelationID string
-		BundleURL     string
+		VMName         string
+		OSFamily       string
+		EnrollToken    string
+		CorrelationID  string
+		ProductEdition string
+		BundleURL      string
 	}{
-		VMName:        vars.VMName,
-		OSFamily:      vars.OSFamily,
-		EnrollToken:   vars.EnrollToken,
-		CorrelationID: vars.CorrelationID,
-		BundleURL:     vars.BundleURL,
+		VMName:         vars.VMName,
+		OSFamily:       vars.OSFamily,
+		EnrollToken:    vars.EnrollToken,
+		CorrelationID:  vars.CorrelationID,
+		ProductEdition: vars.ProductEdition,
+		BundleURL:      vars.BundleURL,
 	}
 
 	var buf bytes.Buffer

@@ -13,7 +13,10 @@ import (
 )
 
 // provisionModuleWithTransport builds a hypervModule wired with the given
-// transport and an in-memory provision store for create-from-source tests.
+// transport and an in-memory provision store for create-from-source tests. A
+// real in-memory SecretStore is injected so the windows create path can resolve
+// the .ppkg host-path secret ({{ secret "ppkg-path-key" }}) when rendering the
+// autounattend answer file (#2047) — no mock framework is used.
 func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 	m := &hypervModule{
 		executor:       &stubHypervExecutor{},
@@ -23,11 +26,17 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 		detector:       &fakeDetector{result: true},
 		provisionStore: NewMemProvisionStore(),
 	}
-	// The Linux create path renders the built-in Debian preseed, which resolves
-	// registration-token + user-password secrets at render time. Inject an
-	// in-memory store carrying those keys so the create-from-source provisioning
-	// tests exercise the real render path (no mocks).
-	_ = m.SetSecretStore(preseedTestStore())
+	// Inject a single in-memory SecretStore carrying every key both OS create
+	// paths resolve at render time so the create-from-source provisioning tests
+	// exercise the real render path (no mocks):
+	//   - Linux preseed (#2046): registration token + crypted user password
+	//   - Windows autounattend (#2047): .ppkg host path + registration token
+	// defaultRegTokenSecretKey is "hyperv/enroll/regtoken", shared by both paths.
+	_ = m.SetSecretStore(newInlineStore(
+		"hyperv/enroll/regtoken", "reg-token-stub-value",
+		"hyperv/enroll/user-password-crypted", "$6$rounds=4096$stub$cryptedstub",
+		ppkgPathSecretKey, `C:\cfgms\packages\cfgms-enroll.ppkg`,
+	))
 	return m
 }
 
