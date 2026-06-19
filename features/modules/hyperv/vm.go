@@ -312,6 +312,31 @@ func (s *SourceConfig) validate() error {
 	return nil
 }
 
+// parseSourceMap reconstructs a *SourceConfig from the generic config map shape
+// produced by VMConfig.AsMap (and by the executor). Returns nil when no source
+// block is present, so the create path stays on the plain lifecycle.
+func parseSourceMap(v interface{}) *SourceConfig {
+	m, ok := v.(map[string]interface{})
+	if !ok || m == nil {
+		return nil
+	}
+	src := &SourceConfig{}
+	src.ISO, _ = m["iso"].(string)
+	src.OSFamily, _ = m["os_family"].(string)
+	src.Unattend, _ = m["unattend"].(string)
+	src.OnExisting, _ = m["on_existing"].(string)
+	if comp, ok := m["completion"].(map[string]interface{}); ok {
+		src.Completion.Mode, _ = comp["mode"].(string)
+		src.Completion.Timeout, _ = comp["timeout"].(string)
+	}
+	// An entirely empty source map (all fields zero) is treated as no source.
+	if src.ISO == "" && src.OSFamily == "" && src.Unattend == "" &&
+		src.OnExisting == "" && src.Completion.Mode == "" && src.Completion.Timeout == "" {
+		return nil
+	}
+	return src
+}
+
 // AsMap implements modules.ConfigState.
 //
 // switch_name carries the primary (first) desired switch for back-compat;
@@ -414,7 +439,11 @@ const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-no
 //     Manager's default new-VM size and is the minimum sensible value
 //     for any Server 2022/2025 guest). The schema does not currently
 //     expose vhd_size_gb; future #1887 follow-up should add it.
-const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation 2 | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
+//   - -Generation is now a parameter ($Generation), not hardcoded to 2.
+//     ADR-009 §5 supports Gen1 and Gen2 VMs (the seed VHDX boots on both,
+//     no floppy needed). setVM passes cfg.Generation (defaulting to 2 when
+//     0). The value travels via ArgumentList as a bare integer literal.
+const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation $Generation | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
 
 // psRemoveVM deletes a VM. Hyper-V refuses to remove a VM that is not Off
 // ("the operation cannot be performed while the object is in its current
@@ -606,6 +635,13 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	}
 	cfg.State = state
 
+	// source (the ISO provisioning block) arrives as a nested map on the
+	// executor-supplied config map. Parse it into a SourceConfig so the
+	// create-from-source path activates for the generic map shape too — the
+	// SourceConfig YAML unmarshal only runs when the module decodes its own
+	// YAML, not on this executor-supplied map.
+	cfg.Source = parseSourceMap(configMap["source"])
+
 	// Also handle *VMConfig passed directly
 	if vc, ok := config.(*VMConfig); ok {
 		*cfg = *vc
@@ -655,6 +691,54 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	}
 
 	// VM does not exist — create it.
+	if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
+		return err
+	}
+
+	// Create-from-source (ADR-009): when a source block is declared, build and
+	// attach the seed VHDX, attach the install ISO, advance the provisioning
+	// record, and power on. The seed/ISO attach + power-on happens INSIDE
+	// provisionVM so the provisioning record reflects each step; the plain
+	// lifecycle start below is skipped for the source path.
+	if cfg.Source != nil {
+		if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
+			return err
+		}
+		// Write-through: update cache on success
+		cfgCopy := *cfg
+		cfgCopy.Name = vmName
+		m.vmsMu.Lock()
+		m.vms[vmName] = cfgCopy
+		m.vmsMu.Unlock()
+		return nil
+	}
+
+	if state == "running" {
+		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			return err
+		}
+	}
+
+	// Write-through: update cache on success
+	cfgCopy := *cfg
+	cfgCopy.Name = vmName
+	m.vmsMu.Lock()
+	m.vms[vmName] = cfgCopy
+	m.vmsMu.Unlock()
+
+	return nil
+}
+
+// createVM issues New-VM with the desired generation and connects every
+// additional desired switch as a separate adapter. Generation defaults to 2
+// when unset (0). It does NOT power the VM on — the caller decides whether to
+// start (plain lifecycle) or hand off to provisionVM (create-from-source).
+func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
+	// 0 means "accept the default" — ADR-009 §5 default is Generation 2.
+	generation := cfg.Generation
+	if generation == 0 {
+		generation = 2
+	}
 
 	psArgs := map[string]string{
 		"Name":       hostName,
@@ -662,6 +746,7 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		"CPU":        fmt.Sprintf("%d", cfg.CPUCount),
 		"VHDPath":    cfg.VHDPath,
 		"SwitchName": cfg.SwitchName,
+		"Generation": fmt.Sprintf("%d", generation),
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
@@ -679,19 +764,6 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 			return err
 		}
 	}
-
-	if state == "running" {
-		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
-			return err
-		}
-	}
-
-	// Write-through: update cache on success
-	cfgCopy := *cfg
-	cfgCopy.Name = vmName
-	m.vmsMu.Lock()
-	m.vms[vmName] = cfgCopy
-	m.vmsMu.Unlock()
 
 	return nil
 }

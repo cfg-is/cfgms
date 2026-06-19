@@ -59,17 +59,43 @@ type hypervModule struct {
 	// transport success only.
 	vswitchesMu sync.RWMutex
 	vswitches   map[string]VSwitchConfig
+
+	// provisionStore persists per-VM provisioning records for the
+	// create-from-source state machine (ADR-009 §2/§3). Defaults to an
+	// in-memory store via New(); tests inject an alternative with
+	// WithProvisionStore.
+	provisionStore ProvisionStore
+}
+
+// HypervOption configures a hypervModule at construction time.
+type HypervOption func(*hypervModule)
+
+// WithProvisionStore overrides the default in-memory ProvisionStore. Tests
+// inject an alternative store to inspect or seed provisioning records.
+func WithProvisionStore(s ProvisionStore) HypervOption {
+	return func(m *hypervModule) {
+		if s != nil {
+			m.provisionStore = s
+		}
+	}
 }
 
 // New creates a new hypervModule. Production callers pass newDefaultDetector();
-// tests inject a fakeDetector via newModuleWithDetector.
-func New(detector HypervDetector) modules.Module {
-	return &hypervModule{
-		executor:  newExecutor(),
-		vms:       make(map[string]VMConfig),
-		vswitches: make(map[string]VSwitchConfig),
-		detector:  detector,
+// tests inject a fakeDetector via newModuleWithDetector. Optional HypervOption
+// values override defaults (e.g. WithProvisionStore for the provisioning
+// record store, which otherwise defaults to an in-memory store).
+func New(detector HypervDetector, opts ...HypervOption) modules.Module {
+	m := &hypervModule{
+		executor:       newExecutor(),
+		vms:            make(map[string]VMConfig),
+		vswitches:      make(map[string]VSwitchConfig),
+		detector:       detector,
+		provisionStore: newMemProvisionStore(),
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // checkDetection calls the injected HypervDetector and enforces the 5-minute
