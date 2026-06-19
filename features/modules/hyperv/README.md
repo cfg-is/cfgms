@@ -38,8 +38,19 @@ VM resource configuration fields (`vm:<name>`):
 | `cpu_count` | integer | Yes (create) | Number of virtual processors |
 | `vhd_path` | string | Yes (create) | Absolute Windows path to VHD/VHDX |
 | `switch_name` | string or list | Yes (create) | The VM's full desired network. One switch name (back-compat) or a list of switch names (multi-NIC). Converged declaratively. |
-| `generation` | integer | No | VM generation (must be 2 or omitted) |
+| `generation` | integer | No | VM generation (`1` or `2`; omit for default `2`) |
 | `state` | string | No | Desired state: `running`, `stopped`, or `absent` |
+| `source` | object | No | ISO boot-provisioning parameters. When present, the module provisions the OS from install media. See [VM provisioning from install media](#vm-provisioning-from-install-media). |
+
+The `source` block (present only when provisioning a VM from install media):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `source.iso` | string | Yes | Absolute Windows path to the installation ISO on the Hyper-V host (e.g. `C:\ISO\server.iso`). Never repacked or re-signed. |
+| `source.os_family` | string | Yes | Installer family: `linux` or `windows`. Selects the answer-file format, the seed answer-file name, and the Gen2 secure-boot template. |
+| `source.unattend` | string | No | Reference to a stored unattended-install profile as a `profile://<name>` URI. Omit to use the built-in default profile for the `os_family` (`debian-12-base` for linux, `windows-server-default` for windows). |
+| `source.completion` | object | No | How the module detects provisioning succeeded. `completion.mode` accepts only `steward-registration` (the v1 value); `completion.timeout` is a Go duration string (e.g. `60m`) bounding the wait. |
+| `source.on_existing` | string | No | Behaviour when the VM already exists. `never` (default) leaves an existing VM untouched; `recreate` is an explicit opt-in to destroy and re-provision. |
 
 ## Usage examples
 
@@ -93,6 +104,143 @@ The resource type is selected via the `module` field as `hyperv.<type>`
     state: present
 ```
 
+## VM provisioning from install media
+
+Adding a `source` block to a `hyperv.vm` resource turns a bare hypervisor into a
+managed endpoint: the module creates the VM, attaches the install ISO and an
+unattended answer file, powers the VM on, and lets the OS install unattended.
+Provisioning is a declarative extension of the existing `hyperv.vm` resource —
+there is no separate imperative "provision" verb, and there is exactly one way to
+make a VM (ADR-009). Convergence makes the declared VM exist; the OS install is an
+implementation detail inside the create path.
+
+### Existence-gating (safety invariant)
+
+The `source` block is acted on **only when the VM does not exist by name** on the
+host. Health and bootability are never the trigger. This is the single most
+important safety property of the feature:
+
+- VM **absent** → provision from `source`.
+- VM **exists** (and has no in-progress provisioning record of ours) → `source`
+  is **inert**; the existing VM is never touched, resized, or rebuilt.
+- VM **exists but broken / won't boot** → surfaced as `degraded`; the module
+  **does not** delete-and-rebuild a VM just because it is unhealthy.
+- Destroying and re-provisioning an existing VM is **explicit opt-in** only, via
+  `source.on_existing: recreate` (default `never`). The default convergence path
+  can never destroy a VM.
+
+To distinguish "my own incomplete provisioning attempt" from "a real existing
+VM", the module keeps a per-VM **provisioning record** (the state machine below).
+Nothing is destroyed automatically, ever.
+
+### Provisioning state machine
+
+The module advances the provisioning record **one step per convergence cycle** —
+it never blocks the convergence loop on a multi-minute install. A controller
+restart or a slow install simply resumes from the recorded state.
+
+```
+absent ── create VM + disks + NICs, attach install ISO + seed VHDX ──▶ creating
+creating ── power on ──▶ installing ── (unattended install runs) ──▶ finalizing
+finalizing ── (detach seed, first boot, steward registers) ──▶ ready
+
+installing ── timeout / install marker = fail ──▶ failed
+existing-but-unhealthy real VM ──────────────────────────────────▶ degraded
+```
+
+| State | Meaning |
+|-------|---------|
+| `absent` | No VM exists by this name; `source` will provision it. |
+| `creating` | VM, disks, and NICs created; install ISO + seed VHDX attached; secure-boot template selected (Gen2). |
+| `installing` | VM powered on; the unattended OS install is running inside the guest. |
+| `finalizing` | Install judged complete; the seed VHDX is detached so the answer file is gone on subsequent boots; the guest's first boot installs and enrolls the steward. |
+| `ready` | The provisioned VM's steward has registered with the controller. |
+| `failed` | The install exceeded `completion.timeout`, or a host-side provisioning step failed. |
+| `degraded` | An existing real VM is unhealthy; the module surfaces this and takes no destructive action. |
+
+**`ready` is determined controller-side.** The `hyperv` module runs on the
+*host's* steward, which cannot see the controller's registry. The host-side module
+therefore advances the record only as far as `finalizing` (OS installed, seed
+detached, first boot underway). The transition to `ready` is made by the
+controller-side completion reconciler when a newly-registered steward's mTLS CN
+matches the **correlation identity** baked into the rendered answer file. The
+provisioning record carries this correlation value; the controller also flips the
+record to `failed` when `completion.timeout` elapses with no matching registration.
+
+### How the answer file is delivered (host-native seed VHDX)
+
+The unattended answer file is delivered on a **secondary VHDX seed disk** attached
+to the VM, built on the Hyper-V host with native cmdlets only (`New-VHD` →
+`Mount-VHD` → `Format-Volume` → copy), then detached at `finalizing`. The seed is
+a FAT32 volume labelled `CFGMS_SEED` created next to the VM's primary VHD
+(`<vhd-dir>\cfgms-seed-<vm-name>.vhdx`).
+
+- Windows Setup auto-discovers `autounattend.xml` from the root of attached
+  removable media; debian-installer reads `preseed.cfg` from the labelled seed
+  volume.
+- The seed VHDX works on **both Gen1 and Gen2** VMs (no floppy needed). For Gen2,
+  the secure-boot template is selected by `os_family` (`MicrosoftWindows` for
+  windows, `MicrosoftUEFICertificateAuthority` for linux); Gen1 has no secure boot.
+- **The install ISO is never repacked or re-signed.** It is attached as-is from
+  its host path. Repacking signed UEFI boot media breaks the boot chain.
+
+### Annotated Linux example (Debian 12, preseed)
+
+```yaml
+- name: stw-lin-01
+  module: hyperv.vm
+  config:
+    generation: 2
+    cpu_count: 2
+    memory_mb: 4096
+    vhd_path: C:\ClusterStorage\CSV01\stw-lin-01.vhdx
+    switch_name: HVSwitch_1G
+    state: running
+    source:
+      iso: C:\ClusterStorage\CSV01\iso\debian-12.iso   # host path; never repacked
+      os_family: linux                                  # selects preseed + UEFI-CA template
+      unattend: profile://debian-12-base                # omit to use the built-in default
+      completion:
+        mode: steward-registration                      # the only v1 mode
+        timeout: 45m
+      on_existing: never                                 # default; never destroys an existing VM
+```
+
+### Annotated Windows example (Windows Server, autounattend)
+
+```yaml
+- name: stw-win-01
+  module: hyperv.vm
+  config:
+    generation: 2
+    cpu_count: 4
+    memory_mb: 6144
+    vhd_path: C:\ClusterStorage\CSV01\stw-win-01.vhdx
+    switch_name: HVSwitch_1G
+    state: running
+    source:
+      iso: C:\ClusterStorage\CSV01\iso\windows-server-2025.iso  # host path; never repacked
+      os_family: windows                                         # selects autounattend + Windows template
+      unattend: profile://windows-server-default                 # omit to use the built-in default
+      completion:
+        mode: steward-registration
+        timeout: 60m
+      on_existing: never
+```
+
+In both examples, `unattend` may be omitted entirely — the module then uses the
+built-in default profile for the `os_family`. Operators add new OS editions,
+locales, or enrollment variants by authoring a stored profile and referencing it
+here, with **no Go code change**. See
+[Adding an unattended-install profile without code changes](../../../docs/operations/hyperv-profile-authoring.md).
+
+### Install media staging is out of scope
+
+`source.iso` is a path on the Hyper-V host (typically on a CSV). Getting the ISO
+onto the host is not this module's concern — an operator stages it, or a
+declarative `file` module resource does. This module adds no controller blob
+store, large-object transfer, or ISO distribution path.
+
 ## Known limitations
 
 1. **CPU/memory resize requires a stopped VM** — Hyper-V does not support hot-resize. The module handles this automatically: when `state: running` with a resize, it stops the VM, resizes, then starts it. A brief outage occurs during this sequence.
@@ -100,6 +248,10 @@ The resource type is selected via the `module` field as `hyperv.<type>`
 3. **VHD path is immutable** — The virtual disk path is set at creation and cannot be changed via this module.
 4. **Basic auth is structurally disabled** — Only NTLM over HTTPS (port 5986) is supported. WinRM must be configured for HTTPS on the target host.
 5. **Integration tests require a live host** — Unit tests use a test implementation of the WinRM transport interface; full end-to-end validation requires `CFGMS_HYPERV_HOST` to be set.
+6. **Install media is a host path** — `source.iso` must already exist on the Hyper-V host (typically on a CSV). This module does not download, copy, or distribute ISOs; stage them with the `file` module or out of band. The ISO is attached as-is and is never repacked or re-signed.
+7. **No host ISO-builder dependency for the seed** — the unattended answer file is delivered on a host-native VHDX seed disk built with `New-VHD`/`Mount-VHD`/`Format-Volume` (present with the Hyper-V + Storage roles the host already runs), so it needs **no** `oscdimg.exe` (Windows ADK) or `mkisofs` on the host. If you choose to author a profile that ships its answer file via a secondary ISO instead of the VHDX seed, building that ISO on the host would require `oscdimg.exe` or `mkisofs` — neither is present on a stock Hyper-V host, which is why the VHDX seed is the supported mechanism.
+8. **Windows enrollment `.ppkg` must be pre-signed** — the Windows path applies a provisioning package (`.ppkg`) at first logon for steward enrollment. The package is referenced by host path (via a secret key) and must be signed ahead of time; this module does not sign `.ppkg` artifacts. An unsigned/self-signed package is acceptable only for lab/dogfood under `module_trust.mode: bypass`.
+9. **Provisioning advances one step per convergence cycle** — a long-running OS install does not block the convergence loop. The host-side module advances only as far as `finalizing`; the `ready` transition is controller-side.
 
 ## Host detection
 
@@ -287,6 +439,8 @@ The following are **not** managed by this module:
 - Steward lifecycle integration (see issue #1790)
 - Controller dispatch wiring (see issue #1790)
 - Load or performance testing
+- **Golden-image / template cloning, an image registry, and a branch-build → image pipeline** — these are Phase 3 (#1792). Provisioning from install media (the `source` block above) is ISO-install only; cloning a prepared template image is a later, separate capability.
+- Controller-side ISO blob store or ISO distribution (install media is a host path; see [VM provisioning from install media](#vm-provisioning-from-install-media))
 
 ## Security considerations
 
