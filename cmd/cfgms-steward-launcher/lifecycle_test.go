@@ -562,12 +562,19 @@ func waitForFile(path string, deadline time.Duration) bool {
 // TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter verifies that when
 // a child fails its startup window and the launcher auto-rolls-back, the
 // upgrade-rolled-back flag file is written with the rolled-back-to version and
-// consecutive_failures in state.json is incremented on each failure.
+// consecutive_failures in state.json is exactly 1 (AC2 postcondition: one
+// failure+rollback → counter is 1).
+//
+// Only v2's binary is installed. After v2 fails and the launcher rolls back to
+// v1, the supervisor finds no v1 binary and returns an error before a second
+// increment can fire — so consecutive_failures stays at 1.
 func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
 	l := newLayout(t)
 	certStoreDir := t.TempDir()
 
-	installFakeSteward(t, l, "v1")
+	// Install v2 only; v1 directory is intentionally absent so the supervisor
+	// returns early (missing binary) after the rollback, before a second failure
+	// can increment the counter.
 	installFakeSteward(t, l, "v2")
 	if err := l.WriteCurrent("v1"); err != nil {
 		t.Fatalf("WriteCurrent v1: %v", err)
@@ -577,7 +584,7 @@ func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
 	}
 	// State: current=v2, previous=v1.
 
-	// Both versions fail immediately (non-zero exit, sinceResult=0 < StartupWindow).
+	// v2 fails immediately (non-zero exit, sinceResult=0 < StartupWindow).
 	envForChild(t, map[string]string{
 		"FAKE_STEWARD_EXIT_CODE": "1",
 		"FAKE_STEWARD_SLEEP_MS":  "0",
@@ -595,7 +602,7 @@ func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
 	}
 
 	if err := runSupervisor(t, s, 10*time.Second); err == nil {
-		t.Fatal("Supervise should return error when all versions fail")
+		t.Fatal("Supervise should return error when v2 fails and v1 binary is absent")
 	}
 
 	// upgrade-rolled-back must exist and contain v1 (the version rolled back TO).
@@ -608,13 +615,14 @@ func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
 		t.Errorf("upgrade-rolled-back = %q, want v1 (the rollback target)", got)
 	}
 
-	// consecutive_failures = 2: v2 failed (rollback) + v1 failed (no budget).
+	// consecutive_failures == 1: v2 failed once; v1 binary was absent so the
+	// supervisor returned before a second increment could fire (AC2 postcondition).
 	ps, loadErr := l.loadState()
 	if loadErr != nil {
 		t.Fatalf("loadState after rollback: %v", loadErr)
 	}
-	if ps.ConsecutiveFailures != 2 {
-		t.Errorf("consecutive_failures = %d, want 2 (one rollback + one final failure)", ps.ConsecutiveFailures)
+	if ps.ConsecutiveFailures != 1 {
+		t.Errorf("consecutive_failures = %d, want 1 (one failure+rollback)", ps.ConsecutiveFailures)
 	}
 }
 
