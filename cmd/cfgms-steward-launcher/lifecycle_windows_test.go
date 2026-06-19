@@ -157,4 +157,3 @@ func runOuterLauncher() {
 	// kill-on-close limit is the only thing that can cull the child.
 	os.Exit(2)
 }
-

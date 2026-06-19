@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/version"
@@ -58,6 +59,18 @@ type Supervisor struct {
 
 	// clock is injectable for tests; production uses time.Now / time.Since.
 	clock clock
+
+	// CertStoreDir is the directory where upgrade flag files (upgrade-committed,
+	// upgrade-rolled-back) are written so the steward process can emit the
+	// corresponding lifecycle events to the controller on reconnect.
+	// Set from --cert-store-dir in production; tests set it directly via t.TempDir().
+	// If empty, flag-file writes are skipped (no cert store configured).
+	CertStoreDir string
+
+	// RetentionPolicy controls pruning of old version directories under
+	// <Root>/versions/ after each successful (committed) startup.
+	// Zero value means no pruning occurs.
+	RetentionPolicy RetentionPolicy
 }
 
 type clock interface {
@@ -148,13 +161,39 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 		if !failedStartup && !nonZeroExit {
 			// Child stayed up past the startup window then exited cleanly.
-			// Normal restart-on-clean-exit path.
+			// Reset the failure counter and prune old version directories,
+			// then write the committed flag file last so its presence is a
+			// reliable completion signal for tests and the steward process.
+			if ps, loadErr := s.Layout.loadState(); loadErr == nil {
+				ps.ConsecutiveFailures = 0
+				if saveErr := s.Layout.saveState(ps); saveErr != nil {
+					_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
+				}
+			} else {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for counter reset: %v\n", loadErr)
+			}
+			if _, pruneErr := pruneVersions(s.Layout.VersionsDir(), current, s.RetentionPolicy, s.clock.Now()); pruneErr != nil {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: retention prune: %v\n", pruneErr)
+			}
+			if flagErr := s.writeFlagFile("upgrade-committed", current); flagErr != nil {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-committed flag: %v\n", flagErr)
+			}
 			continue
 		}
 
-		// Anything else (early exit OR non-zero exit) is a "broken
-		// child" signal. Attempt rollback if we have a previous version
-		// AND we haven't exhausted our budget.
+		// Anything else (early exit OR non-zero exit) is a "broken child"
+		// signal. Increment the consecutive-failure counter on any non-clean
+		// exit regardless of whether a rollback will fire.
+		if ps, loadErr := s.Layout.loadState(); loadErr == nil {
+			ps.ConsecutiveFailures++
+			if saveErr := s.Layout.saveState(ps); saveErr != nil {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: save state on failure: %v\n", saveErr)
+			}
+		} else {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
+		}
+
+		// Attempt rollback if we have a previous version AND budget.
 		previous, perr := s.Layout.ReadPrevious()
 		if perr != nil {
 			return fmt.Errorf("launcher: read previous version after child failure: %w", perr)
@@ -164,6 +203,13 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 				return fmt.Errorf("launcher: child failed (ran for %s) and no rollback available: %w", ranFor, exitErr)
 			}
 			return fmt.Errorf("launcher: child exited inside startup window (%s) and no rollback available", ranFor)
+		}
+
+		// Rollback is going to fire: write the flag file with the version we
+		// are rolling back TO (previous), which will be the version the steward
+		// process is running when it reconnects and reads the flag.
+		if flagErr := s.writeFlagFile("upgrade-rolled-back", previous); flagErr != nil {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-rolled-back flag: %v\n", flagErr)
 		}
 
 		newCurrent, rbErr := s.Layout.Rollback()
@@ -215,4 +261,25 @@ func (s *Supervisor) execOnce(ctx context.Context, exe string) error {
 		return fmt.Errorf("attachChildToJobObject failed: %w", err)
 	}
 	return cmd.Wait()
+}
+
+// writeFlagFile atomically writes a version string to a named flag file in
+// CertStoreDir. The steward process reads these files on startup to emit the
+// corresponding upgrade lifecycle events to the controller.
+//
+// If CertStoreDir is empty the write is skipped silently — this allows tests
+// that do not care about flag files to omit the field.
+func (s *Supervisor) writeFlagFile(name, version string) error {
+	if s.CertStoreDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(s.CertStoreDir, 0o755); err != nil {
+		return err
+	}
+	dst := filepath.Join(s.CertStoreDir, name)
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, []byte(version+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }

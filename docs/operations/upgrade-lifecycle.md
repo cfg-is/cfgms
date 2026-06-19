@@ -105,17 +105,63 @@ binary archive directory (configured per-deployment) for files whose
 If `upgrade.pruned` was emitted for that path, the binary is gone — pull
 from your backup or rebuild from source.
 
+## Steward-side upgrade lifecycle
+
+The launcher (`cfgms-steward-launcher`) implements the same upgrade
+lifecycle observability on the steward side as the controller has for
+its own binary. After each supervised restart, the launcher:
+
+1. **Writes a flag file** in `--cert-store-dir` that the steward process
+   reads on reconnect and converts to a `steward.upgrade.committed` or
+   `steward.upgrade.rolled_back` event reported to the controller.
+2. **Prunes old version directories** under `<Root>/versions/` using the
+   same retention algorithm as the controller.
+3. **Tracks consecutive startup-window failures** in `state.json` so
+   operators can see a persistent failure count via `cfgms-steward-launcher status`.
+
+### Steward-side retention defaults
+
+| Setting | Default | Flag |
+|---|---|---|
+| Quarantine window | 1 h | `--quarantine-window` |
+| Max old versions | 3 | `--max-versions` |
+| Max total bytes | 500 MB | `--max-bytes` |
+
+These match the controller defaults. Override per-steward by passing the
+corresponding flags when registering the launcher as an OS service.
+
+Pruning runs after each **clean** startup (child stayed alive past its
+`--startup-window` and exited with code 0). The active version directory is
+never pruned regardless of policy.
+
+### Reading the ConsecutiveFailures counter
+
+```bash
+cfgms-steward-launcher status --root /opt/cfgms
+```
+
+```
+Root:                /opt/cfgms
+Current:             v1.4.2
+Previous:            v1.4.1
+ConsecutiveFailures: 0
+```
+
+`ConsecutiveFailures` increments on every startup-window failure or non-zero
+exit, and resets to 0 on the first clean startup. A non-zero value after the
+launcher stabilises means operator intervention is needed: the rollback budget
+may be exhausted, or all installed versions are broken.
+
 ## What's NOT yet automated (follow-up work)
 
-- **Scheduled retention sweep**: the Prune helper exists but no
+- **Scheduled retention sweep**: the controller-side Prune helper exists but no
   periodic task wires it up. Operators should call it from cron /
   systemd-timer / Task Scheduler until a built-in scheduler lands.
-- **Steward-side retention**: the launcher (#1918) doesn't yet enforce
-  `MaxVersions` / `MaxBytes` against `<Root>/versions/`. Story #1918
-  itself was scoped to the binary swap; retention pruning is its own
-  follow-up.
-- **Consecutive-failures decay** (mentioned in the original Story
-  #1921 spec): not yet implemented on either side. Manual operator
-  intervention required if a launcher hits its rollback budget.
+- **Steward upgrade history view**: `EventStewardUpgradeCommitted` /
+  `EventStewardUpgradeRolledBack` events reach the controller's
+  `handleEventFromProvider` default case and are not yet stored in
+  `UpgradeStore`. A future story must wire that subscription and expose
+  a REST endpoint before per-steward upgrade history is surfaced in
+  `cfg controller upgrade history`.
 
-These three are tracked as follow-up tasks.
+These are tracked as follow-up tasks.
