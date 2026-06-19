@@ -125,3 +125,14 @@ func TestDarwinManagerNew(t *testing.T) {
 	_, ok := m.(*darwinManager)
 	assert.True(t, ok, "New() should return a *darwinManager on macOS")
 }
+
+// TestDarwinManagerStageBinaryAndRestart_SourceNotFound verifies that
+// StageBinaryAndRestart fails fast at the copy step when the source binary
+// does not exist.
+func TestDarwinManagerStageBinaryAndRestart_SourceNotFound(t *testing.T) {
+	m := New("/usr/local/bin/cfgms-controller")
+	err := m.StageBinaryAndRestart("/nonexistent/ghost-binary", "/etc/cfgms/controller.cfg")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage binary",
+		"error must indicate failure in the copy/stage step")
+}
