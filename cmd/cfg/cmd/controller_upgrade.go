@@ -322,6 +322,9 @@ func newOrchestrator(initial *cutover.ExecProcessHandle) (*cutover.Orchestrator,
 		swap,
 		spawn,
 	)
+	// Story #1921: structured event emission for
+	// `cfg controller upgrade history`.
+	orch.History = cutover.NewHistory(defaultCutoverHistoryPath())
 	return orch, swap, nil
 }
 
