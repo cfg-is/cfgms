@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,7 +15,7 @@ import (
 // provisionModuleWithTransport builds a hypervModule wired with the given
 // transport and an in-memory provision store for create-from-source tests.
 func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
-	return &hypervModule{
+	m := &hypervModule{
 		executor:       &stubHypervExecutor{},
 		transport:      transport,
 		tenantID:       "ops",
@@ -22,6 +23,12 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 		detector:       &fakeDetector{result: true},
 		provisionStore: NewMemProvisionStore(),
 	}
+	// The Linux create path renders the built-in Debian preseed, which resolves
+	// registration-token + user-password secrets at render time. Inject an
+	// in-memory store carrying those keys so the create-from-source provisioning
+	// tests exercise the real render path (no mocks).
+	_ = m.SetSecretStore(preseedTestStore())
+	return m
 }
 
 // sourceVMConfigMap returns the executor-shaped config map for an absent VM
@@ -292,6 +299,136 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 		"install ISO host path must travel via args")
 	assert.NotContains(t, dvd[0].scriptBlock, "server.iso",
 		"ISO path must not be interpolated into the script text")
+}
+
+// ── REQUIRED TEST: installing → finalizing detaches the seed ─────────────────
+
+// runningSourceVMJSON returns a getVM JSON response for a running VM whose
+// CPU/memory/switch match sourceVMConfigMap so applyVMState issues no resize,
+// start, or network reconcile — isolating the finalize behaviour under test.
+func runningSourceVMJSON() string {
+	return `{"found":true,"Name":"stw-01","MemoryStartupBytes":4294967296,` +
+		`"ProcessorCount":2,"Generation":2,"Path":"C:\\ClusterStorage\\CSV01\\stw-01.vhdx",` +
+		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"Running"}`
+}
+
+// TestProvision_InstallingToFinalizingDetachesSeed asserts that a convergence
+// cycle on a VM whose record sits at installing — once the conservative settle
+// window has elapsed and the VM is observed running — advances the record to
+// finalizing and issues Cfgms-DetachSeedVHD (Dismount-VHD). The host-side
+// module must NOT advance to ready (that is controller-side, #2050).
+func TestProvision_InstallingToFinalizingDetachesSeed(t *testing.T) {
+	// getVM is queried twice before detach: once by setVM (existence) and once
+	// by vmIsRunning inside finalizeProvision. Both report Running.
+	transport := &testWinRMTransport{
+		output: runningSourceVMJSON(),
+	}
+	store := NewMemProvisionStore()
+	// Seed an installing record whose StartedAt is well past the settle window
+	// (completion.timeout is 60m → settle is 30m).
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now().Add(-2 * time.Hour),
+	}))
+	m := provisionModuleWithTransport(transport)
+	m.provisionStore = store
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	detach := callsContaining(calls, "Dismount-VHD")
+	require.Len(t, detach, 1, "finalizing must issue exactly one Cfgms-DetachSeedVHD (Dismount-VHD)")
+	assert.True(t, argsContain(detach[0], `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`),
+		"seed path must travel via args, derived from the VM VHD directory")
+	assert.NotContains(t, detach[0].scriptBlock, "cfgms-seed-stw-01",
+		"seed path must not be interpolated into the script text")
+
+	rec, err := store.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFinalizing, rec.State,
+		"host-side module must advance installing → finalizing")
+	assert.NotEqual(t, ProvisionStateReady, rec.State,
+		"host-side module must NOT advance to ready — that is controller-side (#2050)")
+}
+
+// TestProvision_InstallingNotSettledDoesNotDetach asserts that a VM whose
+// installing record has not yet passed the settle window is left at installing
+// with no seed detach — the conservative completion guard (ADR-009 §8).
+func TestProvision_InstallingNotSettledDoesNotDetach(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: runningSourceVMJSON(),
+	}
+	store := NewMemProvisionStore()
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(), // just started — well within the settle window
+	}))
+	m := provisionModuleWithTransport(transport)
+	m.provisionStore = store
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Dismount-VHD"),
+		"install not yet settled must not detach the seed")
+
+	rec, err := store.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateInstalling, rec.State,
+		"record must remain at installing until the settle window elapses")
+}
+
+// TestProvision_RealPreseedRenderedToSeed asserts the Linux create path writes
+// the REAL rendered preseed (not the placeholder) to the seed VHDX, with the
+// resolved registration-token secret and the CorrelationID hostname hint
+// present, and no banned patterns.
+func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
+	}
+	m := provisionModuleWithTransport(transport)
+	require.NoError(t, m.SetSecretStore(preseedTestStore()))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	copyCalls := callsContaining(calls, "Set-Content")
+	require.Len(t, copyCalls, 1, "one Set-Content (answer file copy)")
+	// The answer file name is preseed.cfg for linux.
+	assert.True(t, argsContain(copyCalls[0], "preseed.cfg"), "linux must seed preseed.cfg")
+
+	// Find the rendered content arg (the longest string arg is the preseed body).
+	var content string
+	for _, a := range copyCalls[0].args {
+		if s, ok := a.(string); ok && len(s) > len(content) {
+			content = s
+		}
+	}
+	require.NotEmpty(t, content, "preseed content must be present in the copy args")
+	assert.NotContains(t, content, "placeholder preseed", "linux path must render the REAL preseed, not the placeholder")
+	assert.Contains(t, content, "d-i partman", "rendered preseed must carry partitioning directives")
+	assert.Contains(t, content, "reg-token-stub-value", "registration token secret must be resolved into the preseed")
+	assert.Contains(t, content, "stw-01", "CorrelationID must appear in the preseed")
+	lower := strings.ToLower(content)
+	for _, banned := range []string{"eval", "bash -c", "iex"} {
+		assert.NotContains(t, lower, banned, "rendered preseed must not contain banned pattern %q", banned)
+	}
 }
 
 // ── Provisioning record advancement ──────────────────────────────────────────

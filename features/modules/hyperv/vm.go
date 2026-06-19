@@ -687,6 +687,17 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	}
 
 	if vmExists {
+		// Create-from-source convergence (ADR-009 §6/§8): when the VM already
+		// exists and carries a source block, drive the installing → finalizing
+		// transition (detect install completion + detach the seed VHDX). The
+		// host-side module never advances to ready — that is controller-side
+		// (#2050). finalizeProvision is a no-op unless the record is at installing
+		// and the conservative settle conditions are met.
+		if cfg.Source != nil {
+			if err := m.finalizeProvision(ctx, vmName, hostName, cfg); err != nil {
+				return err
+			}
+		}
 		return m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state)
 	}
 

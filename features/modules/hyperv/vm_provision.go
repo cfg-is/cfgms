@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ── Provisioning PS verb constants (ADR-009 §5) ────────────────────────────
@@ -193,10 +194,19 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
 
+	// Render the answer file written to the seed. For the Linux path (#2046)
+	// this renders the REAL preseed from the referenced (or built-in Debian)
+	// profile, substituting per-VM vars + secrets; for Windows the placeholder
+	// stands until #2047 supplies the autounattend template.
+	answerContent, err := m.renderSeedAnswerFile(ctx, cfg, record.CorrelationID)
+	if err != nil {
+		return m.failProvision(ctx, vmName, record, err)
+	}
+
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
 		"SeedPath": seedPath,
 		"FileName": seedAnswerFileName(cfg.Source.OSFamily),
-		"Content":  seedAnswerFilePlaceholder(cfg.Source.OSFamily),
+		"Content":  answerContent,
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write answer file to seed for VM %q: %w", vmName, psErr))
@@ -231,4 +241,151 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateInstalling)
+}
+
+// renderSeedAnswerFile produces the answer-file content written to the seed VHDX
+// for the given source (ADR-009 §6). For the Linux path (#2046) it resolves the
+// unattended-install profile — the one referenced as source.unattend
+// (profile://<name>), or the built-in Debian 12 profile when none is referenced
+// — and renders its preseed template with this VM's vars + secrets. The
+// CorrelationID is threaded into the template ({{ .CorrelationID }}) so the
+// controller-side reconciler (#2050) can match the registered steward back to
+// the provisioning record.
+//
+// For the Windows path the placeholder content stands until #2047 supplies the
+// autounattend template; this story is Linux-only by scope.
+func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, cfg *VMConfig, correlationID string) (string, error) {
+	if cfg.Source == nil || cfg.Source.OSFamily != "linux" {
+		// Windows / non-Linux: keep the placeholder (autounattend is #2047).
+		return seedAnswerFilePlaceholder(cfg.Source.OSFamily), nil
+	}
+
+	profile, err := m.resolveLinuxProfile(ctx, cfg.Source.Unattend)
+	if err != nil {
+		return "", err
+	}
+
+	store, injected := m.GetSecretStore()
+	if !injected || store == nil {
+		return "", fmt.Errorf("hyperv: cannot render preseed for VM %q: secret store not injected", cfg.Name)
+	}
+
+	rendered, err := NewProfileRenderer().Render(ctx, profile, ProfileVars{
+		VMName:        cfg.Name,
+		OSFamily:      cfg.Source.OSFamily,
+		CorrelationID: correlationID,
+		BundleURL:     profile.Enroll.BundleURL,
+	}, store)
+	if err != nil {
+		return "", fmt.Errorf("hyperv: render preseed for VM %q: %w", cfg.Name, err)
+	}
+	return string(rendered), nil
+}
+
+// resolveLinuxProfile returns the UnattendProfile for a Linux VM source. When
+// the source references a profile (profile://<name>) it is loaded from the
+// profile store; when no reference is given the built-in Debian 12 profile is
+// used so a minimal Linux source ("iso" + "os_family: linux") provisions
+// without operator-authored config (ADR-009 §6/§7).
+func (m *hypervModule) resolveLinuxProfile(ctx context.Context, unattendRef string) (*UnattendProfile, error) {
+	if unattendRef == "" {
+		return defaultLinuxProfile(), nil
+	}
+	name, err := parseProfileName(unattendRef)
+	if err != nil {
+		return nil, err
+	}
+	if m.profileStore == nil {
+		return nil, fmt.Errorf("hyperv: profile %q referenced but no profile store configured: %w", name, ErrProfileNotFound)
+	}
+	profile, err := m.profileStore.GetProfile(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: load profile %q: %w", name, err)
+	}
+	return profile, nil
+}
+
+// finalizeProvision advances a VM whose provisioning record is at installing to
+// finalizing once the unattended install is judged complete, detaching the seed
+// VHDX so the installed OS does not re-read the answer file on subsequent boots
+// (ADR-009 §6/§8). It is invoked on a convergence cycle for a VM that already
+// exists on the host and carries a source block.
+//
+// Completion detection is deliberately conservative (ADR-009 §8 implementation
+// note): the install is judged complete only after at least completion.timeout/2
+// has elapsed since StartedAt AND the VM is observed Running. The host-side
+// module NEVER advances to ready — that transition is owned by the
+// controller-side completion reconciler (#2050) keyed on CorrelationID. When the
+// record is not at installing, or the settle conditions are not met, this is a
+// no-op and the record is left unchanged.
+func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
+	if cfg.Source == nil {
+		return nil
+	}
+	record, err := m.loadOrInitProvision(ctx, vmName)
+	if err != nil {
+		return err
+	}
+	if record.State != ProvisionStateInstalling {
+		// Only an installing record is eligible to advance to finalizing.
+		return nil
+	}
+
+	settle := installSettleDuration(cfg.Source.Completion.Timeout)
+	if time.Since(record.StartedAt) < settle {
+		// Too early — err on the side of waiting (conservative completion).
+		return nil
+	}
+
+	// Confirm the VM is running (booted into the installed OS / past installer).
+	running, err := m.vmIsRunning(ctx, vmName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return nil
+	}
+
+	// Detach the seed VHDX so the answer file is gone on the next boot.
+	seedPath := seedVHDPath(vmName, cfg.VHDPath)
+	if vErr := validateSeedPath(seedPath); vErr != nil {
+		return m.failProvision(ctx, vmName, record, vErr)
+	}
+	if _, psErr := m.transport.ExecutePS(ctx, psDetachSeedVHD, map[string]string{
+		"Path": seedPath,
+	}); psErr != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", hostName, psErr)
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: detach seed VHDX for VM %q: %w", vmName, psErr))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", hostName, nil)
+
+	// Advance installing → finalizing. ready is controller-side (#2050).
+	return m.advanceProvision(ctx, vmName, record, ProvisionStateFinalizing)
+}
+
+// installSettleDuration returns half of the parsed completion.timeout, the
+// minimum elapsed time before the host judges an install complete. An empty or
+// unparseable timeout falls back to half of the default completion timeout. The
+// timeout string is validated upstream by SourceConfig.Validate, so a parse
+// failure here is defensive only.
+func installSettleDuration(timeout string) time.Duration {
+	const defaultCompletionTimeout = 30 * time.Minute
+	if timeout == "" {
+		return defaultCompletionTimeout / 2
+	}
+	d, err := time.ParseDuration(timeout)
+	if err != nil || d <= 0 {
+		return defaultCompletionTimeout / 2
+	}
+	return d / 2
+}
+
+// vmIsRunning queries live host state via getVM and reports whether the VM is in
+// the running power state. A VM that is absent or stopped reports false.
+func (m *hypervModule) vmIsRunning(ctx context.Context, vmName string) (bool, error) {
+	current, err := m.getVM(ctx, vmName)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(current.State, "running"), nil
 }

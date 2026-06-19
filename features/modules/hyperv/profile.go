@@ -92,8 +92,9 @@ type UnattendProfile struct {
 	// AnswerFormat is the answer-file format: preseed or autounattend.
 	AnswerFormat AnswerFormat `yaml:"answer_format"`
 	// Template is the text/template source for the answer file. It may reference
-	// per-VM vars ({{ .VMName }}, {{ .OSFamily }}, {{ .EnrollToken }}) and
-	// secrets ({{ secret "key" }}). It is NOT HTML and is never HTML-escaped.
+	// per-VM vars ({{ .VMName }}, {{ .OSFamily }}, {{ .EnrollToken }},
+	// {{ .CorrelationID }}, {{ .BundleURL }}) and secrets ({{ secret "key" }}).
+	// It is NOT HTML and is never HTML-escaped.
 	Template string `yaml:"template"`
 	// Enroll carries enrollment wiring (token secret key, bundle URL, label).
 	Enroll EnrollConfig `yaml:"enroll,omitempty"`
@@ -133,6 +134,16 @@ type ProfileVars struct {
 	// VALUES referenced via {{ secret "key" }} are resolved separately from the
 	// SecretStore at render time.
 	EnrollToken string
+	// CorrelationID ties the rendered answer file back to the VM's provisioning
+	// record. The Linux preseed template (#2046) substitutes it as the
+	// enrollment hostname/label ({{ .CorrelationID }}) so the controller-side
+	// completion reconciler (#2050) can match the registered steward's mTLS CN
+	// to this VM.
+	CorrelationID string
+	// BundleURL is the enrollment-bundle URL the answer file's first-boot enroll
+	// step pulls the steward package from ({{ .BundleURL }}). It is supplied by
+	// the caller from the profile's Enroll config; it is not a secret.
+	BundleURL string
 }
 
 // ProfileRenderer renders an UnattendProfile's template into answer-file bytes,
@@ -191,13 +202,17 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 	}
 
 	data := struct {
-		VMName      string
-		OSFamily    string
-		EnrollToken string
+		VMName        string
+		OSFamily      string
+		EnrollToken   string
+		CorrelationID string
+		BundleURL     string
 	}{
-		VMName:      vars.VMName,
-		OSFamily:    vars.OSFamily,
-		EnrollToken: vars.EnrollToken,
+		VMName:        vars.VMName,
+		OSFamily:      vars.OSFamily,
+		EnrollToken:   vars.EnrollToken,
+		CorrelationID: vars.CorrelationID,
+		BundleURL:     vars.BundleURL,
 	}
 
 	var buf bytes.Buffer
