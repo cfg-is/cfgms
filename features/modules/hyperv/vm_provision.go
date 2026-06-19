@@ -76,13 +76,130 @@ func seedAnswerFileName(osFamily string) string {
 }
 
 // seedAnswerFilePlaceholder returns the placeholder answer-file content for the
-// os_family. Real templates are injected by #2046/#2047; this story only needs
-// the seed VHDX to be non-empty. The content is a one-line comment stub.
+// os_family when no real profile can be resolved. The Windows path (#2047)
+// renders a real autounattend.xml via renderSeedAnswerFile; this stub remains
+// only for the Linux path (#2046) and as a defensive fallback. The content is a
+// one-line comment stub so the seed VHDX is non-empty.
 func seedAnswerFilePlaceholder(osFamily string) string {
 	if osFamily == "windows" {
 		return "<!-- placeholder autounattend -->"
 	}
 	return "# placeholder preseed"
+}
+
+// resolveProfile resolves the unattended-install profile for a VM source by
+// os_family. When the source declares a profile:// reference it is loaded from
+// the profileStore; otherwise the built-in default for the os_family is used:
+// the Debian 12 profile for linux (#2046) and the Windows Server profile for
+// windows (#2047). An unsupported os_family returns nil, nil so the caller
+// falls back to the os_family placeholder.
+func (m *hypervModule) resolveProfile(ctx context.Context, src *SourceConfig) (*UnattendProfile, error) {
+	switch src.OSFamily {
+	case "linux":
+		return m.resolveLinuxProfile(ctx, src.Unattend)
+	case "windows":
+		return m.resolveWindowsProfile(ctx, src.Unattend)
+	default:
+		return nil, nil
+	}
+}
+
+// resolveWindowsProfile returns the UnattendProfile for a Windows VM source.
+// When the source references a profile (profile://<name>) it is loaded from the
+// profile store; when no reference is given the built-in Windows Server profile
+// is used so a minimal Windows source ("iso" + "os_family: windows") provisions
+// without operator-authored config (ADR-009 §6/§7).
+func (m *hypervModule) resolveWindowsProfile(ctx context.Context, unattendRef string) (*UnattendProfile, error) {
+	if unattendRef == "" {
+		return defaultWindowsProfile(), nil
+	}
+	name, err := parseProfileName(unattendRef)
+	if err != nil {
+		return nil, err
+	}
+	if m.profileStore == nil {
+		return nil, fmt.Errorf("hyperv: profile %q referenced but no profile store configured: %w", name, ErrProfileNotFound)
+	}
+	profile, err := m.profileStore.GetProfile(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: load profile %q: %w", name, err)
+	}
+	return profile, nil
+}
+
+// renderSeedAnswerFile resolves the profile for the VM source and renders the
+// answer-file content written to the seed VHDX, dispatching on os_family. For
+// os_family: linux it renders the REAL preseed (#2046) from the referenced (or
+// built-in Debian) profile; for os_family: windows it renders the real
+// autounattend.xml (#2047) from the referenced (or built-in Windows) profile,
+// substituting the product edition. Both bake the per-VM CorrelationID in so the
+// controller-side reconciler (#2050) can match the registered steward
+// (ADR-009 §8). Secret values referenced via {{ secret "key" }} (e.g. the .ppkg
+// host path) are resolved from the injected SecretStore at render time and are
+// never logged. When no profile resolves (an unsupported os_family), it falls
+// back to the os_family placeholder.
+func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, src *SourceConfig, correlationID string) (string, error) {
+	profile, err := m.resolveProfile(ctx, src)
+	if err != nil {
+		return "", err
+	}
+	if profile == nil {
+		return seedAnswerFilePlaceholder(src.OSFamily), nil
+	}
+
+	store, injected := m.GetSecretStore()
+	if !injected || store == nil {
+		return "", errSecretStoreRequired
+	}
+
+	vars := ProfileVars{
+		VMName:        vmName,
+		OSFamily:      src.OSFamily,
+		CorrelationID: correlationID,
+		BundleURL:     profile.Enroll.BundleURL,
+	}
+	// ProductEdition only applies to the Windows autounattend image-install step;
+	// it is ignored by the Linux preseed template.
+	if src.OSFamily == "windows" {
+		vars.ProductEdition = defaultWindowsEdition
+	}
+
+	rendered, err := NewProfileRenderer().Render(ctx, profile, vars, store)
+	if err != nil {
+		return "", err
+	}
+	return string(rendered), nil
+}
+
+// renderSetupComplete renders the file-staged SetupComplete.cmd enrollment
+// fallback for a Windows guest. It is produced ONLY when the profile sets
+// enroll.use_setup_complete: true (ADR-009 §6); callers must check
+// profile.Enroll.UseSetupComplete before invoking. The rendered content carries
+// a single declared-path cfgms-steward enroll invocation — no runtime
+// composition. enrollToken is supplied pre-resolved by the caller.
+func (m *hypervModule) renderSetupComplete(ctx context.Context, vmName, correlationID, enrollToken string, profile *UnattendProfile) (string, error) {
+	store, ok := m.GetSecretStore()
+	if !ok {
+		return "", errSecretStoreRequired
+	}
+	scProfile := &UnattendProfile{
+		Name:         profile.Name,
+		OSFamily:     "windows",
+		AnswerFormat: AnswerFormatAutounattend,
+		Template:     setupCompleteTemplate,
+		Enroll:       profile.Enroll,
+	}
+	rendered, err := NewProfileRenderer().Render(ctx, scProfile, ProfileVars{
+		VMName:        vmName,
+		OSFamily:      "windows",
+		CorrelationID: correlationID,
+		EnrollToken:   enrollToken,
+		BundleURL:     profile.Enroll.BundleURL,
+	}, store)
+	if err != nil {
+		return "", err
+	}
+	return string(rendered), nil
 }
 
 // seedVHDPath derives the seed VHDX path from the VM's VHD path so the seed
@@ -144,7 +261,11 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	if record.State == ProvisionStateInstalling ||
 		record.State == ProvisionStateFinalizing ||
 		record.State == ProvisionStateReady {
-		// Already past the host-side create steps — nothing to redo.
+		// Already past the host-side create steps — nothing to redo here. For an
+		// installing record the seed-detach + installing → finalizing transition
+		// is driven by the converge path via finalizeProvision (which applies the
+		// conservative settle-time + running guard); the ready transition is
+		// controller-side (#2050).
 		return nil
 	}
 
@@ -194,13 +315,16 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
 
-	// Render the answer file written to the seed. For the Linux path (#2046)
-	// this renders the REAL preseed from the referenced (or built-in Debian)
-	// profile, substituting per-VM vars + secrets; for Windows the placeholder
-	// stands until #2047 supplies the autounattend template.
-	answerContent, err := m.renderSeedAnswerFile(ctx, cfg, record.CorrelationID)
-	if err != nil {
-		return m.failProvision(ctx, vmName, record, err)
+	// Render the unattended answer file for the os_family. renderSeedAnswerFile
+	// dispatches on os_family: linux renders the REAL preseed from the referenced
+	// (or built-in Debian) profile (#2046); windows renders the real
+	// autounattend.xml from the referenced (or built-in Windows) profile (#2047).
+	// Both bake the per-VM CorrelationID in so the controller-side reconciler
+	// (#2050) can match the registered steward (ADR-009 §8). Per-VM vars +
+	// secrets are substituted at render time.
+	answerContent, renderErr := m.renderSeedAnswerFile(ctx, vmName, cfg.Source, record.CorrelationID)
+	if renderErr != nil {
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: render answer file for VM %q: %w", vmName, renderErr))
 	}
 
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
@@ -241,45 +365,6 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateInstalling)
-}
-
-// renderSeedAnswerFile produces the answer-file content written to the seed VHDX
-// for the given source (ADR-009 §6). For the Linux path (#2046) it resolves the
-// unattended-install profile — the one referenced as source.unattend
-// (profile://<name>), or the built-in Debian 12 profile when none is referenced
-// — and renders its preseed template with this VM's vars + secrets. The
-// CorrelationID is threaded into the template ({{ .CorrelationID }}) so the
-// controller-side reconciler (#2050) can match the registered steward back to
-// the provisioning record.
-//
-// For the Windows path the placeholder content stands until #2047 supplies the
-// autounattend template; this story is Linux-only by scope.
-func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, cfg *VMConfig, correlationID string) (string, error) {
-	if cfg.Source == nil || cfg.Source.OSFamily != "linux" {
-		// Windows / non-Linux: keep the placeholder (autounattend is #2047).
-		return seedAnswerFilePlaceholder(cfg.Source.OSFamily), nil
-	}
-
-	profile, err := m.resolveLinuxProfile(ctx, cfg.Source.Unattend)
-	if err != nil {
-		return "", err
-	}
-
-	store, injected := m.GetSecretStore()
-	if !injected || store == nil {
-		return "", fmt.Errorf("hyperv: cannot render preseed for VM %q: secret store not injected", cfg.Name)
-	}
-
-	rendered, err := NewProfileRenderer().Render(ctx, profile, ProfileVars{
-		VMName:        cfg.Name,
-		OSFamily:      cfg.Source.OSFamily,
-		CorrelationID: correlationID,
-		BundleURL:     profile.Enroll.BundleURL,
-	}, store)
-	if err != nil {
-		return "", fmt.Errorf("hyperv: render preseed for VM %q: %w", cfg.Name, err)
-	}
-	return string(rendered), nil
 }
 
 // resolveLinuxProfile returns the UnattendProfile for a Linux VM source. When
