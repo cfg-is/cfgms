@@ -5,7 +5,6 @@ package hyperv
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -85,13 +84,19 @@ func seedAnswerFilePlaceholder(osFamily string) string {
 	return "# placeholder preseed"
 }
 
-// seedVHDPath derives the seed VHDX path from the VM's VHD directory so the
-// seed lands on the same CSV as the VM's primary disk:
-// <vhdDir>\cfgms-seed-<vmName>.vhdx. vhdDir is the DIRECTORY containing the
-// VM's VHD (filepath.Dir of cfg.VHDPath). Windows path separators are used so
-// the path is valid on the host regardless of the steward's own OS.
-func seedVHDPath(vmName, vhdDir string) string {
-	dir := strings.TrimRight(vhdDir, `\/`)
+// seedVHDPath derives the seed VHDX path from the VM's VHD path so the seed
+// lands in the same directory as the VM's primary disk:
+// <vhdDir>\cfgms-seed-<vmName>.vhdx. The parent directory is computed with
+// Windows path semantics (split on \ or /) rather than filepath.Dir, which is
+// OS-dependent: filepath.Dir("C:\\dir\\x.vhdx") returns "." on Linux (it does
+// not treat "\" as a separator), mangling the always-Windows Hyper-V path when
+// the steward or CI runs on a non-Windows OS (Issue #2044).
+func seedVHDPath(vmName, vhdPath string) string {
+	dir := vhdPath
+	if i := strings.LastIndexAny(vhdPath, `\/`); i >= 0 {
+		dir = vhdPath[:i]
+	}
+	dir = strings.TrimRight(dir, `\/`)
 	return dir + `\` + "cfgms-seed-" + vmName + ".vhdx"
 }
 
@@ -166,7 +171,7 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 
 	// Build the seed VHDX next to the VM's primary VHD.
-	seedPath := seedVHDPath(vmName, filepath.Dir(cfg.VHDPath))
+	seedPath := seedVHDPath(vmName, cfg.VHDPath)
 	if err := validateSeedPath(seedPath); err != nil {
 		return m.failProvision(ctx, vmName, record, err)
 	}
