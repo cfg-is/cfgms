@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -240,4 +241,181 @@ func TestReconcile_PowerIdempotent_NoStartWhenAlreadyRunning(t *testing.T) {
 		"already-running host must not be issued a redundant Start-VM")
 	assert.Empty(t, callsContaining(calls, "Stop-VM"))
 	require.Len(t, calls, 1, "fully converged running VM: only the getVM read runs")
+}
+
+// ── Existence-gating safety invariant (ADR-009 §2, Story #2048) ─────────────
+//
+// These tests prove the non-negotiable safety invariant: source provisioning is
+// existence-gated, never health-gated. An existing VM is NEVER auto-destroyed or
+// recreated by default; a broken existing VM is surfaced as degraded, not torn
+// down; only an explicit on_existing: recreate permits destruction; an own
+// in-progress attempt surfaces-and-waits rather than auto-retrying.
+
+// existingSourceVMJSON builds a getVM-shaped JSON for a VM that already exists on
+// the host, in the given raw Hyper-V State string (e.g. "Running", "Off",
+// "Critical"). Used to drive the existence-gating decision tree against a VM the
+// host reports as present.
+func existingSourceVMJSON(name, hvState string) string {
+	return `{"found":true,"Name":"` + name + `","MemoryStartupBytes":4294967296,` +
+		`"ProcessorCount":2,"Generation":2,"Path":"C:\\ClusterStorage\\CSV01\\` + name + `.vhdx",` +
+		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"` + hvState + `"}`
+}
+
+// TestExistenceGating_ExistingVMNotRecreatedByDefault is the headline [REQUIRED
+// TEST]: when a VM already exists on the host and the desired config carries a
+// source block with on_existing: never (the default), the module must issue
+// ZERO New-VM and ZERO Remove-VM calls — the existing VM is never auto-destroyed
+// or recreated. This is the core ADR-009 §2 safety invariant.
+func TestExistenceGating_ExistingVMNotRecreatedByDefault(t *testing.T) {
+	// getVM (call 0) reports the VM already present and running.
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // on_existing: never
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"existing VM must NEVER be (re)created when on_existing is never")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"existing VM must NEVER be destroyed when on_existing is never")
+	// Source orchestration must not have run any of its create-path verbs either.
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"no seed VHDX may be built for an existing VM under the default")
+	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"),
+		"no install ISO may be attached to an existing VM under the default")
+}
+
+// TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault proves the invariant
+// holds for an existing STOPPED VM too — existence, not power state, gates source.
+// A stopped VM with desired state running is started, but never recreated.
+func TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Off"),
+	}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // desired running, on_existing: never
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"), "existing stopped VM must not be recreated")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"), "existing stopped VM must not be destroyed")
+	// Plain lifecycle still converges power state: desired running → Start-VM.
+	require.Len(t, callsContaining(calls, "Start-VM"), 1,
+		"an existing healthy VM still converges to its declared power state")
+}
+
+// TestExistenceGating_BrokenVMSurfacesAsDegraded is the second [REQUIRED TEST]:
+// a VM that exists in an unexpected/broken Hyper-V state ("Critical") under the
+// default on_existing must be surfaced as a degraded provisioning record with
+// LastError describing the observed state — and NEVER torn down.
+func TestExistenceGating_BrokenVMSurfacesAsDegraded(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Critical"),
+	}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // on_existing: never
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"a broken existing VM must NEVER be torn down — degraded is observed, not remediated")
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"a broken existing VM must NEVER be recreated")
+
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err, "a degraded provisioning record must be written")
+	assert.Equal(t, ProvisionStateDegraded, rec.State,
+		"a broken existing VM surfaces as a degraded provisioning record")
+	assert.Contains(t, strings.ToLower(rec.LastError), "critical",
+		"LastError must describe the observed broken VM state")
+}
+
+// TestExistenceGating_RecreateOnlyWhenExplicit proves the ONLY destructive path:
+// when on_existing is recreate and the VM exists, the module issues Remove-VM
+// THEN New-VM (in that order) — the explicit opt-in reprovision.
+func TestExistenceGating_RecreateOnlyWhenExplicit(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(transport)
+
+	configMap := sourceVMConfigMap(2, "linux")
+	src := configMap["source"].(map[string]interface{})
+	src["on_existing"] = "recreate"
+
+	cfg := rawConfigState{m: configMap}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	removes := callsContaining(calls, "Remove-VM")
+	news := callsContaining(calls, "New-VM")
+	require.Len(t, removes, 1, "on_existing: recreate must destroy the existing VM exactly once")
+	require.Len(t, news, 1, "on_existing: recreate must recreate the VM exactly once")
+
+	// Remove must precede New (tear down, then rebuild) — assert by call ordering.
+	var removeIdx, newIdx int
+	for i, c := range calls {
+		if strings.Contains(c.scriptBlock, "Remove-VM") && !strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
+			removeIdx = i
+		}
+		if strings.Contains(c.scriptBlock, "New-VM") {
+			newIdx = i
+		}
+	}
+	assert.Less(t, removeIdx, newIdx, "Remove-VM must precede New-VM on the recreate path")
+}
+
+// TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry proves surface-and-
+// wait: when an own provisioning record exists at installing but the VM is
+// absent from the host (mid-install / transiently not yet visible), the module
+// must NOT re-issue New-VM — auto-retry is off by default (ADR-009 §2).
+func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: `{"found":false}`, // host reports the VM absent
+	}
+	m := provisionModuleWithTransport(transport)
+	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(),
+	}))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"an own in-progress provisioning attempt must surface-and-wait, not auto-retry New-VM")
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"no seed rebuild for an in-progress own attempt")
+
+	// The record must remain at installing — surface-and-wait leaves it untouched.
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateInstalling, rec.State,
+		"surface-and-wait must leave the in-progress record at installing")
 }

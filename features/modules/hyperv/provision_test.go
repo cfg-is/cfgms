@@ -162,6 +162,52 @@ func TestProvisionRecord_LastError(t *testing.T) {
 	assert.Equal(t, "timeout waiting for steward registration", got.LastError)
 }
 
+// TestIsOwnIncompleteAttempt verifies the existence-gating helper: a record in a
+// host-side in-progress state (creating/installing/finalizing) reports true;
+// missing or terminal-state records report false. This is the discriminator that
+// separates "our own incomplete attempt" (safe to surface-and-wait) from "a real
+// existing VM" (never destroyed) in the ADR-009 §2 decision tree.
+func TestIsOwnIncompleteAttempt(t *testing.T) {
+	ctx := context.Background()
+	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+
+	// No record → false.
+	assert.False(t, m.isOwnIncompleteAttempt(ctx, "vm-x"),
+		"no provisioning record must report not-in-progress")
+
+	cases := []struct {
+		state ProvisionState
+		want  bool
+	}{
+		{ProvisionStateAbsent, false},
+		{ProvisionStateCreating, true},
+		{ProvisionStateInstalling, true},
+		{ProvisionStateFinalizing, true},
+		{ProvisionStateReady, false},
+		{ProvisionStateFailed, false},
+		{ProvisionStateDegraded, false},
+	}
+	for _, tc := range cases {
+		require.NoError(t, m.provisionStore.SetProvision(ctx, &ProvisionRecord{
+			VMName: "vm-x", State: tc.state, CorrelationID: "vm-x",
+		}))
+		assert.Equal(t, tc.want, m.isOwnIncompleteAttempt(ctx, "vm-x"),
+			"isOwnIncompleteAttempt for state %q", tc.state)
+	}
+}
+
+// TestIsHealthyVMState verifies the broken-state classifier used by the degraded
+// surface: running/stopped/off/paused/saved/absent are healthy; any other state
+// (critical, off-critical, paused-critical, unknown) is broken (ADR-009 §2).
+func TestIsHealthyVMState(t *testing.T) {
+	for _, s := range []string{"running", "stopped", "off", "paused", "saved", "absent", "Running", "Off"} {
+		assert.True(t, isHealthyVMState(s), "%q must be classified healthy", s)
+	}
+	for _, s := range []string{"critical", "off-critical", "paused-critical", "Critical", "starting-critical", "weird"} {
+		assert.False(t, isHealthyVMState(s), "%q must be classified broken", s)
+	}
+}
+
 // TestProvisionState_Values verifies the ProvisionState string enum values are
 // stable and serialise to the expected strings.
 func TestProvisionState_Values(t *testing.T) {
