@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 var (
@@ -480,6 +481,23 @@ const psSetVMProcessor = `Set-VMProcessor -VMName $Name -Count $CPU`
 // Set-VMMemory is not a standard Hyper-V cmdlet; Set-VM with MemoryStartupBytes is used instead.
 const psSetVMMemory = `Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)`
 
+// isHealthyVMState reports whether a getVM-normalised state string represents a
+// healthy, operable VM. getVM maps the Hyper-V "Running" → "running" and "Off" →
+// "stopped"; every other Hyper-V State (e.g. "Critical", "Off-Critical",
+// "Paused-Critical") is lower-cased verbatim. Per ADR-009 §2 the existence-gating
+// degraded surface treats any state that is neither running nor stopped (nor the
+// synthetic "absent") as broken. "off" and "paused"/"saved" are accepted as
+// non-broken benign power states; only states carrying a "-critical"/"critical"
+// (or otherwise unrecognised) health signal mark the VM degraded.
+func isHealthyVMState(state string) bool {
+	switch strings.ToLower(state) {
+	case "running", "stopped", "off", "paused", "saved", "absent":
+		return true
+	default:
+		return false
+	}
+}
+
 // getVM returns the current state of a VM on the host, queried by its exact name.
 //
 // Contract (matches the directory/file modules):
@@ -686,42 +704,30 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		return err
 	}
 
+	// Existence-gating safety invariant (ADR-009 §2): source provisioning is
+	// existence-gated, never health-gated. When a source block is declared, the
+	// create/destroy decision is made HERE — before any plain-lifecycle apply —
+	// so that an existing VM can never be auto-destroyed or recreated by default,
+	// regardless of its health. The decision tree:
+	//
+	//   1. VM absent, own incomplete provisioning record → surface-and-wait.
+	//   2. VM absent, no in-progress record               → provision (create).
+	//   3. VM exists, on_existing == recreate             → removeVM + provision.
+	//   4. VM exists, broken state, on_existing != recreate → degraded surface.
+	//   5. VM exists, healthy, on_existing != recreate    → source inert;
+	//                                                        drive finalize +
+	//                                                        plain lifecycle.
+	if cfg.Source != nil {
+		return m.applySourceGated(ctx, vmName, hostName, cfg, &currentVM, vmExists, state)
+	}
+
 	if vmExists {
-		// Create-from-source convergence (ADR-009 §6/§8): when the VM already
-		// exists and carries a source block, drive the installing → finalizing
-		// transition (detect install completion + detach the seed VHDX). The
-		// host-side module never advances to ready — that is controller-side
-		// (#2050). finalizeProvision is a no-op unless the record is at installing
-		// and the conservative settle conditions are met.
-		if cfg.Source != nil {
-			if err := m.finalizeProvision(ctx, vmName, hostName, cfg); err != nil {
-				return err
-			}
-		}
 		return m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state)
 	}
 
-	// VM does not exist — create it.
+	// VM does not exist — create it (plain lifecycle, no source block).
 	if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
 		return err
-	}
-
-	// Create-from-source (ADR-009): when a source block is declared, build and
-	// attach the seed VHDX, attach the install ISO, advance the provisioning
-	// record, and power on. The seed/ISO attach + power-on happens INSIDE
-	// provisionVM so the provisioning record reflects each step; the plain
-	// lifecycle start below is skipped for the source path.
-	if cfg.Source != nil {
-		if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
-			return err
-		}
-		// Write-through: update cache on success
-		cfgCopy := *cfg
-		cfgCopy.Name = vmName
-		m.vmsMu.Lock()
-		m.vms[vmName] = cfgCopy
-		m.vmsMu.Unlock()
-		return nil
 	}
 
 	if state == "running" {
@@ -738,6 +744,111 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	m.vmsMu.Unlock()
 
 	return nil
+}
+
+// applySourceGated enforces the ADR-009 §2 existence-gating safety invariant for
+// a hyperv.vm resource that declares a source block. It is the SINGLE place that
+// decides whether source provisioning creates, resumes, recreates, or stands
+// inert — so that an existing VM is NEVER auto-destroyed or recreated under the
+// default (on_existing: never / absent) regardless of its health.
+//
+// Decision tree (mirrors ADR-009 §2 and the story #2048 implementation notes):
+//
+//	VM absent + own incomplete record  → surface-and-wait (no New-VM, no retry).
+//	VM absent + no in-progress record  → createVM + provisionVM (normal create).
+//	VM exists + on_existing==recreate  → removeVM, reset record, then provision.
+//	VM exists + broken state           → degraded record; never destroyed.
+//	VM exists + healthy                → source inert; finalize + plain lifecycle.
+func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName string, cfg *VMConfig, currentVM *VMConfig, vmExists bool, state string) error {
+	onExisting := cfg.Source.OnExisting // "" is treated as "never"
+
+	if !vmExists {
+		// The VM is absent on the host. Distinguish our OWN incomplete
+		// provisioning attempt (a record at creating/installing/finalizing —
+		// provably holds no operator workload, safe to resume) from a fresh
+		// create. Auto-retry of an own-incomplete attempt is OFF by default
+		// (surface-and-wait, ADR-009 §2): the install may simply be mid-flight
+		// and a half-built VM transiently absent from Get-VM. We do NOT re-issue
+		// New-VM — that is what protects against thrashing an in-progress build.
+		if m.isOwnIncompleteAttempt(ctx, vmName) {
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: in-progress provisioning attempt; surface-and-wait (no auto-retry)",
+					"vm_name", logging.SanitizeLogValue(vmName))
+			}
+			return nil
+		}
+		// No in-progress record → normal create-from-source path.
+		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
+			return err
+		}
+		if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
+			return err
+		}
+		cfgCopy := *cfg
+		cfgCopy.Name = vmName
+		m.vmsMu.Lock()
+		m.vms[vmName] = cfgCopy
+		m.vmsMu.Unlock()
+		return nil
+	}
+
+	// ── The VM EXISTS on the host. ──────────────────────────────────────────
+	// Existence-gating: existence alone makes source inert by default. The ONLY
+	// path that may destroy an existing VM is the explicit on_existing: recreate
+	// opt-in. Health/bootability is NEVER the trigger — a broken VM is surfaced
+	// as degraded, not rebuilt.
+	if onExisting == "recreate" {
+		// Explicit destructive opt-in. Tear the existing VM down, reset any
+		// provisioning record so the create path starts clean (absent), then
+		// provision from source.
+		if err := m.removeVM(ctx, vmName); err != nil {
+			return err
+		}
+		if m.provisionStore != nil {
+			if err := m.provisionStore.DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
+				return err
+			}
+		}
+		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
+			return err
+		}
+		if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
+			return err
+		}
+		cfgCopy := *cfg
+		cfgCopy.Name = vmName
+		m.vmsMu.Lock()
+		m.vms[vmName] = cfgCopy
+		m.vmsMu.Unlock()
+		return nil
+	}
+
+	// on_existing is never (or empty). The VM is never destroyed.
+	if !isHealthyVMState(currentVM.State) {
+		// Existing-but-broken VM → surface as degraded (ADR-009 §2). Never
+		// delete-and-rebuild. The record records the observed state so the
+		// operator (and the controller-side reconciler) can see it.
+		record, err := m.loadOrInitProvision(ctx, vmName)
+		if err != nil {
+			return err
+		}
+		return m.degradeProvision(ctx, vmName, record, currentVM.State)
+	}
+
+	// Existing healthy VM → source is inert. Log the inert decision, then drive
+	// the create-from-source convergence (installing → finalizing detach, a
+	// no-op unless an own record is at installing and settle conditions hold)
+	// and the plain lifecycle (power/resize/NIC) so an already-provisioned VM
+	// still converges to its declared running/stopped state without provisioning.
+	if logger, ok := m.GetLogger(); ok {
+		logger.Warn("hyperv: VM exists; source is inert (on_existing: never)",
+			"vm_name", logging.SanitizeLogValue(vmName),
+			"observed_state", logging.SanitizeLogValue(currentVM.State))
+	}
+	if err := m.finalizeProvision(ctx, vmName, hostName, cfg); err != nil {
+		return err
+	}
+	return m.applyVMState(ctx, vmName, hostName, cfg, currentVM, state)
 }
 
 // createVM issues New-VM with the desired generation and connects every

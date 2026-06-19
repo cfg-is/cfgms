@@ -175,6 +175,62 @@ func (m *hypervModule) failProvision(ctx context.Context, vmName string, record 
 	return cause
 }
 
+// isOwnIncompleteAttempt reports whether a provisioning record exists for vmName
+// in a non-terminal, host-side-in-progress state — i.e. one of {creating,
+// installing, finalizing}. Such a record proves the VM (or a half-built VM under
+// the same name) is the module's own incomplete provisioning attempt rather than
+// a pre-existing operator workload, which the existence-gating safety invariant
+// (ADR-009 §2) treats differently: an own-incomplete attempt is surfaced-and-
+// waited-on (never auto-destroyed), while a real existing VM is left untouched.
+//
+// A missing record, or a record in a terminal state (absent/ready/failed/
+// degraded), returns false. A store read error is treated as "no in-progress
+// attempt" (false) — the caller's downstream gating is conservative regardless.
+func (m *hypervModule) isOwnIncompleteAttempt(ctx context.Context, vmName string) bool {
+	if m.provisionStore == nil {
+		return false
+	}
+	record, err := m.provisionStore.GetProvision(ctx, vmName)
+	if err != nil || record == nil {
+		return false
+	}
+	switch record.State {
+	case ProvisionStateCreating, ProvisionStateInstalling, ProvisionStateFinalizing:
+		return true
+	default:
+		return false
+	}
+}
+
+// degradeProvision records that a VM which already exists on the host is in a
+// broken/unhealthy state (ADR-009 §2 degraded surface). It writes a
+// ProvisionRecord at state=degraded with LastError describing the observed
+// Hyper-V state, persists it, and emits a structured log event. It is the
+// non-destructive surface for an existing-but-broken VM: the module NEVER
+// delete-and-rebuilds — degradation is observed and reported, not remediated.
+// observedState is the raw VM power/health state string and is sanitised before
+// it reaches any log field.
+func (m *hypervModule) degradeProvision(ctx context.Context, vmName string, record *ProvisionRecord, observedState string) error {
+	if m.provisionStore == nil {
+		m.provisionStore = NewMemProvisionStore()
+	}
+	prev := record.State
+	record.State = ProvisionStateDegraded
+	record.UpdatedAt = time.Now().UTC()
+	record.LastError = "hyperv: VM in broken state: " + observedState
+	if err := m.provisionStore.SetProvision(ctx, record); err != nil {
+		return err
+	}
+	if logger, ok := m.GetLogger(); ok {
+		logger.Warn("hyperv: existing VM is in a broken state; surfaced as degraded (not torn down)",
+			"vm_name", logging.SanitizeLogValue(vmName),
+			"from_state", string(prev),
+			"observed_state", logging.SanitizeLogValue(observedState),
+			"correlation_id", logging.SanitizeLogValue(record.CorrelationID))
+	}
+	return nil
+}
+
 // ListProvisions returns snapshot copies of all provisioning records. Used by
 // the controller-side completion reconciler (#2050) to match a registered
 // steward to a provisioning VM via CorrelationID.
