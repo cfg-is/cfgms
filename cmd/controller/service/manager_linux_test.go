@@ -143,3 +143,14 @@ func TestSystemdUnitFilePermissions(t *testing.T) {
 	// 0600: owner rw (root only); systemd reads as root, group read is unnecessary
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
+
+// TestLinuxManagerStageBinaryAndRestart_SourceNotFound verifies that
+// StageBinaryAndRestart fails fast at the copy step when the source binary
+// does not exist.
+func TestLinuxManagerStageBinaryAndRestart_SourceNotFound(t *testing.T) {
+	m := New("/usr/bin/cfgms-controller")
+	err := m.StageBinaryAndRestart("/nonexistent/ghost-binary", "/etc/cfgms/controller.cfg")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage binary",
+		"error must indicate failure in the copy/stage step")
+}
