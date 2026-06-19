@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 var (
@@ -65,6 +66,13 @@ type hypervModule struct {
 	// in-memory store via New(); tests inject an alternative with
 	// WithProvisionStore.
 	provisionStore ProvisionStore
+
+	// profileStore loads unattended-install profiles referenced as
+	// profile://<name> in a VM source (ADR-009 §7). It is wired from the
+	// controller's stored-config backend in Configure() when a "config_store"
+	// is supplied, or injected directly in tests via WithProfileStore. It may
+	// be nil when no config store is available; callers must handle that.
+	profileStore ProfileStore
 }
 
 // HypervOption configures a hypervModule at construction time.
@@ -76,6 +84,17 @@ func WithProvisionStore(s ProvisionStore) HypervOption {
 	return func(m *hypervModule) {
 		if s != nil {
 			m.provisionStore = s
+		}
+	}
+}
+
+// WithProfileStore overrides the ProfileStore wired from the config store.
+// Tests inject a memProfileStore (or another ProfileStore) to supply profiles
+// without a stored-config backend. A nil store is ignored.
+func WithProfileStore(s ProfileStore) HypervOption {
+	return func(m *hypervModule) {
+		if s != nil {
+			m.profileStore = s
 		}
 	}
 }
@@ -173,6 +192,17 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 
 	m.tenantID, _ = configMap["tenant_id"].(string)
 	m.auditMgr, _ = configMap["audit_manager"].(*audit.Manager)
+
+	// Wire the stored-config-backed profile store when a config store is
+	// supplied (same injection pattern as audit_manager). Operators define
+	// unattended-install profiles in the controller's stored-config backend and
+	// reference them as profile://<name>; this makes them loadable without code
+	// changes (ADR-009 §7). When no config store is provided, profileStore stays
+	// as set by WithProfileStore (nil in production without a backend).
+	if configStore, ok := configMap["config_store"].(cfgconfig.ConfigStore); ok && configStore != nil {
+		m.profileStore = &ConfigBackedProfileStore{store: configStore, tenantID: m.tenantID}
+	}
+
 	stewardID, _ := configMap["steward_id"].(string)
 	if stewardID == "" {
 		stewardID = m.tenantID + "/hyperv"
