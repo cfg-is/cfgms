@@ -47,22 +47,25 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 		status = business.StewardStatusRegistered
 	}
 
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO stewards
-			(id, hostname, platform, arch, version, ip_address, status,
-			 registered_at, last_seen, last_heartbeat_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		record.ID,
-		record.Hostname,
-		record.Platform,
-		record.Arch,
-		record.Version,
-		record.IPAddress,
-		string(status),
-		formatTime(now),
-		formatTime(now),
-		"", // last_heartbeat_at empty until first heartbeat
-	)
+	err := retryOnBusy(ctx, func() error {
+		_, e := s.db.ExecContext(ctx, `
+			INSERT INTO stewards
+				(id, hostname, platform, arch, version, ip_address, status,
+				 registered_at, last_seen, last_heartbeat_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			record.ID,
+			record.Hostname,
+			record.Platform,
+			record.Arch,
+			record.Version,
+			record.IPAddress,
+			string(status),
+			formatTime(now),
+			formatTime(now),
+			"", // last_heartbeat_at empty until first heartbeat
+		)
+		return e
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return business.ErrStewardAlreadyExists
@@ -75,10 +78,15 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 // UpdateHeartbeat records a heartbeat, updating last_heartbeat_at and last_seen.
 func (s *SQLiteStewardStore) UpdateHeartbeat(ctx context.Context, stewardID string) error {
 	now := formatTime(nowUTC())
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE stewards SET last_heartbeat_at = ?, last_seen = ? WHERE id = ?`,
-		now, now, stewardID,
-	)
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET last_heartbeat_at = ?, last_seen = ? WHERE id = ?`,
+			now, now, stewardID,
+		)
+		return e
+	})
 	if err != nil {
 		return fmt.Errorf("sqlite: failed to update heartbeat for steward %s: %w", stewardID, err)
 	}
@@ -128,10 +136,15 @@ func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status bu
 
 // UpdateStewardStatus updates the lifecycle status of the given steward and bumps last_seen.
 func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE stewards SET status = ?, last_seen = ? WHERE id = ?`,
-		string(status), formatTime(nowUTC()), stewardID,
-	)
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET status = ?, last_seen = ? WHERE id = ?`,
+			string(status), formatTime(nowUTC()), stewardID,
+		)
+		return e
+	})
 	if err != nil {
 		return fmt.Errorf("sqlite: failed to update steward status %s: %w", stewardID, err)
 	}
