@@ -58,7 +58,28 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
 			" -CPU " + intArg(psArgs, "CPU") +
 			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
+			" -Generation " + intArg(psArgs, "Generation"))
+	case psNewSeedVHD:
+		return emit("Cfgms-NewSeedVHD -Path " + quoteArg(psArgs, "Path") +
+			" -SizeBytes " + intArg(psArgs, "SizeBytes"))
+	case psMountSeedVHD:
+		return emit("Cfgms-MountSeedVHD -Path " + quoteArg(psArgs, "Path"))
+	case psCopyToSeedVHD:
+		return emit("Cfgms-CopyToSeedVHD -SeedPath " + quoteArg(psArgs, "SeedPath") +
+			" -FileName " + quoteArg(psArgs, "FileName") +
+			" -Content " + quoteArg(psArgs, "Content"))
+	case psDetachSeedVHD:
+		return emit("Cfgms-DetachSeedVHD -Path " + quoteArg(psArgs, "Path"))
+	case psAttachSeedDisk:
+		return emit("Cfgms-AttachSeedDisk -Name " + quoteArg(psArgs, "Name") +
+			" -SeedPath " + quoteArg(psArgs, "SeedPath"))
+	case psAttachDVD:
+		return emit("Cfgms-AttachDVD -Name " + quoteArg(psArgs, "Name") +
+			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
+	case psSetVMFirmware:
+		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
+			" -Template " + quoteArg(psArgs, "Template"))
 	case psRemoveVM:
 		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -136,8 +157,62 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"CPU":        "4",
 				"VHDPath":    "C:\\VMs\\web-01.vhdx",
 				"SwitchName": "External",
+				"Generation": "2",
 			},
-			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External'",
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External' -Generation 2",
+		},
+		{
+			name:      "New-VM Gen1",
+			psCommand: psCreateVM,
+			psArgs: map[string]string{
+				"Name":       "cfgms-t__web-01",
+				"MemoryMB":   "2048",
+				"CPU":        "2",
+				"VHDPath":    "C:\\VMs\\web-01.vhdx",
+				"SwitchName": "External",
+				"Generation": "1",
+			},
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 2048 -CPU 2 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External' -Generation 1",
+		},
+		{
+			name:      "New-VHD seed",
+			psCommand: psNewSeedVHD,
+			psArgs:    map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "SizeBytes": "67108864"},
+			want:      "Cfgms-NewSeedVHD -Path 'C:\\VMs\\cfgms-seed-web-01.vhdx' -SizeBytes 67108864",
+		},
+		{
+			name:      "Mount-VHD seed",
+			psCommand: psMountSeedVHD,
+			psArgs:    map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"},
+			want:      "Cfgms-MountSeedVHD -Path 'C:\\VMs\\cfgms-seed-web-01.vhdx'",
+		},
+		{
+			name:      "Copy seed answer file",
+			psCommand: psCopyToSeedVHD,
+			psArgs: map[string]string{
+				"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx",
+				"FileName": "autounattend.xml",
+				"Content":  "<!-- placeholder autounattend -->",
+			},
+			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->'",
+		},
+		{
+			name:      "Attach seed disk",
+			psCommand: psAttachSeedDisk,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"},
+			want:      "Cfgms-AttachSeedDisk -Name 'cfgms-t__web-01' -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx'",
+		},
+		{
+			name:      "Attach install ISO DVD",
+			psCommand: psAttachDVD,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"},
+			want:      "Cfgms-AttachDVD -Name 'cfgms-t__web-01' -ISOPath 'C:\\ISO\\server.iso'",
+		},
+		{
+			name:      "Set firmware secure-boot template",
+			psCommand: psSetVMFirmware,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"},
+			want:      "Cfgms-SetVMFirmware -Name 'cfgms-t__web-01' -Template 'MicrosoftWindows'",
 		},
 		{
 			name:      "Set-VMProcessor",
@@ -253,7 +328,7 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 	}{
 		// VM verbs (vm.go)
 		{"psGetVM", psGetVM, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw"}},
+		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw", "Generation": "2"}},
 		{"psRemoveVM", psRemoveVM, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psStartVM", psStartVM, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psStopVM", psStopVM, map[string]string{"Name": "cfgms-t__web-01"}},
@@ -261,6 +336,14 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psSetVMMemory", psSetVMMemory, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048"}},
 		{"psConnectVMNic", psConnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
 		{"psDisconnectVMNic", psDisconnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
+		// VM provisioning verbs (#2044)
+		{"psNewSeedVHD", psNewSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "SizeBytes": "67108864"}},
+		{"psMountSeedVHD", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psCopyToSeedVHD", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "FileName": "preseed.cfg", "Content": "# placeholder preseed"}},
+		{"psDetachSeedVHD", psDetachSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
+		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},

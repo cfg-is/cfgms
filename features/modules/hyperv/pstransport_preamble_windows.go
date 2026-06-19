@@ -83,6 +83,12 @@ function Cfgms-CreateVM {
         [Parameter(Mandatory)][int]$CPU,
         [Parameter(Mandatory)][string]$VHDPath,
         [Parameter(Mandatory)][string]$SwitchName,
+        # Generation is a typed parameter (ADR-009 §5 supports Gen1 AND Gen2 —
+        # the host-native seed VHDX boots on both, no floppy). The Go dispatcher
+        # always passes -Generation (defaulting to 2 when the config omits it),
+        # so it is mandatory here; a missing value is a dispatcher bug, not a
+        # silent default.
+        [Parameter(Mandatory)][int]$Generation,
         # Optional — defaults to a 64 GB dynamic VHD. The schema currently
         # doesn't expose vhd_size_gb so the Go dispatcher never passes one;
         # 64 GB matches the Hyper-V Manager default and is fine for any test
@@ -93,7 +99,7 @@ function Cfgms-CreateVM {
     # New-VM does NOT accept -ProcessorCount (real PS pitfall — surfaced by
     # PR #1912 live B1 bucket). Create with default 1 vCPU, then resize via
     # Set-VMProcessor only when the operator asked for something different.
-    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes ($VHDSizeGB * 1GB) -SwitchName $SwitchName -Generation 2 | Out-Null
+    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes ($VHDSizeGB * 1GB) -SwitchName $SwitchName -Generation $Generation | Out-Null
     if ($CPU -ne 1) {
         Set-VMProcessor -VMName $Name -Count $CPU
     }
@@ -148,6 +154,82 @@ function Cfgms-DisconnectVMNic {
         Where-Object { $_.SwitchName -eq $SwitchName } |
         Select-Object -First 1
     if ($a) { Remove-VMNetworkAdapter -VMNetworkAdapter $a }
+}
+
+# ── VM provisioning: seed VHDX + media attach + firmware (ADR-009 §5) ──
+# Host-native seed disk (NOT an ISO — oscdimg/ADK is absent on a stock
+# Hyper-V host; New-VHD/Mount-VHD/Format-Volume ship with the Hyper-V +
+# Storage roles the host already runs). Each function wraps a single logical
+# host-atomic step; all user-controlled values travel via parameters.
+
+# Cfgms-NewSeedVHD creates an empty dynamic VHDX for the answer-file seed.
+function Cfgms-NewSeedVHD {
+    param([Parameter(Mandatory)][string]$Path, [int]$SizeBytes = 67108864)
+    New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null
+}
+
+# Cfgms-MountSeedVHD mounts the seed VHDX and lays down a single FAT32
+# volume labelled CFGMS_SEED. Windows Setup and debian-installer both
+# auto-discover their answer file from a removable/labelled volume. This is
+# a single host-atomic "make the seed a usable filesystem" step — the
+# pipeline cannot be decomposed into Go without holding the mounted-disk
+# handle across calls, so it intentionally chains more than one cmdlet
+# (same exception class as Cfgms-RemoveVM / Cfgms-GetVM).
+function Cfgms-MountSeedVHD {
+    param([Parameter(Mandatory)][string]$Path)
+    Mount-VHD -Path $Path -Passthru |
+        Initialize-Disk -PartitionStyle MBR -PassThru |
+        New-Partition -UseMaximumSize -AssignDriveLetter |
+        Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null
+}
+
+# Cfgms-CopyToSeedVHD writes the answer file to the root of the seed volume.
+# It mounts the VHDX, resolves the drive letter of the CFGMS_SEED volume,
+# writes $Content to <drive>:\$FileName, then dismounts. $Content and
+# $FileName travel via ArgumentList — never interpolated into script text.
+function Cfgms-CopyToSeedVHD {
+    param(
+        [Parameter(Mandatory)][string]$SeedPath,
+        [Parameter(Mandatory)][string]$FileName,
+        [Parameter(Mandatory)][string]$Content
+    )
+    $disk = Mount-VHD -Path $SeedPath -Passthru
+    $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
+        Where-Object { $_.FileSystemLabel -eq 'CFGMS_SEED' } |
+        Select-Object -First 1).DriveLetter
+    Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
+    Dismount-VHD -Path $SeedPath
+}
+
+# Cfgms-DetachSeedVHD dismounts the seed VHDX from the host (called at
+# finalizing — not in this story's create path). Idempotent on an already
+# dismounted disk via -ErrorAction.
+function Cfgms-DetachSeedVHD {
+    param([Parameter(Mandatory)][string]$Path)
+    Dismount-VHD -Path $Path -ErrorAction SilentlyContinue
+}
+
+# Cfgms-AttachSeedDisk attaches the seed VHDX to the VM as a secondary hard
+# disk. $SeedPath travels via ArgumentList.
+function Cfgms-AttachSeedDisk {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SeedPath)
+    Add-VMHardDiskDrive -VMName $Name -Path $SeedPath
+}
+
+# Cfgms-AttachDVD attaches the install ISO (host path) to the VM as a DVD
+# drive. The ISO is never repacked or re-signed (ADR-009 §5). $ISOPath
+# travels via ArgumentList.
+function Cfgms-AttachDVD {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$ISOPath)
+    Add-VMDvdDrive -VMName $Name -Path $ISOPath
+}
+
+# Cfgms-SetVMFirmware selects the Gen2 secure-boot template by os_family
+# (MicrosoftWindows vs MicrosoftUEFICertificateAuthority). Gen1 VMs have no
+# UEFI/secure boot and never call this. $Template travels via ArgumentList.
+function Cfgms-SetVMFirmware {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Template)
+    Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template
 }
 
 # ── VSwitch read + lifecycle ──────────────────────────────────────────

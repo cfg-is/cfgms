@@ -44,7 +44,8 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 				" -MemoryMB "+intArg(psArgs, "MemoryMB")+
 				" -CPU "+intArg(psArgs, "CPU")+
 				" -VHDPath "+quoteArg(psArgs, "VHDPath")+
-				" -SwitchName "+quoteArg(psArgs, "SwitchName"))
+				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
+				" -Generation "+intArg(psArgs, "Generation"))
 	case psRemoveVM:
 		return t.run(ctx, "Cfgms-RemoveVM -Name "+quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -59,6 +60,33 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx,
 			"Cfgms-SetVMMemory -Name "+quoteArg(psArgs, "Name")+
 				" -MemoryMB "+intArg(psArgs, "MemoryMB"))
+
+	// ── VM provisioning: seed VHDX + media attach + firmware (#2044) ──
+	case psNewSeedVHD:
+		return t.run(ctx,
+			"Cfgms-NewSeedVHD -Path "+quoteArg(psArgs, "Path")+
+				" -SizeBytes "+intArg(psArgs, "SizeBytes"))
+	case psMountSeedVHD:
+		return t.run(ctx, "Cfgms-MountSeedVHD -Path "+quoteArg(psArgs, "Path"))
+	case psCopyToSeedVHD:
+		return t.run(ctx,
+			"Cfgms-CopyToSeedVHD -SeedPath "+quoteArg(psArgs, "SeedPath")+
+				" -FileName "+quoteArg(psArgs, "FileName")+
+				" -Content "+quoteArg(psArgs, "Content"))
+	case psDetachSeedVHD:
+		return t.run(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
+	case psAttachSeedDisk:
+		return t.run(ctx,
+			"Cfgms-AttachSeedDisk -Name "+quoteArg(psArgs, "Name")+
+				" -SeedPath "+quoteArg(psArgs, "SeedPath"))
+	case psAttachDVD:
+		return t.run(ctx,
+			"Cfgms-AttachDVD -Name "+quoteArg(psArgs, "Name")+
+				" -ISOPath "+quoteArg(psArgs, "ISOPath"))
+	case psSetVMFirmware:
+		return t.run(ctx,
+			"Cfgms-SetVMFirmware -Name "+quoteArg(psArgs, "Name")+
+				" -Template "+quoteArg(psArgs, "Template"))
 
 	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
 	case psConnectVMNic:
