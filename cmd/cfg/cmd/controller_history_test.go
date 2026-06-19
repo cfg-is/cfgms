@@ -137,4 +137,3 @@ func TestRunControllerUpgradeHistory_MissingFile_NoError(t *testing.T) {
 	err := runControllerUpgradeHistory(nil, nil)
 	require.NoError(t, err, "missing history file must not return an error — fresh install path")
 }
-
