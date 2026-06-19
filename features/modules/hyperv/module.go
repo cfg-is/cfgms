@@ -90,7 +90,7 @@ func New(detector HypervDetector, opts ...HypervOption) modules.Module {
 		vms:            make(map[string]VMConfig),
 		vswitches:      make(map[string]VSwitchConfig),
 		detector:       detector,
-		provisionStore: newMemProvisionStore(),
+		provisionStore: NewMemProvisionStore(),
 	}
 	for _, opt := range opts {
 		opt(m)
