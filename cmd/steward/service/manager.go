@@ -52,18 +52,6 @@ type Manager interface {
 	IsElevated() bool
 }
 
-// HyperVInstaller is satisfied by platform-specific Manager implementations that
-// support WinRM + Hyper-V service-account provisioning. On platforms that do not
-// support this (Linux, macOS) the Manager returned by New() will not satisfy this
-// interface — callers type-assert and return a clear "not supported" error.
-type HyperVInstaller interface {
-	// InstallHyperV extends the base install with WinRM HTTPS listener binding,
-	// loopback firewall rules, local service account creation, and credential
-	// pre-population. winrmPass must never be empty; callers are responsible for
-	// generating or reading it from stdin before calling this method.
-	InstallHyperV(token, caCertPEM, expectedFingerprint, winrmUser, winrmPass string) error
-}
-
 // New returns the platform-specific Manager for the current OS.
 // binaryPath should be the path returned by os.Executable().
 func New(binaryPath string) Manager {
