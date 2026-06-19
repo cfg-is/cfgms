@@ -56,8 +56,9 @@ type Layout struct {
 // falls back to the deprecated single-line pointer files (current.txt /
 // previous.txt).
 type pointerState struct {
-	Current  string `json:"current"`
-	Previous string `json:"previous,omitempty"`
+	Current             string `json:"current"`
+	Previous            string `json:"previous,omitempty"`
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 }
 
 // StatePath returns the path of the single JSON document that records
@@ -245,7 +246,11 @@ func (l Layout) Rollback() (string, error) {
 	if ps.Previous == "" {
 		return "", errors.New("launcher: no previous version recorded — nothing to roll back to")
 	}
-	newPS := pointerState{Current: ps.Previous, Previous: ps.Current}
+	newPS := pointerState{
+		Current:             ps.Previous,
+		Previous:            ps.Current,
+		ConsecutiveFailures: ps.ConsecutiveFailures, // preserve counter across rollback
+	}
 	if err := l.saveState(newPS); err != nil {
 		return "", err
 	}

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,16 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/version"
 )
+
+// fakeClock is an injectable clock for lifecycle tests that need to control
+// whether a child "passed" its startup window without real time delays.
+type fakeClock struct {
+	now         time.Time
+	sinceResult time.Duration
+}
+
+func (f *fakeClock) Now() time.Time                { return f.now }
+func (f *fakeClock) Since(time.Time) time.Duration { return f.sinceResult }
 
 // TestHelperProcess is the canonical Go pattern for testing exec.Cmd-based
 // code without shipping separate fake binaries. The launcher test re-exec's
@@ -532,5 +543,279 @@ func TestExecOnce_SetsLauncherManagedEnvOnChild(t *testing.T) {
 	if string(got) != "1" {
 		t.Errorf("child saw %s=%q, want \"1\" — execOnce must mark the steward child as launcher-managed (#2003)",
 			version.EnvStewardLauncherManaged, string(got))
+	}
+}
+
+// waitForFile polls for path to exist, returning true when it does or false
+// if deadline passes.
+func waitForFile(path string, deadline time.Duration) bool {
+	expire := time.Now().Add(deadline)
+	for time.Now().Before(expire) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter verifies that when
+// a child fails its startup window and the launcher auto-rolls-back, the
+// upgrade-rolled-back flag file is written with the rolled-back-to version and
+// consecutive_failures in state.json is exactly 1 (AC2 postcondition: one
+// failure+rollback → counter is 1).
+//
+// Only v2's binary is installed. After v2 fails and the launcher rolls back to
+// v1, the supervisor finds no v1 binary and returns an error before a second
+// increment can fire — so consecutive_failures stays at 1.
+func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
+	l := newLayout(t)
+	certStoreDir := t.TempDir()
+
+	// Install v2 only; v1 directory is intentionally absent so the supervisor
+	// returns early (missing binary) after the rollback, before a second failure
+	// can increment the counter.
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	// State: current=v2, previous=v1.
+
+	// v2 fails immediately (non-zero exit, sinceResult=0 < StartupWindow).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		CertStoreDir:      certStoreDir,
+		clock:             &fakeClock{sinceResult: 0}, // always < StartupWindow → failedStartup
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	if err := runSupervisor(t, s, 10*time.Second); err == nil {
+		t.Fatal("Supervise should return error when v2 fails and v1 binary is absent")
+	}
+
+	// upgrade-rolled-back must exist and contain v1 (the version rolled back TO).
+	flagPath := filepath.Join(certStoreDir, "upgrade-rolled-back")
+	data, rdErr := os.ReadFile(flagPath) //nolint:gosec // test temp path
+	if rdErr != nil {
+		t.Fatalf("upgrade-rolled-back flag file not written: %v", rdErr)
+	}
+	if got := strings.TrimSpace(string(data)); got != "v1" {
+		t.Errorf("upgrade-rolled-back = %q, want v1 (the rollback target)", got)
+	}
+
+	// consecutive_failures == 1: v2 failed once; v1 binary was absent so the
+	// supervisor returned before a second increment could fire (AC2 postcondition).
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState after rollback: %v", loadErr)
+	}
+	if ps.ConsecutiveFailures != 1 {
+		t.Errorf("consecutive_failures = %d, want 1 (one failure+rollback)", ps.ConsecutiveFailures)
+	}
+}
+
+// TestSupervise_CleanStartup_WritesFlagAndPrunesVersions verifies that after a
+// child exits cleanly past its StartupWindow:
+//   - upgrade-committed is written with the current version name.
+//   - consecutive_failures in state.json is reset to 0.
+//   - version directories beyond MaxVersions (past quarantine window) are pruned.
+//   - the active version directory is NOT deleted.
+func TestSupervise_CleanStartup_WritesFlagAndPrunesVersions(t *testing.T) {
+	l := newLayout(t)
+	certStoreDir := t.TempDir()
+
+	// Install v1–v4 and stage v4 as current.
+	for _, v := range []string{"v1", "v2", "v3", "v4"} {
+		installFakeSteward(t, l, v)
+	}
+	for _, v := range []string{"v1", "v2", "v3", "v4"} {
+		if err := l.WriteCurrent(v); err != nil {
+			t.Fatalf("WriteCurrent %s: %v", v, err)
+		}
+	}
+	// State: current=v4, previous=v3; v1,v2 are in versions/ but not in pointer state.
+
+	// Pre-seed a non-zero failure counter to prove it gets reset.
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState before pre-seed: %v", loadErr)
+	}
+	ps.ConsecutiveFailures = 7
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	// Set mod times so v1 is oldest, all past quarantine (QuarantineWindow=0).
+	now := time.Now()
+	for i, v := range []string{"v1", "v2", "v3", "v4"} {
+		vDir := filepath.Join(l.VersionsDir(), v)
+		mt := now.Add(-time.Duration(4-i) * time.Hour)
+		if err := os.Chtimes(vDir, mt, mt); err != nil {
+			t.Fatalf("chtimes %s: %v", v, err)
+		}
+	}
+
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "0",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	s := &Supervisor{
+		Layout:        l,
+		StartupWindow: 50 * time.Millisecond,
+		CertStoreDir:  certStoreDir,
+		RetentionPolicy: RetentionPolicy{
+			QuarantineWindow: 0, // no quarantine: all non-active are candidates
+			MaxVersions:      1, // keep 1 non-active → prune v1 and v2
+			MaxBytes:         0,
+		},
+		MaxRollbackCycles: 0,
+		clock:             &fakeClock{sinceResult: time.Minute}, // > StartupWindow → clean
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// The flag file is written last in the clean-startup branch, so when it
+	// exists, counter reset and pruning are both complete.
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag file never appeared within 5s")
+	}
+	cancel()
+	<-done
+
+	// upgrade-committed must contain the current version (v4).
+	data, err := os.ReadFile(flagPath) //nolint:gosec // test temp path
+	if err != nil {
+		t.Fatalf("read upgrade-committed: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "v4" {
+		t.Errorf("upgrade-committed = %q, want v4", got)
+	}
+
+	// consecutive_failures must be reset to 0.
+	ps2, loadErr2 := l.loadState()
+	if loadErr2 != nil {
+		t.Fatalf("loadState after clean startup: %v", loadErr2)
+	}
+	if ps2.ConsecutiveFailures != 0 {
+		t.Errorf("consecutive_failures = %d, want 0", ps2.ConsecutiveFailures)
+	}
+
+	// MaxVersions=1: candidates=[v1,v2,v3] (v4 active), overflow=2 → v1,v2 pruned.
+	for _, pruned := range []string{"v1", "v2"} {
+		if _, err := os.Stat(filepath.Join(l.VersionsDir(), pruned)); err == nil {
+			t.Errorf("version %s should be pruned but dir still exists", pruned)
+		}
+	}
+	// Active version v4 must survive.
+	if _, err := os.Stat(filepath.Join(l.VersionsDir(), "v4")); err != nil {
+		t.Errorf("active version v4 must not be pruned: %v", err)
+	}
+	// v3 (newest non-active, kept within MaxVersions=1) must survive.
+	if _, err := os.Stat(filepath.Join(l.VersionsDir(), "v3")); err != nil {
+		t.Errorf("v3 (within MaxVersions=1) must not be pruned: %v", err)
+	}
+}
+
+// TestSupervise_ConsecutiveFailures_CountAndReset verifies that three
+// consecutive startup-window failures accumulate consecutive_failures=3 in
+// state.json (each write atomic via saveState), and that a subsequent clean
+// startup resets the counter to 0.
+func TestSupervise_ConsecutiveFailures_CountAndReset(t *testing.T) {
+	l := newLayout(t)
+
+	// Two versions that both fail: MaxRollbackCycles=2 causes three executions
+	// (v3 → rollback → v2 → rollback → v3 → no budget → error), each incrementing.
+	installFakeSteward(t, l, "v2")
+	installFakeSteward(t, l, "v3")
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	if err := l.WriteCurrent("v3"); err != nil {
+		t.Fatalf("WriteCurrent v3: %v", err)
+	}
+	// State: current=v3, previous=v2.
+
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	fc := &fakeClock{sinceResult: 0} // always failedStartup
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 2,
+		clock:             fc,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	// Phase 1: three executions → counter = 3.
+	if err := runSupervisor(t, s, 10*time.Second); err == nil {
+		t.Fatal("phase 1: Supervise should return error when all versions fail")
+	}
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState after phase 1: %v", loadErr)
+	}
+	if ps.ConsecutiveFailures != 3 {
+		t.Errorf("after 3 failures: consecutive_failures = %d, want 3", ps.ConsecutiveFailures)
+	}
+
+	// Phase 2: subsequent clean startup must reset counter to 0.
+	// The current version after the rollback loop is whatever the last state
+	// held. Change env to clean exit and use a clock that reports healthy duration.
+	t.Setenv("FAKE_STEWARD_EXIT_CODE", "0")
+	fc.sinceResult = time.Minute // > StartupWindow → clean startup
+
+	certStoreDir := t.TempDir()
+	s2 := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0,
+		CertStoreDir:      certStoreDir,
+		clock:             fc,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() { done2 <- s2.Supervise(ctx2) }()
+
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag file never appeared after clean startup")
+	}
+	cancel2()
+	<-done2
+
+	ps2, loadErr2 := l.loadState()
+	if loadErr2 != nil {
+		t.Fatalf("loadState after phase 2: %v", loadErr2)
+	}
+	if ps2.ConsecutiveFailures != 0 {
+		t.Errorf("after clean startup: consecutive_failures = %d, want 0", ps2.ConsecutiveFailures)
 	}
 }

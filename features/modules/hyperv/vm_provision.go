@@ -171,37 +171,6 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 	return string(rendered), nil
 }
 
-// renderSetupComplete renders the file-staged SetupComplete.cmd enrollment
-// fallback for a Windows guest. It is produced ONLY when the profile sets
-// enroll.use_setup_complete: true (ADR-009 §6); callers must check
-// profile.Enroll.UseSetupComplete before invoking. The rendered content carries
-// a single declared-path cfgms-steward enroll invocation — no runtime
-// composition. enrollToken is supplied pre-resolved by the caller.
-func (m *hypervModule) renderSetupComplete(ctx context.Context, vmName, correlationID, enrollToken string, profile *UnattendProfile) (string, error) {
-	store, ok := m.GetSecretStore()
-	if !ok {
-		return "", errSecretStoreRequired
-	}
-	scProfile := &UnattendProfile{
-		Name:         profile.Name,
-		OSFamily:     "windows",
-		AnswerFormat: AnswerFormatAutounattend,
-		Template:     setupCompleteTemplate,
-		Enroll:       profile.Enroll,
-	}
-	rendered, err := NewProfileRenderer().Render(ctx, scProfile, ProfileVars{
-		VMName:        vmName,
-		OSFamily:      "windows",
-		CorrelationID: correlationID,
-		EnrollToken:   enrollToken,
-		BundleURL:     profile.Enroll.BundleURL,
-	}, store)
-	if err != nil {
-		return "", err
-	}
-	return string(rendered), nil
-}
-
 // seedVHDPath derives the seed VHDX path from the VM's VHD path so the seed
 // lands in the same directory as the VM's primary disk:
 // <vhdDir>\cfgms-seed-<vmName>.vhdx. The parent directory is computed with
