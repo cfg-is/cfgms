@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -25,8 +26,26 @@ var (
 	// ErrInvalidVHDPath is returned when a VHD path is not a valid absolute Windows path.
 	ErrInvalidVHDPath = errors.New("hyperv: invalid VHD path: must be an absolute Windows path (e.g. C:\\VMs\\disk.vhdx)")
 
-	// ErrInvalidGeneration is returned when a VM generation other than 2 (or 0/unset) is specified.
-	ErrInvalidGeneration = errors.New("hyperv: invalid generation: must be 2 (or 0 to accept the default)")
+	// ErrInvalidGeneration is returned when a VM generation outside {1, 2} (or 0/unset) is specified.
+	ErrInvalidGeneration = errors.New("hyperv: invalid generation: must be 1 or 2 (or 0 to accept the default)")
+
+	// ErrInvalidSourceISO is returned when the source iso field is missing or not an absolute Windows path.
+	ErrInvalidSourceISO = errors.New("hyperv: invalid source iso: must be a non-empty absolute Windows path (e.g. C:\\ISO\\server.iso)")
+
+	// ErrInvalidSourceOSFamily is returned when source os_family is not linux or windows.
+	ErrInvalidSourceOSFamily = errors.New("hyperv: invalid source os_family: must be linux or windows")
+
+	// ErrInvalidSourceUnattend is returned when source unattend does not start with profile://.
+	ErrInvalidSourceUnattend = errors.New("hyperv: invalid source unattend: must start with profile://")
+
+	// ErrInvalidSourceCompletionMode is returned when source completion.mode is not steward-registration.
+	ErrInvalidSourceCompletionMode = errors.New("hyperv: invalid source completion.mode: must be steward-registration")
+
+	// ErrInvalidSourceCompletionTimeout is returned when source completion.timeout cannot be parsed as a duration.
+	ErrInvalidSourceCompletionTimeout = errors.New("hyperv: invalid source completion.timeout: must be a valid duration string (e.g. 60m)")
+
+	// ErrInvalidSourceOnExisting is returned when source on_existing is not never or recreate.
+	ErrInvalidSourceOnExisting = errors.New("hyperv: invalid source on_existing: must be never or recreate")
 )
 
 // vmNamePattern is the allowlist for user-supplied VM names. It is an injection
@@ -35,6 +54,34 @@ var vmNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 
 // vhdPathPattern validates Windows absolute paths.
 var vhdPathPattern = regexp.MustCompile(`^[A-Za-z]:\\.*`)
+
+// CompletionConfig specifies how the provisioner detects that the installed OS
+// is ready and has registered its steward.
+type CompletionConfig struct {
+	// Mode is the detection strategy; steward-registration is the only
+	// supported value in v1.
+	Mode string `yaml:"mode,omitempty"`
+	// Timeout is a Go duration string (e.g. "60m") bounding the wait.
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
+// SourceConfig describes the ISO boot-provisioning parameters for a VM.
+// Presence of a source block in a hyperv.vm resource triggers the provisioning
+// state machine (absent → creating → installing → finalizing → ready).
+type SourceConfig struct {
+	// ISO is the absolute Windows path to the installation ISO.
+	ISO string `yaml:"iso"`
+	// OSFamily distinguishes the installer type: linux or windows.
+	OSFamily string `yaml:"os_family"`
+	// Unattend is an optional reference to an unattended-install profile,
+	// expressed as a profile:// URI.
+	Unattend string `yaml:"unattend,omitempty"`
+	// Completion defines how the module knows provisioning succeeded.
+	Completion CompletionConfig `yaml:"completion,omitempty"`
+	// OnExisting controls behaviour when the VM already exists:
+	// never (default) leaves it untouched; recreate destroys and re-provisions.
+	OnExisting string `yaml:"on_existing,omitempty"`
+}
 
 // VMConfig represents the desired state of a Hyper-V virtual machine.
 //
@@ -60,6 +107,9 @@ type VMConfig struct {
 	Generation  int                `yaml:"generation"`
 	// State is the desired lifecycle: "running", "stopped", or "absent" (delete).
 	State string `yaml:"state,omitempty"`
+	// Source, when non-nil, activates the ISO provisioning state machine.
+	// Absent source: block leaves the VM managed by the existing lifecycle only.
+	Source *SourceConfig `yaml:"source,omitempty"`
 }
 
 // stringOrStringList is a YAML scalar-or-sequence: switch_name may be a single
@@ -209,7 +259,9 @@ func (c *VMConfig) Validate() error {
 	if !vmNamePattern.MatchString(c.Name) {
 		return ErrInvalidVMName
 	}
-	if c.Generation != 0 && c.Generation != 2 {
+	// 0 means "accept the default" (Generation 2). 1 and 2 are explicitly valid
+	// per ADR-009 §5, which lifted the Gen-2-only restriction.
+	if c.Generation != 0 && c.Generation != 1 && c.Generation != 2 {
 		return ErrInvalidGeneration
 	}
 	if c.VHDPath != "" && !vhdPathPattern.MatchString(c.VHDPath) {
@@ -223,6 +275,40 @@ func (c *VMConfig) Validate() error {
 			return ErrInvalidSwitchName
 		}
 	}
+	if c.Source != nil {
+		if err := c.Source.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validate checks all SourceConfig fields against their constraints.
+func (s *SourceConfig) validate() error {
+	if !vhdPathPattern.MatchString(s.ISO) {
+		return ErrInvalidSourceISO
+	}
+	switch s.OSFamily {
+	case "linux", "windows":
+	default:
+		return ErrInvalidSourceOSFamily
+	}
+	if s.Unattend != "" && !strings.HasPrefix(s.Unattend, "profile://") {
+		return ErrInvalidSourceUnattend
+	}
+	if s.Completion.Mode != "" && s.Completion.Mode != "steward-registration" {
+		return ErrInvalidSourceCompletionMode
+	}
+	if s.Completion.Timeout != "" {
+		if _, err := time.ParseDuration(s.Completion.Timeout); err != nil {
+			return ErrInvalidSourceCompletionTimeout
+		}
+	}
+	switch s.OnExisting {
+	case "", "never", "recreate":
+	default:
+		return ErrInvalidSourceOnExisting
+	}
 	return nil
 }
 
@@ -233,7 +319,7 @@ func (c *VMConfig) Validate() error {
 // convergence logic reconciles against.
 func (c *VMConfig) AsMap() map[string]interface{} {
 	desired := c.desiredSwitches()
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"name":         c.Name,
 		"memory_mb":    c.MemoryMB,
 		"cpu_count":    c.CPUCount,
@@ -242,7 +328,21 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		"switch_names": desired,
 		"generation":   c.Generation,
 		"state":        c.State,
+		"source":       nil,
 	}
+	if c.Source != nil {
+		m["source"] = map[string]interface{}{
+			"iso":       c.Source.ISO,
+			"os_family": c.Source.OSFamily,
+			"unattend":  c.Source.Unattend,
+			"completion": map[string]interface{}{
+				"mode":    c.Source.Completion.Mode,
+				"timeout": c.Source.Completion.Timeout,
+			},
+			"on_existing": c.Source.OnExisting,
+		}
+	}
+	return m
 }
 
 // switchNameField renders the desired switch SET as the value the drift
@@ -285,7 +385,7 @@ func (c *VMConfig) FromYAML(data []byte) error {
 
 // GetManagedFields returns the list of fields this configuration manages.
 func (c *VMConfig) GetManagedFields() []string {
-	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state"}
+	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source"}
 }
 
 // psGetVM is the script block passed to ExecutePS for VM retrieval.

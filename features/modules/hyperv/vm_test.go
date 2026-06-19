@@ -78,12 +78,11 @@ func TestVMConfig_Validate_AcceptsDoubleUnderscore(t *testing.T) {
 		"VM name containing __ must be accepted now that names are not namespaced")
 }
 
-// TestVMConfig_Validate_RejectsGen1 verifies that Generation 1 VMs are rejected.
-func TestVMConfig_Validate_RejectsGen1(t *testing.T) {
+// TestVMConfig_Validate_AcceptsGen1 verifies that Generation 1 VMs are accepted
+// (ADR-009 §5 lifted the Gen-2-only restriction).
+func TestVMConfig_Validate_AcceptsGen1(t *testing.T) {
 	cfg := &VMConfig{Name: "test-vm", Generation: 1, VHDPath: `C:\VMs\test.vhdx`}
-	err := cfg.Validate()
-	require.Error(t, err, "Generation 1 must be rejected")
-	assert.ErrorIs(t, err, ErrInvalidGeneration)
+	require.NoError(t, cfg.Validate(), "Generation 1 must be accepted per ADR-009 §5")
 }
 
 // TestVMConfig_Validate_AcceptsGen2 verifies that Generation 2 and unset (0) are accepted.
@@ -641,6 +640,153 @@ func contains(args []interface{}, want string) bool {
 		}
 	}
 	return false
+}
+
+// ─── SourceConfig validation tests ────────────────────────────────────────────
+
+// TestSourceConfig_Validate exercises every invalid-source error path via real
+// VMConfig.Validate() calls (no mocks).
+func TestSourceConfig_Validate(t *testing.T) {
+	validBase := func() *VMConfig {
+		return &VMConfig{
+			Name:    "src-vm",
+			VHDPath: `C:\VMs\src-vm.vhdx`,
+			Source: &SourceConfig{
+				ISO:      `C:\ISO\server.iso`,
+				OSFamily: "windows",
+				Completion: CompletionConfig{
+					Mode: "steward-registration",
+				},
+			},
+		}
+	}
+
+	t.Run("valid source passes validation", func(t *testing.T) {
+		require.NoError(t, validBase().Validate())
+	})
+
+	t.Run("non-absolute iso path", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.ISO = "relative/path/server.iso"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceISO)
+	})
+
+	t.Run("empty iso path", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.ISO = ""
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceISO)
+	})
+
+	t.Run("unknown os_family", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OSFamily = "bsd"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceOSFamily)
+	})
+
+	t.Run("empty os_family", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OSFamily = ""
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceOSFamily)
+	})
+
+	t.Run("os_family linux is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OSFamily = "linux"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("unattend without profile:// prefix", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Unattend = "s3://bucket/unattend.xml"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceUnattend)
+	})
+
+	t.Run("unattend with profile:// prefix is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Unattend = "profile://windows/server2022"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("unattend empty is valid (optional)", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Unattend = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("unknown completion mode", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Completion.Mode = "ssh-probe"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceCompletionMode)
+	})
+
+	t.Run("empty completion mode is valid (optional)", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Completion.Mode = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("unparseable completion timeout", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Completion.Timeout = "not-a-duration"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceCompletionTimeout)
+	})
+
+	t.Run("valid completion timeout", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Completion.Timeout = "60m"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("empty completion timeout is valid (optional)", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Completion.Timeout = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("unknown on_existing", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OnExisting = "replace"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceOnExisting)
+	})
+
+	t.Run("on_existing never is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OnExisting = "never"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("on_existing recreate is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OnExisting = "recreate"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("on_existing empty defaults to never (valid)", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.OnExisting = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("nil source leaves existing configs unchanged", func(t *testing.T) {
+		cfg := &VMConfig{Name: "no-src-vm", VHDPath: `C:\VMs\no-src.vhdx`}
+		require.NoError(t, cfg.Validate(), "absent source: block must not affect validation")
+	})
 }
 
 // TestVMConfig_AsMap_SwitchNameReflectsFullSet is the drift-detection
