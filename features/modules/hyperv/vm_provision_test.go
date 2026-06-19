@@ -20,7 +20,7 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 		tenantID:       "ops",
 		vms:            make(map[string]VMConfig),
 		detector:       &fakeDetector{result: true},
-		provisionStore: newMemProvisionStore(),
+		provisionStore: NewMemProvisionStore(),
 	}
 }
 
@@ -303,7 +303,7 @@ func TestProvisionVM_AdvancesRecordAbsentToInstalling(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	store := newMemProvisionStore()
+	store := NewMemProvisionStore()
 	m := provisionModuleWithTransport(transport)
 	m.provisionStore = store
 
@@ -326,7 +326,7 @@ func TestProvisionVM_ResumeFromInstallingDoesNotRestart(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	store := newMemProvisionStore()
+	store := NewMemProvisionStore()
 	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
 		VMName:        "stw-01",
 		State:         ProvisionStateInstalling,
@@ -360,7 +360,7 @@ func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	store := newMemProvisionStore()
+	store := NewMemProvisionStore()
 	m := provisionModuleWithTransport(transport)
 	m.provisionStore = store
 

@@ -18,7 +18,7 @@ import (
 // round-trips on memProvisionStore.
 func TestProvisionStore_CRUD(t *testing.T) {
 	ctx := context.Background()
-	store := newMemProvisionStore()
+	store := NewMemProvisionStore()
 
 	// Get on empty store returns ErrProvisionNotFound.
 	_, err := store.GetProvision(ctx, "vm-01")
@@ -81,7 +81,7 @@ func TestProvisionStore_CRUD(t *testing.T) {
 // TestProvisionStore_MultipleVMs verifies independent records for different VMs.
 func TestProvisionStore_MultipleVMs(t *testing.T) {
 	ctx := context.Background()
-	store := newMemProvisionStore()
+	store := NewMemProvisionStore()
 	now := time.Now().Truncate(time.Second)
 
 	recordA := &ProvisionRecord{VMName: "vm-a", State: ProvisionStateCreating, CorrelationID: "corr-a", StartedAt: now, UpdatedAt: now}
@@ -106,10 +106,45 @@ func TestProvisionStore_MultipleVMs(t *testing.T) {
 	require.NoError(t, err, "vm-b must survive deletion of vm-a")
 }
 
+// TestProvisionStore_ListProvisions verifies that ListProvisions returns
+// independent copies of all stored records and that the empty-store case
+// returns a non-nil empty slice.
+func TestProvisionStore_ListProvisions(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemProvisionStore()
+
+	// Empty store returns empty slice, not nil.
+	list, err := store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, list)
+	assert.Empty(t, list)
+
+	now := time.Now().Truncate(time.Second)
+	recA := &ProvisionRecord{VMName: "vm-a", State: ProvisionStateCreating, CorrelationID: "corr-a", StartedAt: now, UpdatedAt: now}
+	recB := &ProvisionRecord{VMName: "vm-b", State: ProvisionStateReady, CorrelationID: "corr-b", StartedAt: now, UpdatedAt: now}
+	require.NoError(t, store.SetProvision(ctx, recA))
+	require.NoError(t, store.SetProvision(ctx, recB))
+
+	list, err = store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.Len(t, list, 2, "ListProvisions must return all stored records")
+
+	// Mutating a returned pointer must not corrupt the store.
+	for _, r := range list {
+		r.State = ProvisionStateFailed
+	}
+	list2, err := store.ListProvisions(ctx)
+	require.NoError(t, err)
+	for _, r := range list2 {
+		assert.NotEqual(t, ProvisionStateFailed, r.State,
+			"ListProvisions must return copies; mutating them must not affect the store")
+	}
+}
+
 // TestProvisionRecord_LastError verifies that LastError is carried through Set/Get.
 func TestProvisionRecord_LastError(t *testing.T) {
 	ctx := context.Background()
-	store := newMemProvisionStore()
+	store := NewMemProvisionStore()
 	now := time.Now().Truncate(time.Second)
 
 	record := &ProvisionRecord{

@@ -36,6 +36,8 @@ import (
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+	"github.com/cfgis/cfgms/features/modules/hyperv"
+	hypervcompletion "github.com/cfgis/cfgms/features/modules/hyperv/completion"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
@@ -494,12 +496,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// A cert-reuse reconnect never re-runs HTTP registration, so without this
 		// the registry stays empty for a reconnecting steward until a restart.
 		registryConnectHook := service.NewStewardRegistryConnectHook(controllerService, logger)
+		// Issue #2050: completion reconciler — flips finalizing→ready when the
+		// newly-registered steward's CN matches the CorrelationID in the provision
+		// record, and sweeps timed-out non-terminal records to failed. A no-op
+		// memProvisionStore is used when the hyperv feature is not configured so
+		// the controller boots cleanly without any hyperv-specific configuration.
+		completionReconciler := hypervcompletion.New(hyperv.NewMemProvisionStore(), logger)
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
-			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook, completionReconciler)
 			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(composite))
 		} else {
-			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(registryConnectHook))
+			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler)
+			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(composite))
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
 			"mode":       "server",

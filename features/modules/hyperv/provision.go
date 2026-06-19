@@ -55,6 +55,9 @@ type ProvisionStore interface {
 	GetProvision(ctx context.Context, vmName string) (*ProvisionRecord, error)
 	SetProvision(ctx context.Context, record *ProvisionRecord) error
 	DeleteProvision(ctx context.Context, vmName string) error
+	// ListProvisions returns a snapshot of all provisioning records. The caller
+	// receives independent copies; mutating them does not affect the store.
+	ListProvisions(ctx context.Context) ([]*ProvisionRecord, error)
 }
 
 // memProvisionStore is a thread-safe in-memory ProvisionStore for tests.
@@ -63,7 +66,9 @@ type memProvisionStore struct {
 	records map[string]*ProvisionRecord
 }
 
-func newMemProvisionStore() *memProvisionStore {
+// NewMemProvisionStore returns a new in-memory ProvisionStore suitable for
+// tests and as a no-op placeholder when the hyperv feature is not configured.
+func NewMemProvisionStore() *memProvisionStore {
 	return &memProvisionStore{records: make(map[string]*ProvisionRecord)}
 }
 
@@ -104,7 +109,7 @@ func (s *memProvisionStore) DeleteProvision(_ context.Context, vmName string) er
 // persisted until advanceProvision writes a state.
 func (m *hypervModule) loadOrInitProvision(ctx context.Context, vmName string) (*ProvisionRecord, error) {
 	if m.provisionStore == nil {
-		m.provisionStore = newMemProvisionStore()
+		m.provisionStore = NewMemProvisionStore()
 	}
 	record, err := m.provisionStore.GetProvision(ctx, vmName)
 	if err == nil {
@@ -128,7 +133,7 @@ func (m *hypervModule) loadOrInitProvision(ctx context.Context, vmName string) (
 // the caller's subsequent state checks see the new state.
 func (m *hypervModule) advanceProvision(ctx context.Context, vmName string, record *ProvisionRecord, newState ProvisionState) error {
 	if m.provisionStore == nil {
-		m.provisionStore = newMemProvisionStore()
+		m.provisionStore = NewMemProvisionStore()
 	}
 	prev := record.State
 	record.State = newState
@@ -153,7 +158,7 @@ func (m *hypervModule) advanceProvision(ctx context.Context, vmName string, reco
 // exposed via the log at error-detail level beyond the sanitized value.
 func (m *hypervModule) failProvision(ctx context.Context, vmName string, record *ProvisionRecord, cause error) error {
 	if m.provisionStore == nil {
-		m.provisionStore = newMemProvisionStore()
+		m.provisionStore = NewMemProvisionStore()
 	}
 	record.State = ProvisionStateFailed
 	record.UpdatedAt = time.Now().UTC()
@@ -168,4 +173,18 @@ func (m *hypervModule) failProvision(ctx context.Context, vmName string, record 
 			"correlation_id", logging.SanitizeLogValue(record.CorrelationID))
 	}
 	return cause
+}
+
+// ListProvisions returns snapshot copies of all provisioning records. Used by
+// the controller-side completion reconciler (#2050) to match a registered
+// steward to a provisioning VM via CorrelationID.
+func (s *memProvisionStore) ListProvisions(_ context.Context) ([]*ProvisionRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*ProvisionRecord, 0, len(s.records))
+	for _, r := range s.records {
+		cp := *r
+		out = append(out, &cp)
+	}
+	return out, nil
 }
