@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestControllerUpgradeRunCmd_ExperimentalNotice asserts that the upgrade run
+// subcommand's help text contains an experimental/unsupported notice referencing
+// ADR-007, as required by Issue #2019 (freeze the port-swap orchestrator).
+func TestControllerUpgradeRunCmd_ExperimentalNotice(t *testing.T) {
+	longHelp := controllerUpgradeRunCmd.Long
+	assert.True(t,
+		strings.Contains(strings.ToLower(longHelp), "experimental") ||
+			strings.Contains(strings.ToLower(longHelp), "not the supported"),
+		"controllerUpgradeRunCmd.Long must contain an experimental / not-the-supported-path notice; got:\n%s", longHelp)
+	assert.Contains(t, longHelp, "ADR-007",
+		"controllerUpgradeRunCmd.Long must reference ADR-007")
+}
 
 // TestControllerUpgradeStatus_NoStateFile covers the fresh-install
 // path: when the state file doesn't exist, status prints a friendly
@@ -130,8 +144,6 @@ func TestControllerUpgradeCmd_FlagsRegistered(t *testing.T) {
 		{"upgrade rollback", []string{"state", "config", "canonical-api-addr", "canonical-transport-addr", "candidate-api-addr", "candidate-transport-addr"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var cmd interface{ Flag(string) interface{} } //nolint:unused // for symmetry
-			_ = cmd
 			switch c.name {
 			case "upgrade run":
 				for _, f := range c.want {

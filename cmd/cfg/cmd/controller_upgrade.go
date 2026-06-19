@@ -35,8 +35,13 @@ var controllerUpgradeCmd = &cobra.Command{
 	Long: `cfg controller upgrade orchestrates a blue/green controller upgrade
 via the port-ownership-swap pattern.
 
+EXPERIMENTAL — this is not the supported production upgrade path. The
+supported path is the smoketest-gated restart upgrade (cfg controller upgrade
+restart, Issue #2015). This port-swap orchestrator is frozen per ADR-007
+and will be removed once the restart-gated path is the documented default.
+
 Subcommands:
-  upgrade              Stage a new binary, smoketest it, and cut over.
+  upgrade run          Stage a new binary, smoketest it, and cut over (experimental).
   upgrade status       Show which binary is canonical and which is in quarantine.
   upgrade rollback     Restore the previously-quarantined binary as canonical.
 
@@ -49,8 +54,16 @@ Run --help on each subcommand for details.`,
 
 var controllerUpgradeRunCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Stage a new controller binary, smoketest, and cut over",
-	Long: `Runs the full cutover orchestration synchronously:
+	Short: "Stage a new controller binary, smoketest, and cut over (EXPERIMENTAL — not the supported path)",
+	Long: `EXPERIMENTAL — this subcommand is not the supported production upgrade path.
+
+Use cfg controller upgrade restart (Issue #2015) for the supported
+smoketest-gated restart upgrade. This port-swap orchestrator is frozen per
+ADR-007 (docs/architecture/decisions/007-controller-upgrade-and-state-externalization.md)
+and will be removed once the restart-gated path is the documented default.
+Bugs in this subcommand are not prioritised.
+
+Runs the full port-swap cutover orchestration synchronously:
 
   1. Validate the new binary exists and is executable.
   2. Spawn it on the candidate listen addresses for smoketesting.

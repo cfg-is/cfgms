@@ -7,6 +7,19 @@
 // docs/architecture/operating-model.md "Concurrent Controller Execution
 // (Blue/Green Pattern)" for the full architectural context.
 //
+// # Deprecation notice (Issue #2019, ADR-007)
+//
+// This port-swap orchestrator is EXPERIMENTAL and is not the supported
+// production upgrade path. Per ADR-007
+// (docs/architecture/decisions/007-controller-upgrade-and-state-externalization.md),
+// investment in this path has stopped. The supported upgrade path is the
+// smoketest-gated restart upgrade (Issue #2015, cfg controller upgrade
+// restart). The /api/v1/ready real-state smoketest (HTTPSmoketester) and
+// the keep-previous-binary rollback pattern from this package are reused by
+// the restart-gated upgrade and remain maintained. Removal of the remaining
+// port-swap orchestration is tracked for once the restart-gated path is the
+// documented default. No new feature work should target this package.
+//
 // # The cutover state machine
 //
 //	idle ─▶ preparing ─▶ smoketesting ─▶ swapping ─▶ quarantined ─▶ idle
