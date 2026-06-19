@@ -216,14 +216,14 @@ The steward continuously knows about itself. This information is collected indep
 
 ### DNA (Digital Native Attributes)
 
-A snapshot of the device's identity and state:
+A snapshot of the device's identity and state. For the authoritative per-attribute audit table — including platform coverage (Linux / Windows / macOS), sensitivity classification, collection path (fast vs. background), and gap tracking — see [DNA Collection Audit](dna-collection.md).
 
-| Category | Examples |
-|----------|----------|
-| **Hardware** | CPU, memory, disk, motherboard, serial numbers |
-| **Software** | OS, installed packages, running services, startup programs |
-| **Network** | Interfaces, IPs, MACs, routing |
-| **Security** | Firewall status, encryption state, admin accounts |
+| Category | Examples | Collection Path |
+|----------|----------|-----------------|
+| **Hardware** | CPU, memory, disk, motherboard, serial numbers | Fast (cached after first call) |
+| **Software** | OS, installed packages, running services, startup programs | Background (async goroutine) |
+| **Network** | Interfaces, IPs, MACs, routing, DNS, firewall | Fast |
+| **Security** | Encryption state, admin accounts, AV products, certificates | Background (async goroutine) |
 
 DNA is collected on startup and periodically thereafter. It serves two purposes:
 1. **Device identity** — the controller uses DNA to identify and classify devices
