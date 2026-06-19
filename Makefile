@@ -271,15 +271,6 @@ test-install-sh:
 	@bash build/linux/install_test.sh
 	@echo "✅ Linux install.sh tests passed"
 
-# Run Hyper-V host install script Pester tests (Story #1854).
-# Windows CI only — pwsh + Pester 5 required. NOT included in test-complete
-# (same precedent as test-install-sh). Run manually on Windows CI runner.
-test-install-hyperv-ps1:
-	@echo "🪟 Testing scripts/install-hyperv-host.ps1"
-	@echo "============================================"
-	@pwsh -NonInteractive -File scripts/install-hyperv-host_test.ps1
-	@echo "✅ Hyper-V install script tests passed"
-
 # Smart test - core modules + changed modules only
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"

@@ -45,15 +45,6 @@ func newManager(binaryPath string) Manager {
 
 type windowsManager struct {
 	binaryPath string
-	ps         psRunner // nil → uses &execPSRunner{}; injectable for tests
-}
-
-// runner returns the psRunner, defaulting to execPSRunner when none is injected.
-func (m *windowsManager) runner() psRunner {
-	if m.ps != nil {
-		return m.ps
-	}
-	return &execPSRunner{}
 }
 
 // IsElevated returns true if the current process has Administrator privileges.
