@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 var (
@@ -59,6 +60,11 @@ type hypervModule struct {
 	// transport success only.
 	vswitchesMu sync.RWMutex
 	vswitches   map[string]VSwitchConfig
+
+	// profileStore resolves unattended-install profile references (profile://name).
+	// Wired automatically from the "config_store" Configure() key when provided;
+	// overridable via WithProfileStore for tests.
+	profileStore ProfileStore
 }
 
 // New creates a new hypervModule. Production callers pass newDefaultDetector();
@@ -70,6 +76,14 @@ func New(detector HypervDetector) modules.Module {
 		vswitches: make(map[string]VSwitchConfig),
 		detector:  detector,
 	}
+}
+
+// WithProfileStore sets the ProfileStore used to resolve unattended-install
+// profile references. Overrides the ConfigBackedProfileStore wired by Configure
+// when a "config_store" is provided — intended for tests that inject a
+// memProfileStore directly.
+func (m *hypervModule) WithProfileStore(s ProfileStore) {
+	m.profileStore = s
 }
 
 // checkDetection calls the injected HypervDetector and enforces the 5-minute
@@ -152,6 +166,10 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 		stewardID = m.tenantID + "/hyperv"
 	}
 	m.stewardID = stewardID
+
+	if configStore, ok := configMap["config_store"].(cfgconfig.ConfigStore); ok && configStore != nil {
+		m.profileStore = &ConfigBackedProfileStore{store: configStore}
+	}
 
 	transportChoice, _ := configMap["transport"].(string)
 	if transportChoice == "" {
