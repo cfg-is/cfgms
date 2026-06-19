@@ -18,7 +18,7 @@ Two facts decided it:
 
 1. **What's actually sensitive is minimal.** The only genuinely-sensitive value in either answer file is the **tenant join token**. The Debian local-account password is eliminable (the steward is the management path), and the Windows `ppkg-path-key` is a host *path*, not a secret.
 
-2. **The operator threat model already absorbs a join token.** CFGMS targets operators running an RMM-style model: a boot script carries the registration-token equivalent; admission is gated by **source IP** (a known tenant WAN IP auto-approves; otherwise manual approval). The whole automation posture **assumes endpoint compromise** — careful what is trusted *from* an endpoint and what secrets are exposed *to* it (CLAUDE.md threat model). Under that posture a tenant join token is a **low-value secret**: worst case it admits one device into a tenant, where nothing sensitive is trusted to or exposed to endpoints. A Hyper-V host is additionally always-on and among the least-likely-compromised hosts.
+2. **The operator threat model already absorbs a join token.** CFGMS's deployment posture carries the registration-token equivalent in a boot script and gates admission by **source IP** (a known tenant WAN IP auto-approves; otherwise manual approval). The whole automation posture **assumes endpoint compromise** — careful what is trusted *from* an endpoint and what secrets are exposed *to* it (CLAUDE.md threat model). Under that posture a tenant join token is a **low-value secret**: worst case it admits one device into a tenant, where nothing sensitive is trusted to or exposed to endpoints. A Hyper-V host is additionally always-on and among the least-likely-compromised hosts.
 
 A core CFGMS principle also applies: **stewards run without the controller.** Rendering the answer file on the controller would couple *provisioning* to controller availability.
 
@@ -34,7 +34,7 @@ The join token the steward bakes into the answer file is the **tenant's current 
 
 ### 3. Registration admission uses the IP-trust evaluator (#1694)
 
-A provisioned VM's steward is admitted via the existing IP-trust gate — mirroring the operator's RMM source-IP model: registration from the HV host's known tenant network auto-approves; otherwise it requires manual approval. No new admission mechanism is introduced; #1694 is the gate.
+A provisioned VM's steward is admitted via the existing IP-trust gate — the same source-IP admission CFGMS already uses: registration from the HV host's known tenant network auto-approves; otherwise it requires manual approval. No new admission mechanism is introduced; #1694 is the gate (#2082 verifies and wires this path).
 
 ### 4. Minimize the answer file
 
@@ -53,15 +53,15 @@ The CorrelationID baked into the answer file plus the #2050 reconciler already c
 ## Consequences
 
 **Positive**
-- Matches the operator's proven RMM operating model and assume-compromise posture.
+- Matches the operator's proven source-IP-gated, assume-compromise operating posture.
 - Preserves steward autonomy (provision without the controller online to *start*).
 - Closes #2077 by routing the token through the existing config sync — no new secret-distribution machinery, no per-steward manual injection.
 - Reuses #1694 for admission; reuses CorrelationID/#2050 as the optional provenance foundation.
 - Token on-disk exposure is bounded by media cleanup.
 
 **Negative / risks (accepted)**
-- A low-value tenant join token sits briefly on the HV host's seed media (mitigated by cleanup + the assume-compromise model + HV hosts being low-risk).
-- A shared tenant token has broader validity than a per-VM token if leaked — acceptable under the model; per-VM short-lived tokens remain available as future hardening (ADR-009 §8) and compose with §6.
+- A low-value tenant join token sits briefly on the HV host's seed media. Blast radius if leaked: it admits one device into the tenant, where nothing sensitive is trusted to or exposed to endpoints (mitigated further by cleanup + the assume-compromise model + HV hosts being low-risk).
+- A shared tenant token has broader validity than a per-VM token if leaked — acceptable under the model; per-VM short-lived tokens remain available as future hardening (deferred from ADR-009 §8) and compose with the §6 provenance layer.
 
 ## Alternatives considered
 
