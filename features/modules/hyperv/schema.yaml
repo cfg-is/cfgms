@@ -39,8 +39,8 @@ resources:
               pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
       generation:
         type: integer
-        description: VM generation (must be 2 or omitted for default)
-        enum: [2]
+        description: VM generation (1 or 2; omit for default Generation 2)
+        enum: [1, 2]
         default: 2
       state:
         type: string
@@ -50,6 +50,54 @@ resources:
           - stopped
           - absent
         default: running
+      source:
+        type: object
+        description: >
+          ISO boot-provisioning parameters. When present, the module activates
+          the provisioning state machine (absent → creating → installing →
+          finalizing → ready) one step per convergence cycle. Absent source:
+          block leaves the VM managed by the existing lifecycle only.
+        required:
+          - iso
+          - os_family
+        properties:
+          iso:
+            type: string
+            description: Absolute Windows path to the installation ISO (e.g. C:\ISO\server.iso)
+          os_family:
+            type: string
+            description: Installer type
+            enum:
+              - linux
+              - windows
+          unattend:
+            type: string
+            description: >
+              Optional reference to an unattended-install profile expressed as a
+              profile:// URI (e.g. profile://windows/server2022).
+          completion:
+            type: object
+            description: Specifies how the module detects that provisioning succeeded.
+            properties:
+              mode:
+                type: string
+                description: Detection strategy; steward-registration is the only supported value in v1.
+                enum:
+                  - steward-registration
+              timeout:
+                type: string
+                description: >
+                  Go duration string bounding the provisioning wait
+                  (e.g. "60m"). Omit to use the module default.
+          on_existing:
+            type: string
+            description: >
+              Behaviour when the VM already exists. never (default) leaves it
+              untouched; recreate destroys and re-provisions.
+            enum:
+              - never
+              - recreate
+            default: never
 
   vswitch:
     description: Hyper-V virtual switch (external, internal, or private)

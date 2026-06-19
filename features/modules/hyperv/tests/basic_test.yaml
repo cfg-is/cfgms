@@ -58,7 +58,7 @@ tests:
       state: stopped
     expected_error: "invalid VHD path"
 
-  - name: Invalid generation (Generation 1)
+  - name: Valid generation (Generation 1)
     config:
       name: "gen1-vm"
       memory_mb: 2048
@@ -67,4 +67,6 @@ tests:
       switch_name: "Default Switch"
       generation: 1
       state: stopped
-    expected_error: "invalid generation"
+    expected:
+      name: "gen1-vm"
+      state: stopped
