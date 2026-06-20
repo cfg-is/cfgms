@@ -50,6 +50,11 @@ type StewardSettings struct {
 
 	// Upgrade configures the steward upgrade policy. (Issue #1943)
 	Upgrade UpgradeConfig `yaml:"upgrade,omitempty"`
+
+	// RegistrationPollTimeout is the maximum time to wait for manual registration
+	// approval when the controller uses registration.workflow: manual (Issue #1899).
+	// Default is 24h. Set to 0 to use the default.
+	RegistrationPollTimeout time.Duration `yaml:"registration_poll_timeout,omitempty"`
 }
 
 // UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)

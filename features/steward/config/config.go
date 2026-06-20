@@ -58,6 +58,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -343,6 +344,11 @@ func applyDefaults(config *StewardConfig) {
 		} else {
 			config.Steward.ID = "unknown"
 		}
+	}
+
+	// Default poll timeout for manual-review registration: 24h (Issue #1899).
+	if config.Steward.RegistrationPollTimeout == 0 {
+		config.Steward.RegistrationPollTimeout = 24 * time.Hour
 	}
 }
 
