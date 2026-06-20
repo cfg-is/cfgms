@@ -176,19 +176,23 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 		EnrollToken:   m.enrollToken,
 		CAFingerprint: m.enrollCAFingerprint,
 	}
+	// A per-VM random password is generated for both families: Windows uses it
+	// for the one-shot AutoLogon that runs enrollment; Linux uses it for the
+	// local cfgms user (the steward is the management path, so the value is
+	// never surfaced — ADR-010 §4 "randomize it").
+	pw, pwErr := randomAdminPassword()
+	if pwErr != nil {
+		return "", fmt.Errorf("hyperv: generate provisioning password for VM %q: %w", vmName, pwErr)
+	}
+	vars.AdminPassword = pw
+
 	// ProductEdition only applies to the Windows autounattend image-install step;
-	// it is ignored by the Linux preseed template. A per-VM random Administrator
-	// password backs the one-shot AutoLogon that runs enrollment.
+	// it is ignored by the Linux preseed template.
 	if src.OSFamily == "windows" {
 		vars.ProductEdition = defaultWindowsEdition
 		if src.Edition != "" {
 			vars.ProductEdition = src.Edition
 		}
-		pw, pwErr := randomAdminPassword()
-		if pwErr != nil {
-			return "", fmt.Errorf("hyperv: generate admin password for VM %q: %w", vmName, pwErr)
-		}
-		vars.AdminPassword = pw
 	}
 
 	rendered, err := NewProfileRenderer().Render(ctx, profile, vars, store)

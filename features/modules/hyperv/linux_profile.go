@@ -22,19 +22,21 @@ package hyperv
 //
 // The template is rendered by ProfileRenderer.Render (profile.go) using
 // text/template — NOT html/template — so preseed syntax is never HTML-escaped.
-// Per-VM values ({{ .VMName }}, {{ .CorrelationID }}) and secret values
-// ({{ secret "key" }}) travel into the rendered bytes at render time; secret
-// VALUES are never stored in the template, the profile, or committed media.
+// Per-VM values ({{ .VMName }}, {{ .CorrelationID }}, {{ .EnrollToken }},
+// {{ .AdminPassword }}) travel into the rendered bytes at render time. The join
+// token is controller-supplied via config (ADR-010 §2), not a SecretStore
+// lookup; the user password is randomized (ADR-010 §4). No secret VALUES are
+// stored in the template or the profile.
 
 // linuxDefaultProfileName is the built-in Debian 12 profile used when a Linux
 // VM source declares no profile:// reference. Operators may override it by
 // authoring a stored-config profile of the same name (ADR-009 §7).
 const linuxDefaultProfileName = "debian-12-base"
 
-// preseedRegTokenSecretKey is the SecretStore key the built-in Debian profile
-// resolves the registration token from at render time. Only the KEY is baked
-// into the template; the token VALUE is fetched from the secret store during
-// rendering and inserted into the late_command, never persisted to the profile.
+// preseedRegTokenSecretKey is retained as profile metadata
+// (Enroll.RegistrationTokenSecretKey) for operators who author a
+// SecretStore-backed profile. The built-in template now resolves the token from
+// controller-supplied config ({{ .EnrollToken }}, ADR-010), not this key.
 const preseedRegTokenSecretKey = "hyperv/enroll/regtoken"
 
 // preseedBundleURL is the default enrollment-bundle URL the built-in Debian
@@ -85,7 +87,8 @@ d-i passwd/root-login boolean false
 d-i passwd/make-user boolean true
 d-i passwd/user-fullname string CFGMS Operator
 d-i passwd/username string cfgms
-d-i passwd/user-password-crypted password {{ secret "hyperv/enroll/user-password-crypted" }}
+d-i passwd/user-password password {{ .AdminPassword }}
+d-i passwd/user-password-again password {{ .AdminPassword }}
 d-i user-setup/allow-password-weak boolean false
 d-i user-setup/encrypt-home boolean false
 
@@ -120,15 +123,18 @@ d-i grub-installer/bootdev string default
 d-i finish-install/reboot_in_progress note
 
 ### First-boot enrollment.
-# Declared paths only: download the steward bundle, install it, then enroll using
-# the registration token (resolved from the secret store at render time) and the
-# CorrelationID as the enrollment label so the controller-side reconciler (#2050)
-# can match this VM. Each step is a discrete declared invocation joined with a
-# command separator; no runtime code composition.
+# Declared paths only: download the steward bundle, install it, then register
+# using the controller-supplied join token (ADR-010 §2 — {{ .EnrollToken }},
+# not a SecretStore lookup). The hostname is set to {{ .CorrelationID }} above,
+# so the controller-side reconciler (#2050) matches the registered steward by
+# hostname. Each step is a discrete declared invocation joined with a command
+# separator; no runtime code composition. (NOTE: CA-trust/--fingerprint wiring
+# and how d-i loads this preseed are pending the Debian delivery-method decision;
+# the registration command form is now correct regardless.)
 d-i preseed/late_command string \
   in-target wget -q {{ .BundleURL }} -O /tmp/cfgms-steward.deb ; \
   in-target dpkg -i /tmp/cfgms-steward.deb ; \
-  in-target cfgms-steward enroll --token {{ secret "hyperv/enroll/regtoken" }} --label {{ .CorrelationID }}
+  in-target cfgms-steward install --regtoken {{ .EnrollToken }}
 `
 
 // defaultLinuxProfile returns the built-in Debian 12 UnattendProfile used when a

@@ -25,6 +25,10 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 		vms:            make(map[string]VMConfig),
 		detector:       &fakeDetector{result: true},
 		provisionStore: NewMemProvisionStore(),
+		// Controller-supplied enrollment wiring (ADR-010): both the Windows
+		// autounattend and the Linux preseed bake these in via ProfileVars.
+		enrollToken:         "reg-token-stub-value",
+		enrollCAFingerprint: "abc123fingerprint",
 	}
 	// Inject a single in-memory SecretStore carrying the keys the Linux preseed
 	// (#2046) still resolves at render time so the create-from-source tests
