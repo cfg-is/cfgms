@@ -15,6 +15,7 @@ import (
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"google.golang.org/protobuf/proto"
 )
 
 // ControllerService implements the Controller service
@@ -36,6 +37,30 @@ type StewardInfo struct {
 	Status        string
 	Metrics       map[string]string
 	Token         string
+}
+
+// maxVersionLen is the maximum number of bytes stored for a steward-supplied
+// Version string. Caps memory amplification at 50k-steward scale against a
+// malicious or buggy steward sending an oversized value (threat model: stewards
+// on compromised hosts).
+const maxVersionLen = 64
+
+// cloneDNA returns a deep copy of a DNA proto message, or nil if dna is nil.
+// Safe to call under s.mu.RLock() — proto.Clone reads only, never writes.
+func cloneDNA(dna *common.DNA) *common.DNA {
+	if dna == nil {
+		return nil
+	}
+	return proto.Clone(dna).(*common.DNA)
+}
+
+// copyMetrics returns a shallow copy of a string→string metrics map.
+func copyMetrics(m map[string]string) map[string]string {
+	copied := make(map[string]string, len(m))
+	for k, v := range m {
+		copied[k] = v
+	}
+	return copied
 }
 
 // NewControllerService creates a new Controller service without DNA storage.
@@ -347,12 +372,21 @@ func (s *ControllerService) GetStewardCount() int {
 	return len(s.stewards)
 }
 
-// GetStewardInfo returns information about a specific steward
+// GetStewardInfo returns information about a specific steward. The returned
+// value is a copy-on-read: the DNA pointer is deep-cloned and the Metrics map
+// is shallow-copied under the read lock, so callers can safely read (or
+// marshal) the result concurrently with SyncDNA writes.
 func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	info, exists := s.stewards[stewardID]
-	return info, exists
+	if !exists {
+		return nil, false
+	}
+	copied := *info
+	copied.DNA = cloneDNA(info.DNA)
+	copied.Metrics = copyMetrics(info.Metrics)
+	return &copied, true
 }
 
 // RecordHeartbeat advances the live heartbeat state for a registered steward in
@@ -372,6 +406,9 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.Time) bool {
 	if ts.IsZero() {
 		ts = time.Now()
+	}
+	if len(version) > maxVersionLen {
+		version = version[:maxVersionLen]
 	}
 
 	// Fast path: the steward is already in the registry. Hold the lock only long
@@ -571,6 +608,20 @@ func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, 
 	return nil
 }
 
+// SetStewardDNA sets the in-memory DNA pointer for a registered steward,
+// replacing whatever was there (including to nil). Returns false if the
+// steward is not present in the registry.
+func (s *ControllerService) SetStewardDNA(stewardID string, dna *common.DNA) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return false
+	}
+	steward.DNA = dna
+	return true
+}
+
 // UpdateStewardStatus updates the status of a registered steward.
 // Returns an error if the steward is not found.
 func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error {
@@ -584,26 +635,38 @@ func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error 
 	return nil
 }
 
-// GetAllStewards returns a list of all registered stewards
+// GetAllStewards returns a list of all registered stewards. Each entry is a
+// copy-on-read: DNA is deep-cloned and Metrics is shallow-copied under the
+// read lock, so callers can safely read the results concurrently with SyncDNA
+// writes without holding a reference into the live registry.
 func (s *ControllerService) GetAllStewards() []*StewardInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	stewards := make([]*StewardInfo, 0, len(s.stewards))
 	for _, info := range s.stewards {
-		stewards = append(stewards, info)
+		copied := *info
+		copied.DNA = cloneDNA(info.DNA)
+		copied.Metrics = copyMetrics(info.Metrics)
+		stewards = append(stewards, &copied)
 	}
 	return stewards
 }
 
-// findStewardByDNAId finds an existing steward by DNA ID
+// findStewardByDNAId finds an existing steward by DNA ID and returns a
+// copy-on-read. The caller (verifySyncStatus) reads DNA fields — e.g.
+// SyncFingerprint, AttributeCount — after the lock is released, so returning
+// the live pointer would race with a concurrent SyncDNA write.
 func (s *ControllerService) findStewardByDNAId(dnaId string) *StewardInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, steward := range s.stewards {
 		if steward.DNA != nil && steward.DNA.Id == dnaId {
-			return steward
+			copied := *steward
+			copied.DNA = cloneDNA(steward.DNA)
+			copied.Metrics = copyMetrics(steward.Metrics)
+			return &copied
 		}
 	}
 	return nil
