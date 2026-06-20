@@ -500,6 +500,23 @@ For each story with project status `Fix`, find its PR and dispatch the fix agent
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
 **Step 6 — Dispatch:**
+
+**6a — Stalled-dispatch recovery (run before new dispatch):**
+
+The preflight emits `stalled_dispatches` — a list of `In Progress` stories whose agent container (`cfg-agent-<N>`) is not running AND which have no open PR (including WIP drafts). These are silently stalled stories: the container was hard-killed (OOM, docker daemon crash, host restart, `docker rm -f`) and left the pipeline item frozen with no artifact.
+
+For each entry in `preflight.stalled_dispatches`:
+- If the story has a WIP draft PR (`is_draft: true` in `prs_open`): route through `dispatch-fix` instead (Step 5 path) — the draft PR is the work artifact to resume.
+- Otherwise: re-dispatch the story to restart the agent from scratch:
+```bash
+./.claude/scripts/po-act.sh dispatch <ITEM_ID>
+```
+
+The `item_id` comes from `stalled_dispatches[*].item_id`. Re-dispatch resets the story to `In Progress` with a fresh container. This is safe — no existing container or PR would be clobbered (preflight only flags stories where neither exists).
+
+Report stalled recoveries in the cycle summary as: `Re-dispatched stalled story #NNN (no container, no PR)`.
+
+**6b — New story dispatch:**
 Find stories with project status `Ready` that are not `In Progress`. Before dispatching, check for file conflicts with in-flight agents:
 
 Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
