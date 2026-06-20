@@ -470,8 +470,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
 	var jobDispatcher *dispatcher.Dispatcher
-	// hoistedSigner and hoistedSignerCertSerial are set inside the transport block and
-	// re-used by the data plane config handler so both consumers share the same key.
+	// hoistedSigner is the static signing cert captured at boot. It is kept for
+	// the config handler's nil-certManager fallback path. The command publisher and
+	// dispatcher use commandSigner (a DynamicSigner) instead (Issue #1844).
+	// hoistedSignerCertSerial is reported by the registration handler (Story #378).
 	var hoistedSigner signature.Signer
 	var hoistedSignerCertSerial string
 	// signingRotationSvc is hoisted so it can be wired to both the gRPC on-connect hook
@@ -563,6 +565,40 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			}
 		}
 
+		// Issue #1844: Command publisher and dispatcher use a DynamicSigner that
+		// resolves the current signing cert at each sign call rather than a signer
+		// pinned to the boot cert. After a signing-cert rotation where the boot cert
+		// is retired from a steward's trusted set, boot-signed commands fail
+		// verification on the steward side — the same failure the config signer had
+		// before Issue #1816. The DynamicSigner re-resolves the live signing serial
+		// per sign and rebuilds the underlying signer only when that serial changes
+		// (once per rotation, not once per command).
+		//
+		// push_signing_cert safety: this command must be signed with a cert the
+		// target steward already trusts. During the overlap window both old and new
+		// certs are trusted by the steward, so a DynamicSigner resolving the current
+		// (newly rotated) cert is safe as long as the steward is within the overlap
+		// window. After overlap expires, a steward that missed push_signing_cert
+		// needs re-enrollment (Issue #1845).
+		var commandSigner signature.Signer
+		if certManager != nil {
+			cm := certManager
+			commandSigner = signature.NewDynamicSigner(func() (string, func() (signature.SigningKeyExport, error), error) {
+				current, err := cm.GetCurrentCertForPurpose(cert.PurposeSigning)
+				if err != nil {
+					return "", nil, err
+				}
+				serial := current.SerialNumber
+				return serial, func() (signature.SigningKeyExport, error) {
+					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true)
+					if exportErr != nil {
+						return signature.SigningKeyExport{}, exportErr
+					}
+					return signature.SigningKeyExport{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}, nil
+				}, nil
+			})
+		}
+
 		// Initialize execution queue and job dispatcher (Issue #1672).
 		// The dispatcher drains the execution queue on every steward heartbeat and
 		// on a 30-second polling loop. The heartbeat service wires dispatcher.OnHeartbeat
@@ -584,7 +620,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
 			Queue:        executionQueue,
 			ControlPlane: controlPlane,
-			Signer:       hoistedSigner, // share the same signer as commandPublisher
+			Signer:       commandSigner,
 			Logger:       logger,
 		})
 		if dispatcherErr != nil {
@@ -681,16 +717,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
+		// Issue #1844: commandSigner is a DynamicSigner — see block above.
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
 			ControlPlane: controlPlane,
-			Signer:       hoistedSigner,
+			Signer:       commandSigner,
 			Logger:       logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
 		}
-		logger.Info("Command publisher initialized successfully", "signing_enabled", hoistedSigner != nil)
+		logger.Info("Command publisher initialized successfully", "signing_enabled", commandSigner != nil)
 
 		// Issue #1817: Wire the publisher into the signing rotation service now
 		// that it is available. The service was created before the provider to
@@ -736,9 +773,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// the payload (Issue #1816 fleet-e2e OfflinePastWindow). The DynamicSigner
 		// resolves the live signing serial per sign and rebuilds the underlying
 		// signer only when that serial changes (once per rotation). The command
-		// publisher deliberately keeps the boot signer: the steward's command
-		// verifier is a connect-time snapshot, so push_signing_cert commands must
-		// stay verifiable with the cert the steward already holds at connect.
+		// publisher uses the same DynamicSigner pattern (Issue #1844).
 		configSigner := hoistedSigner
 		if certManager != nil {
 			cm := certManager

@@ -83,10 +83,10 @@ func New(cfg *Config) (*Publisher, error) {
 	}, nil
 }
 
-// signCommand wraps cmd in a SignedCommand, signing it when a signer is available.
-func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+// signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when non-nil.
+func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer) (*controlplaneTypes.SignedCommand, error) {
 	sc := &controlplaneTypes.SignedCommand{Command: *cmd}
-	if p.signer == nil {
+	if signer == nil {
 		return sc, nil
 	}
 	// Sign the canonical form (string params + UTC timestamp) that survives the
@@ -96,12 +96,50 @@ func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTy
 	if err != nil {
 		return nil, fmt.Errorf("marshal command for signing: %w", err)
 	}
-	sig, err := p.signer.Sign(cmdBytes)
+	sig, err := signer.Sign(cmdBytes)
 	if err != nil {
 		return nil, fmt.Errorf("sign command: %w", err)
 	}
 	sc.Signature = sig
 	return sc, nil
+}
+
+// signCommand wraps cmd in a SignedCommand using the publisher's configured signer.
+func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+	return p.signCommandWith(cmd, p.signer)
+}
+
+// PublishCommandWithSigner publishes a command signed with the provided signer instead
+// of the publisher's configured signer. Used when push_signing_cert must be signed
+// with the rotating (previous) cert so stewards can verify it before their trust set
+// is updated (Issue #1844).
+func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}, signer signature.Signer) (string, error) {
+	commandID := uuid.New().String()
+
+	cmd := &controlplaneTypes.Command{
+		ID:        commandID,
+		Type:      cmdType,
+		StewardID: stewardID,
+		Timestamp: time.Now(),
+		Params:    params,
+	}
+
+	sc, err := p.signCommandWith(cmd, signer)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign command: %w", err)
+	}
+
+	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
+		return "", fmt.Errorf("failed to send command: %w", err)
+	}
+
+	p.logger.Info("Sent command to steward",
+		"command_id", commandID,
+		"steward_id", stewardID,
+		"type", cmdType,
+		"signed", sc.Signature != nil)
+
+	return commandID, nil
 }
 
 // PublishCommand publishes a command to a specific steward.

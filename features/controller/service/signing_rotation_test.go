@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -445,6 +446,135 @@ func TestEnsureStewardCurrentDelivery(t *testing.T) {
 	require.NotEmpty(t, overlapStr, "overlap_expires_at must be non-empty when rotation is in progress")
 	_, parseErr := time.Parse(time.RFC3339, overlapStr)
 	assert.NoError(t, parseErr, "overlap_expires_at must be a valid RFC3339 timestamp, got: %s", overlapStr)
+}
+
+// TestEnsureStewardCurrent_SignsWithRotatingCertAfterOverlapExpiry verifies that
+// EnsureStewardCurrent signs push_signing_cert with the rotating (old) cert even
+// when the overlap window has already expired. This prevents the bootstrapping
+// deadlock described in Issue #1844: a steward that was offline during an
+// overlap_days=0 rotation only trusts the rotating cert, so receiving a
+// new-cert-signed push_signing_cert rejects it before the trust set can be updated.
+//
+// This reproduces the OfflinePastWindow e2e failure: after a zero-day-overlap
+// rotation, EnsureStewardCurrent previously fell through to the DynamicSigner
+// (new cert) because time.Now().Before(deadline) was FALSE at every call site.
+func TestEnsureStewardCurrent_SignsWithRotatingCertAfterOverlapExpiry(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-past-window-signing"
+
+	dir := t.TempDir()
+	certMgr := newTestCertManager(t, dir)
+
+	// Capture the initial signing cert (cert v1) — it becomes the rotating serial
+	// once we write a cursor that simulates a completed rotation.
+	initialCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	initialCertPEM, _, err := certMgr.ExportCertificate(initialCert.SerialNumber, false)
+	require.NoError(t, err)
+
+	// Build a verifier backed by the initial (rotating) cert to assert the
+	// delivered command was signed with it — not with the new cert.
+	oldVerifier, verErr := signature.NewVerifier(&signature.VerifierConfig{CertificatePEM: initialCertPEM})
+	require.NoError(t, verErr)
+
+	// Generate cert v2 as the "current" cert without going through RotateSigningCertificate,
+	// so we can write the cursor manually with explicit RotatingSerial and overlap=0.
+	rotatedCert, genErr := certMgr.GenerateSigningCertificate(&cert.SigningCertConfig{
+		CommonName:   "cfgms-config-signer-v2",
+		ValidityDays: 30,
+		KeySize:      2048,
+	})
+	require.NoError(t, genErr)
+
+	// Write a cursor that mirrors a zero-overlap rotation that has ALREADY expired:
+	// deadline = RotatedAt + 0 days = RotatedAt, so time.Now().Before(deadline) is
+	// always FALSE (RotatedAt is in the past by definition once we write it).
+	cursorToWrite := &cert.SigningCertCursor{
+		CurrentSerial:     rotatedCert.SerialNumber,
+		RotatingSerial:    initialCert.SerialNumber, // rotating = the cert a missed-steward still trusts
+		OverlapWindowDays: 0,
+		RotatedAt:         time.Now().Add(-time.Second).UTC(), // one second in the past → deadline expired
+	}
+	cursorJSON, marshalErr := json.Marshal(cursorToWrite)
+	require.NoError(t, marshalErr)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(certMgr.GetStoragePath(), "signing-cursor.json"),
+		cursorJSON, 0600,
+	))
+
+	logger := logging.NewNoopLogger()
+	svc := service.NewSigningRotationService(certMgr, logger)
+
+	serverTLS, clientTLS := tlsForTest(t, stewardID)
+	reg := registry.NewRegistry()
+
+	serverProvider := grpcCP.New(grpcCP.ModeServer)
+	require.NoError(t, serverProvider.Initialize(context.Background(), map[string]interface{}{
+		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": reg,
+	}))
+	require.NoError(t, serverProvider.Start(context.Background()))
+	t.Cleanup(serverProvider.ForceStop)
+
+	publisher, pubErr := commands.New(&commands.Config{ControlPlane: serverProvider, Logger: logger})
+	require.NoError(t, pubErr)
+	svc.SetPublisher(publisher)
+
+	clientProvider := grpcCP.New(grpcCP.ModeClient)
+	require.NoError(t, clientProvider.Initialize(context.Background(), map[string]interface{}{
+		"mode": "client", "addr": serverProvider.ListenAddr(), "tls_config": clientTLS, "steward_id": stewardID,
+	}))
+
+	var mu sync.Mutex
+	var receivedCmds []*types.SignedCommand
+	require.NoError(t, clientProvider.SubscribeCommands(context.Background(), stewardID, func(_ context.Context, sc *types.SignedCommand) error {
+		mu.Lock()
+		receivedCmds = append(receivedCmds, sc)
+		mu.Unlock()
+		return nil
+	}))
+	require.NoError(t, clientProvider.Start(context.Background()))
+	t.Cleanup(func() { _ = clientProvider.Stop(context.Background()) })
+
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get(stewardID)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward should be registered")
+
+	require.NoError(t, svc.EnsureStewardCurrent(context.Background(), stewardID))
+
+	var pushCmd *types.SignedCommand
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, cmd := range receivedCmds {
+			if cmd.Command.Type == types.CommandPushSigningCert {
+				pushCmd = cmd
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "push_signing_cert must be received")
+
+	require.NotNil(t, pushCmd)
+	require.NotNil(t, pushCmd.Signature, "push_signing_cert must be signed (unsigned means rotating signer was not used)")
+
+	// The command must be verifiable with the OLD (rotating) cert, not the new cert.
+	// Without the fix, EnsureStewardCurrent skips the rotating signer when
+	// time.Now().Before(deadline) is FALSE (overlap=0 → deadline = RotatedAt, already past)
+	// and falls back to the publisher's signer — causing a bootstrapping deadlock for any
+	// steward that was offline during the rotation fan-out (Issue #1844).
+	//
+	// Use RawParams (proto-wire string map) for the canonical signing bytes, mirroring
+	// HandleCommand — the serial number may be a large integer that stringMapToInterfaceMap
+	// decodes as float64, causing InterfaceParamsToStringMap to re-encode it differently.
+	rawParams := pushCmd.RawParams
+	if rawParams == nil {
+		rawParams = types.InterfaceParamsToStringMap(pushCmd.Command.Params)
+	}
+	cmdBytes, signBytesErr := types.CommandSigningBytes(&pushCmd.Command, rawParams)
+	require.NoError(t, signBytesErr)
+	require.NoError(t, oldVerifier.Verify(cmdBytes, pushCmd.Signature),
+		"push_signing_cert must be verifiable with the rotating (old) cert so offline stewards can bootstrap (Issue #1844)")
 }
 
 // TestRotateAuditLogNoPEMBody verifies that SigningRotationService.Rotate emits a

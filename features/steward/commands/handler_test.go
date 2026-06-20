@@ -635,6 +635,59 @@ func TestHandleCommand_NilStore_StillWorks(t *testing.T) {
 	h.Wait()
 }
 
+// TestUpdateVerifier_AcceptsCommandSignedWithNewCert verifies that UpdateVerifier
+// allows the handler to accept commands signed with a cert that was not known at
+// construction time. This is the push_signing_cert correctness path (Issue #1844):
+// after the steward receives a new signing cert the command handler verifier must
+// be refreshed so that subsequent controller commands (signed with the new cert via
+// the DynamicSigner) are accepted without requiring a full reconnect.
+func TestUpdateVerifier_AcceptsCommandSignedWithNewCert(t *testing.T) {
+	_, oldVerifier := newTestSignerVerifier(t)
+	newSigner, newVerifier := newTestSignerVerifier(t)
+
+	// Handler starts with old-cert-only verifier.
+	h := newTestHandlerWithVerifier(t, nil, oldVerifier)
+
+	dispatched := make(chan struct{}, 1)
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(_ context.Context, _ *cpTypes.Command) error {
+		dispatched <- struct{}{}
+		return nil
+	})
+
+	ctx := context.Background()
+
+	// Command signed with the new cert must be rejected before the verifier update.
+	cmd := &cpTypes.Command{
+		ID:        "new-cert-before-update",
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+	}
+	sc := signTestCommand(t, newSigner, cmd)
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand, "command signed with unknown cert must be rejected before UpdateVerifier")
+
+	// Replace the verifier to include the new cert.
+	h.UpdateVerifier(newVerifier)
+
+	// Same new-cert signer, fresh command ID (replay cache would reject the same ID).
+	cmd2 := &cpTypes.Command{
+		ID:        "new-cert-after-update",
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+	}
+	sc2 := signTestCommand(t, newSigner, cmd2)
+	require.NoError(t, h.HandleCommand(ctx, sc2), "command signed with new cert must be accepted after UpdateVerifier")
+	h.Wait()
+
+	select {
+	case <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("handler was not dispatched after UpdateVerifier accepted the new-cert command")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // capturingLogger — real Logger implementation that records every log call.
 // Used by execute_script security tests to assert on handler log output.
