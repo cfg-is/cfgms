@@ -1369,10 +1369,10 @@ func TestHandleRegister_MalformedDeviceID_400(t *testing.T) {
 
 	for _, badID := range []string{
 		"tooshort",
-		strings.Repeat("a", 63),  // 63 chars
-		strings.Repeat("A", 64),  // uppercase hex — invalid
-		strings.Repeat("g", 64),  // non-hex character
-		strings.Repeat("a", 65),  // 65 chars
+		strings.Repeat("a", 63), // 63 chars
+		strings.Repeat("A", 64), // uppercase hex — invalid
+		strings.Repeat("g", 64), // non-hex character
+		strings.Repeat("a", 65), // 65 chars
 	} {
 		rec := postRegisterWithBody(server, RegistrationRequest{
 			Token:          "cfgms_reg_bad_device_id",
@@ -1420,9 +1420,9 @@ func TestHandleRegister_InvalidIdentityKeyPub_400(t *testing.T) {
 
 	for _, badPub := range []string{
 		"notbase64!!!",
-		base64.StdEncoding.EncodeToString([]byte("tooshort")),                     // <32 bytes
-		base64.StdEncoding.EncodeToString(make([]byte, 33)),                       // 33 bytes
-		base64.StdEncoding.EncodeToString(make([]byte, 64)),                       // 64 bytes (wrong size)
+		base64.StdEncoding.EncodeToString([]byte("tooshort")), // <32 bytes
+		base64.StdEncoding.EncodeToString(make([]byte, 33)),   // 33 bytes
+		base64.StdEncoding.EncodeToString(make([]byte, 64)),   // 64 bytes (wrong size)
 	} {
 		rec := postRegisterWithBody(server, RegistrationRequest{
 			Token:          "cfgms_reg_bad_key_pub",
