@@ -5,6 +5,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"os"
 	goruntime "runtime"
 	"testing"
 
@@ -117,8 +118,12 @@ func TestWorkflowModuleFactory_IntegrationWithEchoModule(t *testing.T) {
 	require.NoError(t, c.Put(b))
 	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
 
-	// Create a runtime and factory backed by the real cache.
-	rt := runtime.NewModuleRuntime(t.TempDir())
+	// Use /tmp explicitly so the socket path fits within macOS's 103-byte sun_path limit.
+	// t.TempDir() on macOS generates paths under /var/folders/... that are too long.
+	runtimeDir, err := os.MkdirTemp("/tmp", "cfgms-wf-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	rt := runtime.NewModuleRuntime(runtimeDir)
 	factory := NewWorkflowModuleFactory(c, rt)
 
 	// CreateModuleInstance must resolve the cached bundle, fork/exec the binary,
