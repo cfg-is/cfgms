@@ -94,6 +94,16 @@ func ValidateConfiguration(config StewardConfig) error {
 		}
 	}
 
+	if config.Steward.DNARefreshInterval != "" {
+		d, err := time.ParseDuration(config.Steward.DNARefreshInterval)
+		if err != nil {
+			return fmt.Errorf("invalid dna_refresh_interval %q: must be a valid duration (e.g. \"30m\", \"15m\", \"1h\")", config.Steward.DNARefreshInterval)
+		}
+		if d <= 0 {
+			return fmt.Errorf("dna_refresh_interval must be positive, got %q", config.Steward.DNARefreshInterval)
+		}
+	}
+
 	if err := ValidateScriptSigningConfig(config.Steward.ScriptSigning); err != nil {
 		return fmt.Errorf("script_signing configuration invalid: %w", err)
 	}
@@ -186,6 +196,19 @@ func GetConvergeInterval(cfg StewardConfig) time.Duration {
 		return 30 * time.Minute
 	}
 	d, err := time.ParseDuration(cfg.Steward.ConvergeInterval)
+	if err != nil || d <= 0 {
+		return 30 * time.Minute
+	}
+	return d
+}
+
+// GetDNARefreshInterval returns the parsed DNA refresh interval.
+// Falls back to 30 minutes if the field is empty or unparseable.
+func GetDNARefreshInterval(cfg StewardConfig) time.Duration {
+	if cfg.Steward.DNARefreshInterval == "" {
+		return 30 * time.Minute
+	}
+	d, err := time.ParseDuration(cfg.Steward.DNARefreshInterval)
 	if err != nil || d <= 0 {
 		return 30 * time.Minute
 	}

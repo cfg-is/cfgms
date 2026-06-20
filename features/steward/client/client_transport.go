@@ -50,6 +50,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
+// DNACollector is the interface used by the DNA refresh loop to re-collect
+// system attributes on each tick. Production code wraps dna.Collector; tests
+// inject a stub returning deterministic attribute maps without real I/O.
+type DNACollector interface {
+	CollectAttributes(ctx context.Context) (map[string]string, error)
+}
+
 // TransportClient represents the steward client using gRPC-over-QUIC for both
 // control plane and data plane communication with the controller.
 // Story #516: Connects once to transport_address for both CP and DP.
@@ -120,10 +127,10 @@ type TransportClient struct {
 	// Connection state — single flag for unified gRPC transport
 	connected bool
 
-	// disconnected guards the one-time close of heartbeatStop/convergenceStop in
-	// Disconnect. A pushed-upgrade graceful self-exit (Issue #2001) adds a second
-	// shutdown trigger path (runCancel → runCtx.Done → Disconnect), so Disconnect
-	// can now legitimately be invoked more than once; closing an already-closed
+	// disconnected guards the one-time close of heartbeatStop/convergenceStop/
+	// dnaRefreshStop in Disconnect. A pushed-upgrade graceful self-exit (Issue #2001)
+	// adds a second shutdown trigger path (runCancel → runCtx.Done → Disconnect), so
+	// Disconnect can now legitimately be invoked more than once; closing an already-closed
 	// channel panics, so the close is gated on this flag under c.mu.
 	disconnected bool
 
@@ -151,6 +158,13 @@ type TransportClient struct {
 	dnaMu            sync.RWMutex
 	currentDNAHash   string            // SHA-256 hash of most-recently observed DNA
 	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
+
+	// DNA refresh loop control (Issue #1915).
+	dnaRefreshInterval time.Duration
+	dnaRefreshStop     chan struct{}
+	// dnaCollector is the DNA collection implementation used by the refresh loop.
+	// Injectable for testing; production code uses dna.NewCollector.
+	dnaCollector DNACollector
 
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
@@ -339,6 +353,16 @@ type TransportConfig struct {
 	// only — production deployments leave this nil. (Issue #1948)
 	UpgradePublisherTrustStore trust.TrustStore
 
+	// DNARefreshInterval is how often the connected steward re-collects and
+	// publishes DNA attribute deltas (Issue #1915). Defaults to 30 minutes.
+	DNARefreshInterval time.Duration
+
+	// DNACollector is the implementation used by the DNA refresh loop to collect
+	// system attributes. When nil, the refresh loop is disabled (no collection
+	// is attempted). Injectable for testing — production code passes a real
+	// dna.Collector via main.go after registration.
+	DNACollector DNACollector
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -355,6 +379,11 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	heartbeatInterval := cfg.HeartbeatInterval
 	if heartbeatInterval == 0 {
 		heartbeatInterval = 20 * time.Second // epic #1664: 20s base + [0,10s) jitter
+	}
+
+	dnaRefreshInterval := cfg.DNARefreshInterval
+	if dnaRefreshInterval == 0 {
+		dnaRefreshInterval = 30 * time.Minute
 	}
 
 	// Per-instance RNG for per-tick heartbeat jitter (epic #1664).
@@ -385,8 +414,11 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		rng:                        rng,
 		heartbeatStop:              make(chan struct{}),
 		convergenceStop:            make(chan struct{}),
+		dnaRefreshStop:             make(chan struct{}),
 		convergeInterval:           30 * time.Minute,
 		convergeIntervalCh:         make(chan struct{}, 1),
+		dnaRefreshInterval:         dnaRefreshInterval,
+		dnaCollector:               cfg.DNACollector,
 		transportAddress:           cfg.ControllerURL,
 		certPath:                   cfg.TLSCertPath,
 		caCertPEM:                  cfg.CACertPEM,
@@ -1256,6 +1288,60 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 	return nil
 }
 
+// StartDNARefreshLoop starts a background goroutine that re-collects system DNA
+// attributes on the configured interval and publishes delta updates to the
+// controller when at least one attribute value has changed.
+//
+// If no DNACollector was provided, the loop exits immediately after logging a
+// warning. The loop exits cleanly when ctx is cancelled or Disconnect is called.
+// The existing 15-second graceful disconnect window applies — the loop does not
+// block shutdown. (Issue #1915)
+func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) {
+	c.mu.RLock()
+	interval := c.dnaRefreshInterval
+	collector := c.dnaCollector
+	c.mu.RUnlock()
+
+	if collector == nil {
+		c.logger.Warn("DNA refresh loop started without a collector; DNA will not be refreshed periodically")
+		return
+	}
+
+	c.logger.Info("Starting DNA refresh loop", "interval", interval)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.dnaRefreshStop:
+				return
+			case <-ticker.C:
+				// Re-read collector on each tick so tests can inject a new
+				// implementation after the loop has started.
+				c.mu.RLock()
+				currentCollector := c.dnaCollector
+				c.mu.RUnlock()
+				if currentCollector == nil {
+					continue
+				}
+				attrs, err := currentCollector.CollectAttributes(ctx)
+				if err != nil {
+					c.logger.Warn("DNA refresh collection failed", "error", err)
+					continue
+				}
+				if len(attrs) == 0 {
+					continue
+				}
+				if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
+					c.logger.Warn("DNA refresh publish failed", "error", err)
+				}
+			}
+		}
+	}()
+}
+
 // SetShutdownFunc wires the graceful-shutdown trigger used after a successful
 // push_steward_binary swap. In production main.go passes the steward's RUN
 // context (runCtx) and its cancel func (runCancel) so a pushed upgrade ends the
@@ -1288,9 +1374,12 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 	// idempotent at their own layers) and return cleanly.
 	if !c.disconnected {
 		c.disconnected = true
-		// Stop heartbeat and convergence loop
+		// Stop heartbeat, convergence, and DNA refresh loops.
 		close(c.heartbeatStop)
 		close(c.convergenceStop)
+		if c.dnaRefreshStop != nil {
+			close(c.dnaRefreshStop)
+		}
 	}
 
 	// Close data plane session

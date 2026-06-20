@@ -350,6 +350,11 @@ func applyDefaults(config *StewardConfig) {
 	if config.Steward.RegistrationPollTimeout == 0 {
 		config.Steward.RegistrationPollTimeout = 24 * time.Hour
 	}
+
+	// Default DNA refresh interval: 30m (Issue #1915).
+	if config.Steward.DNARefreshInterval == "" {
+		config.Steward.DNARefreshInterval = "30m"
+	}
 }
 
 // validateScriptSigningConfig delegates to the shared stewardtypes validator.
