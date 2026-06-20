@@ -242,17 +242,19 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 
 // ── Seed VHDX build + attach sequence ────────────────────────────────────────
 
-// TestProvisionVM_SeedVHDBuildAndAttachSequence drives an absent Gen2 windows
+// TestProvisionVM_SeedVHDBuildAndAttachSequence drives an absent Gen2 LINUX
 // VM with a source block and asserts the full seed build + media attach
 // sequence is emitted in order: New-VHD → Format-Volume (Mount) → Set-Content
-// (copy) → Add-VMHardDiskDrive (seed attach) → Add-VMDvdDrive (ISO).
+// (copy) → Add-VMHardDiskDrive (seed attach) → Add-VMDvdDrive (ISO). The seed
+// VHDX path is Linux-only; Windows delivers its answer file on an ISO (see
+// TestProvisionVM_WindowsBuildsAnswerISO).
 func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := provisionModuleWithTransport(transport)
 
-	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
 
 	transport.mu.Lock()
@@ -289,8 +291,36 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 		"seed path must not be interpolated into the script text")
 
 	copy := callsContaining(calls, "Set-Content")[0]
-	assert.True(t, argsContain(copy, "autounattend.xml"),
-		"windows os_family must seed autounattend.xml")
+	assert.True(t, argsContain(copy, "preseed.cfg"),
+		"linux os_family must seed preseed.cfg")
+}
+
+// TestProvisionVM_WindowsBuildsAnswerISO asserts the Windows path delivers the
+// answer file via an ISO (the new Server 2025 Setup does not scan data disks):
+// it builds an answer ISO, attaches TWO DVDs (answer ISO + install ISO), sets
+// the install DVD first boot, and drives the boot keypress — and never builds a
+// seed VHDX.
+func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, callsContaining(calls, "Cfgms-BuildAnswerIso"), 1, "one answer-ISO build")
+	require.Len(t, callsContaining(calls, "Add-VMDvdDrive"), 2, "two DVDs: answer ISO + install ISO")
+	require.Len(t, callsContaining(calls, "Cfgms-BootKeypress"), 1, "one boot keypress")
+	assert.Empty(t, callsContaining(calls, "New-VHD"), "windows must NOT build a seed VHDX")
+	assert.Empty(t, callsContaining(calls, "Add-VMHardDiskDrive"), "windows attaches no seed disk")
+
+	build := callsContaining(calls, "Cfgms-BuildAnswerIso")[0]
+	assert.True(t, argsContain(build, "autounattend.xml"), "windows answer file is autounattend.xml")
+	assert.True(t, argsContain(build, `C:\ClusterStorage\CSV01\cfgms-answer-stw-01.iso`),
+		"answer ISO path derives from the VM VHD dir and travels via args")
 }
 
 // TestProvisionVM_AttachesInstallISOFromHostPath asserts the install ISO is
@@ -301,7 +331,7 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 	}
 	m := provisionModuleWithTransport(transport)
 
-	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
 
 	transport.mu.Lock()

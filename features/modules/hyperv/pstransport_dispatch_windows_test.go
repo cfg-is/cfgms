@@ -83,7 +83,16 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
 			" -Template " + quoteArg(psArgs, "Template"))
 	case psSetDVDFirstBoot:
-		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name"))
+		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name") +
+			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
+	case psBuildAnswerIso:
+		return emit("Cfgms-BuildAnswerIso -IsoPath " + quoteArg(psArgs, "IsoPath") +
+			" -FileName " + quoteArg(psArgs, "FileName") +
+			" -Content " + quoteArg(psArgs, "Content") +
+			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
+			" -CASrc " + quoteArg(psArgs, "CASrc"))
+	case psBootKeypress:
+		return emit("Cfgms-BootKeypress -Name " + quoteArg(psArgs, "Name"))
 	case psRemoveVM:
 		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -348,7 +357,9 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
-		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
+		{"psBuildAnswerIso", psBuildAnswerIso, map[string]string{"IsoPath": "C:\\cfgms-seeds\\a.iso", "FileName": "autounattend.xml", "Content": "<x/>", "StewardSrc": "", "CASrc": ""}},
+		{"psBootKeypress", psBootKeypress, map[string]string{"Name": "cfgms-t__web-01"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},

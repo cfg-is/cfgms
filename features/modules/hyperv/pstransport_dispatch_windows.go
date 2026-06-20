@@ -99,7 +99,20 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 	case psSetDVDFirstBoot:
 		// runFresh: Set-VMFirmware -FirstBootDevice references the DVD/ISO and
 		// deadlocks in the persistent host (the secure-boot case above does not).
-		return t.runFresh(ctx, "Cfgms-SetDVDFirstBoot -Name "+quoteArg(psArgs, "Name"))
+		return t.runFresh(ctx,
+			"Cfgms-SetDVDFirstBoot -Name "+quoteArg(psArgs, "Name")+
+				" -ISOPath "+quoteArg(psArgs, "ISOPath"))
+	case psBuildAnswerIso:
+		// runFresh: IMAPI2 COM + file I/O; heavy, must not run in the persistent host.
+		return t.runFresh(ctx,
+			"Cfgms-BuildAnswerIso -IsoPath "+quoteArg(psArgs, "IsoPath")+
+				" -FileName "+quoteArg(psArgs, "FileName")+
+				" -Content "+quoteArg(psArgs, "Content")+
+				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
+				" -CASrc "+quoteArg(psArgs, "CASrc"))
+	case psBootKeypress:
+		// runFresh: blocks ~40s driving the VM keyboard.
+		return t.runFresh(ctx, "Cfgms-BootKeypress -Name "+quoteArg(psArgs, "Name"))
 
 	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
 	case psConnectVMNic:

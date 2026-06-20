@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ── Provisioning PS verb constants (ADR-009 §5) ────────────────────────────
@@ -69,6 +71,16 @@ const (
 	// psSetVMFirmware wraps Set-VMFirmware: select the Gen2 secure-boot
 	// template. Gen1 VMs never reach this.
 	psSetVMFirmware = `Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template`
+
+	// psBuildAnswerIso builds a small ISO carrying the rendered answer file
+	// (+ steward binary + CA) for the Windows path: the new Server 2025 Setup
+	// scans DVD roots for autounattend.xml but NOT data disks, so the answer file
+	// is delivered on an ISO attached as a second DVD (built natively via IMAPI2).
+	psBuildAnswerIso = `Cfgms-BuildAnswerIso`
+
+	// psBootKeypress drives the VM keyboard after power-on to satisfy the Windows
+	// install media's "Press any key to boot from CD or DVD" prompt.
+	psBootKeypress = `Cfgms-BootKeypress`
 )
 
 // secureBootTemplate returns the Gen2 secure-boot firmware template for the
@@ -237,6 +249,23 @@ func seedVHDPath(vmName, vhdPath, seedDir string) string {
 	return dir + `\` + "cfgms-seed-" + vmName + ".vhdx"
 }
 
+// answerISOPath derives the Windows answer-ISO path, mirroring seedVHDPath's
+// directory rules (seed_dir when set, else next to the VM's VHD). The answer ISO
+// carries autounattend.xml (+ steward binary + CA) and is attached as a second
+// DVD so the new Server 2025 Setup auto-discovers it (it does not scan data
+// disks). Must be a local, non-CSV path for the same reason as the seed.
+func answerISOPath(vmName, vhdPath, seedDir string) string {
+	dir := seedDir
+	if dir == "" {
+		dir = vhdPath
+		if i := strings.LastIndexAny(vhdPath, `\/`); i >= 0 {
+			dir = vhdPath[:i]
+		}
+	}
+	dir = strings.TrimRight(dir, `\/`)
+	return dir + `\` + "cfgms-answer-" + vmName + ".iso"
+}
+
 // validateSeedPath rejects a seed path that is not a safe absolute Windows
 // path before it can reach the PS transport. A non-absolute path (no drive
 // letter) and a UNC path (\\server\share) are both rejected: the seed must
@@ -311,75 +340,84 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
 	}
 
-	// Build the seed VHDX next to the VM's primary VHD.
-	seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
-	if err := validateSeedPath(seedPath); err != nil {
-		return m.failProvision(ctx, vmName, record, err)
-	}
-
-	if _, psErr := m.transport.ExecutePS(ctx, psNewSeedVHD, map[string]string{
-		"Path": seedPath,
-		// 256 MiB (dynamic, so near-zero on-disk until written). The Windows path
-		// stages the steward binary (~tens of MB) + CA onto the seed; 64 MiB was
-		// too small for the binary, so the seed is sized to hold it (ADR-010).
-		"SizeBytes": "268435456",
-	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, psErr)
-		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: create seed VHDX for VM %q: %w", vmName, psErr))
-	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, nil)
-
-	if _, psErr := m.transport.ExecutePS(ctx, psMountSeedVHD, map[string]string{
-		"Path": seedPath,
-	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, psErr)
-		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: format seed VHDX for VM %q: %w", vmName, psErr))
-	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
-
-	// Render the unattended answer file for the os_family. renderSeedAnswerFile
-	// dispatches on os_family: linux renders the REAL preseed from the referenced
-	// (or built-in Debian) profile (#2046); windows renders the real
-	// autounattend.xml from the referenced (or built-in Windows) profile (#2047).
-	// Both bake the per-VM CorrelationID in so the controller-side reconciler
-	// (#2050) can match the registered steward (ADR-009 §8). Per-VM vars +
-	// secrets are substituted at render time.
+	// Render the unattended answer file (os_family dispatch): linux → preseed
+	// (#2046), windows → autounattend.xml (#2047). The per-VM CorrelationID is
+	// baked in so the controller-side reconciler (#2050) can match the registered
+	// steward (ADR-009 §8). Per-VM vars + secrets substituted at render time.
 	answerContent, renderErr := m.renderSeedAnswerFile(ctx, vmName, cfg.Source, record.CorrelationID)
 	if renderErr != nil {
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: render answer file for VM %q: %w", vmName, renderErr))
 	}
 
-	// Stage the steward binary + controller CA onto the seed for the Windows
-	// self-install path (ADR-010); the Linux/preseed path stages neither (it
-	// fetches the .deb in late_command). Empty values skip staging.
-	var stewardSrc, caSrc string
+	// Answer-file delivery is os_family-specific. Windows: the new Server 2025
+	// Setup scans DVD roots for autounattend.xml but NOT data disks, so the
+	// answer file (+ steward binary + CA) ships on a small ISO attached as a
+	// second DVD (built natively via IMAPI2). Linux: debian-installer reads the
+	// preseed from the labelled FAT32 CFGMS_SEED volume on a seed VHDX.
 	if cfg.Source.OSFamily == "windows" {
-		stewardSrc = m.enrollStewardPath
-		caSrc = m.enrollCAPath
+		isoPath := answerISOPath(vmName, cfg.VHDPath, m.seedDir)
+		if err := validateSeedPath(isoPath); err != nil {
+			return m.failProvision(ctx, vmName, record, err)
+		}
+		if _, psErr := m.transport.ExecutePS(ctx, psBuildAnswerIso, map[string]string{
+			"IsoPath":    isoPath,
+			"FileName":   seedAnswerFileName("windows"),
+			"Content":    answerContent,
+			"StewardSrc": m.enrollStewardPath,
+			"CASrc":      m.enrollCAPath,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BuildAnswerIso", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: build answer ISO for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BuildAnswerIso", hostName, nil)
+		if _, psErr := m.transport.ExecutePS(ctx, psAttachDVD, map[string]string{
+			"Name":    hostName,
+			"ISOPath": isoPath,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach answer ISO to VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, nil)
+	} else {
+		seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
+		if err := validateSeedPath(seedPath); err != nil {
+			return m.failProvision(ctx, vmName, record, err)
+		}
+		if _, psErr := m.transport.ExecutePS(ctx, psNewSeedVHD, map[string]string{
+			"Path":      seedPath,
+			"SizeBytes": "268435456",
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: create seed VHDX for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, nil)
+		if _, psErr := m.transport.ExecutePS(ctx, psMountSeedVHD, map[string]string{"Path": seedPath}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: format seed VHDX for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
+		if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
+			"SeedPath":   seedPath,
+			"FileName":   seedAnswerFileName("linux"),
+			"Content":    answerContent,
+			"StewardSrc": "",
+			"CASrc":      "",
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write answer file to seed for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, nil)
+		if _, psErr := m.transport.ExecutePS(ctx, psAttachSeedDisk, map[string]string{
+			"Name":     hostName,
+			"SeedPath": seedPath,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach seed disk to VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, nil)
 	}
-	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
-		"SeedPath":   seedPath,
-		"FileName":   seedAnswerFileName(cfg.Source.OSFamily),
-		"Content":    answerContent,
-		"StewardSrc": stewardSrc,
-		"CASrc":      caSrc,
-	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
-		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write answer file to seed for VM %q: %w", vmName, psErr))
-	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, nil)
 
-	// Attach the seed VHDX as the secondary disk.
-	if _, psErr := m.transport.ExecutePS(ctx, psAttachSeedDisk, map[string]string{
-		"Name":     hostName,
-		"SeedPath": seedPath,
-	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, psErr)
-		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach seed disk to VM %q: %w", vmName, psErr))
-	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, nil)
-
-	// Attach the install ISO as the DVD drive (host path, never repacked).
+	// Attach the install ISO as a DVD drive (host path, never repacked).
 	if _, psErr := m.transport.ExecutePS(ctx, psAttachDVD, map[string]string{
 		"Name":    hostName,
 		"ISOPath": cfg.Source.ISO,
@@ -390,11 +428,12 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, nil)
 
 	// Make the install DVD the first boot device so a Gen2 VM boots the installer
-	// rather than the empty OS VHD. Gen1 uses BIOS startup order (CD precedes the
-	// IDE disk by default) and is skipped.
+	// rather than the empty OS VHD or the (bootloader-less) answer ISO. The
+	// install ISO is selected by path. Gen1 uses BIOS startup order and is skipped.
 	if generation == 2 {
 		if _, psErr := m.transport.ExecutePS(ctx, psSetDVDFirstBoot, map[string]string{
-			"Name": hostName,
+			"Name":    hostName,
+			"ISOPath": cfg.Source.ISO,
 		}); psErr != nil {
 			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: set DVD first boot for VM %q: %w", vmName, psErr))
@@ -407,6 +446,22 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	// controller-side reconciler (#2050) flips ready.
 	if err := m.execStartVM(ctx, vmName, hostName); err != nil {
 		return m.failProvision(ctx, vmName, record, err)
+	}
+
+	// Windows: drive the keyboard past the install media's "Press any key to
+	// boot from CD or DVD" prompt, which otherwise times out headlessly. The
+	// post-install reboots boot the OS (Windows Setup re-prioritises its own boot
+	// manager). Best-effort — a keypress failure does not fail the provision.
+	if cfg.Source.OSFamily == "windows" {
+		if _, psErr := m.transport.ExecutePS(ctx, psBootKeypress, map[string]string{"Name": hostName}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BootKeypress", hostName, psErr)
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: boot keypress failed (install may still proceed)",
+					"vm_name", logging.SanitizeLogValue(vmName))
+			}
+		} else {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BootKeypress", hostName, nil)
+		}
 	}
 
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateInstalling)

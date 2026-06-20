@@ -259,15 +259,80 @@ function Cfgms-SetVMFirmware {
     Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template
 }
 
-# Cfgms-SetDVDFirstBoot makes the install DVD the Gen2 firmware's first boot
-# device so the VM boots the installer rather than the empty OS disk. Dispatched
-# via runFresh: Set-VMFirmware -FirstBootDevice references the DVD drive, which
-# touches the ISO and deadlocks in the persistent -Command - host (unlike the
-# secure-boot Set-VMFirmware above, which sets only a flag).
+# Cfgms-SetDVDFirstBoot makes the INSTALL DVD (matched by $ISOPath) the Gen2
+# firmware's first boot device so the VM boots the installer rather than the
+# empty OS disk or the (bootloader-less) answer ISO. Two DVDs are attached for
+# Windows (install ISO + answer ISO), so the install ISO must be selected by
+# path. Dispatched via runFresh: Set-VMFirmware -FirstBootDevice references the
+# DVD/ISO and deadlocks in the persistent -Command - host.
 function Cfgms-SetDVDFirstBoot {
-    param([Parameter(Mandatory)][string]$Name)
-    $dvd = Get-VMDvdDrive -VMName $Name | Select-Object -First 1
+    param([Parameter(Mandatory)][string]$Name, [string]$ISOPath = '')
+    $dvd = $null
+    if ($ISOPath) { $dvd = Get-VMDvdDrive -VMName $Name | Where-Object { $_.Path -eq $ISOPath } | Select-Object -First 1 }
+    if (-not $dvd) { $dvd = Get-VMDvdDrive -VMName $Name | Select-Object -First 1 }
     Set-VMFirmware -VMName $Name -FirstBootDevice $dvd
+}
+
+# Cfgms-BuildAnswerIso builds a small ISO ($IsoPath) carrying the rendered
+# answer file ($FileName/$Content) plus, when supplied, the steward binary and
+# controller CA, so the new Windows Server 2025 Setup auto-applies the answer
+# file (the redesigned Setup scans DVD roots but NOT data disks). Built natively
+# via IMAPI2 — no oscdimg/ADK/WSL needed. The IMAPI image IStream is copied to
+# the file by a C# helper because the equivalent PowerShell IStream.Read interop
+# hangs. Dispatched via runFresh (a fresh process; the COM/file work is heavy and
+# must not run in the persistent host).
+function Cfgms-BuildAnswerIso {
+    param(
+        [Parameter(Mandatory)][string]$IsoPath,
+        [Parameter(Mandatory)][string]$FileName,
+        [Parameter(Mandatory)][string]$Content,
+        [string]$StewardSrc = '',
+        [string]$CASrc = ''
+    )
+    Add-Type -ErrorAction SilentlyContinue -TypeDefinition @'
+using System; using System.IO; using System.Runtime.InteropServices; using System.Runtime.InteropServices.ComTypes;
+public static class CfgmsIsoWriter {
+  public static void Save(object comStream, string path) {
+    IStream s = (IStream)comStream;
+    using (FileStream fs = File.Create(path)) {
+      byte[] buf = new byte[1048576];
+      IntPtr read = Marshal.AllocHGlobal(4);
+      try { while (true) { s.Read(buf, buf.Length, read); int n = Marshal.ReadInt32(read); if (n <= 0) break; fs.Write(buf, 0, n); } }
+      finally { Marshal.FreeHGlobal(read); }
+    }
+  }
+}
+'@
+    $tmp = Join-Path $env:TEMP ('cfgms-ans-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    try {
+        Set-Content -Path (Join-Path $tmp $FileName) -Value $Content -NoNewline
+        if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination (Join-Path $tmp 'cfgms-steward.exe') -Force }
+        if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination (Join-Path $tmp 'controller-ca.crt') -Force }
+        Remove-Item $IsoPath -Force -ErrorAction SilentlyContinue
+        $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+        $fsi.FileSystemsToCreate = 7
+        $fsi.VolumeName = 'CFGMS_ANS'
+        $fsi.Root.AddTree($tmp, $false)
+        $res = $fsi.CreateResultImage()
+        [CfgmsIsoWriter]::Save($res.ImageStream, $IsoPath)
+    } finally {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Cfgms-BootKeypress drives the VM keyboard for ~40s after power-on to satisfy
+# the Windows install media's "Press any key to boot from CD or DVD..." prompt,
+# which otherwise times out in a headless VM and the boot loader gives up. Uses
+# the Msvm_Keyboard WMI device. Dispatched via runFresh (it blocks ~40s).
+function Cfgms-BootKeypress {
+    param([Parameter(Mandatory)][string]$Name)
+    for ($i = 0; $i -lt 50; $i++) {
+        $vm = Get-WmiObject -Namespace root\virtualization\v2 -Class Msvm_ComputerSystem -Filter "ElementName='$Name'"
+        $kb = $vm.GetRelated('Msvm_Keyboard') | Select-Object -First 1
+        if ($kb) { $kb.TypeKey(0x20) | Out-Null }
+        Start-Sleep -Milliseconds 400
+    }
 }
 
 # ── VSwitch read + lifecycle ──────────────────────────────────────────
