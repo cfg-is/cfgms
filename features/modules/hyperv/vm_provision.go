@@ -52,6 +52,13 @@ const (
 	// drive. The ISO is never repacked or re-signed.
 	psAttachDVD = `Add-VMDvdDrive -VMName $Name -Path $ISOPath`
 
+	// psSetDVDFirstBoot makes the install DVD the Gen2 firmware's first boot
+	// device. Without this a freshly-created Gen2 VM boots the empty OS VHD (no
+	// bootloader) instead of the installer ISO, so the unattended install never
+	// starts. Gen1 VMs use BIOS startup order (CD precedes IDE by default) and
+	// never reach this.
+	psSetDVDFirstBoot = `$dvd = Get-VMDvdDrive -VMName $Name | Select-Object -First 1; Set-VMFirmware -VMName $Name -FirstBootDevice $dvd`
+
 	// psSetVMFirmware wraps Set-VMFirmware: select the Gen2 secure-boot
 	// template. Gen1 VMs never reach this.
 	psSetVMFirmware = `Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template`
@@ -358,6 +365,19 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach install ISO to VM %q: %w", vmName, psErr))
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, nil)
+
+	// Make the install DVD the first boot device so a Gen2 VM boots the installer
+	// rather than the empty OS VHD. Gen1 uses BIOS startup order (CD precedes the
+	// IDE disk by default) and is skipped.
+	if generation == 2 {
+		if _, psErr := m.transport.ExecutePS(ctx, psSetDVDFirstBoot, map[string]string{
+			"Name": hostName,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: set DVD first boot for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
+	}
 
 	// Power on and advance creating → installing. The unattended install runs
 	// inside the guest; the host-side module observes no further until the
