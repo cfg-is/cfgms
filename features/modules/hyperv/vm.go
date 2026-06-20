@@ -82,6 +82,11 @@ type SourceConfig struct {
 	// OnExisting controls behaviour when the VM already exists:
 	// never (default) leaves it untouched; recreate destroys and re-provisions.
 	OnExisting string `yaml:"on_existing,omitempty"`
+	// Edition is the exact Windows image name the autounattend ImageInstall step
+	// selects (the /IMAGE/NAME value, e.g. "Windows Server 2025 Standard
+	// Evaluation (Desktop Experience)"). Optional; when empty the built-in
+	// defaultWindowsEdition is used. Ignored for os_family: linux.
+	Edition string `yaml:"edition,omitempty"`
 }
 
 // VMConfig represents the desired state of a Hyper-V virtual machine.
@@ -326,6 +331,7 @@ func parseSourceMap(v interface{}) *SourceConfig {
 	src.OSFamily, _ = m["os_family"].(string)
 	src.Unattend, _ = m["unattend"].(string)
 	src.OnExisting, _ = m["on_existing"].(string)
+	src.Edition, _ = m["edition"].(string)
 	if comp, ok := m["completion"].(map[string]interface{}); ok {
 		src.Completion.Mode, _ = comp["mode"].(string)
 		src.Completion.Timeout, _ = comp["timeout"].(string)

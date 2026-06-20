@@ -174,6 +174,9 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 	// password backs the one-shot AutoLogon that runs enrollment.
 	if src.OSFamily == "windows" {
 		vars.ProductEdition = defaultWindowsEdition
+		if src.Edition != "" {
+			vars.ProductEdition = src.Edition
+		}
 		pw, pwErr := randomAdminPassword()
 		if pwErr != nil {
 			return "", fmt.Errorf("hyperv: generate admin password for VM %q: %w", vmName, pwErr)
