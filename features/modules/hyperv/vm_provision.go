@@ -25,12 +25,19 @@ import (
 // maps each const to its Cfgms-* preamble function.
 
 const (
-	// psNewSeedVHD wraps New-VHD: create the empty dynamic seed disk.
-	psNewSeedVHD = `New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null`
+	// psNewSeedVHD ensures the seed's parent directory exists (seed_dir may be a
+	// fresh local path), then wraps New-VHD to create the empty dynamic seed disk.
+	psNewSeedVHD = `New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null; New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null`
 
 	// psMountSeedVHD wraps the Mount-VHD → Initialize-Disk → New-Partition →
-	// Format-Volume pipeline: lay a FAT32 CFGMS_SEED volume on the seed disk.
-	psMountSeedVHD = `Mount-VHD -Path $Path -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null`
+	// Format-Volume pipeline: lay a FAT32 CFGMS_SEED volume on the seed disk, then
+	// Dismount-VHD. The trailing dismount is REQUIRED: Mount-VHD attaches the VHD
+	// host-wide (not process-scoped), so without it the disk stays mounted after
+	// this PS process exits and the subsequent psCopyToSeedVHD Mount-VHD fails with
+	// a sharing violation (0x80070020 "being used by another process"). The
+	// formatted volume persists on the (now-detached) VHD for the copy step to
+	// re-mount.
+	psMountSeedVHD = `Mount-VHD -Path $Path -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null; Dismount-VHD -Path $Path`
 
 	// psCopyToSeedVHD mounts the seed, writes $Content to <drive>:\$FileName,
 	// optionally stages the steward binary ($StewardSrc → <drive>:\cfgms-steward.exe)
@@ -202,17 +209,29 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 	return string(rendered), nil
 }
 
-// seedVHDPath derives the seed VHDX path from the VM's VHD path so the seed
-// lands in the same directory as the VM's primary disk:
-// <vhdDir>\cfgms-seed-<vmName>.vhdx. The parent directory is computed with
-// Windows path semantics (split on \ or /) rather than filepath.Dir, which is
-// OS-dependent: filepath.Dir("C:\\dir\\x.vhdx") returns "." on Linux (it does
-// not treat "\" as a separator), mangling the always-Windows Hyper-V path when
-// the steward or CI runs on a non-Windows OS (Issue #2044).
-func seedVHDPath(vmName, vhdPath string) string {
-	dir := vhdPath
-	if i := strings.LastIndexAny(vhdPath, `\/`); i >= 0 {
-		dir = vhdPath[:i]
+// seedVHDPath derives the seed VHDX path. When seedDir is set (module config
+// seed_dir) the seed lands there: <seedDir>\cfgms-seed-<vmName>.vhdx. Otherwise
+// it lands next to the VM's primary disk: <vhdDir>\cfgms-seed-<vmName>.vhdx.
+//
+// IMPORTANT: the seed must NOT live on a Cluster Shared Volume
+// (C:\ClusterStorage\...). Mount-VHD against a VHDX on a CSV hangs on a cluster
+// node (CSV redirected-I/O / cluster coordination), stalling the whole seed
+// build. The seed is ephemeral (built, attached for install, detached and
+// deleted at finalize), so seed_dir should point at a local, non-CSV directory
+// even when the VM's own VHD lives on CSV.
+//
+// The parent directory is computed with Windows path semantics (split on \ or /)
+// rather than filepath.Dir, which is OS-dependent: filepath.Dir("C:\\dir\\x.vhdx")
+// returns "." on Linux (it does not treat "\" as a separator), mangling the
+// always-Windows Hyper-V path when the steward or CI runs on a non-Windows OS
+// (Issue #2044).
+func seedVHDPath(vmName, vhdPath, seedDir string) string {
+	dir := seedDir
+	if dir == "" {
+		dir = vhdPath
+		if i := strings.LastIndexAny(vhdPath, `\/`); i >= 0 {
+			dir = vhdPath[:i]
+		}
 	}
 	dir = strings.TrimRight(dir, `\/`)
 	return dir + `\` + "cfgms-seed-" + vmName + ".vhdx"
@@ -293,7 +312,7 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 
 	// Build the seed VHDX next to the VM's primary VHD.
-	seedPath := seedVHDPath(vmName, cfg.VHDPath)
+	seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
 	if err := validateSeedPath(seedPath); err != nil {
 		return m.failProvision(ctx, vmName, record, err)
 	}
@@ -458,7 +477,7 @@ func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName s
 	}
 
 	// Detach the seed VHDX so the answer file is gone on the next boot.
-	seedPath := seedVHDPath(vmName, cfg.VHDPath)
+	seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
 	if vErr := validateSeedPath(seedPath); vErr != nil {
 		return m.failProvision(ctx, vmName, record, vErr)
 	}

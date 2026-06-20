@@ -72,7 +72,9 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx,
 			"Cfgms-CopyToSeedVHD -SeedPath "+quoteArg(psArgs, "SeedPath")+
 				" -FileName "+quoteArg(psArgs, "FileName")+
-				" -Content "+quoteArg(psArgs, "Content"))
+				" -Content "+quoteArg(psArgs, "Content")+
+				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
+				" -CASrc "+quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
 		return t.run(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
 	case psAttachSeedDisk:

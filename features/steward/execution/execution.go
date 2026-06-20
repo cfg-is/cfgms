@@ -138,6 +138,7 @@ func (g *genericConfigState) GetManagedFields() []string {
 		"enroll_ca_fingerprint": true, // module operational: controller CA fingerprint for guest TOFU
 		"enroll_steward_path":   true, // module operational: host path to steward binary staged on seed
 		"enroll_ca_path":        true, // module operational: host path to CA cert staged on seed
+		"seed_dir":              true, // module operational: local dir for the provisioning seed VHDX
 	}
 
 	fields := make([]string, 0, len(g.data))

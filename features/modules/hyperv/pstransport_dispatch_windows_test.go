@@ -68,7 +68,9 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psCopyToSeedVHD:
 		return emit("Cfgms-CopyToSeedVHD -SeedPath " + quoteArg(psArgs, "SeedPath") +
 			" -FileName " + quoteArg(psArgs, "FileName") +
-			" -Content " + quoteArg(psArgs, "Content"))
+			" -Content " + quoteArg(psArgs, "Content") +
+			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
+			" -CASrc " + quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
 		return emit("Cfgms-DetachSeedVHD -Path " + quoteArg(psArgs, "Path"))
 	case psAttachSeedDisk:
@@ -194,7 +196,7 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"FileName": "autounattend.xml",
 				"Content":  "<!-- placeholder autounattend -->",
 			},
-			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->'",
+			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->' -StewardSrc '' -CASrc ''",
 		},
 		{
 			name:      "Attach seed disk",

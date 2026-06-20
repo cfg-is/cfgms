@@ -87,6 +87,12 @@ type hypervModule struct {
 	enrollCAFingerprint string
 	enrollStewardPath   string
 	enrollCAPath        string
+
+	// seedDir is a host-local directory for the ephemeral provisioning seed
+	// VHDX. It MUST NOT be on a Cluster Shared Volume (C:\ClusterStorage\...):
+	// Mount-VHD against a CSV-resident VHDX hangs on a cluster node. When empty
+	// the seed lands next to the VM's primary VHD (fine for non-cluster hosts).
+	seedDir string
 }
 
 // HypervOption configures a hypervModule at construction time.
@@ -214,6 +220,7 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.enrollCAFingerprint, _ = configMap["enroll_ca_fingerprint"].(string)
 	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
+	m.seedDir, _ = configMap["seed_dir"].(string)
 
 	// Wire the stored-config-backed profile store when a config store is
 	// supplied (same injection pattern as audit_manager). Operators define
