@@ -467,17 +467,17 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		if ec, ok := event.Details["exit_code"].(float64); ok {
 			result.ExitCode = int(ec)
 		}
-		// The steward emits stdout_preview/stderr_preview (execute_script.go);
-		// accept the bare stdout/stderr keys too for forward compatibility
-		// (Issue #1995, root cause D — key alignment).
-		if stdout, ok := event.Details["stdout_preview"].(string); ok {
+		// Prefer the full capped stdout/stderr keys (Issue #1978: steward now sends up to 1 MB
+		// under the "stdout"/"stderr" keys). Fall back to stdout_preview/stderr_preview (4 KB)
+		// for compatibility with older stewards that only send preview keys.
+		if stdout, ok := event.Details["stdout"].(string); ok {
 			result.Stdout = stdout
-		} else if stdout, ok := event.Details["stdout"].(string); ok {
+		} else if stdout, ok := event.Details["stdout_preview"].(string); ok {
 			result.Stdout = stdout
 		}
-		if stderr, ok := event.Details["stderr_preview"].(string); ok {
+		if stderr, ok := event.Details["stderr"].(string); ok {
 			result.Stderr = stderr
-		} else if stderr, ok := event.Details["stderr"].(string); ok {
+		} else if stderr, ok := event.Details["stderr_preview"].(string); ok {
 			result.Stderr = stderr
 		}
 		// On a command_failed event there is no result; surface the error string
@@ -489,6 +489,21 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 		}
 		if durMs, ok := event.Details["duration_ms"].(float64); ok {
 			result.Duration = time.Duration(durMs) * time.Millisecond
+		}
+
+		// 4 MB controller ceiling: defense-in-depth against a compromised or buggy steward
+		// bypassing the steward-side 1 MB cap (Issue #1978). Drop oversized output rather
+		// than storing unbounded data. The steward-side cap (1 MB) should prevent this from
+		// triggering under normal operation.
+		const controllerOutputCapBytes = 4 * 1024 * 1024
+		if len(result.Stdout)+len(result.Stderr) > controllerOutputCapBytes {
+			d.logger.Error("Execution output exceeds 4 MB controller ceiling; dropping output",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"stdout_bytes", len(result.Stdout),
+				"stderr_bytes", len(result.Stderr))
+			result.Stdout = ""
+			result.Stderr = ""
 		}
 	}
 
