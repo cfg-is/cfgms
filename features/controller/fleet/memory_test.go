@@ -333,3 +333,55 @@ func TestMemoryQuery_Tags_WhitespaceStripped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
 }
+
+func TestMemoryQuery_FilterByIDs_SingleMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001"}})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "device-001", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByIDs_MultiMatch_OR(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001", "device-003"}})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	ids := []string{results[0].ID, results[1].ID}
+	assert.ElementsMatch(t, []string{"device-001", "device-003"}, ids)
+}
+
+func TestMemoryQuery_FilterByIDs_NoMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"nonexistent"}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_FilterByIDs_AND_WithOS(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", map[string]string{"os": "linux"}),
+		testSteward("device-002", "t", "online", map[string]string{"os": "windows"}),
+	)
+
+	// IDs includes device-001, but device-001 is linux not windows — no match.
+	results, err := q.Search(context.Background(), Filter{
+		IDs: []string{"device-001"},
+		OS:  "windows",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}

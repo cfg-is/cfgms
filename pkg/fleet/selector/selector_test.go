@@ -279,3 +279,50 @@ func TestResolve_Combined_ExactSteward(t *testing.T) {
 	ids := resolveIDs(t, "name:es-hv0* os:linux arch:arm64")
 	assert.Equal(t, []string{"s-linux-arm64"}, ids)
 }
+
+// ── id: selector tests ────────────────────────────────────────────────────────
+
+func TestParse_ID_Single(t *testing.T) {
+	f, err := Parse("id:s-linux-arm64")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-linux-arm64"}, f.IDs)
+}
+
+func TestParse_ID_MultiValue(t *testing.T) {
+	f, err := Parse("id:s-linux-arm64,s-windows")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-linux-arm64", "s-windows"}, f.IDs)
+}
+
+func TestParse_UnknownKey_ErrorIncludesID(t *testing.T) {
+	_, err := Parse("typo:value")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "id")
+}
+
+func TestResolve_ID_ExactMatch(t *testing.T) {
+	ids := resolveIDs(t, "id:s-linux-arm64")
+	assert.Equal(t, []string{"s-linux-arm64"}, ids)
+}
+
+func TestResolve_ID_NoMatch(t *testing.T) {
+	ids := resolveIDs(t, "id:nonexistent-steward")
+	assert.Empty(t, ids)
+}
+
+func TestResolve_ID_MultiValue_OR(t *testing.T) {
+	ids := resolveIDs(t, "id:s-linux-arm64,s-windows")
+	assert.ElementsMatch(t, []string{"s-linux-arm64", "s-windows"}, ids)
+}
+
+func TestResolve_ID_Combined_AND_WithOS(t *testing.T) {
+	// s-linux-arm64 is linux; combining with os:windows yields no match.
+	ids := resolveIDs(t, `id:s-linux-arm64 os:"windows server"`)
+	assert.Empty(t, ids)
+}
+
+func TestResolve_ID_Combined_AND_Matches(t *testing.T) {
+	// id:s-linux-arm64 AND os:linux — s-linux-arm64 is linux, so exactly one match.
+	ids := resolveIDs(t, "id:s-linux-arm64 os:linux")
+	assert.Equal(t, []string{"s-linux-arm64"}, ids)
+}

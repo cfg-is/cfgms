@@ -37,6 +37,7 @@ type Filter struct {
 	Hostname      string            // Substring match on DNA["hostname"] (kept for backward compat)
 	Name          string            // Glob match on DNA["hostname"] via path.Match (use name: selector key)
 	DeviceID      string            // Match by exact device ID (id: selector)
+	IDs           []string          // Match stewards whose ID is any of these (OR within the set; id: selector)
 }
 
 // ParseTargetSelector parses a space-separated key:value selector string into a Filter.
