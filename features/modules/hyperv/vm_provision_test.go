@@ -204,12 +204,15 @@ func TestProvisionVM_Gen2WindowsFirmwareTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	fw := callsContaining(calls, "Set-VMFirmware")
-	require.Len(t, fw, 1, "Gen2 VM must call Set-VMFirmware exactly once")
+	fw := callsContaining(calls, "SecureBootTemplate")
+	require.Len(t, fw, 1, "Gen2 VM must set the secure-boot template exactly once")
 	assert.True(t, argsContain(fw[0], "MicrosoftWindows"),
 		"windows os_family must select the MicrosoftWindows template")
 	assert.NotContains(t, fw[0].scriptBlock, "MicrosoftWindows",
 		"firmware template must travel via args, not the script text")
+	// Gen2 must also make the install DVD the first boot device.
+	require.Len(t, callsContaining(calls, "FirstBootDevice"), 1,
+		"Gen2 VM must set the install DVD as the first boot device")
 }
 
 // TestProvisionVM_Gen2LinuxFirmwareTemplate asserts the linux os_family selects
@@ -227,7 +230,7 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	fw := callsContaining(calls, "Set-VMFirmware")
+	fw := callsContaining(calls, "SecureBootTemplate")
 	require.Len(t, fw, 1)
 	assert.True(t, argsContain(fw[0], "MicrosoftUEFICertificateAuthority"),
 		"linux os_family must select the MicrosoftUEFICertificateAuthority template")
