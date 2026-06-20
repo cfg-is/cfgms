@@ -593,9 +593,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Execution queue and job dispatcher initialized")
 
 		// Wire the IP-trust evaluator into the heartbeat service when the
-		// IP-trust store is available (Issue #1694). The database provider
-		// supplies an IPTrustStore; the OSS composite (flatfile+SQLite) returns
-		// nil, in which case the evaluator is skipped.
+		// IP-trust store is available (Issue #1694). Both the database provider
+		// and the OSS composite (flatfile+SQLite, Issue #1900) supply an
+		// IPTrustStore; the evaluator is skipped only when no store is wired.
 		var heartbeatTrustEvaluator heartbeat.TrustEvaluator
 		if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
 			stewardStore := storageManager.GetStewardStore()
@@ -982,8 +982,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			httpServer.SetApprovalHook(api.NewIPTrustApprovalHook(ipTrustStore, logger))
 			if ipTrustStore != nil {
 				logger.Info("IP-trust registration approval hook wired (Issue #1695)")
-			} else {
-				logger.Warn("IP-trust store not available (OSS composite storage); registrations will quarantine until an IP-trust store is wired")
 			}
 
 		case "manual-review":

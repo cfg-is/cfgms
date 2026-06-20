@@ -154,3 +154,23 @@ func TestCreateAuditStoreWithRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, store)
 }
+
+func TestCreateIPTrustStoreRequiresRoot(t *testing.T) {
+	p, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+
+	store, err := p.CreateIPTrustStore(map[string]interface{}{})
+	assert.Nil(t, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "root")
+}
+
+func TestCreateIPTrustStoreWithRoot(t *testing.T) {
+	root := t.TempDir()
+	p, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+
+	store, err := p.CreateIPTrustStore(map[string]interface{}{"root": root})
+	require.NoError(t, err)
+	assert.NotNil(t, store)
+}

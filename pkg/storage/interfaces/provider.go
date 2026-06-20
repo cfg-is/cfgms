@@ -790,6 +790,10 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil {
 		return nil, fmt.Errorf("failed to create steward store (flatfile): %w", err)
 	}
+	ipTrustStore, err := ffProvider.CreateIPTrustStore(flatfileCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ip trust store (flatfile): %w", err)
+	}
 
 	// Prefer single-connection bundle when the provider supports it.
 	// This opens the SQLite database exactly once and shares the *sql.DB across
@@ -807,6 +811,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 			stewardStore, bundle.Command, bundle.Trigger, bundle.Push,
 		)
 		sm.SetPendingRegistrationStore(bundle.PendingRegistration)
+		sm.SetIPTrustStore(ipTrustStore)
 		return sm, nil
 	}
 
@@ -853,5 +858,6 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sessionStore, stewardStore, commandStore, triggerStore, pushStore,
 	)
 	sm.SetPendingRegistrationStore(pendingRegStore)
+	sm.SetIPTrustStore(ipTrustStore)
 	return sm, nil
 }
