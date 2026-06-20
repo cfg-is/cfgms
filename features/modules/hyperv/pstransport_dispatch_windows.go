@@ -61,22 +61,26 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 			"Cfgms-SetVMMemory -Name "+quoteArg(psArgs, "Name")+
 				" -MemoryMB "+intArg(psArgs, "MemoryMB"))
 
-	// ── VM provisioning: seed VHDX + media attach + firmware (#2044) ──
+	// ── VM provisioning: seed VHDX disk ops (#2044) ──────────────────
+	// These four use runFresh (a fresh `powershell -File` process), NOT the
+	// persistent `-Command -` host: Mount-VHD/Dismount-VHD deadlock there
+	// (async Virtual Disk Service). Media-attach + firmware below stay on the
+	// persistent host (Add-VM*/Set-VMFirmware are synchronous and work there).
 	case psNewSeedVHD:
-		return t.run(ctx,
+		return t.runFresh(ctx,
 			"Cfgms-NewSeedVHD -Path "+quoteArg(psArgs, "Path")+
 				" -SizeBytes "+intArg(psArgs, "SizeBytes"))
 	case psMountSeedVHD:
-		return t.run(ctx, "Cfgms-MountSeedVHD -Path "+quoteArg(psArgs, "Path"))
+		return t.runFresh(ctx, "Cfgms-MountSeedVHD -Path "+quoteArg(psArgs, "Path"))
 	case psCopyToSeedVHD:
-		return t.run(ctx,
+		return t.runFresh(ctx,
 			"Cfgms-CopyToSeedVHD -SeedPath "+quoteArg(psArgs, "SeedPath")+
 				" -FileName "+quoteArg(psArgs, "FileName")+
 				" -Content "+quoteArg(psArgs, "Content")+
 				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
 				" -CASrc "+quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
-		return t.run(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
+		return t.runFresh(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
 	case psAttachSeedDisk:
 		return t.run(ctx,
 			"Cfgms-AttachSeedDisk -Name "+quoteArg(psArgs, "Name")+
