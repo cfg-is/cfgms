@@ -55,6 +55,7 @@ What becomes easier or harder by making this decision?
 | [008](008-durable-execution-substrate.md) | Durable Execution Substrate for the Workflow Engine | 2026-06-15 | Accepted |
 | [009](009-hyperv-vm-provisioning-from-install-media.md) | Hyper-V VM Provisioning from Install Media (ISO → Managed Endpoint) | 2026-06-18 | Accepted |
 | [010](010-steward-side-provisioning-enrollment.md) | Steward-Side Provisioning Enrollment — Controller-Supplied Join Token, IP-Trust Admission, Media Cleanup | 2026-06-19 | Accepted |
+| [011](011-registration-refresh.md) | Registration-Refresh for Stewards Offline Past mTLS Cert Expiry | 2026-06-20 | Accepted |
 
 ### Superseded/Deprecated
 
