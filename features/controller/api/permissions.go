@@ -82,6 +82,11 @@ var knownPermissions = map[string]bool{
 	// Steward upgrade dispatch and approval (Issue #1945)
 	"installer:dispatch:steward": true,
 	"installer:approve:steward":  true,
+	// Registration-refresh management (Issue #2096)
+	"registration:list-refresh":          true,
+	"registration:approve-refresh":       true,
+	"registration:deny-refresh":          true,
+	"registration:manage-refresh-policy": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
