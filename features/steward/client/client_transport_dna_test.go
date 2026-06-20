@@ -10,6 +10,7 @@ package client
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,13 +27,18 @@ import (
 // ---------------------------------------------------------------------------
 
 // stubDNACollector satisfies DNACollector and returns the configured snapshot.
-// Call setAttrs to change what CollectAttributes returns on the next tick.
+// Use setAttrs to safely change what CollectAttributes returns on the next tick;
+// the mutex prevents data races when the loop goroutine and the test body
+// access attrs concurrently.
 type stubDNACollector struct {
+	mu    sync.RWMutex
 	attrs map[string]string
 	err   error
 }
 
 func (s *stubDNACollector) CollectAttributes(_ context.Context) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -41,6 +47,12 @@ func (s *stubDNACollector) CollectAttributes(_ context.Context) (map[string]stri
 		out[k] = v
 	}
 	return out, nil
+}
+
+func (s *stubDNACollector) setAttrs(attrs map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attrs = attrs
 }
 
 // newClientWithOfflineQueue returns a minimal TransportClient wired with an
@@ -441,10 +453,7 @@ func TestDNARefreshLoop_StopsOnContextCancel(t *testing.T) {
 	cancel()
 	time.Sleep(20 * time.Millisecond) // let goroutine observe ctx.Done
 
-	stub.attrs = map[string]string{"os": "linux", "hostname": "new"}
-	c.mu.Lock()
-	c.dnaCollector = stub
-	c.mu.Unlock()
+	stub.setAttrs(map[string]string{"os": "linux", "hostname": "new"})
 
 	time.Sleep(40 * time.Millisecond) // extra ticks after cancel
 	assert.Equal(t, 0, q.Len(), "no events must be published after context cancellation")
@@ -475,10 +484,7 @@ func TestDNARefreshLoop_StopsOnDNARefreshStop(t *testing.T) {
 	close(c.dnaRefreshStop)
 	time.Sleep(20 * time.Millisecond) // let goroutine observe channel close
 
-	stub.attrs = map[string]string{"os": "linux", "hostname": "new"}
-	c.mu.Lock()
-	c.dnaCollector = stub
-	c.mu.Unlock()
+	stub.setAttrs(map[string]string{"os": "linux", "hostname": "new"})
 
 	time.Sleep(40 * time.Millisecond) // extra ticks after stop
 	assert.Equal(t, 0, q.Len(), "no events must be published after dnaRefreshStop is closed")
