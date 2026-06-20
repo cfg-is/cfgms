@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,7 +22,9 @@ import (
 
 // RegistrationRequest represents a registration request to the controller.
 type RegistrationRequest struct {
-	Token string `json:"token"`
+	Token          string `json:"token"`
+	DeviceID       string `json:"device_id,omitempty"`        // 64-char hex SHA-256 of Ed25519 public key (Issue #2094)
+	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (Issue #2094)
 }
 
 // RegistrationResponse represents the response from the controller for an approved registration.
@@ -145,28 +148,24 @@ func NewHTTPClient(cfg *HTTPConfig) (*HTTPClient, error) {
 // Returns (nil, *RegistrationPendingResponse, nil) on HTTP 202 (quarantined, pending approval).
 // Returns (nil, nil, error) on any other status or transport failure.
 // Callers must distinguish the pending case and enter a poll loop (story 7).
-func (c *HTTPClient) Register(ctx context.Context, token string) (*RegistrationResponse, *RegistrationPendingResponse, error) {
+func (c *HTTPClient) Register(ctx context.Context, req RegistrationRequest) (*RegistrationResponse, *RegistrationPendingResponse, error) {
 	registrationURL := fmt.Sprintf("%s/api/v1/register", c.controllerURL)
 
-	reqBody := RegistrationRequest{
-		Token: token,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal registration request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, registrationURL, bytes.NewBuffer(jsonBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, registrationURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 
 	c.logger.Info("Sending registration request to controller", "url", registrationURL)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to send registration request: %w", err)
 	}
@@ -265,4 +264,111 @@ func computePollInterval(base, jitter time.Duration) time.Duration {
 		return base
 	}
 	return base + time.Duration(rand.N(uint64(jitter)))
+}
+
+// RefreshChallenge requests a nonce from the controller for the registration-refresh handshake.
+// Returns ErrRefreshRejected when the controller returns HTTP 403 (revoked or dormant device).
+// Returns the challenge response on HTTP 200.
+func (c *HTTPClient) RefreshChallenge(ctx context.Context, deviceID string) (*RefreshChallengeResponse, error) {
+	challengeURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/challenge", c.controllerURL, deviceID)
+
+	reqBody, err := json.Marshal(struct {
+		DeviceID string `json:"device_id"`
+	}{DeviceID: deviceID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal refresh challenge request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, challengeURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create refresh challenge request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send refresh challenge request: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("Failed to close refresh challenge response body", "error", closeErr)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read refresh challenge response: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var cr RefreshChallengeResponse
+		if err := json.Unmarshal(body, &cr); err != nil {
+			return nil, fmt.Errorf("parse refresh challenge response: %w", err)
+		}
+		return &cr, nil
+	case http.StatusForbidden:
+		return nil, ErrRefreshRejected
+	default:
+		return nil, fmt.Errorf("refresh challenge failed with HTTP %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// RefreshComplete submits the proof-of-possession signature to complete the registration-refresh handshake.
+// pop is the Ed25519 signature over sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64).
+//
+// Returns (*RefreshCompleteResponse, nil) on HTTP 200 (cert issued immediately).
+// Returns (nil, ErrRefreshPending) on HTTP 202 (request queued for manual approval).
+// Returns (nil, ErrRefreshRejected) on HTTP 403 (device revoked or dormant).
+func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, nonce string, pop []byte) (*RefreshCompleteResponse, error) {
+	completeURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/complete", c.controllerURL, deviceID)
+
+	reqBody, err := json.Marshal(struct {
+		DeviceID string `json:"device_id"`
+		Nonce    string `json:"nonce"`
+		PoP      string `json:"pop"` // base64url-encoded Ed25519 signature
+	}{
+		DeviceID: deviceID,
+		Nonce:    nonce,
+		PoP:      base64.RawURLEncoding.EncodeToString(pop),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal refresh complete request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, completeURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create refresh complete request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send refresh complete request: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("Failed to close refresh complete response body", "error", closeErr)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read refresh complete response: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var cr RefreshCompleteResponse
+		if err := json.Unmarshal(body, &cr); err != nil {
+			return nil, fmt.Errorf("parse refresh complete response: %w", err)
+		}
+		return &cr, nil
+	case http.StatusAccepted:
+		return nil, ErrRefreshPending
+	case http.StatusForbidden:
+		return nil, ErrRefreshRejected
+	default:
+		return nil, fmt.Errorf("refresh complete failed with HTTP %d: %s", resp.StatusCode, string(body))
+	}
 }

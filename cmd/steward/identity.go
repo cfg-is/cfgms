@@ -108,6 +108,9 @@ type StewardIdentity struct {
 	SigningCertPEM   string     `json:"signing_cert_pem,omitempty"`   // backward compat: single cert (legacy)
 	SigningCertPEMs  []string   `json:"signing_cert_pems,omitempty"`  // Issue #1816: mutable rotation set
 	OverlapExpiresAt *time.Time `json:"overlap_expires_at,omitempty"` // Issue #1816: rotation overlap deadline
+	// Device identity fields (Issue #2094): stable across mTLS cert rotations.
+	DeviceID       string `json:"device_id,omitempty"`        // 64-char lowercase hex SHA-256 of Ed25519 public key
+	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (32 bytes)
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600
