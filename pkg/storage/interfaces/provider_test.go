@@ -519,6 +519,28 @@ func (m *MockPushStore) ListPushesByConfigID(_ context.Context, _, _ string) ([]
 	return []*business.PushRecord{}, nil
 }
 
+// MockIPTrustStore implements business.IPTrustStore for testing
+type MockIPTrustStore struct{}
+
+func (m *MockIPTrustStore) AddTrustedRange(_ context.Context, _, _ string, _ bool) error {
+	return nil
+}
+func (m *MockIPTrustStore) IsTrusted(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+func (m *MockIPTrustStore) ListTrustedRanges(_ context.Context, _ string) ([]*business.IPTrustEntry, error) {
+	return nil, nil
+}
+func (m *MockIPTrustStore) RevokeTrustedRange(_ context.Context, _, _ string) error {
+	return business.ErrIPTrustEntryNotFound
+}
+func (m *MockIPTrustStore) RecordHealthySteward(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+func (m *MockIPTrustStore) GetLastActivity(_ context.Context, _, _ string) (*business.IPTrustActivity, error) {
+	return nil, nil
+}
+
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {
 	// Clear registry for test
@@ -1010,6 +1032,11 @@ func TestCreateOSSStorageManager(t *testing.T) {
 			t.Errorf("TriggerStore should be nil when provider returns ErrNotSupported")
 		}
 
+		// IPTrustStore comes from the flatfile provider (Issue #1900)
+		if sm.GetIPTrustStore() == nil {
+			t.Errorf("IPTrustStore should not be nil — flatfile provider supplies it")
+		}
+
 		globalRegistry.mutex.Lock()
 		delete(globalRegistry.providers, "flatfile")
 		delete(globalRegistry.providers, "sqlite")
@@ -1070,7 +1097,7 @@ func (m *MockOSSProvider) CreatePendingRegistrationStore(_ map[string]interface{
 }
 
 func (m *MockOSSProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, business.ErrNotSupported
+	return &MockIPTrustStore{}, nil
 }
 
 // MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
@@ -1172,7 +1199,10 @@ func (m *MockOSSProviderWithError) CreatePendingRegistrationStore(_ map[string]i
 }
 
 func (m *MockOSSProviderWithError) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, business.ErrNotSupported
+	if err := m.mayFail("CreateIPTrustStore"); err != nil {
+		return nil, err
+	}
+	return &MockIPTrustStore{}, nil
 }
 
 func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {
@@ -1200,6 +1230,7 @@ func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {
 		"CreateConfigStore",
 		"CreateAuditStore",
 		"CreateStewardStore",
+		"CreateIPTrustStore",
 	}
 	sqliteFailures := []string{
 		"CreateRBACStore",
