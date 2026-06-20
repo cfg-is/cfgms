@@ -205,11 +205,15 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 	if rotCursor, cursorErr := s.certManager.GetSigningCursorState(); cursorErr == nil && rotCursor != nil && rotCursor.RotatingSerial != "" {
 		deadline := rotCursor.RotatedAt.Add(time.Duration(rotCursor.OverlapWindowDays) * 24 * time.Hour)
 		overlapExpiresAt = deadline.UTC().Format(time.RFC3339)
-		// Only sign with the rotating cert while the overlap window is open; after it
-		// expires the steward's verifier will have dropped the old cert anyway.
-		if time.Now().Before(deadline) {
-			rotatingSigner = s.buildRotatingSigner(rotCursor.RotatingSerial)
-		}
+		// Always sign push_signing_cert with the rotating (old) cert, regardless of
+		// whether the overlap window has expired. A steward that was offline during
+		// the rotation fan-out only trusts the rotating cert; signing with the new
+		// cert would make verification fail before the trust set is updated —
+		// the bootstrapping deadlock from Issue #1844. The overlap expiry only controls
+		// how the steward filters its own trust set after receiving this push.
+		// If the rotating cert has been purged, buildRotatingSigner returns nil and
+		// we fall back to the DynamicSigner (requiring re-enrollment via Issue #1845).
+		rotatingSigner = s.buildRotatingSigner(rotCursor.RotatingSerial)
 	}
 
 	params := map[string]interface{}{
