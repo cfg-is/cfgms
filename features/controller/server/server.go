@@ -31,6 +31,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
@@ -48,6 +49,7 @@ import (
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/workflow"
+	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
 	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -997,8 +999,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Reports engine wired to HTTP API server")
 	}
 
-	// Issue #414: Wire workflow engine and trigger manager into API server
-	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, logger)
+	// Issue #414: Wire workflow engine and trigger manager into API server.
+	// Issue #1914: Create the controller module cache and workflow module runtime
+	// so the factory can fork/exec controller-kind bundles instead of returning
+	// ErrWorkflowRuntimeNotAvailable on every cache hit.
+	moduleCacheDir := filepath.Join(resolveDNADataRoot(cfg), "module-cache")
+	moduleCache, moduleCacheErr := modulecache.New(moduleCacheDir)
+	if moduleCacheErr != nil {
+		logger.Warn("Failed to initialize controller module cache; workflow modules will be unavailable",
+			"error", moduleCacheErr, "dir", moduleCacheDir)
+	}
+	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
+	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
+	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger)
 	if workflowHandler != nil {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
@@ -1246,17 +1259,21 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logg
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
 // Returns nil, nil on failure so the controller starts without workflow support rather than failing.
-func initializeWorkflowHandler(storageManager *interfaces.StorageManager, logger logging.Logger) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
+func initializeWorkflowHandler(
+	storageManager *interfaces.StorageManager,
+	moduleCache *modulecache.ModuleCache,
+	workflowRT *workflowruntime.ModuleRuntime,
+	logger logging.Logger,
+) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
 	// Workflow module factory: looks up controller-kind module bundles by
-	// name in the controller's module cache (#1883) and (eventually) fork/
-	// execs them as workflow-kind module subprocesses connected over the
-	// WorkflowModuleClient gRPC contract (#1881).
+	// name in the controller's module cache (#1883) and fork/execs them as
+	// workflow-kind module subprocesses connected over the WorkflowModuleClient
+	// gRPC contract (#1881, #1914).
 	//
-	// The cache is wired in once a controller-side ModuleCache instance is
-	// available; until then we pass nil and the factory surfaces
-	// "no cache backing" on any module instantiation. REST-only deployments
-	// (which never resolve modules through the engine) are unaffected.
-	moduleFactory := workflow.NewWorkflowModuleFactory(nil)
+	// moduleCache and workflowRT may be nil when initialization failed; in that
+	// case the factory surfaces descriptive errors on any module instantiation.
+	// REST-only deployments that never resolve modules through the engine are unaffected.
+	moduleFactory := workflow.NewWorkflowModuleFactory(moduleCache, workflowRT)
 
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil)
 
