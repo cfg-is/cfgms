@@ -73,6 +73,20 @@ type hypervModule struct {
 	// is supplied, or injected directly in tests via WithProfileStore. It may
 	// be nil when no config store is available; callers must handle that.
 	profileStore ProfileStore
+
+	// enroll* hold the controller-supplied enrollment wiring for the
+	// create-from-source path (ADR-010 §2/§4). They arrive via the existing
+	// controller→steward config sync (NOT the steward's local SecretStore,
+	// which has no operator write path — the #2077 gap). enrollToken is the
+	// tenant's low-sensitivity join token baked into the rendered answer file;
+	// enrollCAFingerprint is the controller CA's SHA-256 for the guest's
+	// install-time TOFU; enrollStewardPath / enrollCAPath are host paths to the
+	// steward binary and CA cert staged onto the seed VHDX so the guest can
+	// self-install without guest network/installer infra.
+	enrollToken         string
+	enrollCAFingerprint string
+	enrollStewardPath   string
+	enrollCAPath        string
 }
 
 // HypervOption configures a hypervModule at construction time.
@@ -192,6 +206,14 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 
 	m.tenantID, _ = configMap["tenant_id"].(string)
 	m.auditMgr, _ = configMap["audit_manager"].(*audit.Manager)
+
+	// Controller-supplied enrollment wiring for create-from-source (ADR-010).
+	// These ride the existing config sync; absence is non-fatal (a VM source
+	// without enrollment still creates/installs, it just won't auto-register).
+	m.enrollToken, _ = configMap["enroll_token"].(string)
+	m.enrollCAFingerprint, _ = configMap["enroll_ca_fingerprint"].(string)
+	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
+	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
 
 	// Wire the stored-config-backed profile store when a config store is
 	// supplied (same injection pattern as audit_manager). Operators define

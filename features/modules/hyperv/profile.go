@@ -77,12 +77,6 @@ type EnrollConfig struct {
 	// CorrelationLabel ties the provisioned VM back to a provisioning request for
 	// the controller-side completion reconciler (sibling story S8).
 	CorrelationLabel string `yaml:"correlation_label,omitempty"`
-	// UseSetupComplete selects the file-staged SetupComplete.cmd enrollment
-	// fallback for Windows guests (ADR-009 §6). When false (default) the Windows
-	// path relies on the signed .ppkg applied at first logon for enrollment; when
-	// true a SetupComplete.cmd carrying a single declared-path cfgms-steward
-	// enroll invocation is rendered instead. Linux guests ignore this field.
-	UseSetupComplete bool `yaml:"use_setup_complete,omitempty"`
 }
 
 // UnattendProfile is the operator-authored, stored-config definition of an
@@ -157,6 +151,16 @@ type ProfileVars struct {
 	// step pulls the steward package from ({{ .BundleURL }}). It is supplied by
 	// the caller from the profile's Enroll config; it is not a secret.
 	BundleURL string
+	// CAFingerprint is the controller CA's SHA-256 fingerprint (hex) the guest
+	// passes to `cfgms-steward install --fingerprint` for trust-on-first-use of
+	// the private CA staged onto the seed. Controller-supplied via config
+	// (ADR-010); not a secret. Empty when not applicable.
+	CAFingerprint string
+	// AdminPassword is a per-VM random local Administrator password generated at
+	// render time for the Windows autounattend's one-shot AutoLogon (which runs
+	// enrollment). It is never persisted or surfaced; the steward manages the
+	// host after enrollment. Empty for non-Windows profiles.
+	AdminPassword string
 }
 
 // ProfileRenderer renders an UnattendProfile's template into answer-file bytes,
@@ -221,6 +225,8 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 		CorrelationID  string
 		ProductEdition string
 		BundleURL      string
+		CAFingerprint  string
+		AdminPassword  string
 	}{
 		VMName:         vars.VMName,
 		OSFamily:       vars.OSFamily,
@@ -228,6 +234,8 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 		CorrelationID:  vars.CorrelationID,
 		ProductEdition: vars.ProductEdition,
 		BundleURL:      vars.BundleURL,
+		CAFingerprint:  vars.CAFingerprint,
+		AdminPassword:  vars.AdminPassword,
 	}
 
 	var buf bytes.Buffer

@@ -26,16 +26,15 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 		detector:       &fakeDetector{result: true},
 		provisionStore: NewMemProvisionStore(),
 	}
-	// Inject a single in-memory SecretStore carrying every key both OS create
-	// paths resolve at render time so the create-from-source provisioning tests
-	// exercise the real render path (no mocks):
-	//   - Linux preseed (#2046): registration token + crypted user password
-	//   - Windows autounattend (#2047): .ppkg host path + registration token
-	// defaultRegTokenSecretKey is "hyperv/enroll/regtoken", shared by both paths.
+	// Inject a single in-memory SecretStore carrying the keys the Linux preseed
+	// (#2046) still resolves at render time so the create-from-source tests
+	// exercise the real render path (no mocks): registration token + crypted
+	// user password. The Windows autounattend (ADR-010) no longer reads secrets
+	// (token + CA fingerprint are controller-supplied ProfileVars), so it needs
+	// no store entries.
 	_ = m.SetSecretStore(newInlineStore(
 		"hyperv/enroll/regtoken", "reg-token-stub-value",
 		"hyperv/enroll/user-password-crypted", "$6$rounds=4096$stub$cryptedstub",
-		ppkgPathSecretKey, `C:\cfgms\packages\cfgms-enroll.ppkg`,
 	))
 	return m
 }

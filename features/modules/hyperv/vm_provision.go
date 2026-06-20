@@ -33,8 +33,12 @@ const (
 	psMountSeedVHD = `Mount-VHD -Path $Path -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null`
 
 	// psCopyToSeedVHD mounts the seed, writes $Content to <drive>:\$FileName,
-	// and dismounts. $Content and $FileName travel via ArgumentList.
-	psCopyToSeedVHD = `$disk = Mount-VHD -Path $SeedPath -Passthru; $letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq 'CFGMS_SEED' } | Select-Object -First 1).DriveLetter; Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline; Dismount-VHD -Path $SeedPath`
+	// optionally stages the steward binary ($StewardSrc → <drive>:\cfgms-steward.exe)
+	// and controller CA ($CASrc → <drive>:\controller-ca.crt) so a Windows guest
+	// can self-install + enroll offline (ADR-010), and dismounts. $Content,
+	// $FileName, $StewardSrc and $CASrc travel via ArgumentList; empty
+	// $StewardSrc / $CASrc skip staging (the Linux/preseed path stages neither).
+	psCopyToSeedVHD = `$disk = Mount-VHD -Path $SeedPath -Passthru; $letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq 'CFGMS_SEED' } | Select-Object -First 1).DriveLetter; Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline; if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\cfgms-steward.exe') -Force }; if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }; Dismount-VHD -Path $SeedPath`
 
 	// psDetachSeedVHD wraps Dismount-VHD (called at finalizing, not in the
 	// create path this story implements).
@@ -157,11 +161,24 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 		OSFamily:      src.OSFamily,
 		CorrelationID: correlationID,
 		BundleURL:     profile.Enroll.BundleURL,
+		// Controller-supplied enrollment values (ADR-010 §2/§4): the join token
+		// and CA fingerprint ride the config sync, not the local SecretStore.
+		// The default Windows/Linux profiles reference {{ .EnrollToken }} /
+		// {{ .CAFingerprint }} directly so render no longer depends on the
+		// (operator-unwritable) SecretStore for the token (#2077 fix).
+		EnrollToken:   m.enrollToken,
+		CAFingerprint: m.enrollCAFingerprint,
 	}
 	// ProductEdition only applies to the Windows autounattend image-install step;
-	// it is ignored by the Linux preseed template.
+	// it is ignored by the Linux preseed template. A per-VM random Administrator
+	// password backs the one-shot AutoLogon that runs enrollment.
 	if src.OSFamily == "windows" {
 		vars.ProductEdition = defaultWindowsEdition
+		pw, pwErr := randomAdminPassword()
+		if pwErr != nil {
+			return "", fmt.Errorf("hyperv: generate admin password for VM %q: %w", vmName, pwErr)
+		}
+		vars.AdminPassword = pw
 	}
 
 	rendered, err := NewProfileRenderer().Render(ctx, profile, vars, store)
@@ -268,8 +285,11 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 
 	if _, psErr := m.transport.ExecutePS(ctx, psNewSeedVHD, map[string]string{
-		"Path":      seedPath,
-		"SizeBytes": "67108864", // 64 MiB
+		"Path": seedPath,
+		// 256 MiB (dynamic, so near-zero on-disk until written). The Windows path
+		// stages the steward binary (~tens of MB) + CA onto the seed; 64 MiB was
+		// too small for the binary, so the seed is sized to hold it (ADR-010).
+		"SizeBytes": "268435456",
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: create seed VHDX for VM %q: %w", vmName, psErr))
@@ -296,10 +316,20 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: render answer file for VM %q: %w", vmName, renderErr))
 	}
 
+	// Stage the steward binary + controller CA onto the seed for the Windows
+	// self-install path (ADR-010); the Linux/preseed path stages neither (it
+	// fetches the .deb in late_command). Empty values skip staging.
+	var stewardSrc, caSrc string
+	if cfg.Source.OSFamily == "windows" {
+		stewardSrc = m.enrollStewardPath
+		caSrc = m.enrollCAPath
+	}
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
-		"SeedPath": seedPath,
-		"FileName": seedAnswerFileName(cfg.Source.OSFamily),
-		"Content":  answerContent,
+		"SeedPath":   seedPath,
+		"FileName":   seedAnswerFileName(cfg.Source.OSFamily),
+		"Content":    answerContent,
+		"StewardSrc": stewardSrc,
+		"CASrc":      caSrc,
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write answer file to seed for VM %q: %w", vmName, psErr))
