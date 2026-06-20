@@ -451,11 +451,11 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("not registered - call SetStewardID first")
 	}
 
-	// Create TLS configuration for gRPC-over-QUIC
+	// Create TLS configuration for gRPC-over-QUIC. mTLS is mandatory; a
+	// configuration failure is fatal — there is no legitimate path without TLS.
 	tlsConfig, err := c.createTLSConfig()
 	if err != nil {
-		c.logger.Warn("Failed to load TLS config, continuing without TLS", "error", err)
-		tlsConfig = nil
+		return fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
 	// Initialize gRPC control plane provider if not already set

@@ -287,3 +287,33 @@ func TestStartConvergenceLoop_IntervalChangeResetsTicker(t *testing.T) {
 	assert.True(t, fired,
 		"convergence loop must reset its ticker on a converge_interval change and fire a scheduled convergence within 5s")
 }
+
+// TestConnect_FatalOnTLSConfigFailure verifies that a createTLSConfig failure causes
+// Connect to return the underlying error immediately rather than swallowing it and
+// continuing with a nil TLS config (Issue #1662).
+//
+// A TransportClient with certPath set to an empty temp directory causes createTLSConfig
+// to fail when it cannot read ca.crt. Connect must return that error; the misleading
+// downstream "client mode requires 'tls_config'" error must never be reached.
+func TestConnect_FatalOnTLSConfigFailure(t *testing.T) {
+	// certPath points to a real dir with no cert files — triggers the disk path
+	// in createTLSConfig, which fails on the missing ca.crt read.
+	dir := t.TempDir()
+
+	c := &TransportClient{
+		stewardID:        "steward-tls-fail-test",
+		transportAddress: "localhost:0",
+		certPath:         dir,
+		logger:           logging.NewLogger("info"),
+		heartbeatStop:    make(chan struct{}),
+		convergenceStop:  make(chan struct{}),
+		convergeInterval: 30 * time.Minute,
+	}
+
+	ctx := context.Background()
+	err := c.Connect(ctx)
+
+	require.Error(t, err, "Connect must return an error when createTLSConfig fails")
+	assert.Contains(t, err.Error(), "failed to create TLS config",
+		"Connect error must wrap the createTLSConfig failure, not obscure it with a downstream provider error")
+}
