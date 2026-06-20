@@ -55,6 +55,10 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
+	// Default config binds 0.0.0.0:4433; set ExternalAddress so getTransportAddress() succeeds.
+	if cfg.Transport != nil {
+		cfg.Transport.ExternalAddress = "localhost"
+	}
 
 	var logger logging.Logger
 	if len(loggers) > 0 && loggers[0] != nil {
@@ -1122,4 +1126,128 @@ func TestHandleApproveAll_NoPendingStore(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// TestGetTransportAddress_ExternalAddressConfig verifies that transport.external_address
+// is returned as the steward-facing address when ListenAddr binds 0.0.0.0.
+func TestGetTransportAddress_ExternalAddressConfig(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{
+		ListenAddr:      "0.0.0.0:4433",
+		ExternalAddress: "controller.example.com",
+	}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "controller.example.com:4433", addr)
+}
+
+// TestGetTransportAddress_EnvVarFallback verifies that CFGMS_EXTERNAL_HOSTNAME is used
+// when no transport.external_address is configured.
+func TestGetTransportAddress_EnvVarFallback(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env-controller.example.com")
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:9433"}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "env-controller.example.com:9433", addr)
+}
+
+// TestGetTransportAddress_ConfigPrecedenceOverEnvVar verifies that transport.external_address
+// takes precedence over CFGMS_EXTERNAL_HOSTNAME when both are set.
+func TestGetTransportAddress_ConfigPrecedenceOverEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env-controller.example.com")
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{
+		ListenAddr:      "0.0.0.0:4433",
+		ExternalAddress: "config-controller.example.com",
+	}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "config-controller.example.com:4433", addr)
+}
+
+// TestGetTransportAddress_NonBindAll verifies that a specific bind address is
+// returned unchanged without requiring an external address.
+func TestGetTransportAddress_NonBindAll(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{ListenAddr: "192.168.1.10:4433"}
+
+	addr, err := srv.getTransportAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.1.10:4433", addr)
+}
+
+// TestGetTransportAddress_BindAll_NoExternalAddress_ReturnsError verifies that
+// getTransportAddress() returns an informative error when ListenAddr is 0.0.0.0
+// and no external address is available.
+func TestGetTransportAddress_BindAll_NoExternalAddress_ReturnsError(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	tokenStore := newTestRegistrationStore(t)
+	srv, _ := newHandleRegisterServer(t, tokenStore, nil)
+	srv.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+
+	_, err := srv.getTransportAddress()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transport.external_address")
+	assert.Contains(t, err.Error(), "CFGMS_EXTERNAL_HOSTNAME")
+}
+
+// TestHandleRegister_QuarantinePath_TransportAddressError verifies that the quarantine
+// branch returns HTTP 500 when getTransportAddress() fails (misconfigured 0.0.0.0 bind
+// with no external address). This can only occur if startup validation is bypassed.
+func TestHandleRegister_QuarantinePath_TransportAddressError(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	tokenStore := newTestRegistrationStore(t)
+	// newHandleRegisterServer sets ExternalAddress="localhost" so the server builds.
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	// Now simulate a misconfigured transport address (clears the ExternalAddress).
+	server.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_quarantine_transport_err",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_quarantine_transport_err")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"quarantine path must return HTTP 500 when transport address is misconfigured")
+	assert.Contains(t, rec.Body.String(), "transport address not configured")
+}
+
+// TestHandleRegister_ApprovePath_TransportAddressError verifies that the approve
+// branch returns HTTP 500 when getTransportAddress() fails (misconfigured 0.0.0.0 bind
+// with no external address). This can only occur if startup validation is bypassed.
+func TestHandleRegister_ApprovePath_TransportAddressError(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	// newHandleRegisterServer sets ExternalAddress="localhost" so the server builds.
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	// Now simulate a misconfigured transport address (clears the ExternalAddress).
+	server.cfg.Transport = &config.TransportConfig{ListenAddr: "0.0.0.0:4433"}
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_approve_transport_err",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_approve_transport_err")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"approve path must return HTTP 500 when transport address is misconfigured")
+	assert.Contains(t, rec.Body.String(), "transport address not configured")
 }

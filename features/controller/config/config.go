@@ -372,6 +372,11 @@ type TransportConfig struct {
 	// ListenAddr is the address for the unified transport server (e.g., "0.0.0.0:4433")
 	ListenAddr string `yaml:"listen_addr"`
 
+	// ExternalAddress is the hostname or IP address advertised to stewards when
+	// ListenAddr binds 0.0.0.0. Required when ListenAddr starts with "0.0.0.0" and
+	// CFGMS_EXTERNAL_HOSTNAME env var is not set. Example: "controller.example.com"
+	ExternalAddress string `yaml:"external_address,omitempty"`
+
 	// UseCertManager enables the controller's certificate manager for TLS.
 	// When true (default), certificates are managed automatically.
 	UseCertManager bool `yaml:"use_cert_manager"`

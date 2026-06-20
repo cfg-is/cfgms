@@ -313,13 +313,18 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		}
 	}
 
+	transportAddr, err := s.getTransportAddress()
+	if err != nil {
+		return nil, fmt.Errorf("transport address unavailable: %w", err)
+	}
+
 	resp := &RegistrationStatusResponse{
 		Status:           business.PendingRegistrationStatusClaimed,
 		StewardID:        entry.StewardID,
 		TenantID:         entry.TenantID,
 		Group:            tok.Group,
 		ControllerURL:    tok.ControllerURL,
-		TransportAddress: s.getTransportAddress(),
+		TransportAddress: transportAddr,
 		ClientCert:       string(clientCert.CertificatePEM),
 		ClientKey:        string(clientCert.PrivateKeyPEM),
 		CACert:           string(caCert),
@@ -553,7 +558,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 					"tenant_id", token.TenantID,
 					"pending_id", pendingID)
 
-				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, s.getTransportAddress(), "quarantined"); err != nil {
+				quarantineTransportAddr, taErr := s.getTransportAddress()
+				if taErr != nil {
+					s.logger.Error("Transport address not configured; steward cannot reconnect after approval",
+						"steward_id", stewardID, "error", taErr)
+					http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
+					return
+				}
+				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, quarantineTransportAddr, "quarantined"); err != nil {
 					s.logger.Error("Failed to register quarantined steward in controller service",
 						"steward_id", stewardID, "error", err)
 				}
@@ -606,12 +618,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"group", token.Group)
 
 	// Build response with connection details
+	approveTransportAddr, taErr := s.getTransportAddress()
+	if taErr != nil {
+		s.logger.Error("Transport address not configured; steward cannot connect after registration",
+			"steward_id", stewardID, "error", taErr)
+		http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
+		return
+	}
 	resp := RegistrationResponse{
 		StewardID:        stewardID,
 		TenantID:         token.TenantID,
 		Group:            token.Group,
 		ControllerURL:    token.ControllerURL,
-		TransportAddress: s.getTransportAddress(),
+		TransportAddress: approveTransportAddr,
 	}
 
 	// Story #294 Phase 3: Generate client certificates for mTLS (REQUIRED)
@@ -712,25 +731,37 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // getTransportAddress returns the unified transport address for steward connections.
-func (s *Server) getTransportAddress() string {
-	addr := "localhost:4433" // Default transport address
+// Returns an error if ListenAddr binds 0.0.0.0 and neither transport.external_address
+// nor CFGMS_EXTERNAL_HOSTNAME is configured.
+func (s *Server) getTransportAddress() (string, error) {
+	addr := "localhost:4433"
 	if s.cfg.Transport != nil && s.cfg.Transport.ListenAddr != "" {
 		addr = s.cfg.Transport.ListenAddr
 	}
-	return replaceBindAddress(addr)
+
+	// Resolve the external address: config file takes precedence over env var.
+	externalAddress := ""
+	if s.cfg.Transport != nil {
+		externalAddress = s.cfg.Transport.ExternalAddress
+	}
+	if externalAddress == "" {
+		externalAddress = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+	}
+
+	return replaceBindAddress(addr, externalAddress)
 }
 
-// replaceBindAddress replaces 0.0.0.0 bind addresses with external hostname
-func replaceBindAddress(addr string) string {
+// replaceBindAddress substitutes the 0.0.0.0 wildcard with the resolved external address.
+// Returns an error when addr starts with "0.0.0.0:" and externalAddress is empty.
+func replaceBindAddress(addr, externalAddress string) (string, error) {
 	if !strings.HasPrefix(addr, "0.0.0.0:") {
-		return addr
+		return addr, nil
 	}
-	externalHostname := os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
-	if externalHostname == "" {
-		externalHostname = "localhost"
+	if externalAddress == "" {
+		return "", fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
 	}
 	port := strings.TrimPrefix(addr, "0.0.0.0:")
-	return externalHostname + ":" + port
+	return externalAddress + ":" + port, nil
 }
 
 // extractSourceIP returns the source IP from the HTTP request.
