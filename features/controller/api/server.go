@@ -34,6 +34,7 @@ import (
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -104,6 +105,11 @@ type Server struct {
 	stewardBinaryTrustStore        trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
 	testAutoApproveStewardBinaries bool                              // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
 	upgradeStore                   business.UpgradeStore             // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
+	stewardStore                   business.StewardStore             // Issue #2096: durable fleet-registry store for device-ID refresh gate
+	pendingRefreshStore            business.PendingRefreshStore      // Issue #2096: durable pending-refresh queue
+	refreshPolicyStore             business.RefreshPolicyStore       // Issue #2096: per-tenant refresh policy
+	nonceCache                     *cache.Cache                      // Issue #2096: in-memory nonce store (TTL 65s)
+	popVerifier                    PoPVerifier                       // Issue #2096: injectable for revoked-before-PoP testing
 	stopCleanup                    chan struct{}                     // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                     // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                         // idempotent Close
@@ -202,6 +208,8 @@ func New(
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
+		nonceCache:              newNonceCache(),          // Issue #2096: nonce store for registration-refresh
+		popVerifier:             ed25519PoPVerifier{},     // Issue #2096: default PoP verifier; override in tests
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -389,6 +397,11 @@ func (s *Server) setupRouter() {
 	// Use separate path to avoid conflict with authenticated subrouter
 	// TODO: Remove or protect this endpoint in production
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
+
+	// Registration-refresh endpoints (unauthenticated — authenticated by device key PoP).
+	// Registered on the base router like /api/v1/register (Issue #2096).
+	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/challenge", s.handleRefreshChallenge).Methods("POST", "OPTIONS")
+	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/complete", s.handleRefreshComplete).Methods("POST", "OPTIONS")
 
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
@@ -708,6 +721,11 @@ func (s *Server) Close(ctx context.Context) error {
 			}
 		}
 
+		// Close nonce cache to stop its background cleanup goroutine (Issue #2096).
+		if s.nonceCache != nil {
+			s.nonceCache.Close()
+		}
+
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
@@ -892,6 +910,39 @@ func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.upgradeStore = store
+}
+
+// SetStewardStore wires the durable StewardStore used by the registration-refresh
+// endpoints (Issue #2096). When nil, the refresh endpoints return 503.
+func (s *Server) SetStewardStore(store business.StewardStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardStore = store
+}
+
+// SetPendingRefreshStore wires the durable PendingRefreshStore for the
+// registration-refresh approval queue (Issue #2096).
+func (s *Server) SetPendingRefreshStore(store business.PendingRefreshStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingRefreshStore = store
+}
+
+// SetRefreshPolicyStore wires the per-tenant RefreshPolicyStore (Issue #2096).
+func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshPolicyStore = store
+}
+
+// SetPoPVerifier replaces the proof-of-possession verifier.
+// Used in tests to assert the verifier is never called for revoked devices.
+func (s *Server) SetPoPVerifier(v PoPVerifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v != nil {
+		s.popVerifier = v
+	}
 }
 
 // SetSigningRotationService wires the signing rotation service for the
@@ -1300,4 +1351,15 @@ func (s *Server) loadAPIKeysFromStore() error {
 
 	s.logger.Info("Secret store ready - API keys will be loaded on first access")
 	return nil
+}
+
+// newNonceCache creates the short-lived nonce cache for registration-refresh (Issue #2096).
+// Entries have a 65-second TTL; the 60-second enforcement window is applied in the handler.
+func newNonceCache() *cache.Cache {
+	return cache.NewCache(cache.CacheConfig{
+		MaxRuntimeItems: 10000,
+		DefaultTTL:      nonceTTL,
+		CleanupInterval: 30 * time.Second,
+		EvictionPolicy:  cache.EvictionLRU,
+	})
 }
