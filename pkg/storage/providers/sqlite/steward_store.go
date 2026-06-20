@@ -48,11 +48,16 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 	}
 
 	err := retryOnBusy(ctx, func() error {
+		keyPub := record.IdentityKeyPub
+		if keyPub == nil {
+			keyPub = []byte{}
+		}
 		_, e := s.db.ExecContext(ctx, `
 			INSERT INTO stewards
 				(id, hostname, platform, arch, version, ip_address, status,
-				 registered_at, last_seen, last_heartbeat_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 registered_at, last_seen, last_heartbeat_at,
+				 device_id, identity_key_pub, key_protection_level, last_provenance_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.ID,
 			record.Hostname,
 			record.Platform,
@@ -63,6 +68,10 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 			formatTime(now),
 			formatTime(now),
 			"", // last_heartbeat_at empty until first heartbeat
+			record.DeviceID,
+			keyPub,
+			record.KeyProtectionLevel,
+			record.LastProvenanceJSON,
 		)
 		return e
 	})
@@ -101,8 +110,23 @@ func (s *SQLiteStewardStore) UpdateHeartbeat(ctx context.Context, stewardID stri
 func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (*business.StewardRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
-		       registered_at, last_seen, last_heartbeat_at
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json
 		FROM stewards WHERE id = ?`, stewardID)
+	return scanStewardRow(row)
+}
+
+// GetStewardByDeviceID retrieves the record whose device_id matches the given fingerprint.
+// Returns ErrStewardNotFound when no matching record exists.
+func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("sqlite: device ID cannot be empty")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json
+		FROM stewards WHERE device_id = ? LIMIT 1`, deviceID)
 	return scanStewardRow(row)
 }
 
@@ -110,7 +134,8 @@ func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (
 func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
-		       registered_at, last_seen, last_heartbeat_at
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json
 		FROM stewards ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to list stewards: %w", err)
@@ -123,7 +148,8 @@ func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*business.Stew
 func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status business.StewardStatus) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
-		       registered_at, last_seen, last_heartbeat_at
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json
 		FROM stewards WHERE status = ? ORDER BY registered_at ASC`,
 		string(status),
 	)
@@ -164,7 +190,8 @@ func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID st
 func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Time) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, hostname, platform, arch, version, ip_address, status,
-		       registered_at, last_seen, last_heartbeat_at
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json
 		FROM stewards WHERE last_seen > ? ORDER BY last_seen DESC`,
 		formatTime(since),
 	)
@@ -186,9 +213,11 @@ func (s *SQLiteStewardStore) HealthCheck(ctx context.Context) error {
 func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
 	r := &business.StewardRecord{}
 	var statusStr, regStr, lastSeenStr, lastHBStr string
+	var keyPub []byte
 	err := row.Scan(
 		&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &regStr, &lastSeenStr, &lastHBStr,
+		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.LastProvenanceJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -196,6 +225,7 @@ func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan steward: %w", err)
 	}
+	r.IdentityKeyPub = keyPub
 	return populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr), nil
 }
 
@@ -205,12 +235,15 @@ func scanStewardRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 	for rows.Next() {
 		r := &business.StewardRecord{}
 		var statusStr, regStr, lastSeenStr, lastHBStr string
+		var keyPub []byte
 		if err := rows.Scan(
 			&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &regStr, &lastSeenStr, &lastHBStr,
+			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.LastProvenanceJSON,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: failed to scan steward row: %w", err)
 		}
+		r.IdentityKeyPub = keyPub
 		records = append(records, populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr))
 	}
 	return records, rows.Err()

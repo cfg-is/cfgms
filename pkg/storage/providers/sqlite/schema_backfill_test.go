@@ -180,3 +180,84 @@ func TestBackfill_AlterFailure(t *testing.T) {
 	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
 	assert.Contains(t, err.Error(), "back-fill", "error must identify the back-fill stage")
 }
+
+// legacyStewardsSchema is the stewards DDL from before the four registration-refresh
+// identity columns were added. Used to simulate a pre-existing deployment.
+const legacyStewardsSchema = `CREATE TABLE IF NOT EXISTS stewards (
+	id                TEXT PRIMARY KEY,
+	hostname          TEXT NOT NULL DEFAULT '',
+	platform          TEXT NOT NULL DEFAULT '',
+	arch              TEXT NOT NULL DEFAULT '',
+	version           TEXT NOT NULL DEFAULT '',
+	ip_address        TEXT NOT NULL DEFAULT '',
+	status            TEXT NOT NULL DEFAULT 'registered',
+	registered_at     TEXT NOT NULL DEFAULT '',
+	last_seen         TEXT NOT NULL DEFAULT '',
+	last_heartbeat_at TEXT NOT NULL DEFAULT ''
+)`
+
+// TestBackfillStewardColumns_LegacyStewards verifies that initializeSchema adds the
+// four new identity columns to a pre-existing stewards table that lacks them.
+func TestBackfillStewardColumns_LegacyStewards(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	// Seed a legacy-shape stewards table without the four new columns.
+	_, err := db.ExecContext(ctx, legacyStewardsSchema)
+	require.NoError(t, err, "seed legacy stewards schema")
+
+	for _, col := range []string{"device_id", "identity_key_pub", "key_protection_level", "last_provenance_json"} {
+		assert.False(t, hasColumn(t, db, "stewards", col), "pre-condition: %s absent before back-fill", col)
+	}
+
+	// First invocation — should back-fill the missing columns and create the device_id index.
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	for _, col := range []string{"device_id", "identity_key_pub", "key_protection_level", "last_provenance_json"} {
+		assert.True(t, hasColumn(t, db, "stewards", col), "%s present after back-fill", col)
+	}
+	assert.True(t, hasIndex(t, db, "stewards", "idx_stewards_device_id"), "device_id index present after back-fill")
+}
+
+// TestBackfillStewardColumns_Idempotent verifies that calling initializeSchema a second
+// time on an already-migrated stewards table succeeds and existing rows survive.
+func TestBackfillStewardColumns_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	// Seed legacy table and migrate once.
+	_, err := db.ExecContext(ctx, legacyStewardsSchema)
+	require.NoError(t, err, "seed legacy stewards schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	// Insert a row to prove it survives the second pass.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO stewards (id, registered_at, last_seen)
+		VALUES ('s-survive', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err, "insert test row")
+
+	// Second invocation must also succeed and leave rows intact.
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	for _, col := range []string{"device_id", "identity_key_pub", "key_protection_level", "last_provenance_json"} {
+		assert.True(t, hasColumn(t, db, "stewards", col), "%s still present after second pass", col)
+	}
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stewards WHERE id='s-survive'`).Scan(&count))
+	assert.Equal(t, 1, count, "row must survive second initializeSchema")
+}
+
+// TestBackfillStewardColumns_FreshDB verifies that a fresh database initializes cleanly
+// with all four columns present from the CREATE TABLE statement.
+func TestBackfillStewardColumns_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	for _, col := range []string{"device_id", "identity_key_pub", "key_protection_level", "last_provenance_json"} {
+		assert.True(t, hasColumn(t, db, "stewards", col), "%s present on fresh DB", col)
+	}
+	assert.True(t, hasIndex(t, db, "stewards", "idx_stewards_device_id"), "device_id index on fresh DB")
+}

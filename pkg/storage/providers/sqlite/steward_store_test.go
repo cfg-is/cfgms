@@ -233,3 +233,59 @@ func TestSQLiteStewardStore_DeregisterNotFound(t *testing.T) {
 	err := store.DeregisterSteward(context.Background(), "ghost")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
+
+func TestSQLiteStewardStore_GetStewardByDeviceID(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	const deviceID = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	rec := testStewardRec("s-dvc")
+	rec.DeviceID = deviceID
+	rec.IdentityKeyPub = []byte{1, 2, 3, 4}
+	rec.KeyProtectionLevel = "file"
+	rec.LastProvenanceJSON = `{"hostname":"host-s-dvc"}`
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	got, err := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, err)
+	assert.Equal(t, "s-dvc", got.ID)
+	assert.Equal(t, deviceID, got.DeviceID)
+	assert.Equal(t, []byte{1, 2, 3, 4}, got.IdentityKeyPub)
+	assert.Equal(t, "file", got.KeyProtectionLevel)
+	assert.Equal(t, `{"hostname":"host-s-dvc"}`, got.LastProvenanceJSON)
+
+	_, err = store.GetStewardByDeviceID(ctx, "0000000000000000000000000000000000000000000000000000000000000000")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+func TestSQLiteStewardStore_GetStewardByDeviceID_EmptyID(t *testing.T) {
+	store := newTestStewardStore(t)
+	_, err := store.GetStewardByDeviceID(context.Background(), "")
+	require.Error(t, err, "empty device ID must return an error")
+}
+
+// TestSQLiteStewardStore_MigrationIdempotent verifies that calling initializeSchema
+// twice on a populated database returns no error and existing rows survive.
+func TestSQLiteStewardStore_MigrationIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "migration.db")
+	ctx := context.Background()
+
+	// First init — populate with a record.
+	db1, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	store1 := &SQLiteStewardStore{db: db1}
+	require.NoError(t, store1.RegisterSteward(ctx, testStewardRec("s-mig")))
+	require.NoError(t, db1.Close())
+
+	// Reopen the raw DB and call initializeSchema a second time.
+	db2, err := openDB(dbPath)
+	require.NoError(t, err)
+	defer func() { _ = db2.Close() }()
+
+	require.NoError(t, initializeSchema(ctx, db2), "second initializeSchema must not error")
+
+	store2 := &SQLiteStewardStore{db: db2}
+	got, err := store2.GetSteward(ctx, "s-mig")
+	require.NoError(t, err)
+	assert.Equal(t, "s-mig", got.ID, "row must survive second initializeSchema")
+}
