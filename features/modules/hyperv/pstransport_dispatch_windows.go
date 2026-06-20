@@ -82,11 +82,14 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 	case psDetachSeedVHD:
 		return t.runFresh(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
 	case psAttachSeedDisk:
-		return t.run(ctx,
+		// runFresh: Add-VMHardDiskDrive opens the seed VHD, which hits the same
+		// async-VHD deadlock as Mount-VHD in the persistent -Command - host.
+		return t.runFresh(ctx,
 			"Cfgms-AttachSeedDisk -Name "+quoteArg(psArgs, "Name")+
 				" -SeedPath "+quoteArg(psArgs, "SeedPath"))
 	case psAttachDVD:
-		return t.run(ctx,
+		// runFresh: Add-VMDvdDrive opens the install ISO (same reason).
+		return t.runFresh(ctx,
 			"Cfgms-AttachDVD -Name "+quoteArg(psArgs, "Name")+
 				" -ISOPath "+quoteArg(psArgs, "ISOPath"))
 	case psSetVMFirmware:

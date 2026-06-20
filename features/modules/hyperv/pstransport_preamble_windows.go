@@ -186,7 +186,25 @@ function Cfgms-MountSeedVHD {
         Initialize-Disk -PartitionStyle MBR -PassThru |
         New-Partition -UseMaximumSize -AssignDriveLetter |
         Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null
-    Dismount-VHD -Path $Path
+    Cfgms-DismountAndVerify -Path $Path
+}
+
+# Cfgms-DismountAndVerify dismounts a seed VHD and confirms it is fully detached
+# before returning. A VHD left attached (even transiently after a failed/slow
+# dismount) blocks the subsequent Add-VMHardDiskDrive with a 0x80070020
+# "in use by another process" error, so the seed build must guarantee detachment.
+function Cfgms-DismountAndVerify {
+    param([Parameter(Mandatory)][string]$Path)
+    Dismount-VHD -Path $Path -ErrorAction SilentlyContinue
+    $tries = 0
+    while ((Get-VHD -Path $Path -ErrorAction SilentlyContinue).Attached -and $tries -lt 30) {
+        Start-Sleep -Milliseconds 200
+        Dismount-VHD -Path $Path -ErrorAction SilentlyContinue
+        $tries++
+    }
+    if ((Get-VHD -Path $Path -ErrorAction SilentlyContinue).Attached) {
+        throw ('seed VHD still attached to host after dismount: ' + $Path)
+    }
 }
 
 # Cfgms-CopyToSeedVHD re-mounts the formatted seed, writes $Content to
@@ -208,7 +226,7 @@ function Cfgms-CopyToSeedVHD {
     Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
     if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\cfgms-steward.exe') -Force }
     if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
-    Dismount-VHD -Path $SeedPath
+    Cfgms-DismountAndVerify -Path $SeedPath
 }
 
 # Cfgms-DetachSeedVHD dismounts the seed VHDX from the host (called at
