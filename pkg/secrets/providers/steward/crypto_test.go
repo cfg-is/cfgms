@@ -14,8 +14,9 @@ import (
 )
 
 func TestPlatformEncryptor_RoundTrip(t *testing.T) {
-	// newPlatformEncryptor falls back to a per-directory key when /etc/machine-id is
-	// absent or empty, so this test runs in all environments without skipping.
+	// Platform behaviour: Linux uses /etc/machine-id with per-directory fallback;
+	// macOS reads IOPlatformUUID via ioreg (available on all Apple hardware);
+	// Windows uses DPAPI (no machine ID needed). All paths succeed on their native platform.
 	tmpDir := t.TempDir()
 
 	enc, err := newPlatformEncryptor(tmpDir)
