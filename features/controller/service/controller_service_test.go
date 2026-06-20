@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -695,4 +697,98 @@ func TestRecordHeartbeat_BackstopRefreshesExisting(t *testing.T) {
 	info, _ := svc.GetStewardInfo("dev-1")
 	assert.Equal(t, "active", info.Status)
 	assert.Equal(t, "v2", info.Version)
+}
+
+// TestGetStewardInfo_ConcurrentSyncDNA_NoRace verifies that concurrent SyncDNA
+// writes and GetStewardInfo reads do not produce a data race. The race detector
+// catches aliased DNA pointers escaping the registry lock; proto.Clone on read
+// prevents that.
+func TestGetStewardInfo_ConcurrentSyncDNA_NoRace(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{
+		ID:       "dev-1",
+		TenantID: "tenant-a",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	ctx := context.Background()
+	const goroutines = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func(n int) {
+			defer wg.Done()
+			newDNA := makeTestDNA("dev-1", map[string]string{"os": "linux", "iter": fmt.Sprintf("%d", n)})
+			_, _ = svc.SyncDNA(ctx, newDNA)
+		}(i)
+	}
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			info, ok := svc.GetStewardInfo("dev-1")
+			if ok && info.DNA != nil {
+				_ = info.DNA.Id
+				_ = info.DNA.Attributes
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestGetAllStewards_ReturnsDNACopies verifies that GetAllStewards returns fully
+// isolated copies: mutating the returned DNA or Metrics must not alter the live
+// registry entry.
+func TestGetAllStewards_ReturnsDNACopies(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{
+		ID:       "dev-1",
+		TenantID: "tenant-a",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  map[string]string{"cpu": "10"},
+	}
+	svc.mu.Unlock()
+
+	all := svc.GetAllStewards()
+	require.Len(t, all, 1)
+
+	all[0].DNA.Attributes["os"] = "windows"
+	all[0].Metrics["cpu"] = "99"
+
+	info, ok := svc.GetStewardInfo("dev-1")
+	require.True(t, ok)
+	assert.Equal(t, "linux", info.DNA.Attributes["os"], "live DNA must not be affected by returned copy mutation")
+	assert.Equal(t, "10", info.Metrics["cpu"], "live Metrics must not be affected by returned copy mutation")
+}
+
+// TestRecordHeartbeat_VersionCapped verifies that an oversized Version string
+// supplied by a steward is truncated to maxVersionLen before storage.
+func TestRecordHeartbeat_VersionCapped(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.mu.Lock()
+	svc.stewards["dev-1"] = &StewardInfo{
+		ID:      "dev-1",
+		Status:  "active",
+		Metrics: make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	longVersion := strings.Repeat("a", 200)
+	ok := svc.RecordHeartbeat("dev-1", longVersion, time.Now())
+	require.True(t, ok)
+
+	info, found := svc.GetStewardInfo("dev-1")
+	require.True(t, found)
+	assert.Len(t, info.Version, maxVersionLen, "version must be capped at maxVersionLen characters")
+	assert.Equal(t, strings.Repeat("a", maxVersionLen), info.Version)
 }

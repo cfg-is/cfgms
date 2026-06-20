@@ -824,18 +824,17 @@ func TestHandleGetStewardDNA_InternalError(t *testing.T) {
 }
 
 // TestHandleGetStewardDNA_DNANotFound verifies HTTP 404 with code DNA_NOT_FOUND when
-// the steward is registered but its DNA field is nil. GetStewardInfo returns a pointer
-// to the live StewardInfo struct, so setting DNA = nil directly produces the condition.
+// the steward is registered but its DNA field is nil.
 func TestHandleGetStewardDNA_DNANotFound(t *testing.T) {
 	server := setupTestServer(t)
 
 	require.NoError(t, server.controllerService.RegisterSteward("no-dna-steward", "test-tenant", "addr-1", "registered"))
 
-	// Null out the DNA via the pointer returned by GetStewardInfo so GetStewardDNA
-	// returns nil,nil — exercising the DNA_NOT_FOUND response path.
-	info, ok := server.controllerService.GetStewardInfo("no-dna-steward")
+	// Clear the DNA on the live registry entry. GetStewardInfo now returns a
+	// copy-on-read so mutation of the returned value does not reach the live
+	// entry; SetStewardDNA writes directly to the registry.
+	ok := server.controllerService.SetStewardDNA("no-dna-steward", nil)
 	require.True(t, ok)
-	info.DNA = nil
 
 	req := httptest.NewRequest("GET", "/api/v1/stewards/no-dna-steward/dna", nil)
 	req = withTenant(req, "test-tenant")
