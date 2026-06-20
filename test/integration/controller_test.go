@@ -5,8 +5,13 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -150,8 +155,20 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	err = tokenStore.SaveToken(ctx, token)
 	require.NoError(s.T(), err, "Should save registration token")
 
+	// Generate a real Ed25519 identity key pair (Issue #2095, ADR-010 §1).
+	// device_id is the SHA-256 fingerprint of the public key encoded as lowercase hex.
+	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(s.T(), err, "Should generate Ed25519 identity key")
+	digest := sha256.Sum256(pubKey)
+	deviceID := hex.EncodeToString(digest[:])
+	identityKeyPub := base64.StdEncoding.EncodeToString(pubKey)
+
 	// Call the registration API endpoint
-	reqBody, err := json.Marshal(map[string]string{"token": token.Token})
+	reqBody, err := json.Marshal(map[string]string{
+		"token":            token.Token,
+		"device_id":        deviceID,
+		"identity_key_pub": identityKeyPub,
+	})
 	require.NoError(s.T(), err)
 
 	resp, err := s.tlsClient().Post(

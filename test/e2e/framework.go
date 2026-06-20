@@ -5,8 +5,13 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -561,8 +566,18 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		protocol = "https"
 	}
 	registrationURL := fmt.Sprintf("%s://localhost:%d/api/v1/register", protocol, f.config.HTTPPort)
+
+	// Generate a fresh device identity for each registration (ADR-010 §1, Issue #2095).
+	// Each call produces a unique DeviceID to prevent 409 conflicts within the same tenant.
+	identPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate device identity key: %w", err)
+	}
+	identHash := sha256.Sum256(identPub)
 	reqBody := map[string]string{
-		"token": token,
+		"token":            token,
+		"device_id":        hex.EncodeToString(identHash[:]),
+		"identity_key_pub": base64.StdEncoding.EncodeToString(identPub),
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {

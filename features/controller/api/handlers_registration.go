@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -23,6 +25,11 @@ import (
 // RegistrationRequest represents the steward registration request
 type RegistrationRequest struct {
 	Token string `json:"token"`
+
+	// Device identity fields (Issue #2095, ADR-010 §1): stable across mTLS cert rotations.
+	DeviceID           string `json:"device_id,omitempty"`            // 64-char lowercase hex SHA-256 of Ed25519 public key
+	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64-encoded Ed25519 public key (32 bytes)
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"` // "file" or "tpm"
 }
 
 // RegistrationResponse represents the steward registration response for an approved registration.
@@ -451,6 +458,20 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isValidDeviceID returns true if id is exactly 64 lowercase hex characters.
+// The DeviceID is the SHA-256 fingerprint of the steward's Ed25519 identity key (ADR-010 §1).
+func isValidDeviceID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // handleRegister handles steward registration via REST API
 // POST /api/v1/register
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -524,6 +545,29 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"token_prefix", logging.RedactedID(req.Token),
 		"tenant_id", token.TenantID,
 		"steward_id", stewardID)
+
+	// Validate device identity fields (Issue #2095, ADR-010 §1).
+	if !isValidDeviceID(req.DeviceID) {
+		http.Error(w, "device_id is required and must be a 64-character lowercase hex string", http.StatusBadRequest)
+		return
+	}
+	identityKeyBytes, keyErr := base64.StdEncoding.DecodeString(req.IdentityKeyPub)
+	if keyErr != nil || len(identityKeyBytes) != ed25519.PublicKeySize {
+		http.Error(w, "identity_key_pub is required and must be a base64-encoded 32-byte Ed25519 public key", http.StatusBadRequest)
+		return
+	}
+
+	// Reject duplicate DeviceID within the same tenant. Cross-tenant collision is allowed —
+	// each tenant namespace is independent (matching the tenant-isolation pattern at line ~221).
+	if s.stewardStore != nil {
+		if existing, lookupErr := s.stewardStore.GetStewardByDeviceID(r.Context(), req.DeviceID); lookupErr == nil && existing.TenantID == token.TenantID {
+			s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
+				"device_id", logging.SanitizeLogValue(req.DeviceID),
+				"tenant_id", logging.SanitizeLogValue(token.TenantID))
+			http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
+			return
+		}
+	}
 
 	// Issue #422: Run registration approval hook.
 	// Hook errors are non-fatal: we log and fall back to approve so transient failures
@@ -715,6 +759,28 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, "registered"); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
 			"steward_id", stewardID, "error", err)
+	}
+
+	// Persist device identity to the durable StewardStore so the S3b PoP verification
+	// gate (registration-refresh) has a stored public key to verify against (Issue #2095).
+	// Without this write, record.IdentityKeyPub is empty and refresh verification is impossible.
+	if s.stewardStore != nil {
+		now := time.Now().UTC()
+		if storeErr := s.stewardStore.RegisterSteward(r.Context(), &business.StewardRecord{
+			ID:                 stewardID,
+			TenantID:           token.TenantID,
+			Status:             business.StewardStatusRegistered,
+			RegisteredAt:       now,
+			LastSeen:           now,
+			DeviceID:           req.DeviceID,
+			IdentityKeyPub:     identityKeyBytes,
+			KeyProtectionLevel: req.KeyProtectionLevel,
+		}); storeErr != nil {
+			s.logger.Error("Failed to persist device identity to steward store",
+				"steward_id", stewardID,
+				"device_id", logging.SanitizeLogValue(req.DeviceID),
+				"error", storeErr)
+		}
 	}
 
 	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored

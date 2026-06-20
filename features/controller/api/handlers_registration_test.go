@@ -5,6 +5,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -29,6 +32,22 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// testValidDeviceID is a 64-character lowercase hex string used across registration handler tests.
+const testValidDeviceID = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1"
+
+// testValidIdentityKeyPub is a base64-encoded 32-byte Ed25519 public key generated once per
+// test binary run. Using a fixed-per-run key keeps tests deterministic within a run while
+// avoiding a hardcoded test credential.
+var testValidIdentityKeyPub string
+
+func init() {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic("test setup: failed to generate Ed25519 key: " + err.Error())
+	}
+	testValidIdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+}
 
 // newTestRegistrationStore creates a real SQLite-backed registration.Store for handler tests.
 func newTestRegistrationStore(t *testing.T) registration.Store {
@@ -130,9 +149,20 @@ func newTestCertManager(t *testing.T) *cert.Manager {
 	return mgr
 }
 
-// postRegister sends a POST /api/v1/register request and returns the recorder.
+// postRegister sends a POST /api/v1/register request with valid device identity fields
+// and returns the recorder. Use postRegisterWithBody for custom field combinations.
 func postRegister(server *Server, token string) *httptest.ResponseRecorder {
-	body, _ := json.Marshal(RegistrationRequest{Token: token})
+	return postRegisterWithBody(server, RegistrationRequest{
+		Token:          token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
+}
+
+// postRegisterWithBody sends a POST /api/v1/register with an arbitrary request body,
+// allowing tests to set specific DeviceID, IdentityKeyPub, or KeyProtectionLevel values.
+func postRegisterWithBody(server *Server, regReq RegistrationRequest) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(regReq)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -1250,4 +1280,232 @@ func TestHandleRegister_ApprovePath_TransportAddressError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code,
 		"approve path must return HTTP 500 when transport address is misconfigured")
 	assert.Contains(t, rec.Body.String(), "transport address not configured")
+}
+
+// newHandleRegisterServerWithStewardStore creates a server wired with a testStewardStore
+// for device identity persistence tests.
+func newHandleRegisterServerWithStewardStore(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, *testStewardStore) {
+	t.Helper()
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	ss := newTestStewardStore()
+	server.SetStewardStore(ss)
+	return server, ss
+}
+
+// TestHandleRegister_PersistsDeviceIdentity verifies that after a successful registration
+// the controller has stored the DeviceID and IdentityKeyPub on the StewardRecord.
+func TestHandleRegister_PersistsDeviceIdentity(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_persist_identity",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	deviceID := "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2"
+	identityKeyPub := base64.StdEncoding.EncodeToString([]byte(pub))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:              "cfgms_reg_persist_identity",
+		DeviceID:           deviceID,
+		IdentityKeyPub:     identityKeyPub,
+		KeyProtectionLevel: "tpm",
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), resp.StewardID)
+	require.NoError(t, lookupErr, "StewardRecord must be present in the store after registration")
+	assert.Equal(t, deviceID, stored.DeviceID, "stored DeviceID must match the sent value")
+	assert.Equal(t, []byte(pub), stored.IdentityKeyPub, "stored IdentityKeyPub must match the sent public key bytes")
+	assert.Equal(t, "tpm", stored.KeyProtectionLevel)
+	assert.Equal(t, "test-tenant", stored.TenantID)
+}
+
+// TestHandleRegister_MissingDeviceID_400 verifies that a registration request without
+// a DeviceID returns HTTP 400.
+func TestHandleRegister_MissingDeviceID_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_device_id",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_no_device_id",
+		IdentityKeyPub: testValidIdentityKeyPub,
+		// DeviceID intentionally omitted
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "device_id")
+}
+
+// TestHandleRegister_MalformedDeviceID_400 verifies that a registration request with
+// a DeviceID that is not 64 lowercase hex characters returns HTTP 400.
+func TestHandleRegister_MalformedDeviceID_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_bad_device_id",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	for _, badID := range []string{
+		"tooshort",
+		strings.Repeat("a", 63), // 63 chars
+		strings.Repeat("A", 64), // uppercase hex — invalid
+		strings.Repeat("g", 64), // non-hex character
+		strings.Repeat("a", 65), // 65 chars
+	} {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          "cfgms_reg_bad_device_id",
+			DeviceID:       badID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "DeviceID %q must be rejected with 400", badID)
+	}
+}
+
+// TestHandleRegister_MissingIdentityKeyPub_400 verifies that a registration request
+// without an IdentityKeyPub returns HTTP 400.
+func TestHandleRegister_MissingIdentityKeyPub_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_key_pub",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:    "cfgms_reg_no_key_pub",
+		DeviceID: testValidDeviceID,
+		// IdentityKeyPub intentionally omitted
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "identity_key_pub")
+}
+
+// TestHandleRegister_InvalidIdentityKeyPub_400 verifies that a registration request
+// with an IdentityKeyPub that does not decode to 32 bytes returns HTTP 400.
+func TestHandleRegister_InvalidIdentityKeyPub_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_bad_key_pub",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	for _, badPub := range []string{
+		"notbase64!!!",
+		base64.StdEncoding.EncodeToString([]byte("tooshort")), // <32 bytes
+		base64.StdEncoding.EncodeToString(make([]byte, 33)),   // 33 bytes
+		base64.StdEncoding.EncodeToString(make([]byte, 64)),   // 64 bytes (wrong size)
+	} {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          "cfgms_reg_bad_key_pub",
+			DeviceID:       testValidDeviceID,
+			IdentityKeyPub: badPub,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "IdentityKeyPub %q must be rejected with 400", badPub)
+	}
+}
+
+// TestHandleRegister_DuplicateDeviceIDWithinTenant_409 verifies that registering the
+// same DeviceID twice in the same tenant is rejected with HTTP 409.
+func TestHandleRegister_DuplicateDeviceIDWithinTenant_409(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_dup_device_id",
+		TenantID:      "tenant-dup",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	// First registration with this DeviceID — must succeed.
+	rec1 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_dup_device_id",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
+	assert.Equal(t, http.StatusOK, rec1.Code, "first registration must succeed")
+
+	// Second registration with the same DeviceID in the same tenant — must be rejected.
+	rec2 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_dup_device_id",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
+	assert.Equal(t, http.StatusConflict, rec2.Code,
+		"duplicate DeviceID within the same tenant must return HTTP 409")
+}
+
+// TestHandleRegister_DuplicateDeviceIDCrossTenant_200 verifies that the same DeviceID
+// may be used in different tenants without conflict (tenant namespaces are independent).
+func TestHandleRegister_DuplicateDeviceIDCrossTenant_200(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tokA := &registration.Token{
+		Token:         "cfgms_reg_cross_tenant_a",
+		TenantID:      "tenant-a",
+		ControllerURL: "grpc://controller:7443",
+	}
+	tokB := &registration.Token{
+		Token:         "cfgms_reg_cross_tenant_b",
+		TenantID:      "tenant-b",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tokA))
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tokB))
+
+	deviceID := "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2"
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	keyPub := base64.StdEncoding.EncodeToString([]byte(pub))
+
+	// Register under tenant-a — must succeed.
+	rec1 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_cross_tenant_a",
+		DeviceID:       deviceID,
+		IdentityKeyPub: keyPub,
+	})
+	assert.Equal(t, http.StatusOK, rec1.Code, "registration under tenant-a must succeed")
+
+	// Register the same DeviceID under tenant-b — must also succeed (different namespace).
+	rec2 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_cross_tenant_b",
+		DeviceID:       deviceID,
+		IdentityKeyPub: keyPub,
+	})
+	assert.Equal(t, http.StatusOK, rec2.Code,
+		"same DeviceID under a different tenant must be accepted (namespaces are independent)")
 }
