@@ -162,26 +162,38 @@ function Cfgms-DisconnectVMNic {
 # Storage roles the host already runs). Each function wraps a single logical
 # host-atomic step; all user-controlled values travel via parameters.
 
-# Cfgms-RunDiskJob runs a disk/VHD scriptblock in a FRESH PowerShell child
-# process (Start-Job) and surfaces its result. This is REQUIRED for Mount-VHD /
-# Dismount-VHD: those cmdlets attach the VHD asynchronously via the Virtual Disk
-# Service, which DEADLOCKS when run directly in this persistent stdin-piped host
-# (powershell.exe -Command -). A fresh child process has its own message pump and
-# completes normally. $ProgressPreference is silenced in the child to avoid
-# progress-stream stalls. Values pass via -ArgumentList (bound params), never
-# interpolated into script text. A non-Completed job re-throws the child error.
-function Cfgms-RunDiskJob {
-    param([Parameter(Mandatory)][scriptblock]$ScriptBlock, [object[]]$ArgumentList = @())
-    $j = Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
-    $null = Wait-Job $j
-    $out = Receive-Job $j 2>&1
-    $state = $j.State
-    Remove-Job $j -Force
-    if ($state -ne 'Completed') { throw ('hyperv seed disk job ' + $state + ': ' + (($out | ForEach-Object { $_.ToString() }) -join '; ')) }
+# Cfgms-RunDiskScript runs a disk/VHD script in a FRESH powershell.exe child via
+# Start-Process -Wait. This is REQUIRED for Mount-VHD / Dismount-VHD: those
+# cmdlets attach the VHD asynchronously via the Virtual Disk Service, which
+# DEADLOCKS when run in this persistent stdin-REPL host (powershell.exe
+# -Command -) — and so do Start-Job / Wait-Job (they share the host's async
+# machinery). Start-Process -Wait blocks on the OS process handle, which does NOT
+# deadlock, and the child (a normal -File invocation) runs the disk cmdlets fine.
+# $BodyLines are written to a temp .ps1; $ScriptArgs bind positionally to its
+# param() block (never interpolated into script text). A non-zero child exit
+# re-throws the captured stderr.
+function Cfgms-RunDiskScript {
+    param([Parameter(Mandatory)][string[]]$BodyLines, [string[]]$ScriptArgs = @())
+    $tmp = Join-Path $env:TEMP ('cfgms-seed-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $errFile = $tmp + '.err'
+    Set-Content -Path $tmp -Value $BodyLines -Encoding UTF8
+    try {
+        $quoted = ($ScriptArgs | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join ' '
+        $argLine = '-NoProfile -NonInteractive -File "' + $tmp + '" ' + $quoted
+        $pr = Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine -Wait -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
+        if ($pr.ExitCode -ne 0) {
+            $e = ''
+            if (Test-Path $errFile) { $e = (Get-Content $errFile -Raw) }
+            throw ('hyperv seed disk script exit ' + $pr.ExitCode + ': ' + $e)
+        }
+    } finally {
+        Remove-Item $tmp, $errFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # Cfgms-NewSeedVHD creates an empty dynamic VHDX for the answer-file seed,
 # creating the parent directory first (seed_dir may be a fresh local path).
+# New-VHD is synchronous and is safe to run in-host.
 function Cfgms-NewSeedVHD {
     param([Parameter(Mandatory)][string]$Path, [int]$SizeBytes = 67108864)
     New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null
@@ -191,28 +203,25 @@ function Cfgms-NewSeedVHD {
 # Cfgms-MountSeedVHD mounts the seed VHDX, lays down a single FAT32 volume
 # labelled CFGMS_SEED, then DISMOUNTS (so the later copy step can re-mount; a
 # left-mounted VHD causes a 0x80070020 sharing violation on the next Mount-VHD).
-# Runs in a fresh child process (Cfgms-RunDiskJob) because Mount-VHD deadlocks in
-# the persistent host. Windows Setup and debian-installer auto-discover their
-# answer file from the labelled volume.
+# Runs in a fresh child process (Mount-VHD deadlocks in the persistent host).
 function Cfgms-MountSeedVHD {
     param([Parameter(Mandatory)][string]$Path)
-    Cfgms-RunDiskJob -ArgumentList $Path -ScriptBlock {
-        param($p)
-        $ProgressPreference = 'SilentlyContinue'
-        Mount-VHD -Path $p -Passthru |
-            Initialize-Disk -PartitionStyle MBR -PassThru |
-            New-Partition -UseMaximumSize -AssignDriveLetter |
-            Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null
-        Dismount-VHD -Path $p
-    }
+    Cfgms-RunDiskScript -ScriptArgs $Path -BodyLines @(
+        'param([string]$p)',
+        '$ErrorActionPreference = ''Stop''',
+        '$ProgressPreference = ''SilentlyContinue''',
+        'Mount-VHD -Path $p -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel ''CFGMS_SEED'' -Confirm:$false | Out-Null',
+        'Dismount-VHD -Path $p'
+    )
 }
 
 # Cfgms-CopyToSeedVHD re-mounts the formatted seed, writes $Content to
 # <drive>:\$FileName, optionally stages the steward binary ($StewardSrc →
 # cfgms-steward.exe) and controller CA ($CASrc → controller-ca.crt) so a Windows
 # guest can self-install + enroll offline (ADR-010), then dismounts. Runs in a
-# fresh child process (Mount-VHD deadlocks in the persistent host). All values
-# travel via ArgumentList — never interpolated into script text.
+# fresh child process (Mount-VHD deadlocks in the persistent host). The answer
+# content is handed to the child via a temp file (avoids argv size/quoting
+# limits); paths bind positionally.
 function Cfgms-CopyToSeedVHD {
     param(
         [Parameter(Mandatory)][string]$SeedPath,
@@ -221,17 +230,23 @@ function Cfgms-CopyToSeedVHD {
         [string]$StewardSrc = '',
         [string]$CASrc = ''
     )
-    Cfgms-RunDiskJob -ArgumentList $SeedPath,$FileName,$Content,$StewardSrc,$CASrc -ScriptBlock {
-        param($sp,$fn,$content,$stewardSrc,$caSrc)
-        $ProgressPreference = 'SilentlyContinue'
-        $disk = Mount-VHD -Path $sp -Passthru
-        $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
-            Where-Object { $_.FileSystemLabel -eq 'CFGMS_SEED' } |
-            Select-Object -First 1).DriveLetter
-        Set-Content -Path ($letter + ':\' + $fn) -Value $content -NoNewline
-        if ($stewardSrc -and (Test-Path -LiteralPath $stewardSrc)) { Copy-Item -LiteralPath $stewardSrc -Destination ($letter + ':\cfgms-steward.exe') -Force }
-        if ($caSrc -and (Test-Path -LiteralPath $caSrc)) { Copy-Item -LiteralPath $caSrc -Destination ($letter + ':\controller-ca.crt') -Force }
-        Dismount-VHD -Path $sp
+    $contentFile = Join-Path $env:TEMP ('cfgms-ans-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    Set-Content -Path $contentFile -Value $Content -NoNewline
+    try {
+        Cfgms-RunDiskScript -ScriptArgs $SeedPath, $FileName, $contentFile, $StewardSrc, $CASrc -BodyLines @(
+            'param([string]$sp,[string]$fn,[string]$cf,[string]$ss,[string]$ca)',
+            '$ErrorActionPreference = ''Stop''',
+            '$ProgressPreference = ''SilentlyContinue''',
+            '$content = Get-Content -LiteralPath $cf -Raw',
+            '$disk = Mount-VHD -Path $sp -Passthru',
+            '$letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq ''CFGMS_SEED'' } | Select-Object -First 1).DriveLetter',
+            'Set-Content -Path ($letter + '':\'' + $fn) -Value $content -NoNewline',
+            'if ($ss -and (Test-Path -LiteralPath $ss)) { Copy-Item -LiteralPath $ss -Destination ($letter + '':\cfgms-steward.exe'') -Force }',
+            'if ($ca -and (Test-Path -LiteralPath $ca)) { Copy-Item -LiteralPath $ca -Destination ($letter + '':\controller-ca.crt'') -Force }',
+            'Dismount-VHD -Path $sp'
+        )
+    } finally {
+        Remove-Item $contentFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -240,11 +255,11 @@ function Cfgms-CopyToSeedVHD {
 # same Dismount-VHD-deadlock reason as the mount path.
 function Cfgms-DetachSeedVHD {
     param([Parameter(Mandatory)][string]$Path)
-    Cfgms-RunDiskJob -ArgumentList $Path -ScriptBlock {
-        param($p)
-        $ProgressPreference = 'SilentlyContinue'
-        Dismount-VHD -Path $p -ErrorAction SilentlyContinue
-    }
+    Cfgms-RunDiskScript -ScriptArgs $Path -BodyLines @(
+        'param([string]$p)',
+        '$ProgressPreference = ''SilentlyContinue''',
+        'Dismount-VHD -Path $p -ErrorAction SilentlyContinue'
+    )
 }
 
 # Cfgms-AttachSeedDisk attaches the seed VHDX to the VM as a secondary hard
