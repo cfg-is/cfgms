@@ -9,7 +9,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // tableExists reports whether the named table is present in the SQLite catalog.
 func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
@@ -83,6 +83,42 @@ func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillStewardColumns adds the four registration-refresh identity columns to a
+// pre-existing stewards table that was created without them (Issue #2093, ADR-010).
+// Fresh databases (table absent) are skipped. Column-existence is checked via
+// PRAGMA before each ALTER TABLE so the pass is fully idempotent.
+func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "stewards")
+	if err != nil {
+		return fmt.Errorf("sqlite: steward back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"device_id", `ALTER TABLE stewards ADD COLUMN device_id TEXT NOT NULL DEFAULT ''`},
+		{"identity_key_pub", `ALTER TABLE stewards ADD COLUMN identity_key_pub BLOB NOT NULL DEFAULT ''`},
+		{"key_protection_level", `ALTER TABLE stewards ADD COLUMN key_protection_level TEXT NOT NULL DEFAULT ''`},
+		{"last_provenance_json", `ALTER TABLE stewards ADD COLUMN last_provenance_json TEXT NOT NULL DEFAULT ''`},
+	} {
+		present, err := columnExists(ctx, db, "stewards", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: steward back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: stewards back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -90,6 +126,9 @@ func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
 // transaction requires a full file-lock round-trip via the WAL SHM mechanism.
 func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillAuditEntries(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillStewardColumns(ctx, db); err != nil {
 		return err
 	}
 
@@ -267,20 +306,28 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 
 		// Stewards — durable fleet registry (ADR-003 §2, Issue #663)
 		// Records are never deleted; deregistered stewards are retained for audit.
+		// Columns device_id, identity_key_pub, key_protection_level, last_provenance_json
+		// were added in Issue #2093 (ADR-010 registration-refresh). Pre-existing rows
+		// receive empty defaults via backfillStewardColumns() before this transaction.
 		`CREATE TABLE IF NOT EXISTS stewards (
-			id                TEXT PRIMARY KEY,
-			hostname          TEXT NOT NULL DEFAULT '',
-			platform          TEXT NOT NULL DEFAULT '',
-			arch              TEXT NOT NULL DEFAULT '',
-			version           TEXT NOT NULL DEFAULT '',
-			ip_address        TEXT NOT NULL DEFAULT '',
-			status            TEXT NOT NULL DEFAULT 'registered',
-			registered_at     TEXT NOT NULL,
-			last_seen         TEXT NOT NULL,
-			last_heartbeat_at TEXT NOT NULL DEFAULT ''
+			id                   TEXT PRIMARY KEY,
+			hostname             TEXT NOT NULL DEFAULT '',
+			platform             TEXT NOT NULL DEFAULT '',
+			arch                 TEXT NOT NULL DEFAULT '',
+			version              TEXT NOT NULL DEFAULT '',
+			ip_address           TEXT NOT NULL DEFAULT '',
+			status               TEXT NOT NULL DEFAULT 'registered',
+			registered_at        TEXT NOT NULL,
+			last_seen            TEXT NOT NULL,
+			last_heartbeat_at    TEXT NOT NULL DEFAULT '',
+			device_id            TEXT NOT NULL DEFAULT '',
+			identity_key_pub     BLOB NOT NULL DEFAULT '',
+			key_protection_level TEXT NOT NULL DEFAULT '',
+			last_provenance_json TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,
+		`CREATE INDEX IF NOT EXISTS idx_stewards_device_id ON stewards(device_id)`,
 
 		// Commands — durable command dispatch state (ADR-003 §1 Deficiency #5, Issue #665)
 		// Records are append-only for audit purposes; PurgeExpiredRecords removes
@@ -391,6 +438,36 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_status       ON cfgms_pending_registrations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_expires_at   ON cfgms_pending_registrations(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_token_str    ON cfgms_pending_registrations(token_str)`,
+
+		// Pending registration-refresh requests (ADR-010, Issue #2093)
+		// Records are created by the /refresh/challenge handler and acted upon by
+		// the approval flow or auto-accept policy. ClaimBundle is populated by
+		// StoreClaimBundle once the steward completes the PoP exchange.
+		`CREATE TABLE IF NOT EXISTS pending_refresh_requests (
+			pending_id               TEXT PRIMARY KEY,
+			device_id                TEXT NOT NULL,
+			tenant_id                TEXT NOT NULL,
+			source_ip                TEXT NOT NULL DEFAULT '',
+			provenance_matched_fields INTEGER NOT NULL DEFAULT 0,
+			provenance_total_fields   INTEGER NOT NULL DEFAULT 0,
+			claim_bundle             BLOB NOT NULL DEFAULT '',
+			status                   TEXT NOT NULL DEFAULT 'pending',
+			created_at               TEXT NOT NULL,
+			expires_at               TEXT NOT NULL,
+			resolved_at              TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_refresh_device_id  ON pending_refresh_requests(device_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_refresh_tenant_id  ON pending_refresh_requests(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_refresh_status     ON pending_refresh_requests(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_refresh_expires_at ON pending_refresh_requests(expires_at)`,
+
+		// Per-tenant registration-refresh policies (ADR-010 §4, Issue #2093)
+		// Absent rows return the default policy: mode=require_approval, max_dormancy_days=NULL.
+		`CREATE TABLE IF NOT EXISTS refresh_policies (
+			tenant_id         TEXT PRIMARY KEY,
+			mode              TEXT NOT NULL DEFAULT 'require_approval',
+			max_dormancy_days INTEGER
+		)`,
 
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (

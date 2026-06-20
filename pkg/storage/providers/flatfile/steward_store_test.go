@@ -243,3 +243,37 @@ func TestFlatFileStewardStore_DeregisterNotFound(t *testing.T) {
 	err = store.DeregisterSteward(context.Background(), "ghost")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
+
+func TestFlatFileStewardStore_GetStewardByDeviceID(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	const deviceID = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	rec := testStewardRecord("s-dvc")
+	rec.DeviceID = deviceID
+	rec.IdentityKeyPub = []byte{0xde, 0xad}
+	rec.KeyProtectionLevel = "file"
+	rec.LastProvenanceJSON = `{"hostname":"host-s-dvc"}`
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	got, err := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, err)
+	assert.Equal(t, "s-dvc", got.ID)
+	assert.Equal(t, deviceID, got.DeviceID)
+	assert.Equal(t, []byte{0xde, 0xad}, got.IdentityKeyPub)
+	assert.Equal(t, "file", got.KeyProtectionLevel)
+	assert.Equal(t, `{"hostname":"host-s-dvc"}`, got.LastProvenanceJSON)
+
+	_, err = store.GetStewardByDeviceID(ctx, "0000000000000000000000000000000000000000000000000000000000000000")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+func TestFlatFileStewardStore_GetStewardByDeviceID_EmptyID(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	_, err = store.GetStewardByDeviceID(context.Background(), "")
+	require.Error(t, err, "empty device ID must return an error")
+}

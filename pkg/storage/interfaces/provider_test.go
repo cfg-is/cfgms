@@ -431,6 +431,9 @@ func (m *MockStewardStore) DeregisterSteward(_ context.Context, _ string) error 
 func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil
 }
+func (m *MockStewardStore) GetStewardByDeviceID(_ context.Context, _ string) (*business.StewardRecord, error) {
+	return nil, business.ErrStewardNotFound
+}
 func (m *MockStewardStore) HealthCheck(_ context.Context) error { return nil }
 func (m *MockStewardStore) Initialize(_ context.Context) error  { return nil }
 func (m *MockStewardStore) Close() error                        { return nil }

@@ -190,6 +190,17 @@ func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error 
 func (s *testStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil
 }
+func (s *testStewardStore) GetStewardByDeviceID(_ context.Context, deviceID string) (*business.StewardRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.stewards {
+		if r.DeviceID == deviceID {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, business.ErrStewardNotFound
+}
 func (s *testStewardStore) HealthCheck(_ context.Context) error { return nil }
 func (s *testStewardStore) Initialize(_ context.Context) error  { return nil }
 func (s *testStewardStore) Close() error                        { return nil }
