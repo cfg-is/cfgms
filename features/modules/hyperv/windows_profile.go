@@ -97,21 +97,16 @@ const autounattendTemplate = `<?xml version="1.0" encoding="utf-8"?>
           <CreatePartitions>
             <CreatePartition wcm:action="add">
               <Order>1</Order>
-              <Type>Primary</Type>
-              <Size>500</Size>
+              <Type>EFI</Type>
+              <Size>200</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
               <Order>2</Order>
-              <Type>EFI</Type>
-              <Size>100</Size>
-            </CreatePartition>
-            <CreatePartition wcm:action="add">
-              <Order>3</Order>
               <Type>MSR</Type>
               <Size>128</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
-              <Order>4</Order>
+              <Order>3</Order>
               <Type>Primary</Type>
               <Extend>true</Extend>
             </CreatePartition>
@@ -119,9 +114,16 @@ const autounattendTemplate = `<?xml version="1.0" encoding="utf-8"?>
           <ModifyPartitions>
             <ModifyPartition wcm:action="add">
               <Order>1</Order>
-              <PartitionID>4</PartitionID>
+              <PartitionID>1</PartitionID>
+              <Label>System</Label>
+              <Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order>
+              <PartitionID>3</PartitionID>
               <Label>Windows</Label>
               <Format>NTFS</Format>
+              <Letter>C</Letter>
             </ModifyPartition>
           </ModifyPartitions>
         </Disk>
@@ -130,7 +132,7 @@ const autounattendTemplate = `<?xml version="1.0" encoding="utf-8"?>
         <OSImage>
           <InstallTo>
             <DiskID>0</DiskID>
-            <PartitionID>4</PartitionID>
+            <PartitionID>3</PartitionID>
           </InstallTo>
           <InstallFrom>
             <MetaData wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
