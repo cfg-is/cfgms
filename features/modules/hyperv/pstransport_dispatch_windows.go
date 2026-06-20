@@ -96,6 +96,10 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx,
 			"Cfgms-SetVMFirmware -Name "+quoteArg(psArgs, "Name")+
 				" -Template "+quoteArg(psArgs, "Template"))
+	case psSetDVDFirstBoot:
+		// runFresh: Set-VMFirmware -FirstBootDevice references the DVD/ISO and
+		// deadlocks in the persistent host (the secure-boot case above does not).
+		return t.runFresh(ctx, "Cfgms-SetDVDFirstBoot -Name "+quoteArg(psArgs, "Name"))
 
 	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
 	case psConnectVMNic:

@@ -259,6 +259,17 @@ function Cfgms-SetVMFirmware {
     Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template
 }
 
+# Cfgms-SetDVDFirstBoot makes the install DVD the Gen2 firmware's first boot
+# device so the VM boots the installer rather than the empty OS disk. Dispatched
+# via runFresh: Set-VMFirmware -FirstBootDevice references the DVD drive, which
+# touches the ISO and deadlocks in the persistent -Command - host (unlike the
+# secure-boot Set-VMFirmware above, which sets only a flag).
+function Cfgms-SetDVDFirstBoot {
+    param([Parameter(Mandatory)][string]$Name)
+    $dvd = Get-VMDvdDrive -VMName $Name | Select-Object -First 1
+    Set-VMFirmware -VMName $Name -FirstBootDevice $dvd
+}
+
 # ── VSwitch read + lifecycle ──────────────────────────────────────────
 function Cfgms-GetVSwitch {
     param([Parameter(Mandatory)][string]$Name)

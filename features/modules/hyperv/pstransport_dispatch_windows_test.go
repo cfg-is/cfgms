@@ -82,6 +82,8 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psSetVMFirmware:
 		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
 			" -Template " + quoteArg(psArgs, "Template"))
+	case psSetDVDFirstBoot:
+		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name"))
 	case psRemoveVM:
 		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -346,6 +348,7 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
+		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
