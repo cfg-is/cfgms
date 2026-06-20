@@ -1228,6 +1228,7 @@ func refreshAndConnect(
 		CACert:           completeResp.CACert,
 		ServerCert:       completeResp.ServerCert,
 	}
+	enrichApprovedWithDeviceIdentity(&bundle, ks)
 	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)
 }
 

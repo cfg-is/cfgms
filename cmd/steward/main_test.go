@@ -506,6 +506,76 @@ func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 		"HTTP 202 from refresh/complete must return ErrRefreshPending, not a fatal error")
 }
 
+// TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity verifies that when the
+// controller returns HTTP 200 for /refresh/complete, the persisted identity file
+// carries DeviceID and IdentityKeyPub from the key store — i.e. that
+// enrichApprovedWithDeviceIdentity is called before connectWithApprovedRegistration.
+// The transport connection itself will fail (no real controller), but saveIdentity
+// is called before the transport attempt, so the file is a reliable signal.
+func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
+	dir := t.TempDir()
+
+	ks, err := identity.NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	_, _, err = ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	expectedDeviceID := ks.DeviceID()
+	require.NotEmpty(t, expectedDeviceID)
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/refresh/challenge"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"nonce":"dGVzdA","server_ts":1,"expires_in":60}`))
+		case strings.HasSuffix(r.URL.Path, "/refresh/complete"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			resp := map[string]string{
+				"client_cert":       "fake-cert",
+				"client_key":        "fake-key",
+				"ca_cert":           "fake-ca",
+				"server_cert":       "fake-server",
+				"transport_address": srvURL,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	origURL := ControllerURL
+	ControllerURL = srv.URL
+	t.Cleanup(func() { ControllerURL = origURL })
+
+	storedID := &StewardIdentity{
+		StewardID:        "steward-refresh-test",
+		TenantID:         "tenant-1",
+		TransportAddress: srv.URL,
+		CACertPEM:        "fake-ca",
+		ServerCertPEM:    "fake-server",
+	}
+
+	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
+	// but saveIdentity is invoked before the transport attempt so the identity file is written.
+	_, _ = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", logging.NewLogger("error"))
+
+	// The identity file saved by connectWithApprovedRegistration must carry the
+	// DeviceID and IdentityKeyPub from the key store.  An empty DeviceID here
+	// means enrichApprovedWithDeviceIdentity was not called before the bundle was
+	// passed to connectWithApprovedRegistration.
+	savedID, loadErr := loadIdentity(dir)
+	require.NoError(t, loadErr)
+	require.NotNil(t, savedID, "identity file must exist after a successful refresh/complete response")
+	assert.Equal(t, expectedDeviceID, savedID.DeviceID,
+		"DeviceID must be populated in persisted identity after successful refresh")
+	assert.NotEmpty(t, savedID.IdentityKeyPub,
+		"IdentityKeyPub must be populated in persisted identity after successful refresh")
+}
+
 // TestPollForApproval_BackoffIntervalGrows verifies that the poll interval doubles
 // on each "pending" response up to maxInterval.
 func TestPollForApproval_BackoffIntervalGrows(t *testing.T) {
