@@ -88,20 +88,26 @@ func TestCommandNil(t *testing.T) {
 	assert.Nil(t, commandFromProto(nil))
 }
 
+// allCommandTypes enumerates every types.Command* constant that must survive
+// the proto round-trip. Add new constants here as they are defined in
+// pkg/controlplane/types/messages.go. The guard test below asserts this list
+// stays in sync with commandTypeToProto (Issue #1994).
+var allCommandTypes = []types.CommandType{
+	types.CommandSyncConfig,
+	types.CommandSyncDNA,
+	types.CommandReconnect,
+	types.CommandExecuteScript,
+	types.CommandRelayResponse,
+	types.CommandPushSigningCert,
+	types.CommandPushStewardBinary,
+}
+
 func TestCommandTypeRoundTrip(t *testing.T) {
 	// Every command type the controller can dispatch must survive the
 	// semantic→proto→semantic round-trip. A type missing from either map
 	// serialises to the zero enum value, which mutates the signed Type field
 	// and makes steward-side signature verification fail (Issue #1943/#1948).
-	allTypes := []types.CommandType{
-		types.CommandSyncConfig,
-		types.CommandSyncDNA,
-		types.CommandReconnect,
-		types.CommandExecuteScript,
-		types.CommandPushSigningCert,
-		types.CommandPushStewardBinary,
-	}
-	for _, ct := range allTypes {
+	for _, ct := range allCommandTypes {
 		t.Run(string(ct), func(t *testing.T) {
 			pb, ok := commandTypeToProto[ct]
 			require.True(t, ok, "command type %q missing from commandTypeToProto", ct)
@@ -110,6 +116,26 @@ func TestCommandTypeRoundTrip(t *testing.T) {
 			result := protoToCommandType[pb]
 			assert.Equal(t, ct, result)
 		})
+	}
+}
+
+// TestCommandTypeConvertMapsComplete guards against the class of omission from
+// Issue #1992 and #1994: a Command* constant is added to messages.go but never
+// added to the convert maps, causing silent Type-collapse to UNSPECIFIED on the
+// wire. The slice length pin fails the test at compile-time if allCommandTypes
+// and commandTypeToProto diverge.
+func TestCommandTypeConvertMapsComplete(t *testing.T) {
+	require.Len(t, allCommandTypes, len(commandTypeToProto),
+		"allCommandTypes is out of sync with commandTypeToProto — "+
+			"add the new Command* constant to both the slice and the convert maps")
+
+	for _, ct := range allCommandTypes {
+		_, inToProto := commandTypeToProto[ct]
+		assert.True(t, inToProto, "command type %q missing from commandTypeToProto", ct)
+
+		pbVal := commandTypeToProto[ct]
+		_, inFromProto := protoToCommandType[pbVal]
+		assert.True(t, inFromProto, "proto value for command type %q missing from protoToCommandType", ct)
 	}
 }
 
@@ -125,6 +151,7 @@ func TestCommandTypeProtoDescriptorComplete(t *testing.T) {
 		transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT:      "COMMAND_TYPE_EXECUTE_SCRIPT",
 		transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT:   "COMMAND_TYPE_PUSH_SIGNING_CERT",
 		transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
+		transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE:      "COMMAND_TYPE_RELAY_RESPONSE",
 	}
 	for ct, name := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -21,6 +21,7 @@ enum CommandType {
   COMMAND_TYPE_EXECUTE_SCRIPT = 8; // Issue #1669/#1992: controller dispatches a signed script execution to a steward
   COMMAND_TYPE_PUSH_SIGNING_CERT = 9; // Issue #1817: controller pushes current signing cert on every steward connect
   COMMAND_TYPE_PUSH_STEWARD_BINARY = 10; // Issue #1943: controller pushes a new steward binary for self-upgrade
+  COMMAND_TYPE_RELAY_RESPONSE = 11;      // Issue #1994: controller sends relay response back to steward relay goroutine
 }
 
 // EventType enumerates the types of events a steward emits to a controller.
