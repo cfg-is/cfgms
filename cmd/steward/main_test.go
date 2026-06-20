@@ -11,13 +11,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward/registration"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration/identity"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -429,6 +432,78 @@ func TestPollForApproval_ContextCanceled_ReturnsTimeoutError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "timed out")
+}
+
+// TestHasExpiredClientCert covers the three cases from the acceptance criteria:
+// all-expired → true; empty → false; mixed valid+expired → false.
+func TestHasExpiredClientCert(t *testing.T) {
+	makeClient := func(valid bool) *cert.CertificateInfo {
+		return &cert.CertificateInfo{Type: cert.CertificateTypeClient, IsValid: valid}
+	}
+	makeServer := func(valid bool) *cert.CertificateInfo {
+		return &cert.CertificateInfo{Type: cert.CertificateTypePublicAPI, IsValid: valid}
+	}
+
+	cases := []struct {
+		name  string
+		certs []*cert.CertificateInfo
+		want  bool
+	}{
+		{name: "all client certs expired", certs: []*cert.CertificateInfo{makeClient(false), makeClient(false)}, want: true},
+		{name: "single expired client cert", certs: []*cert.CertificateInfo{makeClient(false)}, want: true},
+		{name: "empty list", certs: nil, want: false},
+		{name: "no client certs (only server)", certs: []*cert.CertificateInfo{makeServer(false)}, want: false},
+		{name: "mixed: one valid one expired", certs: []*cert.CertificateInfo{makeClient(true), makeClient(false)}, want: false},
+		{name: "all client certs valid", certs: []*cert.CertificateInfo{makeClient(true)}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, hasExpiredClientCert(tc.certs))
+		})
+	}
+}
+
+// TestRefreshAndConnect_202_ReturnsErrRefreshPending verifies that when the controller
+// returns HTTP 202 for the /refresh/complete endpoint, refreshAndConnect returns
+// ErrRefreshPending rather than a fatal error or a successful connection.
+func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
+	dir := t.TempDir()
+
+	ks, err := identity.NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	_, _, err = ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/refresh/challenge"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"nonce":"dGVzdA","server_ts":1,"expires_in":60}`))
+		case strings.HasSuffix(r.URL.Path, "/refresh/complete"):
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// Temporarily point ControllerURL at the test server.
+	origURL := ControllerURL
+	ControllerURL = srv.URL
+	t.Cleanup(func() { ControllerURL = origURL })
+
+	storedID := &StewardIdentity{
+		StewardID:        "steward-refresh-test",
+		TenantID:         "tenant-1",
+		TransportAddress: srv.URL,
+		CACertPEM:        "fake-ca",
+		ServerCertPEM:    "fake-server",
+	}
+
+	_, err = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", logging.NewLogger("error"))
+	require.ErrorIs(t, err, registration.ErrRefreshPending,
+		"HTTP 202 from refresh/complete must return ErrRefreshPending, not a fatal error")
 }
 
 // TestPollForApproval_BackoffIntervalGrows verifies that the poll interval doubles

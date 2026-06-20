@@ -7,7 +7,9 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -29,6 +31,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/registration/identity"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
@@ -171,7 +174,18 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		runCtx, runCancel := context.WithCancel(ctx)
 		defer runCancel()
 
-		transportCl, err := registerAndConnect(runCtx, regToken, logger)
+		// Initialise device identity key store before registration so the refresh
+		// handshake path (Issue #2094) has a stable key available. Failure here is
+		// non-fatal: initial registration still works; only the refresh path is disabled.
+		ks, ksErr := identity.NewFileKeyStore(defaultCertStoreDir())
+		if ksErr != nil {
+			logger.Warn("Failed to create device identity key store; registration-refresh disabled", "error", ksErr)
+		} else if _, _, loadErr := ks.GenerateOrLoad(runCtx); loadErr != nil {
+			logger.Warn("Failed to load/generate device identity key; registration-refresh disabled", "error", loadErr)
+			ks = nil
+		}
+
+		transportCl, err := registerAndConnect(runCtx, regToken, ks, logger)
 		if err != nil {
 			return fmt.Errorf("failed to register with controller: %w", err)
 		}
@@ -586,6 +600,8 @@ type approvedRegistration struct {
 	CACert           string
 	ServerCert       string
 	SigningCert      string
+	DeviceID         string // stable device identity ID (Issue #2094)
+	IdentityKeyPub   string // base64-encoded Ed25519 public key (Issue #2094)
 }
 
 // registerAndConnect registers the steward using HTTP REST API
@@ -595,11 +611,15 @@ type approvedRegistration struct {
 // On restart with a valid stored cert and identity, HTTP registration is skipped
 // and the steward reconnects directly using the persisted credentials (Issue #1719).
 //
+// When the steward's mTLS cert is expired but a stored identity and device identity key
+// exist, registerAndConnect tries the registration-refresh handshake (Issue #2094) before
+// falling through to full HTTP re-registration.
+//
 // When the controller uses registration.workflow: manual (Issue #1899), the steward
 // persists the pending_id locally and polls GET /api/v1/registration/status/{pending_id}
 // with exponential backoff (5s → 60s max) until approved, denied, or timed out.
 // On restart, the persisted pending_id is resumed rather than creating a new pending record.
-func registerAndConnect(ctx context.Context, token string, logger logging.Logger) (*client.TransportClient, error) {
+func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyStore, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
 	certStoreDir := defaultCertStoreDir()
@@ -608,7 +628,38 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, logger); tc != nil {
 		return tc, nil
 	} else if reconnErr != nil {
-		logger.Warn("Stored-identity reconnect failed; falling back to HTTP registration", "error", reconnErr)
+		logger.Warn("Stored-identity reconnect failed; checking for expired-cert refresh path", "error", reconnErr)
+	}
+
+	// Expired-cert refresh path (Issue #2094): when a stored identity exists and all
+	// client certs are expired, attempt the registration-refresh handshake before
+	// falling through to full HTTP re-registration.
+	if ks != nil && ks.DeviceID() != "" {
+		if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
+			certMgr, certMgrErr := cert.NewManager(&cert.ManagerConfig{
+				StoragePath:    certStoreDir,
+				LoadExistingCA: true,
+			})
+			if certMgrErr == nil {
+				if certs, listErr := certMgr.ListCertificates(); listErr == nil && hasExpiredClientCert(certs) {
+					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, logger)
+					if refreshErr == nil {
+						return tc, nil
+					}
+					if errors.Is(refreshErr, registration.ErrRefreshPending) {
+						logger.Warn("Registration refresh pending operator approval; retry later",
+							"device_id", logging.SanitizeLogValue(ks.DeviceID()))
+						return nil, refreshErr
+					}
+					if errors.Is(refreshErr, registration.ErrRefreshRejected) {
+						logger.Error("Registration refresh rejected; steward must be manually re-admitted",
+							"device_id", logging.SanitizeLogValue(ks.DeviceID()))
+						return nil, refreshErr
+					}
+					logger.Warn("Registration refresh failed; falling back to HTTP re-registration", "error", refreshErr)
+				}
+			}
+		}
 	}
 
 	logger.Info("Registering steward via HTTP API")
@@ -645,6 +696,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 			return nil, pollErr
 		}
 		if approved != nil {
+			enrichApprovedWithDeviceIdentity(approved, ks)
 			_ = clearPendingState(certStoreDir)
 			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, logger)
 		}
@@ -658,7 +710,15 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
-	regResp, pendingResp, err := httpClient.Register(regCtx, token)
+	regReq := registration.RegistrationRequest{Token: token}
+	if ks != nil && ks.DeviceID() != "" {
+		regReq.DeviceID = ks.DeviceID()
+		if pub := ks.PublicKey(); pub != nil {
+			regReq.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+		}
+	}
+
+	regResp, pendingResp, err := httpClient.Register(regCtx, regReq)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
 	}
@@ -685,6 +745,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 			_ = clearPendingState(certStoreDir)
 			return nil, fmt.Errorf("registration approval timed out after %s; re-run with a fresh token if needed", pollTimeout)
 		}
+		enrichApprovedWithDeviceIdentity(approved, ks)
 		_ = clearPendingState(certStoreDir)
 		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, logger)
 	}
@@ -707,6 +768,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		ServerCert:       regResp.ServerCert,
 		SigningCert:      regResp.SigningCert,
 	}
+	enrichApprovedWithDeviceIdentity(&bundle, ks)
 	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)
 }
 
@@ -798,18 +860,20 @@ func connectWithApprovedRegistration(
 ) (*client.TransportClient, error) {
 	// Persist the identity record so that a subsequent restart can reconnect
 	// without HTTP re-registration (Issue #1719).
-	identity := StewardIdentity{
+	persistedID := StewardIdentity{
 		StewardID:        reg.StewardID,
 		TenantID:         reg.TenantID,
 		TransportAddress: reg.TransportAddress,
 		CACertPEM:        reg.CACert,
 		ServerCertPEM:    reg.ServerCert,
 		SigningCertPEM:   reg.SigningCert,
+		DeviceID:         reg.DeviceID,
+		IdentityKeyPub:   reg.IdentityKeyPub,
 	}
-	if saveErr := saveIdentity(certStoreDir, identity); saveErr != nil {
+	if saveErr := saveIdentity(certStoreDir, persistedID); saveErr != nil {
 		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
 	} else {
-		logger.Info("Steward identity persisted for restart reuse", "steward_id", identity.StewardID)
+		logger.Info("Steward identity persisted for restart reuse", "steward_id", persistedID.StewardID)
 	}
 
 	// Optionally load the local steward config to apply custom replay window,
@@ -1047,6 +1111,124 @@ func hasValidClientCert(certs []*cert.CertificateInfo) bool {
 		}
 	}
 	return false
+}
+
+// hasExpiredClientCert reports true only when certs contains at least one client certificate
+// AND every client certificate in the list is expired (IsValid == false).
+// Returns false when certs contains no client certificates at all.
+func hasExpiredClientCert(certs []*cert.CertificateInfo) bool {
+	found := false
+	for _, c := range certs {
+		if c.Type == cert.CertificateTypeClient {
+			found = true
+			if c.IsValid {
+				return false
+			}
+		}
+	}
+	return found
+}
+
+// enrichApprovedWithDeviceIdentity sets DeviceID and IdentityKeyPub on reg from ks when available,
+// so the identity file persists the device identity across restarts (Issue #2094).
+func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks *identity.FileKeyStore) {
+	if ks == nil || ks.DeviceID() == "" {
+		return
+	}
+	reg.DeviceID = ks.DeviceID()
+	if pub := ks.PublicKey(); pub != nil {
+		reg.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+	}
+}
+
+// refreshAndConnect performs the registration-refresh handshake (ADR-011, Issue #2094)
+// for a steward whose mTLS cert has expired. The handshake proves device identity via
+// an Ed25519 proof-of-possession signature over a server-issued nonce.
+//
+// Returns ErrRefreshPending when the controller queues the request for manual approval.
+// Returns ErrRefreshRejected when the controller refuses (revoked or dormant device).
+// On success, persists the new cert via saveIdentity and reconnects.
+func refreshAndConnect(
+	ctx context.Context,
+	id *StewardIdentity,
+	ks *identity.FileKeyStore,
+	certStoreDir, token string,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
+	controllerURL := ControllerURL
+	if controllerURL == "" {
+		return nil, fmt.Errorf("controller URL not set; cannot perform registration refresh")
+	}
+
+	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
+	if err != nil {
+		return nil, fmt.Errorf("create HTTP client for refresh: %w", err)
+	}
+
+	logger.Info("Attempting registration-refresh handshake",
+		"device_id", logging.SanitizeLogValue(ks.DeviceID()),
+		"steward_id", logging.SanitizeLogValue(id.StewardID))
+
+	challengeCtx, challengeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer challengeCancel()
+
+	challenge, err := httpClient.RefreshChallenge(challengeCtx, ks.DeviceID())
+	if err != nil {
+		return nil, fmt.Errorf("refresh challenge: %w", err)
+	}
+
+	// Decode the nonce from base64url.
+	nonceBytes, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode refresh nonce: %w", err)
+	}
+
+	// Compute the PoP digest: sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)
+	// per ADR-011 §4. This formula must match the controller's implementation exactly.
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], challenge.ServerTS)
+
+	digestInput := make([]byte, 0, len(nonceBytes)+len(ks.DeviceID())+8)
+	digestInput = append(digestInput, nonceBytes...)
+	digestInput = append(digestInput, []byte(ks.DeviceID())...)
+	digestInput = append(digestInput, tsBuf[:]...)
+	digest := sha256.Sum256(digestInput)
+
+	pop, err := ks.Sign(digest[:])
+	if err != nil {
+		return nil, fmt.Errorf("sign refresh digest: %w", err)
+	}
+
+	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer completeCancel()
+
+	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), challenge.Nonce, pop)
+	if err != nil {
+		return nil, err // ErrRefreshPending or ErrRefreshRejected propagated to caller
+	}
+
+	logger.Info("Registration refresh approved; storing new certificate",
+		"steward_id", logging.SanitizeLogValue(id.StewardID))
+
+	// Persist the refreshed identity with updated certs.
+	updatedID := *id
+	updatedID.CACertPEM = completeResp.CACert
+	updatedID.ServerCertPEM = completeResp.ServerCert
+	updatedID.TransportAddress = completeResp.TransportAddress
+	if saveErr := saveIdentity(certStoreDir, updatedID); saveErr != nil {
+		logger.Warn("Failed to persist refreshed identity; next restart may re-register", "error", saveErr)
+	}
+
+	bundle := approvedRegistration{
+		StewardID:        id.StewardID,
+		TenantID:         id.TenantID,
+		TransportAddress: completeResp.TransportAddress,
+		ClientCert:       completeResp.ClientCert,
+		ClientKey:        completeResp.ClientKey,
+		CACert:           completeResp.CACert,
+		ServerCert:       completeResp.ServerCert,
+	}
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the
