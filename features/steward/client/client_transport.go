@@ -1565,6 +1565,17 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 	c.overlapExpiresAt = overlapExpiresAt
 	c.mu.Unlock()
 
+	// Refresh the command handler's verifier so subsequent commands signed with the
+	// newly pushed cert are accepted without reconnecting. Without this, the handler's
+	// verifier remains a snapshot from connection time and rejects commands signed by
+	// the new cert even after the steward's trust set has been updated (Issue #1844).
+	c.mu.RLock()
+	handler := c.commandHandler
+	c.mu.RUnlock()
+	if handler != nil {
+		handler.UpdateVerifier(c.buildVerifierOnDemand())
+	}
+
 	// Resolve the applied cert's serial for the log. Prefer the controller-supplied
 	// "serial" param (exact controller-side string form); fall back to the parsed
 	// cert's serial so the serial is always recorded even for older controllers or

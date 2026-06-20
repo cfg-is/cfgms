@@ -210,6 +210,16 @@ func (h *Handler) Wait() {
 	h.wg.Wait()
 }
 
+// UpdateVerifier replaces the handler's signature verifier. Called after a
+// push_signing_cert command updates the steward's trust set so that subsequent
+// commands signed with the newly trusted cert are accepted without reconnecting
+// (Issue #1844).
+func (h *Handler) UpdateVerifier(v signature.Verifier) {
+	h.mu.Lock()
+	h.verifier = v
+	h.mu.Unlock()
+}
+
 // sweepStaleExecutingCommands marks commands that were left in "executing" state
 // (from a crashed or restarted process) as "failed" with error "controller_restart".
 func (h *Handler) sweepStaleExecutingCommands(ctx context.Context) error {
@@ -282,7 +292,12 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	cmd := &signed.Command
 
 	// 1. Signature verification (only when a verifier is configured).
-	if h.verifier != nil {
+	// Read verifier under the lock because UpdateVerifier may replace it concurrently
+	// after a push_signing_cert delivery (Issue #1844).
+	h.mu.RLock()
+	verifier := h.verifier
+	h.mu.RUnlock()
+	if verifier != nil {
 		if signed.Signature == nil {
 			return ErrUnauthenticatedCommand
 		}
@@ -297,7 +312,7 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err != nil {
 			return fmt.Errorf("marshal command for verification: %w", err)
 		}
-		if err := h.verifier.Verify(cmdBytes, signed.Signature); err != nil {
+		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
 	}
