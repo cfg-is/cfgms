@@ -233,6 +233,30 @@ func TestGetConvergeInterval_EmptyFallback(t *testing.T) {
 	assert.Equal(t, 30*time.Minute, GetConvergeInterval(cfg))
 }
 
+// --- GetDNARefreshInterval ---
+
+func TestGetDNARefreshInterval_ValidInterval(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{DNARefreshInterval: "15m"}}
+	assert.Equal(t, 15*time.Minute, GetDNARefreshInterval(cfg))
+}
+
+func TestGetDNARefreshInterval_EmptyFallback(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{}}
+	assert.Equal(t, 30*time.Minute, GetDNARefreshInterval(cfg))
+}
+
+func TestGetDNARefreshInterval_InvalidStringFallback(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{DNARefreshInterval: "notaduration"}}
+	assert.Equal(t, 30*time.Minute, GetDNARefreshInterval(cfg),
+		"unparseable duration must fall back to 30m default")
+}
+
+func TestGetDNARefreshInterval_ZeroFallback(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{DNARefreshInterval: "0s"}}
+	assert.Equal(t, 30*time.Minute, GetDNARefreshInterval(cfg),
+		"zero duration must fall back to 30m default")
+}
+
 // --- GetConfiguredModules ---
 
 func TestGetConfiguredModules_DeduplicatesModules(t *testing.T) {

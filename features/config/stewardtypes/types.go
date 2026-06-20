@@ -55,6 +55,11 @@ type StewardSettings struct {
 	// approval when the controller uses registration.workflow: manual (Issue #1899).
 	// Default is 24h. Set to 0 to use the default.
 	RegistrationPollTimeout time.Duration `yaml:"registration_poll_timeout,omitempty"`
+
+	// DNARefreshInterval is how often the steward re-collects and publishes DNA
+	// attribute deltas while connected to the controller (Issue #1915).
+	// Accepts Go duration strings (e.g. "30m", "1h"). Default: 30m.
+	DNARefreshInterval string `yaml:"dna_refresh_interval,omitempty"`
 }
 
 // UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)

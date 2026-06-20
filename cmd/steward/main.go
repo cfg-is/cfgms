@@ -240,6 +240,11 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		// convergence as an out-of-band optimization on top of the schedule.
 		transportCl.StartConvergenceLoop(runCtx)
 
+		// Start periodic DNA refresh loop. Re-collects system attributes on
+		// the configured interval and publishes delta updates so the controller
+		// fleet view stays current without requiring a full reconnect. (Issue #1915)
+		transportCl.StartDNARefreshLoop(runCtx)
+
 		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
 		// graceful self-exit request via SetShutdownFunc → runCancel).
 		<-runCtx.Done()
@@ -877,17 +882,20 @@ func connectWithApprovedRegistration(
 	}
 
 	// Optionally load the local steward config to apply custom replay window,
-	// params-size limits, and upgrade policy. If no config file is found (the
-	// common case when the steward is purely controller-managed), defaults apply.
+	// params-size limits, upgrade policy, and DNA refresh interval.
+	// If no config file is found (the common case when the steward is purely
+	// controller-managed), defaults apply.
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var scriptSigning stewardconfig.ScriptSigningConfig
 	var upgradeAllowDowngrade bool
+	var dnaRefreshInterval time.Duration
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		scriptSigning = cfg.Steward.ScriptSigning
 		upgradeAllowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
+		dnaRefreshInterval = stewardconfig.GetDNARefreshInterval(cfg)
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
@@ -908,6 +916,8 @@ func connectWithApprovedRegistration(
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
+		DNARefreshInterval:          dnaRefreshInterval,
+		DNACollector:                newDNACollectorAdapter(logger),
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1010,10 +1020,12 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var upgradeAllowDowngradeReconnect bool
+	var dnaRefreshIntervalReconnect time.Duration
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		upgradeAllowDowngradeReconnect = cfg.Steward.Upgrade.AllowDowngrade
+		dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(cfg)
 	}
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
@@ -1030,6 +1042,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
+		DNARefreshInterval:          dnaRefreshIntervalReconnect,
+		DNACollector:                newDNACollectorAdapter(logger),
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1386,4 +1400,25 @@ func publishUpgradeLifecycleEvent(ctx context.Context, tc upgradeEventPublisher,
 	logger.Info("Upgrade lifecycle event (no control plane publish)",
 		"event_type", eventType, "version", version)
 	return nil
+}
+
+// dnaCollectorAdapter adapts dna.Collector to the client.DNACollector interface
+// by extracting the Attributes map from the proto DNA result. (Issue #1915)
+type dnaCollectorAdapter struct {
+	collector *dna.Collector
+}
+
+func newDNACollectorAdapter(logger logging.Logger) *dnaCollectorAdapter {
+	return &dnaCollectorAdapter{collector: dna.NewCollector(logger)}
+}
+
+func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string]string, error) {
+	result, err := a.collector.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.Attributes, nil
 }

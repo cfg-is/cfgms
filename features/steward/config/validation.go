@@ -23,6 +23,11 @@ func GetConvergeInterval(cfg StewardConfig) time.Duration {
 	return stewardtypes.GetConvergeInterval(cfg)
 }
 
+// GetDNARefreshInterval delegates to the shared stewardtypes implementation.
+func GetDNARefreshInterval(cfg StewardConfig) time.Duration {
+	return stewardtypes.GetDNARefreshInterval(cfg)
+}
+
 // GetConfiguredModules delegates to the shared stewardtypes implementation.
 func GetConfiguredModules(config StewardConfig) []string {
 	return stewardtypes.GetConfiguredModules(config)
