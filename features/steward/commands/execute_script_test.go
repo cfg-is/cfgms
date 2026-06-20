@@ -19,6 +19,154 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// ---------------------------------------------------------------------------
+// Issue #1978 — 1 MB hard cap on exec output.
+// ---------------------------------------------------------------------------
+
+// overCapStdoutScriptBody returns a script that writes approximately 2 MB to stdout
+// — twice the execOutputHardCapBytes limit — using fast shell builtins.
+func overCapStdoutScriptBody() string {
+	if runtime.GOOS == "windows" {
+		// PowerShell: write 2 MB of 'A' without buffering overhead.
+		return `[Console]::Out.Write([string]::new('A', 2097152))`
+	}
+	// bash: yes generates an infinite stream; head -c cuts at exactly 2 MB.
+	return `yes A | head -c 2097152`
+}
+
+// underCapStdoutScriptBody returns a script that writes 512 KB to stdout —
+// well under the execOutputHardCapBytes limit — using fast shell builtins.
+func underCapStdoutScriptBody() string {
+	if runtime.GOOS == "windows" {
+		return `[Console]::Out.Write([string]::new('A', 524288))`
+	}
+	return `yes A | head -c 524288`
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for applyOutputCap.
+// ---------------------------------------------------------------------------
+
+func TestApplyOutputCap_BelowLimit_NoChange(t *testing.T) {
+	out, err := applyOutputCap("hello", "world", execOutputHardCapBytes)
+	assert.Equal(t, "hello", out)
+	assert.Equal(t, "world", err)
+}
+
+func TestApplyOutputCap_AtExactLimit_NoChange(t *testing.T) {
+	stdout := strings.Repeat("A", execOutputHardCapBytes)
+	out, err := applyOutputCap(stdout, "", execOutputHardCapBytes)
+	assert.Equal(t, stdout, out, "output exactly at limit must not be truncated")
+	assert.Empty(t, err)
+	assert.NotContains(t, out, execOutputTruncMarker)
+}
+
+// TestApplyOutputCap_StdoutExceedsLimit is a required test verifying that
+// when a command produces 2 MB of stdout, the capped output contains the
+// truncation marker and does not exceed the 1 MB ceiling (plus marker length).
+func TestApplyOutputCap_StdoutExceedsLimit_TruncatedWithMarker(t *testing.T) {
+	twoMB := strings.Repeat("A", 2*execOutputHardCapBytes)
+	out, err := applyOutputCap(twoMB, "", execOutputHardCapBytes)
+	assert.True(t, strings.HasSuffix(out, execOutputTruncMarker),
+		"capped stdout must end with the truncation marker")
+	assert.Empty(t, err, "stderr must be empty when stdout fills the cap")
+	assert.LessOrEqual(t, len(out)+len(err), execOutputHardCapBytes+len(execOutputTruncMarker),
+		"combined capped output must not exceed cap + marker")
+	assert.NotEqual(t, twoMB, out, "output must be shorter than original 2 MB")
+}
+
+func TestApplyOutputCap_CombinedExceedsLimit_StderrTruncated(t *testing.T) {
+	halfCap := strings.Repeat("A", execOutputHardCapBytes/2)
+	// stdout alone fits; adding extra stderr pushes combined over the cap.
+	out, err := applyOutputCap(halfCap, halfCap+strings.Repeat("B", 100), execOutputHardCapBytes)
+	assert.Equal(t, halfCap, out, "stdout must be unchanged when it fits in the cap")
+	assert.True(t, strings.HasSuffix(err, execOutputTruncMarker),
+		"stderr must end with the truncation marker when it is the buffer that overflows")
+	assert.LessOrEqual(t, len(out)+len(err), execOutputHardCapBytes+len(execOutputTruncMarker))
+}
+
+func TestApplyOutputCap_EmptyInputs_NoChange(t *testing.T) {
+	out, err := applyOutputCap("", "", execOutputHardCapBytes)
+	assert.Empty(t, out)
+	assert.Empty(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests via handleExecuteScript — required by AC.
+// ---------------------------------------------------------------------------
+
+// TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker is a required test (Issue #1978 AC):
+// an exec command producing 2 MB of output must result in capped output ending with the
+// truncation marker. Verified via the full stdout field in EventScriptCompleted.
+func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(overCapStdoutScriptBody()))
+	sc := testSignedCommandWithParams("esc-cap-over-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          platformShell(),
+		"execution_id":   "esc-cap-over-001",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+
+	// Full capped output is sent under the "stdout" key.
+	stdout, ok := evt.Details["stdout"].(string)
+	require.True(t, ok, "stdout field must be present and a string in EventScriptCompleted")
+
+	assert.True(t, strings.HasSuffix(stdout, execOutputTruncMarker),
+		"capped stdout must end with %q; got %d bytes ending in: %q",
+		execOutputTruncMarker, len(stdout), lastN(stdout, 50))
+	assert.LessOrEqual(t, len(stdout), execOutputHardCapBytes+len(execOutputTruncMarker),
+		"capped stdout must not exceed 1 MB + marker length")
+}
+
+// TestExecuteScriptHandler_OutputUnderCap_CapturedFully is a required test (Issue #1978 AC):
+// an exec command producing under 1 MB of output must be captured fully without a truncation marker.
+func TestExecuteScriptHandler_OutputUnderCap_CapturedFully(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(underCapStdoutScriptBody()))
+	sc := testSignedCommandWithParams("esc-cap-under-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          platformShell(),
+		"execution_id":   "esc-cap-under-001",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+
+	stdout, ok := evt.Details["stdout"].(string)
+	require.True(t, ok, "stdout field must be present and a string in EventScriptCompleted")
+
+	assert.NotContains(t, stdout, execOutputTruncMarker,
+		"output under 1 MB must not contain the truncation marker")
+	// 512 KB = 524288; allow for newlines added by the shell.
+	assert.GreaterOrEqual(t, len(stdout), 500*1024,
+		"output under cap must not be silently dropped (expected ~512 KB)")
+}
+
+// lastN returns the last n bytes of s as a string, for readable test failure messages.
+func lastN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
 // TestResolveRelayUID_SystemContext verifies that a system-context script
 // resolves to the steward process UID, making the relay socket chown a no-op.
 func TestResolveRelayUID_SystemContext(t *testing.T) {

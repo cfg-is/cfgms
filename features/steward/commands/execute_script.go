@@ -21,6 +21,8 @@ import (
 
 const (
 	scriptPreviewMaxBytes   = 4096
+	execOutputHardCapBytes  = 1 << 20 // 1 MB combined stdout+stderr cap
+	execOutputTruncMarker   = "\n[output truncated at 1 MB]"
 	defaultScriptTimeoutSec = 900 // 15 minutes
 )
 
@@ -194,6 +196,9 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 		return nil
 	}
 
+	// Apply 1 MB hard cap on combined stdout+stderr before generating previews.
+	result.Stdout, result.Stderr = applyOutputCap(result.Stdout, result.Stderr, execOutputHardCapBytes)
+
 	// Truncate previews to cap; excess bytes are silently dropped.
 	// stdout_preview and stderr_preview are NEVER logged — only byte counts are.
 	stdoutPreview := truncatePreview(result.Stdout, scriptPreviewMaxBytes)
@@ -219,6 +224,8 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 			"duration_ms":    result.Duration.Milliseconds(),
 			"stdout_preview": stdoutPreview,
 			"stderr_preview": stderrPreview,
+			"stdout":         result.Stdout, // full capped output (up to 1 MB); controller reads this key
+			"stderr":         result.Stderr, // full capped output (up to 1 MB); controller reads this key
 		},
 	})
 	return nil
@@ -239,6 +246,28 @@ func resolveRelayUID(execCtx script.ExecutionContext, logger logging.Logger) int
 		return os.Getuid()
 	}
 	return uid
+}
+
+// applyOutputCap enforces a combined hard cap on stdout+stderr.
+// stdout is filled first; remaining capacity goes to stderr.
+// Appends execOutputTruncMarker to whichever buffer is truncated.
+// Returns unchanged strings when len(stdout)+len(stderr) <= capBytes.
+func applyOutputCap(stdout, stderr string, capBytes int) (string, string) {
+	if len(stdout)+len(stderr) <= capBytes {
+		return stdout, stderr
+	}
+	markerLen := len(execOutputTruncMarker)
+	available := capBytes - markerLen
+	if available < 0 {
+		available = 0
+	}
+	if len(stdout) >= available {
+		// stdout alone fills or exceeds the available budget; drop stderr.
+		return stdout[:available] + execOutputTruncMarker, ""
+	}
+	// stdout fits; give stderr the remaining budget.
+	remaining := available - len(stdout)
+	return stdout, stderr[:remaining] + execOutputTruncMarker
 }
 
 // truncatePreview returns at most maxBytes bytes of s; excess is silently dropped.
