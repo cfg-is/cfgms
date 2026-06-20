@@ -14,6 +14,74 @@ import (
 
 // identityFileName is the name of the on-disk steward identity file,
 // stored alongside the cert store in defaultCertStoreDir().
+// pendingStateFileName is the name of the on-disk pending registration state file.
+// Stored alongside the identity file in defaultCertStoreDir() so restarts resume
+// the same pending record rather than creating a new one on each restart (Issue #1899).
+const pendingStateFileName = "steward-pending.json"
+
+// PendingState holds the pending registration ID issued by the controller when
+// registration.workflow is set to "manual". Persisted between restarts so the
+// steward resumes polling the same record instead of creating duplicate entries.
+type PendingState struct {
+	PendingID string `json:"pending_id"`
+}
+
+// savePendingState writes state to dir/steward-pending.json with permissions 0600.
+// The write is atomic: content goes to a temp file then renamed into place.
+func savePendingState(dir string, state PendingState) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create pending state dir: %w", err)
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal pending state: %w", err)
+	}
+	path := filepath.Join(dir, pendingStateFileName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write pending state file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit pending state file: %w", err)
+	}
+	return nil
+}
+
+// loadPendingState reads dir/steward-pending.json.
+// Returns (nil, nil) when the file does not exist — caller performs fresh registration.
+// Returns (nil, err) on read/parse failure.
+func loadPendingState(dir string) (*PendingState, error) {
+	path := filepath.Join(dir, pendingStateFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read pending state file: %w", err)
+	}
+	var state PendingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("pending state file corrupt (JSON parse failed): %w", err)
+	}
+	if state.PendingID == "" {
+		return nil, fmt.Errorf("pending state file missing pending_id")
+	}
+	return &state, nil
+}
+
+// clearPendingState removes dir/steward-pending.json if it exists.
+// Returns nil when the file does not exist (no-op).
+func clearPendingState(dir string) error {
+	path := filepath.Join(dir, pendingStateFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear pending state file: %w", err)
+	}
+	return nil
+}
+
+// identityFileName is the name of the on-disk steward identity file,
+// stored alongside the cert store in defaultCertStoreDir().
 const identityFileName = "steward-identity.json"
 
 // StewardIdentity is the persisted record written after first HTTP registration

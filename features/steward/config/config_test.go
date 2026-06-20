@@ -303,6 +303,8 @@ func TestApplyDefaults(t *testing.T) {
 	assert.Equal(t, ActionContinue, config.Steward.ErrorHandling.ModuleLoadFailure)
 	assert.Equal(t, ActionWarn, config.Steward.ErrorHandling.ResourceFailure)
 	assert.Equal(t, ActionFail, config.Steward.ErrorHandling.ConfigurationError)
+	assert.Equal(t, 24*time.Hour, config.Steward.RegistrationPollTimeout,
+		"default RegistrationPollTimeout must be 24h (Issue #1899)")
 }
 
 func TestGetConfigSearchPaths(t *testing.T) {

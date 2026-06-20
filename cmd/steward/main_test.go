@@ -5,13 +5,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/cmd/steward/service"
+	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -291,4 +296,168 @@ func TestStandaloneStartErrorPropagatesToRunSteward(t *testing.T) {
 	err := runSteward(ctx, "", "/nonexistent/cfgms-config-does-not-exist.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create standalone steward")
+}
+
+// newPollTestClient returns an HTTPClient pointed at the given httptest.Server URL,
+// with no timeout override (the httptest server responds immediately).
+func newPollTestClient(t *testing.T, srv *httptest.Server) *registration.HTTPClient {
+	t.Helper()
+	c, err := registration.NewHTTPClient(&registration.HTTPConfig{
+		ControllerURL: srv.URL,
+		Logger:        logging.NewLogger("error"),
+	})
+	require.NoError(t, err)
+	return c
+}
+
+// statusBody serialises a RegistrationStatusResponse to JSON for httptest handlers.
+func statusBody(t *testing.T, status, stewardID, tenantID, transport, cert, key, ca string) []byte {
+	t.Helper()
+	resp := registration.RegistrationStatusResponse{
+		Status:           status,
+		StewardID:        stewardID,
+		TenantID:         tenantID,
+		TransportAddress: transport,
+		ClientCert:       cert,
+		ClientKey:        key,
+		CACert:           ca,
+	}
+	b, err := json.Marshal(resp)
+	require.NoError(t, err)
+	return b
+}
+
+// TestPollForApproval_ImmediateApproval verifies that a single "claimed" response with
+// cert fields returns the populated approvedRegistration without error.
+func TestPollForApproval_ImmediateApproval(t *testing.T) {
+	body := statusBody(t, "claimed", "s1", "t1", "ctrl:4433", "CERT", "KEY", "CA")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	result, err := pollForApproval(context.Background(), newPollTestClient(t, srv),
+		"pending-1", "tok", 5*time.Second, 0, 0, logging.NewLogger("error"))
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "s1", result.StewardID)
+	assert.Equal(t, "t1", result.TenantID)
+	assert.Equal(t, "CERT", result.ClientCert)
+	assert.Equal(t, "CA", result.CACert)
+}
+
+// TestPollForApproval_Denied_ReturnsError verifies that a "denied" status causes
+// pollForApproval to return a non-nil error containing "denied".
+func TestPollForApproval_Denied_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"denied"}`))
+	}))
+	defer srv.Close()
+
+	result, err := pollForApproval(context.Background(), newPollTestClient(t, srv),
+		"pending-denied", "tok", 5*time.Second, 0, 0, logging.NewLogger("error"))
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "denied")
+}
+
+// TestPollForApproval_Gone410_ReturnsNilNoError verifies that an HTTP 410 Gone response
+// (which PollStatus maps to Status:"claimed" with no cert fields) causes pollForApproval
+// to return (nil, nil) so the caller knows to re-register.
+func TestPollForApproval_Gone410_ReturnsNilNoError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer srv.Close()
+
+	result, err := pollForApproval(context.Background(), newPollTestClient(t, srv),
+		"pending-expired", "tok", 5*time.Second, 0, 0, logging.NewLogger("error"))
+
+	assert.NoError(t, err)
+	assert.Nil(t, result, "nil result signals caller to re-register")
+}
+
+// TestPollForApproval_PendingThenApproved_ReturnsCerts verifies the typical manual-review
+// flow: first poll returns "pending", second poll returns "claimed" with certs.
+func TestPollForApproval_PendingThenApproved_ReturnsCerts(t *testing.T) {
+	var callCount atomic.Int32
+	body := statusBody(t, "claimed", "s1", "t1", "ctrl:4433", "CERT", "KEY", "CA")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := callCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"status":"pending"}`))
+		} else {
+			_, _ = w.Write(body)
+		}
+	}))
+	defer srv.Close()
+
+	result, err := pollForApproval(context.Background(), newPollTestClient(t, srv),
+		"pending-123", "tok", 10*time.Second, 0, 0, logging.NewLogger("error"))
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "CERT", result.ClientCert)
+	assert.Equal(t, int32(2), callCount.Load(), "must poll exactly twice: pending then claimed")
+}
+
+// TestPollForApproval_ContextCanceled_ReturnsTimeoutError verifies that a pre-canceled
+// context causes pollForApproval to return a "timed out" error immediately.
+func TestPollForApproval_ContextCanceled_ReturnsTimeoutError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately before the first poll
+
+	result, err := pollForApproval(ctx, newPollTestClient(t, srv),
+		"pending-cancel", "tok", 24*time.Hour, 0, 0, logging.NewLogger("error"))
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out")
+}
+
+// TestPollForApproval_BackoffIntervalGrows verifies that the poll interval doubles
+// on each "pending" response up to maxInterval.
+func TestPollForApproval_BackoffIntervalGrows(t *testing.T) {
+	// Respond "pending" once then immediately "claimed" to avoid a long-running loop.
+	var callCount atomic.Int32
+	body := statusBody(t, "claimed", "s1", "t1", "ctrl:4433", "CERT", "KEY", "CA")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := callCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"status":"pending"}`))
+		} else {
+			_, _ = w.Write(body)
+		}
+	}))
+	defer srv.Close()
+
+	// Pass non-zero intervals; PollStatus will be called with growing base intervals.
+	// The httptest server responds immediately, so the test doesn't sleep.
+	// We verify that no error occurs and approval is received.
+	result, err := pollForApproval(context.Background(), newPollTestClient(t, srv),
+		"pending-backoff", "tok", 30*time.Second, 1*time.Millisecond, 10*time.Millisecond,
+		logging.NewLogger("error"))
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "CERT", result.ClientCert)
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -572,12 +573,32 @@ func defaultPlatformCACertPath() string {
 	}
 }
 
+// approvedRegistration holds the fields returned by the controller after a successful
+// registration — either an immediate HTTP 200 or a manual-review poll approval.
+// This allows connectWithApprovedRegistration to serve both paths without duplication.
+type approvedRegistration struct {
+	StewardID        string
+	TenantID         string
+	Group            string
+	TransportAddress string
+	ClientCert       string
+	ClientKey        string
+	CACert           string
+	ServerCert       string
+	SigningCert      string
+}
+
 // registerAndConnect registers the steward using HTTP REST API
 // and then establishes gRPC-over-QUIC connections for ongoing communication.
 // Both control plane and data plane use the transport_address from the registration response.
 //
 // On restart with a valid stored cert and identity, HTTP registration is skipped
 // and the steward reconnects directly using the persisted credentials (Issue #1719).
+//
+// When the controller uses registration.workflow: manual (Issue #1899), the steward
+// persists the pending_id locally and polls GET /api/v1/registration/status/{pending_id}
+// with exponential backoff (5s → 60s max) until approved, denied, or timed out.
+// On restart, the persisted pending_id is resumed rather than creating a new pending record.
 func registerAndConnect(ctx context.Context, token string, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
@@ -604,6 +625,36 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
 
+	// Load the approval poll timeout from optional local config (default: 24h).
+	pollTimeout := 24 * time.Hour
+	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil && cfg.Steward.RegistrationPollTimeout > 0 {
+		pollTimeout = cfg.Steward.RegistrationPollTimeout
+	}
+
+	// Resume a pending registration from a previous run if one exists.
+	// This avoids creating a duplicate pending record on every steward restart (Issue #1899).
+	if pendingState, loadErr := loadPendingState(certStoreDir); loadErr != nil {
+		logger.Warn("Failed to load pending registration state; re-registering", "error", loadErr)
+	} else if pendingState != nil {
+		logger.Info("Resuming pending registration from previous run",
+			"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
+		approved, pollErr := pollForApproval(ctx, httpClient, pendingState.PendingID, token,
+			pollTimeout, 5*time.Second, 60*time.Second, logger)
+		if pollErr != nil {
+			_ = clearPendingState(certStoreDir)
+			return nil, pollErr
+		}
+		if approved != nil {
+			_ = clearPendingState(certStoreDir)
+			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, logger)
+		}
+		// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
+		logger.Info("Persisted pending record expired on controller; performing fresh registration")
+		if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+			logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+		}
+	}
+
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
@@ -612,34 +663,148 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
 	}
 
-	// Issue #1693: quarantine returns 202 with no certificates. The steward cannot
-	// proceed to transport setup without certs. The poll loop is deferred to story 7;
-	// surface the pending state as a retriable error so the caller knows to retry.
 	if pendingResp != nil {
-		logger.Info("Registration is pending operator approval — no certificates issued",
-			"pending_id", pendingResp.PendingID,
-			"steward_id", pendingResp.StewardID,
-			"tenant_id", pendingResp.TenantID,
-			"status", pendingResp.Status)
-		return nil, fmt.Errorf("registration pending operator approval (pending_id=%s): administrator must run 'cfg registration approve %s'",
-			pendingResp.PendingID, pendingResp.PendingID)
+		// Controller returned HTTP 202: registration is pending operator approval.
+		// Persist the pending_id so restarts resume this record rather than creating
+		// a duplicate (Issue #1899).
+		logger.Info("Registration is pending operator approval — polling for approval",
+			"pending_id", logging.SanitizeLogValue(pendingResp.PendingID),
+			"steward_id", logging.SanitizeLogValue(pendingResp.StewardID),
+			"tenant_id", logging.SanitizeLogValue(pendingResp.TenantID))
+		if saveErr := savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID}); saveErr != nil {
+			logger.Warn("Failed to persist pending registration ID; restart will re-register", "error", saveErr)
+		}
+		approved, pollErr := pollForApproval(ctx, httpClient, pendingResp.PendingID, token,
+			pollTimeout, 5*time.Second, 60*time.Second, logger)
+		if pollErr != nil {
+			_ = clearPendingState(certStoreDir)
+			return nil, pollErr
+		}
+		if approved == nil {
+			// 410 immediately after registration — controller record vanished unexpectedly.
+			_ = clearPendingState(certStoreDir)
+			return nil, fmt.Errorf("registration approval timed out after %s; re-run with a fresh token if needed", pollTimeout)
+		}
+		_ = clearPendingState(certStoreDir)
+		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, logger)
 	}
 
+	// Immediate approval (HTTP 200): proceed directly to transport setup.
 	logger.Info("Registration successful via HTTP",
 		"steward_id", regResp.StewardID,
 		"tenant_id", regResp.TenantID,
 		"group", regResp.Group,
 		"transport_address", regResp.TransportAddress)
 
-	// Persist the identity record immediately after registration so that a
-	// subsequent restart can reconnect without HTTP re-registration (Issue #1719).
-	identity := StewardIdentity{
+	bundle := approvedRegistration{
 		StewardID:        regResp.StewardID,
 		TenantID:         regResp.TenantID,
+		Group:            regResp.Group,
 		TransportAddress: regResp.TransportAddress,
-		CACertPEM:        regResp.CACert,
-		ServerCertPEM:    regResp.ServerCert,
-		SigningCertPEM:   regResp.SigningCert,
+		ClientCert:       regResp.ClientCert,
+		ClientKey:        regResp.ClientKey,
+		CACert:           regResp.CACert,
+		ServerCert:       regResp.ServerCert,
+		SigningCert:      regResp.SigningCert,
+	}
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)
+}
+
+// pollForApproval polls GET /api/v1/registration/status/{pendingID} with exponential
+// backoff until the controller approves, denies, or the timeout is reached.
+//
+// Intervals grow from initialInterval up to maxInterval. Pass initialInterval=0 to
+// skip all sleeps (useful in tests via the PollStatus(0,0) pass-through).
+//
+// Returns:
+//   - (*approvedRegistration, nil) when approved (status "claimed" with cert fields)
+//   - (nil, nil) when the pending record expired (HTTP 410) — caller should re-register
+//   - (nil, error) on denial, timeout, or context cancellation
+func pollForApproval(
+	ctx context.Context,
+	httpClient *registration.HTTPClient,
+	pendingID, regToken string,
+	pollTimeout, initialInterval, maxInterval time.Duration,
+	logger logging.Logger,
+) (*approvedRegistration, error) {
+	pollCtx, pollCancel := context.WithTimeout(ctx, pollTimeout)
+	defer pollCancel()
+
+	const pollJitter = 2 * time.Second
+	currentInterval := initialInterval
+
+	for {
+		jitter := pollJitter
+		if currentInterval == 0 {
+			jitter = 0
+		}
+
+		resp, err := httpClient.PollStatus(pollCtx, pendingID, regToken, currentInterval, jitter)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, fmt.Errorf("registration approval timed out after %s; re-run with a fresh token if needed", pollTimeout)
+			}
+			// Transient network error — log and retry with unchanged interval.
+			logger.Warn("Transient error polling registration status; will retry", "error", err)
+			continue
+		}
+
+		switch resp.Status {
+		case "claimed":
+			if resp.ClientCert == "" {
+				// HTTP 410: pending record expired or already claimed by another process.
+				logger.Info("Pending registration record expired or already claimed; will re-register")
+				return nil, nil
+			}
+			logger.Info("Registration approved by operator",
+				"steward_id", logging.SanitizeLogValue(resp.StewardID),
+				"tenant_id", logging.SanitizeLogValue(resp.TenantID))
+			return &approvedRegistration{
+				StewardID:        resp.StewardID,
+				TenantID:         resp.TenantID,
+				Group:            resp.Group,
+				TransportAddress: resp.TransportAddress,
+				ClientCert:       resp.ClientCert,
+				ClientKey:        resp.ClientKey,
+				CACert:           resp.CACert,
+				ServerCert:       resp.ServerCert,
+				SigningCert:      resp.SigningCert,
+			}, nil
+
+		case "denied":
+			return nil, fmt.Errorf("registration denied by operator")
+
+		default:
+			// "pending" or any other status — keep polling with backoff.
+			logger.Info("Registration still pending operator approval; polling",
+				"pending_id", logging.SanitizeLogValue(pendingID),
+				"status", logging.SanitizeLogValue(resp.Status))
+			if currentInterval > 0 && maxInterval > 0 {
+				currentInterval = min(currentInterval*2, maxInterval)
+			}
+		}
+	}
+}
+
+// connectWithApprovedRegistration persists the steward identity from an approved
+// registration (immediate or manual-review poll), then builds and connects the
+// transport client. Shared by the immediate-approval and poll-approval paths to
+// avoid duplication.
+func connectWithApprovedRegistration(
+	ctx context.Context,
+	reg approvedRegistration,
+	certStoreDir, token string,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
+	// Persist the identity record so that a subsequent restart can reconnect
+	// without HTTP re-registration (Issue #1719).
+	identity := StewardIdentity{
+		StewardID:        reg.StewardID,
+		TenantID:         reg.TenantID,
+		TransportAddress: reg.TransportAddress,
+		CACertPEM:        reg.CACert,
+		ServerCertPEM:    reg.ServerCert,
+		SigningCertPEM:   reg.SigningCert,
 	}
 	if saveErr := saveIdentity(certStoreDir, identity); saveErr != nil {
 		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
@@ -663,14 +828,14 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
 	// offline queue encryption (Issue #920).
-	certMgr, secretStore := buildCertManagerAndSecretStore(regResp.ClientCert, regResp.ClientKey, logger)
+	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, logger)
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
-		ControllerURL:               regResp.TransportAddress,
+		ControllerURL:               reg.TransportAddress,
 		RegistrationToken:           token,
-		CACertPEM:                   regResp.CACert,
-		ClientCertPEM:               regResp.ClientCert,
-		ServerCertPEM:               regResp.ServerCert,
+		CACertPEM:                   reg.CACert,
+		ClientCertPEM:               reg.ClientCert,
+		ServerCertPEM:               reg.ServerCert,
 		CertManager:                 certMgr,
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
@@ -697,25 +862,25 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		return nil, fmt.Errorf("failed to create transport client: %w", err)
 	}
 
-	transportClient.SetStewardID(regResp.StewardID)
-	transportClient.SetTenantID(regResp.TenantID)
+	transportClient.SetStewardID(reg.StewardID)
+	transportClient.SetTenantID(reg.TenantID)
 
 	if err := transportClient.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("failed to connect to controller: %w", err)
 	}
 
 	logger.Info("Connected to controller via gRPC transport",
-		"transport_address", regResp.TransportAddress)
+		"transport_address", reg.TransportAddress)
 
 	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
-	if err := transportClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
+	if err := transportClient.InitializeConfigExecutor(reg.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
 	}
 
-	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
+	logger.Info("Configuration executor initialized", "tenant_id", reg.TenantID)
 
 	return transportClient, nil
 }
