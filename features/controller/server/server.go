@@ -165,6 +165,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, ErrNilConfig
 	}
 
+	// Validate transport config early: refuse to start if 0.0.0.0 bind has no external address.
+	if cfg.Transport != nil && strings.HasPrefix(cfg.Transport.ListenAddr, "0.0.0.0") {
+		externalAddr := cfg.Transport.ExternalAddress
+		if externalAddr == "" {
+			externalAddr = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+		}
+		if externalAddr == "" {
+			return nil, fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
+		}
+	}
+
 	logger.Info("Config validated, proceeding with storage initialization...")
 
 	// Initialize global storage provider system - REQUIRED for all deployments

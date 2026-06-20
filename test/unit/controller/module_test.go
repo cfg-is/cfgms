@@ -28,6 +28,10 @@ func newTestController(t *testing.T) *controller.Controller {
 	cfg.Certificate.CAPath = tempDir + "/certs/ca"
 	cfg.Storage.FlatfileRoot = tempDir + "/storage-flatfile"
 	cfg.Storage.SQLitePath = tempDir + "/cfgms.db"
+	// Required when ListenAddr binds 0.0.0.0 (the default): set external address.
+	if cfg.Transport != nil {
+		cfg.Transport.ExternalAddress = "localhost"
+	}
 
 	// Pre-initialize: create CA and write init marker (Story #410)
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)

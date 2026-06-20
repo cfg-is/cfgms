@@ -310,3 +310,86 @@ func TestBuiltinWorkflowSeedingManualReview(t *testing.T) {
 	require.True(t, ok, "manual-review workflow must have a string 'registration_decision' variable")
 	assert.Equal(t, "quarantine", decision, "manual-review workflow must set registration_decision=quarantine")
 }
+
+// TestServer_New_Fails_BindAll_NoExternalAddress verifies that server.New() returns
+// a non-nil error when transport.listen_addr binds 0.0.0.0 and neither
+// transport.external_address nor CFGMS_EXTERNAL_HOSTNAME is configured.
+func TestServer_New_Fails_BindAll_NoExternalAddress(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+		Transport: &config.TransportConfig{
+			ListenAddr: "0.0.0.0:4433",
+		},
+	}
+
+	_, err := New(cfg, logging.NewNoopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "transport.listen_addr binds 0.0.0.0 but no external address is configured")
+	assert.Contains(t, err.Error(), "transport.external_address")
+	assert.Contains(t, err.Error(), "CFGMS_EXTERNAL_HOSTNAME")
+}
+
+// TestServer_New_Succeeds_BindAll_WithExternalAddressConfig verifies that server.New()
+// succeeds when transport.listen_addr binds 0.0.0.0 and transport.external_address is set.
+func TestServer_New_Succeeds_BindAll_WithExternalAddressConfig(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+		Transport: &config.TransportConfig{
+			ListenAddr:      "0.0.0.0:4433",
+			ExternalAddress: "controller.example.com",
+		},
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+}
+
+// TestServer_New_Succeeds_BindAll_WithEnvVar verifies that server.New() succeeds when
+// transport.listen_addr binds 0.0.0.0 and CFGMS_EXTERNAL_HOSTNAME is set.
+func TestServer_New_Succeeds_BindAll_WithEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env-controller.example.com")
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+		Transport: &config.TransportConfig{
+			ListenAddr: "0.0.0.0:4433",
+		},
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+}
