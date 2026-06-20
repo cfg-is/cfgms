@@ -416,6 +416,9 @@ func init() {
 	stewardCmd.AddCommand(stewardUpgradeCmd)
 	stewardUpgradeCmd.AddCommand(stewardUpgradeStatusCmd)
 	stewardUpgradeCmd.AddCommand(stewardUpgradeRollbackCmd)
+
+	// Refresh management subcommands (Issue #2097).
+	stewardCmd.AddCommand(refreshCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,

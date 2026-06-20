@@ -531,6 +531,21 @@ func (s *Server) setupRouter() {
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
+	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
+	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
+	api.Handle("/stewards/refresh/pending",
+		s.requirePermission("refresh", "list-pending")(http.HandlerFunc(s.handleListPendingRefreshes))).Methods("GET")
+	api.Handle("/stewards/refresh/{pending_id}/approve",
+		s.requirePermission("refresh", "approve")(http.HandlerFunc(s.handleApproveRefresh))).Methods("POST")
+	api.Handle("/stewards/refresh/{pending_id}/reject",
+		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
+
+	// Per-tenant refresh policy endpoints (Issue #2097).
+	tenants.Handle("/{id}/refresh-policy",
+		s.requirePermission("refresh", "get-policy")(http.HandlerFunc(s.handleGetRefreshPolicy))).Methods("GET")
+	tenants.Handle("/{id}/refresh-policy",
+		s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy))).Methods("PUT")
+
 	// Installer artifact management endpoints (Issue #1702).
 	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
 	installer := api.PathPrefix("/installer/artifacts").Subrouter()

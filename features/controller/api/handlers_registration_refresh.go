@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -19,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -513,6 +515,374 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		"validity_days", validityDays)
 
 	return resp, nil
+}
+
+// ---- Admin request / response types -----------------------------------------
+
+// AdminRefreshApproveRequest is the optional body for the admin approve endpoint.
+type AdminRefreshApproveRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// AdminRefreshApproveResponse is returned by POST /api/v1/stewards/refresh/{pending_id}/approve.
+type AdminRefreshApproveResponse struct {
+	Status      string `json:"status"`
+	PendingID   string `json:"pending_id"`
+	ClientCert  string `json:"client_cert,omitempty"`
+	ClientKey   string `json:"client_key,omitempty"`
+	CACert      string `json:"ca_cert,omitempty"`
+	SigningCert string `json:"signing_cert,omitempty"`
+}
+
+// AdminRefreshRejectRequest is the body for the admin reject endpoint.
+type AdminRefreshRejectRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// AdminRefreshPolicyRequest is the body for PUT /api/v1/tenants/{id}/refresh-policy.
+type AdminRefreshPolicyRequest struct {
+	Mode            string `json:"mode"`
+	MaxDormancyDays *int   `json:"max_dormancy_days,omitempty"`
+}
+
+// AdminRefreshPolicyResponse is returned by GET /api/v1/tenants/{id}/refresh-policy.
+type AdminRefreshPolicyResponse struct {
+	TenantID        string `json:"tenant_id"`
+	Mode            string `json:"mode"`
+	MaxDormancyDays *int   `json:"max_dormancy_days,omitempty"`
+}
+
+// APIPendingRefreshEntry is the wire representation of a pending refresh entry.
+type APIPendingRefreshEntry struct {
+	PendingID               string    `json:"pending_id"`
+	DeviceID                string    `json:"device_id"`
+	TenantID                string    `json:"tenant_id"`
+	SourceIP                string    `json:"source_ip"`
+	ProvenanceMatchedFields int       `json:"provenance_matched_fields"`
+	ProvenanceTotalFields   int       `json:"provenance_total_fields"`
+	Status                  string    `json:"status"`
+	CreatedAt               time.Time `json:"created_at"`
+	ExpiresAt               time.Time `json:"expires_at"`
+}
+
+// ---- Admin handlers ----------------------------------------------------------
+
+// handleListPendingRefreshes handles GET /api/v1/stewards/refresh/pending.
+// Requires "refresh:list-pending" permission.
+func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Request) {
+	if s.pendingRefreshStore == nil {
+		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// TenantID is always taken from the authenticated context for scoped callers;
+	// unscoped admins (TenantID=="") may use the query param to filter.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	tenantID := callerTenant
+	if tenantID == "" {
+		tenantID = r.URL.Query().Get("tenant_id")
+	}
+
+	entries, err := s.pendingRefreshStore.ListPendingRefresh(r.Context(), tenantID)
+	if err != nil {
+		s.logger.Error("Failed to list pending refreshes", "error", err)
+		http.Error(w, "failed to list pending refreshes", http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]APIPendingRefreshEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, APIPendingRefreshEntry{
+			PendingID:               e.PendingID,
+			DeviceID:                e.DeviceID,
+			TenantID:                e.TenantID,
+			SourceIP:                e.SourceIP,
+			ProvenanceMatchedFields: e.ProvenanceMatchedFields,
+			ProvenanceTotalFields:   e.ProvenanceTotalFields,
+			Status:                  e.Status,
+			CreatedAt:               e.CreatedAt,
+			ExpiresAt:               e.ExpiresAt,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(out); err != nil {
+		s.logger.Error("Failed to encode pending refreshes", "error", err)
+	}
+}
+
+// handleApproveRefresh handles POST /api/v1/stewards/refresh/{pending_id}/approve.
+// Generates a cert bundle for the steward, stores it, sets status to approved, and
+// emits an audit event. The cert bundle is returned to the caller and stored for
+// delivery on the steward's next poll.
+func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
+	pendingID := mux.Vars(r)["pending_id"]
+
+	var req AdminRefreshApproveRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if s.pendingRefreshStore == nil {
+		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	entry, err := s.pendingRefreshStore.GetPendingRefreshByID(r.Context(), pendingID)
+	if err != nil {
+		if err == business.ErrPendingRefreshNotFound {
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to get pending refresh", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
+		return
+	}
+
+	if entry.Status != business.PendingRefreshStatusPending {
+		http.Error(w, "refresh request is not in pending state", http.StatusConflict)
+		return
+	}
+
+	// Cross-tenant: a scoped caller may only approve refreshes within their tenant hierarchy.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		sameTenant := entry.TenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			// 404 to avoid disclosing existence of pending refreshes across tenants.
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	if s.stewardStore == nil {
+		http.Error(w, "steward store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), entry.DeviceID)
+	if err != nil {
+		if err == business.ErrStewardNotFound {
+			s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+				business.AuditEventSystemEvent, "refresh_admin_approve_error",
+				business.AuditResultError, business.AuditSeverityHigh,
+				map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "steward_not_found"})
+			http.Error(w, "steward not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to get steward for refresh approval", "device_id", logging.SanitizeLogValue(entry.DeviceID), "error", err)
+		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+			business.AuditEventSystemEvent, "refresh_admin_approve_error",
+			business.AuditResultError, business.AuditSeverityHigh,
+			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "store_error"})
+		http.Error(w, "failed to get steward", http.StatusInternalServerError)
+		return
+	}
+
+	certResp, err := s.buildRefreshClaimResponse(r.Context(), record)
+	if err != nil {
+		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+			business.AuditEventSystemEvent, "refresh_admin_approve_error",
+			business.AuditResultError, business.AuditSeverityHigh,
+			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "cert_issuance_failed"})
+		http.Error(w, "failed to issue certificate", http.StatusInternalServerError)
+		return
+	}
+
+	bundle, err := json.Marshal(certResp)
+	if err != nil {
+		s.logger.Error("Failed to marshal claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "internal error serializing cert bundle", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.pendingRefreshStore.StoreClaimBundle(r.Context(), pendingID, bundle); err != nil {
+		s.logger.Error("Failed to store claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "failed to store claim bundle", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusApproved); err != nil {
+		s.logger.Error("Failed to update refresh status to approved", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "failed to update refresh status", http.StatusInternalServerError)
+		return
+	}
+
+	s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+		business.AuditEventAuthentication, "refresh_admin_approved",
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"pending_id": logging.SanitizeLogValue(pendingID),
+			"device_id":  logging.SanitizeLogValue(entry.DeviceID),
+			"tenant_id":  logging.SanitizeLogValue(entry.TenantID),
+			"decision":   "approved",
+			"reason":     logging.SanitizeLogValue(req.Reason),
+		})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(AdminRefreshApproveResponse{
+		Status:      "approved",
+		PendingID:   pendingID,
+		ClientCert:  certResp.ClientCert,
+		ClientKey:   certResp.ClientKey,
+		CACert:      certResp.CACert,
+		SigningCert: certResp.SigningCert,
+	}); err != nil {
+		s.logger.Error("Failed to encode approve response", "error", err)
+	}
+}
+
+// handleRejectRefresh handles POST /api/v1/stewards/refresh/{pending_id}/reject.
+// Sets status to rejected and emits an audit event.
+func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
+	pendingID := mux.Vars(r)["pending_id"]
+
+	var req AdminRefreshRejectRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if s.pendingRefreshStore == nil {
+		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	entry, err := s.pendingRefreshStore.GetPendingRefreshByID(r.Context(), pendingID)
+	if err != nil {
+		if err == business.ErrPendingRefreshNotFound {
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to get pending refresh for rejection", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
+		return
+	}
+
+	if entry.Status != business.PendingRefreshStatusPending {
+		http.Error(w, "refresh request is not in pending state", http.StatusConflict)
+		return
+	}
+
+	// Cross-tenant: a scoped caller may only reject refreshes within their tenant hierarchy.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		sameTenant := entry.TenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusRejected); err != nil {
+		s.logger.Error("Failed to update refresh status to rejected", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		http.Error(w, "failed to update refresh status", http.StatusInternalServerError)
+		return
+	}
+
+	s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
+		business.AuditEventSecurityEvent, "refresh_admin_rejected",
+		business.AuditResultDenied, business.AuditSeverityMedium,
+		map[string]interface{}{
+			"pending_id": logging.SanitizeLogValue(pendingID),
+			"device_id":  logging.SanitizeLogValue(entry.DeviceID),
+			"tenant_id":  logging.SanitizeLogValue(entry.TenantID),
+			"decision":   "rejected",
+			"reason":     logging.SanitizeLogValue(req.Reason),
+		})
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleGetRefreshPolicy handles GET /api/v1/tenants/{id}/refresh-policy.
+func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID := mux.Vars(r)["id"]
+
+	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		sameTenant := tenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			http.Error(w, "tenant not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	if s.refreshPolicyStore == nil {
+		http.Error(w, "refresh policy store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	policy, err := s.refreshPolicyStore.GetPolicy(r.Context(), tenantID)
+	if err != nil {
+		s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+		http.Error(w, "failed to get refresh policy", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(AdminRefreshPolicyResponse{
+		TenantID:        policy.TenantID,
+		Mode:            policy.Mode,
+		MaxDormancyDays: policy.MaxDormancyDays,
+	}); err != nil {
+		s.logger.Error("Failed to encode refresh policy", "error", err)
+	}
+}
+
+// handleSetRefreshPolicy handles PUT /api/v1/tenants/{id}/refresh-policy.
+func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
+	tenantID := mux.Vars(r)["id"]
+
+	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		sameTenant := tenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			http.Error(w, "tenant not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	var req AdminRefreshPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	switch req.Mode {
+	case "auto_accept", "require_approval", "reject":
+	default:
+		http.Error(w, "invalid mode: must be auto_accept, require_approval, or reject", http.StatusBadRequest)
+		return
+	}
+
+	if s.refreshPolicyStore == nil {
+		http.Error(w, "refresh policy store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	policy := &business.RefreshPolicy{
+		TenantID:        tenantID,
+		Mode:            req.Mode,
+		MaxDormancyDays: req.MaxDormancyDays,
+	}
+	if err := s.refreshPolicyStore.SetPolicy(r.Context(), policy); err != nil {
+		s.logger.Error("Failed to set refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+		http.Error(w, "failed to set refresh policy", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(AdminRefreshPolicyResponse{
+		TenantID:        tenantID,
+		Mode:            req.Mode,
+		MaxDormancyDays: req.MaxDormancyDays,
+	}); err != nil {
+		s.logger.Error("Failed to encode refresh policy response", "error", err)
+	}
 }
 
 // emitRefreshAudit records a registration-refresh audit event.
