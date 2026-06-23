@@ -28,10 +28,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
@@ -48,6 +50,23 @@ import (
 // (derived from MAC + hostname) changes between convergence cycles, indicating a
 // VM/container migration or hardware change that requires manual reconciliation.
 var ErrDNAIDMismatch = errors.New("DNA-ID mismatch: manual reconciliation required")
+
+// monitorEntry pairs a module's Monitor with its resource configuration.
+// Used to fan-in ChangeEvents and dispatch targeted reconciles.
+type monitorEntry struct {
+	resourceID string
+	resource   config.ResourceConfig
+	monitor    modules.Monitor
+}
+
+// bundleNameFromModuleRef extracts the module bundle name from a module reference.
+// "hyperv.vm" → "hyperv"; "file" → "file".
+func bundleNameFromModuleRef(moduleRef string) string {
+	if idx := strings.IndexByte(moduleRef, '.'); idx >= 0 {
+		return moduleRef[:idx]
+	}
+	return moduleRef
+}
 
 // Steward manages configuration for a single endpoint in standalone mode.
 //
@@ -82,6 +101,10 @@ type Steward struct {
 
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
+
+	// monitors holds active monitor entries started on cfg load.
+	// Each entry has had Monitor(ctx, resourceID, desired) called on it.
+	monitors []monitorEntry
 
 	// Shutdown coordination
 	shutdown chan struct{}
@@ -250,8 +273,9 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 	// When the Compare step detects drift, this logs the event before Set corrects it.
 	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
 
-	// Give monitors a moment to start
-	time.Sleep(50 * time.Millisecond)
+	// Start monitors for modules that implement the Monitor interface.
+	// Monitor events feed a targeted reconcile of the changed resource.
+	s.startMonitors(ctx)
 
 	// Converge immediately on startup
 	s.runConvergence(ctx)
@@ -429,6 +453,130 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 			s.runConvergence(ctx)
 		}
 	}
+}
+
+// startMonitors iterates the cfg resources, loads each module from the factory,
+// type-asserts modules.Monitor, and calls Monitor(ctx, resourceID, desired) for
+// each module that implements the interface. A fan-in goroutine forwards all
+// ChangeEvents to a single dispatch loop that calls runTargetedReconcile.
+//
+// Modules that do not implement Monitor are silently skipped — they fall back
+// to the scheduled convergence interval. This is always the case today; the
+// first Monitor implementation (Hyper-V) lands in S2.
+func (s *Steward) startMonitors(ctx context.Context) {
+	var entries []monitorEntry
+
+	for _, resource := range s.standaloneConfig.Resources {
+		bundle := bundleNameFromModuleRef(resource.Module)
+
+		mod, err := s.moduleFactory.LoadModule(bundle)
+		if err != nil || mod == nil {
+			continue
+		}
+
+		mon, ok := mod.(modules.Monitor)
+		if !ok {
+			continue
+		}
+
+		resourceID := s.executor.GetResourceID(resource)
+		desired := execution.NewConfigState(resource.Config)
+
+		if err := mon.Monitor(ctx, resourceID, desired); err != nil {
+			s.logger.Warn("Failed to start module monitor",
+				"resource", resource.Name,
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", err)
+			continue
+		}
+
+		entries = append(entries, monitorEntry{
+			resourceID: resourceID,
+			resource:   resource,
+			monitor:    mon,
+		})
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	s.monitors = entries
+
+	// Fan-in: one forwarding goroutine per monitor channel; all send to fanIn.
+	fanIn := make(chan modules.ChangeEvent, len(entries)*4)
+	for _, entry := range entries {
+		ch := entry.monitor.Changes()
+		go func(ch <-chan modules.ChangeEvent) {
+			for {
+				select {
+				case evt, ok := <-ch:
+					if !ok {
+						return
+					}
+					select {
+					case fanIn <- evt:
+					case <-ctx.Done():
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(ch)
+	}
+
+	go s.monitorEventLoop(ctx, fanIn)
+}
+
+// monitorEventLoop reads ChangeEvents from the fan-in channel and dispatches
+// a targeted reconcile for each event. It exits when the context is cancelled
+// or the shutdown channel is closed.
+func (s *Steward) monitorEventLoop(ctx context.Context, events <-chan modules.ChangeEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.shutdown:
+			return
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			s.logger.Info("Monitor change event received",
+				"resource_id", logging.SanitizeLogValue(evt.ResourceID),
+				"change_type", evt.ChangeType)
+			s.runTargetedReconcile(ctx, evt.ResourceID)
+		}
+	}
+}
+
+// runTargetedReconcile finds the ResourceConfig whose module-internal ID matches
+// resourceID and calls ExecuteResource for it. The ChangeEvent that triggered
+// this call is treated as a hint only — current state is read via module.Get()
+// and desired state comes from the cfg ResourceConfig, never from the event.
+//
+// If resourceID is not present in cfg (unmanaged resource), the call is a no-op.
+// ctx.Done() is checked before the reconcile so a shutdown mid-dispatch exits cleanly.
+func (s *Steward) runTargetedReconcile(ctx context.Context, resourceID string) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	for _, resource := range s.standaloneConfig.Resources {
+		if s.executor.GetResourceID(resource) == resourceID {
+			s.logger.Info("Running targeted reconcile for monitored resource",
+				"resource", resource.Name,
+				"resource_id", logging.SanitizeLogValue(resourceID))
+			s.executor.ExecuteResource(ctx, resource)
+			return
+		}
+	}
+
+	s.logger.Info("Monitor event for unmanaged resource (not in cfg, skipping)",
+		"resource_id", logging.SanitizeLogValue(resourceID))
 }
 
 // Stop gracefully shuts down the steward and cleans up resources.

@@ -228,6 +228,14 @@ func (f *ModuleFactory) GetLoadedModules() []string {
 	return modules
 }
 
+// RegisterModule adds or replaces a module instance in the cache.
+// Subsequent calls to LoadModule or CreateModuleInstance for name will return mod.
+// Used in tests to inject real test implementations and in production to pre-wire
+// modules that need special construction (e.g. modules with injected dependencies).
+func (f *ModuleFactory) RegisterModule(name string, mod modules.Module) {
+	f.instances[name] = mod
+}
+
 // UnloadModule removes a module instance from the cache
 func (f *ModuleFactory) UnloadModule(moduleName string) {
 	delete(f.instances, moduleName)

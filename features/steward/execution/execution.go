@@ -36,6 +36,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/cfgis/cfgms/features/modules"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 )
 
@@ -86,6 +87,13 @@ const (
 	// module.Set() and module.Verify() were NOT called; the drift is reported but not corrected.
 	StatusNonCompliant
 )
+
+// NewConfigState creates a ConfigState from a raw configuration map.
+// Used by the steward to build the desired-state argument for Monitor() calls
+// without duplicating the executor's internal createConfigState logic.
+func NewConfigState(data map[string]interface{}) modules.ConfigState {
+	return &genericConfigState{data: data}
+}
 
 // genericConfigState is a simple map-backed ConfigState implementation used
 // when no module-specific state type is needed.

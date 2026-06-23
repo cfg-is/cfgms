@@ -4,8 +4,11 @@ package steward
 
 import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/features/steward/execution"
 )
 
 // RunConvergence exposes the unexported runConvergence method for black-box tests.
@@ -36,4 +39,25 @@ var SetDNACollector = func(s *Steward, c *dna.Collector) {
 // SetDriftDetector replaces the driftDetector field for test injection (e.g. nil-safety tests).
 var SetDriftDetector = func(s *Steward, d drift.Detector) {
 	s.driftDetector = d
+}
+
+// RunTargetedReconcile exposes the unexported runTargetedReconcile for black-box tests.
+var RunTargetedReconcile = (*Steward).runTargetedReconcile
+
+// RegisterTestModule injects a module instance into the steward's factory cache.
+// Subsequent calls to LoadModule or CreateModuleInstance for name will return mod.
+var RegisterTestModule = func(s *Steward, name string, mod modules.Module) {
+	s.moduleFactory.RegisterModule(name, mod)
+}
+
+// SetDriftModeForTest sets the executor's drift mode for tests that need to
+// exercise monitor-mode reconcile paths.
+var SetDriftModeForTest = func(s *Steward, mode config.DriftMode) {
+	s.executor.SetDriftMode(mode)
+}
+
+// SetDriftEventHandlerForTest sets the executor's drift event handler for tests
+// that need to capture drift events (e.g. to assert EventType in monitor mode).
+var SetDriftEventHandlerForTest = func(s *Steward, handler execution.DriftEventHandler) {
+	s.executor.SetDriftEventHandler(handler)
 }
