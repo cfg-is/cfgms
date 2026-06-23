@@ -186,10 +186,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
 	}
 
-	// Create storage manager — OSS composite (flatfile+SQLite) or database single-provider.
-	// The git provider is removed (Issue #664) and is rejected here with a migration hint.
+	// Create storage manager — cluster mode (Postgres), OSS composite (flatfile+SQLite),
+	// or legacy database single-provider. The git provider is removed (Issue #664).
 	var storageManager *interfaces.StorageManager
-	if cfg.Storage.FlatfileRoot != "" {
+	if cfg.HA.IsClusterMode() {
+		// Cluster mode: all business stores backed by shared Postgres so every node
+		// serving the same fleet uses the same state (Issue #2119).
+		pgDSN := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		var s3Config map[string]interface{}
+		if cfg.Storage.Cluster != nil {
+			s3Config = cfg.Storage.Cluster.S3
+		}
+		logger.Info("Cluster mode: initializing Postgres business store backend...",
+			"ha_mode", cfg.HA.Mode)
+		var clusterErr error
+		storageManager, clusterErr = interfaces.CreateClusterStorageManager(pgDSN, s3Config)
+		if clusterErr != nil {
+			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
+		}
+		logger.Info("Cluster storage backend initialized")
+	} else if cfg.Storage.FlatfileRoot != "" {
 		logger.Info("Initializing OSS composite storage backend...",
 			"flatfile_root", cfg.Storage.FlatfileRoot,
 			"sqlite_path", cfg.Storage.SQLitePath)
@@ -247,14 +266,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize tenant management with durable storage
 	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
 
-	// Detect HA deployment mode early so we can select the correct DNA backend
-	// and blob provider before initializing either. The full haManager is
-	// initialized below; this read is environment-only and has no side effects.
-	haEarlyCfg := ha.DefaultConfig()
-	if err := haEarlyCfg.LoadFromEnvironment(); err != nil {
-		logger.Warn("Failed to load HA config from environment for backend selection", "error", err)
-	}
-	isClusterMode := haEarlyCfg.Mode == ha.ClusterMode
+	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
+	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
+	// selection; the separate haEarlyCfg.LoadFromEnvironment() path is no longer needed
+	// because LoadWithPath already applies env-var overrides to cfg.HA (Issue #2119).
+	isClusterMode := cfg.HA.IsClusterMode()
 
 	// DNA storage — durable steward DNA + fleet registry. Shared by the
 	// controller service (warm-loading the steward registry after a restart)

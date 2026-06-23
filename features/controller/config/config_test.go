@@ -441,3 +441,91 @@ func TestRegistrationConfig_DarkWindowAndTimeout_YAML(t *testing.T) {
 	assert.Equal(t, 3*24*time.Hour, cfg.Registration.GetPendingReviewTimeout(),
 		"72h must parse to 3 days")
 }
+
+// TestHAMode_YAML verifies that ha.mode: cluster is parsed correctly (Issue #2119).
+func TestHAMode_YAML(t *testing.T) {
+	yamlInput := "ha:\n  mode: cluster\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.HA, "HA config must be populated when ha block is present")
+	assert.Equal(t, "cluster", cfg.HA.Mode,
+		"ha.mode: cluster must parse to the string \"cluster\"")
+	assert.True(t, cfg.HA.IsClusterMode(), "IsClusterMode() must return true for mode=cluster")
+}
+
+// TestHAMode_YAML_Single verifies that ha.mode: single is parsed correctly.
+func TestHAMode_YAML_Single(t *testing.T) {
+	yamlInput := "ha:\n  mode: single\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.HA)
+	assert.Equal(t, "single", cfg.HA.Mode)
+	assert.False(t, cfg.HA.IsClusterMode())
+}
+
+// TestHAMode_YAML_Absent verifies that omitting ha block leaves HA nil.
+func TestHAMode_YAML_Absent(t *testing.T) {
+	yamlInput := "listen_addr: \"127.0.0.1:8080\"\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	assert.Nil(t, cfg.HA, "HA config must be nil when the ha block is absent")
+}
+
+// TestHAModeEnvVar verifies that CFGMS_HA_MODE overrides ha.mode from YAML (Issue #2119).
+func TestHAModeEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_HA_MODE", "cluster")
+	// Clear CFGMS_STORAGE_CLUSTER_POSTGRES_DSN so it doesn't interfere.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.HA, "CFGMS_HA_MODE must materialise the HA config section")
+	assert.Equal(t, "cluster", cfg.HA.Mode,
+		"CFGMS_HA_MODE=cluster must set ha.Mode to \"cluster\"")
+	assert.True(t, cfg.HA.IsClusterMode())
+}
+
+// TestClusterStorageConfig_YAML verifies that storage.cluster.postgres_dsn is parsed (Issue #2119).
+func TestClusterStorageConfig_YAML(t *testing.T) {
+	yamlInput := `
+storage:
+  cluster:
+    postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require"
+    s3:
+      bucket: "cfgms-installers"
+      region: "us-east-1"
+`
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.Storage.Cluster, "storage.cluster must be populated")
+	assert.Equal(t,
+		"host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require",
+		cfg.Storage.Cluster.PostgresDSN)
+	require.NotNil(t, cfg.Storage.Cluster.S3)
+	assert.Equal(t, "cfgms-installers", cfg.Storage.Cluster.S3["bucket"])
+	assert.Equal(t, "us-east-1", cfg.Storage.Cluster.S3["region"])
+}
+
+// TestClusterStorageDSNEnvVar verifies that CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides
+// storage.cluster.postgres_dsn (Issue #2119).
+func TestClusterStorageDSNEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable")
+	t.Setenv("CFGMS_HA_MODE", "") // clear so HA mode is not set by env
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Storage.Cluster,
+		"CFGMS_STORAGE_CLUSTER_POSTGRES_DSN must materialise storage.cluster")
+	assert.Equal(t,
+		"host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable",
+		cfg.Storage.Cluster.PostgresDSN)
+}

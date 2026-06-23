@@ -90,20 +90,42 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		storageManager *interfaces.StorageManager
 		err            error
 	)
-	// OSS composite path: flatfile (config/audit/steward) + SQLite (business data)
-	logger.Info("Initializing OSS composite storage backend...",
-		"flatfile_root", cfg.Storage.FlatfileRoot,
-		"sqlite_path", cfg.Storage.SQLitePath)
-	storageManager, err = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
+
+	if cfg.HA.IsClusterMode() {
+		// Cluster mode: all business stores backed by shared Postgres so every node sees
+		// the same fleet state immediately after --init. S3 blob store is configured
+		// separately at startup; only the DSN is needed here.
+		pgDSN := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		var s3Config map[string]interface{}
+		if cfg.Storage.Cluster != nil {
+			s3Config = cfg.Storage.Cluster.S3
+		}
+		logger.Info("Cluster mode: initializing Postgres business store backend...",
+			"ha_mode", cfg.HA.Mode)
+		storageManager, err = interfaces.CreateClusterStorageManager(pgDSN, s3Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize cluster storage: %w", err)
+		}
+		logger.Info("Cluster storage backend initialized")
+	} else {
+		// OSS composite path: flatfile (config/audit/steward) + SQLite (business data)
+		logger.Info("Initializing OSS composite storage backend...",
+			"flatfile_root", cfg.Storage.FlatfileRoot,
+			"sqlite_path", cfg.Storage.SQLitePath)
+		storageManager, err = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
+		}
+		logger.Info("OSS composite storage backend initialized")
 	}
 	defer func() {
 		if cErr := storageManager.Close(); cErr != nil {
 			logger.Error("Failed to close storage manager during initialization", "error", cErr)
 		}
 	}()
-	logger.Info("OSS composite storage backend initialized")
 
 	// Step 2: Create CA and certificates
 	logger.Info("Creating Certificate Authority...", "ca_path", caPath)
@@ -226,11 +248,17 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 
 	// Step 5: Write init marker (LAST — all-or-nothing)
 	logger.Info("Writing initialization marker...")
+	// Reflect the actual backing provider: cluster mode uses "database" regardless of
+	// what cfg.Storage.Provider says, so second-node bootstrap can identify the backend.
+	storageProviderName := cfg.Storage.Provider
+	if cfg.HA.IsClusterMode() {
+		storageProviderName = "database"
+	}
 	marker := &InitMarker{
 		Version:           1,
 		InitializedAt:     time.Now().UTC(),
 		ControllerVersion: version.Short(),
-		StorageProvider:   cfg.Storage.Provider,
+		StorageProvider:   storageProviderName,
 		CAFingerprint:     caInfo.Fingerprint,
 	}
 
@@ -253,12 +281,12 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 
 	logger.Info("Initialization complete",
 		"ca_fingerprint", caInfo.Fingerprint,
-		"storage_provider", cfg.Storage.Provider,
+		"storage_provider", storageProviderName,
 		"controller_version", version.Short())
 
 	return &Result{
 		CAFingerprint:   caInfo.Fingerprint,
-		StorageProvider: cfg.Storage.Provider,
+		StorageProvider: storageProviderName,
 		InitializedAt:   marker.InitializedAt,
 	}, nil
 }
