@@ -155,6 +155,65 @@ func TestHandleGetTenant_MissingPermission(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
+func TestHandleSuspendTenant_Success(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant"})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "suspend must return 200")
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "suspendable-tenant", data["id"])
+	assert.Equal(t, string(business.TenantStatusSuspended), data["status"])
+
+	// Verify status persisted to storage
+	td, err := server.tenantManager.GetTenant(ctx, "suspendable-tenant")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, td.Status)
+}
+
+func TestHandleSuspendTenant_NotFound(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestHandleSuspendTenant_MissingPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"tenant:read"})
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "perm-check-tenant"})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/perm-check-tenant/suspend", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 // TestHandleGetTenant_ResponseShape verifies the full shape of the tenant JSON response.
 func TestHandleGetTenant_ResponseShape(t *testing.T) {
 	server := setupTestServer(t)

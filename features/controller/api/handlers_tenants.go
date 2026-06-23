@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -60,4 +61,34 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccessResponse(w, td)
+}
+
+// handleSuspendTenant implements POST /api/v1/tenants/{id}/suspend.
+// Sets the tenant status to TenantStatusSuspended. Used by agent-dispatch cleanup
+// paths to deactivate the agent-test/<N> sub-tenant after the agent exits.
+// Returns 200 on success, 404 when the tenant does not exist.
+func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	if err := s.tenantManager.SuspendTenant(r.Context(), tenantID); err != nil {
+		if strings.Contains(err.Error(), "tenant not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to suspend tenant", "SUSPEND_FAILED")
+		return
+	}
+
+	s.logger.Info("Suspended tenant",
+		"tenant_id", logging.SanitizeLogValue(tenantID))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":     tenantID,
+		"status": string(business.TenantStatusSuspended),
+	})
 }

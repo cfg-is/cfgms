@@ -684,3 +684,26 @@ func TestManager_CreateTenant_InvalidExplicitID_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid explicit tenant ID")
 }
+
+func TestManager_SuspendTenant(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "suspend-test"})
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status)
+
+	require.NoError(t, manager.SuspendTenant(ctx, "suspend-test"))
+
+	suspended, err := manager.GetTenant(ctx, "suspend-test")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, suspended.Status)
+}
+
+func TestManager_SuspendTenant_NotFound(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	err := manager.SuspendTenant(ctx, "nonexistent-tenant")
+	require.Error(t, err)
+}
