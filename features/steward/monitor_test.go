@@ -324,15 +324,30 @@ func TestMonitorModeNeverSets(t *testing.T) {
 		ChangeType: modules.ChangeTypeModified,
 	})
 
-	// Wait for the targeted reconcile (Get called again).
+	// Wait for the drift event rather than just GetCallCount. The handler fires
+	// after Get→CompareStates inside the same ExecuteResource call, so polling
+	// GetCallCount alone is a race: the test goroutine can be scheduled between
+	// Get returning and the handler being invoked, causing capturedEventTypes to
+	// be empty when we read it. Waiting for the event itself eliminates the race.
 	require.Eventually(t, func() bool {
-		return testMon.GetCallCount() > initialGetCount
-	}, 2*time.Second, 10*time.Millisecond, "targeted reconcile must run after ChangeEvent")
+		mu.Lock()
+		defer mu.Unlock()
+		for _, et := range capturedEventTypes {
+			if et == "drift.detected.monitor" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "drift.detected.monitor must be emitted after ChangeEvent")
+
+	// Get must have been called — reconcile read actual current state.
+	assert.Greater(t, testMon.GetCallCount(), initialGetCount,
+		"Get must be called during targeted reconcile")
 
 	// Set must never have been called — monitor mode skips Set/Verify.
 	assert.Equal(t, 0, testMon.SetCallCount(), "Set must never be called in monitor mode")
 
-	// "drift.detected.monitor" must have been emitted.
+	// "drift.detected.monitor" must have been emitted (confirmed above via Eventually).
 	mu.Lock()
 	types := make([]string, len(capturedEventTypes))
 	copy(types, capturedEventTypes)
