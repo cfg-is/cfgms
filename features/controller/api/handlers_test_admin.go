@@ -47,7 +47,7 @@ func (s *Server) handleTestSetStewardStatus(w http.ResponseWriter, r *http.Reque
 
 	if err := s.stewardStore.UpdateStewardStatus(r.Context(), id, business.StewardStatus(req.Status)); err != nil {
 		s.logger.Error("handleTestSetStewardStatus: failed to update status",
-			"steward_id", logging.SanitizeLogValue(id), "status", logging.SanitizeLogValue(req.Status), "error", err)
+			"steward_id", logging.SanitizeLogValue(id), "status", logging.SanitizeLogValue(req.Status), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

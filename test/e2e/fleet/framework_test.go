@@ -640,8 +640,7 @@ func (s *FleetTestSuite) setStewardStatusByID(t *testing.T, stewardID, status st
 // mode is one of: "auto_accept", "require_approval", "reject".
 func (s *FleetTestSuite) setRefreshPolicy(t *testing.T, tenantID, mode string) {
 	t.Helper()
-	url := fmt.Sprintf("%s/api/v1/tenants/%s/refresh-policy", s.controllerURL,
-		strings.ReplaceAll(tenantID, "/", "%2F"))
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/refresh-policy", s.controllerURL, tenantID)
 	body, err := json.Marshal(map[string]string{"mode": mode})
 	require.NoError(t, err, "setRefreshPolicy: marshal request body")
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, strings.NewReader(string(body)))
