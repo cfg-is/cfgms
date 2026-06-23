@@ -494,11 +494,14 @@ func (s *FleetTestSuite) waitForStewardVersion(t *testing.T, container, version 
 // expired one, simulating a steward that has been offline past cert expiry.
 //
 // It docker-copies the cert store from the container to a host temp dir, loads a
-// cert.Manager from it, imports a back-dated client cert via certMgr.ImportCertificate,
-// deletes the old valid client cert(s), and copies the modified store back.
+// cert.Manager from it to find existing client cert serials, writes expired cert/key/
+// metadata files directly into each existing serial directory, and copies the modified
+// store back. The in-place serial-directory approach sidesteps docker cp's additive
+// behaviour: files inside existing directories are overwritten, but no new serial
+// directories are created and no container-side deletions are needed.
+//
 // device_identity.enc and steward-identity.json are preserved because they live in
-// the cert store root (not in per-serial subdirectories) and are not touched by the
-// cert.Manager operations.
+// the cert store root, not in per-serial subdirectories.
 //
 // The container must be stopped before calling this helper.
 func (s *FleetTestSuite) expireStewardCerts(t *testing.T, container string) {
@@ -529,7 +532,7 @@ func (s *FleetTestSuite) expireStewardCerts(t *testing.T, container string) {
 	})
 	require.NoError(t, err, "expireStewardCerts: load cert manager")
 
-	// Record serial numbers of existing client certs to delete after import.
+	// Record serial numbers of existing client certs to replace in-place.
 	certs, err := mgr.ListCertificates()
 	require.NoError(t, err, "expireStewardCerts: list certificates")
 	var oldSerials []string
@@ -538,31 +541,55 @@ func (s *FleetTestSuite) expireStewardCerts(t *testing.T, container string) {
 			oldSerials = append(oldSerials, c.SerialNumber)
 		}
 	}
+	require.NotEmpty(t, oldSerials,
+		"expireStewardCerts: no client certs found in %s cert store; steward may not be registered", container)
 
 	// Generate a self-signed cert+key pair with NotBefore/NotAfter both in the past.
 	expiredCertPEM, expiredKeyPEM := generateExpiredClientCertPEM(t)
 
-	// Import the expired cert via the manager (satisfies the certMgr.ImportCertificate
-	// requirement in the story; creates a new per-serial subdirectory in hostCertDir).
-	_, err = mgr.ImportCertificate(expiredCertPEM, expiredKeyPEM, cert.CertificateTypeClient)
-	require.NoError(t, err, "expireStewardCerts: import expired cert")
-
-	// Delete old valid client certs from the store.
+	// Replace each client cert IN-PLACE: write expired cert data into the same serial
+	// directories that already exist in the container. docker cp is additive — it merges
+	// files into the destination but never deletes directories. By overwriting the files
+	// in the existing serial directories (rather than creating a new serial directory),
+	// the docker cp below replaces the valid cert data with expired data in-place, so
+	// the steward's cert store contains only expired client certs after the copy-back.
+	now := time.Now().UTC()
 	for _, serial := range oldSerials {
-		if delErr := mgr.DeleteCertificate(serial); delErr != nil {
-			t.Logf("expireStewardCerts: warning: failed to delete old cert %s: %v", serial, delErr)
+		serialDir := filepath.Join(hostCertDir, serial)
+		if err := os.WriteFile(filepath.Join(serialDir, "cert.pem"), expiredCertPEM, 0o600); err != nil {
+			t.Fatalf("expireStewardCerts: overwrite cert.pem for serial %s: %v", serial, err)
+		}
+		if err := os.WriteFile(filepath.Join(serialDir, "key.pem"), expiredKeyPEM, 0o600); err != nil {
+			t.Fatalf("expireStewardCerts: overwrite key.pem for serial %s: %v", serial, err)
+		}
+		// Overwrite metadata.json with expired timestamps so loadCertificates recomputes
+		// IsValid = false (time.Now().Before(ExpiresAt) → false when ExpiresAt is in the past).
+		meta := &cert.CertificateInfo{
+			Type:         cert.CertificateTypeClient,
+			CommonName:   "cfgms-expired-test-client",
+			SerialNumber: serial,
+			CreatedAt:    now.Add(-48 * time.Hour),
+			ExpiresAt:    now.Add(-24 * time.Hour),
+			IsValid:      false,
+		}
+		metaJSON, jerr := json.MarshalIndent(meta, "", "  ")
+		require.NoError(t, jerr, "expireStewardCerts: marshal metadata for serial %s", serial)
+		if err := os.WriteFile(filepath.Join(serialDir, "metadata.json"), metaJSON, 0o600); err != nil {
+			t.Fatalf("expireStewardCerts: overwrite metadata.json for serial %s: %v", serial, err)
 		}
 	}
 
 	// Copy the modified cert store back to the container.
+	// docker cp src/. container:dst copies the CONTENTS of src into dst, overwriting
+	// existing files. The in-place serial-directory replacement above means the docker cp
+	// here overwrites the valid cert files with expired ones — no directory deletion needed.
 	cpInCtx, cpInCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	// docker cp src/. container:dst copies the CONTENTS of src into dst.
 	out, err = exec.CommandContext(cpInCtx, "docker", "cp",
 		hostCertDir+"/.", fmt.Sprintf("%s:%s", container, certStoreDir)).CombinedOutput()
 	cpInCancel()
 	require.NoError(t, err, "expireStewardCerts: docker cp modified cert store back: %s", string(out))
 
-	t.Logf("expireStewardCerts: replaced %d client cert(s) with expired version in %s",
+	t.Logf("expireStewardCerts: replaced %d client cert(s) with expired version in %s (in-place)",
 		len(oldSerials), container)
 }
 
