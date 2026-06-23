@@ -19,6 +19,8 @@ bin/
 test-controller
 test-steward
 test-*
+# Shell test scripts in devcontainer are not binaries — allow them
+!.devcontainer/scripts/test-*.sh
 
 # Generated protobuf files in wrong location (should be in api/proto/)
 /steward/
