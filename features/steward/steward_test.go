@@ -4,12 +4,17 @@ package steward_test
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
 	steward "github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -89,5 +94,281 @@ func TestNewStandaloneWithConfig(t *testing.T) {
 
 	assert.Equal(t, "standalone-test-steward", s.GetStewardID())
 	// Constructor success + Start()/Stop() succeeding proves healthCheck and executor wiring.
+	require.NoError(t, s.Stop(context.Background()))
+}
+
+// warnCapturingLogger wraps logging.Logger and records Warn messages for assertions.
+// This is a real implementation of the Logger interface — not a mock — used only to
+// observe which warnings the production code emits during resilience tests.
+type warnCapturingLogger struct {
+	mu      sync.Mutex
+	warns   []string
+	wrapped logging.Logger
+}
+
+func newWarnCapturingLogger(wrapped logging.Logger) *warnCapturingLogger {
+	return &warnCapturingLogger{wrapped: wrapped}
+}
+
+func (l *warnCapturingLogger) Debug(msg string, kv ...interface{}) { l.wrapped.Debug(msg, kv...) }
+func (l *warnCapturingLogger) Info(msg string, kv ...interface{})  { l.wrapped.Info(msg, kv...) }
+func (l *warnCapturingLogger) Warn(msg string, kv ...interface{}) {
+	l.mu.Lock()
+	l.warns = append(l.warns, msg)
+	l.mu.Unlock()
+	l.wrapped.Warn(msg, kv...)
+}
+func (l *warnCapturingLogger) Error(msg string, kv ...interface{}) { l.wrapped.Error(msg, kv...) }
+func (l *warnCapturingLogger) Fatal(msg string, kv ...interface{}) { l.wrapped.Fatal(msg, kv...) }
+func (l *warnCapturingLogger) DebugCtx(ctx context.Context, msg string, kv ...interface{}) {
+	l.wrapped.DebugCtx(ctx, msg, kv...)
+}
+func (l *warnCapturingLogger) InfoCtx(ctx context.Context, msg string, kv ...interface{}) {
+	l.wrapped.InfoCtx(ctx, msg, kv...)
+}
+func (l *warnCapturingLogger) WarnCtx(ctx context.Context, msg string, kv ...interface{}) {
+	l.mu.Lock()
+	l.warns = append(l.warns, msg)
+	l.mu.Unlock()
+	l.wrapped.WarnCtx(ctx, msg, kv...)
+}
+func (l *warnCapturingLogger) ErrorCtx(ctx context.Context, msg string, kv ...interface{}) {
+	l.wrapped.ErrorCtx(ctx, msg, kv...)
+}
+func (l *warnCapturingLogger) FatalCtx(ctx context.Context, msg string, kv ...interface{}) {
+	l.wrapped.FatalCtx(ctx, msg, kv...)
+}
+
+func (l *warnCapturingLogger) WarnMessages() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.warns))
+	copy(out, l.warns)
+	return out
+}
+
+// newTestMonitorModuleWithCap creates a testMonitorModule with a custom channel capacity.
+func newTestMonitorModuleWithCap(t *testing.T, cap int) *testMonitorModule {
+	t.Helper()
+	return &testMonitorModule{
+		changesCh: make(chan modules.ChangeEvent, cap),
+	}
+}
+
+// TestMonitorDebounce verifies that a burst of N events for the same resourceID
+// within the debounce window yields exactly one ExecuteResource call (coalescing).
+func TestMonitorDebounce(t *testing.T) {
+	logger := logging.NewLogger("warn")
+	dir := t.TempDir()
+	cfgPath := writeSingleMonitorCfg(t, dir, "debounce-steward")
+
+	testMon := newTestMonitorModule(t)
+
+	s, err := steward.NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	steward.RegisterTestModule(s, "testmonitor", testMon)
+	// Short debounce so the test completes quickly.
+	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, s.Start(ctx))
+
+	// Reset tracking after initial convergence so we isolate event-triggered reconciles.
+	testMon.ResetTracking()
+
+	// Send 5 events for the same resourceID in rapid succession.
+	for i := 0; i < 5; i++ {
+		testMon.SendChange(modules.ChangeEvent{
+			ResourceID: "my-resource",
+			ChangeType: modules.ChangeTypeModified,
+		})
+	}
+
+	// Wait for the debounce to fire and exactly one reconcile to complete.
+	// ExecuteResource calls Set when drift is detected; SetCallCount > 0 confirms
+	// the reconcile ran.
+	require.Eventually(t, func() bool {
+		return testMon.SetCallCount() > 0
+	}, 500*time.Millisecond, 5*time.Millisecond,
+		"debounced reconcile must run after burst of events")
+
+	// Allow extra time for any erroneous second reconcile to appear.
+	time.Sleep(100 * time.Millisecond)
+
+	// Exactly one Set call means exactly one ExecuteResource call — the burst was coalesced.
+	// (Each ExecuteResource that detects drift calls Set exactly once.)
+	assert.Equal(t, 1, testMon.SetCallCount(),
+		"burst of events within debounce window must coalesce to exactly one ExecuteResource call")
+
+	require.NoError(t, s.Stop(context.Background()))
+}
+
+// TestMonitorQueueShedToPoll verifies that flooding the fan-in channel beyond its
+// bounded capacity drops events non-blockingly (Warn-logged) and that the affected
+// resource is corrected by the next scheduled convergence pass.
+func TestMonitorQueueShedToPoll(t *testing.T) {
+	baseLogger := logging.NewLogger("warn")
+	capLog := newWarnCapturingLogger(baseLogger)
+
+	dir := t.TempDir()
+	cfgPath := writeSingleMonitorCfg(t, dir, "shed-to-poll-steward")
+
+	// Use a large channel so SendChange never blocks; only the steward's internal
+	// fan-in queue is the bottleneck under test.
+	testMon := newTestMonitorModuleWithCap(t, 200)
+
+	s, err := steward.NewStandalone(cfgPath, capLog)
+	require.NoError(t, err)
+	steward.RegisterTestModule(s, "testmonitor", testMon)
+	// Short debounce so the one reconcile that does fire runs quickly.
+	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
+	// Small fan-in capacity so queue overflow is guaranteed regardless of scheduler
+	// timing. Any burst > 2 will shed at least one event and emit the Warn log.
+	steward.SetMonitorFanInCapForTest(s, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, s.Start(ctx))
+	testMon.ResetTracking()
+
+	// Flood with 20 events — well beyond the 2-entry fan-in queue.
+	// All sends must complete quickly (non-blocking).
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		testMon.SendChange(modules.ChangeEvent{
+			ResourceID: "my-resource",
+			ChangeType: modules.ChangeTypeModified,
+		})
+	}
+	assert.Less(t, time.Since(start), 500*time.Millisecond,
+		"flooding the monitor channel must be non-blocking")
+
+	// Wait for at least one reconcile driven by the events that made it through.
+	require.Eventually(t, func() bool {
+		return testMon.GetCallCount() > 0
+	}, 2*time.Second, 10*time.Millisecond,
+		"at least one event-driven reconcile must occur despite queue pressure")
+
+	// Verify that Warn was emitted for the shed events.
+	warns := capLog.WarnMessages()
+	hasShedWarn := false
+	for _, w := range warns {
+		if strings.Contains(w, "queue full") || strings.Contains(w, "shed") {
+			hasShedWarn = true
+			break
+		}
+	}
+	assert.True(t, hasShedWarn,
+		"Warn must be logged when events are dropped due to full queue")
+
+	// Simulate the next scheduled convergence pass: it must correct the resource
+	// regardless of how many events were shed.
+	setCalls := testMon.SetCallCount()
+	steward.RunConvergence(s, ctx)
+	assert.Greater(t, testMon.SetCallCount(), setCalls,
+		"scheduled convergence pass must correct a resource whose events were shed")
+
+	require.NoError(t, s.Stop(context.Background()))
+}
+
+// TestMonitorCloseRace verifies that a ChangeEvent immediately followed by a
+// concurrent Stop() causes no panic and no goroutine leak.
+func TestMonitorCloseRace(t *testing.T) {
+	// Snapshot goroutines that exist before this test creates any steward-owned
+	// goroutines. This excludes long-running background goroutines started by other
+	// tests in the same binary (e.g. DNA collector os/exec processes) from the
+	// final leak check — we only verify goroutines introduced by this test.
+	existingGoroutines := goleak.IgnoreCurrent()
+
+	logger := logging.NewLogger("warn")
+	dir := t.TempDir()
+	cfgPath := writeSingleMonitorCfg(t, dir, "close-race-steward")
+
+	testMon := newTestMonitorModule(t)
+
+	s, err := steward.NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	steward.RegisterTestModule(s, "testmonitor", testMon)
+	// Short debounce so the timer can fire before Stop() in the racy path.
+	steward.SetDebounceWindowForTest(s, 10*time.Millisecond)
+	// Disable DNA collection so the background os/exec goroutines it spawns during
+	// runConvergence are not included in the goroutine leak check. This test
+	// exercises monitor goroutine lifecycle only; DNA collection is tested elsewhere.
+	steward.SetDNACollector(s, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, s.Start(ctx))
+
+	// Send a ChangeEvent and immediately call Stop() — race between the
+	// debounce timer and the shutdown signal.
+	assert.NotPanics(t, func() {
+		testMon.SendChange(modules.ChangeEvent{
+			ResourceID: "my-resource",
+			ChangeType: modules.ChangeTypeModified,
+		})
+		// Concurrent Stop: may race with the debounce timer.
+		require.NoError(t, s.Stop(context.Background()))
+	})
+
+	// All goroutines introduced by this test must have exited by the time
+	// Stop() returns (monitored via WaitGroups). existingGoroutines excludes
+	// pre-existing background goroutines from other tests (e.g. DNA collector
+	// os/exec processes from TestMonitorQueueShedToPoll) so we only check
+	// for leaks from this test's steward instance.
+	goleak.VerifyNone(t, existingGoroutines)
+}
+
+// TestMonitorDNARefreshAfterChange verifies that after an event-driven correction
+// that changes state, the DNA snapshot (previousDNA) is refreshed so the next
+// heartbeat reflects the updated hash before the scheduled convergence tick fires.
+func TestMonitorDNARefreshAfterChange(t *testing.T) {
+	logger := logging.NewLogger("warn")
+	dir := t.TempDir()
+	cfgPath := writeSingleMonitorCfg(t, dir, "dna-refresh-steward")
+
+	testMon := newTestMonitorModule(t)
+
+	s, err := steward.NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	steward.RegisterTestModule(s, "testmonitor", testMon)
+	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, s.Start(ctx))
+
+	// Initial convergence has run; previousDNA is now the real system DNA.
+	// Inject a sentinel so we can detect when detectUnmanagedDNADrift is called again.
+	steward.SetPreviousDNA(s, &commonpb.DNA{
+		Id:         "sentinel-id-dna-refresh-test",
+		Attributes: map[string]string{},
+	})
+
+	testMon.ResetTracking()
+
+	// Send a ChangeEvent. testMonitorModule.Get() returns "drifted" and the
+	// cfg desires "present", so ExecuteResource will call Set → ChangesApplied=true
+	// → runTargetedReconcile triggers DNA refresh.
+	testMon.SendChange(modules.ChangeEvent{
+		ResourceID: "my-resource",
+		ChangeType: modules.ChangeTypeModified,
+	})
+
+	// Wait for the full runTargetedReconcile sequence: ExecuteResource (Set) followed
+	// by detectUnmanagedDNADrift updating previousDNA. Both run sequentially in the
+	// same monitorEventLoop goroutine, so polling GetPreviousDNA is the correct
+	// synchronization — no sleep needed.
+	require.Eventually(t, func() bool {
+		dna := steward.GetPreviousDNA(s)
+		return dna != nil && dna.Id != "sentinel-id-dna-refresh-test"
+	}, 2*time.Second, 10*time.Millisecond,
+		"DNA snapshot must be refreshed after a state-changing targeted reconcile")
+
 	require.NoError(t, s.Stop(context.Background()))
 }
