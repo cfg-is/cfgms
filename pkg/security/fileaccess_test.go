@@ -45,7 +45,14 @@ func TestValidateAndCleanPath(t *testing.T) {
 			name:     "directory traversal with absolute path",
 			basePath: tempDir,
 			userPath: func() string {
-				// On Windows, use a Windows absolute path; on Unix, use a Unix absolute path
+				// An absolute path well outside the base. Both fixtures normally
+				// exist but are read-restricted, which is the point of #2120: on
+				// Windows the SAM hive is ACL-protected, so a naive EvalSymlinks
+				// would fail with "Access is denied" before any containment check
+				// and surface a permission error instead of a traversal error.
+				// ValidateAndCleanPath must reject it as a traversal attempt
+				// (containment is checked in raw form before the filesystem is
+				// touched), with the same assertion on every platform.
 				if runtime.GOOS == "windows" {
 					return "C:\\Windows\\System32\\config\\sam"
 				}
