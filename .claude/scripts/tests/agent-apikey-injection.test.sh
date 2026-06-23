@@ -186,6 +186,14 @@ else
   printf '  FAIL  T3 cred dir :ro bind-mount not found in dispatch script\n'
 fi
 
+ran=$((ran + 1))
+if grep -q 'CFGMS_ADMIN_BUNDLE=' "${DISPATCH}"; then
+  printf '  ok    T3 launch sets CFGMS_ADMIN_BUNDLE="" (bundle auto-discovery disabled)\n'
+else
+  fail=$((fail + 1))
+  printf '  FAIL  T3 CFGMS_ADMIN_BUNDLE="" not found in dispatch script (bundle isolation missing)\n'
+fi
+
 # ---------------------------------------------------------------------------
 # T4: mint failure — CRED_MINT_FAILED, no cred dir, no orphan container
 # ---------------------------------------------------------------------------

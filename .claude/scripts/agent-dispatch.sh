@@ -637,6 +637,7 @@ case "$cmd" in
       -e "CFGMS_API_KEY_FILE=/run/cfgms/agent-cred/api.key" \
       -e "CFGMS_TENANT=agent-test/${num}" \
       -e "CFGMS_TIER1_URL=${tier1_url}" \
+      -e "CFGMS_ADMIN_BUNDLE=" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${num}" 2>&1); then
