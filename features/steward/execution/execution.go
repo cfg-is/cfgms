@@ -133,15 +133,20 @@ func (g *genericConfigState) GetManagedFields() []string {
 	// and `tenant_id`; future modules may add their own) plumbs them in
 	// through resource.config and consumes them at Configure-time only.
 	excludedFields := map[string]bool{
-		"path":              true, // resourceID, not state
-		"name":              true, // resource identifier
-		"transport":         true, // module operational: which client to use
-		"tenant_id":         true, // module operational: namespace prefix
-		"steward_id":        true, // module operational: audit subject
-		"audit_manager":     true, // module operational: pointer, never serialised
-		"winrm_host":        true, // module operational: WinRM endpoint
-		"winrm_user_secret": true, // module operational: SecretStore key
-		"winrm_pass_secret": true, // module operational: SecretStore key
+		"path":                  true, // resourceID, not state
+		"name":                  true, // resource identifier
+		"transport":             true, // module operational: which client to use
+		"tenant_id":             true, // module operational: namespace prefix
+		"steward_id":            true, // module operational: audit subject
+		"audit_manager":         true, // module operational: pointer, never serialised
+		"winrm_host":            true, // module operational: WinRM endpoint
+		"winrm_user_secret":     true, // module operational: SecretStore key
+		"winrm_pass_secret":     true, // module operational: SecretStore key
+		"enroll_token":          true, // module operational: hyperv create-from-source join token (ADR-010)
+		"enroll_ca_fingerprint": true, // module operational: controller CA fingerprint for guest TOFU
+		"enroll_steward_path":   true, // module operational: host path to steward binary staged on seed
+		"enroll_ca_path":        true, // module operational: host path to CA cert staged on seed
+		"seed_dir":              true, // module operational: local dir for the provisioning seed VHDX
 	}
 
 	fields := make([]string, 0, len(g.data))

@@ -703,6 +703,81 @@ func TestSourceConfig_Validate(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 	})
 
+	// ── cloud-init (source.image) validation ──────────────────────────────
+	// validCloudInit returns a linux cloud-init source (image, no iso).
+	validCloudInit := func() *VMConfig {
+		return &VMConfig{
+			Name:    "ci-vm",
+			VHDPath: `C:\VMs\ci-vm.vhdx`,
+			Source: &SourceConfig{
+				Image:    `C:\images\debian-13-generic-amd64.raw`,
+				OSFamily: "linux",
+				ResizeGB: 20,
+				Completion: CompletionConfig{
+					Mode: "steward-registration",
+				},
+			},
+		}
+	}
+
+	t.Run("linux cloud-init image is valid", func(t *testing.T) {
+		require.NoError(t, validCloudInit().Validate())
+	})
+
+	t.Run("linux cloud-init image is detected", func(t *testing.T) {
+		assert.True(t, validCloudInit().Source.isCloudInit())
+		// A linux source with iso (not image) is NOT cloud-init.
+		legacy := validBase()
+		legacy.Source.OSFamily = "linux"
+		assert.False(t, legacy.Source.isCloudInit())
+	})
+
+	t.Run("linux with neither image nor iso", func(t *testing.T) {
+		cfg := validCloudInit()
+		cfg.Source.Image = ""
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceMedia)
+	})
+
+	t.Run("non-absolute image path", func(t *testing.T) {
+		cfg := validCloudInit()
+		cfg.Source.Image = "images/debian.raw"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceImage)
+	})
+
+	t.Run("UNC image path is rejected", func(t *testing.T) {
+		cfg := validCloudInit()
+		cfg.Source.Image = `\\fileserver\share\debian.raw`
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceImage)
+	})
+
+	t.Run("negative resize_gb is rejected", func(t *testing.T) {
+		cfg := validCloudInit()
+		cfg.Source.ResizeGB = -1
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceResize)
+	})
+
+	t.Run("oversized resize_gb is rejected", func(t *testing.T) {
+		cfg := validCloudInit()
+		cfg.Source.ResizeGB = 100000
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceResize)
+	})
+
+	t.Run("zero resize_gb is valid (native size)", func(t *testing.T) {
+		cfg := validCloudInit()
+		cfg.Source.ResizeGB = 0
+		require.NoError(t, cfg.Validate())
+	})
+
 	t.Run("unattend without profile:// prefix", func(t *testing.T) {
 		cfg := validBase()
 		cfg.Source.Unattend = "s3://bucket/unattend.xml"

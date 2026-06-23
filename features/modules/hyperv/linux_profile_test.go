@@ -11,25 +11,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// preseedTestStore returns an in-memory SecretStore seeded with the secret keys
-// the built-in Debian profile resolves at render time (registration token +
-// crypted user password). No mocks — a real in-memory store double.
+// preseedTestStore returns an empty in-memory SecretStore. The built-in Debian
+// profile no longer resolves secrets at render time (ADR-010: the join token is
+// a controller-supplied ProfileVar, the user password is randomized) — but
+// Render still requires a non-nil store, so this supplies a real empty double.
 func preseedTestStore() *inlineSecretStore {
-	return newInlineStore(
-		"hyperv/enroll/regtoken", "reg-token-stub-value",
-		"hyperv/enroll/user-password-crypted", "$6$rounds=4096$stub$cryptedstub",
-	)
+	return newInlineStore()
 }
 
 // TestLinuxPreseed_TemplateRendersValidSyntax renders the built-in Debian 12
-// preseed template with synthetic vars/secrets and asserts no template errors
-// and the presence of the key preseed directives (ADR-009 §6).
+// preseed template with synthetic vars and asserts no template errors and the
+// presence of the key preseed directives (ADR-009 §6), with the controller-
+// supplied join token baked in via {{ .EnrollToken }} (ADR-010).
 func TestLinuxPreseed_TemplateRendersValidSyntax(t *testing.T) {
 	profile := defaultLinuxProfile()
 	out, err := NewProfileRenderer().Render(context.Background(), profile, ProfileVars{
 		VMName:        "stw-lin-01",
 		OSFamily:      "linux",
 		CorrelationID: "stw-lin-01",
+		EnrollToken:   "reg-token-stub-value",
+		AdminPassword: "Aa3-Bb4-Cc5-Dd6-Ee7",
 		BundleURL:     profile.Enroll.BundleURL,
 	}, preseedTestStore())
 	require.NoError(t, err, "preseed template must render without errors")
@@ -45,14 +46,16 @@ func TestLinuxPreseed_TemplateRendersValidSyntax(t *testing.T) {
 		assert.Contains(t, rendered, directive, "rendered preseed must contain %q", directive)
 	}
 
-	// The resolved secret value lands in the output (not the key name).
-	assert.Contains(t, rendered, "reg-token-stub-value", "registration token secret must be substituted")
-	assert.NotContains(t, rendered, `secret "hyperv/enroll/regtoken"`, "secret template call must be resolved, not left literal")
+	// The controller-supplied join token lands in the install command.
+	assert.Contains(t, rendered, "install --regtoken reg-token-stub-value",
+		"join token must be substituted into the real registration command")
+	assert.NotContains(t, rendered, "cfgms-steward enroll",
+		"the non-existent 'enroll' subcommand must not appear")
 }
 
 // TestLinuxPreseed_CorrelationIDInOutput asserts the CorrelationID is threaded
-// into the rendered preseed (as the enrollment hostname/label) so the
-// controller-side reconciler (#2050) can match the steward back to the record.
+// into the rendered preseed as the enrollment hostname so the controller-side
+// reconciler (#2050) can match the steward back to the record by hostname.
 func TestLinuxPreseed_CorrelationIDInOutput(t *testing.T) {
 	profile := defaultLinuxProfile()
 	const corr = "stw-corr-abc123"
@@ -60,15 +63,15 @@ func TestLinuxPreseed_CorrelationIDInOutput(t *testing.T) {
 		VMName:        "stw-lin-01",
 		OSFamily:      "linux",
 		CorrelationID: corr,
+		EnrollToken:   "tok",
+		AdminPassword: "Aa3-Bb4-Cc5-Dd6-Ee7",
 		BundleURL:     profile.Enroll.BundleURL,
 	}, preseedTestStore())
 	require.NoError(t, err)
 
 	rendered := string(out)
 	assert.Contains(t, rendered, "d-i netcfg/get_hostname string "+corr,
-		"CorrelationID must be the enrollment hostname hint")
-	assert.Contains(t, rendered, "--label "+corr,
-		"CorrelationID must be passed as the enroll label in late_command")
+		"CorrelationID must be the enrollment hostname the reconciler matches on")
 }
 
 // TestLinuxPreseed_NoBannedPatterns scans the rendered preseed for the banned

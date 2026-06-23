@@ -46,9 +46,12 @@ The `source` block (present only when provisioning a VM from install media):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `source.iso` | string | Yes | Absolute Windows path to the installation ISO on the Hyper-V host (e.g. `C:\ISO\server.iso`). Never repacked or re-signed. |
-| `source.os_family` | string | Yes | Installer family: `linux` or `windows`. Selects the answer-file format, the seed answer-file name, and the Gen2 secure-boot template. |
-| `source.unattend` | string | No | Reference to a stored unattended-install profile as a `profile://<name>` URI. Omit to use the built-in default profile for the `os_family` (`debian-12-base` for linux, `windows-server-default` for windows). |
+| `source.image` | string | One of `image`/`iso` (linux) | Absolute Windows path to a **cloud image** (`.raw` or `.vhdx`) on the Hyper-V host (e.g. `C:\images\debian-13-generic-amd64.raw`). Selects the **cloud-init** path (the default/recommended Linux path): the module prepares the VM's boot disk from this image and delivers enrollment via a NoCloud `CIDATA` seed — no boot-media repack, Secure Boot intact. Ignored for `os_family: windows`. See [Linux provisioning: cloud-init](#linux-provisioning-cloud-init-default). |
+| `source.iso` | string | Yes (windows); legacy (linux) | Absolute Windows path to the installation ISO on the Hyper-V host (e.g. `C:\ISO\server.iso`). Required for `os_family: windows` (autounattend). For `os_family: linux` it selects the legacy netinst + preseed path (use `image` instead unless you specifically need ISO install). Never repacked or re-signed. |
+| `source.resize_gb` | integer | No | Cloud-init path only: grow the converted boot disk to this many GB (cloud-init `growpart` expands the root filesystem on first boot). `0`/omitted leaves the image at its native size. |
+| `source.os_family` | string | Yes | Installer family: `linux` or `windows`. Selects the answer-file format and the Gen2 secure-boot template. |
+| `source.unattend` | string | No | Reference to a stored unattended-install profile as a `profile://<name>` URI. Omit to use the built-in default profile for the media kind (`debian-cloudinit-base` for a linux cloud image, `debian-12-base` for a linux ISO, `windows-server-default` for windows). |
+| `source.edition` | string | No | Windows only: the exact image name the autounattend `ImageInstall` step selects (the `/IMAGE/NAME` value, e.g. `Windows Server 2025 SERVERSTANDARD`). Omit to use the built-in default. |
 | `source.completion` | object | No | How the module detects provisioning succeeded. `completion.mode` accepts only `steward-registration` (the v1 value); `completion.timeout` is a Go duration string (e.g. `60m`) bounding the wait. |
 | `source.on_existing` | string | No | Behaviour when the VM already exists. `never` (default) leaves an existing VM untouched; `recreate` is an explicit opt-in to destroy and re-provision. |
 
@@ -184,7 +187,75 @@ a FAT32 volume labelled `CFGMS_SEED` created next to the VM's primary VHD
 - **The install ISO is never repacked or re-signed.** It is attached as-is from
   its host path. Repacking signed UEFI boot media breaks the boot chain.
 
-### Annotated Linux example (Debian 12, preseed)
+### Linux provisioning: cloud-init (default)
+
+For Linux, the **default and recommended** path boots a prebuilt **cloud image**
+(`source.image`) and enrols via **cloud-init**, rather than running a netinst
+installer. This is how Linux VMs are idiomatically provisioned on every cloud and
+hypervisor, and it sidesteps the netinst constraint that the kernel command line
+(the only way to point an installer at a preseed) can only be set by repacking the
+boot media — which breaks the signed shim under Secure Boot.
+
+How it works (all host-native — no `qemu-img`, no `xorriso`, no WSL, no external
+tool added to the host):
+
+1. **Boot disk from the cloud image.** A `.raw` cloud image is wrapped with a
+   fixed-VHD footer and converted to a dynamic VHDX with the Hyper-V `Convert-VHD`
+   cmdlet (a `.vhd`/`.vhdx` image is converted/copied directly), optionally grown
+   with `source.resize_gb`. The cloud image's **signed bootloader is never
+   modified**, so Secure Boot stays on (Gen2 uses the
+   `MicrosoftUEFICertificateAuthority` template).
+2. **Enrollment via a NoCloud `CIDATA` seed.** A small FAT32 VHDX labelled
+   `CIDATA` carrying `user-data` + `meta-data` (plus the steward binary and the
+   controller CA) is attached as a data disk. cloud-init **auto-detects the
+   `CIDATA` volume by label on first boot — no kernel command line, no boot-media
+   repack.** Its `user-data` `runcmd` (list/exec form only — no shell-string
+   composition) runs `cfgms-steward install --regtoken … --ca-cert … --fingerprint
+   …`, which on a live system stages the binary, writes the systemd unit, and
+   starts enrollment.
+3. The seed is detached at `finalizing`; the OS disk is the first boot device.
+
+**Host prerequisite:** the cloud image (`source.image`) must already be on the
+host, exactly like an ISO — stage it with the `file` module or out of band. Debian
+publishes suitable **generic** cloud images (`.raw`) at
+`https://cloud.debian.org/images/cloud/<release>/latest/` (use the `generic`
+variant, which ships cloud-init — **not** the `nocloud` variant, which has no
+cloud-init). No ISO-builder, no Linux toolchain, and no answer-file repack are
+required on the host.
+
+```yaml
+- name: stw-lin-01
+  module: hyperv.vm
+  config:
+    generation: 2
+    cpu_count: 2
+    memory_mb: 2048
+    vhd_path: C:\VMs\stw-lin-01.vhdx                          # the converted boot disk
+    switch_name: HVSwitch_1G
+    state: running
+    seed_dir: C:\cfgms-seeds                                  # local (non-CSV) seed dir
+    source:
+      image: C:\images\debian-13-generic-amd64.raw           # cloud image; signed bootloader untouched
+      os_family: linux                                        # selects cloud-init + UEFI-CA template
+      resize_gb: 20                                           # grow rootfs on first boot (optional)
+      unattend: profile://debian-cloudinit-base               # omit to use the built-in default
+      completion:
+        mode: steward-registration                            # the only v1 mode
+        timeout: 60m
+      on_existing: never                                       # default; never destroys an existing VM
+```
+
+The enrollment join token and CA fingerprint are supplied via the module's
+controller-synced config (`enroll_token`, `enroll_ca_fingerprint`), and the
+steward binary + CA are staged from `enroll_steward_path` / `enroll_ca_path` (the
+linux steward built for the guest). See [ADR-009](../../../docs/architecture/decisions/009-vm-from-iso-managed-endpoint.md).
+
+### Annotated Linux example (legacy netinst ISO + preseed)
+
+The netinst + preseed path remains available for air-gapped or ISO-only sites that
+cannot use a cloud image. Set `source.iso` (instead of `source.image`) for a linux
+source to select it. It uses a `CFGMS_SEED` preseed seed VHDX and the install ISO
+attached as a DVD; the ISO is never repacked or re-signed.
 
 ```yaml
 - name: stw-lin-01
@@ -198,7 +269,7 @@ a FAT32 volume labelled `CFGMS_SEED` created next to the VM's primary VHD
     state: running
     source:
       iso: C:\ClusterStorage\CSV01\iso\debian-12.iso   # host path; never repacked
-      os_family: linux                                  # selects preseed + UEFI-CA template
+      os_family: linux                                  # with iso (not image) → preseed + UEFI-CA template
       unattend: profile://debian-12-base                # omit to use the built-in default
       completion:
         mode: steward-registration                      # the only v1 mode
@@ -439,7 +510,7 @@ The following are **not** managed by this module:
 - Steward lifecycle integration (see issue #1790)
 - Controller dispatch wiring (see issue #1790)
 - Load or performance testing
-- **Golden-image / template cloning, an image registry, and a branch-build → image pipeline** — these are Phase 3 (#1792). Provisioning from install media (the `source` block above) is ISO-install only; cloning a prepared template image is a later, separate capability.
+- **Golden-image / template cloning, an image registry, and a branch-build → image pipeline** — these are Phase 3 (#1792). The `source` block provisions either from install media (Windows ISO + autounattend, legacy Linux netinst + preseed) or from a vendor **cloud image** booted with cloud-init (the default Linux path). Booting a stock vendor cloud image is **not** the same as cloning a CFGMS-prepared golden template from an image registry — that pipeline is the later, separate Phase 3 capability.
 - Controller-side ISO blob store or ISO distribution (install media is a host path; see [VM provisioning from install media](#vm-provisioning-from-install-media))
 
 ## Security considerations
