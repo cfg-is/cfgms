@@ -139,13 +139,15 @@ func (s *testPendingRefreshStore) UpdateRefreshStatus(_ context.Context, id, sta
 	}
 	return nil
 }
-func (s *testPendingRefreshStore) ListPendingRefresh(_ context.Context, _ string) ([]*business.PendingRefreshEntry, error) {
+func (s *testPendingRefreshStore) ListPendingRefresh(_ context.Context, tenantID string) ([]*business.PendingRefreshEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*business.PendingRefreshEntry, 0, len(s.entries))
 	for _, e := range s.entries {
-		cp := *e
-		out = append(out, &cp)
+		if tenantID == "" || e.TenantID == tenantID {
+			cp := *e
+			out = append(out, &cp)
+		}
 	}
 	return out, nil
 }
@@ -719,6 +721,435 @@ func TestProvenance_CannotUngateRevoked(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, 0, verifier.callCount(), "PoP must not be called for revoked device")
+}
+
+// ---- Admin handler tests ----------------------------------------------------
+
+// newRefreshAdminTestServer builds a Server with a cert manager for admin handler tests.
+func newRefreshAdminTestServer(
+	t *testing.T,
+	stewardSt *testStewardStore,
+	pendingRefreshSt *testPendingRefreshStore,
+	policyStore business.RefreshPolicyStore,
+) (*Server, *audit.Manager) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	logger := logging.NewNoopLogger()
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	certMgr := newTestCertManager(t)
+
+	server, err := New(
+		cfg, logger,
+		controllerService, configService, nil, rbacService,
+		certMgr, tenantManager, rbacManager,
+		nil, nil,
+		newTestRegistrationStore(t),
+		"", nil,
+		auditMgr,
+		nil, nil, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(ctx)
+	})
+
+	server.SetStewardStore(stewardSt)
+	if pendingRefreshSt != nil {
+		server.SetPendingRefreshStore(pendingRefreshSt)
+	}
+	if policyStore != nil {
+		server.SetRefreshPolicyStore(policyStore)
+	}
+
+	return server, auditMgr
+}
+
+func TestHandleRefreshApprove_Unauthenticated(t *testing.T) {
+	server := setupTestServer(t)
+	server.SetStewardStore(newTestStewardStore())
+	server.SetPendingRefreshStore(newTestPendingRefreshStore())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/some-pending-id/approve", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
+	pub, _ := newTestEd25519KeyPair(t)
+	ss := newTestStewardStore()
+	ss.add(&business.StewardRecord{
+		ID:             "steward-approve",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pub),
+	})
+
+	prs := newTestPendingRefreshStore()
+	pendingID := "refresh-approve-test"
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, auditMgr := newRefreshAdminTestServer(t, ss, prs, newTestRefreshPolicyStore())
+	apiKey := NewTestKey(t, server, []string{"refresh:approve"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "approve must succeed: %s", rec.Body.String())
+
+	var resp AdminRefreshApproveResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "approved", resp.Status)
+	assert.Equal(t, pendingID, resp.PendingID)
+	assert.NotEmpty(t, resp.ClientCert, "client cert must be in response")
+	assert.NotEmpty(t, resp.ClientKey, "client key must be in response")
+	assert.NotEmpty(t, resp.CACert, "CA cert must be in response")
+
+	// Verify the store was updated.
+	updated, err := prs.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusApproved, updated.Status)
+	assert.NotNil(t, updated.ClaimBundle, "claim bundle must be stored")
+
+	// Verify audit event was emitted.
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{})
+	require.NoError(t, err)
+	found := false
+	for _, e := range entries {
+		if e.Action == "refresh_admin_approved" {
+			assert.NotEmpty(t, e.Details["device_id"], "device_id in audit")
+			assert.NotEmpty(t, e.Details["tenant_id"], "tenant_id in audit")
+			assert.Equal(t, "approved", e.Details["decision"])
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "refresh_admin_approved audit event expected")
+}
+
+func TestHandleRefreshReject_RejectsEntry(t *testing.T) {
+	pub, _ := newTestEd25519KeyPair(t)
+	ss := newTestStewardStore()
+	ss.add(&business.StewardRecord{
+		ID:             "steward-reject",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pub),
+	})
+
+	prs := newTestPendingRefreshStore()
+	pendingID := "refresh-reject-test"
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, auditMgr := newRefreshAdminTestServer(t, ss, prs, newTestRefreshPolicyStore())
+	apiKey := NewTestKey(t, server, []string{"refresh:reject"})
+
+	body, _ := json.Marshal(AdminRefreshRejectRequest{Reason: "unauthorized device"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/reject", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "reject must succeed: %s", rec.Body.String())
+
+	updated, err := prs.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusRejected, updated.Status)
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{})
+	require.NoError(t, err)
+	found := false
+	for _, e := range entries {
+		if e.Action == "refresh_admin_rejected" {
+			assert.Equal(t, "rejected", e.Details["decision"])
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "refresh_admin_rejected audit event expected")
+}
+
+func TestHandleListPendingRefreshes_ReturnsList(t *testing.T) {
+	ss := newTestStewardStore()
+	prs := newTestPendingRefreshStore()
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: "refresh-list-1",
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, _ := newRefreshAdminTestServer(t, ss, prs, newTestRefreshPolicyStore())
+	apiKey := NewTestKey(t, server, []string{"refresh:list-pending"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/refresh/pending", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []APIPendingRefreshEntry
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	assert.Len(t, entries, 1)
+	assert.Equal(t, "refresh-list-1", entries[0].PendingID)
+}
+
+func TestHandleGetRefreshPolicy_ReturnsDefault(t *testing.T) {
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, newTestRefreshPolicyStore())
+	server.SetRefreshPolicyStore(newTestRefreshPolicyStore())
+	apiKey := NewTestKey(t, server, []string{"refresh:get-policy"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+testTenantID+"/refresh-policy", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "get-policy must succeed: %s", rec.Body.String())
+	var policy AdminRefreshPolicyResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &policy))
+	assert.Equal(t, testTenantID, policy.TenantID)
+	assert.Equal(t, "require_approval", policy.Mode)
+}
+
+func TestHandleSetRefreshPolicy_SetsMode(t *testing.T) {
+	ps := newTestRefreshPolicyStore()
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, ps)
+	apiKey := NewTestKey(t, server, []string{"refresh:set-policy"})
+
+	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "auto_accept"})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "set-policy must succeed: %s", rec.Body.String())
+
+	policy, err := ps.GetPolicy(context.Background(), testTenantID)
+	require.NoError(t, err)
+	assert.Equal(t, "auto_accept", policy.Mode)
+}
+
+func TestHandleSetRefreshPolicy_InvalidMode_Returns400(t *testing.T) {
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, newTestRefreshPolicyStore())
+	apiKey := NewTestKey(t, server, []string{"refresh:set-policy"})
+
+	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "invalid_mode"})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestHandleRefreshApprove_NotFound(t *testing.T) {
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), newTestPendingRefreshStore(), nil)
+	apiKey := NewTestKey(t, server, []string{"refresh:approve"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/nonexistent-id/approve", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleRefreshReject_Unauthenticated(t *testing.T) {
+	server := setupTestServer(t)
+	server.SetStewardStore(newTestStewardStore())
+	server.SetPendingRefreshStore(newTestPendingRefreshStore())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/some-id/reject", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// ---- Cross-tenant isolation tests for admin handlers -------------------------
+
+func TestHandleApproveRefresh_CrossTenantReturns404(t *testing.T) {
+	prs := newTestPendingRefreshStore()
+	pendingID := "refresh-cross-approve"
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID, // belongs to "test-tenant"
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), prs, nil)
+	// API key scoped to a different tenant.
+	apiKey := NewEphemeralTestKey(t, server, []string{"refresh:approve"}, "other-tenant", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// 404 rather than 403 to avoid disclosing pending-refresh existence across tenants.
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Entry must remain pending — nothing was mutated.
+	entry, err := prs.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
+}
+
+func TestHandleRejectRefresh_CrossTenantReturns404(t *testing.T) {
+	prs := newTestPendingRefreshStore()
+	pendingID := "refresh-cross-reject"
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID, // belongs to "test-tenant"
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), prs, nil)
+	// API key scoped to a different tenant.
+	apiKey := NewEphemeralTestKey(t, server, []string{"refresh:reject"}, "other-tenant", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/reject", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Entry must remain pending — nothing was mutated.
+	entry, err := prs.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
+}
+
+func TestHandleListPendingRefreshes_ScopedCallerSeesOnlyOwnTenant(t *testing.T) {
+	prs := newTestPendingRefreshStore()
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: "refresh-own-tenant",
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID, // caller's own tenant
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: "refresh-other-tenant",
+		DeviceID:  "bbbbbbbbbbbbbbbb",
+		TenantID:  "other-tenant", // another tenant's entry
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), prs, newTestRefreshPolicyStore())
+	// Key scoped to testTenantID — must only see its own entries regardless of query param.
+	apiKey := NewTestKey(t, server, []string{"refresh:list-pending"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/refresh/pending", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []APIPendingRefreshEntry
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	require.Len(t, entries, 1, "scoped caller must only see own-tenant entries")
+	assert.Equal(t, testTenantID, entries[0].TenantID)
+	assert.Equal(t, "refresh-own-tenant", entries[0].PendingID)
+}
+
+func TestHandleGetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, newTestRefreshPolicyStore())
+	// Key scoped to "other-tenant" — must not read policy for testTenantID.
+	apiKey := NewEphemeralTestKey(t, server, []string{"refresh:get-policy"}, "other-tenant", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+testTenantID+"/refresh-policy", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleSetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
+	ps := newTestRefreshPolicyStore()
+	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, ps)
+	// Key scoped to "other-tenant" — must not write policy for testTenantID.
+	apiKey := NewEphemeralTestKey(t, server, []string{"refresh:set-policy"}, "other-tenant", 5*time.Minute)
+
+	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "reject"})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Policy for testTenantID must remain at default — nothing mutated.
+	policy, err := ps.GetPolicy(context.Background(), testTenantID)
+	require.NoError(t, err)
+	assert.Equal(t, "require_approval", policy.Mode)
 }
 
 func TestRefresh_NoPolicyDefault(t *testing.T) {

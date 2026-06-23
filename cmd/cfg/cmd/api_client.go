@@ -715,6 +715,116 @@ func (c *APIClient) RollbackUpgrade(ctx context.Context, upgradeID string, req *
 	return &result, nil
 }
 
+// ListPendingRefreshes lists pending registration-refresh requests.
+// An empty tenantID returns entries for all tenants.
+func (c *APIClient) ListPendingRefreshes(ctx context.Context, tenantID string) ([]APIPendingRefreshEntry, error) {
+	path := "/api/v1/stewards/refresh/pending"
+	if tenantID != "" {
+		path += "?tenant_id=" + url.QueryEscape(tenantID)
+	}
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var entries []APIPendingRefreshEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return entries, nil
+}
+
+// ApproveRefresh approves a pending registration-refresh request by pending_id.
+func (c *APIClient) ApproveRefresh(ctx context.Context, pendingID string) (*APIApproveRefreshResponse, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/refresh/"+url.PathEscape(pendingID)+"/approve", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result APIApproveRefreshResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// RejectRefresh rejects a pending registration-refresh request by pending_id.
+func (c *APIClient) RejectRefresh(ctx context.Context, pendingID, reason string) error {
+	body, err := json.Marshal(struct {
+		Reason string `json:"reason,omitempty"`
+	}{Reason: reason})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/refresh/"+url.PathEscape(pendingID)+"/reject", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	return nil
+}
+
+// GetRefreshPolicy retrieves the per-tenant registration-refresh policy.
+func (c *APIClient) GetRefreshPolicy(ctx context.Context, tenantID string) (*APIRefreshPolicyResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/refresh-policy", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var policy APIRefreshPolicyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&policy); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &policy, nil
+}
+
+// SetRefreshPolicy creates or replaces the per-tenant registration-refresh policy.
+func (c *APIClient) SetRefreshPolicy(ctx context.Context, tenantID, mode string, maxDormancyDays *int) error {
+	reqBody := struct {
+		Mode            string `json:"mode"`
+		MaxDormancyDays *int   `json:"max_dormancy_days,omitempty"`
+	}{
+		Mode:            mode,
+		MaxDormancyDays: maxDormancyDays,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "PUT", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/refresh-policy", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	return nil
+}
+
 // parseError extracts error message from HTTP response
 func (c *APIClient) parseError(resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
