@@ -577,8 +577,12 @@ Collected in the background via `collectSecurityInfo()` → `CollectPermissions`
 | `etc_permissions` | Permissions string on /etc | `collectKeyDirectoryPermissions` (darwin) | Background | public | N/A | N/A | GREEN | NO |
 | `tmp_permissions` | Permissions string on /tmp | `collectKeyDirectoryPermissions` (darwin) | Background | public | N/A | N/A | GREEN | NO |
 | `var_permissions` | Permissions string on /var | `collectKeyDirectoryPermissions` (darwin) | Background | public | N/A | N/A | GREEN | NO |
-| `hyperv_role` | Whether Hyper-V role is enabled | — | — | public | N/A | N/A | N/A | YES <!-- GAP: hyperv_role is not collected on any platform. Windows would require querying WMI Win32_OptionalFeature for the Microsoft-Hyper-V-All feature or checking the DISM feature state. No collector queries this. Required for VM inventory (Epic #1932). --> |
-| `vm_inventory` | Summary of hosted virtual machines | — | — | tenant-sensitive | N/A | N/A | N/A | YES <!-- GAP: vm_inventory is not collected on any platform. Depends on hyperv_role gap being filled first. --> |
+| `hyperv_role_installed` | Whether the Hyper-V role (vmms service) is installed | `collectHyperVInfo` (windows) | Fast | public | N/A | N/A | GREEN | NO |
+| `hyperv_enabled` | Whether the Microsoft-Hyper-V-All feature is enabled (DISM; elevation-gated, omitted with a WARN when unavailable) | `collectHyperVInfo` (windows) | Fast | public | N/A | N/A | GREEN | NO |
+| `virtualization_type` | Detected hypervisor when running as a guest, else `none` | `collectVirtualizationInfo` (linux) / `collectHyperVInfo` (windows) | Fast | public | GREEN | N/A | GREEN | NO |
+| `virtualization_role` | `guest` / `host` / `baremetal` | `collectVirtualizationInfo` (linux) / `collectHyperVInfo` (windows) | Fast | public | GREEN | N/A | GREEN | NO |
+| `hyperv_host` | Whether this Linux host runs the mshv hypervisor (`/dev/mshv` or mshv module) | `collectVirtualizationInfo` (linux) | Fast | public | GREEN | N/A | N/A | NO |
+| `vm_inventory` | Summary of hosted virtual machines | — | — | tenant-sensitive | N/A | N/A | N/A | NO <!-- N/A — deferred to module Monitor epic #2110: VM presence/state is observed via the hyperv module Get() + Monitor capability, not a DNA snapshot. VM names are tenant-sensitive and must never enter DNA; a running-VM count is volatile telemetry that would churn the DNA hash. --> |
 | `permission_info` | Stub (generic/unsupported platforms) | `GenericSecurityCollector.CollectPermissions` | Background | public | N/A | N/A | N/A | NO |
 
 ---
@@ -627,8 +631,8 @@ The operating model doc (lines 221–226) documents four DNA categories. This ta
 | Linux certificate store not enumerated (`certificate_info` = stub) | Linux | `LinuxSecurityCollector.CollectCertificates` | Open |
 | `firewall_state` unreliable when ufw/iptables absent | Linux | `LinuxNetworkCollector.CollectFirewall` | Open |
 | No unified `firewall_state` key (Windows uses per-profile keys only) | Windows | `WindowsNetworkCollector.CollectFirewall` | Open |
-| `hyperv_role` not collected | Windows | `WindowsSecurityCollector.CollectPermissions` | Open |
-| `vm_inventory` not collected | Windows | (new collector needed) | Open |
+| `hyperv_role` not collected | Windows | `WindowsHardwareCollector.collectHyperVInfo` (now `hyperv_role_installed` + `hyperv_enabled`) | Resolved (#1950) |
+| `vm_inventory` not collected | Windows | N/A — deferred to module Monitor epic #2110 (observed via module `Get()` + `Monitor`, not DNA) | Resolved (#1950) |
 | `system_serial_number` not collected | Windows, macOS | `WindowsHardwareCollector`, `DarwinHardwareCollector` | Open |
 | No unified `encryption_state` key | All | Multi-platform | Open |
 

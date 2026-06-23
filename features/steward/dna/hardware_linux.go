@@ -8,11 +8,14 @@ package dna
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 const linuxCmdTimeout = 30 * time.Second
@@ -144,7 +147,82 @@ func (l *LinuxHardwareCollector) CollectMotherboard(ctx context.Context, attribu
 	}
 	cancel3()
 
+	l.collectVirtualizationInfo(ctx, attributes)
+
 	return nil
+}
+
+// collectVirtualizationInfo records whether the steward is running inside a VM
+// (guest) and which hypervisor, plus whether this Linux host is itself a Hyper-V
+// host (the mshv hypervisor device/module). It sets virtualization_type,
+// virtualization_role, and hyperv_host.
+//
+// VM inventory / running-VM count is deliberately NOT collected (#1950): VM
+// presence/state is volatile runtime telemetry observed via the hyperv module's
+// Get()/Monitor path, not a stable DNA attribute, and would churn the DNA hash.
+//
+// Every exec uses the argv form (exec.CommandContext(ctx, bin, args...)); no
+// command composes a shell string or pipes through a shell.
+func (l *LinuxHardwareCollector) collectVirtualizationInfo(ctx context.Context, attributes map[string]string) {
+	// Preferred: systemd-detect-virt. It exits non-zero with stdout "none" on
+	// bare metal, so read stdout regardless of exit status.
+	cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+	out, _ := exec.CommandContext(cmdCtx, "systemd-detect-virt").Output()
+	cancel()
+	virtType := strings.TrimSpace(string(out))
+
+	// Fallback to the DMI product name when systemd-detect-virt is unavailable.
+	if virtType == "" {
+		if data, err := os.ReadFile("/sys/class/dmi/id/product_name"); err == nil {
+			pn := strings.ToLower(strings.TrimSpace(string(data)))
+			switch {
+			case strings.Contains(pn, "virtual machine"): // Hyper-V guest
+				virtType = "microsoft"
+			case strings.Contains(pn, "vmware"):
+				virtType = "vmware"
+			case strings.Contains(pn, "kvm"), strings.Contains(pn, "qemu"):
+				virtType = "kvm"
+			case strings.Contains(pn, "virtualbox"):
+				virtType = "oracle"
+			}
+		}
+	}
+	if virtType == "" {
+		// Neither source resolved a type; default to "none" and note the
+		// degradation rather than emitting an empty attribute.
+		virtType = "none"
+		_ = logging.Warn(ctx, "dna: virtualization type undetermined (systemd-detect-virt and DMI both unavailable); defaulting to none", nil)
+	}
+	attributes["virtualization_type"] = virtType
+
+	// Hyper-V host detection: the mshv hypervisor device, or the mshv kernel
+	// module. Search lsmod output in Go — never an `lsmod | grep` shell pipe.
+	hypervHost := false
+	if _, err := os.Stat("/dev/mshv"); err == nil {
+		hypervHost = true
+	} else {
+		cmdCtx2, cancel2 := context.WithTimeout(ctx, linuxCmdTimeout)
+		if lsmod, lerr := exec.CommandContext(cmdCtx2, "lsmod").Output(); lerr == nil {
+			for _, line := range strings.Split(string(lsmod), "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "mshv") {
+					hypervHost = true
+					break
+				}
+			}
+		}
+		cancel2()
+	}
+	attributes["hyperv_host"] = strconv.FormatBool(hypervHost)
+
+	// Role: guest if detected inside a VM; otherwise a Hyper-V host, or bare metal.
+	switch {
+	case virtType != "none":
+		attributes["virtualization_role"] = "guest"
+	case hypervHost:
+		attributes["virtualization_role"] = "host"
+	default:
+		attributes["virtualization_role"] = "baremetal"
+	}
 }
 
 // parseProcCPUInfo parses /proc/cpuinfo for CPU details
