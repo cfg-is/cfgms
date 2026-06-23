@@ -3,6 +3,8 @@
 package steward
 
 import (
+	"time"
+
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
@@ -43,6 +45,20 @@ var SetDriftDetector = func(s *Steward, d drift.Detector) {
 
 // RunTargetedReconcile exposes the unexported runTargetedReconcile for black-box tests.
 var RunTargetedReconcile = (*Steward).runTargetedReconcile
+
+// SetDebounceWindowForTest overrides the per-resource monitor debounce window on a
+// specific Steward instance. Tests set a short window (e.g. 20ms) so they don't
+// wait the production 1500ms before a coalesced reconcile fires.
+var SetDebounceWindowForTest = func(s *Steward, d time.Duration) {
+	s.debounceWindow = d
+}
+
+// SetMonitorFanInCapForTest overrides the fan-in channel capacity for a specific
+// Steward instance. Tests set a small value (e.g. 2) to guarantee queue overflow
+// without relying on scheduler timing when testing shed-to-poll behavior.
+var SetMonitorFanInCapForTest = func(s *Steward, cap int) {
+	s.monitorFanInCap = cap
+}
 
 // RegisterTestModule injects a module instance into the steward's factory cache.
 // Subsequent calls to LoadModule or CreateModuleInstance for name will return mod.
