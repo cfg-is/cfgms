@@ -44,6 +44,14 @@ func collectFullSnapshot(t *testing.T) map[string]string {
 		t.Fatalf("first Collect (kicks off background collection): %v", err)
 	}
 	c.WaitForBackground(ctx)
+	// If WaitForBackground returned because ctx was cancelled (e.g. a short test
+	// -timeout) rather than because background collection finished, the snapshot
+	// is PARTIAL — fail with a clear message so missing background attributes are
+	// not misread as a genuine must-collect coverage gap.
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("background collection did not complete before ctx cancellation (%v); "+
+			"snapshot is partial — increase the test timeout rather than treating this as a coverage gap", err)
+	}
 	snap, err := c.Collect(ctx)
 	if err != nil {
 		t.Fatalf("second Collect (merged full snapshot): %v", err)
