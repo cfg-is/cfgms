@@ -70,12 +70,14 @@ func (m *Manager) QueryFleet(ctx context.Context, filter *FleetFilter) (*FleetQu
 		filter = &FleetFilter{}
 	}
 
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return nil, fmt.Errorf("fleet query requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.QueryFleet(ctx, filter)
+	case *DatabaseBackend:
+		return backend.QueryFleet(ctx, filter)
+	default:
+		return nil, fmt.Errorf("fleet query requires SQLite or database backend, got %T", m.storage)
 	}
-
-	return sqliteBackend.QueryFleet(ctx, filter)
 }
 
 // QueryFleet executes the fleet query against the SQLite backend.
@@ -202,11 +204,14 @@ func (b *SQLiteBackend) QueryFleet(ctx context.Context, filter *FleetFilter) (*F
 // ListAllDeviceIDs returns the device IDs of all stewards in storage.
 // Used during controller startup to warm the in-memory registry.
 func (m *Manager) ListAllDeviceIDs(ctx context.Context) ([]string, error) {
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return nil, fmt.Errorf("ListAllDeviceIDs requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.listAllDeviceIDs(ctx)
+	case *DatabaseBackend:
+		return backend.listAllDeviceIDs(ctx)
+	default:
+		return nil, fmt.Errorf("ListAllDeviceIDs requires SQLite or database backend, got %T", m.storage)
 	}
-	return sqliteBackend.listAllDeviceIDs(ctx)
 }
 
 // Ping performs a cheap O(1) round-trip to the durable store to confirm it is
@@ -215,15 +220,14 @@ func (m *Manager) ListAllDeviceIDs(ctx context.Context) ([]string, error) {
 // real-state signal a readiness probe needs (Issue #2012). Used by
 // ControllerService.StorageReady and the blue/green cutover smoketest.
 func (m *Manager) Ping(ctx context.Context) error {
-	// Mirrors the SQLite-only constraint of ListAllDeviceIDs/GetLatestByDeviceID:
-	// the OSS composite DNA backend is SQLite (DefaultConfig). A future
-	// PostgreSQL/file backend rollout must extend this to round-trip that
-	// backend, or readiness (and the cutover smoketest) will hard-fail there.
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return fmt.Errorf("Ping requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.ping(ctx)
+	case *DatabaseBackend:
+		return backend.ping(ctx)
+	default:
+		return fmt.Errorf("Ping requires SQLite or database backend, got %T", m.storage)
 	}
-	return sqliteBackend.ping(ctx)
 }
 
 // ping issues a trivial SELECT to confirm the SQLite connection is live and the
@@ -245,11 +249,14 @@ func (b *SQLiteBackend) ping(ctx context.Context) error {
 // in-memory index, which starts empty after a controller restart — so this is
 // the path LoadFromStorage must use to warm the steward registry on startup.
 func (m *Manager) GetLatestByDeviceID(ctx context.Context, deviceID string) (*DNARecord, error) {
-	sqliteBackend, ok := m.storage.(*SQLiteBackend)
-	if !ok {
-		return nil, fmt.Errorf("GetLatestByDeviceID requires SQLite backend")
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.GetLatestByDeviceID(ctx, deviceID)
+	case *DatabaseBackend:
+		return backend.GetLatestByDeviceID(ctx, deviceID)
+	default:
+		return nil, fmt.Errorf("GetLatestByDeviceID requires SQLite or database backend, got %T", m.storage)
 	}
-	return sqliteBackend.GetLatestByDeviceID(ctx, deviceID)
 }
 
 // listAllDeviceIDs queries the distinct device IDs stored in dna_history.
