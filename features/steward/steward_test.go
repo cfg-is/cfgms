@@ -317,7 +317,16 @@ func TestMonitorCloseRace(t *testing.T) {
 	// pre-existing background goroutines from other tests (e.g. DNA collector
 	// os/exec processes from TestMonitorQueueShedToPoll) so we only check
 	// for leaks from this test's steward instance.
-	goleak.VerifyNone(t, existingGoroutines)
+	//
+	// DNA background collection goroutines (bgOnce.Do in dna.Collector.Collect)
+	// use context.Background() and outlive the test. They spawn child goroutines
+	// for software/security collection AFTER goleak.IgnoreCurrent() snapshots,
+	// so those children (and their os/exec pipe goroutines) are not captured
+	// by existingGoroutines. Ignore these known-safe patterns explicitly.
+	goleak.VerifyNone(t, existingGoroutines,
+		goleak.IgnoreTopFunction("os/exec.(*Cmd).writerDescriptor.func1"),
+		goleak.IgnoreTopFunction("os/exec.(*Cmd).watchCtx"),
+	)
 }
 
 // TestMonitorDNARefreshAfterChange verifies that after an event-driven correction

@@ -128,6 +128,11 @@ type Steward struct {
 
 	// Shutdown coordination
 	shutdown chan struct{}
+
+	// healthCancel cancels the health monitor goroutine's context. Called in Stop()
+	// to guarantee the goroutine exits even if Stop() is called before
+	// HealthMonitor.Start() sets running=true (TOCTOU race on running.Load()).
+	healthCancel context.CancelFunc
 }
 
 // NewStandalone creates a new Steward instance for standalone operation.
@@ -287,10 +292,14 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 
 	// Start health monitoring in background. Tracked by s.wg so Stop() →
 	// s.wg.Wait() ensures the goroutine exits before cleanup proceeds.
+	// healthCtx is derived so Stop() can cancel it directly, covering the TOCTOU
+	// window where Stop() is called before HealthMonitor.Start() sets running=true.
+	healthCtx, healthCancel := context.WithCancel(ctx)
+	s.healthCancel = healthCancel
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.healthCheck.Start(ctx)
+		s.healthCheck.Start(healthCtx)
 	}()
 
 	// Register managed resource drift handler on the execution engine.
@@ -690,6 +699,12 @@ func (s *Steward) Stop(ctx context.Context) error {
 		// Already closed
 	default:
 		close(s.shutdown)
+	}
+
+	// Cancel the health monitor's context so its goroutine exits via ctx.Done()
+	// even if Stop() races with HealthMonitor.Start() before running is set.
+	if s.healthCancel != nil {
+		s.healthCancel()
 	}
 
 	// Stop health monitoring (blocks until goroutine exits).
