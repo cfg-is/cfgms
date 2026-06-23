@@ -208,7 +208,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 				"id", keyID,
 				"role_id", logging.SanitizeLogValue(createReq.RoleID),
 				"tenant_id", logging.SanitizeLogValue(tenantID),
-				"error", assignErr)
+				"error", logging.SanitizeLogValue(assignErr.Error()))
 			// Non-fatal: the key is usable; the role-assignment record is for audit only.
 		}
 	}
