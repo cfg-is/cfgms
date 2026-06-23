@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // WindowsHardwareCollector handles Windows-specific hardware collection.
@@ -152,7 +154,86 @@ func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attri
 	// OS version for hardware context — native registry reads (no process spawn)
 	w.collectOSVersionFromRegistry(attributes)
 
+	w.collectHyperVInfo(ctx, attributes)
+
 	return nil
+}
+
+// collectHyperVInfo records Hyper-V host-capability and guest-detection
+// attributes:
+//   - hyperv_role_installed (true/false): the Virtual Machine Management service
+//     (vmms) is registered. Read from the registry — no process spawn, no
+//     elevation.
+//   - virtualization_type / virtualization_role: guest detection from the BIOS
+//     system identity (registry, no elevation).
+//   - hyperv_enabled (true/false): the Microsoft-Hyper-V-All optional feature is
+//     enabled. Queried with DISM in argv form (no PowerShell string
+//     composition). This requires elevation; on any error the attribute is
+//     omitted (not stubbed) with a WARN, per #1950.
+//
+// VM inventory / running-VM count / VM names are deliberately NOT collected
+// (#1950): VM presence/state is observed via the hyperv module Get()/Monitor
+// path, and VM names are tenant-sensitive and must never enter DNA.
+func (w *WindowsHardwareCollector) collectHyperVInfo(ctx context.Context, attributes map[string]string) {
+	// Hyper-V role installed: the vmms service key exists. Registry read only.
+	roleInstalled := false
+	if key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SYSTEM\CurrentControlSet\Services\vmms`, registry.QUERY_VALUE); err == nil {
+		_ = key.Close()
+		roleInstalled = true
+	}
+	attributes["hyperv_role_installed"] = strconv.FormatBool(roleInstalled)
+
+	// Guest detection from the BIOS system identity (registry, no elevation).
+	virtType := "none"
+	if key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`HARDWARE\DESCRIPTION\System\BIOS`, registry.QUERY_VALUE); err == nil {
+		manufacturer, _, _ := key.GetStringValue("SystemManufacturer")
+		product, _, _ := key.GetStringValue("SystemProductName")
+		_ = key.Close()
+		combined := strings.ToLower(manufacturer + " " + product)
+		switch {
+		case strings.Contains(combined, "microsoft") && strings.Contains(combined, "virtual"):
+			virtType = "hyperv"
+		case strings.Contains(combined, "vmware"):
+			virtType = "vmware"
+		case strings.Contains(combined, "virtualbox"):
+			virtType = "virtualbox"
+		case strings.Contains(combined, "kvm"), strings.Contains(combined, "qemu"):
+			virtType = "kvm"
+		}
+	}
+	attributes["virtualization_type"] = virtType
+
+	switch {
+	case virtType != "none":
+		attributes["virtualization_role"] = "guest"
+	case roleInstalled:
+		attributes["virtualization_role"] = "host"
+	default:
+		attributes["virtualization_role"] = "baremetal"
+	}
+
+	// Hyper-V enabled: query the optional feature via DISM in argv form. Requires
+	// elevation; on any error, WARN and omit rather than emit a misleading value.
+	out, err := runCommand(ctx, "dism", "/online", "/english", "/get-featureinfo",
+		"/featurename:Microsoft-Hyper-V-All")
+	if err != nil {
+		_ = logging.Warn(ctx, "dna: could not query Hyper-V feature state via DISM (elevation may be required); omitting hyperv_enabled", nil)
+		return
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "State :") {
+			state := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "State :")))
+			// DISM reports "Enabled", "Disabled", or transitional
+			// "Enable Pending" / "Disable Pending".
+			attributes["hyperv_enabled"] = strconv.FormatBool(strings.HasPrefix(state, "enable"))
+			return
+		}
+	}
+	// Feature info returned but no State line — treat as undeterminable.
+	_ = logging.Warn(ctx, "dna: DISM returned no State for Microsoft-Hyper-V-All; omitting hyperv_enabled", nil)
 }
 
 // parseWMICPUOutput parses WMI CPU output
