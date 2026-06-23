@@ -17,10 +17,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
+
+// agentDevAPIPermissions is the API-key permission set for the agent.dev role.
+// Corresponds to the RBAC permissions in features/rbac/defaults.go: steward.read,
+// config.read, module.read, tenant.read, and config.validate. No write or admin perms.
+var agentDevAPIPermissions = []string{
+	"steward:read",
+	"steward:list",
+	"steward:read-config",
+	"steward:read-modules",
+	"steward:validate-config",
+	"config:list",
+	"config:list-deployments",
+	"tenant:read",
+}
 
 // handleListAPIKeys handles GET /api/v1/api-keys
 // M-AUTH-1: List API keys from central secret store, filtered to the authenticated tenant
@@ -66,6 +82,24 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if createReq.Name == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "API key name is required", "MISSING_NAME")
 		return
+	}
+
+	// RoleID takes precedence: resolve permissions from the named role.
+	// Only agent.dev is supported in this release; future roles extend this map.
+	if createReq.RoleID != "" {
+		switch createReq.RoleID {
+		case "agent.dev":
+			if len(createReq.Permissions) > 0 {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Cannot specify both role_id and permissions", "CONFLICTING_FIELDS")
+				return
+			}
+			createReq.Permissions = agentDevAPIPermissions
+		default:
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"Unknown role_id: "+createReq.RoleID, "UNKNOWN_ROLE")
+			return
+		}
 	}
 
 	// C1: Validate permissions against the known allow-list. "*" and unknown IDs are rejected.
@@ -155,6 +189,28 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			TenantID:    tenantID,
 		},
 		Key: keyString,
+	}
+
+	// Bind the API key to the requested role via RBAC role assignment so that
+	// the role association is recorded for auditing and management queries.
+	if createReq.RoleID != "" && s.rbacManager != nil {
+		ctx := rbac.WithSensitiveOperationJustification(r.Context(),
+			"api-key creation: binding key "+keyID+" to role "+createReq.RoleID+" in tenant "+tenantID)
+		assignErr := s.rbacManager.AssignRole(ctx, &common.RoleAssignment{
+			Id:         uuid.New().String(),
+			SubjectId:  keyID,
+			RoleId:     createReq.RoleID,
+			TenantId:   tenantID,
+			AssignedBy: "api-admin",
+		})
+		if assignErr != nil {
+			s.logger.Warn("Failed to record RBAC role assignment for API key",
+				"id", keyID,
+				"role_id", logging.SanitizeLogValue(createReq.RoleID),
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", assignErr)
+			// Non-fatal: the key is usable; the role-assignment record is for audit only.
+		}
 	}
 
 	s.logger.Info("Created new API key",

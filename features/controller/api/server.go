@@ -33,6 +33,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -110,9 +111,10 @@ type Server struct {
 	refreshPolicyStore             business.RefreshPolicyStore       // Issue #2096: per-tenant refresh policy
 	nonceCache                     *cache.Cache                      // Issue #2096: in-memory nonce store (TTL 65s)
 	popVerifier                    PoPVerifier                       // Issue #2096: injectable for revoked-before-PoP testing
-	stopCleanup                    chan struct{}                     // signals startAPIKeyCleanup to exit
-	cleanupDone                    chan struct{}                     // closed when cleanup goroutine exits
-	closeOnce                      sync.Once                         // idempotent Close
+	isolationEngine                *tenantsecurity.TenantIsolationEngine // Issue #2123: tenant isolation enforcement for scoped API keys
+	stopCleanup                    chan struct{}                          // signals startAPIKeyCleanup to exit
+	cleanupDone                    chan struct{}                          // closed when cleanup goroutine exits
+	closeOnce                      sync.Once                             // idempotent Close
 }
 
 // APIKey represents an API key for external authentication
@@ -958,6 +960,16 @@ func (s *Server) SetPoPVerifier(v PoPVerifier) {
 	if v != nil {
 		s.popVerifier = v
 	}
+}
+
+// SetIsolationEngine wires the tenant isolation engine used by requirePermission
+// to enforce tenant-scoped API-key isolation (Issue #2123). When nil (default),
+// isolation checks are skipped — only set in deployments that require tenant
+// boundary enforcement for agent credentials.
+func (s *Server) SetIsolationEngine(engine *tenantsecurity.TenantIsolationEngine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.isolationEngine = engine
 }
 
 // SetSigningRotationService wires the signing rotation service for the

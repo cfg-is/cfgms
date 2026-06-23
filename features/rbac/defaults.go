@@ -272,6 +272,20 @@ var DefaultRoles = []*common.Role{
 		IsSystemRole: true,
 		TenantId:     "", // System-wide role
 	},
+	{
+		Id:          "agent.dev",
+		Name:        "Agent Developer",
+		Description: "Least-privilege read-only role for dev agent containers bound to agent-test sub-tenants; includes config.validate but no write or admin permissions",
+		PermissionIds: []string{
+			"steward.read",
+			"config.read",
+			"module.read",
+			"tenant.read",
+			"config.validate",
+		},
+		IsSystemRole: true,
+		TenantId:     "", // System-wide; assignment is scoped to a tenant via RoleAssignment.TenantId
+	},
 
 	// Tenant Roles (will be created per tenant)
 	{

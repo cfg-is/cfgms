@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -30,6 +31,10 @@ const (
 	apiKeyContextKey       contextKey = "api_key"
 	authDecisionContextKey contextKey = "auth_decision"
 	principalContextKey    contextKey = "principal"
+	// targetTenantContextKey carries the explicitly requested target tenant for the
+	// isolation check. Set by test helpers or upstream middleware; takes precedence
+	// over URL-derived tenant. Empty means same-tenant (no cross-tenant check).
+	targetTenantContextKey contextKey = "target_tenant"
 )
 
 // Principal represents an authenticated entity — either an mTLS admin cert or an API key.
@@ -446,6 +451,40 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
+			// Tenant isolation check for scoped (non-admin) API-key principals.
+			// Admin principals (TenantID == "") skip this check entirely.
+			s.mu.RLock()
+			engine := s.isolationEngine
+			s.mu.RUnlock()
+			if engine != nil && !principal.IsAdmin && principal.TenantID != "" {
+				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
+				if targetTenant != "" && targetTenant != principal.TenantID {
+					isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
+						SubjectID:       principal.ID,
+						SubjectTenantID: principal.TenantID,
+						TargetTenantID:  targetTenant,
+						ResourceID:      resource,
+						AccessLevel:     tenantsecurity.CrossTenantLevelRead,
+					})
+					if isoErr != nil || isoResp == nil || !isoResp.Granted {
+						isoDecision := &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Cross-tenant access denied by isolation engine",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						}
+						s.auditAuthorizationDecision(r, isoDecision)
+						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+						return
+					}
+				}
+			}
+
 			// Principal has required permission — grant access.
 			reason := "API key has required permission: " + permissionID
 			if principal.IsAdmin {
@@ -651,4 +690,27 @@ func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 		}
 	}
 	return false
+}
+
+// extractTargetTenantFromRequest returns the tenant being targeted by this request,
+// used by the isolation engine to detect cross-tenant access. Resolution order:
+//  1. targetTenantContextKey in context (set by tests or upstream middleware).
+//  2. URL path variable "tenant_id".
+//  3. URL path variable "id" when resourceType == "tenant".
+//
+// Returns "" when no explicit target tenant is present (caller treats as same-tenant).
+func (s *Server) extractTargetTenantFromRequest(r *http.Request, resourceType string) string {
+	if t, ok := r.Context().Value(targetTenantContextKey).(string); ok && t != "" {
+		return t
+	}
+	vars := mux.Vars(r)
+	if t := vars["tenant_id"]; t != "" {
+		return t
+	}
+	if resourceType == "tenant" {
+		if t := vars["id"]; t != "" {
+			return t
+		}
+	}
+	return ""
 }

@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -205,4 +207,99 @@ func TestHandleCreateAPIKey_AcceptsKnownPermissions(t *testing.T) {
 	rec := callHandleCreateAPIKey(server, body, "default")
 
 	assert.Equal(t, http.StatusCreated, rec.Code, "known permissions must be accepted")
+}
+
+// TestHandleCreateAPIKey_RoleID_ConflictsWithPermissions verifies that supplying both
+// role_id and permissions in the same request is rejected with 400 CONFLICTING_FIELDS.
+func TestHandleCreateAPIKey_RoleID_ConflictsWithPermissions(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := []byte(`{"name":"conflict-key","role_id":"agent.dev","permissions":["steward:read"]}`)
+	rec := callHandleCreateAPIKey(server, body, "agent-test/1")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CONFLICTING_FIELDS")
+}
+
+// TestHandleCreateAPIKey_RoleID_UnknownRole verifies that an unrecognized role_id
+// is rejected with 400 UNKNOWN_ROLE.
+func TestHandleCreateAPIKey_RoleID_UnknownRole(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := []byte(`{"name":"bad-role-key","role_id":"does-not-exist"}`)
+	rec := callHandleCreateAPIKey(server, body, "agent-test/1")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "UNKNOWN_ROLE")
+}
+
+// TestHandleCreateAPIKey_AgentDevRole_SetsCorrectPermissions verifies that role_id="agent.dev"
+// resolves to exactly the agentDevAPIPermissions set and creates the key successfully.
+func TestHandleCreateAPIKey_AgentDevRole_SetsCorrectPermissions(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := []byte(`{"name":"agent-dev-key","role_id":"agent.dev","tenant_id":"agent-test/1"}`)
+	rec := callHandleCreateAPIKey(server, body, "agent-test/1")
+
+	require.Equal(t, http.StatusCreated, rec.Code, "agent.dev role_id must create key successfully")
+
+	// Response is wrapped in APIResponse{Data: APIKeyCreateResult, Timestamp}.
+	// Decode via the JSON map to avoid re-serializing the nested struct.
+	var outer struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &outer))
+
+	raw, ok := outer.Data["permissions"].([]interface{})
+	require.True(t, ok, "permissions must be a JSON array in response data")
+
+	got := make([]string, len(raw))
+	for i, v := range raw {
+		s, ok := v.(string)
+		require.True(t, ok, "each permission must be a string")
+		got[i] = s
+	}
+	want := make([]string, len(agentDevAPIPermissions))
+	copy(want, agentDevAPIPermissions)
+	sort.Strings(got)
+	sort.Strings(want)
+	assert.Equal(t, want, got, "agent.dev key must carry exactly the agentDevAPIPermissions set")
+	assert.Equal(t, "agent-test/1", outer.Data["tenant_id"])
+	assert.NotEmpty(t, outer.Data["key"], "plaintext key must be returned on creation")
+}
+
+// TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200 covers the pre-existing error path
+// at handlers_apikeys.go:300-304: a key injected only into memory (never persisted to the
+// secret store) triggers a DeleteSecret failure, but the handler returns 200 because the
+// in-memory entry is already removed.
+func TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Inject a key directly into memory, bypassing the secret store, so that
+	// the subsequent DeleteSecret call returns "secret not found".
+	key := &APIKey{
+		ID:          "memory-only-key-id",
+		Key:         "memory-only-key-secret",
+		Name:        "Memory-Only Key",
+		Permissions: []string{"steward:read"},
+		CreatedAt:   time.Now().UTC(),
+		TenantID:    "agent-test/1",
+	}
+	injectAPIKey(server, key)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/memory-only-key-id", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "memory-only-key-id"})
+	rec := httptest.NewRecorder()
+	server.handleDeleteAPIKey(rec, req)
+
+	// The handler must return 200: memory was cleared even though secret-store deletion failed.
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "deleted")
+
+	// Confirm key is no longer in the in-memory cache.
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	for _, k := range server.apiKeys {
+		assert.NotEqual(t, "memory-only-key-id", k.ID, "key must be removed from memory even when secret store deletion fails")
+	}
 }
