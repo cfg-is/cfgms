@@ -144,6 +144,20 @@ func ValidateAndCleanPath(basePath, userPath string) (string, error) {
 		absUserPath = filepath.Join(rawAbsBasePath, cleanUserPath)
 	}
 
+	// Preliminary containment check in raw (pre-symlink-resolution) form, BEFORE
+	// touching the filesystem. If the path is already outside the base, it is a
+	// traversal attempt — reject it now rather than calling EvalSymlinks on a path
+	// outside the sandbox. This both (a) avoids touching out-of-base files at all,
+	// and (b) ensures an out-of-base path that exists but is inaccessible (e.g. an
+	// ACL-protected file on Windows such as C:\Windows\System32\config\sam) is
+	// reported as a traversal attempt instead of an incidental "permission denied"
+	// from EvalSymlinks (#2120). A symlink inside the base that escapes is still
+	// caught by the final containmentCheck after resolution below.
+	if rawRel, rawRelErr := filepath.Rel(rawAbsBasePath, absUserPath); rawRelErr != nil ||
+		strings.HasPrefix(rawRel, "..") || filepath.IsAbs(rawRel) {
+		return "", fmt.Errorf("path traversal attempt detected: %s is outside %s", userPath, absBasePath)
+	}
+
 	// Resolve symlinks in the user path, with fallback for non-existent targets.
 	// This must happen before the final containment check so both paths are canonical.
 	resolved, resolveErr := filepath.EvalSymlinks(absUserPath)
