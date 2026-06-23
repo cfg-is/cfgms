@@ -81,7 +81,29 @@ const (
 	// psBootKeypress drives the VM keyboard after power-on to satisfy the Windows
 	// install media's "Press any key to boot from CD or DVD" prompt.
 	psBootKeypress = `Cfgms-BootKeypress`
+
+	// ── cloud-init (Linux VM-from-cloud-image) path (ADR-009 §6) ─────────────
+	//
+	// psPrepCloudBootDisk prepares the VM's boot disk from a cloud image: a raw
+	// image is wrapped with a fixed-VHD footer and converted to a dynamic VHDX (a
+	// .vhdx image is copied as-is), optionally resized. Host-native — no qemu-img,
+	// no xorriso, no WSL. The cloud image's signed bootloader is never modified.
+	psPrepCloudBootDisk = `Cfgms-PrepCloudBootDisk`
+
+	// psCreateVMFromDisk creates a VM that boots an EXISTING prepared disk
+	// (New-VM -VHDPath), used by the cloud-init path where the boot disk is the
+	// converted cloud image rather than a freshly-created empty VHD.
+	psCreateVMFromDisk = `Cfgms-CreateVMFromDisk`
+
+	// psSetHddFirstBoot makes the OS hard disk (matched by path) the Gen2
+	// firmware's first boot device, so a cloud-init VM boots the cloud image
+	// rather than the attached CIDATA seed disk.
+	psSetHddFirstBoot = `Cfgms-SetHddFirstBoot`
 )
+
+// gibibyte is 1024^3, used to convert source.resize_gb into a byte count for the
+// cloud boot-disk resize (0 means "leave at native size").
+const gibibyte = int64(1) << 30
 
 // secureBootTemplate returns the Gen2 secure-boot firmware template for the
 // given os_family. Windows guests use the Microsoft Windows template; Linux
@@ -126,7 +148,7 @@ func seedAnswerFilePlaceholder(osFamily string) string {
 func (m *hypervModule) resolveProfile(ctx context.Context, src *SourceConfig) (*UnattendProfile, error) {
 	switch src.OSFamily {
 	case "linux":
-		return m.resolveLinuxProfile(ctx, src.Unattend)
+		return m.resolveLinuxProfile(ctx, src)
 	case "windows":
 		return m.resolveWindowsProfile(ctx, src.Unattend)
 	default:
@@ -340,6 +362,22 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
 	}
 
+	// cloud-init (Linux VM-from-cloud-image): the boot disk (already prepared
+	// from the cloud image by createVM) carries its own OS + cloud-init. There is
+	// NO installer and NO install ISO — enrollment rides a NoCloud CIDATA seed
+	// VHDX (user-data + meta-data + steward + CA) that cloud-init auto-detects on
+	// first boot. Build + attach that seed, make the OS disk the first boot
+	// device, and we're done (no DVD, no keypress).
+	if cfg.Source.isCloudInit() {
+		if err := m.provisionCloudInit(ctx, vmName, hostName, cfg, record, generation); err != nil {
+			return err
+		}
+		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			return m.failProvision(ctx, vmName, record, err)
+		}
+		return m.advanceProvision(ctx, vmName, record, ProvisionStateInstalling)
+	}
+
 	// Render the unattended answer file (os_family dispatch): linux → preseed
 	// (#2046), windows → autounattend.xml (#2047). The per-VM CorrelationID is
 	// baked in so the controller-side reconciler (#2050) can match the registered
@@ -467,16 +505,117 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateInstalling)
 }
 
+// cloudInitMetaData returns the minimal NoCloud meta-data document for a VM.
+// instance-id is unique per VM (cloud-init only re-runs when it changes);
+// local-hostname is set to the CorrelationID so the booted guest's hostname
+// matches the provisioning record the controller-side reconciler keys on.
+func cloudInitMetaData(vmName, correlationID string) string {
+	host := correlationID
+	if host == "" {
+		host = vmName
+	}
+	return "instance-id: " + vmName + "\nlocal-hostname: " + host + "\n"
+}
+
+// provisionCloudInit performs the cloud-init media setup for a Linux
+// VM-from-cloud-image: render user-data, build the NoCloud CIDATA seed VHDX
+// (user-data + meta-data + steward binary + controller CA), attach it as a data
+// disk, and make the OS disk the Gen2 first boot device. The boot disk itself was
+// already prepared from the cloud image by createVM. No install ISO, no keypress
+// — cloud-init auto-detects the CIDATA seed on first boot. The caller powers the
+// VM on and advances the record to installing.
+func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName string, cfg *VMConfig, record *ProvisionRecord, generation int) error {
+	// Render the cloud-init user-data (resolves the built-in or operator
+	// cloud-init profile). CorrelationID is baked in for controller-side matching.
+	userData, renderErr := m.renderSeedAnswerFile(ctx, vmName, cfg.Source, record.CorrelationID)
+	if renderErr != nil {
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: render cloud-init user-data for VM %q: %w", vmName, renderErr))
+	}
+	metaData := cloudInitMetaData(vmName, record.CorrelationID)
+
+	// Build the NoCloud seed: a FAT32 volume labelled CIDATA carrying user-data,
+	// meta-data, the linux steward binary (dest name cfgms-steward) and the
+	// controller CA. Reuses the seed-VHDX machinery (#2044) via the Label /
+	// FileName2 / StewardDest parameters. The seed MUST be on a local (non-CSV)
+	// path — Mount-VHD against a CSV-resident VHDX hangs (seed_dir handles this).
+	seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
+	if err := validateSeedPath(seedPath); err != nil {
+		return m.failProvision(ctx, vmName, record, err)
+	}
+	if _, psErr := m.transport.ExecutePS(ctx, psNewSeedVHD, map[string]string{
+		"Path":      seedPath,
+		"SizeBytes": "268435456",
+	}); psErr != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, psErr)
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: create CIDATA seed VHDX for VM %q: %w", vmName, psErr))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, nil)
+	if _, psErr := m.transport.ExecutePS(ctx, psMountSeedVHD, map[string]string{
+		"Path":  seedPath,
+		"Label": cidataVolumeLabel,
+	}); psErr != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, psErr)
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: format CIDATA seed VHDX for VM %q: %w", vmName, psErr))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
+	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
+		"SeedPath":    seedPath,
+		"Label":       cidataVolumeLabel,
+		"FileName":    "user-data",
+		"Content":     userData,
+		"FileName2":   "meta-data",
+		"Content2":    metaData,
+		"StewardSrc":  m.enrollStewardPath,
+		"StewardDest": "cfgms-steward",
+		"CASrc":       m.enrollCAPath,
+	}); psErr != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write cloud-init seed for VM %q: %w", vmName, psErr))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, nil)
+	if _, psErr := m.transport.ExecutePS(ctx, psAttachSeedDisk, map[string]string{
+		"Name":     hostName,
+		"SeedPath": seedPath,
+	}); psErr != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, psErr)
+		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach CIDATA seed to VM %q: %w", vmName, psErr))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, nil)
+
+	// Make the OS disk (the converted cloud image) the first boot device so the
+	// VM boots the cloud image rather than the attached CIDATA seed. Gen1 uses
+	// BIOS startup order and is skipped.
+	if generation == 2 {
+		if _, psErr := m.transport.ExecutePS(ctx, psSetHddFirstBoot, map[string]string{
+			"Name":    hostName,
+			"VHDPath": cfg.VHDPath,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, psErr)
+			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: set OS-disk first boot for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
+	}
+	return nil
+}
+
+// cidataVolumeLabel is the NoCloud seed volume label cloud-init auto-detects.
+const cidataVolumeLabel = "CIDATA"
+
 // resolveLinuxProfile returns the UnattendProfile for a Linux VM source. When
 // the source references a profile (profile://<name>) it is loaded from the
-// profile store; when no reference is given the built-in Debian 12 profile is
-// used so a minimal Linux source ("iso" + "os_family: linux") provisions
-// without operator-authored config (ADR-009 §6/§7).
-func (m *hypervModule) resolveLinuxProfile(ctx context.Context, unattendRef string) (*UnattendProfile, error) {
-	if unattendRef == "" {
+// profile store; when no reference is given the built-in profile is used so a
+// minimal Linux source provisions without operator-authored config: cloud-init
+// for a cloud image (source.image), preseed for a netinst ISO (ADR-009 §6/§7).
+func (m *hypervModule) resolveLinuxProfile(ctx context.Context, src *SourceConfig) (*UnattendProfile, error) {
+	if src.Unattend == "" {
+		// No operator profile: choose the built-in by media kind. A cloud image
+		// (source.image) → cloud-init user-data; a netinst ISO → preseed (legacy).
+		if src.isCloudInit() {
+			return defaultLinuxCloudInitProfile(), nil
+		}
 		return defaultLinuxProfile(), nil
 	}
-	name, err := parseProfileName(unattendRef)
+	name, err := parseProfileName(src.Unattend)
 	if err != nil {
 		return nil, err
 	}

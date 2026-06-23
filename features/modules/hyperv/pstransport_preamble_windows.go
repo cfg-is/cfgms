@@ -105,6 +105,25 @@ function Cfgms-CreateVM {
     }
 }
 
+# Cfgms-CreateVMFromDisk creates a VM that boots an EXISTING prepared disk
+# (New-VM -VHDPath), used by the cloud-init path where the boot disk is the
+# converted cloud image (Cfgms-PrepCloudBootDisk) rather than a fresh empty VHD.
+# Mirrors Cfgms-CreateVM except -VHDPath (attach existing) replaces -NewVHDPath.
+function Cfgms-CreateVMFromDisk {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][int]$MemoryMB,
+        [Parameter(Mandatory)][int]$CPU,
+        [Parameter(Mandatory)][string]$VHDPath,
+        [Parameter(Mandatory)][string]$SwitchName,
+        [Parameter(Mandatory)][int]$Generation
+    )
+    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -VHDPath $VHDPath -SwitchName $SwitchName -Generation $Generation | Out-Null
+    if ($CPU -ne 1) {
+        Set-VMProcessor -VMName $Name -Count $CPU
+    }
+}
+
 # Cfgms-RemoveVM mirrors psRemoveVM in vm.go: Hyper-V refuses to remove a VM
 # that is not Off ("the operation cannot be performed while the object is in
 # its current state"), and a running VM also keeps any connected vSwitch "in
@@ -178,14 +197,15 @@ function Cfgms-NewSeedVHD {
 }
 
 # Cfgms-MountSeedVHD mounts the seed VHDX, lays down a single FAT32 volume
-# labelled CFGMS_SEED, then DISMOUNTS (so the later copy step can re-mount; a
-# left-mounted VHD causes a 0x80070020 sharing violation on the next Mount-VHD).
+# (label $Label, default CFGMS_SEED — the cloud-init path passes CIDATA), then
+# DISMOUNTS (so the later copy step can re-mount; a left-mounted VHD causes a
+# 0x80070020 sharing violation on the next Mount-VHD).
 function Cfgms-MountSeedVHD {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [string]$Label = 'CFGMS_SEED')
     Mount-VHD -Path $Path -Passthru |
         Initialize-Disk -PartitionStyle MBR -PassThru |
         New-Partition -UseMaximumSize -AssignDriveLetter |
-        Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null
+        Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Label -Confirm:$false | Out-Null
     Cfgms-DismountAndVerify -Path $Path
 }
 
@@ -207,24 +227,32 @@ function Cfgms-DismountAndVerify {
     }
 }
 
-# Cfgms-CopyToSeedVHD re-mounts the formatted seed, writes $Content to
-# <drive>:\$FileName, optionally stages the steward binary ($StewardSrc →
-# cfgms-steward.exe) and controller CA ($CASrc → controller-ca.crt) so a Windows
-# guest can self-install + enroll offline (ADR-010), then dismounts.
+# Cfgms-CopyToSeedVHD re-mounts the formatted seed (matched by label $Label,
+# default CFGMS_SEED), writes $Content to <drive>:\$FileName and — when supplied —
+# a second file $Content2 to <drive>:\$FileName2 (the cloud-init path writes both
+# user-data and meta-data). It optionally stages the steward binary ($StewardSrc →
+# $StewardDest, default cfgms-steward.exe; the linux cloud-init path passes
+# cfgms-steward) and the controller CA ($CASrc → controller-ca.crt) so the guest
+# can self-install + enroll offline (ADR-010), then dismounts.
 function Cfgms-CopyToSeedVHD {
     param(
         [Parameter(Mandatory)][string]$SeedPath,
         [Parameter(Mandatory)][string]$FileName,
         [Parameter(Mandatory)][string]$Content,
+        [string]$Label = 'CFGMS_SEED',
+        [string]$FileName2 = '',
+        [string]$Content2 = '',
         [string]$StewardSrc = '',
+        [string]$StewardDest = 'cfgms-steward.exe',
         [string]$CASrc = ''
     )
     $disk = Mount-VHD -Path $SeedPath -Passthru
     $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
-        Where-Object { $_.FileSystemLabel -eq 'CFGMS_SEED' } |
+        Where-Object { $_.FileSystemLabel -eq $Label } |
         Select-Object -First 1).DriveLetter
     Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
-    if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\cfgms-steward.exe') -Force }
+    if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
+    if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
     if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
     Cfgms-DismountAndVerify -Path $SeedPath
 }
@@ -271,6 +299,110 @@ function Cfgms-SetDVDFirstBoot {
     if ($ISOPath) { $dvd = Get-VMDvdDrive -VMName $Name | Where-Object { $_.Path -eq $ISOPath } | Select-Object -First 1 }
     if (-not $dvd) { $dvd = Get-VMDvdDrive -VMName $Name | Select-Object -First 1 }
     Set-VMFirmware -VMName $Name -FirstBootDevice $dvd
+}
+
+# ── cloud-init (Linux VM-from-cloud-image) ─────────────────────────────
+# Host-native cloud-image → VHDX conversion: no qemu-img, no xorriso, no WSL. A
+# raw cloud image is wrapped with a fixed-VHD footer (Cfgms-VhdFixedFooter) so
+# Convert-VHD can read it, then converted to a dynamic VHDX; a .vhd/.vhdx image is
+# converted/copied directly. The cloud image's signed bootloader is never modified
+# (Secure Boot stays intact). Dispatched via runFresh (Convert-VHD is heavy I/O).
+
+# Cfgms-VhdFixedFooter returns the 512-byte Microsoft fixed-VHD footer for a disk
+# image of $Size bytes (a multiple of 512). All multi-byte fields are big-endian;
+# disk geometry (CHS) follows the VHD spec; the checksum is the ones-complement of
+# the byte sum (with the checksum field zeroed). Appending it to a raw image
+# produces a valid fixed VHD.
+function Cfgms-VhdFixedFooter {
+    param([Parameter(Mandatory)][long]$Size)
+    function _BE { param([uint64]$v, [int]$width)
+        $b = New-Object byte[] $width
+        for ($i = 0; $i -lt $width; $i++) { $b[$width - 1 - $i] = [byte](($v -shr ($i * 8)) -band 0xFF) }
+        return ,$b
+    }
+    $f = New-Object byte[] 512
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('conectix'), 0, $f, 0, 8)
+    [Array]::Copy((_BE 2 4), 0, $f, 8, 4)                         # features
+    [Array]::Copy((_BE 0x00010000 4), 0, $f, 12, 4)              # file format version
+    [Array]::Copy((_BE ([uint64]::MaxValue) 8), 0, $f, 16, 8)    # data offset (fixed = all-ones)
+    $tstamp = [uint32]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 946684800)
+    [Array]::Copy((_BE $tstamp 4), 0, $f, 24, 4)                 # timestamp (since 2000-01-01)
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('cfgm'), 0, $f, 28, 4)   # creator application
+    [Array]::Copy((_BE 0x00010000 4), 0, $f, 32, 4)             # creator version
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes('Wi2k'), 0, $f, 36, 4)   # creator host OS (Windows)
+    [Array]::Copy((_BE ([uint64]$Size) 8), 0, $f, 40, 8)        # original size
+    [Array]::Copy((_BE ([uint64]$Size) 8), 0, $f, 48, 8)        # current size
+    # CHS geometry (VHD spec appendix).
+    $tsec = [int64]($Size / 512)
+    $maxS = [int64]65535 * 16 * 255
+    if ($tsec -gt $maxS) { $tsec = $maxS }
+    if ($tsec -ge ([int64]65535 * 16 * 63)) {
+        $spt = 255; $heads = 16; $cth = [int64]($tsec / $spt)
+    } else {
+        $spt = 17; $cth = [int64]($tsec / $spt)
+        $heads = [int64](($cth + 1023) / 1024)
+        if ($heads -lt 4) { $heads = 4 }
+        if (($cth -ge ($heads * 1024)) -or ($heads -gt 16)) { $spt = 31; $heads = 16; $cth = [int64]($tsec / $spt) }
+        if ($cth -ge ($heads * 1024)) { $spt = 63; $heads = 16; $cth = [int64]($tsec / $spt) }
+    }
+    $cyl = [int64]($cth / $heads)
+    $f[56] = [byte](($cyl -shr 8) -band 0xFF); $f[57] = [byte]($cyl -band 0xFF)
+    $f[58] = [byte]$heads; $f[59] = [byte]$spt
+    [Array]::Copy((_BE 2 4), 0, $f, 60, 4)                       # disk type = fixed
+    [Array]::Copy(([guid]::NewGuid().ToByteArray()), 0, $f, 68, 16)  # unique id
+    $sum = [uint64]0
+    foreach ($b in $f) { $sum += $b }
+    # Ones-complement of the 32-bit byte sum. Use an explicit [uint64] mask: the
+    # bare hex literal 0xFFFFFFFF parses as Int32 (-1) in PowerShell, which would
+    # make the subtraction negative and fail the [uint32] cast.
+    $mask = [uint64]4294967295
+    $cks = [uint32]($mask - ($sum -band $mask))
+    [Array]::Copy((_BE ([uint64]$cks) 4), 0, $f, 64, 4)         # checksum
+    return ,$f
+}
+
+# Cfgms-PrepCloudBootDisk prepares the VM boot disk from a cloud image. A .vhdx is
+# copied as-is; a .vhd is converted; any other extension is treated as a raw image
+# (footer-wrapped → fixed VHD → dynamic VHDX). Optionally resized larger
+# ($ResizeBytes > 0; cloud-init growpart expands the rootfs on first boot).
+function Cfgms-PrepCloudBootDisk {
+    param(
+        [Parameter(Mandatory)][string]$ImagePath,
+        [Parameter(Mandatory)][string]$VhdPath,
+        [long]$ResizeBytes = 0
+    )
+    New-Item -ItemType Directory -Force -Path (Split-Path -Path $VhdPath -Parent) | Out-Null
+    if (Test-Path -LiteralPath $VhdPath) { Remove-Item -LiteralPath $VhdPath -Force }
+    $ext = [IO.Path]::GetExtension($ImagePath).ToLowerInvariant()
+    if ($ext -eq '.vhdx') {
+        Copy-Item -LiteralPath $ImagePath -Destination $VhdPath -Force
+    } elseif ($ext -eq '.vhd') {
+        Convert-VHD -Path $ImagePath -DestinationPath $VhdPath -VHDType Dynamic
+    } else {
+        $parent = Split-Path -Path $VhdPath -Parent
+        $tmpVhd = Join-Path $parent ([IO.Path]::GetFileNameWithoutExtension($VhdPath) + '.fixed.vhd')
+        if (Test-Path -LiteralPath $tmpVhd) { Remove-Item -LiteralPath $tmpVhd -Force }
+        Copy-Item -LiteralPath $ImagePath -Destination $tmpVhd -Force
+        $size = (Get-Item -LiteralPath $tmpVhd).Length
+        if (($size % 512) -ne 0) { throw ('cloud image size not a multiple of 512: ' + $size) }
+        $footer = Cfgms-VhdFixedFooter -Size $size
+        $fsAppend = [IO.File]::Open($tmpVhd, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+        try { $fsAppend.Write($footer, 0, 512) } finally { $fsAppend.Dispose() }
+        Convert-VHD -Path $tmpVhd -DestinationPath $VhdPath -VHDType Dynamic
+        Remove-Item -LiteralPath $tmpVhd -Force -ErrorAction SilentlyContinue
+    }
+    if ($ResizeBytes -gt 0) { Resize-VHD -Path $VhdPath -SizeBytes $ResizeBytes }
+}
+
+# Cfgms-SetHddFirstBoot makes the OS hard disk (matched by $VHDPath) the Gen2
+# firmware's first boot device, so a cloud-init VM boots the cloud image rather
+# than the attached CIDATA seed disk. Dispatched via runFresh (Set-VMFirmware
+# -FirstBootDevice referencing a disk deadlocks in the persistent host).
+function Cfgms-SetHddFirstBoot {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$VHDPath)
+    $hdd = Get-VMHardDiskDrive -VMName $Name | Where-Object { $_.Path -eq $VHDPath } | Select-Object -First 1
+    if (-not $hdd) { $hdd = Get-VMHardDiskDrive -VMName $Name | Select-Object -First 1 }
+    Set-VMFirmware -VMName $Name -FirstBootDevice $hdd
 }
 
 # Cfgms-BuildAnswerIso builds a small ISO ($IsoPath) carrying the rendered

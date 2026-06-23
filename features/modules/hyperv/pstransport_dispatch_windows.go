@@ -71,12 +71,22 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 			"Cfgms-NewSeedVHD -Path "+quoteArg(psArgs, "Path")+
 				" -SizeBytes "+intArg(psArgs, "SizeBytes"))
 	case psMountSeedVHD:
-		return t.runFresh(ctx, "Cfgms-MountSeedVHD -Path "+quoteArg(psArgs, "Path"))
+		// -Label is optional: omitted for the legacy CFGMS_SEED path (PS default),
+		// passed as CIDATA for the cloud-init NoCloud seed.
+		return t.runFresh(ctx, "Cfgms-MountSeedVHD -Path "+quoteArg(psArgs, "Path")+
+			optArg(psArgs, "Label", "Label"))
 	case psCopyToSeedVHD:
+		// -Label / -FileName2 / -Content2 / -StewardDest are optional: absent for
+		// the legacy single-file CFGMS_SEED path (PS defaults), present for the
+		// cloud-init CIDATA seed (user-data + meta-data + cfgms-steward).
 		return t.runFresh(ctx,
 			"Cfgms-CopyToSeedVHD -SeedPath "+quoteArg(psArgs, "SeedPath")+
 				" -FileName "+quoteArg(psArgs, "FileName")+
 				" -Content "+quoteArg(psArgs, "Content")+
+				optArg(psArgs, "Label", "Label")+
+				optArg(psArgs, "FileName2", "FileName2")+
+				optArg(psArgs, "Content2", "Content2")+
+				optArg(psArgs, "StewardDest", "StewardDest")+
 				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
 				" -CASrc "+quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
@@ -113,6 +123,29 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 	case psBootKeypress:
 		// runFresh: blocks ~40s driving the VM keyboard.
 		return t.runFresh(ctx, "Cfgms-BootKeypress -Name "+quoteArg(psArgs, "Name"))
+
+	// ── cloud-init (Linux VM-from-cloud-image) ───────────────────────
+	case psPrepCloudBootDisk:
+		// runFresh: Convert-VHD is heavy file I/O.
+		return t.runFresh(ctx,
+			"Cfgms-PrepCloudBootDisk -ImagePath "+quoteArg(psArgs, "ImagePath")+
+				" -VhdPath "+quoteArg(psArgs, "VhdPath")+
+				" -ResizeBytes "+intArg(psArgs, "ResizeBytes"))
+	case psCreateVMFromDisk:
+		// Persistent host (like Cfgms-CreateVM): New-VM does not mount the disk.
+		return t.run(ctx,
+			"Cfgms-CreateVMFromDisk -Name "+quoteArg(psArgs, "Name")+
+				" -MemoryMB "+intArg(psArgs, "MemoryMB")+
+				" -CPU "+intArg(psArgs, "CPU")+
+				" -VHDPath "+quoteArg(psArgs, "VHDPath")+
+				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
+				" -Generation "+intArg(psArgs, "Generation"))
+	case psSetHddFirstBoot:
+		// runFresh: Set-VMFirmware -FirstBootDevice referencing a disk deadlocks
+		// in the persistent host (same as Cfgms-SetDVDFirstBoot).
+		return t.runFresh(ctx,
+			"Cfgms-SetHddFirstBoot -Name "+quoteArg(psArgs, "Name")+
+				" -VHDPath "+quoteArg(psArgs, "VHDPath"))
 
 	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
 	case psConnectVMNic:
@@ -162,6 +195,18 @@ func (t *psHostTransport) dispatchCreateVSwitchExternal(ctx context.Context, psC
 // const-based call sites already validate the inputs.
 func quoteArg(psArgs map[string]string, key string) string {
 	return quoteForPS(psArgs[key])
+}
+
+// optArg renders an OPTIONAL named parameter: when psArgs[key] is non-empty it
+// returns " -<paramName> '<quoted value>'", otherwise the empty string so the PS
+// function's own default applies. This lets the cloud-init path pass extra args
+// (Label, FileName2, Content2, StewardDest) to the shared seed functions while
+// the legacy CFGMS_SEED single-file call sites stay byte-for-byte unchanged.
+func optArg(psArgs map[string]string, paramName, key string) string {
+	if psArgs[key] == "" {
+		return ""
+	}
+	return " -" + paramName + " " + quoteForPS(psArgs[key])
 }
 
 // intArg returns the named psArgs value rendered as an unquoted bare

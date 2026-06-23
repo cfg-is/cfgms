@@ -93,6 +93,17 @@ The unattended answer file is delivered on a **secondary VHDX seed disk** attach
 
 `autounattend.xml` is the supported mechanism for unattended Windows **Setup** from ISO (not deprecated; install-time, not config-time). A `.ppkg` cannot install the OS — it configures an already-installed Windows. Using a **signed ppkg** for the post-install/enrollment step (rather than an inline PowerShell blob in `<FirstLogonCommands>`) is a deliberate fit with the module banned-pattern rules: a signed declarative artifact over runtime script composition.
 
+### 6a. Linux default: cloud image + cloud-init (NoCloud), not netinst + preseed (amendment, 2026-06)
+
+**For Linux the default/recommended path is a prebuilt vendor cloud image booted with cloud-init, not a netinst ISO + preseed.** This was adopted after live validation showed the netinst route is structurally awkward on a headless Hyper-V host: an unattended debian-installer needs its **kernel command line** to point at the preseed (`auto=true preseed/file=…`), and the only ways to set that headless are (a) repacking the boot media — which to preserve Secure Boot requires `xorriso -boot_image any replay` (xorriso is **not** a winget/choco package, and **WSL cannot run as `LocalSystem`**, which the steward is — so the steward cannot shell out to it), or (b) typing the cmdline via the emulated keyboard (too fragile to ship). Both were rejected.
+
+cloud-init sidesteps the problem entirely:
+
+- **Boot disk = the cloud image.** A `.raw` cloud image is wrapped with a fixed-VHD footer (computed host-side) and converted to a dynamic VHDX with the in-box `Convert-VHD` cmdlet (`.vhd`/`.vhdx` images convert/copy directly), optionally grown via `resize_gb`. **No `qemu-img`, no `xorriso`, no WSL, no external host tool** — and the cloud image's **signed bootloader is never modified**, so Secure Boot stays on (`MicrosoftUEFICertificateAuthority` template).
+- **Enrollment via a NoCloud `CIDATA` seed.** A FAT32 VHDX labelled `CIDATA` carrying `user-data` + `meta-data` (built with the same host-native `New-VHD`/`Mount-VHD`/`Format-Volume` seed machinery as §5, relabelled) is attached as a data disk. cloud-init **auto-detects it by volume label on first boot — no kernel cmdline, no boot-media repack.** The `user-data` `runcmd` is **list/exec form only** (argv arrays, never shell strings) so it carries no banned patterns, and runs `cfgms-steward install --regtoken … --ca-cert … --fingerprint …`.
+
+The host prerequisite is identical to the ISO case — the cloud image is a host path, staged out of band (use the Debian **`generic`** cloud image, which ships cloud-init; not the `nocloud` variant). The legacy netinst + preseed path (§5/§6) remains available for air-gapped/ISO-only sites by setting `source.iso` (instead of `source.image`) on a linux source. Windows stays ISO + autounattend; the Windows-ISO / Linux-cloud-image asymmetry mirrors real-world idiomatic practice. The §8 enrollment model, correlation identity, and `finalizing`→`ready` controller-side completion are unchanged.
+
 ### 7. Unattended profiles are stored config, addable without code
 
 A profile (`profile://<name>`) is a stored config object (ADR-003 taxonomy) describing `os_family`, `answer_format`, the answer-file template, and an `enroll` block. Operators add a new OS by adding a profile — **no code change** (the AC). Profiles are rendered with per-VM variables and **secrets from the secrets provider at provision time** — never cleartext in the profile or committed media.
@@ -107,7 +118,7 @@ First boot installs and enrolls the steward exactly as a normal steward deployme
 
 ### 9. Scope boundary
 
-This capability is **ISO-install only**. Golden-image / template cloning, an image registry, and a branch-build→image pipeline are **Phase 3** (#1792) — they need an image store and build pipeline and are the scale optimization for ephemeral per-dispatch fleets. They are explicitly **out of scope** here.
+This capability provisions from **install media or a vendor cloud image** (§6a) — both are host-staged inputs the module turns into a managed endpoint in one converge. Booting a stock vendor cloud image is **not** golden-image cloning: **CFGMS-prepared** golden-image / template cloning, an image registry, and a branch-build→image pipeline are **Phase 3** (#1792) — they need an image store and build pipeline and are the scale optimization for ephemeral per-dispatch fleets. They are explicitly **out of scope** here.
 
 ## Consequences
 

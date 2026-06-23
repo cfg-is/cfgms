@@ -33,6 +33,12 @@ var (
 	// ErrInvalidSourceISO is returned when the source iso field is missing or not an absolute Windows path.
 	ErrInvalidSourceISO = errors.New("hyperv: invalid source iso: must be a non-empty absolute Windows path (e.g. C:\\ISO\\server.iso)")
 
+	// ErrInvalidSourceImage is returned when a linux cloud-init source image field is not an absolute Windows path.
+	ErrInvalidSourceImage = errors.New("hyperv: invalid source image: must be an absolute Windows path to a .raw or .vhdx cloud image (e.g. C:\\images\\debian.raw)")
+
+	// ErrInvalidSourceMedia is returned when a linux source declares neither iso (preseed) nor image (cloud-init).
+	ErrInvalidSourceMedia = errors.New("hyperv: invalid source: a linux source requires either image (cloud-init) or iso (netinst+preseed)")
+
 	// ErrInvalidSourceOSFamily is returned when source os_family is not linux or windows.
 	ErrInvalidSourceOSFamily = errors.New("hyperv: invalid source os_family: must be linux or windows")
 
@@ -70,8 +76,21 @@ type CompletionConfig struct {
 // Presence of a source block in a hyperv.vm resource triggers the provisioning
 // state machine (absent → creating → installing → finalizing → ready).
 type SourceConfig struct {
-	// ISO is the absolute Windows path to the installation ISO.
-	ISO string `yaml:"iso"`
+	// ISO is the absolute Windows path to the installation ISO. Required for
+	// os_family: windows (autounattend) and for the legacy os_family: linux
+	// netinst+preseed path. Ignored when Image is set (cloud-init).
+	ISO string `yaml:"iso,omitempty"`
+	// Image is the absolute Windows host path to a cloud image (.raw or .vhdx)
+	// for the os_family: linux cloud-init path. When set, the module prepares the
+	// VM's boot disk from this image (raw → fixed VHD → dynamic VHDX) and delivers
+	// enrollment via a NoCloud CIDATA seed instead of a netinst ISO + preseed.
+	// This is the default/recommended Linux path (no boot-media repack, Secure
+	// Boot intact). Ignored for os_family: windows.
+	Image string `yaml:"image,omitempty"`
+	// ResizeGB optionally grows the cloud-image boot disk to this many GB after
+	// conversion (cloud-init growpart expands the root filesystem on first boot).
+	// 0 leaves the image at its native size. Cloud-init (Image) path only.
+	ResizeGB int `yaml:"resize_gb,omitempty"`
 	// OSFamily distinguishes the installer type: linux or windows.
 	OSFamily string `yaml:"os_family"`
 	// Unattend is an optional reference to an unattended-install profile,
@@ -289,13 +308,36 @@ func (c *VMConfig) Validate() error {
 	return nil
 }
 
+// isCloudInit reports whether this source uses the cloud-init/NoCloud path: a
+// linux source that declares a cloud image (source.image). The alternative linux
+// path is the legacy netinst ISO + preseed (Image empty, ISO set).
+func (s *SourceConfig) isCloudInit() bool {
+	return s.OSFamily == "linux" && s.Image != ""
+}
+
 // validate checks all SourceConfig fields against their constraints.
 func (s *SourceConfig) validate() error {
-	if !vhdPathPattern.MatchString(s.ISO) {
-		return ErrInvalidSourceISO
-	}
 	switch s.OSFamily {
-	case "linux", "windows":
+	case "windows":
+		// Windows requires an install ISO (autounattend).
+		if !vhdPathPattern.MatchString(s.ISO) {
+			return ErrInvalidSourceISO
+		}
+	case "linux":
+		// Linux accepts EITHER a cloud image (cloud-init, default/recommended) OR
+		// a netinst ISO (legacy preseed). At least one must be a valid path.
+		switch {
+		case s.Image != "":
+			if !vhdPathPattern.MatchString(s.Image) {
+				return ErrInvalidSourceImage
+			}
+		case s.ISO != "":
+			if !vhdPathPattern.MatchString(s.ISO) {
+				return ErrInvalidSourceISO
+			}
+		default:
+			return ErrInvalidSourceMedia
+		}
 	default:
 		return ErrInvalidSourceOSFamily
 	}
@@ -328,16 +370,26 @@ func parseSourceMap(v interface{}) *SourceConfig {
 	}
 	src := &SourceConfig{}
 	src.ISO, _ = m["iso"].(string)
+	src.Image, _ = m["image"].(string)
 	src.OSFamily, _ = m["os_family"].(string)
 	src.Unattend, _ = m["unattend"].(string)
 	src.OnExisting, _ = m["on_existing"].(string)
 	src.Edition, _ = m["edition"].(string)
+	// resize_gb may arrive as int or int64 (YAML/JSON numeric shapes).
+	switch v := m["resize_gb"].(type) {
+	case int:
+		src.ResizeGB = v
+	case int64:
+		src.ResizeGB = int(v)
+	case float64:
+		src.ResizeGB = int(v)
+	}
 	if comp, ok := m["completion"].(map[string]interface{}); ok {
 		src.Completion.Mode, _ = comp["mode"].(string)
 		src.Completion.Timeout, _ = comp["timeout"].(string)
 	}
 	// An entirely empty source map (all fields zero) is treated as no source.
-	if src.ISO == "" && src.OSFamily == "" && src.Unattend == "" &&
+	if src.ISO == "" && src.Image == "" && src.OSFamily == "" && src.Unattend == "" &&
 		src.OnExisting == "" && src.Completion.Mode == "" && src.Completion.Timeout == "" {
 		return nil
 	}
@@ -365,6 +417,8 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 	if c.Source != nil {
 		m["source"] = map[string]interface{}{
 			"iso":       c.Source.ISO,
+			"image":     c.Source.Image,
+			"resize_gb": c.Source.ResizeGB,
 			"os_family": c.Source.OSFamily,
 			"unattend":  c.Source.Unattend,
 			"completion": map[string]interface{}{
@@ -372,6 +426,7 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 				"timeout": c.Source.Completion.Timeout,
 			},
 			"on_existing": c.Source.OnExisting,
+			"edition":     c.Source.Edition,
 		}
 	}
 	return m
@@ -877,22 +932,49 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 		"Generation": fmt.Sprintf("%d", generation),
 	}
 
+	// cloud-init (Linux VM-from-cloud-image): the boot disk IS the cloud image,
+	// not a freshly-created empty VHD. Prepare it (raw → fixed VHD → dynamic VHDX,
+	// optional resize) and create the VM attaching the EXISTING disk
+	// (New-VM -VHDPath) instead of New-VM -NewVHDPath.
+	if cfg.Source != nil && cfg.Source.isCloudInit() {
+		resizeBytes := int64(cfg.Source.ResizeGB) * gibibyte
+		if _, psErr := m.transport.ExecutePS(ctx, psPrepCloudBootDisk, map[string]string{
+			"ImagePath":   cfg.Source.Image,
+			"VhdPath":     cfg.VHDPath,
+			"ResizeBytes": fmt.Sprintf("%d", resizeBytes),
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", hostName, psErr)
+			return fmt.Errorf("hyperv: prepare cloud boot disk for VM %q: %w", vmName, psErr)
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", hostName, nil)
+		_, psErr := m.transport.ExecutePS(ctx, psCreateVMFromDisk, psArgs)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", hostName, psErr)
+		if psErr != nil {
+			return fmt.Errorf("hyperv: create VM %q from cloud image: %w", vmName, psErr)
+		}
+		return m.connectAdditionalNics(ctx, vmName, hostName, cfg)
+	}
+
 	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", hostName, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
 	}
 
-	// New-VM -SwitchName connected the first desired switch (cfg.SwitchName).
-	// Connect one additional adapter for every remaining switch in the desired
-	// set so a multi-NIC declaration materialises all adapters at create time.
+	return m.connectAdditionalNics(ctx, vmName, hostName, cfg)
+}
+
+// connectAdditionalNics connects one extra network adapter for every desired
+// switch beyond the first (New-VM -SwitchName already connected the first), so a
+// multi-NIC declaration materialises all adapters at create time. Shared by the
+// empty-VHD and cloud-image create paths.
+func (m *hypervModule) connectAdditionalNics(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
 	desired := cfg.desiredSwitches()
 	for _, sw := range desired[min(1, len(desired)):] {
 		if err := m.connectVMToSwitch(ctx, vmName, hostName, sw); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 

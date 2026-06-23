@@ -46,16 +46,24 @@ var (
 type AnswerFormat string
 
 const (
-	// AnswerFormatPreseed is the Debian/Ubuntu preseed.cfg format.
+	// AnswerFormatPreseed is the Debian/Ubuntu preseed.cfg format (legacy
+	// netinst-ISO Linux path).
 	AnswerFormatPreseed AnswerFormat = "preseed"
 	// AnswerFormatAutounattend is the Windows Setup autounattend.xml format.
 	AnswerFormatAutounattend AnswerFormat = "autounattend"
+	// AnswerFormatCloudInit is the cloud-init user-data (cloud-config) format
+	// delivered via a NoCloud CIDATA seed — the default Linux path when a source
+	// declares a cloud image (source.image) rather than a netinst ISO. cloud-init
+	// auto-detects the CIDATA-labelled seed on first boot; no kernel cmdline or
+	// boot-media repack is required (so the cloud image's signed bootloader stays
+	// intact under Secure Boot).
+	AnswerFormatCloudInit AnswerFormat = "cloud-init"
 )
 
 // valid reports whether the AnswerFormat is one of the v1-supported formats.
 func (f AnswerFormat) valid() bool {
 	switch f {
-	case AnswerFormatPreseed, AnswerFormatAutounattend:
+	case AnswerFormatPreseed, AnswerFormatAutounattend, AnswerFormatCloudInit:
 		return true
 	default:
 		return false

@@ -346,6 +346,115 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 		"ISO path must not be interpolated into the script text")
 }
 
+// ── cloud-init (Linux VM-from-cloud-image) path ──────────────────────────────
+
+// cloudInitVMConfigMap returns the executor-shaped config map for an absent
+// linux VM that boots a cloud image (source.image) via cloud-init.
+func cloudInitVMConfigMap(generation int) map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "stw-01",
+		"memory_mb":   2048,
+		"cpu_count":   2,
+		"vhd_path":    `C:\VMs\stw-01.vhdx`,
+		"generation":  generation,
+		"state":       "running",
+		"switch_name": "HVSwitch_1G",
+		"source": map[string]interface{}{
+			"image":     `C:\images\debian-13-generic-amd64.raw`,
+			"os_family": "linux",
+			"resize_gb": 20,
+			"completion": map[string]interface{}{
+				"mode":    "steward-registration",
+				"timeout": "60m",
+			},
+			"on_existing": "never",
+		},
+	}
+}
+
+// TestProvisionVM_CloudInitPath drives an absent Gen2 linux VM that declares a
+// cloud image and asserts the codified cloud-init path: the boot disk is prepared
+// from the image (Cfgms-PrepCloudBootDisk) and the VM is created attaching that
+// existing disk (Cfgms-CreateVMFromDisk); a CIDATA NoCloud seed (user-data +
+// meta-data + cfgms-steward) is built and attached; the OS disk is made the first
+// boot device; and there is NO install ISO, NO answer ISO, and NO boot keypress.
+func TestProvisionVM_CloudInitPath(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+	// The linux steward binary + CA host paths the seed stages (ADR-010).
+	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// Boot disk prepared from the cloud image, then VM created attaching it.
+	prep := callsContaining(calls, "Cfgms-PrepCloudBootDisk")
+	require.Len(t, prep, 1, "one Cfgms-PrepCloudBootDisk (cloud image → boot VHDX)")
+	assert.True(t, argsContain(prep[0], `C:\images\debian-13-generic-amd64.raw`),
+		"cloud image path travels via args")
+	assert.True(t, argsContain(prep[0], `C:\VMs\stw-01.vhdx`), "boot VHDX path travels via args")
+	require.Len(t, callsContaining(calls, "Cfgms-CreateVMFromDisk"), 1,
+		"cloud-init VM is created attaching the existing prepared disk")
+
+	// NoCloud CIDATA seed: New-VHD → Format → Set-Content (user-data + meta-data)
+	// → Add-VMHardDiskDrive. The seed carries the steward binary too.
+	require.Len(t, callsContaining(calls, "New-VHD"), 1, "one New-VHD (CIDATA seed)")
+	require.Len(t, callsContaining(calls, "Set-Content"), 1, "one Set-Content (seed write)")
+	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "one seed attach")
+	copyCall := callsContaining(calls, "Set-Content")[0]
+	assert.True(t, argsContain(copyCall, "CIDATA"), "seed volume is labelled CIDATA")
+	assert.True(t, argsContain(copyCall, "user-data"), "seed carries user-data")
+	assert.True(t, argsContain(copyCall, "meta-data"), "seed carries meta-data")
+	assert.True(t, argsContain(copyCall, "cfgms-steward"), "seed stages the linux steward (dest cfgms-steward)")
+
+	// OS disk made first boot; no installer media; no keypress.
+	require.Len(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"), 1,
+		"cloud-init must make the OS disk the first boot device")
+	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"), "cloud-init attaches no install ISO")
+	assert.Empty(t, callsContaining(calls, "Cfgms-BuildAnswerIso"), "cloud-init builds no answer ISO")
+	assert.Empty(t, callsContaining(calls, "Cfgms-BootKeypress"), "cloud-init needs no boot keypress")
+	require.Len(t, callsContaining(calls, "Start-VM"), 1, "VM is powered on")
+}
+
+// TestProvision_CloudInitUserDataRenderedToSeed asserts the cloud-init path
+// writes a REAL rendered cloud-config user-data (not the placeholder) carrying the
+// controller-supplied token + CA fingerprint and the CorrelationID, with list-form
+// runcmd and no banned patterns.
+func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	copyCall := callsContaining(calls, "Set-Content")[0]
+	var userData string
+	for _, a := range copyCall.args {
+		if s, ok := a.(string); ok && strings.Contains(s, "#cloud-config") && len(s) > len(userData) {
+			userData = s
+		}
+	}
+	require.NotEmpty(t, userData, "rendered cloud-config user-data must be present in the copy args")
+	assert.Contains(t, userData, "runcmd", "user-data must carry runcmd")
+	assert.Contains(t, userData, "cfgms-steward", "user-data must install the steward")
+	assert.Contains(t, userData, "reg-token-stub-value", "controller-supplied token must be rendered into user-data")
+	assert.Contains(t, userData, "abc123fingerprint", "CA fingerprint must be rendered into user-data")
+	assert.Contains(t, userData, "stw-01", "CorrelationID must appear in the user-data")
+	lower := strings.ToLower(userData)
+	for _, banned := range []string{"eval", "bash -c", "iex", "invoke-expression"} {
+		assert.NotContains(t, lower, banned, "rendered user-data must not contain banned pattern %q", banned)
+	}
+}
+
 // ── REQUIRED TEST: installing → finalizing detaches the seed ─────────────────
 
 // runningSourceVMJSON returns a getVM JSON response for a running VM whose

@@ -153,3 +153,57 @@ func defaultLinuxProfile() *UnattendProfile {
 		},
 	}
 }
+
+// linuxCloudInitProfileName is the built-in cloud-init profile used when a Linux
+// VM source declares a cloud image (source.image) and no profile:// reference.
+const linuxCloudInitProfileName = "debian-cloudinit-base"
+
+// cloudInitUserDataTemplate is the cloud-init user-data (cloud-config) rendered
+// to the NoCloud CIDATA seed for an os_family: linux source that boots a cloud
+// image (source.image). cloud-init auto-detects the CIDATA-labelled seed on
+// first boot — no kernel cmdline, no boot-media repack — and runs runcmd as root.
+//
+// The seed volume (built host-side) carries the steward binary (cfgms-steward)
+// and controller CA (controller-ca.crt) next to this user-data. runcmd copies the
+// binary off the vfat seed (which has no Unix exec bit), makes it executable, and
+// runs `cfgms-steward install --regtoken … --ca-cert … --fingerprint …`, which on
+// a live (non-chroot) system stages the binary, writes the CA + systemd unit
+// (token baked in), and `systemctl enable --now` starts enrollment. The
+// controller URL is baked into the binary at build time (ldflags).
+//
+// ALL runcmd entries are LIST (exec) form — argv arrays, never shell strings — so
+// there is no `bash -c "<string>"`, no eval, no runtime code composition
+// (CLAUDE.md banned patterns, ADR-009 §6). The join token and CA fingerprint are
+// controller-supplied via config (ADR-010 §2 — {{ .EnrollToken }} /
+// {{ .CAFingerprint }}), not a SecretStore lookup. The hostname is set to
+// {{ .CorrelationID }} so the controller-side completion reconciler (#2050) can
+// match the registered steward back to this VM's provisioning record (ADR-009 §8).
+const cloudInitUserDataTemplate = `#cloud-config
+# CFGMS Linux VM-from-cloud-image enrollment (NoCloud datasource).
+# Rendered for VM {{ .VMName }} (correlation {{ .CorrelationID }}).
+hostname: {{ .CorrelationID }}
+runcmd:
+  - [ mkdir, -p, /mnt/cidata ]
+  - [ mount, /dev/disk/by-label/CIDATA, /mnt/cidata ]
+  - [ cp, /mnt/cidata/cfgms-steward, /opt/cfgms-steward ]
+  - [ chmod, "0755", /opt/cfgms-steward ]
+  - [ /opt/cfgms-steward, install, --regtoken, "{{ .EnrollToken }}", --ca-cert, /mnt/cidata/controller-ca.crt, --fingerprint, "{{ .CAFingerprint }}" ]
+  - [ umount, /mnt/cidata ]
+`
+
+// defaultLinuxCloudInitProfile returns the built-in cloud-init UnattendProfile
+// used when a Linux VM source declares a cloud image (source.image) and no
+// profile:// reference. The join token and CA fingerprint are controller-supplied
+// via config (ProfileVars), not the local SecretStore (#2077 fix); operators
+// override it by authoring a stored-config profile of the same name.
+func defaultLinuxCloudInitProfile() *UnattendProfile {
+	return &UnattendProfile{
+		Name:         linuxCloudInitProfileName,
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormatCloudInit,
+		Template:     cloudInitUserDataTemplate,
+		Enroll: EnrollConfig{
+			RegistrationTokenSecretKey: preseedRegTokenSecretKey,
+		},
+	}
+}
