@@ -194,12 +194,9 @@ func TestMonitorDebounce(t *testing.T) {
 	}, 500*time.Millisecond, 5*time.Millisecond,
 		"debounced reconcile must run after burst of events")
 
-	// Allow extra time for any erroneous second reconcile to appear.
-	time.Sleep(100 * time.Millisecond)
-
-	// Exactly one Set call means exactly one ExecuteResource call — the burst was coalesced.
-	// (Each ExecuteResource that detects drift calls Set exactly once.)
-	assert.Equal(t, 1, testMon.SetCallCount(),
+	// Verify no erroneous second reconcile fires within the observation window.
+	assert.Never(t, func() bool { return testMon.SetCallCount() > 1 },
+		100*time.Millisecond, 5*time.Millisecond,
 		"burst of events within debounce window must coalesce to exactly one ExecuteResource call")
 
 	require.NoError(t, s.Stop(context.Background()))
