@@ -23,6 +23,8 @@ import (
 //     certificate.internal.ip_addresses), if set
 //   - the CFGMS_EXTERNAL_HOSTNAME env value, classified as IP SAN if it parses
 //     as an IP literal and DNS SAN otherwise
+//   - cfg.Transport.ExternalAddress, classified the same way (both sources are
+//     honored and de-duped; neither overrides the other)
 //
 // Without merging in cfg.Certificate.Server and CFGMS_EXTERNAL_HOSTNAME, a
 // steward dialing the controller by its external hostname fails mTLS
@@ -54,6 +56,16 @@ func TransportCertSANs(cfg *config.Config) (dnsNames, ipAddresses []string) {
 			ipAddresses = append(ipAddresses, hostname)
 		} else {
 			dnsNames = append(dnsNames, hostname)
+		}
+	}
+
+	if cfg != nil && cfg.Transport != nil {
+		if addr := strings.TrimSpace(cfg.Transport.ExternalAddress); addr != "" {
+			if net.ParseIP(addr) != nil {
+				ipAddresses = append(ipAddresses, addr)
+			} else {
+				dnsNames = append(dnsNames, addr)
+			}
 		}
 	}
 
