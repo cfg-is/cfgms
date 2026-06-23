@@ -207,11 +207,14 @@ func (m *hypervModule) pump(sub uintptr, signal windows.Handle, stop <-chan stru
 // renderEventXML renders one event handle to its XML form.
 func renderEventXML(event uintptr) (string, error) {
 	var bufUsed, propCount uint32
-	// First call sizes the buffer.
-	procEvtRender.Call(0, event, uintptr(evtRenderEventXML), 0, 0,
+	// First call sizes the buffer: it returns FALSE with
+	// ERROR_INSUFFICIENT_BUFFER and sets bufUsed to the required byte count. A
+	// zero size means a different failure (e.g. ERROR_EVT_INVALID_EVENT_DATA);
+	// surface that errno rather than lumping it into a generic message.
+	_, _, sizeErr := procEvtRender.Call(0, event, uintptr(evtRenderEventXML), 0, 0,
 		uintptr(unsafe.Pointer(&bufUsed)), uintptr(unsafe.Pointer(&propCount)))
 	if bufUsed == 0 {
-		return "", fmt.Errorf("hyperv monitor: EvtRender sizing returned 0")
+		return "", fmt.Errorf("hyperv monitor: EvtRender sizing returned 0: %w", sizeErr)
 	}
 	buf := make([]uint16, (bufUsed+1)/2)
 	ok, _, callErr := procEvtRender.Call(0, event, uintptr(evtRenderEventXML),

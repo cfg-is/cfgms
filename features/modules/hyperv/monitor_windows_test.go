@@ -104,7 +104,46 @@ func newMonitorModule(t *testing.T) *hypervModule {
 	t.Helper()
 	m, ok := New(nil).(*hypervModule)
 	require.True(t, ok, "New must return *hypervModule")
+	// Close at teardown so the lifecycle contract is self-documenting and any
+	// future regression that leaks a real reader goroutine is caught.
+	t.Cleanup(func() { _ = m.Close() })
 	return m
+}
+
+// TestVMNameFromEvent covers all three extraction shapes vmNameFromEvent
+// supports: the primary Hyper-V UserData/VmName element, a named EventData
+// field, and a positional EventData value (%1 is always the VM name). The
+// EventData fallbacks are defense-in-depth for providers that use the generic
+// <EventData> shape, so they need direct coverage.
+func TestVMNameFromEvent(t *testing.T) {
+	mk := func(userData string, data ...struct{ name, val string }) renderedEvent {
+		var ev renderedEvent
+		ev.UserData.Inner = userData
+		for _, d := range data {
+			ev.EventData.Data = append(ev.EventData.Data, struct {
+				Name  string `xml:"Name,attr"`
+				Value string `xml:",chardata"`
+			}{Name: d.name, Value: d.val})
+		}
+		return ev
+	}
+	cases := []struct {
+		name string
+		ev   renderedEvent
+		want string
+	}{
+		{"userdata vmname", mk(`<VmlEventLog xmlns='http://www.microsoft.com/Windows/Virtualization/Events'><VmName>UD-VM</VmName><VmId>x</VmId></VmlEventLog>`), "UD-VM"},
+		{"eventdata named vmname", mk("", struct{ name, val string }{"VmName", "ED-VM"}), "ED-VM"},
+		{"eventdata named generic", mk("", struct{ name, val string }{"Name", "ED-Name"}), "ED-Name"},
+		{"eventdata positional", mk("", struct{ name, val string }{"", "POS-VM"}, struct{ name, val string }{"", "id"}), "POS-VM"},
+		{"userdata wins over eventdata", mk(`<X><VmName>UD-WINS</VmName></X>`, struct{ name, val string }{"VmName", "ED-LOSES"}), "UD-WINS"},
+		{"none", mk(""), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, vmNameFromEvent(tc.ev))
+		})
+	}
 }
 
 // AC#1: registering interest in N VMs creates exactly ONE host subscription.
