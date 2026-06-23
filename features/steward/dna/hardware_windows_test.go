@@ -7,6 +7,7 @@ package dna
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,4 +70,22 @@ func assertNoVMInventoryKeys(t *testing.T, attrs map[string]string) {
 		_, present := attrs[forbidden]
 		assert.False(t, present, "forbidden VM-inventory key %q must not be emitted as DNA", forbidden)
 	}
+	// Defense in depth: no DNA key may reference per-VM inventory/state/identity,
+	// regardless of exact spelling (tenant-sensitive — #1950 Out of Scope).
+	for k := range attrs {
+		assert.Falsef(t, keyReferencesVMInventory(k),
+			"no DNA key may reference per-VM inventory/state; got %q", k)
+	}
+}
+
+// keyReferencesVMInventory reports whether an attribute key names per-VM
+// inventory, count, or identity (which must never enter DNA).
+func keyReferencesVMInventory(key string) bool {
+	k := strings.ToLower(key)
+	return strings.HasPrefix(k, "vm_") ||
+		strings.Contains(k, "_vm_") ||
+		strings.Contains(k, "vm_inventory") ||
+		strings.Contains(k, "vm_count") ||
+		strings.Contains(k, "vm_running") ||
+		strings.Contains(k, "vm_name")
 }

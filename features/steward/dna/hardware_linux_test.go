@@ -7,6 +7,7 @@ package dna
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,5 +48,14 @@ func TestLinuxVirtualizationCollector(t *testing.T) {
 	} {
 		_, present := attrs[forbidden]
 		assert.False(t, present, "forbidden VM-inventory key %q must not be emitted as DNA", forbidden)
+	}
+	// Defense in depth: no DNA key may reference per-VM inventory/state/identity,
+	// regardless of exact spelling (tenant-sensitive).
+	for k := range attrs {
+		lk := strings.ToLower(k)
+		vmRef := strings.HasPrefix(lk, "vm_") || strings.Contains(lk, "_vm_") ||
+			strings.Contains(lk, "vm_inventory") || strings.Contains(lk, "vm_count") ||
+			strings.Contains(lk, "vm_running") || strings.Contains(lk, "vm_name")
+		assert.Falsef(t, vmRef, "no DNA key may reference per-VM inventory/state; got %q", k)
 	}
 }
