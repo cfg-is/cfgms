@@ -10,26 +10,24 @@ IMAGE="${1:-cfg-agent:latest}"
 FAILED=0
 echo "=== cfg-agent image test: ${IMAGE} ==="
 
-# Test 1: cfg version exits 0 and produces non-empty output containing "Version:".
-# Uses `cfg version` subcommand — the cobra root command exposes --version only
-# when rootCmd.Version is set; cmd/cfg is out of scope for this story.
-echo "--- [1] cfg version: exits 0 + non-empty version output ---"
+# Test 1: cfg --version exits 0 and produces non-empty output containing "Version:".
+echo "--- [1] cfg --version: exits 0 + non-empty version output ---"
 cfg_exit=0
-cfg_out=$(docker run --rm --entrypoint cfg "${IMAGE}" version 2>&1) || cfg_exit=$?
+cfg_out=$(docker run --rm --entrypoint cfg "${IMAGE}" --version 2>&1) || cfg_exit=$?
 if [[ "$cfg_exit" -ne 0 ]]; then
-    echo "FAIL: cfg version exited ${cfg_exit}"
+    echo "FAIL: cfg --version exited ${cfg_exit}"
     FAILED=$((FAILED + 1))
 else
-    echo "PASS: cfg version exited 0"
+    echo "PASS: cfg --version exited 0"
 fi
 if [[ -z "$cfg_out" ]]; then
-    echo "FAIL: cfg version produced empty output"
+    echo "FAIL: cfg --version produced empty output"
     FAILED=$((FAILED + 1))
 elif ! echo "$cfg_out" | grep -q "Version:"; then
-    echo "FAIL: cfg version output lacks 'Version:' field: ${cfg_out}"
+    echo "FAIL: cfg --version output lacks 'Version:' field: ${cfg_out}"
     FAILED=$((FAILED + 1))
 else
-    echo "PASS: cfg version output: ${cfg_out}"
+    echo "PASS: cfg --version output: ${cfg_out}"
 fi
 
 # Test 2: Security gate — no private-key material in image layers.
