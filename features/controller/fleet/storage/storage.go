@@ -51,8 +51,9 @@ type Manager struct {
 // Config defines the configuration for DNA storage management.
 type Config struct {
 	// Storage backend configuration
-	Backend BackendType `json:"backend" yaml:"backend"`
-	DataDir string      `json:"data_dir" yaml:"data_dir"` // Directory for storage files (default: "data")
+	Backend     BackendType `json:"backend" yaml:"backend"`
+	DataDir     string      `json:"data_dir" yaml:"data_dir"`         // Directory for storage files (default: "data")
+	DatabaseURL string      `json:"database_url" yaml:"database_url"` // PostgreSQL connection string for BackendDatabase
 
 	// Compression configuration
 	CompressionLevel       int     `json:"compression_level" yaml:"compression_level"`               // 1-9, higher = better compression
