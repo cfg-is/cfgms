@@ -39,6 +39,9 @@ var (
 	// ErrInvalidSourceMedia is returned when a linux source declares neither iso (preseed) nor image (cloud-init).
 	ErrInvalidSourceMedia = errors.New("hyperv: invalid source: a linux source requires either image (cloud-init) or iso (netinst+preseed)")
 
+	// ErrInvalidSourceResize is returned when source resize_gb is negative or exceeds the VHDX maximum (64 TiB).
+	ErrInvalidSourceResize = errors.New("hyperv: invalid source resize_gb: must be between 0 and 65536 (GiB)")
+
 	// ErrInvalidSourceOSFamily is returned when source os_family is not linux or windows.
 	ErrInvalidSourceOSFamily = errors.New("hyperv: invalid source os_family: must be linux or windows")
 
@@ -328,7 +331,10 @@ func (s *SourceConfig) validate() error {
 		// a netinst ISO (legacy preseed). At least one must be a valid path.
 		switch {
 		case s.Image != "":
-			if !vhdPathPattern.MatchString(s.Image) {
+			// Reject a UNC image path (\\server\share) — the cloud image must live
+			// on a local/CSV drive, never an arbitrary network share (matches the
+			// seed-path guard). A drive-letter absolute path is required.
+			if strings.HasPrefix(s.Image, `\\`) || !vhdPathPattern.MatchString(s.Image) {
 				return ErrInvalidSourceImage
 			}
 		case s.ISO != "":
@@ -340,6 +346,10 @@ func (s *SourceConfig) validate() error {
 		}
 	default:
 		return ErrInvalidSourceOSFamily
+	}
+	// resize_gb (cloud-init only) must be non-negative and within the VHDX max.
+	if s.ResizeGB < 0 || s.ResizeGB > 65536 {
+		return ErrInvalidSourceResize
 	}
 	if s.Unattend != "" && !strings.HasPrefix(s.Unattend, "profile://") {
 		return ErrInvalidSourceUnattend

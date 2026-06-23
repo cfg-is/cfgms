@@ -39,15 +39,28 @@ const (
 	// a sharing violation (0x80070020 "being used by another process"). The
 	// formatted volume persists on the (now-detached) VHD for the copy step to
 	// re-mount.
-	psMountSeedVHD = `Mount-VHD -Path $Path -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'CFGMS_SEED' -Confirm:$false | Out-Null; Dismount-VHD -Path $Path`
+	//
+	// This const is the script the WinRM transport runs directly (buildInvokeCommand
+	// wraps it as Invoke-Command); the ps-host transport instead dispatches to the
+	// preamble's Cfgms-MountSeedVHD. The two must agree on the PARAMETER CONTRACT —
+	// $Label (optional) selects the FAT32 volume label: legacy preseed/windows
+	// callers omit it (so it is $null on WinRM → defaults to CFGMS_SEED), the
+	// cloud-init path passes CIDATA. (The ps-host preamble additionally hardens the
+	// trailing dismount with a verify-loop, Cfgms-DismountAndVerify, which the bare
+	// WinRM const text below does not replicate — WinRM is the secondary transport.)
+	psMountSeedVHD = `Mount-VHD -Path $Path -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel $(if ($Label) { $Label } else { 'CFGMS_SEED' }) -Confirm:$false | Out-Null; Dismount-VHD -Path $Path`
 
-	// psCopyToSeedVHD mounts the seed, writes $Content to <drive>:\$FileName,
-	// optionally stages the steward binary ($StewardSrc → <drive>:\cfgms-steward.exe)
-	// and controller CA ($CASrc → <drive>:\controller-ca.crt) so a Windows guest
-	// can self-install + enroll offline (ADR-010), and dismounts. $Content,
-	// $FileName, $StewardSrc and $CASrc travel via ArgumentList; empty
-	// $StewardSrc / $CASrc skip staging (the Linux/preseed path stages neither).
-	psCopyToSeedVHD = `$disk = Mount-VHD -Path $SeedPath -Passthru; $letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq 'CFGMS_SEED' } | Select-Object -First 1).DriveLetter; Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline; if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\cfgms-steward.exe') -Force }; if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }; Dismount-VHD -Path $SeedPath`
+	// psCopyToSeedVHD mounts the seed (volume matched by $Label, default
+	// CFGMS_SEED), writes $Content to <drive>:\$FileName and — when supplied — a
+	// second file $Content2 to <drive>:\$FileName2 (the cloud-init path writes both
+	// user-data and meta-data). It optionally stages the steward binary ($StewardSrc
+	// → $StewardDest, default cfgms-steward.exe; the linux cloud-init path passes
+	// cfgms-steward) and controller CA ($CASrc → <drive>:\controller-ca.crt) so the
+	// guest can self-install + enroll offline (ADR-010), and dismounts. All values
+	// travel via ArgumentList; empty optional params fall back to their defaults.
+	// WinRM-transport variant of the preamble's Cfgms-CopyToSeedVHD — same parameter
+	// contract; the preamble adds the verify-dismount hardening (see psMountSeedVHD).
+	psCopyToSeedVHD = `$disk = Mount-VHD -Path $SeedPath -Passthru; $label = $(if ($Label) { $Label } else { 'CFGMS_SEED' }); $letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq $label } | Select-Object -First 1).DriveLetter; Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline; if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }; if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $(if ($StewardDest) { $StewardDest } else { 'cfgms-steward.exe' })) -Force }; if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }; Dismount-VHD -Path $SeedPath`
 
 	// psDetachSeedVHD wraps Dismount-VHD (called at finalizing, not in the
 	// create path this story implements).

@@ -400,8 +400,12 @@ function Cfgms-PrepCloudBootDisk {
 # -FirstBootDevice referencing a disk deadlocks in the persistent host).
 function Cfgms-SetHddFirstBoot {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$VHDPath)
+    # Match the OS disk by path. Do NOT silently fall back to "first disk found":
+    # on a cloud-init VM the seed CIDATA VHDX is also attached, and booting it (a
+    # tiny non-bootable FAT32 disk) instead of the OS disk would brick the boot.
+    # A genuine no-match is a provisioning bug — fail loudly.
     $hdd = Get-VMHardDiskDrive -VMName $Name | Where-Object { $_.Path -eq $VHDPath } | Select-Object -First 1
-    if (-not $hdd) { $hdd = Get-VMHardDiskDrive -VMName $Name | Select-Object -First 1 }
+    if (-not $hdd) { throw ('OS boot disk not found on VM ' + $Name + ' for path: ' + $VHDPath) }
     Set-VMFirmware -VMName $Name -FirstBootDevice $hdd
 }
 

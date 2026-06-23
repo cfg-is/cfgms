@@ -421,6 +421,31 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 	require.Len(t, callsContaining(calls, "Start-VM"), 1, "VM is powered on")
 }
 
+// TestProvisionVM_CloudInitGen1SkipsHddFirstBoot drives an absent Gen1 linux
+// cloud-image VM and asserts the cloud-init seed is still built and attached but
+// Cfgms-SetHddFirstBoot is NOT issued (Gen1 uses BIOS startup order, not UEFI
+// firmware boot device — same Gen1 contract as the install-media path).
+func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(1)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"),
+		"Gen1 cloud-init VMs must not set a UEFI first boot device")
+	assert.Empty(t, callsContaining(calls, "Set-VMFirmware"),
+		"Gen1 has no secure boot / firmware step")
+	// The cloud-init seed build + boot-disk prep still happen on Gen1.
+	require.Len(t, callsContaining(calls, "Cfgms-PrepCloudBootDisk"), 1, "Gen1 still preps the cloud boot disk")
+	require.Len(t, callsContaining(calls, "New-VHD"), 1, "Gen1 still builds the CIDATA seed")
+	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "Gen1 still attaches the seed")
+}
+
 // TestProvision_CloudInitUserDataRenderedToSeed asserts the cloud-init path
 // writes a REAL rendered cloud-config user-data (not the placeholder) carrying the
 // controller-supplied token + CA fingerprint and the CorrelationID, with list-form
@@ -446,11 +471,15 @@ func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
 	require.NotEmpty(t, userData, "rendered cloud-config user-data must be present in the copy args")
 	assert.Contains(t, userData, "runcmd", "user-data must carry runcmd")
 	assert.Contains(t, userData, "cfgms-steward", "user-data must install the steward")
+	assert.Contains(t, userData, "install", "user-data must run the steward install command")
 	assert.Contains(t, userData, "reg-token-stub-value", "controller-supplied token must be rendered into user-data")
 	assert.Contains(t, userData, "abc123fingerprint", "CA fingerprint must be rendered into user-data")
 	assert.Contains(t, userData, "stw-01", "CorrelationID must appear in the user-data")
+	// runcmd must be list/exec form (argv arrays), never shell-string composition.
+	assert.Contains(t, userData, "  - [ ", "runcmd entries must be YAML list (exec) form, not shell strings")
 	lower := strings.ToLower(userData)
-	for _, banned := range []string{"eval", "bash -c", "iex", "invoke-expression"} {
+	// CLAUDE.md banned patterns: no shell-string composition / runtime code eval.
+	for _, banned := range []string{"eval", "bash -c", "sh -c", "iex", "invoke-expression", "-encodedcommand", "python -c"} {
 		assert.NotContains(t, lower, banned, "rendered user-data must not contain banned pattern %q", banned)
 	}
 }
