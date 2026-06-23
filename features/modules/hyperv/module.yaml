@@ -17,6 +17,7 @@ interfaces:
   - Get
   - Set
   - Test
+  - Monitor
 
 security:
   requires_root: false

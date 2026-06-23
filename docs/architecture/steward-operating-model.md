@@ -207,7 +207,7 @@ The convergence runtime now wires `Monitor` automatically: on cfg load it calls 
 
 Current adoption:
 
-- **Implemented**: none (first implementation planned for Hyper-V, S2)
+- **Implemented**: `hyperv` (VM state — power on/off and create/delete, via a single host-level Windows Event Log subscription over the Hyper-V VMMS/Worker channels; Windows only, polling backstop elsewhere)
 - **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `script`, `firewall`, `package`, `patch`
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
