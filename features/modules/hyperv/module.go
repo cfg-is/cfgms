@@ -93,6 +93,26 @@ type hypervModule struct {
 	// Mount-VHD against a CSV-resident VHDX hangs on a cluster node. When empty
 	// the seed lands next to the VM's primary VHD (fine for non-cluster hosts).
 	seedDir string
+
+	// Monitor (modules.Monitor, #2114) state. A single host-level Windows Event
+	// Log subscription fans out to per-VM ChangeEvents on the one monChanges
+	// channel. Fields live here (cross-platform) so module.go owns the struct;
+	// the subscription is driven entirely by the build-tagged monitor_*.go files.
+	//
+	// monSub holds the wevtapi EvtSubscribe handle as a uintptr so this struct
+	// stays platform-neutral (monitor_windows.go casts it to windows.Handle).
+	// Zero means "no active subscription". monInterest is the set of registered
+	// resourceIDs (vm:<name>); the subscription is created on first interest and
+	// torn down when the last is removed or on Close.
+	monMu       sync.Mutex
+	monChanges  chan modules.ChangeEvent
+	monInterest map[string]struct{}
+	monSub      uintptr
+	monClosed   bool
+	// monTeardown stops the reader goroutine and releases the EvtSubscribe and
+	// signal handles. It is set by the platform establish routine when the
+	// subscription is created and cleared on Close. nil means "no subscription".
+	monTeardown func() error
 }
 
 // HypervOption configures a hypervModule at construction time.
