@@ -39,6 +39,18 @@ func newTestController(t *testing.T) *controller.Controller {
 	logger := unit.NewTestLogger(t)
 	ctrl, err := controller.New(cfg, logger)
 	require.NoError(t, err)
+
+	// Close the controller stack before the deferred t.TempDir() cleanup runs.
+	// t.Cleanup callbacks run LIFO and before TempDir removal, so closing here
+	// releases the SQLite file handle and avoids the Windows "file is being used
+	// by another process" unlink error during TempDir cleanup (#1923). Cleanup
+	// errors are secondary to the test outcome, so log rather than fail.
+	t.Cleanup(func() {
+		if cerr := ctrl.Close(); cerr != nil {
+			t.Logf("newTestController: controller close during cleanup: %v", cerr)
+		}
+	})
+
 	return ctrl
 }
 
