@@ -946,6 +946,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
+	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
+	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile
+	// provider creates it); the refresh stores are nil when the non-bundle SQLite
+	// fallback path was taken (unit-test-only scenario).
+	if ss := storageManager.GetStewardStore(); ss != nil {
+		httpServer.SetStewardStore(ss)
+	}
+	if prs := storageManager.GetPendingRefreshStore(); prs != nil {
+		httpServer.SetPendingRefreshStore(prs)
+	}
+	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
+		httpServer.SetRefreshPolicyStore(rps)
+	}
+	if as := storageManager.GetAuditStore(); as != nil {
+		httpServer.SetAuditStore(as)
+	}
+
 	// Issue #1948: Wire in-memory upgrade store so the dispatch/status endpoints
 	// are operational. A durable SQLite-backed store is a follow-up; for the
 	// OSS composite deployment the in-memory store is sufficient because upgrade

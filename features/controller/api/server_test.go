@@ -973,6 +973,24 @@ func TestTestEndpointAuthGate(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for QUIC endpoint when env var is unset")
 		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: env var unset → auth required
+		handlerCalled = false
+		req = httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/status", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for status endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// GET /api/v1/test/audit/count — Issue #2098: env var unset → auth required
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/audit/count", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for audit count endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
 	})
 
 	t.Run("bypass works when CFGMS_ENABLE_TEST_ENDPOINTS is true", func(t *testing.T) {
@@ -1003,6 +1021,24 @@ func TestTestEndpointAuthGate(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for QUIC test endpoint")
 		assert.True(t, handlerCalled, "Handler should be called for QUIC test endpoint (auth bypassed)")
+
+		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/status", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for status test endpoint")
+		assert.True(t, handlerCalled, "Handler should be called for status test endpoint (auth bypassed)")
+
+		// GET /api/v1/test/audit/count — Issue #2098: should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/audit/count", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for audit count test endpoint")
+		assert.True(t, handlerCalled, "Handler should be called for audit count test endpoint (auth bypassed)")
 	})
 
 	t.Run("warn log emitted on bypass", func(t *testing.T) {

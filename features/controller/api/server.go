@@ -109,6 +109,7 @@ type Server struct {
 	stewardStore                   business.StewardStore                 // Issue #2096: durable fleet-registry store for device-ID refresh gate
 	pendingRefreshStore            business.PendingRefreshStore          // Issue #2096: durable pending-refresh queue
 	refreshPolicyStore             business.RefreshPolicyStore           // Issue #2096: per-tenant refresh policy
+	auditStore                     business.AuditStore                   // Issue #2098: direct audit store for test-mode count endpoint
 	nonceCache                     *cache.Cache                          // Issue #2096: in-memory nonce store (TTL 65s)
 	popVerifier                    PoPVerifier                           // Issue #2096: injectable for revoked-before-PoP testing
 	isolationEngine                *tenantsecurity.TenantIsolationEngine // Issue #2123: tenant isolation enforcement for scoped API keys
@@ -400,6 +401,11 @@ func (s *Server) setupRouter() {
 	// Use separate path to avoid conflict with authenticated subrouter
 	// TODO: Remove or protect this endpoint in production
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
+
+	// Issue #2098: Test-mode admin endpoints — active only when CFGMS_ENABLE_TEST_ENDPOINTS=true.
+	// Fleet E2E tests use these instead of sqlite3 CLI (not installed in Alpine container).
+	s.router.HandleFunc("/api/v1/test/stewards/{id}/status", s.handleTestSetStewardStatus).Methods("PUT")
+	s.router.HandleFunc("/api/v1/test/audit/count", s.handleTestAuditCount).Methods("GET")
 
 	// Registration-refresh endpoints (unauthenticated — authenticated by device key PoP).
 	// Registered on the base router like /api/v1/register (Issue #2096).
@@ -953,6 +959,15 @@ func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshPolicyStore = store
+}
+
+// SetAuditStore wires a direct AuditStore reference for the test-mode count endpoint
+// (Issue #2098). Production code uses s.auditManager; this allows test endpoints to
+// query audit entries without needing sqlite3 CLI in the controller container.
+func (s *Server) SetAuditStore(store business.AuditStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditStore = store
 }
 
 // SetPoPVerifier replaces the proof-of-possession verifier.

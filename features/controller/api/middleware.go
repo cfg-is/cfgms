@@ -225,6 +225,21 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			// Issue #2098: test-mode status update and audit count endpoints (no auth in test mode).
+			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/status") {
+				s.logger.Warn("Test endpoint accessed with authentication bypass",
+					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if r.Method == "GET" && r.URL.Path == "/api/v1/test/audit/count" {
+				s.logger.Warn("Test endpoint accessed with authentication bypass",
+					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 
 		// H2: mTLS-presented identity always wins.

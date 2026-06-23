@@ -4,12 +4,18 @@ package fleet
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -481,6 +488,236 @@ func (s *FleetTestSuite) waitForStewardVersion(t *testing.T, container, version 
 		time.Sleep(2 * time.Second)
 	}
 	return false
+}
+
+// expireStewardCerts replaces the steward's stored mTLS client certificate with an
+// expired one, simulating a steward that has been offline past cert expiry.
+//
+// It docker-copies the cert store from the container to a host temp dir, loads a
+// cert.Manager from it, imports a back-dated client cert via certMgr.ImportCertificate,
+// deletes the old valid client cert(s), and copies the modified store back.
+// device_identity.enc and steward-identity.json are preserved because they live in
+// the cert store root (not in per-serial subdirectories) and are not touched by the
+// cert.Manager operations.
+//
+// The container must be stopped before calling this helper.
+func (s *FleetTestSuite) expireStewardCerts(t *testing.T, container string) {
+	t.Helper()
+	if err := validateFleetContainer(container); err != nil {
+		t.Fatalf("expireStewardCerts: %v", err)
+	}
+
+	const certStoreDir = "/var/lib/cfgms/steward/certs"
+
+	// Copy cert store from container to a host temp directory.
+	hostCertDir := filepath.Join(s.tmpDir, "certstore-"+container)
+	if err := os.MkdirAll(hostCertDir, 0o750); err != nil {
+		t.Fatalf("expireStewardCerts: create host cert dir: %v", err)
+	}
+
+	cpOutCtx, cpOutCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// docker cp container:dir/. dst copies directory CONTENTS (not the dir itself).
+	out, err := exec.CommandContext(cpOutCtx, "docker", "cp",
+		fmt.Sprintf("%s:%s/.", container, certStoreDir), hostCertDir).CombinedOutput()
+	cpOutCancel()
+	require.NoError(t, err, "expireStewardCerts: docker cp cert store out: %s", string(out))
+
+	// Load the cert.Manager from the copied store.
+	mgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    hostCertDir,
+		LoadExistingCA: true,
+	})
+	require.NoError(t, err, "expireStewardCerts: load cert manager")
+
+	// Record serial numbers of existing client certs to delete after import.
+	certs, err := mgr.ListCertificates()
+	require.NoError(t, err, "expireStewardCerts: list certificates")
+	var oldSerials []string
+	for _, c := range certs {
+		if c.Type == cert.CertificateTypeClient {
+			oldSerials = append(oldSerials, c.SerialNumber)
+		}
+	}
+
+	// Generate a self-signed cert+key pair with NotBefore/NotAfter both in the past.
+	expiredCertPEM, expiredKeyPEM := generateExpiredClientCertPEM(t)
+
+	// Import the expired cert via the manager (satisfies the certMgr.ImportCertificate
+	// requirement in the story; creates a new per-serial subdirectory in hostCertDir).
+	_, err = mgr.ImportCertificate(expiredCertPEM, expiredKeyPEM, cert.CertificateTypeClient)
+	require.NoError(t, err, "expireStewardCerts: import expired cert")
+
+	// Delete old valid client certs from the store.
+	for _, serial := range oldSerials {
+		if delErr := mgr.DeleteCertificate(serial); delErr != nil {
+			t.Logf("expireStewardCerts: warning: failed to delete old cert %s: %v", serial, delErr)
+		}
+	}
+
+	// Copy the modified cert store back to the container.
+	cpInCtx, cpInCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// docker cp src/. container:dst copies the CONTENTS of src into dst.
+	out, err = exec.CommandContext(cpInCtx, "docker", "cp",
+		hostCertDir+"/.", fmt.Sprintf("%s:%s", container, certStoreDir)).CombinedOutput()
+	cpInCancel()
+	require.NoError(t, err, "expireStewardCerts: docker cp modified cert store back: %s", string(out))
+
+	t.Logf("expireStewardCerts: replaced %d client cert(s) with expired version in %s",
+		len(oldSerials), container)
+}
+
+// generateExpiredClientCertPEM creates a self-signed RSA cert+key pair with
+// NotBefore=-48h and NotAfter=-24h, simulating a cert that expired yesterday.
+// The cert does not need to be CA-signed; cert.Manager.ImportCertificate only
+// validates that the cert and key match, not that the cert is CA-signed.
+func generateExpiredClientCertPEM(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err, "generateExpiredClientCertPEM: generate RSA key")
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err, "generateExpiredClientCertPEM: generate serial")
+
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "cfgms-expired-test-client"},
+		NotBefore:    now.Add(-48 * time.Hour),
+		NotAfter:     now.Add(-24 * time.Hour), // expired 24 hours ago
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	// Self-signed: parent == template, signer == key.
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err, "generateExpiredClientCertPEM: create certificate")
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER := x509.MarshalPKCS1PrivateKey(key)
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+// ---- Registration-refresh helper functions (Issue #2098) ---------------------
+
+// getDeviceIDFromContainer reads the device_id from the steward-identity.json
+// stored in the container's cert store. The container must be running.
+func (s *FleetTestSuite) getDeviceIDFromContainer(t *testing.T, container string) string {
+	t.Helper()
+	const identityFile = "/var/lib/cfgms/steward/certs/steward-identity.json"
+	raw, err := s.dockerExec(t, container, "cat", identityFile)
+	require.NoError(t, err, "getDeviceIDFromContainer: read %s from %s", identityFile, container)
+	var id struct {
+		DeviceID string `json:"device_id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &id),
+		"getDeviceIDFromContainer: parse steward-identity.json from %s", container)
+	require.NotEmpty(t, id.DeviceID,
+		"getDeviceIDFromContainer: device_id is empty in %s:%s", container, identityFile)
+	return id.DeviceID
+}
+
+// setStewardStatusByID sets the lifecycle status of the steward with the given ID
+// via the controller's test-mode REST endpoint (PUT /api/v1/test/stewards/{id}/status).
+// The fleet-controller must have CFGMS_ENABLE_TEST_ENDPOINTS=true.
+func (s *FleetTestSuite) setStewardStatusByID(t *testing.T, stewardID, status string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/test/stewards/%s/status", s.controllerURL, stewardID)
+	body, err := json.Marshal(map[string]string{"status": status})
+	require.NoError(t, err, "setStewardStatusByID: marshal request body")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, strings.NewReader(string(body)))
+	require.NoError(t, err, "setStewardStatusByID: build request")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "setStewardStatusByID: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode,
+		"setStewardStatusByID: unexpected response for steward %s → %s", stewardID, status)
+}
+
+// setRefreshPolicy sets the per-tenant refresh policy via the controller REST API.
+// mode is one of: "auto_accept", "require_approval", "reject".
+func (s *FleetTestSuite) setRefreshPolicy(t *testing.T, tenantID, mode string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/refresh-policy", s.controllerURL,
+		strings.ReplaceAll(tenantID, "/", "%2F"))
+	body, err := json.Marshal(map[string]string{"mode": mode})
+	require.NoError(t, err, "setRefreshPolicy: marshal request body")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, strings.NewReader(string(body)))
+	require.NoError(t, err, "setRefreshPolicy: build request")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "setRefreshPolicy: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"setRefreshPolicy: unexpected response for tenant %s mode %s: %s", tenantID, mode, resp.Status)
+}
+
+// pendingRefreshEntry is the API representation of a pending refresh queue entry.
+type pendingRefreshEntry struct {
+	PendingID string `json:"pending_id"`
+	DeviceID  string `json:"device_id"`
+	TenantID  string `json:"tenant_id"`
+	Status    string `json:"status"`
+}
+
+// listPendingRefreshes fetches pending refresh entries from the controller.
+// An empty tenant_id returns all entries (admin-scoped call).
+func (s *FleetTestSuite) listPendingRefreshes(t *testing.T, tenantID string) []pendingRefreshEntry {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/stewards/refresh/pending", s.controllerURL)
+	if tenantID != "" {
+		url += "?tenant_id=" + strings.ReplaceAll(tenantID, "/", "%2F")
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	require.NoError(t, err, "listPendingRefreshes: build request")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "listPendingRefreshes: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"listPendingRefreshes: unexpected response: %s", resp.Status)
+	var entries []pendingRefreshEntry
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&entries), "listPendingRefreshes: decode response")
+	return entries
+}
+
+// approveRefreshViaAPI approves a pending refresh entry via the controller REST API.
+func (s *FleetTestSuite) approveRefreshViaAPI(t *testing.T, pendingID string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/stewards/refresh/%s/approve", s.controllerURL, pendingID)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, nil)
+	require.NoError(t, err, "approveRefreshViaAPI: build request")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "approveRefreshViaAPI: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"approveRefreshViaAPI: unexpected response for pending_id %s: %s", pendingID, resp.Status)
+}
+
+// queryAuditActionCount returns the number of audit entries with the given action
+// attributed to the given device_id. Calls the test-mode controller endpoint which
+// flushes the audit manager before querying.
+func (s *FleetTestSuite) queryAuditActionCount(t *testing.T, action, deviceID string) int {
+	t.Helper()
+	params := url.Values{}
+	params.Set("action", action)
+	if deviceID != "" {
+		params.Set("device_id", deviceID)
+	}
+	rawURL := fmt.Sprintf("%s/api/v1/test/audit/count?%s", s.controllerURL, params.Encode())
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	require.NoError(t, err, "queryAuditActionCount: build request")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "queryAuditActionCount: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"queryAuditActionCount: unexpected response: %s", resp.Status)
+	var result struct {
+		Count int `json:"count"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result), "queryAuditActionCount: decode response")
+	return result.Count
 }
 
 // TestFleetWalkthrough is the single ordered entry point for all fleet walkthrough scenarios.

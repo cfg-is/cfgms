@@ -48,6 +48,8 @@ type BusinessStoreBundle struct {
 	Push                business.PushStore
 	PendingRegistration business.PendingRegistrationStore
 	IPTrust             business.IPTrustStore
+	PendingRefresh      business.PendingRefreshStore // Issue #2098: registration-refresh approval queue
+	RefreshPolicy       business.RefreshPolicyStore  // Issue #2098: per-tenant refresh policy
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -528,6 +530,8 @@ type StorageManager struct {
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
+	pendingRefreshStore      business.PendingRefreshStore // Issue #2098: registration-refresh approval queue
+	refreshPolicyStore       business.RefreshPolicyStore  // Issue #2098: per-tenant refresh policy
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -618,6 +622,28 @@ func (sm *StorageManager) GetIPTrustStore() business.IPTrustStore {
 // SetIPTrustStore wires the IP-trust store after construction.
 func (sm *StorageManager) SetIPTrustStore(s business.IPTrustStore) {
 	sm.ipTrustStore = s
+}
+
+// GetPendingRefreshStore returns the pending-refresh approval queue (Issue #2098).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetPendingRefreshStore() business.PendingRefreshStore {
+	return sm.pendingRefreshStore
+}
+
+// SetPendingRefreshStore wires the pending-refresh store after construction.
+func (sm *StorageManager) SetPendingRefreshStore(s business.PendingRefreshStore) {
+	sm.pendingRefreshStore = s
+}
+
+// GetRefreshPolicyStore returns the per-tenant refresh policy store (Issue #2098).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetRefreshPolicyStore() business.RefreshPolicyStore {
+	return sm.refreshPolicyStore
+}
+
+// SetRefreshPolicyStore wires the per-tenant refresh policy store after construction.
+func (sm *StorageManager) SetRefreshPolicyStore(s business.RefreshPolicyStore) {
+	sm.refreshPolicyStore = s
 }
 
 // GetCapabilities returns the provider's capabilities.
@@ -911,6 +937,8 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		)
 		sm.SetPendingRegistrationStore(bundle.PendingRegistration)
 		sm.SetIPTrustStore(ipTrustStore)
+		sm.SetPendingRefreshStore(bundle.PendingRefresh)
+		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
 		return sm, nil
 	}
 
@@ -958,5 +986,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	)
 	sm.SetPendingRegistrationStore(pendingRegStore)
 	sm.SetIPTrustStore(ipTrustStore)
+	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle
+	// (OpenBusinessStores). The non-bundle fallback path leaves them nil — acceptable since
+	// this path is only taken when the provider does not implement BusinessStoreOpener,
+	// which in practice means unit tests that do not exercise the refresh flow.
 	return sm, nil
 }
