@@ -130,6 +130,11 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	s.containerStop(t, container)
 	s.expireStewardCerts(t, container)
 
+	// Restore to registered before returning — runs even if t.Fatalf fires below.
+	t.Cleanup(func() {
+		s.setStewardStatusByID(t, stewardID, "registered")
+	})
+
 	// Mark the steward as revoked in the controller DB (via test-mode REST endpoint).
 	s.setStewardStatusByID(t, stewardID, "revoked")
 	t.Logf("Revoked: marked steward %s as revoked", stewardID)
@@ -167,9 +172,7 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	}
 	t.Logf("Revoked: audit refresh_challenge_rejected count=%d for device %s", auditCount, deviceID)
 
-	// Restore the steward to registered status so subsequent tests are not broken.
-	s.setStewardStatusByID(t, stewardID, "registered")
-	t.Log("Revoked: restored steward status to 'registered'")
+	t.Log("Revoked: steward correctly rejected; status will be restored to 'registered' by t.Cleanup")
 }
 
 // testRefreshArchived verifies Scenario 3 (AC7–AC9):

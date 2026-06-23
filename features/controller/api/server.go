@@ -552,9 +552,10 @@ func (s *Server) setupRouter() {
 		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
 
 	// Per-tenant refresh policy endpoints (Issue #2097).
-	tenants.Handle("/{id:.+}/refresh-policy",
+	// {tenant_path:.+} allows '/' in the path variable for hierarchical tenant IDs.
+	tenants.Handle("/{tenant_path:.+}/refresh-policy",
 		s.requirePermission("refresh", "get-policy")(http.HandlerFunc(s.handleGetRefreshPolicy))).Methods("GET")
-	tenants.Handle("/{id:.+}/refresh-policy",
+	tenants.Handle("/{tenant_path:.+}/refresh-policy",
 		s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy))).Methods("PUT")
 
 	// Installer artifact management endpoints (Issue #1702).

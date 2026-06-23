@@ -92,6 +92,9 @@ func (s *Server) validateURLParameters(validator *security.EnhancedValidator, re
 		case "id":
 			// Validate ID parameters (should be UUIDs or alphanumeric)
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")
+		case "tenant_path":
+			// Hierarchical tenant IDs use '/' as a path separator: "fleet-root/fleet-child-a".
+			validator.ValidateString(result, "path."+param, value, "required", "charset:tenant_path_id", "max_length:256")
 		case "serial":
 			// Certificate serial numbers
 			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric", "max_length:40")

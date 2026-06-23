@@ -793,9 +793,9 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleGetRefreshPolicy handles GET /api/v1/tenants/{id}/refresh-policy.
+// handleGetRefreshPolicy handles GET /api/v1/tenants/{tenant_path}/refresh-policy.
 func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
-	tenantID := mux.Vars(r)["id"]
+	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
@@ -830,9 +830,9 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// handleSetRefreshPolicy handles PUT /api/v1/tenants/{id}/refresh-policy.
+// handleSetRefreshPolicy handles PUT /api/v1/tenants/{tenant_path}/refresh-policy.
 func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
-	tenantID := mux.Vars(r)["id"]
+	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
