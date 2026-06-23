@@ -150,15 +150,24 @@ func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
 		testDB = fmt.Sprintf("cfgms_test_%d", time.Now().Unix())
 	}
 
+	// session_hmac_key is required by the database SessionStore constructor; the constructor
+	// fails closed (no silent insecure fallback) when it is absent. Use an env-override so
+	// CI can inject a real key; fall back to a fixed test-only key for local development.
+	hmacKey := os.Getenv("CFGMS_TEST_SESSION_HMAC_KEY")
+	if hmacKey == "" {
+		hmacKey = "test-hmac-key-for-storage-fixture-tests-only"
+	}
+
 	f.Configs["database"] = &StorageTestConfig{
 		Provider: "database",
 		Config: map[string]interface{}{
-			"host":     testHost,
-			"port":     testPort,
-			"database": testDB,
-			"username": "cfgms_test",
-			"password": testPassword,
-			"sslmode":  "disable", // For testing only
+			"host":             testHost,
+			"port":             testPort,
+			"database":         testDB,
+			"username":         "cfgms_test",
+			"password":         testPassword,
+			"sslmode":          "disable", // For testing only
+			"session_hmac_key": hmacKey,
 		},
 	}
 }
