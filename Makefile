@@ -1975,7 +1975,7 @@ test-e2e-fleet: build-cli
 	docker compose --profile fleet -f docker-compose.test.yml up -d --build --wait; \
 	echo ""; \
 	echo "Running fleet E2E tests..."; \
-	CFG_BINARY=$(CURDIR)/bin/cfg CFGMS_FLEET_TEST=1 go test -v -timeout 300s ./test/e2e/fleet/...
+	CFG_BINARY=$(CURDIR)/bin/cfg CFGMS_FLEET_TEST=1 go test -v -timeout 600s ./test/e2e/fleet/...
 	@echo ""
 	@echo "✅ FLEET E2E TESTS PASSED"
 

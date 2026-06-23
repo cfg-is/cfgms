@@ -104,15 +104,15 @@ type hypervModule struct {
 	// Zero means "no active subscription". monInterest is the set of registered
 	// resourceIDs (vm:<name>); the subscription is created on first interest and
 	// torn down when the last is removed or on Close.
-	monMu       sync.Mutex               //nolint:unused // used by monitor_windows.go
-	monChanges  chan modules.ChangeEvent //nolint:unused // used by monitor_windows.go
-	monInterest map[string]struct{}      //nolint:unused // used by monitor_windows.go
-	monSub      uintptr                  //nolint:unused // used by monitor_windows.go
-	monClosed   bool                     //nolint:unused // used by monitor_windows.go
+	monMu       sync.Mutex               //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
+	monChanges  chan modules.ChangeEvent //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
+	monInterest map[string]struct{}      //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
+	monSub      uintptr                  //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
+	monClosed   bool                     //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
 	// monTeardown stops the reader goroutine and releases the EvtSubscribe and
 	// signal handles. It is set by the platform establish routine when the
 	// subscription is created and cleared on Close. nil means "no subscription".
-	monTeardown func() error //nolint:unused // used by monitor_windows.go
+	monTeardown func() error //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
 }
 
 // HypervOption configures a hypervModule at construction time.
