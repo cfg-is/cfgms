@@ -17,10 +17,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
-	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
