@@ -443,28 +443,35 @@ except Exception: print('')" 2>/dev/null || echo "")
     ;;
 
   block)
-    # Usage: po-act.sh block <ISSUE_NUM> <reason>
-    # Sets project status to Blocked, assigns to founder, posts escalation comment.
-    issue="${1:?issue number required}"
+    # Usage: po-act.sh block <ISSUE_NUM|ITEM_ID> <reason>
+    # Sets project status to Blocked. For a public issue, also posts an escalation
+    # comment; a draft item (no issue) is set by item_id and takes no comment.
+    arg="${1:?issue number or item_id required}"
     reason="${2:?reason required (use - to read stdin)}"
     ts=$(date -u +"%Y-%m-%d %H:%MZ")
     if [ "$reason" = "-" ]; then
       reason=$(cat)
     fi
     body=$(printf '## Pipeline blocked — %s\n\n%s\n\n_Escalated to founder by PO cycle._\n' "$ts" "$reason")
-    # Update project status to Blocked (idempotently add issue to project first)
-    item_id=$(bash "$PROJECT_QUEUE" add-issue "$issue" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
-    if [ -n "${item_id:-}" ]; then
-      bash "$PROJECT_QUEUE" update-field "$item_id" status "Blocked" >/dev/null 2>&1 || true
+    if [[ "$arg" =~ ^[0-9]+$ ]]; then
+      # Public issue: add to project (idempotent), set Blocked, post escalation comment.
+      item_id=$(bash "$PROJECT_QUEUE" add-issue "$arg" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
+      if [ -n "${item_id:-}" ]; then
+        bash "$PROJECT_QUEUE" update-field "$item_id" status "Blocked" >/dev/null 2>&1 || true
+      fi
+      printf '%s\n' "$body" | gh issue comment "$arg" --repo "$REPO" --body-file - >/dev/null 2>&1 || true
+    else
+      # Draft item: already in the project; set Blocked by item_id (drafts take no comment).
+      bash "$PROJECT_QUEUE" update-field "$arg" status "Blocked" >/dev/null 2>&1 || true
     fi
-    printf '%s\n' "$body" | gh issue comment "$issue" --repo "$REPO" --body-file - >/dev/null
-    echo "BLOCKED:$issue"
+    echo "BLOCKED:$arg"
     ;;
 
   unblock)
-    # Usage: po-act.sh unblock <ISSUE_NUM> <reason> [--as-fix]
-    # Sets project status to Ready (or Fix with --as-fix), posts resolution comment.
-    issue="${1:?issue number required}"
+    # Usage: po-act.sh unblock <ISSUE_NUM|ITEM_ID> <reason> [--as-fix]
+    # Sets project status to Ready (or Fix with --as-fix). Posts a resolution
+    # comment for a public issue; a draft item is set by item_id (no comment).
+    arg="${1:?issue number or item_id required}"
     reason="${2:?reason required (use - to read stdin)}"
     mode="${3:-}"
     ts=$(date -u +"%Y-%m-%d %H:%MZ")
@@ -472,17 +479,18 @@ except Exception: print('')" 2>/dev/null || echo "")
       reason=$(cat)
     fi
     body=$(printf '## Pipeline unblocked — %s\n\n%s\n' "$ts" "$reason")
-    # Update project status (idempotently add issue to project first)
-    item_id=$(bash "$PROJECT_QUEUE" add-issue "$issue" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
-    if [ -n "${item_id:-}" ]; then
-      new_status="Ready"
-      if [ "$mode" = "--as-fix" ]; then
-        new_status="Fix"
+    new_status="Ready"
+    [ "$mode" = "--as-fix" ] && new_status="Fix"
+    if [[ "$arg" =~ ^[0-9]+$ ]]; then
+      item_id=$(bash "$PROJECT_QUEUE" add-issue "$arg" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
+      if [ -n "${item_id:-}" ]; then
+        bash "$PROJECT_QUEUE" update-field "$item_id" status "$new_status" >/dev/null 2>&1 || true
       fi
-      bash "$PROJECT_QUEUE" update-field "$item_id" status "$new_status" >/dev/null 2>&1 || true
+      printf '%s\n' "$body" | gh issue comment "$arg" --repo "$REPO" --body-file - >/dev/null 2>&1 || true
+    else
+      bash "$PROJECT_QUEUE" update-field "$arg" status "$new_status" >/dev/null 2>&1 || true
     fi
-    printf '%s\n' "$body" | gh issue comment "$issue" --repo "$REPO" --body-file - >/dev/null
-    echo "UNBLOCKED:$issue${mode:+ ($mode)}"
+    echo "UNBLOCKED:$arg${mode:+ ($mode)}"
     ;;
 
   ""|-h|--help|help)

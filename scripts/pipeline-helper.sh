@@ -39,6 +39,9 @@ Dispatch / materialization (privileged — called by po-act.sh dispatch):
 
 Community issues (human-directed, interactive sessions only):
   create-community-issue <title> <body_file>     Create a PUBLIC, UNLOCKED community issue
+
+Lock maintenance (run from the PO cron):
+  lock-sweep                                     Lock+internal pipeline PRs; re-lock any unlocked internal issue
 USAGE
   exit 1
 }
@@ -243,6 +246,75 @@ case "$cmd" in
     issue_num=$(echo "$issue_url" | grep -oP '\d+$')
     # Community issues stay public + unlocked by design — no lock, no internal label.
     echo "CREATED_COMMUNITY:${issue_num}:${issue_url}"
+    ;;
+
+  # ── Lock maintenance (run from the PO cron) ──────────────────────
+
+  lock-sweep)
+    # Idempotent backstop: lock + `internal`-tag pipeline PRs (which have no single
+    # creation chokepoint), and re-lock any unlocked `internal` issue (covers the
+    # create->lock race in materialize/create-epic). Locked items take no external
+    # comments — the injection surface stays closed.
+    python3 - "$REPO" <<'PYEOF'
+import json, subprocess, sys
+
+repo = sys.argv[1]
+owner, name = repo.split('/')
+
+
+def gh_json(args):
+    r = subprocess.run(['gh'] + args, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        return None
+    return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+def graphql(query, **vars):
+    args = ['api', 'graphql', '-f', f'query={query}']
+    for k, v in vars.items():
+        args += ['-F', f'{k}={v}']
+    return gh_json(args)
+
+
+def lock(node_id):
+    graphql('mutation($l:ID!){lockLockable(input:{lockableId:$l}){clientMutationId}}', l=node_id)
+
+
+locked_count = 0
+
+# 1. Open pipeline PRs (feature/story-* or feature/item-*): lock + internal label.
+prs = gh_json(['pr', 'list', '--repo', repo, '--state', 'open',
+               '--json', 'number,headRefName,id,labels', '--limit', '100']) or []
+for pr in prs:
+    if not pr['headRefName'].startswith(('feature/story-', 'feature/item-')):
+        continue
+    locked = graphql('query($o:String!,$n:String!,$num:Int!){repository(owner:$o,name:$n){'
+                     'pullRequest(number:$num){locked}}}', o=owner, n=name, num=pr['number'])
+    is_locked = (((locked or {}).get('data') or {}).get('repository') or {}).get('pullRequest', {}).get('locked')
+    labels = [l['name'] for l in pr.get('labels', [])]
+    if 'internal' not in labels:
+        subprocess.run(['gh', 'pr', 'edit', str(pr['number']), '--repo', repo,
+                        '--add-label', 'internal'], capture_output=True)
+    if not is_locked:
+        lock(pr['id'])
+        locked_count += 1
+        print(f"LOCKED_PR:#{pr['number']}")
+
+# 2. Open `internal` issues that are unlocked: re-lock.
+issues = gh_json(['issue', 'list', '--repo', repo, '--state', 'open',
+                  '--label', 'internal', '--json', 'number,id', '--limit', '200']) or []
+for iss in issues:
+    locked = graphql('query($o:String!,$n:String!,$num:Int!){repository(owner:$o,name:$n){'
+                     'issue(number:$num){locked}}}', o=owner, n=name, num=iss['number'])
+    is_locked = (((locked or {}).get('data') or {}).get('repository') or {}).get('issue', {}).get('locked')
+    if not is_locked:
+        lock(iss['id'])
+        locked_count += 1
+        print(f"LOCKED_ISSUE:#{iss['number']}")
+
+print(f"LOCK_SWEEP_DONE:{locked_count}")
+PYEOF
     ;;
 
   *)
