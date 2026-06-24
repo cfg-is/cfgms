@@ -155,6 +155,14 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 		return fmt.Errorf("failed to initialize global logging: %w", err)
 	}
+	// Flush and close the logger when runSteward returns so that buffered log
+	// entries (AsyncWrites=true, FlushInterval=5s) reach disk before os.Exit
+	// is called — critical for short-lived exit paths (e.g. ErrRefreshRejected).
+	defer func() {
+		if mgr := logging.GetGlobalLoggingManager(); mgr != nil {
+			_ = mgr.Close()
+		}
+	}()
 	(&logging.TelemetryBridge{}).Initialize()
 
 	logging.InitializeGlobalLoggerFactory("steward", "main")
@@ -1225,10 +1233,18 @@ func refreshAndConnect(
 		"steward_id", logging.SanitizeLogValue(id.StewardID))
 
 	// Persist the refreshed identity with updated certs.
+	// The controller's refresh response does not include TransportAddress or ServerCert
+	// (the connection endpoint and signing cert do not change during cert refresh).
+	// Preserve the stored values as authoritative fallbacks so the reconnect succeeds
+	// even when the controller omits those optional fields.
 	updatedID := *id
 	updatedID.CACertPEM = completeResp.CACert
-	updatedID.ServerCertPEM = completeResp.ServerCert
-	updatedID.TransportAddress = completeResp.TransportAddress
+	if completeResp.ServerCert != "" {
+		updatedID.ServerCertPEM = completeResp.ServerCert
+	}
+	if completeResp.TransportAddress != "" {
+		updatedID.TransportAddress = completeResp.TransportAddress
+	}
 	if saveErr := saveIdentity(certStoreDir, updatedID); saveErr != nil {
 		logger.Warn("Failed to persist refreshed identity; next restart may re-register", "error", saveErr)
 	}
@@ -1236,11 +1252,11 @@ func refreshAndConnect(
 	bundle := approvedRegistration{
 		StewardID:        id.StewardID,
 		TenantID:         id.TenantID,
-		TransportAddress: completeResp.TransportAddress,
+		TransportAddress: updatedID.TransportAddress,
 		ClientCert:       completeResp.ClientCert,
 		ClientKey:        completeResp.ClientKey,
 		CACert:           completeResp.CACert,
-		ServerCert:       completeResp.ServerCert,
+		ServerCert:       updatedID.ServerCertPEM,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
 	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)

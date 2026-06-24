@@ -154,13 +154,14 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 
 	// AC: steward must NOT be connected (it should not have recovered).
 	// Poll for 15s to make sure it doesn't eventually reconnect.
-	for i := 0; i < 5; i++ {
-		time.Sleep(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
 		state, err := s.getStewardConnectionState(t, stewardID)
 		if err == nil && state == "connected" {
 			t.Errorf("Revoked: steward reconnected after revocation — this should not happen")
 			break
 		}
+		time.Sleep(3 * time.Second)
 	}
 
 	// AC: audit log records at least one refresh_challenge_rejected entry.
@@ -196,7 +197,7 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	deviceID := s.getDeviceIDFromContainer(t, container)
 	t.Logf("Archived: device_id=%s steward_id=%s", deviceID, stewardID)
 
-	// Stop container, expire certs, mark archived, then set policy to require_approval.
+	// Stop container, expire certs, mark archived.
 	s.containerStop(t, container)
 	s.expireStewardCerts(t, container)
 
@@ -204,6 +205,14 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	// (bypasses policy: even auto_accept policy queues archived stewards).
 	s.setStewardStatusByID(t, stewardID, "archived")
 	t.Logf("Archived: marked steward %s as archived", stewardID)
+
+	// Set auto_accept policy so that after admin approval promotes the steward from
+	// "archived" to "registered", the steward's next retry immediately receives a new
+	// cert rather than being re-queued by the default require_approval policy.
+	// The archived status is what drives the initial 202 queue — policy is irrelevant
+	// for the first attempt (archived bypasses policy). Policy only applies on retry.
+	s.setRefreshPolicy(t, tenantID, "auto_accept")
+	t.Logf("Archived: set refresh policy for %s to auto_accept", tenantID)
 
 	// Start the container.
 	s.containerStart(t, container, 60*time.Second)
