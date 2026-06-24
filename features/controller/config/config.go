@@ -225,6 +225,11 @@ type CertificateConfig struct {
 
 	// Signing contains configuration for the config signing certificate
 	Signing *SigningCertificateConfig `yaml:"signing"`
+
+	// ClusterCA configures CA material sourcing from OpenBao in cluster-mode
+	// deployments. When set and ha.mode is "cluster", the controller loads
+	// the CA from the vault rather than generating or loading it from local disk.
+	ClusterCA *ClusterCAConfig `yaml:"cluster_ca,omitempty"`
 }
 
 // PublicAPICertConfig contains configuration for the public-facing API certificate
@@ -266,6 +271,32 @@ type SigningCertificateConfig struct {
 
 	// Organization name
 	Organization string `yaml:"organization"`
+}
+
+// ClusterCAConfig configures CA material sourcing from a shared OpenBao secret store
+// in cluster-mode deployments. The CA private key never resides on the node disk;
+// it is retrieved from the vault at boot and held in-process only.
+//
+// The vault token must be supplied via the OPENBAO_TOKEN or BAO_TOKEN environment
+// variable — never in the configuration file.
+type ClusterCAConfig struct {
+	// VaultAddress is the OpenBao server URL. Must be HTTPS in production.
+	// Example: "https://vault.example.com:8200"
+	// Override via CFGMS_CLUSTER_CA_VAULT_ADDRESS environment variable.
+	VaultAddress string `yaml:"vault_address"`
+
+	// VaultKeyPath is the secret path in the format "tenantID/key-name" where
+	// the cluster CA cert and key PEM are stored in the KV v2 engine.
+	// Example: "root/cluster-ca"
+	// Override via CFGMS_CLUSTER_CA_VAULT_KEY_PATH environment variable.
+	VaultKeyPath string `yaml:"vault_key_path"`
+
+	// VaultTLSCert is the path to a PEM CA certificate for vault TLS verification.
+	// Optional; required when the vault uses a private CA.
+	VaultTLSCert string `yaml:"vault_tls_cert,omitempty"`
+
+	// VaultMountPath is the KV v2 mount path (default: "secret").
+	VaultMountPath string `yaml:"vault_mount_path,omitempty"`
 }
 
 // ServerCertificateConfig contains server certificate settings
@@ -868,6 +899,22 @@ func LoadWithPath(configPath string) (*Config, error) {
 			cfg.Storage.Cluster = &ClusterStorageConfig{}
 		}
 		cfg.Storage.Cluster.PostgresDSN = pgDSN
+	}
+
+	// Cluster CA vault configuration environment variables (Issue #2018).
+	// Vault token is intentionally NOT configurable here — it must come from
+	// OPENBAO_TOKEN or BAO_TOKEN environment variables, never from a config file.
+	if vaultAddr := os.Getenv("CFGMS_CLUSTER_CA_VAULT_ADDRESS"); vaultAddr != "" {
+		if cfg.Certificate.ClusterCA == nil {
+			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
+		}
+		cfg.Certificate.ClusterCA.VaultAddress = vaultAddr
+	}
+	if vaultKeyPath := os.Getenv("CFGMS_CLUSTER_CA_VAULT_KEY_PATH"); vaultKeyPath != "" {
+		if cfg.Certificate.ClusterCA == nil {
+			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
+		}
+		cfg.Certificate.ClusterCA.VaultKeyPath = vaultKeyPath
 	}
 
 	return cfg, nil

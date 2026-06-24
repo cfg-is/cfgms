@@ -537,6 +537,49 @@ func skipInitTestIfNoPostgres(t *testing.T) string {
 	return dsn
 }
 
+// TestRun_ClusterMode_VaultKeyPathValidation verifies that Run returns a clear error
+// when ha.mode is cluster, cluster_ca is configured, but vault_key_path is malformed.
+// This test does not require a running OpenBao instance.
+func TestRun_ClusterMode_VaultKeyPathValidation(t *testing.T) {
+	pgDSN := skipInitTestIfNoPostgres(t)
+
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		CertPath:        caDir,
+		AdminBundlePath: bundlePath,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				Organization: "Test Org",
+			},
+			ClusterCA: &config.ClusterCAConfig{
+				VaultAddress: "https://vault.example.com:8200",
+				VaultKeyPath: "malformed-no-slash", // intentionally invalid
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider: "database",
+			Cluster: &config.ClusterStorageConfig{
+				PostgresDSN: pgDSN,
+			},
+		},
+		HA: &config.HAConfig{Mode: "cluster"},
+	}
+
+	_, err := Run(cfg, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vault_key_path")
+}
+
 // TestRun_ClusterMode_UsesDatabaseProvider is the REQUIRED test for Issue #2119:
 // Run() with ha.Mode == ClusterMode + a test Postgres DSN must succeed and report
 // "database" as the storage provider, confirming the database-backed steward store

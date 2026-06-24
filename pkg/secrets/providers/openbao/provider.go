@@ -117,7 +117,8 @@ func (p *OpenBaoProvider) CreateSecretStore(config map[string]interface{}) (inte
 	return store, nil
 }
 
-// enforceProductionGuard rejects dev-mode indicators in production environments.
+// enforceProductionGuard rejects dev-mode indicators and plaintext HTTP addresses
+// in production environments.
 func enforceProductionGuard(cfg *OpenBaoConfig) error {
 	isProduction := os.Getenv("CFGMS_TELEMETRY_ENVIRONMENT") == "production"
 	if !isProduction {
@@ -136,6 +137,17 @@ func enforceProductionGuard(cfg *OpenBaoConfig) error {
 				"  OpenBao dev mode, which stores data in memory and is wiped on restart.\n" +
 				"  Fix: use a proper OpenBao service token and ensure dev mode is not enabled.\n" +
 				"  See: pkg/secrets/providers/openbao/README.md",
+		)
+	}
+
+	if len(cfg.Address) >= 7 && cfg.Address[:7] == "http://" {
+		return fmt.Errorf(
+			"OpenBao provider refused to start:\n"+
+				"  Reason: plaintext HTTP vault address rejected in a production environment.\n"+
+				"  Address %q uses http:// which transmits CA keys and tokens in cleartext.\n"+
+				"  Fix: configure vault_address with https:// and provide tls_cert if needed.\n"+
+				"  See: docs/operations/cluster-ca.md",
+			cfg.Address,
 		)
 	}
 

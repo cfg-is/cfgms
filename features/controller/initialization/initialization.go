@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -24,6 +25,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/openbao" // register OpenBao provider for cluster CA
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for OSS composite manager
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for OSS composite manager
@@ -153,13 +156,20 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		caConfig.Organization = cfg.Certificate.Server.Organization
 	}
 
-	certManager, err := cert.NewManager(&cert.ManagerConfig{
+	managerCfg := &cert.ManagerConfig{
 		StoragePath:          certPath,
 		CAConfig:             caConfig,
 		LoadExistingCA:       false,
 		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
 		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
-	})
+	}
+
+	var certManager *cert.Manager
+	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
+		certManager, err = initClusterCA(context.Background(), cfg, managerCfg, logger)
+	} else {
+		certManager, err = cert.NewManager(managerCfg)
+	}
 	if err != nil {
 		if rbErr := rollback.Execute(); rbErr != nil {
 			logger.Error("Rollback failed after CA creation error", "rollback_error", rbErr.Error())
@@ -397,4 +407,51 @@ func CAFilesExist(caPath string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// initClusterCA creates the cert Manager using a CA sourced from OpenBao. It
+// builds the vault config from cfg.Certificate.ClusterCA, splits the VaultKeyPath
+// into tenantID and key components, and delegates to cert.NewManagerFromSecretStore.
+// The vault token must come from OPENBAO_TOKEN or BAO_TOKEN env vars; it is not
+// read from the config file.
+func initClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.ManagerConfig, logger logging.Logger) (*cert.Manager, error) {
+	clusterCA := cfg.Certificate.ClusterCA
+
+	logger.Info("Cluster mode: loading CA from vault",
+		"vault_address", clusterCA.VaultAddress,
+		"vault_key_path", clusterCA.VaultKeyPath)
+
+	vaultConfig := map[string]interface{}{
+		"address": clusterCA.VaultAddress,
+	}
+	if clusterCA.VaultMountPath != "" {
+		vaultConfig["mount_path"] = clusterCA.VaultMountPath
+	}
+	if clusterCA.VaultTLSCert != "" {
+		vaultConfig["tls_cert"] = clusterCA.VaultTLSCert
+	}
+
+	parts := strings.SplitN(clusterCA.VaultKeyPath, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, fmt.Errorf("certificate.cluster_ca.vault_key_path must be in format 'tenantID/key-name', got: %q", clusterCA.VaultKeyPath)
+	}
+	tenantID, keyPath := parts[0], parts[1]
+
+	store, err := secretsinterfaces.CreateSecretStoreFromConfig("openbao", vaultConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OpenBao secret store for cluster CA: %w", err)
+	}
+	defer func() {
+		if cErr := store.Close(); cErr != nil {
+			logger.Error("Failed to close vault secret store after CA init", "error", cErr)
+		}
+	}()
+
+	manager, err := cert.NewManagerFromSecretStore(ctx, store, tenantID, keyPath, managerCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize cluster CA from vault: %w", err)
+	}
+
+	logger.Info("Cluster CA loaded from vault", "tenant_id", tenantID, "key_path", keyPath)
+	return manager, nil
 }
