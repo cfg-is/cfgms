@@ -52,6 +52,7 @@
       "Bash(./scripts/pipeline-helper.sh append-section *)",
       "Bash(./scripts/pipeline-helper.sh create-story *)",
       "Bash(./scripts/pipeline-helper.sh create-epic *)",
+      "Bash(./scripts/pipeline-helper.sh materialize-issue *)",
       "Bash(./scripts/pipeline-helper.sh link-child *)",
       "Bash(./scripts/project-queue.sh *)",
       "SlashCommand(/po)",
@@ -62,6 +63,19 @@
       "SlashCommand(/isoagents:*)",
       "Skill(isoagents)",
       "Skill(isoagents:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-autonomous-issue-create.sh"
+          }
+        ]
+      }
     ]
   }
 }

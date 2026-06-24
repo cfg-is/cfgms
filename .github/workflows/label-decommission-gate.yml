@@ -48,3 +48,30 @@ jobs:
           fi
 
           echo "PASS: No decommissioned label references found in executable code paths."
+
+      - name: No raw 'gh issue create' in pipeline scripts
+        run: |
+          # Pipeline dev items are materialized at dispatch (project-queue.sh
+          # materialize -> convert, not create). The ONLY sanctioned `gh issue
+          # create` calls live in scripts/pipeline-helper.sh (create-epic,
+          # create-community-issue — human/PO-initiated, locked or community).
+          # Any other raw create in an executable script is a cutover violation.
+          matches=$(grep -rn "gh issue create" \
+            .claude/ scripts/ .devcontainer/ \
+            --include="*.sh" --include="*.py" \
+            | grep -v -E "^[^:]+:[0-9]+:[[:space:]]*#" \
+            | grep -v "scripts/pipeline-helper.sh" \
+            | grep -v "scripts/test-scripts.sh" \
+            || true)
+
+          if [ -n "$matches" ]; then
+            echo "FAIL: raw 'gh issue create' outside the sanctioned helper:"
+            echo "$matches"
+            echo ""
+            echo "Autonomous pipeline code must not create public issues."
+            echo "Dev items are materialized at dispatch; file new work as a private"
+            echo "draft via: ./scripts/pipeline-helper.sh create-story <epic> <title> <body>"
+            exit 1
+          fi
+
+          echo "PASS: No raw 'gh issue create' outside the sanctioned helper."

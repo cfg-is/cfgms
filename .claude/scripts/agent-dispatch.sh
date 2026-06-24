@@ -415,6 +415,7 @@ case "$cmd" in
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${num}" 2>&1); then
@@ -463,6 +464,7 @@ case "$cmd" in
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${entrypoint_args[@]}" 2>&1); then
@@ -718,6 +720,7 @@ case "$cmd" in
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \

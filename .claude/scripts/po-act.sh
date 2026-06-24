@@ -158,13 +158,33 @@ except Exception: print('')" 2>/dev/null || echo "")
       container_name="cfg-agent-${story}"
       first_arg="${story}"
     else
-      # Item ID path: genuine issueless project drafts only (non-numeric arg
-      # that did not resolve to an issue number above).
+      # Issueless project draft → materialize it into a locked `internal` issue
+      # at dispatch, then run the rest of dispatch first-class on feature/story-<N>.
+      # (The old item-<id> branch path is review-sweep-invisible — Issue #1700 —
+      # so we convert to an issue here instead of dispatching the draft directly.)
       item_id="$arg"
-      LAST12=$(echo "$item_id" | tr -cd 'a-zA-Z0-9' | rev | cut -c1-12 | rev)
-      clone_path="${WORKTREE_BASE}/item-${LAST12}"
-      container_name="cfg-agent-item-${LAST12}"
-      first_arg="${item_id}"
+      PIPELINE_HELPER="$(cd "$(dirname "$0")/../.." && pwd)/scripts/pipeline-helper.sh"
+      epic_num=$(bash "$PROJECT_QUEUE" get-item "$item_id" 2>/dev/null \
+        | python3 -c "import json,sys,re
+try:
+    b=json.load(sys.stdin).get('body') or ''
+    m=re.search(r'[Pp]arent epic[:#\s]*#?(\d+)', b)
+    print(m.group(1) if m else '')
+except Exception: print('')" 2>/dev/null || echo "")
+      mat=$(bash "$PIPELINE_HELPER" materialize-issue "$item_id" "$epic_num" 2>&1) || {
+        echo "ERROR: materialize-issue failed for ${item_id}: ${mat}" >&2
+        exit 1
+      }
+      story=$(echo "$mat" | grep -oE '#[0-9]+' | tr -d '#' | head -1)
+      if [ -z "${story:-}" ]; then
+        echo "ERROR: materialize-issue returned no issue number: ${mat}" >&2
+        exit 1
+      fi
+      echo "MATERIALIZED_AT_DISPATCH:${item_id}:#${story}"
+      issue_for_env="$story"
+      clone_path="${WORKTREE_BASE}/story-${story}"
+      container_name="cfg-agent-${story}"
+      first_arg="${story}"
     fi
 
     # Phase 2 — capability guard (defense in depth; the preflight already filters
@@ -226,6 +246,7 @@ except Exception: print('')" 2>/dev/null || echo "")
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_PROJECT_ITEM_ID=${item_id}" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${first_arg}" 2>&1); then
