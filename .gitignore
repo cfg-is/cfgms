@@ -21,6 +21,8 @@ test-steward
 test-*
 # Shell test scripts in devcontainer are not binaries — allow them
 !.devcontainer/scripts/test-*.sh
+# Shell test scripts in .claude/scripts/tests/ are not binaries — allow them
+!.claude/scripts/tests/test-*.sh
 
 # Generated protobuf files in wrong location (should be in api/proto/)
 /steward/
