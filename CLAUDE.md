@@ -259,6 +259,10 @@ docs/          # Documentation
 - Committing test artifacts — use `git add <specific files>`
 - Logging unsanitized input — use `logging.SanitizeLogValue()`
 
+### Code Navigation (serena MCP)
+
+When the `serena` MCP server is connected (interactive, PO, and dev-agent sessions), prefer its semantic tools over text search for navigating and editing Go code: `find_symbol`, `get_symbols_overview`, and `find_referencing_symbols` to locate code; `replace_symbol_body` / `insert_after_symbol` / `insert_before_symbol` for symbol-level edits. They are more precise and burn far less context than `Grep` + `Read` + whole-file `Edit`. Fall back to grep/read only when the target isn't a code symbol (config, docs, generated files) or serena is unavailable. Serena ships its own usage manual — call its `initial_instructions` tool at the start of a coding task to load it.
+
 ## Desired State Development (DSD)
 
 Stories are outcome-based. Work is complete only when the entire system reflects the desired end state.
