@@ -23,6 +23,7 @@ type LoggingManager struct {
 	batchBuffer  []interfaces.LogEntry
 	batchMutex   sync.Mutex
 	stopBatching chan struct{}
+	batchingWg   sync.WaitGroup // tracks the batchingRoutine goroutine lifetime
 
 	// eventBus fans out log entries to subscribers asynchronously.
 	eventBus eventbusInterfaces.EventBus
@@ -164,7 +165,11 @@ func NewLoggingManager(config *LoggingConfig) (*LoggingManager, error) {
 
 	// Start batching routine if async writes are enabled
 	if config.AsyncWrites && config.BatchSize > 1 {
-		go manager.batchingRoutine()
+		manager.batchingWg.Add(1)
+		go func() {
+			defer manager.batchingWg.Done()
+			manager.batchingRoutine()
+		}()
 	}
 
 	manager.initialized = true
@@ -272,10 +277,14 @@ func (m *LoggingManager) Close() error {
 		return nil
 	}
 
-	// Stop batching routine
+	// Signal and wait for the batching goroutine to drain its final flush and
+	// exit before closing shared resources (provider, event bus). Without the
+	// Wait(), Close() can call provider.Close() while batchingRoutine is still
+	// in its final flushBatch → provider.WriteBatch, causing a data race.
 	if m.stopBatching != nil {
 		close(m.stopBatching)
 	}
+	m.batchingWg.Wait()
 
 	// Close the event bus (also closes all subscribers).
 	if m.eventBus != nil {
@@ -284,7 +293,10 @@ func (m *LoggingManager) Close() error {
 		}
 	}
 
-	// Flush any remaining entries
+	// Flush any remaining entries. In the async path this is a no-op because
+	// batchingRoutine already performed a final flush before exiting (signaled
+	// above). In the sync path (AsyncWrites=false) there is no goroutine so the
+	// batchMutex guard is needed to drain any pending entries.
 	if err := m.flushBatch(context.Background()); err != nil {
 		fmt.Printf("Warning: failed to flush batch during shutdown: %v\n", err)
 	}

@@ -18,6 +18,48 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 )
 
+// TestLoggingManager_AsyncClose_NoBatchingRoutineRace verifies that Close() waits
+// for the batchingRoutine goroutine to finish before closing shared resources.
+// Without the batchingWg fix, this test exposes a race between the goroutine's
+// final flushBatch→provider.WriteBatch and Close()'s provider.Close() when run
+// with -race.
+func TestLoggingManager_AsyncClose_NoBatchingRoutineRace(t *testing.T) {
+	cfg := &LoggingConfig{
+		Provider: "file",
+		Config: map[string]interface{}{
+			"directory":        t.TempDir(),
+			"file_prefix":      "race-test",
+			"max_file_size":    1024 * 1024,
+			"retention_days":   1,
+			"compress_rotated": false,
+		},
+		Level:         "DEBUG",
+		ServiceName:   "race-test",
+		Component:     "test",
+		BatchSize:     2,         // small batch so batchingRoutine starts
+		FlushInterval: time.Hour, // long interval so Close() triggers the stop path
+		AsyncWrites:   true,
+		BufferSize:    16,
+	}
+
+	manager, err := NewLoggingManager(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	// Fill the batch buffer so the batchingRoutine has work to do during Close.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "INFO",
+			Message:   "async-close-race",
+		}))
+	}
+
+	// Close() must drain the batchingRoutine before touching the provider;
+	// the race detector will catch any concurrent WriteBatch/Close on the provider.
+	require.NoError(t, manager.Close())
+}
+
 func TestLoggingManager_BasicFunctionality(t *testing.T) {
 	// Create temporary directory for test logs
 	tmpDir, err := os.MkdirTemp("", "cfgms-logging-manager-test-*")

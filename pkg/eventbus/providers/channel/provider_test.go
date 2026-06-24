@@ -15,8 +15,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
-// stubSubscriber is a test-only LoggingSubscriber that records calls.
-type stubSubscriber struct {
+// testSubscriber is a test-only LoggingSubscriber that records calls.
+type testSubscriber struct {
 	mu       sync.Mutex
 	received []interfaces.LogEntry
 	delay    time.Duration
@@ -25,32 +25,32 @@ type stubSubscriber struct {
 	closed   bool
 }
 
-func newStub() *stubSubscriber {
-	return &stubSubscriber{
+func newTestSub() *testSubscriber {
+	return &testSubscriber{
 		filter: func(interfaces.LogEntry) bool { return true },
 	}
 }
 
-func (s *stubSubscriber) Name() string        { return "stub" }
-func (s *stubSubscriber) Description() string { return "test stub" }
-func (s *stubSubscriber) Initialize(_ map[string]interface{}) error {
+func (s *testSubscriber) Name() string        { return "test-sub" }
+func (s *testSubscriber) Description() string { return "test subscriber" }
+func (s *testSubscriber) Initialize(_ map[string]interface{}) error {
 	return nil
 }
-func (s *stubSubscriber) Available() (bool, error) { return true, nil }
-func (s *stubSubscriber) Close() error {
+func (s *testSubscriber) Available() (bool, error) { return true, nil }
+func (s *testSubscriber) Close() error {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
 	return nil
 }
 
-func (s *stubSubscriber) ShouldHandle(e interfaces.LogEntry) bool {
+func (s *testSubscriber) ShouldHandle(e interfaces.LogEntry) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.filter(e)
 }
 
-func (s *stubSubscriber) HandleLogEntry(_ context.Context, e interfaces.LogEntry) error {
+func (s *testSubscriber) HandleLogEntry(_ context.Context, e interfaces.LogEntry) error {
 	if s.delay > 0 {
 		time.Sleep(s.delay)
 	}
@@ -63,7 +63,7 @@ func (s *stubSubscriber) HandleLogEntry(_ context.Context, e interfaces.LogEntry
 	return nil
 }
 
-func (s *stubSubscriber) entries() []interfaces.LogEntry {
+func (s *testSubscriber) entries() []interfaces.LogEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]interfaces.LogEntry, len(s.received))
@@ -80,7 +80,7 @@ func entry(msg string) interfaces.LogEntry {
 }
 
 func TestChannelEventBus_DeliverToSubscriber(t *testing.T) {
-	sub := newStub()
+	sub := newTestSub()
 	bus := New(16)
 	bus.Subscribe(sub)
 
@@ -95,7 +95,7 @@ func TestChannelEventBus_DeliverToSubscriber(t *testing.T) {
 }
 
 func TestChannelEventBus_MultipleSubscribers(t *testing.T) {
-	s1, s2 := newStub(), newStub()
+	s1, s2 := newTestSub(), newTestSub()
 	bus := New(16)
 	bus.Subscribe(s1)
 	bus.Subscribe(s2)
@@ -114,7 +114,7 @@ func TestChannelEventBus_MultipleSubscribers(t *testing.T) {
 // DroppedCount() increments; primary WriteEntry persistence still succeeds.
 func TestChannelEventBus_DropWithCounter(t *testing.T) {
 	// Create a slow subscriber that holds the event goroutine so the buffer fills.
-	slow := newStub()
+	slow := newTestSub()
 	slow.delay = 200 * time.Millisecond
 
 	bus := New(1) // buffer of 1 so it fills immediately
@@ -131,7 +131,7 @@ func TestChannelEventBus_DropWithCounter(t *testing.T) {
 }
 
 func TestChannelEventBus_SubscriberFiltering(t *testing.T) {
-	sub := newStub()
+	sub := newTestSub()
 	sub.filter = func(e interfaces.LogEntry) bool { return e.Level == "ERROR" }
 
 	bus := New(16)
@@ -149,9 +149,9 @@ func TestChannelEventBus_SubscriberFiltering(t *testing.T) {
 }
 
 func TestChannelEventBus_SubscriberErrorDoesNotStopFanOut(t *testing.T) {
-	bad := newStub()
+	bad := newTestSub()
 	bad.err = errors.New("subscriber failure")
-	good := newStub()
+	good := newTestSub()
 
 	bus := New(16)
 	bus.Subscribe(bad)
@@ -176,14 +176,14 @@ func TestChannelEventBus_RuntimeSubscribe(t *testing.T) {
 	// entry before registering the subscriber-under-test. This is race-free:
 	// once drain receives the entry the bus has consumed it from the channel, so
 	// a subscriber added after this point will never see it.
-	drain := newStub()
+	drain := newTestSub()
 	bus.Subscribe(drain)
 	bus.Publish(entry("pre-subscribe"))
 	require.Eventually(t, func() bool {
 		return len(drain.entries()) >= 1
 	}, time.Second, 5*time.Millisecond, "drain subscriber must receive pre-subscribe entry")
 
-	sub := newStub()
+	sub := newTestSub()
 	bus.Subscribe(sub)
 
 	bus.Publish(entry("post-subscribe"))
@@ -203,7 +203,7 @@ func TestChannelEventBus_CloseIdempotent(t *testing.T) {
 }
 
 func TestChannelEventBus_SubscribersClosedOnBusClose(t *testing.T) {
-	sub := newStub()
+	sub := newTestSub()
 	bus := New(16)
 	bus.Subscribe(sub)
 
