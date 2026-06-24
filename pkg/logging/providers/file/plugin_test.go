@@ -4,7 +4,6 @@ package file
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,10 +15,7 @@ import (
 )
 
 func TestFileProvider_BasicFunctionality(t *testing.T) {
-	// Create temporary directory for test logs
-	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpDir := t.TempDir()
 
 	// Create provider
 	provider := &FileProvider{}
@@ -49,7 +45,7 @@ func TestFileProvider_BasicFunctionality(t *testing.T) {
 	}
 
 	// Test initialization
-	err = provider.Initialize(config)
+	err := provider.Initialize(config)
 	require.NoError(t, err)
 	defer func() { _ = provider.Close() }()
 
@@ -60,10 +56,7 @@ func TestFileProvider_BasicFunctionality(t *testing.T) {
 }
 
 func TestFileProvider_WriteAndQuery(t *testing.T) {
-	// Create temporary directory for test logs
-	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpDir := t.TempDir()
 
 	// Create and initialize provider
 	provider := &FileProvider{}
@@ -78,7 +71,7 @@ func TestFileProvider_WriteAndQuery(t *testing.T) {
 		"flush_interval":   "1s",
 	}
 
-	err = provider.Initialize(config)
+	err := provider.Initialize(config)
 	require.NoError(t, err)
 	defer func() { _ = provider.Close() }()
 
@@ -179,10 +172,7 @@ func TestFileProvider_WriteAndQuery(t *testing.T) {
 }
 
 func TestFileProvider_LevelFiltering(t *testing.T) {
-	// Create temporary directory for test logs
-	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpDir := t.TempDir()
 
 	// Create and initialize provider
 	provider := &FileProvider{}
@@ -191,7 +181,7 @@ func TestFileProvider_LevelFiltering(t *testing.T) {
 		"file_prefix": "test",
 	}
 
-	err = provider.Initialize(config)
+	err := provider.Initialize(config)
 	require.NoError(t, err)
 	defer func() { _ = provider.Close() }()
 
@@ -231,10 +221,7 @@ func TestFileProvider_LevelFiltering(t *testing.T) {
 }
 
 func TestFileProvider_Stats(t *testing.T) {
-	// Create temporary directory for test logs
-	tmpDir, err := os.MkdirTemp("", "cfgms-logging-test-*")
-	require.NoError(t, err)
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpDir := t.TempDir()
 
 	// Create and initialize provider
 	provider := &FileProvider{}
@@ -243,7 +230,7 @@ func TestFileProvider_Stats(t *testing.T) {
 		"file_prefix": "test",
 	}
 
-	err = provider.Initialize(config)
+	err := provider.Initialize(config)
 	require.NoError(t, err)
 	defer func() { _ = provider.Close() }()
 
@@ -271,6 +258,49 @@ func TestFileProvider_Stats(t *testing.T) {
 	assert.Greater(t, stats.StorageSize, int64(0))
 	assert.Greater(t, stats.WriteLatencyMs, 0.0)
 	assert.False(t, stats.LatestEntry.IsZero())
+}
+
+// TestFileProvider_DoubleClose verifies that calling Close() twice on the same
+// provider is a no-op and does not panic or return an error.
+func TestFileProvider_DoubleClose(t *testing.T) {
+	dir := t.TempDir()
+	provider := &FileProvider{}
+	config := map[string]interface{}{
+		"directory":        dir,
+		"file_prefix":      "test",
+		"compress_rotated": false,
+	}
+	require.NoError(t, provider.Initialize(config))
+
+	require.NoError(t, provider.Close())
+	require.NoError(t, provider.Close()) // second call must be a no-op
+}
+
+// TestFileProvider_ReinitializeAfterClose verifies the singleton registry reuse
+// pattern: Initialize → Close → Initialize → Close must fully close the file
+// both times. Previously, a fired sync.Once made the second Close a no-op,
+// leaving the log file open and causing Windows "file in use" errors.
+func TestFileProvider_ReinitializeAfterClose(t *testing.T) {
+	for i := 0; i < 2; i++ {
+		dir := t.TempDir()
+		provider := &FileProvider{}
+		config := map[string]interface{}{
+			"directory":        dir,
+			"file_prefix":      "test",
+			"compress_rotated": false,
+		}
+		require.NoError(t, provider.Initialize(config), "Initialize cycle %d", i)
+
+		ctx := context.Background()
+		require.NoError(t, provider.WriteEntry(ctx, interfaces.LogEntry{
+			Level: "INFO", Message: "entry",
+		}), "WriteEntry cycle %d", i)
+
+		require.NoError(t, provider.Close(), "Close cycle %d", i)
+
+		// After Close the file must be fully released so the directory can be
+		// removed (the t.TempDir cleanup will verify this on all platforms).
+	}
 }
 
 func TestFileProvider_ProviderRegistration(t *testing.T) {

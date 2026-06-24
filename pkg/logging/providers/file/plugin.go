@@ -28,7 +28,6 @@ type FileProvider struct {
 	stats        interfaces.ProviderStats
 	initialized  bool
 	stopRotation chan struct{}
-	closeOnce    sync.Once
 	bgWg         sync.WaitGroup // tracks backgroundMaintenance goroutine
 }
 
@@ -174,50 +173,48 @@ func (p *FileProvider) Initialize(config map[string]interface{}) error {
 	return nil
 }
 
-// Close shuts down the provider and closes files
+// Close shuts down the provider and closes files.
+// Safe to call multiple times and safe to call after a subsequent Initialize
+// (the singleton registry pattern reuses the same *FileProvider across tests).
 func (p *FileProvider) Close() error {
-	var err error
-	p.closeOnce.Do(func() {
-		// Stop background tasks first, then mark as closing
-		p.mutex.Lock()
-		if !p.initialized {
-			p.mutex.Unlock()
-			return
-		}
-
-		// Mark as closing and get the stop channel
-		p.initialized = false
-		stopChan := p.stopRotation
-		p.stopRotation = nil // Prevent further usage
+	// Atomically transition initialized → false and capture the stop channel.
+	// Using p.mutex (not a sync.Once) so that Initialize() can reset the state
+	// for re-use; a fired sync.Once would make Close a no-op on the second call.
+	p.mutex.Lock()
+	if !p.initialized {
 		p.mutex.Unlock()
+		return nil
+	}
+	p.initialized = false
+	stopChan := p.stopRotation
+	p.stopRotation = nil
+	p.mutex.Unlock()
 
-		// Stop background tasks if they were started
-		if stopChan != nil {
-			close(stopChan)
-		}
+	// Signal backgroundMaintenance to exit.
+	if stopChan != nil {
+		close(stopChan)
+	}
 
-		// Wait for backgroundMaintenance to fully exit before closing the file.
-		// This guarantees no goroutine holds the file handle when we close it,
-		// which prevents Windows "file in use" errors during test TempDir cleanup.
-		p.bgWg.Wait()
+	// Wait for backgroundMaintenance to fully exit before closing the file.
+	// This guarantees no goroutine holds the file handle when we close it,
+	// which prevents Windows "file in use" errors during test TempDir cleanup.
+	p.bgWg.Wait()
 
-		// Now safely close resources
-		p.mutex.Lock()
-		defer p.mutex.Unlock()
+	// Flush and close resources under the write lock.
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 
-		// Close resources
-		if p.writer != nil {
-			_ = p.writer.Flush() // Ignore flush error during cleanup
-			p.writer = nil
-		}
+	if p.writer != nil {
+		_ = p.writer.Flush()
+		p.writer = nil
+	}
 
-		if p.currentFile != nil {
-			_ = p.currentFile.Close() // Ignore close error during cleanup
-			p.currentFile = nil
-		}
-	})
+	if p.currentFile != nil {
+		_ = p.currentFile.Close()
+		p.currentFile = nil
+	}
 
-	return err
+	return nil
 }
 
 // WriteEntry writes a single log entry to the file
