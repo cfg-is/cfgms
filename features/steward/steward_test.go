@@ -319,13 +319,28 @@ func TestMonitorCloseRace(t *testing.T) {
 	// for leaks from this test's steward instance.
 	//
 	// DNA background collection goroutines (bgOnce.Do in dna.Collector.Collect)
-	// use context.Background() and outlive the test. They spawn child goroutines
-	// for software/security collection AFTER goleak.IgnoreCurrent() snapshots,
-	// so those children (and their os/exec pipe goroutines) are not captured
-	// by existingGoroutines. Ignore these known-safe patterns explicitly.
+	// use context.Background() and outlive the test that triggered them. They are
+	// kicked off by *sibling* tests in this package (this test disables DNA), but
+	// run AFTER goleak.IgnoreCurrent() snapshots here, so they are not captured by
+	// existingGoroutines and are not goroutines of the steward under test.
+	//
+	// The collector spawns a tree: Collect → bgOnce → runBackgroundCollection →
+	// {collectSoftwareInfo, collectSecurityInfo} → (per command) os/exec command
+	// goroutines (stdout/stderr pipe copy + ctx-watch). All of these can be
+	// mid-flight when this test's goleak check runs on a slow runner.
+	//
+	// Match each family by ANY frame in the stack (IgnoreAnyFunction also matches
+	// the "created by" frame). The os/exec command goroutines are the ones that
+	// actually trip this on macos: their stack is pure io/os/internal-poll (top =
+	// internal/poll.runtime_pollWait for the pipe reader), with os/exec present
+	// only as the creator — so a top-function ignore on writerDescriptor/watchCtx
+	// (the earlier approach) missed them. os/exec.(*Cmd).Start is the creator of
+	// every os/exec helper goroutine, so it covers them all.
 	goleak.VerifyNone(t, existingGoroutines,
-		goleak.IgnoreTopFunction("os/exec.(*Cmd).writerDescriptor.func1"),
-		goleak.IgnoreTopFunction("os/exec.(*Cmd).watchCtx"),
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).Start"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSoftwareInfo"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSecurityInfo"),
 	)
 }
 
