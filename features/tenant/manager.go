@@ -185,6 +185,18 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	return existing, nil
 }
 
+// SuspendTenant sets the status of an existing tenant to TenantStatusSuspended.
+// Used by the agent-dispatch cleanup path (Issue #2124) to deactivate the
+// agent-test/<N> sub-tenant when the agent container exits.
+func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) error {
+	existing, err := m.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	existing.Status = business.TenantStatusSuspended
+	return m.store.UpdateTenant(ctx, existing)
+}
+
 // DeleteTenant deletes a tenant
 func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	// Cannot delete default tenant

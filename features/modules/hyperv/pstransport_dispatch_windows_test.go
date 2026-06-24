@@ -64,13 +64,34 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-NewSeedVHD -Path " + quoteArg(psArgs, "Path") +
 			" -SizeBytes " + intArg(psArgs, "SizeBytes"))
 	case psMountSeedVHD:
-		return emit("Cfgms-MountSeedVHD -Path " + quoteArg(psArgs, "Path"))
+		return emit("Cfgms-MountSeedVHD -Path " + quoteArg(psArgs, "Path") +
+			optArg(psArgs, "Label", "Label"))
 	case psCopyToSeedVHD:
 		return emit("Cfgms-CopyToSeedVHD -SeedPath " + quoteArg(psArgs, "SeedPath") +
 			" -FileName " + quoteArg(psArgs, "FileName") +
-			" -Content " + quoteArg(psArgs, "Content"))
+			" -Content " + quoteArg(psArgs, "Content") +
+			optArg(psArgs, "Label", "Label") +
+			optArg(psArgs, "FileName2", "FileName2") +
+			optArg(psArgs, "Content2", "Content2") +
+			optArg(psArgs, "StewardDest", "StewardDest") +
+			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
+			" -CASrc " + quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
 		return emit("Cfgms-DetachSeedVHD -Path " + quoteArg(psArgs, "Path"))
+	case psPrepCloudBootDisk:
+		return emit("Cfgms-PrepCloudBootDisk -ImagePath " + quoteArg(psArgs, "ImagePath") +
+			" -VhdPath " + quoteArg(psArgs, "VhdPath") +
+			" -ResizeBytes " + intArg(psArgs, "ResizeBytes"))
+	case psCreateVMFromDisk:
+		return emit("Cfgms-CreateVMFromDisk -Name " + quoteArg(psArgs, "Name") +
+			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
+			" -CPU " + intArg(psArgs, "CPU") +
+			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
+			" -Generation " + intArg(psArgs, "Generation"))
+	case psSetHddFirstBoot:
+		return emit("Cfgms-SetHddFirstBoot -Name " + quoteArg(psArgs, "Name") +
+			" -VHDPath " + quoteArg(psArgs, "VHDPath"))
 	case psAttachSeedDisk:
 		return emit("Cfgms-AttachSeedDisk -Name " + quoteArg(psArgs, "Name") +
 			" -SeedPath " + quoteArg(psArgs, "SeedPath"))
@@ -80,6 +101,17 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psSetVMFirmware:
 		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
 			" -Template " + quoteArg(psArgs, "Template"))
+	case psSetDVDFirstBoot:
+		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name") +
+			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
+	case psBuildAnswerIso:
+		return emit("Cfgms-BuildAnswerIso -IsoPath " + quoteArg(psArgs, "IsoPath") +
+			" -FileName " + quoteArg(psArgs, "FileName") +
+			" -Content " + quoteArg(psArgs, "Content") +
+			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
+			" -CASrc " + quoteArg(psArgs, "CASrc"))
+	case psBootKeypress:
+		return emit("Cfgms-BootKeypress -Name " + quoteArg(psArgs, "Name"))
 	case psRemoveVM:
 		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -194,7 +226,7 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"FileName": "autounattend.xml",
 				"Content":  "<!-- placeholder autounattend -->",
 			},
-			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->'",
+			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->' -StewardSrc '' -CASrc ''",
 		},
 		{
 			name:      "Attach seed disk",
@@ -344,6 +376,16 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
+		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
+		{"psBuildAnswerIso", psBuildAnswerIso, map[string]string{"IsoPath": "C:\\cfgms-seeds\\a.iso", "FileName": "autounattend.xml", "Content": "<x/>", "StewardSrc": "", "CASrc": ""}},
+		{"psBootKeypress", psBootKeypress, map[string]string{"Name": "cfgms-t__web-01"}},
+		// cloud-init (Linux VM-from-cloud-image) verbs (#2080)
+		{"psPrepCloudBootDisk", psPrepCloudBootDisk, map[string]string{"ImagePath": "C:\\images\\debian.raw", "VhdPath": "C:\\VMs\\web-01.vhdx", "ResizeBytes": "21474836480"}},
+		{"psCreateVMFromDisk", psCreateVMFromDisk, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048", "CPU": "2", "VHDPath": "C:\\VMs\\web-01.vhdx", "SwitchName": "External", "Generation": "2"}},
+		{"psSetHddFirstBoot", psSetHddFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "VHDPath": "C:\\VMs\\web-01.vhdx"}},
+		// cloud-init CIDATA seed reuses psMountSeedVHD/psCopyToSeedVHD with extra optional args
+		{"psMountSeedVHD/cidata", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA"}},
+		{"psCopyToSeedVHD/cidata", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA", "FileName": "user-data", "Content": "#cloud-config", "FileName2": "meta-data", "Content2": "instance-id: x", "StewardSrc": "C:\\s\\cfgms-steward-linux", "StewardDest": "cfgms-steward", "CASrc": "C:\\s\\ca.crt"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},

@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -61,11 +62,16 @@ type ExecutorConfig struct {
 // It serves both standalone mode (direct ExecuteConfiguration calls) and controller
 // mode (ApplyConfiguration with raw config bytes in, ConfigStatusReport out).
 type Executor struct {
-	factory      *factory.ModuleFactory
-	comparator   *stewardtesting.StateComparator
-	config       config.ErrorHandlingConfig
-	tenantID     string
-	logger       logging.Logger
+	factory    *factory.ModuleFactory
+	comparator *stewardtesting.StateComparator
+	config     config.ErrorHandlingConfig
+	tenantID   string
+	logger     logging.Logger
+
+	// mu protects driftHandler and driftMode. Both can be written after construction
+	// (controller delivers new cfg, tests replace the handler) while ExecuteResource
+	// reads them concurrently from the monitor event loop.
+	mu           sync.RWMutex
 	driftHandler DriftEventHandler
 	driftMode    config.DriftMode
 }
@@ -116,14 +122,18 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 // SetDriftEventHandler registers a callback invoked when the Compare step detects
 // drift on a managed resource, before Set corrects it. Pass nil to remove a handler.
 func (e *Executor) SetDriftEventHandler(handler DriftEventHandler) {
+	e.mu.Lock()
 	e.driftHandler = handler
+	e.mu.Unlock()
 }
 
 // SetDriftMode updates the executor's drift mode. Call this when the
 // controller delivers a new cfg with an updated drift_mode field.
 // An empty string is treated as DriftModeApply (default behavior).
 func (e *Executor) SetDriftMode(mode config.DriftMode) {
+	e.mu.Lock()
 	e.driftMode = mode
+	e.mu.Unlock()
 }
 
 // ExecuteConfiguration executes the complete configuration for all resources.
@@ -277,22 +287,30 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		"added_fields", stateDiff.GetAddedFieldNames(),
 		"removed_fields", stateDiff.GetRemovedFieldNames())
 
+	// Snapshot drift mode and handler under the read lock. Both may be updated
+	// concurrently (controller delivers new cfg, tests replace the handler) while
+	// the monitor event loop dispatches ExecuteResource calls.
+	e.mu.RLock()
+	driftMode := e.driftMode
+	driftHandler := e.driftHandler
+	e.mu.RUnlock()
+
 	// Tag the event type for upstream telemetry before invoking the handler.
 	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
 	// from apply-mode stewards that simply have not drifted.
-	if e.driftMode == config.DriftModeMonitor {
+	if driftMode == config.DriftModeMonitor {
 		stateDiff.EventType = "drift.detected.monitor"
 	} else {
 		stateDiff.EventType = "drift.detected"
 	}
 
 	// Emit drift event. Handler fires in both modes — ordering is always preserved.
-	if e.driftHandler != nil {
-		e.driftHandler(resource.Name, resource.Module, &stateDiff)
+	if driftHandler != nil {
+		driftHandler(resource.Name, resource.Module, &stateDiff)
 	}
 
 	// In monitor mode, report non-compliance without correcting the drift.
-	if e.driftMode == config.DriftModeMonitor {
+	if driftMode == config.DriftModeMonitor {
 		result.Status = StatusNonCompliant
 		result.ExecutionTime = time.Since(startTime)
 		e.logger.Info("Monitor mode: drift detected, skipping Set",
@@ -336,6 +354,14 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 // createConfigState converts a map[string]interface{} to a ConfigState.
 func (e *Executor) createConfigState(configData map[string]interface{}) (modules.ConfigState, error) {
 	return &genericConfigState{data: configData}, nil
+}
+
+// GetResourceID returns the module-internal resource identifier for the given
+// ResourceConfig. This is the identifier passed to module.Get, module.Set, and
+// Monitor() — callers that need to match ChangeEvent.ResourceID against cfg
+// resources must use this method to ensure the IDs are consistent.
+func (e *Executor) GetResourceID(resource config.ResourceConfig) string {
+	return e.getResourceIdentifier(resource)
 }
 
 // parseModuleRef splits a module reference into its bundle and resource-type

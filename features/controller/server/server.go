@@ -68,6 +68,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
 	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
@@ -185,10 +186,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
 	}
 
-	// Create storage manager — OSS composite (flatfile+SQLite) or database single-provider.
-	// The git provider is removed (Issue #664) and is rejected here with a migration hint.
+	// Create storage manager — cluster mode (Postgres), OSS composite (flatfile+SQLite),
+	// or legacy database single-provider. The git provider is removed (Issue #664).
 	var storageManager *interfaces.StorageManager
-	if cfg.Storage.FlatfileRoot != "" {
+	if cfg.HA.IsClusterMode() {
+		// Cluster mode: all business stores backed by shared Postgres so every node
+		// serving the same fleet uses the same state (Issue #2119).
+		pgDSN := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		var s3Config map[string]interface{}
+		if cfg.Storage.Cluster != nil {
+			s3Config = cfg.Storage.Cluster.S3
+		}
+		logger.Info("Cluster mode: initializing Postgres business store backend...",
+			"ha_mode", cfg.HA.Mode)
+		var clusterErr error
+		storageManager, clusterErr = interfaces.CreateClusterStorageManager(pgDSN, s3Config)
+		if clusterErr != nil {
+			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
+		}
+		logger.Info("Cluster storage backend initialized")
+	} else if cfg.Storage.FlatfileRoot != "" {
 		logger.Info("Initializing OSS composite storage backend...",
 			"flatfile_root", cfg.Storage.FlatfileRoot,
 			"sqlite_path", cfg.Storage.SQLitePath)
@@ -246,18 +266,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize tenant management with durable storage
 	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
 
+	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
+	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
+	// selection; the separate haEarlyCfg.LoadFromEnvironment() path is no longer needed
+	// because LoadWithPath already applies env-var overrides to cfg.HA (Issue #2119).
+	isClusterMode := cfg.HA.IsClusterMode()
+
 	// DNA storage — durable steward DNA + fleet registry. Shared by the
 	// controller service (warm-loading the steward registry after a restart)
 	// and the reports engine. (Issue #1572)
 	//
-	// The data root must be an ABSOLUTE, CWD-independent path: two controllers
-	// of the same deployment can be launched from different working directories
-	// (notably the systemd unit vs. a blue/green candidate spawned by
-	// `cfg controller upgrade`), and they must resolve the SAME DNA store or the
-	// candidate comes up with an empty steward registry. See resolveDNADataRoot
-	// and Issue #2010.
+	// Single-node: SQLite at an absolute, CWD-independent path (see resolveDNADataRoot
+	// and Issue #2010). Cluster: PostgreSQL-backed DatabaseBackend shared by all nodes
+	// (connection string from CFGMS_DNA_DATABASE_URL); resolveDNADataRoot is not
+	// called in cluster mode (Issue #2118).
 	dnaStorageConfig := dnaStorage.DefaultConfig()
-	dnaStorageConfig.DataDir = filepath.Join(resolveDNADataRoot(cfg), "dna-reports")
+	if isClusterMode {
+		dnaStorageConfig.Backend = dnaStorage.BackendDatabase
+		// DatabaseURL left empty: NewDatabaseBackend reads CFGMS_DNA_DATABASE_URL
+		// or individual CFGMS_DNA_DB_* env vars.
+		logger.Info("Cluster mode: using PostgreSQL DNA backend (CFGMS_DNA_DATABASE_URL)")
+	} else {
+		dnaStorageConfig.DataDir = filepath.Join(resolveDNADataRoot(cfg), "dna-reports")
+	}
 	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
@@ -842,22 +873,49 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Initialize installer artifact blob store (Issue #1702).
-	// Default BlobStorage.Root when not explicitly configured (e.g. in tests or
-	// minimal configs that rely on the storage path for co-location).
-	blobRoot := cfg.BlobStorage.Root
-	if blobRoot == "" {
-		if cfg.Storage.FlatfileRoot != "" {
-			blobRoot = filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
-		} else if cfg.Storage.SQLitePath != "" {
-			blobRoot = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+	// Cluster mode: S3-compatible blob store so all nodes share one installer
+	// repository (bucket from CFGMS_S3_INSTALLER_BUCKET, credentials from the
+	// default AWS credential chain). Single-node: filesystem blob store with the
+	// node-local path resolved from config (Issue #2118).
+	var installerBlobStore blob.BlobStore
+	var blobErr error
+	if isClusterMode {
+		bucket := os.Getenv("CFGMS_S3_INSTALLER_BUCKET")
+		if bucket == "" {
+			return nil, fmt.Errorf("cluster mode requires CFGMS_S3_INSTALLER_BUCKET to be set for installer artifact storage")
 		}
+		s3Cfg := map[string]interface{}{
+			"bucket": bucket,
+		}
+		if region := os.Getenv("CFGMS_S3_INSTALLER_REGION"); region != "" {
+			s3Cfg["region"] = region
+		}
+		if endpoint := os.Getenv("CFGMS_S3_INSTALLER_ENDPOINT_URL"); endpoint != "" {
+			s3Cfg["endpoint_url"] = endpoint
+		}
+		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("s3", s3Cfg)
+		if blobErr != nil {
+			return nil, fmt.Errorf("failed to initialize S3 installer blob store: %w", blobErr)
+		}
+		logger.Info("Cluster mode: S3 installer blob store initialized", "bucket", bucket)
+	} else {
+		// Default BlobStorage.Root when not explicitly configured (e.g. in tests or
+		// minimal configs that rely on the storage path for co-location).
+		blobRoot := cfg.BlobStorage.Root
+		if blobRoot == "" {
+			if cfg.Storage.FlatfileRoot != "" {
+				blobRoot = filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
+			} else if cfg.Storage.SQLitePath != "" {
+				blobRoot = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+			}
+		}
+		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("filesystem",
+			map[string]interface{}{"root": blobRoot})
+		if blobErr != nil {
+			return nil, fmt.Errorf("failed to initialize installer blob store: %w", blobErr)
+		}
+		logger.Info("Installer artifact blob store initialized", "root", blobRoot)
 	}
-	installerBlobStore, blobErr := blob.CreateBlobStoreFromConfig("filesystem",
-		map[string]interface{}{"root": blobRoot})
-	if blobErr != nil {
-		return nil, fmt.Errorf("failed to initialize installer blob store: %w", blobErr)
-	}
-	logger.Info("Installer artifact blob store initialized", "root", blobRoot)
 
 	// Initialize HTTP API server
 	httpServer, err := api.New(

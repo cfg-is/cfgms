@@ -203,9 +203,22 @@ Modules **should, when possible, implement the `Monitor` interface** to watch fo
 
 Some resources don't have a feasible event-source (no OS-level watcher, no vendor API hook); those modules fall back to the scheduled re-check interval (`steward.converge_interval`). Event-driven Monitor support is preferred and should be added where the underlying platform permits it.
 
-Current adoption (as of v0.9.x):
+The convergence runtime now wires `Monitor` automatically: on cfg load it calls `Monitor(ctx, resourceID, desired)` for every module that implements the interface, fans in the `Changes()` channels, and on each `ChangeEvent` runs a targeted `ExecuteResource` for the changed `resourceID` (treating the event as a hint — actual state is re-read via `module.Get()` and desired state comes from the cfg, never from `event.Details`).
 
-- **Implemented**: none
+### Monitor Resilience
+
+The Monitor consumer is hardened against event storms, slow modules, and concurrent shutdown:
+
+| Property | Behaviour |
+|----------|-----------|
+| **Debounce** | Duplicate events for the same `resourceID` within a 1.5 s window are coalesced into a single `ExecuteResource` call. The first event starts a timer; subsequent events within the window are dropped. |
+| **Bounded queue + shed-to-poll** | The fan-in channel has a fixed capacity of 64 events. When full, incoming events are dropped with a `Warn` log entry (`"Monitor event queue full, event shed to scheduled poll"`). The scheduled `convergenceLoop` continues at its normal interval and will correct any resources whose events were shed. |
+| **DNA refresh on change** | After a targeted reconcile that calls `Set` (i.e. `ChangesApplied = true`), the steward re-collects the DNA snapshot immediately. The refreshed hash is available on the next heartbeat without waiting for the next scheduled convergence tick. |
+| **Clean shutdown** | `Stop()` closes the shutdown channel (stopping all pending debounce timers), waits for fan-in and event-loop goroutines to exit via `WaitGroup`, then calls `Close()` on each active monitor before unloading modules. No `Set` call can run after `Close()`. |
+
+Current adoption:
+
+- **Implemented**: `hyperv` (VM state — power on/off and create/delete, via a single host-level Windows Event Log subscription over the Hyper-V VMMS/Worker channels; Windows only, polling backstop elsewhere)
 - **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `script`, `firewall`, `package`, `patch`
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).

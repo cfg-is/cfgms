@@ -28,10 +28,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
@@ -48,6 +50,27 @@ import (
 // (derived from MAC + hostname) changes between convergence cycles, indicating a
 // VM/container migration or hardware change that requires manual reconciliation.
 var ErrDNAIDMismatch = errors.New("DNA-ID mismatch: manual reconciliation required")
+
+// monitorQueueCapacity is the maximum number of ChangeEvents the fan-in channel
+// can buffer. When full, events are shed to the next scheduled convergence pass.
+const monitorQueueCapacity = 64
+
+// monitorEntry pairs a module's Monitor with its resource configuration.
+// Used to fan-in ChangeEvents and dispatch targeted reconciles.
+type monitorEntry struct {
+	resourceID string
+	resource   config.ResourceConfig
+	monitor    modules.Monitor
+}
+
+// bundleNameFromModuleRef extracts the module bundle name from a module reference.
+// "hyperv.vm" → "hyperv"; "file" → "file".
+func bundleNameFromModuleRef(moduleRef string) string {
+	if idx := strings.IndexByte(moduleRef, '.'); idx >= 0 {
+		return moduleRef[:idx]
+	}
+	return moduleRef
+}
 
 // Steward manages configuration for a single endpoint in standalone mode.
 //
@@ -83,8 +106,33 @@ type Steward struct {
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
 
+	// monitors holds active monitor entries started on cfg load.
+	// Each entry has had Monitor(ctx, resourceID, desired) called on it.
+	monitors []monitorEntry
+
+	// debounceWindow is the per-resource debounce interval for monitor events.
+	// Events for the same resourceID within this window are coalesced into one
+	// targeted reconcile. Defaults to 1500ms; override via export_test.go in tests.
+	debounceWindow time.Duration
+
+	// monitorFanInCap overrides the fan-in channel capacity when non-zero.
+	// Tests set a small value (e.g. 2) to guarantee queue overflow without
+	// relying on scheduler timing. Production code always uses monitorQueueCapacity.
+	monitorFanInCap int
+
+	// wg tracks the convergence loop goroutine and the health monitor goroutine
+	// for clean shutdown.
+	wg sync.WaitGroup
+	// monitorWg tracks fan-in and event-loop goroutines started by startMonitors.
+	monitorWg sync.WaitGroup
+
 	// Shutdown coordination
 	shutdown chan struct{}
+
+	// healthCancel cancels the health monitor goroutine's context. Called in Stop()
+	// to guarantee the goroutine exits even if Stop() is called before
+	// HealthMonitor.Start() sets running=true (TOCTOU race on running.Load()).
+	healthCancel context.CancelFunc
 }
 
 // NewStandalone creates a new Steward instance for standalone operation.
@@ -203,6 +251,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		executor:         executor,
 		dnaCollector:     dnaCollector,
 		driftDetector:    driftDetector,
+		debounceWindow:   1500 * time.Millisecond,
 		shutdown:         make(chan struct{}),
 	}, nil
 }
@@ -241,23 +290,35 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 		"resources", len(s.standaloneConfig.Resources),
 		"converge_interval", interval)
 
-	// Start health monitoring in background
+	// Start health monitoring in background. Tracked by s.wg so Stop() →
+	// s.wg.Wait() ensures the goroutine exits before cleanup proceeds.
+	// healthCtx is derived so Stop() can cancel it directly, covering the TOCTOU
+	// window where Stop() is called before HealthMonitor.Start() sets running=true.
+	healthCtx, healthCancel := context.WithCancel(ctx)
+	s.healthCancel = healthCancel
+	s.wg.Add(1)
 	go func() {
-		s.healthCheck.Start(ctx)
+		defer s.wg.Done()
+		s.healthCheck.Start(healthCtx)
 	}()
 
 	// Register managed resource drift handler on the execution engine.
 	// When the Compare step detects drift, this logs the event before Set corrects it.
 	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
 
-	// Give monitors a moment to start
-	time.Sleep(50 * time.Millisecond)
+	// Start monitors for modules that implement the Monitor interface.
+	// Monitor events feed a targeted reconcile of the changed resource.
+	s.startMonitors(ctx)
 
 	// Converge immediately on startup
 	s.runConvergence(ctx)
 
 	// Start scheduled convergence loop
-	go s.convergenceLoop(ctx, interval)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.convergenceLoop(ctx, interval)
+	}()
 
 	s.logger.Info("Steward started successfully in standalone mode")
 	return nil
@@ -431,6 +492,194 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// startMonitors iterates the cfg resources, loads each module from the factory,
+// type-asserts modules.Monitor, and calls Monitor(ctx, resourceID, desired) for
+// each module that implements the interface. A fan-in goroutine forwards all
+// ChangeEvents to a single dispatch loop that calls runTargetedReconcile.
+//
+// Modules that do not implement Monitor are silently skipped — they fall back
+// to the scheduled convergence interval. This is always the case today; the
+// first Monitor implementation (Hyper-V) lands in S2.
+func (s *Steward) startMonitors(ctx context.Context) {
+	var entries []monitorEntry
+
+	for _, resource := range s.standaloneConfig.Resources {
+		bundle := bundleNameFromModuleRef(resource.Module)
+
+		mod, err := s.moduleFactory.LoadModule(bundle)
+		if err != nil || mod == nil {
+			continue
+		}
+
+		mon, ok := mod.(modules.Monitor)
+		if !ok {
+			continue
+		}
+
+		resourceID := s.executor.GetResourceID(resource)
+		desired := execution.NewConfigState(resource.Config)
+
+		if err := mon.Monitor(ctx, resourceID, desired); err != nil {
+			s.logger.Warn("Failed to start module monitor",
+				"resource", resource.Name,
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", err)
+			continue
+		}
+
+		entries = append(entries, monitorEntry{
+			resourceID: resourceID,
+			resource:   resource,
+			monitor:    mon,
+		})
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	s.monitors = entries
+
+	// Fan-in: one forwarding goroutine per monitor channel; all send to fanIn.
+	// fanIn is bounded at monitorQueueCapacity; excess events are shed to the
+	// next scheduled convergence pass (non-blocking drop with Warn log).
+	fanInCap := monitorQueueCapacity
+	if s.monitorFanInCap > 0 {
+		fanInCap = s.monitorFanInCap
+	}
+	fanIn := make(chan modules.ChangeEvent, fanInCap)
+	for _, entry := range entries {
+		ch := entry.monitor.Changes()
+		s.monitorWg.Add(1)
+		go func(ch <-chan modules.ChangeEvent) {
+			defer s.monitorWg.Done()
+			for {
+				select {
+				case evt, ok := <-ch:
+					if !ok {
+						return
+					}
+					// Non-blocking send: if the queue is full, shed this event to
+					// the next scheduled convergence pass and log at Warn.
+					select {
+					case fanIn <- evt:
+					default:
+						s.logger.Warn("Monitor event queue full, event shed to scheduled poll",
+							"resource_id", logging.SanitizeLogValue(evt.ResourceID))
+					}
+				case <-ctx.Done():
+					return
+				case <-s.shutdown:
+					return
+				}
+			}
+		}(ch)
+	}
+
+	s.monitorWg.Add(1)
+	go func() {
+		defer s.monitorWg.Done()
+		s.monitorEventLoop(ctx, fanIn)
+	}()
+}
+
+// monitorEventLoop reads ChangeEvents from the fan-in channel and dispatches
+// debounced targeted reconciles. Multiple events for the same resourceID within
+// the debounce window are coalesced into a single runTargetedReconcile call.
+// Exits when the context is cancelled or the shutdown channel is closed.
+func (s *Steward) monitorEventLoop(ctx context.Context, events <-chan modules.ChangeEvent) {
+	// fireCh receives debounced resourceIDs after their timer window elapses.
+	// Buffered to avoid blocking the timer goroutines under load.
+	fireCh := make(chan string, 16)
+	// debounce maps resourceID → pending AfterFunc timer.
+	debounce := make(map[string]*time.Timer)
+
+	defer func() {
+		// Stop all pending timers so their functions never run and no goroutines
+		// are created after this loop exits.
+		for _, t := range debounce {
+			t.Stop()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.shutdown:
+			return
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			s.logger.Info("Monitor change event received",
+				"resource_id", logging.SanitizeLogValue(evt.ResourceID),
+				"change_type", evt.ChangeType)
+			resourceID := evt.ResourceID
+			if _, exists := debounce[resourceID]; !exists {
+				// First event for this resourceID in the window — start the timer.
+				debounce[resourceID] = time.AfterFunc(s.debounceWindow, func() {
+					select {
+					case fireCh <- resourceID:
+					case <-ctx.Done():
+					case <-s.shutdown:
+					}
+				})
+			}
+			// Duplicate events within the window are coalesced — the existing
+			// timer will fire once after the debounce window elapses.
+		case resourceID := <-fireCh:
+			delete(debounce, resourceID)
+			s.runTargetedReconcile(ctx, resourceID)
+		}
+	}
+}
+
+// runTargetedReconcile finds the ResourceConfig whose module-internal ID matches
+// resourceID and calls ExecuteResource for it. The ChangeEvent that triggered
+// this call is treated as a hint only — current state is read via module.Get()
+// and desired state comes from the cfg ResourceConfig, never from the event.
+//
+// If resourceID is not present in cfg (unmanaged resource), the call is a no-op.
+// Both ctx.Done() and s.shutdown are checked before the reconcile so a shutdown
+// mid-dispatch exits cleanly without calling Set after Close().
+//
+// When the reconcile changes state (ChangesApplied), a fresh DNA snapshot is
+// collected so the next heartbeat reflects the corrected state before the
+// scheduled convergence tick fires.
+func (s *Steward) runTargetedReconcile(ctx context.Context, resourceID string) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-s.shutdown:
+		return
+	default:
+	}
+
+	for _, resource := range s.standaloneConfig.Resources {
+		if s.executor.GetResourceID(resource) == resourceID {
+			s.logger.Info("Running targeted reconcile for monitored resource",
+				"resource", resource.Name,
+				"resource_id", logging.SanitizeLogValue(resourceID))
+			result := s.executor.ExecuteResource(ctx, resource)
+			if result.ChangesApplied {
+				s.logger.Info("Targeted reconcile changed state, refreshing DNA snapshot",
+					"resource", resource.Name,
+					"resource_id", logging.SanitizeLogValue(resourceID))
+				if _, err := s.detectUnmanagedDNADrift(ctx); err != nil {
+					s.logger.Warn("DNA refresh after targeted reconcile returned error",
+						"resource", resource.Name,
+						"error", err)
+				}
+			}
+			return
+		}
+	}
+
+	s.logger.Info("Monitor event for unmanaged resource (not in cfg, skipping)",
+		"resource_id", logging.SanitizeLogValue(resourceID))
+}
+
 // Stop gracefully shuts down the steward and cleans up resources.
 //
 // This method:
@@ -444,7 +693,7 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 func (s *Steward) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping steward", "id", s.standaloneConfig.Steward.ID)
 
-	// Signal shutdown to all background goroutines
+	// Signal shutdown to all background goroutines.
 	select {
 	case <-s.shutdown:
 		// Already closed
@@ -452,8 +701,22 @@ func (s *Steward) Stop(ctx context.Context) error {
 		close(s.shutdown)
 	}
 
-	// Stop health monitoring
+	// Cancel the health monitor's context so its goroutine exits via ctx.Done()
+	// even if Stop() races with HealthMonitor.Start() before running is set.
+	if s.healthCancel != nil {
+		s.healthCancel()
+	}
+
+	// Stop health monitoring (blocks until goroutine exits).
 	s.healthCheck.Stop()
+
+	// Wait for the convergence loop goroutine to exit.
+	s.wg.Wait()
+
+	// Wait for all monitor goroutines (fan-in + event loop) to exit.
+	// This guarantees no further ExecuteResource calls after Close() is called
+	// on the monitors below.
+	s.monitorWg.Wait()
 
 	// Close drift detector
 	if s.driftDetector != nil {
@@ -466,6 +729,17 @@ func (s *Steward) Stop(ctx context.Context) error {
 	if s.secretStore != nil {
 		if err := s.secretStore.Close(); err != nil {
 			s.logger.Warn("Failed to close secret store", "error", err)
+		}
+	}
+
+	// Close all active monitors before unloading modules.
+	// Closing the monitor releases any OS-level watchers and signals to the
+	// module that no further ChangeEvents will be produced.
+	for _, entry := range s.monitors {
+		if err := entry.monitor.Close(); err != nil {
+			s.logger.Warn("Failed to close monitor",
+				"resource_id", logging.SanitizeLogValue(entry.resourceID),
+				"error", err)
 		}
 	}
 

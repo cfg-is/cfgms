@@ -167,6 +167,7 @@ type PermissionCheckResult struct {
 type APIKeyCreateRequest struct {
 	Name        string     `json:"name"`
 	Permissions []string   `json:"permissions"`
+	RoleID      string     `json:"role_id,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id,omitempty"`
 }

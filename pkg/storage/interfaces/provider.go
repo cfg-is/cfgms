@@ -753,6 +753,105 @@ func NewStorageManagerFromStores(
 	}
 }
 
+// CreateClusterStorageManager composes the cluster storage tier from the database provider
+// (Postgres-backed business stores) using pgConnStr as the libpq connection string.
+//
+// s3Config documents the S3-compatible blob store configuration required for cluster
+// installer artifact storage. The blob store itself is NOT created here — callers are
+// responsible for initialising it separately (e.g. via blob.CreateBlobStoreFromConfig("s3", s3Config)).
+// Passing nil is accepted but means the caller must configure S3 via CFGMS_S3_INSTALLER_BUCKET.
+//
+// The "database" provider must be registered before calling this function via a blank-import
+// in the calling binary's main.go or in a providers_test.go file for tests.
+//
+// Used by initialization.go (--init) and server.go (startup) when ha.mode == cluster.
+func CreateClusterStorageManager(pgConnStr string, _ map[string]interface{}) (*StorageManager, error) {
+	if pgConnStr == "" {
+		return nil, fmt.Errorf("cluster storage requires a Postgres connection string (storage.cluster.postgres_dsn or CFGMS_STORAGE_CLUSTER_POSTGRES_DSN)")
+	}
+
+	dbCfg := map[string]interface{}{"dsn": pgConnStr}
+
+	provider, err := GetStorageProvider("database")
+	if err != nil {
+		return nil, fmt.Errorf("database provider not registered for cluster storage (blank-import database provider in calling binary or test providers_test.go): %w", err)
+	}
+
+	clientTenantStore, err := provider.CreateClientTenantStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create client tenant store: %w", err)
+	}
+	configStore, err := provider.CreateConfigStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create config store: %w", err)
+	}
+	auditStore, err := provider.CreateAuditStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create audit store: %w", err)
+	}
+	rbacStore, err := provider.CreateRBACStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create RBAC store: %w", err)
+	}
+	tenantStore, err := provider.CreateTenantStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create tenant store: %w", err)
+	}
+	registrationTokenStore, err := provider.CreateRegistrationTokenStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create registration token store: %w", err)
+	}
+	sessionStore, err := provider.CreateSessionStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create session store: %w", err)
+	}
+	stewardStore, err := provider.CreateStewardStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create steward store: %w", err)
+	}
+	commandStore, err := provider.CreateCommandStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create command store: %w", err)
+	}
+	triggerStore, err := provider.CreateTriggerStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create trigger store: %w", err)
+	}
+	pushStore, err := provider.CreatePushStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create push store: %w", err)
+	}
+	ipTrustStore, err := provider.CreateIPTrustStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create IP trust store: %w", err)
+	}
+	pendingRegStore, err := provider.CreatePendingRegistrationStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create pending registration store: %w", err)
+	}
+
+	sm := &StorageManager{
+		providerName:           "database",
+		provider:               provider,
+		clientTenantStore:      clientTenantStore,
+		configStore:            configStore,
+		auditStore:             auditStore,
+		rbacStore:              rbacStore,
+		tenantStore:            tenantStore,
+		registrationTokenStore: registrationTokenStore,
+		sessionStore:           sessionStore,
+		stewardStore:           stewardStore,
+		commandStore:           commandStore,
+		triggerStore:           triggerStore,
+		pushStore:              pushStore,
+		ipTrustStore:           ipTrustStore,
+	}
+	if pendingRegStore != nil {
+		sm.SetPendingRegistrationStore(pendingRegStore)
+	}
+	return sm, nil
+}
+
 // CreateOSSStorageManager composes the OSS storage tier from a flatfile provider (for
 // config/audit/steward stores) and a SQLite provider (for business-data stores), following
 // the ADR-003 store-to-provider mapping.

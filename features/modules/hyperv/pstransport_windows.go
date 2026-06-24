@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -222,6 +223,44 @@ func (t *psHostTransport) loadPreamble() error {
 // surfaced as an error if non-empty.
 //
 // Holds the transport mutex for the duration of the round trip.
+// runFresh executes a single Cfgms-* expression in a FRESH powershell.exe
+// process via -File, instead of the persistent `-Command -` host. This is
+// REQUIRED for the seed VHDX disk operations (New/Mount/Copy/Detach): Mount-VHD
+// and Dismount-VHD attach the VHD via the async Virtual Disk Service, which
+// DEADLOCKS in the persistent stdin-REPL host — and so do Start-Job and
+// Start-Process -Wait launched from inside it. A fresh `powershell -File`
+// process runs the disk cmdlets directly with no deadlock (proven on cfg-lab).
+//
+// The temp script is the full preamble (Cfgms-* defs + safe defaults) followed
+// by the expression, so the verb resolves exactly as in the persistent host.
+// The script is removed after the run. Unlike run(), this does not serialise on
+// t.mu (it spawns an independent process) and is unaffected by t.closed.
+func (t *psHostTransport) runFresh(ctx context.Context, expression string) (string, error) {
+	f, err := os.CreateTemp("", "cfgms-seedop-*.ps1")
+	if err != nil {
+		return "", fmt.Errorf("hyperv-ps-host: create temp seed script: %w", err)
+	}
+	tmpPath := f.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, werr := io.WriteString(f, psHostPreamble+"\n"+expression+"\n"); werr != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("hyperv-ps-host: write temp seed script: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return "", fmt.Errorf("hyperv-ps-host: close temp seed script: %w", cerr)
+	}
+
+	cmd := exec.CommandContext(ctx, "powershell.exe",
+		"-NoProfile", "-NonInteractive", "-File", tmpPath,
+	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return string(out), fmt.Errorf("hyperv-ps-host: fresh seed op failed: %w: %s",
+			runErr, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 func (t *psHostTransport) run(_ context.Context, expression string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

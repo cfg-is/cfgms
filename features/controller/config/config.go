@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -115,6 +116,12 @@ type Config struct {
 
 	// BlobStorage configures the blob storage backend for installer artifacts (Issue #1702).
 	BlobStorage BlobStorageConfig `yaml:"blob_storage,omitempty"`
+
+	// HA configures the deployment mode for storage selection.
+	// Set ha.mode to "cluster" to activate cluster-mode storage (Postgres + S3).
+	// Override ha.mode via CFGMS_HA_MODE environment variable.
+	// Valid modes: "single" (default), "blue-green", "cluster".
+	HA *HAConfig `yaml:"ha,omitempty"`
 }
 
 // RegistrationConfig holds registration approval workflow settings.
@@ -276,6 +283,34 @@ type ServerCertificateConfig struct {
 	Organization string `yaml:"organization"`
 }
 
+// HAConfig selects the controller deployment mode for storage backend selection.
+// Only the Mode field is used at init/startup; full cluster coordination lives in pkg/ha.
+// This thin config type avoids a pkg/ha import cycle through pkg/testing/storage.
+type HAConfig struct {
+	// Mode is the deployment mode: "single" (default), "blue-green", or "cluster".
+	Mode string `yaml:"mode"`
+}
+
+// IsClusterMode returns true when ha.mode is "cluster".
+func (h *HAConfig) IsClusterMode() bool {
+	return h != nil && h.Mode == "cluster"
+}
+
+// ClusterStorageConfig holds Postgres + S3 connection details for cluster-mode deployments.
+// Set under storage.cluster.* in controller.cfg when ha.mode is cluster.
+type ClusterStorageConfig struct {
+	// PostgresDSN is the libpq connection string for the shared Postgres backend.
+	// All controller nodes in the cluster must point at the same Postgres instance.
+	// Example: "host=pg.example.com port=5432 dbname=cfgms user=cfgms password=... sslmode=require"
+	// Override via CFGMS_STORAGE_CLUSTER_POSTGRES_DSN environment variable.
+	PostgresDSN string `yaml:"postgres_dsn"`
+
+	// S3 holds S3-compatible blob store configuration keys used for installer artifact storage.
+	// Required keys: "bucket". Optional: "region", "endpoint_url", "access_key_id", "secret_access_key".
+	// When empty, the S3 bucket name is read from CFGMS_S3_INSTALLER_BUCKET at startup.
+	S3 map[string]interface{} `yaml:"s3,omitempty"`
+}
+
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
 	// Provider specifies which storage provider to use (database, flatfile, sqlite).
@@ -297,6 +332,10 @@ type StorageConfig struct {
 	// storage manager. Caller-controlled DSN — use a file path such as
 	// "/var/lib/cfgms/cfgms.db". Only used when FlatfileRoot is set.
 	SQLitePath string `yaml:"sqlite_path,omitempty"`
+
+	// Cluster holds Postgres + S3 connection details for cluster-mode deployments.
+	// Required when ha.mode is cluster. Ignored in single-node deployments.
+	Cluster *ClusterStorageConfig `yaml:"cluster,omitempty"`
 }
 
 // LoggingConfig contains global logging provider configuration
@@ -810,6 +849,25 @@ func LoadWithPath(configPath string) (*Config, error) {
 			cfg.Registration = &RegistrationConfig{}
 		}
 		cfg.Registration.Workflow = regWorkflow
+	}
+
+	// HA mode environment variable (Issue #2119).
+	// CFGMS_HA_MODE overrides ha.mode from the config file.
+	// Valid values: "single", "blue-green", "cluster".
+	if haMode := os.Getenv("CFGMS_HA_MODE"); haMode != "" {
+		if cfg.HA == nil {
+			cfg.HA = &HAConfig{}
+		}
+		cfg.HA.Mode = strings.ToLower(haMode)
+	}
+
+	// Cluster storage DSN environment variable (Issue #2119).
+	// CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides storage.cluster.postgres_dsn.
+	if pgDSN := os.Getenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN"); pgDSN != "" {
+		if cfg.Storage.Cluster == nil {
+			cfg.Storage.Cluster = &ClusterStorageConfig{}
+		}
+		cfg.Storage.Cluster.PostgresDSN = pgDSN
 	}
 
 	return cfg, nil

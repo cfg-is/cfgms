@@ -3,13 +3,20 @@
 package initialization
 
 import (
+	"crypto/rand"
 	"crypto/x509"
+	"database/sql"
+	"encoding/base64"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,6 +25,33 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// getTestDBPassword returns the test database password from CFGMS_TEST_DB_PASSWORD,
+// or generates a cryptographically secure random password when unset.
+// Inlined here to avoid the pkg/testutil → features/controller/initialization import cycle.
+func getTestDBPassword() string {
+	if pw := os.Getenv("CFGMS_TEST_DB_PASSWORD"); pw != "" {
+		return pw
+	}
+	return generateSecureTestPassword()
+}
+
+// generateSecureTestPassword generates a cryptographically secure random password.
+// Mirrors pkg/testutil.GenerateSecurePassword() — inlined to avoid the import cycle.
+func generateSecureTestPassword() string {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return fmt.Sprintf("test-fallback-%d", 0) // rand.Read failure is extremely rare
+	}
+	pw := base64.StdEncoding.EncodeToString(randomBytes)
+	pw = strings.ReplaceAll(pw, "=", "")
+	pw = strings.ReplaceAll(pw, "+", "")
+	pw = strings.ReplaceAll(pw, "/", "")
+	if len(pw) > 25 {
+		pw = pw[:25]
+	}
+	return pw
+}
 
 func TestIsInitialized(t *testing.T) {
 	tempDir := t.TempDir()
@@ -462,4 +496,90 @@ func makeTestConfig(t *testing.T, tempDir, caDir, bundlePath string) *config.Con
 			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
 		},
 	}
+}
+
+// buildInitTestPostgresDSN returns a DSN for the shared test Postgres instance.
+func buildInitTestPostgresDSN() string {
+	pw := getTestDBPassword()
+	port := 5432
+	if p := os.Getenv("CFGMS_TEST_DB_PORT"); p != "" {
+		if pi, err := strconv.Atoi(p); err == nil {
+			port = pi
+		}
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	return fmt.Sprintf("host=localhost port=%d dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, pw)
+}
+
+// skipInitTestIfNoPostgres skips the calling test if the Postgres instance is unreachable.
+func skipInitTestIfNoPostgres(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Postgres test in short mode")
+	}
+	dsn := buildInitTestPostgresDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Skip("Postgres not available:", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Ping(); err != nil {
+		t.Skip("Postgres not reachable:", err)
+	}
+	return dsn
+}
+
+// TestRun_ClusterMode_UsesDatabaseProvider is the REQUIRED test for Issue #2119:
+// Run() with ha.Mode == ClusterMode + a test Postgres DSN must succeed and report
+// "database" as the storage provider, confirming the database-backed steward store
+// (not flatfile/SQLite) is selected.
+func TestRun_ClusterMode_UsesDatabaseProvider(t *testing.T) {
+	pgDSN := skipInitTestIfNoPostgres(t)
+
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		CertPath:        caDir,
+		AdminBundlePath: bundlePath,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				DNSNames:     []string{"localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "Test Org",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider: "database",
+			Cluster: &config.ClusterStorageConfig{
+				PostgresDSN: pgDSN,
+			},
+		},
+		HA: &config.HAConfig{Mode: "cluster"},
+	}
+
+	result, err := Run(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, "database", result.StorageProvider,
+		"cluster-mode init must record database as the storage provider")
+	assert.NotEmpty(t, result.CAFingerprint)
+	assert.False(t, result.InitializedAt.IsZero())
 }

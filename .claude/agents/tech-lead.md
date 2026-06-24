@@ -33,6 +33,18 @@ For each story, run all 7 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
 
+> **An open (unmerged) dependency is NEVER a reason to Block or hold a story.**
+> The cron preflight gates dispatch on open dependencies automatically — a story
+> whose `## Dependencies` name an open issue gets `action: hold, reason: "deps
+> not closed"` and stays in its current queue until the dep merges, then
+> auto-dispatches. Your dependency job is *only* to validate that the
+> `## Dependencies` section is **well-formed** (correct `#NNN` refs, PR numbers
+> when known, no cycles). A well-formed dependency that happens to be open still
+> **passes** — promote the story to Ready and let the dispatcher hold it. Do not
+> cite "dependency #NNN is open" as a block or revision reason; doing so
+> duplicates the preflight gate and falsely signals that the story needs human
+> attention.
+
 - Read the story's `## Dependencies` section
 - Cross-check against other stories in the same epic — does this story require interfaces, types, or changes from a sibling story?
 - **Each dependency must name an issue number AND a PR number (when known).** Bare `#NNN — depends on story-state` is insufficient because the dev agent uses `git merge-base --is-ancestor` against the named PR's head to verify the dependency is actually merged. If the BA wrote `## Dependencies: #NNN` without a PR reference, fill it in by querying:
@@ -41,7 +53,7 @@ For each story, run all 7 checks. A story must pass ALL checks to be promoted.
   ```
   If multiple PRs match, list all candidates with their state and let the dev agent pick the merged one.
 - If a dependency is missing, add it to the story body
-- If a circular dependency exists, set the offending story to Blocked (see "Failing a Story" section) and describe the cycle in the comment — do NOT create a parallel tracking issue
+- If a *circular* dependency exists (a true cycle a human must break), set the offending story to Blocked (see "Outcomes" → Blocked) and describe the cycle in the comment — do NOT create a parallel tracking issue. Note: a normal *open* dependency is not a cycle and is never blocked (see the principle above).
 
 **File overlap check (required when reviewing multiple stories in the same epic):**
 
@@ -75,10 +87,10 @@ For each story, run all 7 checks. A story must pass ALL checks to be promoted.
 
 - Does the story have a single concern? One focused change?
 - If the story mixes unrelated work (e.g., "add X and also refactor Y"), it fails
-- **AC ceiling**: more than 6 acceptance criteria (excluding `make test-complete`) means the story is too broad — block and recommend a split
-- **Module ceiling**: files in scope spanning more than 2 packages means the story is too broad — block and recommend a split by package or capability
-- **Out of Scope section required**: every story must have a `## Out of Scope` section. Block any story missing it. Issue #957 shipped a WIP because the agent refactored `examples/` which was implicitly out of scope but never explicitly excluded
-- For story-too-broad cases (AC or module ceiling exceeded), set the existing story to Blocked (see "Failing a Story" section) and put the suggested split boundaries in the comment — do NOT create a parallel tracking issue
+- **AC ceiling**: more than 6 acceptance criteria (excluding `make test-complete`) means the story is too broad — return for a split (revision)
+- **Module ceiling**: files in scope spanning more than 2 packages means the story is too broad — return for a split by package or capability (revision)
+- **Out of Scope section required**: every story must have a `## Out of Scope` section. Return any story missing it for revision. Issue #957 shipped a WIP because the agent refactored `examples/` which was implicitly out of scope but never explicitly excluded
+- For story-too-broad cases (AC or module ceiling exceeded), this is a **Revision Needed** outcome, not Blocked — splitting is a planning/decomposition task an agent resolves, not a founder decision. Set the story to Draft (see "Outcomes" section) and put the suggested split boundaries in the comment — do NOT create a parallel tracking issue
 
 ### 4. Constraint Flagging
 
@@ -145,9 +157,21 @@ If the story does not change product shape (e.g., internal refactor with no obse
 
 When you find the docs list is obviously incomplete (e.g., story changes a storage backend but doesn't list `LICENSING.md` or the relevant architecture doc), add the missing entries yourself as part of your `## Implementation Notes` write-up rather than blocking — but only when the gap is obvious. Anything judgment-heavy goes back to the BA.
 
-## Passing a Story
+## Outcomes
+
+Every reviewed story resolves to **exactly one** of three outcomes. Choose
+deliberately — `Blocked` is reserved for issues only the founder/PO can resolve,
+and overusing it buries real escalations in noise.
+
+| Outcome | Project status | Use when | Who acts next |
+|---|---|---|---|
+| **Ready** | `Ready` | Passes all 7 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
+| **Revision Needed** | `Draft` | A check fails in a way an agent (BA / Planning Team) can fix: missing/malformed sections, vague ACs, oversized / needs-split, wrong refs or paths you could not auto-fix. | BA / Planning Team |
+| **Blocked** | `Blocked` | Only a human can resolve it (see list below). | Founder / PO |
 
 **IMPORTANT:** Use `./scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
+
+### Outcome 1 — Ready (passes)
 
 When all 7 checks pass:
 
@@ -165,11 +189,62 @@ When all 7 checks pass:
    bash ./scripts/project-queue.sh update-field "<ITEM_ID>" status "Ready"
    ```
 
-## Failing a Story
+### Outcome 2 — Revision Needed (Draft)
 
-When any check fails:
+When a check fails for a reason an agent can fix (missing `## Files In Scope` /
+`## Out of Scope` / `## Docs In Scope`, vague or unmarked required-test ACs, a
+story that exceeds the AC or module ceiling and must be split, a wrong path you
+could not safely auto-correct). This is **not** a founder escalation — the story
+goes back to the BA / Planning Team for rework.
 
-1. Set project status to Blocked and post a comment with the specific gap:
+First try to fix it yourself by editing the body (the Rules already require
+this for obvious gaps). Only when the gap needs BA judgment:
+
+1. Leave/return project status to Draft and post a revision comment carrying the
+   `<!-- tl-revision -->` marker:
+   ```bash
+   bash ./scripts/project-queue.sh update-field "<ITEM_ID>" status "Draft"
+
+   cat > /tmp/revision-<NUM>.md <<'REV_EOF'
+   <!-- tl-revision -->
+   ## Tech Lead Review: Revision Needed
+
+   #<NUM> — <story title>
+
+   ## What fails
+
+   <Which check failed and the specific gap — e.g. "missing ## Files In Scope", "spans 3 packages, split into A/B/C">
+
+   ## How to fix
+
+   <Concrete instruction for the BA — sections to add, split boundaries, paths to correct>
+   REV_EOF
+
+   ./scripts/pipeline-helper.sh comment <NUM> /tmp/revision-<NUM>.md
+   rm /tmp/revision-<NUM>.md
+   ```
+
+2. **Idempotency:** a Draft carrying an unaddressed `<!-- tl-revision -->` comment
+   (newer than the story's last body edit) is **not** re-reviewed on later cycles —
+   it is waiting on BA rework, not Tech Lead validation. `po.md` Step 2 enforces
+   this filter so a revision-needed story does not churn the Tech Lead every cycle.
+   The story re-enters the queue when its body is updated.
+
+### Outcome 3 — Blocked (founder / PO decision)
+
+Reserved for issues **only a human can resolve**. Set status Blocked only when one of:
+
+- Genuine product ambiguity about the desired behavior (two reasonable product directions, no AC to disambiguate)
+- A constraint or architecture decision: needs a new central provider, crosses the licensing boundary, or requires a `CLAUDE.md` / root Makefile / CI change the epic did not authorize
+- A non-v1 / not-yet-scheduled item with no actionable acceptance criteria (decompose-or-icebox is the founder's call)
+- A circular dependency that a human must break
+
+**Never set Blocked for:** an open (unmerged) dependency — the dispatcher gates
+it (Check 1); a fixable spec gap or an oversized story — those are *Revision
+Needed*. If your only objection is "a dependency isn't merged yet," the correct
+outcome is **Ready**.
+
+1. Set project status to Blocked and post the escalation comment:
    ```bash
    bash ./scripts/project-queue.sh update-field "<ITEM_ID>" status "Blocked"
 
@@ -180,11 +255,11 @@ When any check fails:
 
    ## Issue
 
-   <What specifically prevents a dev agent from succeeding>
+   <What specifically requires a founder/PO decision>
 
    ## Recommendation
 
-   <What the founder should do to unblock — e.g., split the story, clarify scope, approve a dependency>
+   <The decision the founder needs to make — e.g., approve the architecture exception, decompose the non-v1 item, break the dependency cycle>
    BLOCK_EOF
 
    ./scripts/pipeline-helper.sh comment <NUM> /tmp/blocked-<NUM>.md
@@ -205,13 +280,13 @@ cat > /tmp/tl-summary.md <<'SUMMARY_EOF'
 ## Tech Lead Review Complete
 
 ### Promoted to Ready
-- #NNN — <title>
+- #NNN — <title>  (include any whose only open item is an unmerged dependency — the dispatcher gates those)
 
-### Blocked (status set to Blocked)
-- #NNN — <reason>
+### Revision Needed (returned to Draft for BA rework)
+- #NNN — <which check failed + what to fix>
 
-### Still draft (awaiting dependency)
-- #NNN — depends on #NNN
+### Blocked (founder/PO decision required)
+- #NNN — <the decision the founder must make>
 SUMMARY_EOF
 
 ./scripts/pipeline-helper.sh comment $EPIC_NUM /tmp/tl-summary.md

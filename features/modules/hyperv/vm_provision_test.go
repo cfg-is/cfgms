@@ -25,17 +25,20 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 		vms:            make(map[string]VMConfig),
 		detector:       &fakeDetector{result: true},
 		provisionStore: NewMemProvisionStore(),
+		// Controller-supplied enrollment wiring (ADR-010): both the Windows
+		// autounattend and the Linux preseed bake these in via ProfileVars.
+		enrollToken:         "reg-token-stub-value",
+		enrollCAFingerprint: "abc123fingerprint",
 	}
-	// Inject a single in-memory SecretStore carrying every key both OS create
-	// paths resolve at render time so the create-from-source provisioning tests
-	// exercise the real render path (no mocks):
-	//   - Linux preseed (#2046): registration token + crypted user password
-	//   - Windows autounattend (#2047): .ppkg host path + registration token
-	// defaultRegTokenSecretKey is "hyperv/enroll/regtoken", shared by both paths.
+	// Inject a single in-memory SecretStore carrying the keys the Linux preseed
+	// (#2046) still resolves at render time so the create-from-source tests
+	// exercise the real render path (no mocks): registration token + crypted
+	// user password. The Windows autounattend (ADR-010) no longer reads secrets
+	// (token + CA fingerprint are controller-supplied ProfileVars), so it needs
+	// no store entries.
 	_ = m.SetSecretStore(newInlineStore(
 		"hyperv/enroll/regtoken", "reg-token-stub-value",
 		"hyperv/enroll/user-password-crypted", "$6$rounds=4096$stub$cryptedstub",
-		ppkgPathSecretKey, `C:\cfgms\packages\cfgms-enroll.ppkg`,
 	))
 	return m
 }
@@ -205,12 +208,15 @@ func TestProvisionVM_Gen2WindowsFirmwareTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	fw := callsContaining(calls, "Set-VMFirmware")
-	require.Len(t, fw, 1, "Gen2 VM must call Set-VMFirmware exactly once")
+	fw := callsContaining(calls, "SecureBootTemplate")
+	require.Len(t, fw, 1, "Gen2 VM must set the secure-boot template exactly once")
 	assert.True(t, argsContain(fw[0], "MicrosoftWindows"),
 		"windows os_family must select the MicrosoftWindows template")
 	assert.NotContains(t, fw[0].scriptBlock, "MicrosoftWindows",
 		"firmware template must travel via args, not the script text")
+	// Gen2 must also make the install DVD the first boot device.
+	require.Len(t, callsContaining(calls, "FirstBootDevice"), 1,
+		"Gen2 VM must set the install DVD as the first boot device")
 }
 
 // TestProvisionVM_Gen2LinuxFirmwareTemplate asserts the linux os_family selects
@@ -228,7 +234,7 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	fw := callsContaining(calls, "Set-VMFirmware")
+	fw := callsContaining(calls, "SecureBootTemplate")
 	require.Len(t, fw, 1)
 	assert.True(t, argsContain(fw[0], "MicrosoftUEFICertificateAuthority"),
 		"linux os_family must select the MicrosoftUEFICertificateAuthority template")
@@ -236,17 +242,19 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 
 // ── Seed VHDX build + attach sequence ────────────────────────────────────────
 
-// TestProvisionVM_SeedVHDBuildAndAttachSequence drives an absent Gen2 windows
+// TestProvisionVM_SeedVHDBuildAndAttachSequence drives an absent Gen2 LINUX
 // VM with a source block and asserts the full seed build + media attach
 // sequence is emitted in order: New-VHD → Format-Volume (Mount) → Set-Content
-// (copy) → Add-VMHardDiskDrive (seed attach) → Add-VMDvdDrive (ISO).
+// (copy) → Add-VMHardDiskDrive (seed attach) → Add-VMDvdDrive (ISO). The seed
+// VHDX path is Linux-only; Windows delivers its answer file on an ISO (see
+// TestProvisionVM_WindowsBuildsAnswerISO).
 func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	m := provisionModuleWithTransport(transport)
 
-	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
 
 	transport.mu.Lock()
@@ -283,8 +291,36 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 		"seed path must not be interpolated into the script text")
 
 	copy := callsContaining(calls, "Set-Content")[0]
-	assert.True(t, argsContain(copy, "autounattend.xml"),
-		"windows os_family must seed autounattend.xml")
+	assert.True(t, argsContain(copy, "preseed.cfg"),
+		"linux os_family must seed preseed.cfg")
+}
+
+// TestProvisionVM_WindowsBuildsAnswerISO asserts the Windows path delivers the
+// answer file via an ISO (the new Server 2025 Setup does not scan data disks):
+// it builds an answer ISO, attaches TWO DVDs (answer ISO + install ISO), sets
+// the install DVD first boot, and drives the boot keypress — and never builds a
+// seed VHDX.
+func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, callsContaining(calls, "Cfgms-BuildAnswerIso"), 1, "one answer-ISO build")
+	require.Len(t, callsContaining(calls, "Add-VMDvdDrive"), 2, "two DVDs: answer ISO + install ISO")
+	require.Len(t, callsContaining(calls, "Cfgms-BootKeypress"), 1, "one boot keypress")
+	assert.Empty(t, callsContaining(calls, "New-VHD"), "windows must NOT build a seed VHDX")
+	assert.Empty(t, callsContaining(calls, "Add-VMHardDiskDrive"), "windows attaches no seed disk")
+
+	build := callsContaining(calls, "Cfgms-BuildAnswerIso")[0]
+	assert.True(t, argsContain(build, "autounattend.xml"), "windows answer file is autounattend.xml")
+	assert.True(t, argsContain(build, `C:\ClusterStorage\CSV01\cfgms-answer-stw-01.iso`),
+		"answer ISO path derives from the VM VHD dir and travels via args")
 }
 
 // TestProvisionVM_AttachesInstallISOFromHostPath asserts the install ISO is
@@ -295,7 +331,7 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 	}
 	m := provisionModuleWithTransport(transport)
 
-	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
 
 	transport.mu.Lock()
@@ -308,6 +344,144 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 		"install ISO host path must travel via args")
 	assert.NotContains(t, dvd[0].scriptBlock, "server.iso",
 		"ISO path must not be interpolated into the script text")
+}
+
+// ── cloud-init (Linux VM-from-cloud-image) path ──────────────────────────────
+
+// cloudInitVMConfigMap returns the executor-shaped config map for an absent
+// linux VM that boots a cloud image (source.image) via cloud-init.
+func cloudInitVMConfigMap(generation int) map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "stw-01",
+		"memory_mb":   2048,
+		"cpu_count":   2,
+		"vhd_path":    `C:\VMs\stw-01.vhdx`,
+		"generation":  generation,
+		"state":       "running",
+		"switch_name": "HVSwitch_1G",
+		"source": map[string]interface{}{
+			"image":     `C:\images\debian-13-generic-amd64.raw`,
+			"os_family": "linux",
+			"resize_gb": 20,
+			"completion": map[string]interface{}{
+				"mode":    "steward-registration",
+				"timeout": "60m",
+			},
+			"on_existing": "never",
+		},
+	}
+}
+
+// TestProvisionVM_CloudInitPath drives an absent Gen2 linux VM that declares a
+// cloud image and asserts the codified cloud-init path: the boot disk is prepared
+// from the image (Cfgms-PrepCloudBootDisk) and the VM is created attaching that
+// existing disk (Cfgms-CreateVMFromDisk); a CIDATA NoCloud seed (user-data +
+// meta-data + cfgms-steward) is built and attached; the OS disk is made the first
+// boot device; and there is NO install ISO, NO answer ISO, and NO boot keypress.
+func TestProvisionVM_CloudInitPath(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+	// The linux steward binary + CA host paths the seed stages (ADR-010).
+	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// Boot disk prepared from the cloud image, then VM created attaching it.
+	prep := callsContaining(calls, "Cfgms-PrepCloudBootDisk")
+	require.Len(t, prep, 1, "one Cfgms-PrepCloudBootDisk (cloud image → boot VHDX)")
+	assert.True(t, argsContain(prep[0], `C:\images\debian-13-generic-amd64.raw`),
+		"cloud image path travels via args")
+	assert.True(t, argsContain(prep[0], `C:\VMs\stw-01.vhdx`), "boot VHDX path travels via args")
+	require.Len(t, callsContaining(calls, "Cfgms-CreateVMFromDisk"), 1,
+		"cloud-init VM is created attaching the existing prepared disk")
+
+	// NoCloud CIDATA seed: New-VHD → Format → Set-Content (user-data + meta-data)
+	// → Add-VMHardDiskDrive. The seed carries the steward binary too.
+	require.Len(t, callsContaining(calls, "New-VHD"), 1, "one New-VHD (CIDATA seed)")
+	require.Len(t, callsContaining(calls, "Set-Content"), 1, "one Set-Content (seed write)")
+	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "one seed attach")
+	copyCall := callsContaining(calls, "Set-Content")[0]
+	assert.True(t, argsContain(copyCall, "CIDATA"), "seed volume is labelled CIDATA")
+	assert.True(t, argsContain(copyCall, "user-data"), "seed carries user-data")
+	assert.True(t, argsContain(copyCall, "meta-data"), "seed carries meta-data")
+	assert.True(t, argsContain(copyCall, "cfgms-steward"), "seed stages the linux steward (dest cfgms-steward)")
+
+	// OS disk made first boot; no installer media; no keypress.
+	require.Len(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"), 1,
+		"cloud-init must make the OS disk the first boot device")
+	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"), "cloud-init attaches no install ISO")
+	assert.Empty(t, callsContaining(calls, "Cfgms-BuildAnswerIso"), "cloud-init builds no answer ISO")
+	assert.Empty(t, callsContaining(calls, "Cfgms-BootKeypress"), "cloud-init needs no boot keypress")
+	require.Len(t, callsContaining(calls, "Start-VM"), 1, "VM is powered on")
+}
+
+// TestProvisionVM_CloudInitGen1SkipsHddFirstBoot drives an absent Gen1 linux
+// cloud-image VM and asserts the cloud-init seed is still built and attached but
+// Cfgms-SetHddFirstBoot is NOT issued (Gen1 uses BIOS startup order, not UEFI
+// firmware boot device — same Gen1 contract as the install-media path).
+func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(1)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"),
+		"Gen1 cloud-init VMs must not set a UEFI first boot device")
+	assert.Empty(t, callsContaining(calls, "Set-VMFirmware"),
+		"Gen1 has no secure boot / firmware step")
+	// The cloud-init seed build + boot-disk prep still happen on Gen1.
+	require.Len(t, callsContaining(calls, "Cfgms-PrepCloudBootDisk"), 1, "Gen1 still preps the cloud boot disk")
+	require.Len(t, callsContaining(calls, "New-VHD"), 1, "Gen1 still builds the CIDATA seed")
+	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "Gen1 still attaches the seed")
+}
+
+// TestProvision_CloudInitUserDataRenderedToSeed asserts the cloud-init path
+// writes a REAL rendered cloud-config user-data (not the placeholder) carrying the
+// controller-supplied token + CA fingerprint and the CorrelationID, with list-form
+// runcmd and no banned patterns.
+func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(transport)
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	copyCall := callsContaining(calls, "Set-Content")[0]
+	var userData string
+	for _, a := range copyCall.args {
+		if s, ok := a.(string); ok && strings.Contains(s, "#cloud-config") && len(s) > len(userData) {
+			userData = s
+		}
+	}
+	require.NotEmpty(t, userData, "rendered cloud-config user-data must be present in the copy args")
+	assert.Contains(t, userData, "runcmd", "user-data must carry runcmd")
+	assert.Contains(t, userData, "cfgms-steward", "user-data must install the steward")
+	assert.Contains(t, userData, "install", "user-data must run the steward install command")
+	assert.Contains(t, userData, "reg-token-stub-value", "controller-supplied token must be rendered into user-data")
+	assert.Contains(t, userData, "abc123fingerprint", "CA fingerprint must be rendered into user-data")
+	assert.Contains(t, userData, "stw-01", "CorrelationID must appear in the user-data")
+	// runcmd must be list/exec form (argv arrays), never shell-string composition.
+	assert.Contains(t, userData, "  - [ ", "runcmd entries must be YAML list (exec) form, not shell strings")
+	lower := strings.ToLower(userData)
+	// CLAUDE.md banned patterns: no shell-string composition / runtime code eval.
+	for _, banned := range []string{"eval", "bash -c", "sh -c", "iex", "invoke-expression", "-encodedcommand", "python -c"} {
+		assert.NotContains(t, lower, banned, "rendered user-data must not contain banned pattern %q", banned)
+	}
 }
 
 // ── REQUIRED TEST: installing → finalizing detaches the seed ─────────────────

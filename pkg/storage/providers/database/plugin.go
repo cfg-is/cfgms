@@ -141,22 +141,45 @@ func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (bus
 	return store, nil
 }
 
-// CreateSessionStore is not supported by the database provider in this release.
-// Use the SQLite provider for SessionStore, or extend this provider in a future story.
+// CreateSessionStore creates a PostgreSQL-backed SessionStore.
+// Bearer tokens are stored as HMAC-SHA256 hashes; plaintext tokens are never written to the DB.
+// RLS is enforced by setting app.current_tenant per transaction in the store layer.
 func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (business.SessionStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseSessionStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database session store: %w", err)
+	}
+	return store, nil
 }
 
-// CreateStewardStore is not supported by the database provider.
-// StewardStore is implemented by the flat-file and SQLite providers (Issue #663).
+// CreateStewardStore creates a PostgreSQL-backed StewardStore with tenant-scoped RLS.
 func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseStewardStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database steward store: %w", err)
+	}
+	return store, nil
 }
 
-// CreateCommandStore is not supported by the database provider.
-// Command dispatch state belongs in the business-data tier (SQLite for OSS).
+// CreateCommandStore creates a PostgreSQL-backed CommandStore with tenant-scoped RLS.
 func (p *DatabaseProvider) CreateCommandStore(config map[string]interface{}) (business.CommandStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseCommandStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database command store: %w", err)
+	}
+	return store, nil
 }
 
 // CreateTriggerStore is not supported by the database provider.
