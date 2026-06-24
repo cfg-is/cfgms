@@ -586,13 +586,13 @@ The conversation follows this protocol:
 
 Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
 
-Once all stories are APPROVED (or PO-decided), create them in the project queue. There are two paths — pick **one** per epic, don't mix.
+Once all stories are APPROVED (or PO-decided), create them as **project items — never public GitHub issues.** Decomposition has exactly one path.
 
-**Path A (default) — project draft items (private, no public GH issue):**
+**Decomposition NEVER runs `gh issue create`.** Use `create-story`, which produces a private project draft:
 
 ```bash
 cat > /tmp/story-body.md <<'STORY_EOF'
-<full story body from final agreed proposal>
+<full parser-compliant story body (## Dependencies, ## Files In Scope, etc.)>
 STORY_EOF
 
 ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
@@ -602,40 +602,13 @@ rm /tmp/story-body.md
 bash ./scripts/project-queue.sh update-field <item_id> status "Ready"
 ```
 
-Path A produces project drafts only — there is no public GH issue and no GitHub sub-issue link to the parent epic. The preflight's `sub_issues_total` for the epic stays 0, but the `body_referencing_issues` count is also 0 (drafts aren't issues), so undecomposed-detection requires the parent epic to be closed or have a decomposition-complete marker comment. Use this path when stories don't need external visibility (the common case for internal-engineering work).
+**Why no public issue here.** The public issue tracker is injection + leak surface (epic #1469). **All pipeline work originates from the private project.** A dev work-item becomes a GitHub issue *only when it is dispatched*, and *only* via the privileged materialize step (`po-act.sh dispatch` → `pipeline-helper.sh materialize-issue`), which creates the issue **already locked** and labelled **`internal`**, with a dev-focused body, then dispatches it normally (`feature/story-<N>`). This keeps issues first-class for the dev/PR/review/merge machinery while keeping everything that isn't being actively worked off the public tracker. There is no "create the issue now" path during decomposition.
 
-**Path B — public GitHub issues (when external visibility is needed):**
+**Work-product test — what may EVER become an issue.** If the deliverable is a **repo artifact** (code, docs, config that lives in the repo), it may be materialized as an issue at dispatch. If the deliverable does **not** live in the repo (business setup, legal/licensing review as a decision, ops, finance), it stays a project item forever and is **never** an issue. License-*file* edits are repo artifacts (OK); "have a lawyer review licensing" is not.
 
-Use when stories should be referenceable from outside the team (open-source contributors, cross-team coordination, public roadmap tracking). Requires four calls per story; **all four are required** or the story will not be visible to the pipeline:
+**Never apply `pipeline:*` / `agent:*` labels** — those are decommissioned; the board **Status** field is the only queue signal. Dev issues carry only `story` (+ `epic` for epics) and `internal` (applied by the materialize step).
 
-```bash
-cat > /tmp/story-body.md <<'STORY_EOF'
-## Parent epic: #<EPIC_NUM>
-
-<full story body, including the parser-required ## Dependencies and ## Files In Scope sections>
-STORY_EOF
-
-# 1. Create the public GH issue
-issue_num=$(gh issue create --repo cfg-is/cfgms \
-  --title "<scope>: <title>" \
-  --label story \
-  --body-file /tmp/story-body.md \
-  | grep -oE '[0-9]+$')
-
-# 2. Link as sub-issue of the parent epic (so subIssuesSummary tracks completion)
-./scripts/pipeline-helper.sh link-child <EPIC_NUM> "$issue_num"
-
-# 3. Add the issue to the project queue (so the preflight can see it)
-item_id=$(./scripts/project-queue.sh add-issue "$issue_num" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
-
-# 4. Mark Ready (skipping Draft — Tech Lead validated during planning)
-./scripts/project-queue.sh update-field "$item_id" status "Ready"
-
-rm /tmp/story-body.md
-```
-
-**Common failure mode (caught 2026-05-18 on epic #1500):** decomposition created public GH issues via `gh issue create` but skipped steps 2–4. The stories were visible on GitHub but invisible to the pipeline — no sub-issue link (epic looked undecomposed), no project item (`list-by-status Ready` returned `[]`), no status (dispatcher could never pick them up). If you create a GH issue, you must do all four calls.
+Epic undecomposed-detection: drafts aren't sub-issues, so `sub_issues_total` stays 0 — mark the epic decomposed with a decomposition-complete marker comment (or close it) so the preflight doesn't re-flag it.
 
 **7g. Post summary on epic:**
 ```bash
