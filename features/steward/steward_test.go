@@ -385,10 +385,15 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	// by detectUnmanagedDNADrift updating previousDNA. Both run sequentially in the
 	// same monitorEventLoop goroutine, so polling GetPreviousDNA is the correct
 	// synchronization — no sleep needed.
+	//
+	// 15s timeout: macOS CI runners are slow and detectUnmanagedDNADrift runs
+	// multiple network OS commands (networksetup, scutil, netstat, etc.) that can
+	// collectively take several seconds on loaded CI runners. 15s gives ample
+	// headroom while still catching cases where the DNA is never refreshed.
 	require.Eventually(t, func() bool {
 		dna := steward.GetPreviousDNA(s)
 		return dna != nil && dna.Id != "sentinel-id-dna-refresh-test"
-	}, 2*time.Second, 10*time.Millisecond,
+	}, 15*time.Second, 10*time.Millisecond,
 		"DNA snapshot must be refreshed after a state-changing targeted reconcile")
 
 	require.NoError(t, s.Stop(context.Background()))
