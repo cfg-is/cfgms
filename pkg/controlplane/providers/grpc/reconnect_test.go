@@ -280,6 +280,8 @@ func TestOnStateChangeCallback(t *testing.T) {
 		},
 	}))
 	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+	t.Cleanup(server.ForceStop)
 
 	// Should have seen Connecting → Connected
 	require.Eventually(t, func() bool {

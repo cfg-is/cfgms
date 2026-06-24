@@ -344,8 +344,12 @@ func (p *Provider) startServer() error {
 		)
 		transportpb.RegisterStewardTransportServer(p.grpcServer, p.serverImpl)
 
+		// Capture local references: ForceStop/stopServer may nil the shared
+		// fields before this goroutine runs, and reading p.grpcServer inside
+		// the goroutine would then panic.
+		grpcSrv := p.grpcServer
 		go func() {
-			if err := p.grpcServer.Serve(ql); err != nil {
+			if err := grpcSrv.Serve(ql); err != nil {
 				p.logger.Error("gRPC server stopped", "error", err)
 			}
 		}()
@@ -631,13 +635,16 @@ func (p *Provider) checkClientConnected() error {
 // Stop gracefully shuts down the control plane.
 func (p *Provider) Stop(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.cancel != nil {
 		p.cancel()
 	}
+	mode := p.mode
+	p.mu.Unlock()
+	// mu is released before the blocking teardown so that ControlChannel
+	// handlers (which acquire mu.RLock in dispatchEvent/dispatchHeartbeat)
+	// can exit without deadlocking against GracefulStop.
 
-	switch p.mode {
+	switch mode {
 	case ModeServer:
 		return p.stopServer()
 	case ModeClient:
@@ -648,21 +655,31 @@ func (p *Provider) Stop(ctx context.Context) error {
 }
 
 func (p *Provider) stopServer() error {
-	if p.ownGRPCServer {
-		if p.grpcServer != nil {
-			p.grpcServer.GracefulStop()
-		}
-		if p.listener != nil {
-			_ = p.listener.Close()
-		}
-	}
-	// Clear server state so the singleton can be re-initialized cleanly
-	// (e.g., when multiple integration tests create separate controllers)
-	p.grpcServer = nil
+	// Snapshot and clear fields under mu so concurrent calls and
+	// ForceStop() see nil fields and skip double-teardown.
+	p.mu.Lock()
+	ownGRPC := p.ownGRPCServer
+	listener := p.listener
+	grpcServer := p.grpcServer
 	p.listener = nil
+	p.grpcServer = nil
 	p.serverImpl = nil
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
+	p.mu.Unlock()
+
+	if ownGRPC {
+		// Close the QUIC listener first so that all active ControlChannel
+		// streams receive an error from stream.Recv(). This unblocks
+		// GracefulStop, which would otherwise wait forever for persistent
+		// bidirectional streams to close on their own.
+		if listener != nil {
+			_ = listener.Close()
+		}
+		if grpcServer != nil {
+			grpcServer.GracefulStop()
+		}
+	}
 	return nil
 }
 
@@ -980,12 +997,27 @@ func (p *Provider) ListenAddr() string {
 // waiting for in-progress RPCs to complete. Use in tests when GracefulStop
 // would hang on long-lived ControlChannel streams.
 func (p *Provider) ForceStop() {
-	if p.ownGRPCServer {
-		if p.listener != nil {
-			_ = p.listener.Close()
+	// Cancel the provider context and snapshot+clear shared fields under mu
+	// so that concurrent Stop() calls and multiple ForceStop() invocations
+	// are safe (mu also guards p.listener and p.grpcServer against races).
+	p.mu.Lock()
+	if p.cancel != nil {
+		p.cancel()
+	}
+	ownGRPC := p.ownGRPCServer
+	listener := p.listener
+	grpcServer := p.grpcServer
+	p.listener = nil
+	p.grpcServer = nil
+	p.serverImpl = nil
+	p.mu.Unlock()
+
+	if ownGRPC {
+		if listener != nil {
+			_ = listener.Close()
 		}
-		if p.grpcServer != nil {
-			p.grpcServer.Stop()
+		if grpcServer != nil {
+			grpcServer.Stop()
 		}
 	}
 }
