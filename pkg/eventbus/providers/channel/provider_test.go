@@ -172,9 +172,16 @@ func TestChannelEventBus_SubscriberErrorDoesNotStopFanOut(t *testing.T) {
 func TestChannelEventBus_RuntimeSubscribe(t *testing.T) {
 	bus := New(16)
 
-	// Publish before subscribing — these must NOT be delivered.
+	// Use a drain subscriber to confirm the bus has dispatched the pre-subscribe
+	// entry before registering the subscriber-under-test. This is race-free:
+	// once drain receives the entry the bus has consumed it from the channel, so
+	// a subscriber added after this point will never see it.
+	drain := newStub()
+	bus.Subscribe(drain)
 	bus.Publish(entry("pre-subscribe"))
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(drain.entries()) >= 1
+	}, time.Second, 5*time.Millisecond, "drain subscriber must receive pre-subscribe entry")
 
 	sub := newStub()
 	bus.Subscribe(sub)

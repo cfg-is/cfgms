@@ -197,8 +197,10 @@ func TestLoggingManager_EventChannelOverflow(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, manager.Close()) }()
 
-	// Add a subscriber so the bus's drop counter is exercised.
+	// Add a subscriber with a small delay so the loop goroutine is held per
+	// entry, ensuring 100 rapid publishes overflow the buffer=1 bus.
 	sub := newTestSubscriber("overflow-sub")
+	sub.handleDelay = time.Millisecond
 	manager.AddSubscriber(sub)
 
 	// Flood the bus directly (bypassing WriteEntry's file-I/O) so the publish
@@ -259,12 +261,20 @@ func TestLoggingManager_RuntimeAddSubscriber_ReceivesEntries(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Publish before subscribing — these must NOT be delivered.
+	// Add a drain subscriber to confirm the bus has dispatched the pre-subscribe
+	// entry before registering the subscriber-under-test. This is race-free:
+	// once drain receives the entry the bus has consumed it from the channel, so
+	// a subscriber added after this point will never see it.
+	drain := newTestSubscriber("drain-confirm")
+	manager.AddSubscriber(drain)
+
+	// Publish before subscribing — these must NOT be delivered to runtime-sub.
 	require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
 		Timestamp: time.Now(), Level: "INFO", Message: "pre-subscribe entry",
 	}))
-	// Give the bus time to drain the pre-subscribe entry before adding the subscriber.
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(drain.Entries()) >= 1
+	}, time.Second, 5*time.Millisecond, "drain subscriber must confirm pre-subscribe entry dispatched")
 
 	// Add subscriber at runtime.
 	sub := newTestSubscriber("runtime-sub")

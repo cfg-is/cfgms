@@ -27,10 +27,11 @@ const (
 
 // Bus is the in-process channel EventBus implementation.
 type Bus struct {
-	ch      chan interfaces.LogEntry
-	stopCh  chan struct{}
-	once    sync.Once
-	dropped atomic.Int64
+	ch       chan interfaces.LogEntry
+	stopCh   chan struct{}
+	loopDone chan struct{} // closed when loop exits
+	once     sync.Once
+	dropped  atomic.Int64
 
 	mu          sync.RWMutex
 	subscribers []interfaces.LoggingSubscriber
@@ -43,10 +44,14 @@ func New(bufSize int) *Bus {
 		bufSize = 1
 	}
 	b := &Bus{
-		ch:     make(chan interfaces.LogEntry, bufSize),
-		stopCh: make(chan struct{}),
+		ch:       make(chan interfaces.LogEntry, bufSize),
+		stopCh:   make(chan struct{}),
+		loopDone: make(chan struct{}),
 	}
-	go b.loop()
+	go func() {
+		b.loop()
+		close(b.loopDone)
+	}()
 	return b
 }
 
@@ -74,24 +79,24 @@ func (b *Bus) DroppedCount() int64 {
 	return b.dropped.Load()
 }
 
-// Close drains the event loop, closes all subscribers, and releases
-// resources. Safe to call multiple times.
+// Close stops the event loop, waits for it to exit, closes all subscribers,
+// and releases resources. Safe to call multiple times.
 func (b *Bus) Close() error {
 	b.once.Do(func() {
 		close(b.stopCh)
-	})
+		<-b.loopDone
 
-	// Close all registered subscribers.
-	b.mu.RLock()
-	subs := make([]interfaces.LoggingSubscriber, len(b.subscribers))
-	copy(subs, b.subscribers)
-	b.mu.RUnlock()
+		b.mu.RLock()
+		subs := make([]interfaces.LoggingSubscriber, len(b.subscribers))
+		copy(subs, b.subscribers)
+		b.mu.RUnlock()
 
-	for _, s := range subs {
-		if err := s.Close(); err != nil {
-			fmt.Printf("Warning: failed to close event bus subscriber %s: %v\n", s.Name(), err)
+		for _, s := range subs {
+			if err := s.Close(); err != nil {
+				fmt.Printf("Warning: failed to close event bus subscriber %s: %v\n", s.Name(), err)
+			}
 		}
-	}
+	})
 	return nil
 }
 
@@ -107,19 +112,24 @@ func (b *Bus) loop() {
 	}
 }
 
-// dispatch sends entry to all subscribers whose ShouldHandle returns true.
-// Each subscriber is called in its own goroutine with a per-handler timeout.
+// dispatch sends entry to all matching subscribers in parallel and blocks
+// until all have returned (or their per-handler timeout fires). Blocking the
+// loop goroutine here is intentional: it gives the channel buffer time to fill
+// when subscribers are slow, making drop-counter behaviour deterministic.
 func (b *Bus) dispatch(entry interfaces.LogEntry) {
 	b.mu.RLock()
 	subs := make([]interfaces.LoggingSubscriber, len(b.subscribers))
 	copy(subs, b.subscribers)
 	b.mu.RUnlock()
 
+	var wg sync.WaitGroup
 	for _, sub := range subs {
 		if !sub.ShouldHandle(entry) {
 			continue
 		}
+		wg.Add(1)
 		go func(s interfaces.LoggingSubscriber) {
+			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), defaultHandlerTimeout)
 			defer cancel()
 			if err := s.HandleLogEntry(ctx, entry); err != nil {
@@ -127,4 +137,5 @@ func (b *Bus) dispatch(entry interfaces.LogEntry) {
 			}
 		}(sub)
 	}
+	wg.Wait()
 }
