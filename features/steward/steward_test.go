@@ -319,13 +319,24 @@ func TestMonitorCloseRace(t *testing.T) {
 	// for leaks from this test's steward instance.
 	//
 	// DNA background collection goroutines (bgOnce.Do in dna.Collector.Collect)
-	// use context.Background() and outlive the test. They spawn child goroutines
-	// for software/security collection AFTER goleak.IgnoreCurrent() snapshots,
-	// so those children (and their os/exec pipe goroutines) are not captured
-	// by existingGoroutines. Ignore these known-safe patterns explicitly.
+	// use context.Background() and outlive the test that triggered them. They are
+	// kicked off by *sibling* tests in this package (this test disables DNA), but
+	// run AFTER goleak.IgnoreCurrent() snapshots here, so they are not captured by
+	// existingGoroutines and are not goroutines of the steward under test.
+	//
+	// The collector spawns a tree: Collect → bgOnce → runBackgroundCollection →
+	// {collectSoftwareInfo, collectSecurityInfo} → (per-command) os/exec pipe
+	// goroutines. Ignoring only the os/exec leaves (as before) left the
+	// intermediate dna.* goroutines uncovered, so whichever was mid-flight on a
+	// slow CI runner intermittently tripped this check (the residual
+	// TestMonitorCloseRace flake after the afterFuncWg fix). Ignore the whole DNA
+	// background-collection family by any frame in the stack.
 	goleak.VerifyNone(t, existingGoroutines,
 		goleak.IgnoreTopFunction("os/exec.(*Cmd).writerDescriptor.func1"),
 		goleak.IgnoreTopFunction("os/exec.(*Cmd).watchCtx"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSoftwareInfo"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSecurityInfo"),
 	)
 }
 
