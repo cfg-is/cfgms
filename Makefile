@@ -827,7 +827,7 @@ test-data-consistency:
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
-	@echo "📦 Installing Nancy v2.0.0..."
+	@echo "📦 Installing Nancy v2.1.0..."
 	@echo "============================="
 	@if command -v nancy >/dev/null 2>&1; then \
 		echo "✅ Nancy is already installed: $$(nancy --version)"; \
@@ -845,16 +845,16 @@ install-nancy:
 	case "$$os" in \
 		linux) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
 			fi ;; \
 		darwin) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
 			elif [ "$$arch" = "arm64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
@@ -904,25 +904,25 @@ security-deps:
 	@if ! command -v nancy >/dev/null 2>&1; then \
 		echo "❌ Error: nancy is not installed"; \
 		echo ""; \
-		echo "Install nancy (v2.0.0) for your platform:"; \
+		echo "Install nancy (v2.1.0) for your platform:"; \
 		echo ""; \
 		echo "🚀 Quick Install (recommended):"; \
 		echo "  make install-nancy"; \
 		echo ""; \
 		echo "📥 Manual Install - Linux (amd64):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Intel):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Apple Silicon):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-arm64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🪟 Manual Install - Windows (PowerShell):"; \
-		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
+		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
 		echo "  Move-Item nancy.exe \$$(go env GOPATH)\\bin\\nancy.exe"; \
 		echo ""; \
 		echo "📦 Package Managers:"; \
