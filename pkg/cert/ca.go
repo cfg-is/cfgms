@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -16,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // CA represents a Certificate Authority with its certificate and private key
@@ -608,4 +611,101 @@ func (ca *CA) generateSerialNumber() (*big.Int, error) {
 func (ca *CA) calculateFingerprint(certDER []byte) string {
 	hash := sha256.Sum256(certDER)
 	return hex.EncodeToString(hash[:])
+}
+
+// LoadCAFromSecretStore retrieves CA cert+key PEM from a SecretStore and
+// populates the CA in-memory without writing the key to local disk.
+// keyPath is the secret key name for the CA certificate (without tenantID prefix).
+// The CA private key is loaded from "<tenantID>/<keyPath>-key".
+// This is the cluster-mode path — call LoadCA for single-node deployments.
+func (ca *CA) LoadCAFromSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string) error {
+	certSecret, err := store.GetSecret(ctx, tenantID+"/"+keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to get CA certificate from secret store: %w", err)
+	}
+
+	keySecret, err := store.GetSecret(ctx, tenantID+"/"+keyPath+"-key")
+	if err != nil {
+		return fmt.Errorf("failed to get CA private key from secret store: %w", err)
+	}
+
+	caCertPEM := []byte(certSecret.Value)
+	caKeyPEM := []byte(keySecret.Value)
+
+	block, _ := pem.Decode(caCertPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode CA certificate PEM from secret store")
+	}
+
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA certificate from secret store: %w", err)
+	}
+
+	parsedKey, err := ParsePrivateKeyFromPEM(caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA private key from secret store: %w", err)
+	}
+
+	rsaKey, ok := parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("CA private key must be RSA, got unsupported key type")
+	}
+
+	if err := ValidateKeyPair(caCertPEM, caKeyPEM); err != nil {
+		return fmt.Errorf("CA key does not match certificate in secret store: %w", err)
+	}
+
+	org := "CFGMS"
+	if len(caCert.Subject.Organization) > 0 {
+		org = caCert.Subject.Organization[0]
+	}
+	ca.config = &CAConfig{Organization: org}
+	ca.certificate = caCert
+	ca.privateKey = rsaKey
+	ca.initialized = true
+
+	return nil
+}
+
+// StoreCAToSecretStore stores the CA certificate and private key PEM in a SecretStore.
+// Called during cluster-mode first-boot init to publish CA material to the shared
+// vault so subsequent nodes can load it via LoadCAFromSecretStore.
+// The cert is stored at "<tenantID>/<keyPath>" and the key at "<tenantID>/<keyPath>-key".
+func (ca *CA) StoreCAToSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string) error {
+	if !ca.initialized {
+		return fmt.Errorf("CA is not initialized")
+	}
+
+	certPEM, err := ca.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("failed to get CA certificate: %w", err)
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(ca.privateKey),
+	})
+
+	if err := store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+		Key:         keyPath,
+		Value:       string(certPEM),
+		TenantID:    tenantID,
+		CreatedBy:   "cfgms-controller-init",
+		Description: "CFGMS cluster CA certificate",
+	}); err != nil {
+		return fmt.Errorf("failed to store CA certificate in secret store: %w", err)
+	}
+
+	if err := store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+		Key:         keyPath + "-key",
+		Value:       string(keyPEM),
+		TenantID:    tenantID,
+		CreatedBy:   "cfgms-controller-init",
+		Description: "CFGMS cluster CA private key",
+	}); err != nil {
+		return fmt.Errorf("failed to store CA private key in secret store: %w", err)
+	}
+
+	return nil
 }

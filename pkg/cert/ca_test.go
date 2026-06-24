@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 func TestNewCA(t *testing.T) {
@@ -508,4 +511,94 @@ func TestCA_CertificateValidityPeriods(t *testing.T) {
 			assert.InDelta(t, expectedDuration.Seconds(), actualDuration.Seconds(), tolerance.Seconds())
 		})
 	}
+}
+
+// TestLoadCAFromSecretStore_RoundTrip stores a CA in an in-memory secret store then
+// loads it back and verifies the loaded CA can sign certs and the fingerprint matches.
+func TestLoadCAFromSecretStore_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	// Create and initialize a CA.
+	ca, err := NewCA(&CAConfig{Organization: "Test", Country: "US", ValidityDays: 365})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+
+	origCertPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+	origInfo, err := ca.GetCAInfo()
+	require.NoError(t, err)
+
+	// Store in secret store.
+	require.NoError(t, ca.StoreCAToSecretStore(ctx, store, "root", "cluster-ca"))
+
+	// Load into a new CA instance.
+	loaded := &CA{}
+	require.NoError(t, loaded.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca"))
+
+	assert.True(t, loaded.IsInitialized())
+
+	loadedCertPEM, err := loaded.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, origCertPEM, loadedCertPEM)
+
+	loadedInfo, err := loaded.GetCAInfo()
+	require.NoError(t, err)
+	assert.Equal(t, origInfo.Fingerprint, loadedInfo.Fingerprint)
+	assert.Equal(t, origInfo.CommonName, loadedInfo.CommonName)
+
+	// Loaded CA must be able to sign a leaf cert.
+	leafCert, err := loaded.GenerateServerCertificate(&ServerCertConfig{
+		CommonName:   "test-server",
+		ValidityDays: 30,
+	})
+	require.NoError(t, err)
+	result, err := loaded.ValidateCertificate(leafCert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, result.IsValid)
+}
+
+// TestStoreCAToSecretStore_UninitializedReturnsError ensures StoreCAToSecretStore
+// rejects an uninitialized CA rather than storing empty/nil data.
+func TestStoreCAToSecretStore_UninitializedReturnsError(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+	ca := &CA{}
+	err := ca.StoreCAToSecretStore(ctx, store, "root", "cluster-ca")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not initialized")
+}
+
+// TestLoadCAFromSecretStore_MissingCertReturnsError verifies that LoadCAFromSecretStore
+// returns a descriptive error when the CA cert secret does not exist.
+func TestLoadCAFromSecretStore_MissingCertReturnsError(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+	ca := &CA{}
+	err := ca.LoadCAFromSecretStore(ctx, store, "root", "nonexistent")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "CA certificate")
+}
+
+// TestLoadCAFromSecretStore_MissingKeyReturnsError verifies that LoadCAFromSecretStore
+// returns an error when the cert secret exists but the key secret does not.
+func TestLoadCAFromSecretStore_MissingKeyReturnsError(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	// Store only the cert, omit the key.
+	ca, err := NewCA(&CAConfig{Organization: "Test", Country: "US", ValidityDays: 365})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+	certPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+
+	require.NoError(t, store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+		Key: "cluster-ca", TenantID: "root", Value: string(certPEM),
+	}))
+
+	loaded := &CA{}
+	err = loaded.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "CA private key")
 }
