@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
@@ -97,7 +98,8 @@ type Listener struct {
 	cfg    *quicgo.Config    // effective config after Listen() injection
 	ctx    context.Context
 	cancel context.CancelFunc
-	conns  chan net.Conn // buffered queue of ready connections
+	conns  chan net.Conn  // buffered queue of ready connections
+	wg     sync.WaitGroup // tracks acceptLoop and acceptStream goroutines
 }
 
 // Compile-time check that Listener implements net.Listener.
@@ -157,7 +159,11 @@ func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Lis
 		cancel: cancel,
 		conns:  make(chan net.Conn, 64),
 	}
-	go l.acceptLoop()
+	l.wg.Add(1)
+	go func() {
+		defer l.wg.Done()
+		l.acceptLoop()
+	}()
 	return l, nil
 }
 
@@ -170,6 +176,7 @@ func (l *Listener) acceptLoop() {
 		if err != nil {
 			return
 		}
+		l.wg.Add(1)
 		go l.acceptStream(quicConn)
 	}
 }
@@ -178,6 +185,7 @@ func (l *Listener) acceptLoop() {
 // bidirectional stream. On success the wrapped Conn is pushed to l.conns.
 // On timeout the QUIC connection is closed so the peer is not left dangling.
 func (l *Listener) acceptStream(quicConn *quicgo.Conn) {
+	defer l.wg.Done()
 	ctx, cancel := context.WithTimeout(l.ctx, 5*time.Second)
 	defer cancel()
 	stream, err := quicConn.AcceptStream(ctx)
@@ -211,6 +219,12 @@ func (l *Listener) Accept() (net.Conn, error) {
 // Close stops the listener. Any blocked Accept call will return with an error.
 func (l *Listener) Close() error {
 	l.cancel()
+	// Wait for acceptLoop and all in-flight acceptStream goroutines to exit
+	// before closing the underlying QUIC infrastructure. This ensures that
+	// by the time Close returns, every goroutine we own has exited, so the
+	// quic-go transport goroutines (runSendQueue, listen) can proceed to
+	// their own exit without competing I/O from our side.
+	l.wg.Wait()
 	err := l.ql.Close()
 	if l.tr != nil {
 		_ = l.tr.Close()
