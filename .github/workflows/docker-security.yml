@@ -32,7 +32,7 @@ env:
   GO_VERSION: '1.26.4'
   REGISTRY: ghcr.io
   IMAGE_PREFIX: cfg-is/cfgms
-  TRIVY_VERSION: 'v0.71.0'
+  TRIVY_VERSION: 'v0.71.2'
 
 jobs:
   # Scan Controller Docker Image
