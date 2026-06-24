@@ -196,7 +196,15 @@ func (m *hypervModule) setVSwitch(ctx context.Context, resourceID string, config
 	state, _ := configMap["state"].(string)
 
 	if state == "absent" {
-		return m.removeVSwitch(ctx, switchName)
+		// Snapshot current state for audit before-capture (best-effort).
+		var deleteBefore map[string]interface{}
+		if cur, gErr := m.getVSwitch(ctx, switchName); gErr == nil && cur != nil && cur.State != "absent" {
+			deleteBefore = map[string]interface{}{
+				"switch_type": cur.SwitchType,
+				"state":       cur.State,
+			}
+		}
+		return m.removeVSwitch(ctx, switchName, deleteBefore)
 	}
 
 	cfg := &VSwitchConfig{Name: switchName}
@@ -229,6 +237,11 @@ func (m *hypervModule) setVSwitch(ctx context.Context, resourceID string, config
 func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg *VSwitchConfig) error {
 	// The host object name is the exact switch name — no namespacing.
 	hostName := switchName
+	cfgResourceID := "vswitch:" + switchName
+	after := map[string]interface{}{
+		"switch_type": cfg.SwitchType,
+		"state":       "present",
+	}
 
 	var (
 		psCmd  string
@@ -253,7 +266,7 @@ func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCmd, psArgs)
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VMSwitch", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VMSwitch", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: create vswitch %q: %w", switchName, psErr)
 	}
@@ -268,13 +281,16 @@ func (m *hypervModule) createVSwitch(ctx context.Context, switchName string, cfg
 }
 
 // removeVSwitch deletes a virtual switch from the host.
+// before captures the non-sensitive scalar state prior to deletion; pass nil
+// when the current state is unknown.
 // Write-through cache semantics: transport is called first; cache updated on success only.
-func (m *hypervModule) removeVSwitch(ctx context.Context, switchName string) error {
+func (m *hypervModule) removeVSwitch(ctx context.Context, switchName string, before map[string]interface{}) error {
 	// The host object name is the exact switch name — no namespacing.
 	hostName := switchName
+	cfgResourceID := "vswitch:" + switchName
 
 	_, psErr := m.transport.ExecutePS(ctx, psRemoveVSwitch, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMSwitch", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMSwitch", cfgResourceID, before, nil, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: remove vswitch %q: %w", switchName, psErr)
 	}

@@ -362,6 +362,8 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		generation = 2
 	}
 
+	cfgResourceID := "vm:" + vmName
+
 	// Gen2 secure-boot template by os_family; Gen1 has no UEFI/secure boot.
 	if generation == 2 {
 		template := secureBootTemplate(cfg.Source.OSFamily)
@@ -369,10 +371,10 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 			"Name":     hostName,
 			"Template": template,
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: set firmware for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
 	}
 
 	// cloud-init (Linux VM-from-cloud-image): the boot disk (already prepared
@@ -385,7 +387,9 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		if err := m.provisionCloudInit(ctx, vmName, hostName, cfg, record, generation); err != nil {
 			return err
 		}
-		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+		if err := m.execStartVM(ctx, cfgResourceID, hostName,
+			map[string]interface{}{"state": "stopped"},
+			map[string]interface{}{"state": "running"}); err != nil {
 			return m.failProvision(ctx, vmName, record, err)
 		}
 		return m.advanceProvision(ctx, vmName, record, ProvisionStateInstalling)
@@ -417,18 +421,18 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 			"StewardSrc": m.enrollStewardPath,
 			"CASrc":      m.enrollCAPath,
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BuildAnswerIso", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BuildAnswerIso", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: build answer ISO for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BuildAnswerIso", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BuildAnswerIso", cfgResourceID, nil, nil, nil)
 		if _, psErr := m.transport.ExecutePS(ctx, psAttachDVD, map[string]string{
 			"Name":    hostName,
 			"ISOPath": isoPath,
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach answer ISO to VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", cfgResourceID, nil, nil, nil)
 	} else {
 		seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
 		if err := validateSeedPath(seedPath); err != nil {
@@ -438,15 +442,15 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 			"Path":      seedPath,
 			"SizeBytes": "268435456",
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: create seed VHDX for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", cfgResourceID, nil, nil, nil)
 		if _, psErr := m.transport.ExecutePS(ctx, psMountSeedVHD, map[string]string{"Path": seedPath}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: format seed VHDX for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, nil)
 		if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
 			"SeedPath":   seedPath,
 			"FileName":   seedAnswerFileName("linux"),
@@ -454,18 +458,18 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 			"StewardSrc": "",
 			"CASrc":      "",
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write answer file to seed for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, nil)
 		if _, psErr := m.transport.ExecutePS(ctx, psAttachSeedDisk, map[string]string{
 			"Name":     hostName,
 			"SeedPath": seedPath,
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach seed disk to VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", cfgResourceID, nil, nil, nil)
 	}
 
 	// Attach the install ISO as a DVD drive (host path, never repacked).
@@ -473,10 +477,10 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		"Name":    hostName,
 		"ISOPath": cfg.Source.ISO,
 	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", cfgResourceID, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach install ISO to VM %q: %w", vmName, psErr))
 	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", hostName, nil)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMDvdDrive", cfgResourceID, nil, nil, nil)
 
 	// Make the install DVD the first boot device so a Gen2 VM boots the installer
 	// rather than the empty OS VHD or the (bootloader-less) answer ISO. The
@@ -486,16 +490,18 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 			"Name":    hostName,
 			"ISOPath": cfg.Source.ISO,
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: set DVD first boot for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
 	}
 
 	// Power on and advance creating → installing. The unattended install runs
 	// inside the guest; the host-side module observes no further until the
 	// controller-side reconciler (#2050) flips ready.
-	if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+	if err := m.execStartVM(ctx, cfgResourceID, hostName,
+		map[string]interface{}{"state": "stopped"},
+		map[string]interface{}{"state": "running"}); err != nil {
 		return m.failProvision(ctx, vmName, record, err)
 	}
 
@@ -505,13 +511,13 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	// manager). Best-effort — a keypress failure does not fail the provision.
 	if cfg.Source.OSFamily == "windows" {
 		if _, psErr := m.transport.ExecutePS(ctx, psBootKeypress, map[string]string{"Name": hostName}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BootKeypress", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BootKeypress", cfgResourceID, nil, nil, psErr)
 			if logger, ok := m.GetLogger(); ok {
 				logger.Warn("hyperv: boot keypress failed (install may still proceed)",
 					"vm_name", logging.SanitizeLogValue(vmName))
 			}
 		} else {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BootKeypress", hostName, nil)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Cfgms-BootKeypress", cfgResourceID, nil, nil, nil)
 		}
 	}
 
@@ -538,6 +544,8 @@ func cloudInitMetaData(vmName, correlationID string) string {
 // — cloud-init auto-detects the CIDATA seed on first boot. The caller powers the
 // VM on and advances the record to installing.
 func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName string, cfg *VMConfig, record *ProvisionRecord, generation int) error {
+	cfgResourceID := "vm:" + vmName
+
 	// Render the cloud-init user-data (resolves the built-in or operator
 	// cloud-init profile). CorrelationID is baked in for controller-side matching.
 	userData, renderErr := m.renderSeedAnswerFile(ctx, vmName, cfg.Source, record.CorrelationID)
@@ -559,18 +567,18 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		"Path":      seedPath,
 		"SizeBytes": "268435456",
 	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", cfgResourceID, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: create CIDATA seed VHDX for VM %q: %w", vmName, psErr))
 	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", hostName, nil)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psMountSeedVHD, map[string]string{
 		"Path":  seedPath,
 		"Label": cidataVolumeLabel,
 	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: format CIDATA seed VHDX for VM %q: %w", vmName, psErr))
 	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", hostName, nil)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
 		"SeedPath":    seedPath,
 		"Label":       cidataVolumeLabel,
@@ -582,18 +590,18 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		"StewardDest": "cfgms-steward",
 		"CASrc":       m.enrollCAPath,
 	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write cloud-init seed for VM %q: %w", vmName, psErr))
 	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", hostName, nil)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psAttachSeedDisk, map[string]string{
 		"Name":     hostName,
 		"SeedPath": seedPath,
 	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", cfgResourceID, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: attach CIDATA seed to VM %q: %w", vmName, psErr))
 	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", hostName, nil)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", cfgResourceID, nil, nil, nil)
 
 	// Make the OS disk (the converted cloud image) the first boot device so the
 	// VM boots the cloud image rather than the attached CIDATA seed. Gen1 uses
@@ -603,10 +611,10 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 			"Name":    hostName,
 			"VHDPath": cfg.VHDPath,
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: set OS-disk first boot for VM %q: %w", vmName, psErr))
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
 	}
 	return nil
 }
@@ -691,10 +699,10 @@ func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName s
 	if _, psErr := m.transport.ExecutePS(ctx, psDetachSeedVHD, map[string]string{
 		"Path": seedPath,
 	}); psErr != nil {
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", "vm:"+vmName, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: detach seed VHDX for VM %q: %w", vmName, psErr))
 	}
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", hostName, nil)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", "vm:"+vmName, nil, nil, nil)
 
 	// Advance installing → finalizing. ready is controller-side (#2050).
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateFinalizing)

@@ -678,7 +678,17 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	state, _ := configMap["state"].(string)
 
 	if state == "absent" {
-		return m.removeVM(ctx, vmName)
+		// Snapshot current state for the audit before-capture (best-effort: nil is
+		// acceptable if the VM is already absent or the host is unreachable).
+		var deleteBefore map[string]interface{}
+		if cur, gErr := m.getVM(ctx, vmName); gErr == nil && cur != nil && cur.State != "absent" {
+			deleteBefore = map[string]interface{}{
+				"cpu":       cur.CPUCount,
+				"memory_mb": cur.MemoryMB,
+				"state":     cur.State,
+			}
+		}
+		return m.removeVM(ctx, vmName, deleteBefore)
 	}
 
 	cfg := &VMConfig{Name: vmName}
@@ -802,7 +812,9 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	}
 
 	if state == "running" {
-		if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+		if err := m.execStartVM(ctx, "vm:"+vmName, hostName,
+			map[string]interface{}{"state": "stopped"},
+			map[string]interface{}{"state": "running"}); err != nil {
 			return err
 		}
 	}
@@ -872,7 +884,15 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		// Explicit destructive opt-in. Tear the existing VM down, reset any
 		// provisioning record so the create path starts clean (absent), then
 		// provision from source.
-		if err := m.removeVM(ctx, vmName); err != nil {
+		var recreateBefore map[string]interface{}
+		if vmExists && currentVM != nil {
+			recreateBefore = map[string]interface{}{
+				"cpu":       currentVM.CPUCount,
+				"memory_mb": currentVM.MemoryMB,
+				"state":     currentVM.State,
+			}
+		}
+		if err := m.removeVM(ctx, vmName, recreateBefore); err != nil {
 			return err
 		}
 		if m.provisionStore != nil {
@@ -942,6 +962,15 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 		"Generation": fmt.Sprintf("%d", generation),
 	}
 
+	cfgResourceID := "vm:" + vmName
+	// after captures the non-sensitive scalar desired state for audit; VHD path
+	// and switch names are deliberately omitted (sensitive / not scalar).
+	after := map[string]interface{}{
+		"cpu":       cfg.CPUCount,
+		"memory_mb": cfg.MemoryMB,
+		"state":     "stopped", // New-VM always creates in Off state
+	}
+
 	// cloud-init (Linux VM-from-cloud-image): the boot disk IS the cloud image,
 	// not a freshly-created empty VHD. Prepare it (raw → fixed VHD → dynamic VHDX,
 	// optional resize) and create the VM attaching the EXISTING disk
@@ -953,35 +982,35 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 			"VhdPath":     cfg.VHDPath,
 			"ResizeBytes": fmt.Sprintf("%d", resizeBytes),
 		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", hostName, psErr)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", cfgResourceID, nil, nil, psErr)
 			return fmt.Errorf("hyperv: prepare cloud boot disk for VM %q: %w", vmName, psErr)
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", hostName, nil)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Convert-VHD", cfgResourceID, nil, nil, nil)
 		_, psErr := m.transport.ExecutePS(ctx, psCreateVMFromDisk, psArgs)
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", hostName, psErr)
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", cfgResourceID, nil, after, psErr)
 		if psErr != nil {
 			return fmt.Errorf("hyperv: create VM %q from cloud image: %w", vmName, psErr)
 		}
-		return m.connectAdditionalNics(ctx, vmName, hostName, cfg)
+		return m.connectAdditionalNics(ctx, cfgResourceID, vmName, hostName, cfg)
 	}
 
 	_, psErr := m.transport.ExecutePS(ctx, psCreateVM, psArgs)
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
 	}
 
-	return m.connectAdditionalNics(ctx, vmName, hostName, cfg)
+	return m.connectAdditionalNics(ctx, cfgResourceID, vmName, hostName, cfg)
 }
 
 // connectAdditionalNics connects one extra network adapter for every desired
 // switch beyond the first (New-VM -SwitchName already connected the first), so a
 // multi-NIC declaration materialises all adapters at create time. Shared by the
 // empty-VHD and cloud-image create paths.
-func (m *hypervModule) connectAdditionalNics(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
+func (m *hypervModule) connectAdditionalNics(ctx context.Context, cfgResourceID, vmName, hostName string, cfg *VMConfig) error {
 	desired := cfg.desiredSwitches()
 	for _, sw := range desired[min(1, len(desired)):] {
-		if err := m.connectVMToSwitch(ctx, vmName, hostName, sw); err != nil {
+		if err := m.connectVMToSwitch(ctx, cfgResourceID, vmName, hostName, sw); err != nil {
 			return err
 		}
 	}
@@ -991,18 +1020,33 @@ func (m *hypervModule) connectAdditionalNics(ctx context.Context, vmName, hostNa
 // applyVMState transitions an existing VM to the desired power state, applying
 // CPU/memory resize when the desired values differ from current.
 func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
+	cfgResourceID := "vm:" + vmName
+
 	// Reconcile the VM's network adapters to the desired switch set before any
 	// power-state change. Add-VMNetworkAdapter / Remove-VMNetworkAdapter both
 	// operate on running and stopped VMs, so ordering relative to start/stop
 	// does not matter. reconcileNetwork mutates current.SwitchNames in place so
 	// the cache write at the end of this function reflects the converged set.
-	if err := m.reconcileNetwork(ctx, vmName, hostName, desired, current); err != nil {
+	if err := m.reconcileNetwork(ctx, cfgResourceID, vmName, hostName, desired, current); err != nil {
 		return err
 	}
 
 	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
 	needsMemResize := desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
 	needsResize := needsCPUResize || needsMemResize
+
+	// Build per-operation before/after snapshots for resize auditing. Only
+	// non-sensitive scalars (cpu count, memory MB) are included — no VHD paths,
+	// no switch names, no live host values.
+	var cpuBefore, cpuAfter, memBefore, memAfter map[string]interface{}
+	if needsCPUResize {
+		cpuBefore = map[string]interface{}{"cpu": current.CPUCount}
+		cpuAfter = map[string]interface{}{"cpu": desired.CPUCount}
+	}
+	if needsMemResize {
+		memBefore = map[string]interface{}{"memory_mb": current.MemoryMB}
+		memAfter = map[string]interface{}{"memory_mb": desired.MemoryMB}
+	}
 
 	switch state {
 	case "running":
@@ -1012,30 +1056,36 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 			// Gating on current.State keeps the transition idempotent: a VM that
 			// is already stopped is not issued a redundant Stop-VM.
 			if current.State != "stopped" {
-				if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+				if err := m.execStopVM(ctx, cfgResourceID, hostName,
+					map[string]interface{}{"state": current.State},
+					map[string]interface{}{"state": "stopped"}); err != nil {
 					return err
 				}
 			}
 			if needsCPUResize {
-				if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
+				if err := m.execSetVMProcessor(ctx, cfgResourceID, hostName, desired.CPUCount, cpuBefore, cpuAfter); err != nil {
 					return err
 				}
 			}
 			if needsMemResize {
-				if err := m.execSetVMMemory(ctx, vmName, hostName, desired.MemoryMB); err != nil {
+				if err := m.execSetVMMemory(ctx, cfgResourceID, hostName, desired.MemoryMB, memBefore, memAfter); err != nil {
 					return err
 				}
 			}
 			// A resize always ends with the VM stopped, so the desired running
 			// state requires an unconditional Start-VM here.
-			if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			if err := m.execStartVM(ctx, cfgResourceID, hostName,
+				map[string]interface{}{"state": "stopped"},
+				map[string]interface{}{"state": "running"}); err != nil {
 				return err
 			}
 		} else if current.State != "running" {
 			// No resize needed — only start the VM if it is not already running.
 			// Re-applying a config whose power state already matches issues no
 			// Start-VM (Hyper-V errors "already in the running state" otherwise).
-			if err := m.execStartVM(ctx, vmName, hostName); err != nil {
+			if err := m.execStartVM(ctx, cfgResourceID, hostName,
+				map[string]interface{}{"state": current.State},
+				map[string]interface{}{"state": "running"}); err != nil {
 				return err
 			}
 		}
@@ -1049,18 +1099,20 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 		// Stop ONLY IF the VM is not already stopped — re-applying a stopped
 		// config on an already-stopped VM issues no Stop-VM.
 		if current.State != "stopped" {
-			if err := m.execStopVM(ctx, vmName, hostName); err != nil {
+			if err := m.execStopVM(ctx, cfgResourceID, hostName,
+				map[string]interface{}{"state": current.State},
+				map[string]interface{}{"state": "stopped"}); err != nil {
 				return err
 			}
 		}
 		// The VM is stopped (or was already), so resize can proceed.
 		if needsCPUResize {
-			if err := m.execSetVMProcessor(ctx, vmName, hostName, desired.CPUCount); err != nil {
+			if err := m.execSetVMProcessor(ctx, cfgResourceID, hostName, desired.CPUCount, cpuBefore, cpuAfter); err != nil {
 				return err
 			}
 		}
 		if needsMemResize {
-			if err := m.execSetVMMemory(ctx, vmName, hostName, desired.MemoryMB); err != nil {
+			if err := m.execSetVMMemory(ctx, cfgResourceID, hostName, desired.MemoryMB, memBefore, memAfter); err != nil {
 				return err
 			}
 		}
@@ -1084,7 +1136,7 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 // Switch names are passed to the connect/disconnect primitives exactly as the
 // VM create path passes them to New-VM -SwitchName (the literal name the admin
 // specified — no prefix or suffix is added on the host).
-func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName string, desired, current *VMConfig) error {
+func (m *hypervModule) reconcileNetwork(ctx context.Context, cfgResourceID, vmName, hostName string, desired, current *VMConfig) error {
 	desiredSet := desired.desiredSwitches()
 	// No network declared on the desired config → leave the VM's adapters
 	// untouched (never implicitly strip a VM to zero NICs).
@@ -1094,12 +1146,12 @@ func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName st
 
 	toConnect, toDisconnect := switchSetDiff(desiredSet, current.desiredSwitches())
 	for _, sw := range toConnect {
-		if err := m.connectVMToSwitch(ctx, vmName, hostName, sw); err != nil {
+		if err := m.connectVMToSwitch(ctx, cfgResourceID, vmName, hostName, sw); err != nil {
 			return err
 		}
 	}
 	for _, sw := range toDisconnect {
-		if err := m.disconnectVMFromSwitch(ctx, vmName, hostName, sw); err != nil {
+		if err := m.disconnectVMFromSwitch(ctx, cfgResourceID, vmName, hostName, sw); err != nil {
 			return err
 		}
 	}
@@ -1112,14 +1164,15 @@ func (m *hypervModule) reconcileNetwork(ctx context.Context, vmName, hostName st
 
 // connectVMToSwitch connects a new network adapter on the VM to switchName.
 // switchName travels via ArgumentList — never interpolated into script text.
-func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, switchName string) error {
+func (m *hypervModule) connectVMToSwitch(ctx context.Context, cfgResourceID, vmName, hostName, switchName string) error {
 	// switchName is the exact switch name the admin specified — used verbatim so
 	// Add-VMNetworkAdapter targets the switch by the name on the host.
 	_, psErr := m.transport.ExecutePS(ctx, psConnectVMNic, map[string]string{
 		"Name":       hostName,
 		"SwitchName": switchName,
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", hostName, psErr)
+	after := map[string]interface{}{"switch": "vswitch:" + switchName}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMNetworkAdapter", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: connect VM %q to switch %q: %w", vmName, switchName, psErr)
 	}
@@ -1128,70 +1181,74 @@ func (m *hypervModule) connectVMToSwitch(ctx context.Context, vmName, hostName, 
 
 // disconnectVMFromSwitch removes the network adapter connected to switchName on
 // the VM. switchName travels via ArgumentList — never interpolated.
-func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, vmName, hostName, switchName string) error {
+func (m *hypervModule) disconnectVMFromSwitch(ctx context.Context, cfgResourceID, vmName, hostName, switchName string) error {
 	// switchName is the exact switch name; the adapter's SwitchName on the host is
 	// the same literal name, so it travels verbatim for the Where-Object match.
 	_, psErr := m.transport.ExecutePS(ctx, psDisconnectVMNic, map[string]string{
 		"Name":       hostName,
 		"SwitchName": switchName,
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", hostName, psErr)
+	before := map[string]interface{}{"switch": "vswitch:" + switchName}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VMNetworkAdapter", cfgResourceID, before, nil, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: disconnect VM %q from switch %q: %w", vmName, switchName, psErr)
 	}
 	return nil
 }
 
-func (m *hypervModule) execStartVM(ctx context.Context, vmName, hostName string) error {
+func (m *hypervModule) execStartVM(ctx context.Context, cfgResourceID, hostName string, before, after map[string]interface{}) error {
 	_, psErr := m.transport.ExecutePS(ctx, psStartVM, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Start-VM", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Start-VM", cfgResourceID, before, after, psErr)
 	if psErr != nil {
-		return fmt.Errorf("hyperv: Start-VM %q: %w", vmName, psErr)
+		return fmt.Errorf("hyperv: Start-VM %q: %w", hostName, psErr)
 	}
 	return nil
 }
 
-func (m *hypervModule) execStopVM(ctx context.Context, vmName, hostName string) error {
+func (m *hypervModule) execStopVM(ctx context.Context, cfgResourceID, hostName string, before, after map[string]interface{}) error {
 	_, psErr := m.transport.ExecutePS(ctx, psStopVM, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Stop-VM", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Stop-VM", cfgResourceID, before, after, psErr)
 	if psErr != nil {
-		return fmt.Errorf("hyperv: Stop-VM %q: %w", vmName, psErr)
+		return fmt.Errorf("hyperv: Stop-VM %q: %w", hostName, psErr)
 	}
 	return nil
 }
 
-func (m *hypervModule) execSetVMProcessor(ctx context.Context, vmName, hostName string, cpuCount int) error {
+func (m *hypervModule) execSetVMProcessor(ctx context.Context, cfgResourceID, hostName string, cpuCount int, before, after map[string]interface{}) error {
 	_, psErr := m.transport.ExecutePS(ctx, psSetVMProcessor, map[string]string{
 		"Name": hostName,
 		"CPU":  fmt.Sprintf("%d", cpuCount),
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMProcessor", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMProcessor", cfgResourceID, before, after, psErr)
 	if psErr != nil {
-		return fmt.Errorf("hyperv: Set-VMProcessor %q: %w", vmName, psErr)
+		return fmt.Errorf("hyperv: Set-VMProcessor %q: %w", hostName, psErr)
 	}
 	return nil
 }
 
-func (m *hypervModule) execSetVMMemory(ctx context.Context, vmName, hostName string, memoryMB int64) error {
+func (m *hypervModule) execSetVMMemory(ctx context.Context, cfgResourceID, hostName string, memoryMB int64, before, after map[string]interface{}) error {
 	_, psErr := m.transport.ExecutePS(ctx, psSetVMMemory, map[string]string{
 		"Name":     hostName,
 		"MemoryMB": fmt.Sprintf("%d", memoryMB),
 	})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMMemory", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMMemory", cfgResourceID, before, after, psErr)
 	if psErr != nil {
-		return fmt.Errorf("hyperv: Set-VMMemory %q: %w", vmName, psErr)
+		return fmt.Errorf("hyperv: Set-VMMemory %q: %w", hostName, psErr)
 	}
 	return nil
 }
 
 // removeVM deletes a VM from the host.
+// before captures the non-sensitive scalar state (cpu, memory_mb, state) prior to
+// deletion for the audit record; pass nil when the state is unknown.
 // Write-through cache semantics: transport is called first; cache updated on success only.
-func (m *hypervModule) removeVM(ctx context.Context, vmName string) error {
+func (m *hypervModule) removeVM(ctx context.Context, vmName string, before map[string]interface{}) error {
 	// The host object name is the exact VM name — no namespacing.
 	hostName := vmName
+	cfgResourceID := "vm:" + vmName
 
 	_, psErr := m.transport.ExecutePS(ctx, psRemoveVM, map[string]string{"Name": hostName})
-	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VM", hostName, psErr)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-VM", cfgResourceID, before, nil, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: remove VM %q: %w", vmName, psErr)
 	}

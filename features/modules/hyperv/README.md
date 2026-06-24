@@ -513,6 +513,30 @@ The following are **not** managed by this module:
 - **Golden-image / template cloning, an image registry, and a branch-build → image pipeline** — these are Phase 3 (#1792). The `source` block provisions either from install media (Windows ISO + autounattend, legacy Linux netinst + preseed) or from a vendor **cloud image** booted with cloud-init (the default Linux path). Booting a stock vendor cloud image is **not** the same as cloning a CFGMS-prepared golden template from an image registry — that pipeline is the later, separate Phase 3 capability.
 - Controller-side ISO blob store or ISO distribution (install media is a host path; see [VM provisioning from install media](#vm-provisioning-from-install-media))
 
+## Audit records
+
+Every mutation the module makes to a Hyper-V host is recorded through `pkg/audit` via `recordHypervOp`. An entry is emitted for each PS verb (`New-VM`, `Start-VM`, `Stop-VM`, `Set-VMProcessor`, `Set-VMMemory`, `Remove-VM`, `New-VMSwitch`, `Remove-VMSwitch`, `Add-VMNetworkAdapter`, `Remove-VMNetworkAdapter`).
+
+**Resource identity**: the audit `ResourceID` is always the cfg-declared id (`vm:<name>` or `vswitch:<name>`), never the bare host-side object name.
+
+**Before/after changes**: captured as non-sensitive scalar fields only. The allowed fields per verb are:
+
+| Verb | Before | After |
+|------|--------|-------|
+| `New-VM` | _(empty)_ | `cpu`, `memory_mb`, `state` |
+| `Remove-VM` | `cpu`, `memory_mb`, `state` | _(empty)_ |
+| `Set-VMProcessor` | `cpu` | `cpu` |
+| `Set-VMMemory` | `memory_mb` | `memory_mb` |
+| `Start-VM` / `Stop-VM` | `state` | `state` |
+| `Add-VMNetworkAdapter` | _(empty)_ | `switch` (cfg switch id) |
+| `Remove-VMNetworkAdapter` | `switch` (cfg switch id) | _(empty)_ |
+| `New-VMSwitch` | _(empty)_ | `switch_type`, `state` |
+| `Remove-VMSwitch` | `switch_type`, `state` | _(empty)_ |
+
+**Excluded from all records**: live VM names (as bare values), VHD/VHDX paths, live switch names, and any host-side values that could aid lateral movement. Switch names in `Add-VMNetworkAdapter`/`Remove-VMNetworkAdapter` records appear as cfg ids (`vswitch:<name>`), not raw host values.
+
+The before-snapshot for delete operations is captured best-effort immediately before the mutation call. If the snapshot fails (VM/switch already absent, host unreachable), the record is emitted with `before=nil` — the audit record is still correct, just less detailed.
+
 ## Security considerations
 
 - **PowerShell injection prevention**: The `Invoke-Command` parameter injection pattern is used — user values are passed as WinRM `Arguments`, never embedded in the script block text

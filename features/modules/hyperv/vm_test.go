@@ -53,7 +53,8 @@ func TestVMHostName_IsExactConfigName(t *testing.T) {
 	transport := &testWinRMTransport{}
 	m := vmModuleWithTransport(transport, tenantID)
 
-	// state:absent → Remove-VM, which passes only Name in args.
+	// state:absent → getVM (call 0) then Remove-VM (call 1).
+	// Both pass only Name in args — the exact config name, no prefix.
 	require.NoError(t, m.Set(context.Background(), "vm:"+vmName,
 		mapConfigState{"name": vmName, "state": "absent"}))
 
@@ -61,9 +62,10 @@ func TestVMHostName_IsExactConfigName(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1)
-	require.NotEmpty(t, calls[0].args)
-	assert.Equal(t, vmName, calls[0].args[0],
+	require.Len(t, calls, 2, "getVM + Remove-VM expected for absent path")
+	// calls[1] is Remove-VM — verify the exact name is passed as an arg.
+	require.NotEmpty(t, calls[1].args)
+	assert.Equal(t, vmName, calls[1].args[0],
 		"host-side VM name must be the exact config name — no cfgms- prefix or tenant namespacing")
 }
 
@@ -166,8 +168,9 @@ func TestSet_VMAbsent_CallsRemoveVM(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1, "exactly one ExecutePS call expected for Remove")
-	call := calls[0]
+	// absent path: call 0 = getVM (before-snapshot), call 1 = Remove-VM.
+	require.Len(t, calls, 2, "getVM + Remove-VM expected for absent path")
+	call := calls[1]
 
 	// script must contain Remove-VM
 	assert.Contains(t, call.scriptBlock, "Remove-VM",
@@ -244,18 +247,19 @@ func TestExactName_RegardlessOfTenant(t *testing.T) {
 	callsB := transportB.calls
 	transportB.mu.Unlock()
 
-	require.Len(t, callsA, 1)
-	require.Len(t, callsB, 1)
+	// absent path: call 0 = getVM, call 1 = Remove-VM.
+	require.Len(t, callsA, 2, "getVM + Remove-VM expected for absent path (tenant A)")
+	require.Len(t, callsB, 2, "getVM + Remove-VM expected for absent path (tenant B)")
 
-	// Both tenants must target the exact name "foo" — no prefix.
-	require.NotEmpty(t, callsA[0].args)
-	assert.Equal(t, "foo", callsA[0].args[0], "tenant A must use the exact name")
-	require.NotEmpty(t, callsB[0].args)
-	assert.Equal(t, "foo", callsB[0].args[0], "tenant B must use the exact name")
+	// Both tenants must target the exact name "foo" in the Remove-VM call — no prefix.
+	require.NotEmpty(t, callsA[1].args)
+	assert.Equal(t, "foo", callsA[1].args[0], "tenant A must use the exact name")
+	require.NotEmpty(t, callsB[1].args)
+	assert.Equal(t, "foo", callsB[1].args[0], "tenant B must use the exact name")
 
 	// Injection safety: the name still travels via args, never interpolated.
-	assert.NotContains(t, callsA[0].scriptBlock, "foo")
-	assert.NotContains(t, callsB[0].scriptBlock, "foo")
+	assert.NotContains(t, callsA[1].scriptBlock, "foo")
+	assert.NotContains(t, callsB[1].scriptBlock, "foo")
 }
 
 // ─── VMConfig ConfigState interface tests ─────────────────────────────────────

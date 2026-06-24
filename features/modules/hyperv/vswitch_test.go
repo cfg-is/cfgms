@@ -41,9 +41,10 @@ func TestVSwitchHostName_IsExactConfigName(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1)
-	require.NotEmpty(t, calls[0].args)
-	assert.Equal(t, "myswitch", calls[0].args[0],
+	// absent path: call 0 = getVSwitch (before-snapshot), call 1 = Remove-VMSwitch.
+	require.Len(t, calls, 2, "getVSwitch + Remove-VMSwitch expected for absent path")
+	require.NotEmpty(t, calls[1].args)
+	assert.Equal(t, "myswitch", calls[1].args[0],
 		"host-side switch name must be the exact config name — no cfgms- prefix or tenant namespacing")
 }
 
@@ -196,8 +197,9 @@ func TestVSwitchInjectionDefense(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1, "exactly one ExecutePS call expected for Remove")
-	call := calls[0]
+	// absent path: call 0 = getVSwitch, call 1 = Remove-VMSwitch.
+	require.Len(t, calls, 2, "getVSwitch + Remove-VMSwitch expected for absent path")
+	call := calls[1]
 
 	// Exact name must appear in args, not scriptBlock.
 	require.Len(t, call.args, 1)
@@ -366,8 +368,9 @@ func TestSet_VSwitch_DeleteAbsent(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	require.Len(t, calls, 1)
-	call := calls[0]
+	// absent path: call 0 = getVSwitch (before-snapshot), call 1 = Remove-VMSwitch.
+	require.Len(t, calls, 2, "getVSwitch + Remove-VMSwitch expected for absent path")
+	call := calls[1]
 
 	assert.Contains(t, call.scriptBlock, "Remove-VMSwitch",
 		"Set with state absent must invoke Remove-VMSwitch")
@@ -446,16 +449,17 @@ func TestVSwitchExactName_RegardlessOfTenant(t *testing.T) {
 	callsB := transportB.calls
 	transportB.mu.Unlock()
 
-	require.Len(t, callsA, 1)
-	require.Len(t, callsB, 1)
+	// absent path: call 0 = getVSwitch, call 1 = Remove-VMSwitch.
+	require.Len(t, callsA, 2, "getVSwitch + Remove-VMSwitch expected for absent path (tenant A)")
+	require.Len(t, callsB, 2, "getVSwitch + Remove-VMSwitch expected for absent path (tenant B)")
 
-	require.Len(t, callsA[0].args, 1)
-	assert.Equal(t, "net", callsA[0].args[0], "tenant A must use the exact name")
+	require.Len(t, callsA[1].args, 1)
+	assert.Equal(t, "net", callsA[1].args[0], "tenant A must use the exact name")
 
-	require.Len(t, callsB[0].args, 1)
-	assert.Equal(t, "net", callsB[0].args[0], "tenant B must use the exact name")
+	require.Len(t, callsB[1].args, 1)
+	assert.Equal(t, "net", callsB[1].args[0], "tenant B must use the exact name")
 
 	// Injection safety: the name still travels via args, never interpolated.
-	assert.NotContains(t, callsA[0].scriptBlock, "net")
-	assert.NotContains(t, callsB[0].scriptBlock, "net")
+	assert.NotContains(t, callsA[1].scriptBlock, "net")
+	assert.NotContains(t, callsB[1].scriptBlock, "net")
 }
