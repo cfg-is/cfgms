@@ -66,9 +66,11 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 8. **Verify GitHub labels exist** (idempotent):
    ```bash
-   gh label create "epic" --color "3E4B9E" --description "Top-level epic issue" --force
-   gh label create "story" --color "0E8A16" --description "Story sub-issue of an epic" --force
-   gh label create "high-priority" --color "D73A4A" --description "Escalation tracking issue requiring founder attention" --force
+   gh label create "epic" --color "3E4B9E" --description "Top-level epic (internal, locked)" --force
+   gh label create "story" --color "0E8A16" --description "Story work-item (materialized from a private project draft at dispatch)" --force
+   gh label create "internal" --color "5319E7" --description "Automated internal pipeline item — locked to external comment. Contributors: see CONTRIBUTING." --force
+   gh label create "community" --color "0E8A16" --description "Community-reported issue (public, open for comment). Bugs & feature requests welcome." --force
+   gh label create "high-priority" --color "D73A4A" --description "Escalation requiring founder attention" --force
    ```
    Note: `pipeline:*` and `agent:*` labels were decommissioned (Story #1482). Work queue state is now in GitHub Projects V2 — see `scripts/project-queue.sh`.
 

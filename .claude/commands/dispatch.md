@@ -55,7 +55,7 @@ For each issue number:
       ```
       If the issue doesn't exist or is closed, skip with warning.
 
-   b. **Quality check** (warnings only, do not block):
+   b. **Quality check** (warnings only, do not block) — applies when accepting a pre-existing public issue by number; pipeline dev items are materialized at dispatch (locked + `internal`) and validated as drafts beforehand:
       - Check issue body has acceptance criteria (`- [ ]` checkboxes) — warn if missing
       - Check issue body length — warn if < 200 characters (likely under-specified)
       - Check for reference implementation mention — warn if absent
