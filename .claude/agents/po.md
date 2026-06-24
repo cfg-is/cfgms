@@ -305,6 +305,13 @@ Remove stale agent containers and clones. Run:
 ```
 This finds containers whose stories are closed, have project status `Failed`, or project status `Blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
 
+**Step 1.6 — Lock sweep:**
+Keep the public tracker's injection surface closed. Run:
+```bash
+./scripts/pipeline-helper.sh lock-sweep
+```
+Locks open pipeline PRs (`feature/story-*` / `feature/item-*`) + tags them `internal`, and re-locks any unlocked `internal` issue (backstop for the materialize/create-epic create→lock race). Idempotent; safe every cycle.
+
 **Step 1.6 — Dependency pin refresh (cron + cycle):**
 
 The `dependency-pin-check` GitHub Actions workflow appends a `## Weekly Pin Check — <date>` comment (authored by `github-actions`) to a long-lived issue labelled `dependency-pins` whenever a pinned tool/toolchain has a newer upstream release. This step turns that signal into dispatchable bump stories by running the `refresh-pins` skill — which researches every pin against upstream, applies the cooldown + CVE policy, and creates one Draft `story,dependencies` issue per pin that should bump. Those drafts are then promoted by the Tech Lead pass (Step 2) in this same cycle.
