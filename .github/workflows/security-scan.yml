@@ -47,7 +47,7 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
@@ -81,7 +81,7 @@ jobs:
         fi
     
     - name: Upload Trivy SARIF
-      uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+      uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
       if: always() && hashFiles('sarif-results/trivy.sarif') != ''
       with:
         sarif_file: sarif-results/trivy.sarif
@@ -89,7 +89,7 @@ jobs:
       continue-on-error: true
     
     - name: Upload Trivy Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: trivy-results
@@ -106,7 +106,7 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
@@ -152,7 +152,7 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
@@ -206,7 +206,7 @@ jobs:
     # configuration, and results are still available via workflow artifacts.
     #
     # - name: Upload gosec SARIF
-    #   uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+    #   uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
     #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
     #   with:
     #     sarif_file: sarif-results/gosec.sarif
@@ -214,7 +214,7 @@ jobs:
     #   continue-on-error: true
 
     - name: Upload gosec Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: gosec-results
@@ -231,7 +231,7 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
@@ -283,7 +283,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
@@ -349,7 +349,7 @@ jobs:
         fi
     
     - name: Upload Consolidated Security Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: security-scan-consolidated
