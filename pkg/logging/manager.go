@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	eventbusInterfaces "github.com/cfgis/cfgms/pkg/eventbus/interfaces"
+	channelBus "github.com/cfgis/cfgms/pkg/eventbus/providers/channel"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging/subscribers/syslog"
 )
@@ -17,15 +19,13 @@ import (
 // for all CFGMS components to write structured logs
 type LoggingManager struct {
 	provider     interfaces.LoggingProvider
-	subscribers  []interfaces.LoggingSubscriber
 	config       *LoggingConfig
 	batchBuffer  []interfaces.LogEntry
 	batchMutex   sync.Mutex
 	stopBatching chan struct{}
 
-	// Event subscriber support
-	eventChan  chan interfaces.LogEntry
-	stopEvents chan struct{}
+	// eventBus fans out log entries to subscribers asynchronously.
+	eventBus eventbusInterfaces.EventBus
 
 	initialized   bool
 	defaultFields map[string]interface{}
@@ -136,31 +136,30 @@ func NewLoggingManager(config *LoggingConfig) (*LoggingManager, error) {
 		return nil, fmt.Errorf("failed to create logging provider: %w", err)
 	}
 
+	bufSize := config.BufferSize
+	if bufSize <= 0 {
+		bufSize = 1000
+	}
+
 	// Create manager
 	manager := &LoggingManager{
 		provider:      provider,
-		subscribers:   make([]interfaces.LoggingSubscriber, 0),
 		config:        config,
 		batchBuffer:   make([]interfaces.LogEntry, 0, config.BatchSize),
 		stopBatching:  make(chan struct{}),
 		defaultFields: make(map[string]interface{}),
+		eventBus:      channelBus.New(bufSize),
 	}
 
 	// Set default fields
 	manager.defaultFields["service_name"] = config.ServiceName
 	manager.defaultFields["component"] = config.Component
 
-	// Initialize subscribers
+	// Register config-declared subscribers (e.g. syslog) with the bus.
 	if err := manager.initializeSubscribers(); err != nil {
-		_ = provider.Close() // Clean up provider if subscriber initialization fails
+		_ = provider.Close()
+		_ = manager.eventBus.Close()
 		return nil, fmt.Errorf("failed to initialize subscribers: %w", err)
-	}
-
-	// Initialize event channels only if we have subscribers
-	if len(manager.subscribers) > 0 {
-		manager.eventChan = make(chan interfaces.LogEntry, config.BufferSize)
-		manager.stopEvents = make(chan struct{})
-		go manager.eventLoop()
 	}
 
 	// Start batching routine if async writes are enabled
@@ -196,14 +195,9 @@ func (m *LoggingManager) WriteEntry(ctx context.Context, entry interfaces.LogEnt
 		err = m.provider.WriteEntry(ctx, entry)
 	}
 
-	// If primary storage succeeded, notify subscribers (best effort)
-	if err == nil && len(m.subscribers) > 0 && m.eventChan != nil {
-		select {
-		case m.eventChan <- entry:
-			// Event queued for subscribers
-		default:
-			// Buffer full, drop event (primary storage still succeeded)
-		}
+	// If primary storage succeeded, fan out to subscribers via the bus (best effort).
+	if err == nil {
+		m.eventBus.Publish(entry)
 	}
 
 	return err
@@ -283,15 +277,10 @@ func (m *LoggingManager) Close() error {
 		close(m.stopBatching)
 	}
 
-	// Stop event loop for subscribers
-	if m.stopEvents != nil {
-		close(m.stopEvents)
-	}
-
-	// Close all subscribers
-	for _, subscriber := range m.subscribers {
-		if err := subscriber.Close(); err != nil {
-			fmt.Printf("Warning: failed to close subscriber %s: %v\n", subscriber.Name(), err)
+	// Close the event bus (also closes all subscribers).
+	if m.eventBus != nil {
+		if err := m.eventBus.Close(); err != nil {
+			fmt.Printf("Warning: failed to close event bus: %v\n", err)
 		}
 	}
 
@@ -546,11 +535,11 @@ func Fatal(ctx context.Context, message string, fields map[string]interface{}) e
 	return WriteLog(ctx, "FATAL", message, fields)
 }
 
-// initializeSubscribers creates and initializes configured subscribers
+// initializeSubscribers creates and registers config-declared subscribers with the event bus.
 func (m *LoggingManager) initializeSubscribers() error {
 	for i, subscriberConfig := range m.config.Subscribers {
 		if !subscriberConfig.Enabled {
-			continue // Skip disabled subscribers
+			continue
 		}
 
 		subscriber, err := m.createSubscriber(subscriberConfig.Type)
@@ -562,56 +551,26 @@ func (m *LoggingManager) initializeSubscribers() error {
 			return fmt.Errorf("failed to initialize subscriber %d (%s): %w", i, subscriberConfig.Type, err)
 		}
 
-		m.subscribers = append(m.subscribers, subscriber)
+		m.eventBus.Subscribe(subscriber)
 		fmt.Printf("Initialized logging subscriber: %s - %s\n", subscriber.Name(), subscriber.Description())
 	}
 
 	return nil
 }
 
-// createSubscriber creates a subscriber instance by type
-func (m *LoggingManager) createSubscriber(subscriberType string) (interfaces.LoggingSubscriber, error) {
-	// Check for test mock subscribers first
-	if mockFactory != nil {
-		if mock, err := mockFactory(subscriberType); err == nil {
-			return mock, nil
-		}
-	}
+// AddSubscriber registers a subscriber at runtime, delegating to the event bus.
+// The subscriber receives entries published after this call returns.
+func (m *LoggingManager) AddSubscriber(sub interfaces.LoggingSubscriber) {
+	m.eventBus.Subscribe(sub)
+}
 
+// createSubscriber creates a subscriber instance by type.
+func (m *LoggingManager) createSubscriber(subscriberType string) (interfaces.LoggingSubscriber, error) {
 	switch subscriberType {
 	case "syslog":
 		return syslog.NewSyslogSubscriber(), nil
 	default:
 		return nil, fmt.Errorf("unknown subscriber type: %s", subscriberType)
-	}
-}
-
-// mockFactory is used for testing - set to nil in production
-var mockFactory func(string) (interfaces.LoggingSubscriber, error)
-
-// eventLoop processes log entries for subscribers in background
-func (m *LoggingManager) eventLoop() {
-	for {
-		select {
-		case entry := <-m.eventChan:
-			// Send to all subscribers in parallel
-			for _, subscriber := range m.subscribers {
-				if subscriber.ShouldHandle(entry) {
-					go func(s interfaces.LoggingSubscriber) {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-						defer cancel()
-
-						if err := s.HandleLogEntry(ctx, entry); err != nil {
-							// Log subscriber failure, but don't fail primary logging
-							fmt.Printf("Warning: Subscriber %s failed: %v\n", s.Name(), err)
-						}
-					}(subscriber)
-				}
-			}
-
-		case <-m.stopEvents:
-			return
-		}
 	}
 }
 

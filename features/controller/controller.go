@@ -46,6 +46,13 @@ type Controller struct {
 	// Directory service for unified directory operations
 	directoryService directory.Service
 
+	// stewardEventManager is a dedicated LoggingManager for ingested steward
+	// events, kept separate from the controller's own application logs so
+	// per-steward queries (S6) don't co-mingle controller-internal log lines.
+	// It is injected into both the transport server (for WriteEntry in S2)
+	// and the API server (for QueryTimeRange in S6).
+	stewardEventManager *logging.LoggingManager
+
 	// Shutdown management
 	shutdown chan struct{}
 	running  bool
@@ -74,22 +81,59 @@ func New(cfg *config.Config, logger logging.Logger) (*Controller, error) {
 		logging.InitializeGlobalLoggerFactory("cfgms-controller", "controller")
 	}
 
+	// Create the dedicated steward-event LoggingManager. This uses the same
+	// provider type as the global logging config but is a separate instance so
+	// per-steward queries (handleGetStewardLogs, S6) don't co-mingle with
+	// controller-internal application logs.
+	var stewardEventMgr *logging.LoggingManager
+	if cfg.Logging != nil {
+		baseCfg := cfg.Logging.ToLoggingManagerConfig()
+		// Deep-copy the provider config map so the steward-event sink can have
+		// its own backend target distinct from the controller's application logs.
+		stewardProviderCfg := make(map[string]interface{}, len(baseCfg.Config))
+		for k, v := range baseCfg.Config {
+			stewardProviderCfg[k] = v
+		}
+		stewardCfg := *baseCfg
+		stewardCfg.Config = stewardProviderCfg
+		stewardCfg.ServiceName = "cfgms-steward-events"
+		stewardCfg.Component = "steward-event-sink"
+		stewardCfg.Subscribers = nil // steward-event sink has no config-declared subscribers
+		if m, err := logging.NewLoggingManager(&stewardCfg); err != nil {
+			logger.Warn("Failed to initialize steward-event logging manager, steward event sink disabled",
+				"error", err)
+		} else {
+			stewardEventMgr = m
+			logger.Info("Steward-event logging manager initialized", "provider", stewardCfg.Provider)
+		}
+	}
+
 	// Create the gRPC server
 	srv, err := server.New(cfg, logger)
 	if err != nil {
+		if stewardEventMgr != nil {
+			_ = stewardEventMgr.Close()
+		}
 		return nil, err
+	}
+
+	// Inject steward-event manager into both servers.
+	if stewardEventMgr != nil {
+		srv.SetStewardEventManager(stewardEventMgr)
+		srv.GetAPIServer().SetStewardEventLoggingManager(stewardEventMgr)
 	}
 
 	// Create the directory service
 	dirService := directory.NewDirectoryService(logger)
 
 	controller := &Controller{
-		config:           cfg,
-		logger:           logger,
-		modules:          make(map[string]Module),
-		server:           srv,
-		directoryService: dirService,
-		shutdown:         make(chan struct{}),
+		config:              cfg,
+		logger:              logger,
+		modules:             make(map[string]Module),
+		server:              srv,
+		directoryService:    dirService,
+		stewardEventManager: stewardEventMgr,
+		shutdown:            make(chan struct{}),
 	}
 
 	// Set up module registry integration
@@ -140,6 +184,15 @@ func (c *Controller) stopLocked() error {
 	if err := c.server.Stop(); err != nil {
 		c.logger.Error("Failed to stop gRPC server", "error", err)
 		return err
+	}
+
+	// Close dedicated steward-event logging manager.
+	if c.stewardEventManager != nil {
+		if err := c.stewardEventManager.Close(); err != nil {
+			c.logger.Error("Failed to close steward-event logging manager", "error", err)
+		} else {
+			c.logger.Info("Steward-event logging manager closed successfully")
+		}
 	}
 
 	// Cleanup global logging provider

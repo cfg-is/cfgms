@@ -118,6 +118,7 @@ type Server struct {
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
+	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
 }
 
 // resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
@@ -2078,6 +2079,30 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 	// TODO: Store status report in database/audit log for MSP admin visibility
 
 	return nil
+}
+
+// SetStewardEventManager injects the dedicated steward-event LoggingManager.
+// Called by the Controller before Start so the LogStream handler (S2) can
+// write ingested steward events to this manager.
+func (s *Server) SetStewardEventManager(m *logging.LoggingManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardEventManager = m
+}
+
+// GetStewardEventManager returns the dedicated steward-event LoggingManager.
+func (s *Server) GetStewardEventManager() *logging.LoggingManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.stewardEventManager
+}
+
+// GetAPIServer returns the REST API server owned by this transport server.
+// Used by Controller.New to inject shared dependencies after both servers are created.
+func (s *Server) GetAPIServer() *api.Server {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.httpServer
 }
 
 // GetTransportListenAddr returns the actual QUIC transport listen address after binding.

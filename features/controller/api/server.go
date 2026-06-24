@@ -112,6 +112,7 @@ type Server struct {
 	nonceCache                     *cache.Cache                          // Issue #2096: in-memory nonce store (TTL 65s)
 	popVerifier                    PoPVerifier                           // Issue #2096: injectable for revoked-before-PoP testing
 	isolationEngine                *tenantsecurity.TenantIsolationEngine // Issue #2123: tenant isolation enforcement for scoped API keys
+	stewardEventLoggingManager     *logging.LoggingManager               // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
@@ -981,6 +982,15 @@ func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signingRotationService = svc
+}
+
+// SetStewardEventLoggingManager injects the dedicated steward-event
+// LoggingManager. Call after New() and before Start(). The manager is used by
+// handleGetStewardLogs (S6) to serve per-steward event queries.
+func (s *Server) SetStewardEventLoggingManager(m *logging.LoggingManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardEventLoggingManager = m
 }
 
 // SetModuleResolution wires the controller-side module resolution dependencies

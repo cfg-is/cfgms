@@ -12,165 +12,108 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
+
+	// Auto-register the file provider so NewLoggingManager("file") works.
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 )
 
-// MockSubscriber implements LoggingSubscriber for testing
-type MockSubscriber struct {
-	name          string
-	description   string
-	initialized   bool
-	closed        bool
-	config        map[string]interface{}
-	handled       []interfaces.LogEntry
-	shouldHandle  func(interfaces.LogEntry) bool
-	handleError   error
-	availableFunc func() (bool, error)
-	mutex         sync.RWMutex
+// testSubscriber is a test-local implementation of LoggingSubscriber.
+// It is entirely self-contained — no production code hooks are used.
+type testSubscriber struct {
+	mu           sync.Mutex
+	name         string
+	received     []interfaces.LogEntry
+	err          error
+	filterFn     func(interfaces.LogEntry) bool
+	closed       bool
+	handleDelay  time.Duration
+	handleCalled int
 }
 
-func NewMockSubscriber(name string) *MockSubscriber {
-	return &MockSubscriber{
-		name:          name,
-		description:   "Mock subscriber for testing",
-		handled:       make([]interfaces.LogEntry, 0),
-		shouldHandle:  func(interfaces.LogEntry) bool { return true },
-		availableFunc: func() (bool, error) { return true, nil },
+func newTestSubscriber(name string) *testSubscriber {
+	return &testSubscriber{
+		name:     name,
+		filterFn: func(interfaces.LogEntry) bool { return true },
 	}
 }
 
-func (m *MockSubscriber) Name() string {
-	return m.name
+func (s *testSubscriber) Name() string        { return s.name }
+func (s *testSubscriber) Description() string { return "test subscriber" }
+func (s *testSubscriber) Initialize(_ map[string]interface{}) error {
+	return nil
 }
+func (s *testSubscriber) Available() (bool, error) { return true, nil }
 
-func (m *MockSubscriber) Description() string {
-	return m.description
-}
-
-func (m *MockSubscriber) Initialize(config map[string]interface{}) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.config = config
-	m.initialized = true
+func (s *testSubscriber) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	return nil
 }
 
-func (m *MockSubscriber) Close() error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.closed = true
-	return nil
+func (s *testSubscriber) ShouldHandle(e interfaces.LogEntry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.filterFn(e)
 }
 
-func (m *MockSubscriber) HandleLogEntry(ctx context.Context, entry interfaces.LogEntry) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	if m.handleError != nil {
-		return m.handleError
+func (s *testSubscriber) HandleLogEntry(_ context.Context, e interfaces.LogEntry) error {
+	if s.handleDelay > 0 {
+		time.Sleep(s.handleDelay)
 	}
-
-	m.handled = append(m.handled, entry)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handleCalled++
+	if s.err != nil {
+		return s.err
+	}
+	s.received = append(s.received, e)
 	return nil
 }
 
-func (m *MockSubscriber) ShouldHandle(entry interfaces.LogEntry) bool {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-	return m.shouldHandle(entry)
+func (s *testSubscriber) Entries() []interfaces.LogEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]interfaces.LogEntry, len(s.received))
+	copy(out, s.received)
+	return out
 }
 
-func (m *MockSubscriber) Available() (bool, error) {
-	return m.availableFunc()
+func (s *testSubscriber) IsClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
-func (m *MockSubscriber) GetHandled() []interfaces.LogEntry {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-	return append([]interfaces.LogEntry(nil), m.handled...)
-}
-
-func (m *MockSubscriber) SetShouldHandle(fn func(interfaces.LogEntry) bool) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.shouldHandle = fn
-}
-
-func (m *MockSubscriber) SetHandleError(err error) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.handleError = err
-}
-
-func TestLoggingManager_WithSubscribers(t *testing.T) {
-	// Create config with mock subscribers
-	config := &LoggingConfig{
+// fileLoggingConfig returns a minimal file-provider LoggingConfig using t.TempDir().
+func fileLoggingConfig(t *testing.T) *LoggingConfig {
+	t.Helper()
+	return &LoggingConfig{
 		Provider: "file",
 		Config: map[string]interface{}{
-			"directory":   "/tmp/test-logs",
+			"directory":   t.TempDir(),
 			"file_prefix": "test",
 		},
 		Level:       "INFO",
 		ServiceName: "test-service",
 		Component:   "test-component",
-		AsyncWrites: false, // Synchronous for testing
+		AsyncWrites: false,
 		BufferSize:  100,
-		Subscribers: []SubscriberConfig{
-			{
-				Type:    "mock1",
-				Enabled: true,
-				Config:  map[string]interface{}{"test": "config1"},
-			},
-			{
-				Type:    "mock2",
-				Enabled: true,
-				Config:  map[string]interface{}{"test": "config2"},
-			},
-			{
-				Type:    "mock3",
-				Enabled: false, // Disabled
-				Config:  map[string]interface{}{"test": "config3"},
-			},
-		},
 	}
+}
 
-	// Create manager with mock subscriber factory
-	originalMockFactory := mockFactory
-	defer func() { mockFactory = originalMockFactory }()
+func TestLoggingManager_WithSubscribers(t *testing.T) {
+	cfg := fileLoggingConfig(t)
 
-	mockSubscribers := make(map[string]*MockSubscriber)
-	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
-		mock := NewMockSubscriber(subscriberType)
-		mockSubscribers[subscriberType] = mock
-		return mock, nil
-	}
-
-	// Import providers
-	_ = "github.com/cfgis/cfgms/pkg/logging/providers/file"
-
-	manager, err := NewLoggingManager(config)
+	manager, err := NewLoggingManager(cfg)
 	require.NoError(t, err)
-	defer func() { _ = manager.Close() }()
+	defer func() { require.NoError(t, manager.Close()) }()
 
-	// Verify subscribers were initialized
-	assert.Len(t, manager.subscribers, 2) // Only enabled ones
+	sub1 := newTestSubscriber("sub1")
+	sub2 := newTestSubscriber("sub2")
+	manager.AddSubscriber(sub1)
+	manager.AddSubscriber(sub2)
 
-	// Check mock1 was initialized
-	mock1, exists := mockSubscribers["mock1"]
-	require.True(t, exists)
-	assert.True(t, mock1.initialized)
-	assert.Equal(t, map[string]interface{}{"test": "config1"}, mock1.config)
-
-	// Check mock2 was initialized
-	mock2, exists := mockSubscribers["mock2"]
-	require.True(t, exists)
-	assert.True(t, mock2.initialized)
-	assert.Equal(t, map[string]interface{}{"test": "config2"}, mock2.config)
-
-	// Check mock3 was not initialized (disabled)
-	_, exists = mockSubscribers["mock3"]
-	assert.False(t, exists)
-
-	// Test log entry handling
 	ctx := context.Background()
 	entry := interfaces.LogEntry{
 		Timestamp: time.Now(),
@@ -178,255 +121,165 @@ func TestLoggingManager_WithSubscribers(t *testing.T) {
 		Message:   "Test message",
 	}
 
-	err = manager.WriteEntry(ctx, entry)
-	assert.NoError(t, err)
+	require.NoError(t, manager.WriteEntry(ctx, entry))
 
-	// Give some time for async processing
-	time.Sleep(100 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(sub1.Entries()) == 1 && len(sub2.Entries()) == 1
+	}, time.Second, 10*time.Millisecond)
 
-	// Verify both subscribers received the entry
-	handled1 := mock1.GetHandled()
-	assert.Len(t, handled1, 1)
-	assert.Equal(t, "Test message", handled1[0].Message)
-
-	handled2 := mock2.GetHandled()
-	assert.Len(t, handled2, 1)
-	assert.Equal(t, "Test message", handled2[0].Message)
+	assert.Equal(t, "Test message", sub1.Entries()[0].Message)
+	assert.Equal(t, "Test message", sub2.Entries()[0].Message)
 }
 
 func TestLoggingManager_SubscriberFiltering(t *testing.T) {
-	config := &LoggingConfig{
-		Provider: "file",
-		Config: map[string]interface{}{
-			"directory":   "/tmp/test-logs",
-			"file_prefix": "test",
-		},
-		Level:       "INFO",
-		ServiceName: "test-service",
-		BufferSize:  100,
-		Subscribers: []SubscriberConfig{
-			{
-				Type:    "filtered",
-				Enabled: true,
-				Config:  map[string]interface{}{},
-			},
-		},
-	}
+	cfg := fileLoggingConfig(t)
 
-	mockSubscriber := NewMockSubscriber("filtered")
-	// Only handle ERROR level
-	mockSubscriber.SetShouldHandle(func(entry interfaces.LogEntry) bool {
-		return entry.Level == "ERROR"
-	})
-
-	originalMockFactory := mockFactory
-	defer func() { mockFactory = originalMockFactory }()
-
-	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
-		return mockSubscriber, nil
-	}
-
-	manager, err := NewLoggingManager(config)
+	manager, err := NewLoggingManager(cfg)
 	require.NoError(t, err)
-	defer func() { _ = manager.Close() }()
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	sub := newTestSubscriber("filtered")
+	sub.filterFn = func(e interfaces.LogEntry) bool { return e.Level == "ERROR" }
+	manager.AddSubscriber(sub)
 
 	ctx := context.Background()
 
-	// Send INFO entry (should be filtered out)
-	infoEntry := interfaces.LogEntry{
-		Timestamp: time.Now(),
-		Level:     "INFO",
-		Message:   "Info message",
-	}
-	err = manager.WriteEntry(ctx, infoEntry)
-	assert.NoError(t, err)
+	require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+		Timestamp: time.Now(), Level: "INFO", Message: "ignored",
+	}))
+	require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+		Timestamp: time.Now(), Level: "ERROR", Message: "Error message",
+	}))
 
-	// Send ERROR entry (should be handled)
-	errorEntry := interfaces.LogEntry{
-		Timestamp: time.Now(),
-		Level:     "ERROR",
-		Message:   "Error message",
-	}
-	err = manager.WriteEntry(ctx, errorEntry)
-	assert.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return len(sub.Entries()) == 1
+	}, time.Second, 10*time.Millisecond)
 
-	time.Sleep(100 * time.Millisecond)
-
-	handled := mockSubscriber.GetHandled()
-	assert.Len(t, handled, 1)
-	assert.Equal(t, "ERROR", handled[0].Level)
-	assert.Equal(t, "Error message", handled[0].Message)
+	assert.Equal(t, "ERROR", sub.Entries()[0].Level)
+	assert.Equal(t, "Error message", sub.Entries()[0].Message)
 }
 
 func TestLoggingManager_SubscriberError(t *testing.T) {
-	config := &LoggingConfig{
-		Provider: "file",
-		Config: map[string]interface{}{
-			"directory":   "/tmp/test-logs",
-			"file_prefix": "test",
-		},
-		Level:      "INFO",
-		BufferSize: 100,
-		Subscribers: []SubscriberConfig{
-			{
-				Type:    "error-subscriber",
-				Enabled: true,
-				Config:  map[string]interface{}{},
-			},
-		},
-	}
+	cfg := fileLoggingConfig(t)
 
-	mockSubscriber := NewMockSubscriber("error-subscriber")
-	mockSubscriber.SetHandleError(assert.AnError)
-
-	originalMockFactory := mockFactory
-	defer func() { mockFactory = originalMockFactory }()
-
-	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
-		return mockSubscriber, nil
-	}
-
-	manager, err := NewLoggingManager(config)
+	manager, err := NewLoggingManager(cfg)
 	require.NoError(t, err)
-	defer func() { _ = manager.Close() }()
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	errSub := newTestSubscriber("error-sub")
+	errSub.err = assert.AnError
+	manager.AddSubscriber(errSub)
 
 	ctx := context.Background()
 	entry := interfaces.LogEntry{
-		Timestamp: time.Now(),
-		Level:     "INFO",
-		Message:   "Test message",
+		Timestamp: time.Now(), Level: "INFO", Message: "Test message",
 	}
 
-	// Primary logging should succeed even if subscriber fails
-	err = manager.WriteEntry(ctx, entry)
-	assert.NoError(t, err)
+	// Primary logging must succeed even when the subscriber returns an error.
+	require.NoError(t, manager.WriteEntry(ctx, entry))
 
-	time.Sleep(100 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		errSub.mu.Lock()
+		called := errSub.handleCalled
+		errSub.mu.Unlock()
+		return called == 1
+	}, time.Second, 10*time.Millisecond)
 
-	// Verify subscriber was called (but failed)
-	handled := mockSubscriber.GetHandled()
-	assert.Len(t, handled, 0) // No successful handling due to error
+	// No successful handling due to error return.
+	assert.Empty(t, errSub.Entries())
 }
 
 func TestLoggingManager_EventChannelOverflow(t *testing.T) {
-	config := &LoggingConfig{
-		Provider: "file",
-		Config: map[string]interface{}{
-			"directory":   "/tmp/test-logs",
-			"file_prefix": "test",
-		},
-		Level:      "INFO",
-		BufferSize: 2, // Very small buffer to test overflow
-		Subscribers: []SubscriberConfig{
-			{
-				Type:    "slow-subscriber",
-				Enabled: true,
-				Config:  map[string]interface{}{},
-			},
-		},
-	}
+	cfg := fileLoggingConfig(t)
+	cfg.BufferSize = 1 // tiny buffer to force drops
 
-	mockSubscriber := NewMockSubscriber("slow-subscriber")
-
-	originalMockFactory := mockFactory
-	defer func() { mockFactory = originalMockFactory }()
-
-	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
-		return mockSubscriber, nil
-	}
-
-	manager, err := NewLoggingManager(config)
+	manager, err := NewLoggingManager(cfg)
 	require.NoError(t, err)
-	defer func() { _ = manager.Close() }()
+	defer func() { require.NoError(t, manager.Close()) }()
 
-	ctx := context.Background()
+	// Add a subscriber so the bus's drop counter is exercised.
+	sub := newTestSubscriber("overflow-sub")
+	manager.AddSubscriber(sub)
 
-	// Send multiple entries quickly to overflow buffer
-	for i := 0; i < 10; i++ {
-		entry := interfaces.LogEntry{
-			Timestamp: time.Now(),
-			Level:     "INFO",
-			Message:   "Rapid message",
-		}
-		err = manager.WriteEntry(ctx, entry)
-		assert.NoError(t, err) // Primary logging should still succeed
+	// Flood the bus directly (bypassing WriteEntry's file-I/O) so the publish
+	// loop runs faster than the event loop can drain with bufSize=1.
+	floodEntry := interfaces.LogEntry{Timestamp: time.Now(), Level: "INFO", Message: "flood"}
+	for i := 0; i < 100; i++ {
+		manager.eventBus.Publish(floodEntry)
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// The bus must have dropped at least one entry.
+	chanBus, ok := manager.eventBus.(interface{ DroppedCount() int64 })
+	require.True(t, ok, "eventBus must expose DroppedCount for overflow verification")
+	assert.Greater(t, chanBus.DroppedCount(), int64(0), "expected at least one dropped entry")
 
-	// Some entries may be dropped due to buffer overflow, but no errors
-	handled := mockSubscriber.GetHandled()
-	assert.LessOrEqual(t, len(handled), 10)
+	// Primary WriteEntry persistence must still succeed even when the bus is overflowing.
+	require.NoError(t, manager.WriteEntry(context.Background(), interfaces.LogEntry{
+		Timestamp: time.Now(), Level: "INFO", Message: "persistence check",
+	}))
 }
 
 func TestLoggingManager_NoSubscribers(t *testing.T) {
-	config := &LoggingConfig{
-		Provider: "file",
-		Config: map[string]interface{}{
-			"directory":   "/tmp/test-logs",
-			"file_prefix": "test",
-		},
-		Level:       "INFO",
-		Subscribers: []SubscriberConfig{}, // No subscribers
-	}
+	cfg := fileLoggingConfig(t)
 
-	manager, err := NewLoggingManager(config)
+	manager, err := NewLoggingManager(cfg)
 	require.NoError(t, err)
-	defer func() { _ = manager.Close() }()
+	defer func() { require.NoError(t, manager.Close()) }()
 
-	assert.Len(t, manager.subscribers, 0)
-	assert.Nil(t, manager.eventChan)
-
-	// Should work normally without subscribers
+	// Should work normally without subscribers.
 	ctx := context.Background()
-	entry := interfaces.LogEntry{
-		Timestamp: time.Now(),
-		Level:     "INFO",
-		Message:   "Test message",
-	}
-
-	err = manager.WriteEntry(ctx, entry)
-	assert.NoError(t, err)
+	require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+		Timestamp: time.Now(), Level: "INFO", Message: "no subscribers",
+	}))
 }
 
 func TestLoggingManager_Close_WithSubscribers(t *testing.T) {
-	config := &LoggingConfig{
-		Provider: "file",
-		Config: map[string]interface{}{
-			"directory":   "/tmp/test-logs",
-			"file_prefix": "test",
-		},
-		Level:      "INFO",
-		BufferSize: 100,
-		Subscribers: []SubscriberConfig{
-			{
-				Type:    "close-test",
-				Enabled: true,
-				Config:  map[string]interface{}{},
-			},
-		},
-	}
+	cfg := fileLoggingConfig(t)
 
-	mockSubscriber := NewMockSubscriber("close-test")
-
-	originalMockFactory := mockFactory
-	defer func() { mockFactory = originalMockFactory }()
-
-	mockFactory = func(subscriberType string) (interfaces.LoggingSubscriber, error) {
-		return mockSubscriber, nil
-	}
-
-	manager, err := NewLoggingManager(config)
+	manager, err := NewLoggingManager(cfg)
 	require.NoError(t, err)
 
-	// Verify subscriber is initialized
-	assert.True(t, mockSubscriber.initialized)
-	assert.False(t, mockSubscriber.closed)
+	sub := newTestSubscriber("close-test")
+	manager.AddSubscriber(sub)
+	assert.False(t, sub.IsClosed())
 
-	// Close manager
-	err = manager.Close()
-	assert.NoError(t, err)
+	require.NoError(t, manager.Close())
+	assert.True(t, sub.IsClosed())
+}
 
-	// Verify subscriber was closed
-	assert.True(t, mockSubscriber.closed)
+// TestLoggingManager_RuntimeAddSubscriber_ReceivesEntries is an ACCEPTANCE
+// CRITERIA required test. It verifies that a subscriber added at runtime via
+// AddSubscriber receives subsequent WriteEntry entries.
+func TestLoggingManager_RuntimeAddSubscriber_ReceivesEntries(t *testing.T) {
+	cfg := fileLoggingConfig(t)
+
+	manager, err := NewLoggingManager(cfg)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	ctx := context.Background()
+
+	// Publish before subscribing — these must NOT be delivered.
+	require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+		Timestamp: time.Now(), Level: "INFO", Message: "pre-subscribe entry",
+	}))
+	// Give the bus time to drain the pre-subscribe entry before adding the subscriber.
+	time.Sleep(20 * time.Millisecond)
+
+	// Add subscriber at runtime.
+	sub := newTestSubscriber("runtime-sub")
+	manager.AddSubscriber(sub)
+
+	// Publish after subscribing — MUST be delivered.
+	require.NoError(t, manager.WriteEntry(ctx, interfaces.LogEntry{
+		Timestamp: time.Now(), Level: "INFO", Message: "post-subscribe entry",
+	}))
+
+	require.Eventually(t, func() bool {
+		return len(sub.Entries()) == 1
+	}, time.Second, 10*time.Millisecond, "runtime subscriber must receive post-subscribe entry")
+
+	assert.Equal(t, "post-subscribe entry", sub.Entries()[0].Message)
+	// The pre-subscribe entry must NOT have been delivered.
+	assert.Len(t, sub.Entries(), 1)
 }
