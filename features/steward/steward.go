@@ -593,13 +593,25 @@ func (s *Steward) monitorEventLoop(ctx context.Context, events <-chan modules.Ch
 	fireCh := make(chan string, 16)
 	// debounce maps resourceID → pending AfterFunc timer.
 	debounce := make(map[string]*time.Timer)
+	// afterFuncWg tracks in-flight AfterFunc goroutines so monitorEventLoop
+	// does not return (and monitorWg.Done() is not called) until every timer
+	// callback has exited. Without this, a timer that fires concurrently with
+	// Stop() outlives monitorWg.Wait() and is caught by goleak as a leak.
+	var afterFuncWg sync.WaitGroup
 
 	defer func() {
-		// Stop all pending timers so their functions never run and no goroutines
-		// are created after this loop exits.
+		// Stop pending timers. t.Stop() returns true only if the timer has not
+		// yet fired — in that case the goroutine will never run, so we call
+		// Done() ourselves to balance the Add(1) from below. If t.Stop()
+		// returns false the goroutine is already running; it will call Done().
 		for _, t := range debounce {
-			t.Stop()
+			if t.Stop() {
+				afterFuncWg.Done()
+			}
 		}
+		// Wait for any in-flight AfterFunc goroutines to exit. They observe
+		// s.shutdown (already closed) via their select and return promptly.
+		afterFuncWg.Wait()
 	}()
 
 	for {
@@ -618,7 +630,9 @@ func (s *Steward) monitorEventLoop(ctx context.Context, events <-chan modules.Ch
 			resourceID := evt.ResourceID
 			if _, exists := debounce[resourceID]; !exists {
 				// First event for this resourceID in the window — start the timer.
+				afterFuncWg.Add(1)
 				debounce[resourceID] = time.AfterFunc(s.debounceWindow, func() {
+					defer afterFuncWg.Done()
 					select {
 					case fireCh <- resourceID:
 					case <-ctx.Done():
