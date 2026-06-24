@@ -353,9 +353,32 @@ Include the skill's headline (bumping / holding / up-to-date counts + story numb
 **Step 2 — Tech Lead pass (legacy only):**
 Handles `Draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `Ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
 
-Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`. Collect their issue numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item <ITEM_ID_NNN>"`, mode `auto`.
+Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`.
+**Filter out revision-pending drafts first:** a Draft that already carries an
+unaddressed `<!-- tl-revision -->` comment (a Tech Lead "Revision Needed" marker
+newer than the story's last body update) is waiting on BA / Planning Team rework,
+not on Tech Lead — skip it, or it churns the Tech Lead every cycle. It re-enters
+the queue when its body is updated. For the remaining drafts, collect their issue
+numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech
+Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent
+executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item
+<ITEM_ID_NNN>"`, mode `auto`.
 
-The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get their project status set to `Ready`. Failing stories get their project status set to `Blocked`.
+The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency
+ordering, implementation notes, scope, constraints, and ambiguity, and resolves
+each story to one of three outcomes (see its "Outcomes" section):
+
+- **Ready** — passes all checks. A well-formed but still-*open* dependency does
+  **not** prevent Ready; the preflight gates dispatch on open deps automatically
+  (`action: hold, reason: deps not closed`). The Tech Lead never Blocks or holds
+  on an open dependency.
+- **Revision Needed** → status stays `Draft` with a `<!-- tl-revision -->`
+  comment (BA-fixable: missing sections, vague ACs, oversized/needs-split, wrong
+  paths). Not a founder escalation.
+- **Blocked** → reserved for decisions only the founder/PO can make (genuine
+  product ambiguity, an architecture/constraint exception, a non-v1 item with no
+  actionable AC, a circular dependency). Per the status taxonomy, `Blocked`
+  means "needs founder decision" — do not use it as a generic rejection bucket.
 
 **Step 3 — Rebase stuck PRs:**
 
