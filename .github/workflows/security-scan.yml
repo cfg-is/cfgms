@@ -111,13 +111,13 @@ jobs:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+    #   uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
@@ -157,13 +157,13 @@ jobs:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+    #   uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
@@ -236,13 +236,13 @@ jobs:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+    #   uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
@@ -288,7 +288,7 @@ jobs:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
         go-version: ${{ env.GO_VERSION }}
 
