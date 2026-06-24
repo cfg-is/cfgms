@@ -101,21 +101,20 @@ For each pin with verdict BUMP or BUMP NOW:
    - `{{SCOPE_PATHS}}` — comma-separated paths to grep within (derived from `locations`)
    - `{{COOLDOWN_BLOCK}}` — "Cooldown elapsed (N days since release)" OR "Cooldown OVERRIDE: CVE-X blocking <gate>"
 3. Write the instantiated body to `/tmp/refresh-pins-<slug>.md`
-4. Create the story:
+4. Create the story as a PRIVATE project draft (never a public issue). Pass the
+   dependency-pins tracking epic as the parent, or `0` if there is none:
    ```bash
-   gh issue create --repo cfg-is/cfgms \
-     --title "deps: bump <name> <from> → <to> (<short-reason>)" \
-     --label "story,dependencies" \
-     --body-file /tmp/refresh-pins-<slug>.md
+   bash ./scripts/pipeline-helper.sh create-story <epic_num_or_0> \
+     "deps: bump <name> <from> → <to> (<short-reason>)" \
+     /tmp/refresh-pins-<slug>.md
+   # Returns CREATED_DRAFT:<item_id>, status Draft by default.
    ```
-5. Add the new story to the project queue at Draft status:
-   ```bash
-   item_id=$(bash ./scripts/project-queue.sh add-issue <STORY_NUM> | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
-   bash ./scripts/project-queue.sh update-field "$item_id" status "Draft"
-   ```
-6. Capture the returned URL/number for the report
+5. Capture the returned `item_id` for the report.
 
-If a story for the same pin+version already exists (search by title with `gh issue list --search "deps: bump <name> <from> → <to>"`), update it in place via `gh issue comment` rather than duplicating.
+If a draft for the same pin+version already exists (scan the project's Draft and
+Ready buckets via `project-queue.sh list-by-status` and match on title), update
+its body via `project-queue.sh` / `pipeline-helper.sh` rather than duplicating —
+do not create a public issue.
 
 ## Phase 5: Cooldown override audit (if any BUMP NOW)
 

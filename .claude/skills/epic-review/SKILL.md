@@ -184,13 +184,12 @@ The epic's sub-issues are all closed, but AC verification on `origin/develop` fa
 Drafted by /epic-review on <YYYY-MM-DD>. Tech Lead to refine implementation notes before dispatch.
 EOF
 
-remediation_num=$(gh issue create --repo cfg-is/cfgms \
-  --title "remediation: <shortened epic title> — <one-line gap>" \
-  --label "epic-followup" \
-  --body-file /tmp/epic-remediation-<N>.md | grep -oE '/[0-9]+$' | tr -d /)
-
-item_id=$(/workspace/scripts/project-queue.sh add-issue "$remediation_num" | jq -r '.item_id')
-/workspace/scripts/project-queue.sh update-field "$item_id" status Draft
+# Remediation is repo-artifact dev work → a PRIVATE project draft under the epic,
+# never a public issue. create-story returns CREATED_DRAFT:<item_id> at Draft
+# status (Tech Lead validates before it becomes Ready/dispatchable).
+/workspace/scripts/pipeline-helper.sh create-story <epic_num> \
+  "remediation: <shortened epic title> — <one-line gap>" \
+  /tmp/epic-remediation-<N>.md
 ```
 
 ### KEEP OPEN — record only

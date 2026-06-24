@@ -21,7 +21,21 @@ describes the new substrate, the migration state, and operational procedures.
 | `pipeline:epic` label | `epic` label (kept as GitHub label) |
 | `pipeline:story` label | `story` label (kept as GitHub label) |
 
-Labels still in use: `epic`, `story`, `high-priority`, `dependencies`.
+Labels still in use: `epic`, `story`, `internal`, `community`, `high-priority`, `dependencies`.
+
+## Issue Classes & Materialization (2026-06-24)
+
+Work-items no longer originate as public issues. The pipeline plans and refines on the **private project board**; the public issue tracker is treated as injection + leak surface and is kept minimal.
+
+| Class | Created by | Public? | Locked? | Labels |
+|-------|-----------|---------|---------|--------|
+| Pipeline story | `project-queue.sh materialize` **at dispatch** (convert draft→issue) | yes | **locked** | `story` + `internal` |
+| Epic | `pipeline-helper.sh create-epic` (PO, interactive) | yes | **locked** | `epic` + `internal` |
+| Community | `pipeline-helper.sh create-community-issue` (human, interactive) | yes | **unlocked** | `community` |
+
+- **Decomposition** writes private **drafts** (`pipeline-helper.sh create-story`). A draft becomes a GitHub issue **only when dispatched** — `po-act.sh dispatch` calls `materialize-issue`, which converts the draft in place (`convertProjectV2DraftIssueItemToIssue`), locks it, and tags `internal`. Issues stay first-class for the dev/PR/review/merge machinery while nothing un-worked sits on the public tracker.
+- **Autonomous agents never run `gh issue create`** — enforced by a PreToolUse hook (`.claude/hooks/block-autonomous-issue-create.sh`, fires when `CFGMS_AUTONOMOUS=true`) and a CI gate (`label-decommission-gate.yml`). The only sanctioned creators are the `pipeline-helper.sh` subcommands above; the `materialize` path uses *convert*, not create.
+- **Locking** closes the write/injection vector. `pipeline-helper.sh lock-sweep` (run from the PO cron) locks pipeline PRs and re-locks any unlocked `internal` issue.
 
 ## Infrastructure
 
