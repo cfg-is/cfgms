@@ -18,7 +18,7 @@ var ErrRefreshRejected = errors.New("registration refresh rejected by controller
 // RefreshChallengeResponse is the response body from POST /api/v1/stewards/{device_id}/refresh/challenge.
 type RefreshChallengeResponse struct {
 	Nonce     string `json:"nonce"`      // base64url-encoded 32-byte random nonce
-	ServerTS  uint64 `json:"server_ts"`  // unix seconds, included in the PoP digest
+	ServerTS  uint64 `json:"server_ts"`  // unix nanoseconds, included in the PoP digest
 	ExpiresIn int    `json:"expires_in"` // seconds until the nonce expires (typically 60)
 }
 

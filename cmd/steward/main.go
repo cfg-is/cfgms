@@ -1224,7 +1224,7 @@ func refreshAndConnect(
 	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer completeCancel()
 
-	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), challenge.Nonce, pop)
+	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), id.TenantID, challenge.Nonce, int64(challenge.ServerTS), pop)
 	if err != nil {
 		return nil, err // ErrRefreshPending or ErrRefreshRejected propagated to caller
 	}

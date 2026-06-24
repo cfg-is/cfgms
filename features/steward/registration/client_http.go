@@ -316,21 +316,25 @@ func (c *HTTPClient) RefreshChallenge(ctx context.Context, deviceID string) (*Re
 
 // RefreshComplete submits the proof-of-possession signature to complete the registration-refresh handshake.
 // pop is the Ed25519 signature over sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64).
+// issuedAt must be the server_ts value from the challenge response (Unix nanoseconds), used by the
+// controller's IssuedAt gate to verify the request arrived within the 60s nonce window.
 //
 // Returns (*RefreshCompleteResponse, nil) on HTTP 200 (cert issued immediately).
 // Returns (nil, ErrRefreshPending) on HTTP 202 (request queued for manual approval).
 // Returns (nil, ErrRefreshRejected) on HTTP 403 (device revoked or dormant).
-func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, nonce string, pop []byte) (*RefreshCompleteResponse, error) {
+func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, nonce string, issuedAt int64, pop []byte) (*RefreshCompleteResponse, error) {
 	completeURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/complete", c.controllerURL, deviceID)
 
 	reqBody, err := json.Marshal(struct {
-		DeviceID string `json:"device_id"`
-		Nonce    string `json:"nonce"`
-		PoP      string `json:"pop"` // base64url-encoded Ed25519 signature
+		TenantID  string `json:"tenant_id,omitempty"`
+		Nonce     string `json:"nonce"`
+		IssuedAt  int64  `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
+		Signature string `json:"signature"` // base64url Ed25519 sig over PoP digest
 	}{
-		DeviceID: deviceID,
-		Nonce:    nonce,
-		PoP:      base64.RawURLEncoding.EncodeToString(pop),
+		TenantID:  tenantID,
+		Nonce:     nonce,
+		IssuedAt:  issuedAt,
+		Signature: base64.RawURLEncoding.EncodeToString(pop),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal refresh complete request: %w", err)
