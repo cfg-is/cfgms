@@ -749,45 +749,69 @@ no docker container, because a Linux container can't provide a Windows execution
 environment. Stories are worked **one at a time, in-process**.
 
 **Why no distributed lock is needed.** The orchestrator (Linux, docker dispatch)
-and this host serve **disjoint execution-environment slices**, so the two cron
-loops never select the same story even when out of phase. The only required
-guard is claiming each story (`Ready → In Progress`) **before** working it —
-`po-act.sh claim` does this with the same status check the docker path uses.
+and this host serve **disjoint execution-environment slices**, so the
+orchestrator's cron and this host's `/po work` drain never select the same story
+even when interleaved. The only required guard is claiming each story
+(`Ready → In Progress`) **before** working it — `po-act.sh claim` does this with
+the same status check the docker path uses.
 
-### Loop
+### Drain loop (availability-gated — drain-then-stop, NOT a timer)
 
-1. **Preflight** with this host's caps already set in the environment.
-   `CFGMS_PO_HOST_CAPS` must be **exported in the shell before** this call — the
-   preflight reads it to compute which stories are dispatchable here:
+`/po work` is **availability-gated, not time-gated**: it works every story this
+host can currently claim, back-to-back, **in one invocation**, then **stops**.
+
+**Do NOT wrap `/po work` in a fixed-interval `/loop` / cron.** There is nothing
+to do "every N minutes" — work is gated on a story *becoming claimable* (a
+blocking dependency PR merging, a new tagged story going `Ready`), which are
+**events, not a clock**. A timer just burns idle invocations when nothing is
+claimable and doesn't accelerate a backlog. Re-invoke `/po work` **on demand**
+(or when you know a blocker has cleared); within the invocation it drains
+everything already claimable.
+
+Each iteration:
+
+1. **Preflight FRESH** — re-run this at the start of *every* iteration (after each
+   completed story) and read the LIVE result. **Never reuse a prior preflight's
+   output or your own remembered pipeline view.** The Linux orchestrator runs on
+   **another host** and drains the pipeline **concurrently** (merging deps,
+   promoting stories to `Ready`, clearing holds), so a story that was held when
+   you started the last story may be claimable now — and vice-versa. Beware even
+   the preflight's own on-disk cache: a stale cache can hide a now-`Ready` story,
+   so re-running `preflight` (which re-queries GitHub/project state) is required,
+   not optional. `CFGMS_PO_HOST_CAPS` must be exported in the shell first:
    ```bash
    export CFGMS_PO_HOST_CAPS=windows   # set once per shell/session on this host
    ./.claude/scripts/po-act.sh preflight
    ```
-   Read `windows_queue` (or, generally, `dispatch_recommendations` entries with
-   `action: "dispatch"` — under this host's caps, its environment's stories
-   become dispatchable while `linux` stories are held). Also honor the
-   `dispatch_blocked` code-health gate exactly as §4.0 (don't start work on a
-   broken `develop`).
+   Read `dispatch_recommendations` entries with `action: "dispatch"` (under this
+   host's caps its environment's stories are dispatchable; other-environment
+   stories are `hold`). Honor the `dispatch_blocked` code-health gate exactly as
+   §4.0 (don't start work on a broken `develop`).
 
-2. **Pick the first eligible story** (ascending order — same ordering the
-   preflight uses).
+2. **If nothing is `action: "dispatch"` → STOP.** No claimable story for this
+   host's caps means the drain is done — exit the invocation. **Do not idle,
+   poll, or schedule a tick.** A tagged story that merely *exists but is held* on
+   a dependency or file-conflict owned by the orchestrator (e.g. a `needs-windows`
+   story blocked behind a non-windows PR) is **not claimable** and **not yours to
+   wait on** — it becomes claimable on a future `/po work` once its blocker
+   clears. Report what (if anything) you shipped and what remains held, then end.
 
-3. **Claim it** before doing any work:
+3. **Otherwise pick the first eligible story** (ascending order) and **claim it**:
    ```bash
    ./.claude/scripts/po-act.sh claim <ITEM_ID>
    ```
    - `CLAIMED:<item>` → proceed.
-   - `CLAIM_LOST:<item>` → another host/cycle took it (or it left Ready); skip to
-     the next story. Never work an unclaimed story.
+   - `CLAIM_LOST:<item>` → another host/cycle took it (or it left `Ready`); go
+     back to step 1 (fresh preflight). Never work an unclaimed story.
 
-4. **Work it locally in this session** — run the standard dev workflow against the
+4. **Work it to completion, in-process** — the standard dev workflow against the
    claimed story: `/story-start <NUM>` → implement (TDD, real components, no
-   mocks) → validation gates (`make test-complete`) → `/story-complete` (opens a
-   PR targeting `develop`). This runs natively on the host, so Windows-only
-   build/test paths are exercised for real.
+   mocks) → validation gates (`make test-complete`) → `/story-complete`
+   (adversarial review → PR targeting `develop`). **One invocation carries the
+   story start-to-finish; there are no timer ticks mid-story.** This runs natively
+   on the host, so the environment's build/test paths are exercised for real.
 
-5. **Next.** Repeat 2–4 until no eligible stories remain for this host's caps,
-   then idle. Re-invoked each tick via `/loop /po work`.
+5. **Loop back to step 1** (fresh preflight). Keep draining until step 2 stops you.
 
 **Scope.** This host only **produces** PRs for its environment's stories. Review,
 fix-cycle, merge-queue, and decomposition stay with the Linux orchestrator
