@@ -150,30 +150,40 @@ func parseCIMSystemUUID(csv string, attributes map[string]string) {
 }
 
 // parseCIMMemoryModules parses Win32_PhysicalMemory selected as
-// Capacity,FormFactor,MemoryType,Speed. Mirrors parseWMIMemoryModulesOutput:
-// the attribute keys are not indexed, so the last valid module wins.
+// Capacity,FormFactor,MemoryType,Speed. Mirrors parseWMIMemoryModulesOutput
+// exactly: it counts every module, sums the parseable capacities into
+// memory_modules_total_capacity, emits memory_module_count, and stores the
+// FIRST module's details as the representative sample.
 func parseCIMMemoryModules(csv string, attributes map[string]string) {
+	var moduleCount int
+	var totalCapacity int64
 	for _, f := range cimDataRows(csv) {
 		if len(f) < 4 {
 			continue
 		}
-		// Only record a module whose Capacity is a valid integer (mirrors the
-		// wmic parser's guard).
-		if _, err := strconv.ParseInt(f[0], 10, 64); err != nil {
-			continue
+		moduleCount++
+		if capacity, err := strconv.ParseInt(f[0], 10, 64); err == nil {
+			totalCapacity += capacity
 		}
-		if f[0] != "" {
-			attributes["memory_module_capacity"] = f[0]
+		// First module's details as the representative sample.
+		if moduleCount == 1 {
+			if f[0] != "" {
+				attributes["memory_module_capacity"] = f[0]
+			}
+			if f[1] != "" {
+				attributes["memory_module_form_factor"] = f[1]
+			}
+			if f[2] != "" {
+				attributes["memory_module_type"] = f[2]
+			}
+			if f[3] != "" {
+				attributes["memory_module_speed"] = f[3] + "MHz"
+			}
 		}
-		if f[1] != "" {
-			attributes["memory_module_form_factor"] = f[1]
-		}
-		if f[2] != "" {
-			attributes["memory_module_type"] = f[2]
-		}
-		if f[3] != "" {
-			attributes["memory_module_speed"] = f[3] + "MHz"
-		}
+	}
+	if moduleCount > 0 {
+		attributes["memory_module_count"] = fmt.Sprintf("%d", moduleCount)
+		attributes["memory_modules_total_capacity"] = fmt.Sprintf("%d", totalCapacity)
 	}
 }
 

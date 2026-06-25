@@ -76,20 +76,35 @@ func TestParseCIMSystemUUID(t *testing.T) {
 }
 
 func TestParseCIMMemoryModules(t *testing.T) {
-	// Two identical modules; last valid module wins (mirrors the wmic parser,
-	// whose keys are not indexed).
-	csv := "\"Capacity\",\"FormFactor\",\"MemoryType\",\"Speed\"\r\n\"17179869184\",\"8\",\"0\",\"2667\"\r\n\"17179869184\",\"8\",\"0\",\"2667\"\r\n"
+	// Two DIFFERENT modules: the FIRST module is the representative sample,
+	// count is all modules, and total_capacity is the sum (mirrors the wmic
+	// parser exactly).
+	csv := "\"Capacity\",\"FormFactor\",\"MemoryType\",\"Speed\"\r\n" +
+		"\"17179869184\",\"8\",\"0\",\"2667\"\r\n" +
+		"\"8589934592\",\"8\",\"0\",\"3200\"\r\n"
 	a := map[string]string{}
 	parseCIMMemoryModules(csv, a)
-	assert.Equal(t, "17179869184", a["memory_module_capacity"])
+	assert.Equal(t, "17179869184", a["memory_module_capacity"], "first module wins")
 	assert.Equal(t, "8", a["memory_module_form_factor"])
 	assert.Equal(t, "0", a["memory_module_type"])
-	assert.Equal(t, "2667MHz", a["memory_module_speed"])
+	assert.Equal(t, "2667MHz", a["memory_module_speed"], "first module's speed")
+	assert.Equal(t, "2", a["memory_module_count"])
+	assert.Equal(t, "25769803776", a["memory_modules_total_capacity"], "17179869184 + 8589934592")
 
-	// A row with a non-integer Capacity is skipped (guard).
+	// A row whose Capacity is non-integer is still counted (mirrors wmic: the
+	// raw value is stored, but it does not contribute to total_capacity).
 	m := map[string]string{}
 	parseCIMMemoryModules("\"Capacity\",\"FormFactor\",\"MemoryType\",\"Speed\"\r\n\"n/a\",\"8\",\"0\",\"2667\"\r\n", m)
-	assert.Empty(t, m)
+	assert.Equal(t, "n/a", m["memory_module_capacity"])
+	assert.Equal(t, "1", m["memory_module_count"])
+	assert.Equal(t, "0", m["memory_modules_total_capacity"])
+
+	// Empty / header-only → no attributes, no panic.
+	for _, bad := range []string{"", "\"Capacity\",\"FormFactor\",\"MemoryType\",\"Speed\"\r\n"} {
+		e := map[string]string{}
+		require.NotPanics(t, func() { parseCIMMemoryModules(bad, e) })
+		assert.Empty(t, e)
+	}
 }
 
 func TestParseCIMPhysicalDisks(t *testing.T) {
@@ -104,6 +119,16 @@ func TestParseCIMPhysicalDisks(t *testing.T) {
 	assert.Equal(t, "Microsoft Storage Space Device", a["physical_disk_1_model"])
 	assert.Equal(t, "322101964800", a["physical_disk_1_size_bytes"])
 	assert.NotEmpty(t, a["physical_disk_1_size_gb"])
+	assert.Equal(t, "SCSI", a["physical_disk_2_interface"])
+	assert.Equal(t, "Fixed hard disk media", a["physical_disk_2_media_type"])
 	assert.Equal(t, "SAMSUNG MZVLB1T0HBLR-000L7", a["physical_disk_2_model"])
 	assert.Equal(t, "1024203640320", a["physical_disk_2_size_bytes"])
+	assert.NotEmpty(t, a["physical_disk_2_size_gb"])
+
+	// Empty / header-only → no disks, no panic.
+	for _, bad := range []string{"", "\"InterfaceType\",\"MediaType\",\"Model\",\"Size\"\r\n"} {
+		e := map[string]string{}
+		require.NotPanics(t, func() { parseCIMPhysicalDisks(bad, e) })
+		assert.Empty(t, e)
+	}
 }
