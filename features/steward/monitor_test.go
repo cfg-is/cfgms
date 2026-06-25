@@ -197,6 +197,9 @@ func TestMonitorConsumerWiring(t *testing.T) {
 	require.NoError(t, err)
 	steward.RegisterTestModule(s, "testmonitor", testMon)
 	steward.RegisterTestModule(s, "testnoop", testNoop)
+	// Disable DNA collection: this test exercises monitor wiring only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -246,6 +249,9 @@ func TestMonitorEventIsHintNotTruth(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	steward.RegisterTestModule(s, "testmonitor", testMon)
+	// Disable DNA collection: this test exercises event-is-hint-not-truth only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -297,6 +303,9 @@ func TestMonitorModeNeverSets(t *testing.T) {
 	// Set monitor mode BEFORE start so both initial convergence and event-triggered
 	// reconciles run in monitor mode.
 	steward.SetDriftModeForTest(s, config.DriftModeMonitor)
+	// Disable DNA collection: this test exercises drift-mode-never-sets only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

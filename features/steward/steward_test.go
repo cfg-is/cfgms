@@ -169,6 +169,9 @@ func TestMonitorDebounce(t *testing.T) {
 	steward.RegisterTestModule(s, "testmonitor", testMon)
 	// Short debounce so the test completes quickly.
 	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
+	// Disable DNA collection: this test exercises debounce coalescing only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -224,6 +227,9 @@ func TestMonitorQueueShedToPoll(t *testing.T) {
 	// Small fan-in capacity so queue overflow is guaranteed regardless of scheduler
 	// timing. Any burst > 2 will shed at least one event and emit the Warn log.
 	steward.SetMonitorFanInCapForTest(s, 2)
+	// Disable DNA collection: this test exercises queue-shed-to-poll only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -370,6 +376,12 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, s.Start(ctx))
+	// Safety net: cancel ctx first (kills any in-flight OS commands) then stop the
+	// steward even if require.Eventually fails and s.Stop is never reached below.
+	t.Cleanup(func() {
+		cancel()
+		_ = s.Stop(context.Background())
+	})
 
 	// Initial convergence has run; previousDNA is now the real system DNA.
 	// Inject a sentinel so we can detect when detectUnmanagedDNADrift is called again.
@@ -393,14 +405,14 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	// same monitorEventLoop goroutine, so polling GetPreviousDNA is the correct
 	// synchronization — no sleep needed.
 	//
-	// 15s timeout: macOS CI runners are slow and detectUnmanagedDNADrift runs
+	// 30s timeout: macOS CI runners are slow and detectUnmanagedDNADrift runs
 	// multiple network OS commands (networksetup, scutil, netstat, etc.) that can
-	// collectively take several seconds on loaded CI runners. 15s gives ample
-	// headroom while still catching cases where the DNA is never refreshed.
+	// collectively take 10-20s on loaded CI runners. 30s gives ample headroom
+	// while still catching cases where the DNA is never refreshed.
 	require.Eventually(t, func() bool {
 		dna := steward.GetPreviousDNA(s)
 		return dna != nil && dna.Id != "sentinel-id-dna-refresh-test"
-	}, 15*time.Second, 10*time.Millisecond,
+	}, 30*time.Second, 10*time.Millisecond,
 		"DNA snapshot must be refreshed after a state-changing targeted reconcile")
 
 	require.NoError(t, s.Stop(context.Background()))
