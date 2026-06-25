@@ -329,15 +329,22 @@ func TestMonitorCloseRace(t *testing.T) {
 	// goroutines (stdout/stderr pipe copy + ctx-watch). All of these can be
 	// mid-flight when this test's goleak check runs on a slow runner.
 	//
-	// Match each family by ANY frame in the stack (IgnoreAnyFunction also matches
-	// the "created by" frame). The os/exec command goroutines are the ones that
-	// actually trip this on macos: their stack is pure io/os/internal-poll (top =
-	// internal/poll.runtime_pollWait for the pipe reader), with os/exec present
-	// only as the creator — so a top-function ignore on writerDescriptor/watchCtx
-	// (the earlier approach) missed them. os/exec.(*Cmd).Start is the creator of
-	// every os/exec helper goroutine, so it covers them all.
+	// goleak.IgnoreAnyFunction matches goroutines that have the named function
+	// anywhere in their OWN stack — it does NOT match the "created by" line
+	// (goleak explicitly excludes creator functions from the match set). The
+	// os/exec goroutines fall into two families:
+	//
+	//   1. Pipe I/O copiers: top = internal/poll.runtime_pollWait, with
+	//      os/exec.(*Cmd).Start.func2 further down (the goroutine entry point).
+	//      IgnoreTopFunction("writerDescriptor") misses these because the top
+	//      function is the poll wait, not the copier.
+	//
+	//   2. Context watcher: os/exec.(*Cmd).watchCtx on top.
+	//
+	// Match by the actual goroutine entry-point functions visible in the stack.
 	goleak.VerifyNone(t, existingGoroutines,
-		goleak.IgnoreAnyFunction("os/exec.(*Cmd).Start"),
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).Start.func2"),
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).watchCtx"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSoftwareInfo"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSecurityInfo"),
