@@ -593,7 +593,10 @@ func (p *FileProvider) buildSecureFilePath(filename string) (string, error) {
 	return fullPath, nil
 }
 
-// init registers the file provider
+// init registers the file provider factory so each LoggingManager gets its own
+// FileProvider instance with independent state (no shared initialized flag or file handles).
 func init() {
-	interfaces.RegisterLoggingProvider(&FileProvider{})
+	interfaces.RegisterLoggingProviderFactory(func() interfaces.LoggingProvider {
+		return &FileProvider{}
+	})
 }
