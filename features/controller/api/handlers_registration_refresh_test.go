@@ -1175,3 +1175,44 @@ func TestRefresh_NoPolicyDefault(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code, "default policy must queue: %s", rec.Body.String())
 	assert.Equal(t, 1, prs.count(), "one pending entry must be created")
 }
+
+// TestRefresh_AutoAccept_NoProvenanceBaseline verifies that auto_accept policy issues a
+// cert immediately when the steward has no stored provenance (LastProvenanceJSON == "").
+// Initial registration never stores provenance, so the first refresh must not be demoted
+// to require_approval by a score-of-zero comparison against an absent baseline.
+func TestRefresh_AutoAccept_NoProvenanceBaseline(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	ss := newTestStewardStore()
+	ss.add(&business.StewardRecord{
+		ID:                 "s-active",
+		DeviceID:           testDeviceID,
+		TenantID:           testTenantID,
+		Status:             business.StewardStatusActive,
+		IdentityKeyPub:     []byte(pub),
+		LastProvenanceJSON: "", // no baseline — first refresh after registration
+	})
+
+	prs := newTestPendingRefreshStore()
+	ps := newTestRefreshPolicyStore()
+	require.NoError(t, ps.SetPolicy(context.Background(), &business.RefreshPolicy{
+		TenantID: testTenantID,
+		Mode:     "auto_accept",
+	}))
+
+	server, _ := newRefreshAdminTestServer(t, ss, prs, ps)
+	server.SetPoPVerifier(ed25519PoPVerifier{})
+
+	challenge := issueChallenge(t, server, testDeviceID, testTenantID)
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, challenge, priv, nil)
+
+	rec := postComplete(server, testDeviceID, req)
+	assert.Equal(t, http.StatusOK, rec.Code, "auto_accept with no provenance baseline must issue cert immediately: %s", rec.Body.String())
+	assert.Equal(t, 0, prs.count(), "no pending entry must be created for auto_accept with no baseline")
+
+	var resp RefreshCompleteResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "approved", resp.Status)
+	assert.NotEmpty(t, resp.ClientCert)
+	assert.NotEmpty(t, resp.ClientKey)
+	assert.NotEmpty(t, resp.CACert)
+}

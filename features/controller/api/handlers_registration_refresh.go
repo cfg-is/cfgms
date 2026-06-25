@@ -371,15 +371,20 @@ func (s *Server) handleRefreshByPolicy(
 		http.Error(w, "refresh rejected by tenant policy", http.StatusForbidden)
 
 	case "auto_accept":
-		pm := registration.ProvenanceMatcher{}
-		result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
-		if result.Score < registration.ProvenanceMatchThreshold {
-			// Demote to require_approval (demote-only invariant).
-			s.handleRefreshQueueEntry(w, r, record, deviceID, provenance,
-				result.MatchedFields, result.TotalFields, "auto_accept_demoted")
-			return
+		// Only compare provenance when a baseline exists. A missing baseline (first
+		// refresh after initial registration) is not evidence of device change —
+		// the check is skipped and the cert is issued immediately.
+		if record.LastProvenanceJSON != "" {
+			pm := registration.ProvenanceMatcher{}
+			result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
+			if result.Score < registration.ProvenanceMatchThreshold {
+				// Demote to require_approval (demote-only invariant).
+				s.handleRefreshQueueEntry(w, r, record, deviceID, provenance,
+					result.MatchedFields, result.TotalFields, "auto_accept_demoted")
+				return
+			}
 		}
-		// Sufficient provenance: issue new certificate immediately.
+		// No stored provenance baseline, or sufficient provenance match: issue cert immediately.
 		resp, err := s.buildRefreshClaimResponse(r.Context(), record)
 		if err != nil {
 			s.logger.Error("Failed to issue refresh certificate", "steward_id", record.ID, "error", err)
@@ -393,11 +398,7 @@ func (s *Server) handleRefreshByPolicy(
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventAuthentication, "refresh_cert_issued",
 			business.AuditResultSuccess, business.AuditSeverityHigh,
-			map[string]interface{}{
-				"decision":       "approved",
-				"matched_fields": result.MatchedFields,
-				"total_fields":   result.TotalFields,
-			})
+			map[string]interface{}{"decision": "approved"})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
