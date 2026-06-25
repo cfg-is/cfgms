@@ -169,6 +169,9 @@ func TestMonitorDebounce(t *testing.T) {
 	steward.RegisterTestModule(s, "testmonitor", testMon)
 	// Short debounce so the test completes quickly.
 	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
+	// Disable DNA collection: this test exercises debounce coalescing only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -224,6 +227,9 @@ func TestMonitorQueueShedToPoll(t *testing.T) {
 	// Small fan-in capacity so queue overflow is guaranteed regardless of scheduler
 	// timing. Any burst > 2 will shed at least one event and emit the Warn log.
 	steward.SetMonitorFanInCapForTest(s, 2)
+	// Disable DNA collection: this test exercises queue-shed-to-poll only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -329,15 +335,22 @@ func TestMonitorCloseRace(t *testing.T) {
 	// goroutines (stdout/stderr pipe copy + ctx-watch). All of these can be
 	// mid-flight when this test's goleak check runs on a slow runner.
 	//
-	// Match each family by ANY frame in the stack (IgnoreAnyFunction also matches
-	// the "created by" frame). The os/exec command goroutines are the ones that
-	// actually trip this on macos: their stack is pure io/os/internal-poll (top =
-	// internal/poll.runtime_pollWait for the pipe reader), with os/exec present
-	// only as the creator — so a top-function ignore on writerDescriptor/watchCtx
-	// (the earlier approach) missed them. os/exec.(*Cmd).Start is the creator of
-	// every os/exec helper goroutine, so it covers them all.
+	// goleak.IgnoreAnyFunction matches goroutines that have the named function
+	// anywhere in their OWN stack — it does NOT match the "created by" line
+	// (goleak explicitly excludes creator functions from the match set). The
+	// os/exec goroutines fall into two families:
+	//
+	//   1. Pipe I/O copiers: top = internal/poll.runtime_pollWait, with
+	//      os/exec.(*Cmd).Start.func2 further down (the goroutine entry point).
+	//      IgnoreTopFunction("writerDescriptor") misses these because the top
+	//      function is the poll wait, not the copier.
+	//
+	//   2. Context watcher: os/exec.(*Cmd).watchCtx on top.
+	//
+	// Match by the actual goroutine entry-point functions visible in the stack.
 	goleak.VerifyNone(t, existingGoroutines,
-		goleak.IgnoreAnyFunction("os/exec.(*Cmd).Start"),
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).Start.func2"),
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).watchCtx"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSoftwareInfo"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSecurityInfo"),
@@ -363,6 +376,12 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, s.Start(ctx))
+	// Safety net: cancel ctx first (kills any in-flight OS commands) then stop the
+	// steward even if require.Eventually fails and s.Stop is never reached below.
+	t.Cleanup(func() {
+		cancel()
+		_ = s.Stop(context.Background())
+	})
 
 	// Initial convergence has run; previousDNA is now the real system DNA.
 	// Inject a sentinel so we can detect when detectUnmanagedDNADrift is called again.
@@ -385,10 +404,15 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	// by detectUnmanagedDNADrift updating previousDNA. Both run sequentially in the
 	// same monitorEventLoop goroutine, so polling GetPreviousDNA is the correct
 	// synchronization — no sleep needed.
+	//
+	// 30s timeout: macOS CI runners are slow and detectUnmanagedDNADrift runs
+	// multiple network OS commands (networksetup, scutil, netstat, etc.) that can
+	// collectively take 10-20s on loaded CI runners. 30s gives ample headroom
+	// while still catching cases where the DNA is never refreshed.
 	require.Eventually(t, func() bool {
 		dna := steward.GetPreviousDNA(s)
 		return dna != nil && dna.Id != "sentinel-id-dna-refresh-test"
-	}, 2*time.Second, 10*time.Millisecond,
+	}, 30*time.Second, 10*time.Millisecond,
 		"DNA snapshot must be refreshed after a state-changing targeted reconcile")
 
 	require.NoError(t, s.Stop(context.Background()))

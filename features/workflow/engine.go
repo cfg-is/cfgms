@@ -177,27 +177,40 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 	e.mutex.Lock()
 
 	if err != nil {
-		// Handle workflow-level error
-		var workflowErr *WorkflowError
-		if wfErr, ok := err.(*WorkflowError); ok {
-			workflowErr = wfErr
+		// If the execution context was explicitly cancelled (via CancelExecution),
+		// treat this as a cancellation rather than a failure. This prevents the
+		// async goroutine from overriding StatusCancelled with StatusFailed.
+		// Context timeout (DeadlineExceeded) is still treated as a failure.
+		if execution.Context.Err() == context.Canceled {
+			e.mutex.Unlock()
+			if execution.GetStatus() != StatusCancelled {
+				execution.SetStatus(StatusCancelled)
+			}
+			e.logger.Info("Workflow execution cancelled",
+				"execution_id", execution.ID)
 		} else {
-			workflowErr = NewWorkflowError(
-				ErrorCodeStepExecution,
-				err.Error(),
-				execution.GetCurrentStep(),
-				"",
-				err,
-			).WithVariableState(execution.Variables)
-		}
+			// Handle workflow-level error
+			var workflowErr *WorkflowError
+			if wfErr, ok := err.(*WorkflowError); ok {
+				workflowErr = wfErr
+			} else {
+				workflowErr = NewWorkflowError(
+					ErrorCodeStepExecution,
+					err.Error(),
+					execution.GetCurrentStep(),
+					"",
+					err,
+				).WithVariableState(execution.Variables)
+			}
 
-		execution.SetError(workflowErr.Error())
-		execution.SetErrorDetails(workflowErr)
-		e.mutex.Unlock()
-		execution.SetStatus(StatusFailed)
-		e.logger.Error("Workflow execution failed",
-			"execution_id", execution.ID,
-			"error", workflowErr.FullError())
+			execution.SetError(workflowErr.Error())
+			execution.SetErrorDetails(workflowErr)
+			e.mutex.Unlock()
+			execution.SetStatus(StatusFailed)
+			e.logger.Error("Workflow execution failed",
+				"execution_id", execution.ID,
+				"error", workflowErr.FullError())
+		}
 	} else {
 		e.mutex.Unlock()
 		execution.SetStatus(StatusCompleted)

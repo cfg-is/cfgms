@@ -343,15 +343,23 @@ func (entry LogEntry) ToSyslogFormat() string {
 		entry.Message)
 }
 
+// LoggingProviderFactory creates a fresh, uninitialized LoggingProvider instance.
+// Register via RegisterLoggingProviderFactory so CreateLoggingProviderFromConfig
+// returns a new instance on each call, preventing multiple LoggingManagers from
+// sharing provider state (e.g., initialized flag, file handles) and racing.
+type LoggingProviderFactory func() LoggingProvider
+
 // Global logging provider registry (separate from storage providers)
 var (
 	globalLoggingRegistry = &loggingProviderRegistry{
 		providers: make(map[string]LoggingProvider),
+		factories: make(map[string]LoggingProviderFactory),
 	}
 )
 
 type loggingProviderRegistry struct {
 	providers map[string]LoggingProvider
+	factories map[string]LoggingProviderFactory
 	mutex     sync.RWMutex
 }
 
@@ -424,7 +432,39 @@ func validateLoggingProvider(provider LoggingProvider) error {
 	return nil
 }
 
-// GetLoggingProvider retrieves a registered provider by name
+// RegisterLoggingProviderFactory registers a factory that creates fresh provider instances.
+// Preferred over RegisterLoggingProvider when multiple LoggingManager instances may
+// use the same provider type — each CreateLoggingProviderFromConfig call returns a
+// distinct instance with no shared mutable state.
+func RegisterLoggingProviderFactory(factory LoggingProviderFactory) {
+	template := factory()
+	if template == nil {
+		fmt.Printf("Warning: LoggingProviderFactory returned nil instance\n")
+		return
+	}
+	if err := validateLoggingProvider(template); err != nil {
+		fmt.Printf("Warning: Failed to register logging provider factory '%s': %v\n", template.Name(), err)
+		return
+	}
+
+	globalLoggingRegistry.mutex.Lock()
+	defer globalLoggingRegistry.mutex.Unlock()
+
+	name := template.Name()
+	if existing, exists := globalLoggingRegistry.providers[name]; exists {
+		fmt.Printf("Warning: Overwriting existing logging provider '%s' (version %s) with factory version %s\n",
+			name, existing.GetVersion(), template.GetVersion())
+	}
+	// Store the template for capability/availability introspection and the factory for instance creation.
+	globalLoggingRegistry.providers[name] = template
+	globalLoggingRegistry.factories[name] = factory
+	fmt.Printf("Registered logging provider factory: %s v%s - %s\n",
+		name, template.GetVersion(), template.Description())
+}
+
+// GetLoggingProvider retrieves a registered provider by name.
+// For factory-registered providers the returned instance is an uninitialized template used
+// only for capability introspection; use CreateLoggingProviderFromConfig to get a usable instance.
 func GetLoggingProvider(name string) (LoggingProvider, error) {
 	globalLoggingRegistry.mutex.RLock()
 	defer globalLoggingRegistry.mutex.RUnlock()
@@ -434,9 +474,13 @@ func GetLoggingProvider(name string) (LoggingProvider, error) {
 		return nil, fmt.Errorf("logging provider '%s' not found", name)
 	}
 
-	// Check availability
-	if available, err := provider.Available(); !available {
-		return nil, fmt.Errorf("logging provider '%s' not available: %v", name, err)
+	// Factory-registered providers store an uninitialized template; calling Available() on it
+	// would always fail because no config has been applied. Skip the check — availability is
+	// guaranteed once CreateLoggingProviderFromConfig successfully initializes a fresh instance.
+	if _, hasFactory := globalLoggingRegistry.factories[name]; !hasFactory {
+		if available, err := provider.Available(); !available {
+			return nil, fmt.Errorf("logging provider '%s' not available: %v", name, err)
+		}
 	}
 
 	return provider, nil
@@ -469,13 +513,21 @@ func GetRegisteredProviders() map[string]LoggingProvider {
 	return providers
 }
 
-// GetAvailableLoggingProviders returns all providers that are currently available
+// GetAvailableLoggingProviders returns all providers that are currently available.
+// Factory-registered providers are always included because their templates are uninitialized;
+// use CreateLoggingProviderFromConfig to obtain a ready-to-use instance.
 func GetAvailableLoggingProviders() map[string]LoggingProvider {
 	globalLoggingRegistry.mutex.RLock()
 	defer globalLoggingRegistry.mutex.RUnlock()
 
 	available := make(map[string]LoggingProvider)
 	for name, provider := range globalLoggingRegistry.providers {
+		if _, hasFactory := globalLoggingRegistry.factories[name]; hasFactory {
+			// Template is uninitialized by design; include it — the factory guarantees
+			// a usable instance can be created on demand.
+			available[name] = provider
+			continue
+		}
 		if ok, err := provider.Available(); ok && err == nil {
 			available[name] = provider
 		}
@@ -521,30 +573,38 @@ func ListLoggingProviders() []LoggingProviderInfo {
 	return providers
 }
 
-// CreateLoggingProviderFromConfig creates and initializes a logging provider from configuration
+// CreateLoggingProviderFromConfig creates and initializes a logging provider from configuration.
+// When a factory was registered via RegisterLoggingProviderFactory, a fresh instance is created
+// on every call so concurrent LoggingManagers each own an independent provider with no shared state.
 func CreateLoggingProviderFromConfig(providerName string, config map[string]interface{}) (LoggingProvider, error) {
-	// Get provider from registry without checking availability (since it's not initialized yet)
 	globalLoggingRegistry.mutex.RLock()
-	provider, exists := globalLoggingRegistry.providers[providerName]
+	factory := globalLoggingRegistry.factories[providerName]
+	singleton, exists := globalLoggingRegistry.providers[providerName]
 	globalLoggingRegistry.mutex.RUnlock()
 
 	if !exists {
-		// Provide helpful error with available options
 		registeredNames := GetRegisteredLoggingProviderNames()
 		return nil, fmt.Errorf("logging provider '%s' not found. Registered providers: %v", providerName, registeredNames)
 	}
 
-	// Initialize the provider with the given configuration
-	if err := provider.Initialize(config); err != nil {
+	// Prefer a factory so each caller gets its own instance with no shared mutable state.
+	// Fall back to the singleton for providers registered without a factory (backward compat).
+	var instance LoggingProvider
+	if factory != nil {
+		instance = factory()
+	} else {
+		instance = singleton
+	}
+
+	if err := instance.Initialize(config); err != nil {
 		return nil, fmt.Errorf("failed to initialize logging provider '%s': %w", providerName, err)
 	}
 
-	// Now check availability after initialization
-	if available, err := provider.Available(); !available {
+	if available, err := instance.Available(); !available {
 		return nil, fmt.Errorf("logging provider '%s' not available after initialization: %v", providerName, err)
 	}
 
-	return provider, nil
+	return instance, nil
 }
 
 // UnregisterLoggingProvider removes a provider from the registry (primarily for testing)
@@ -554,6 +614,7 @@ func UnregisterLoggingProvider(name string) bool {
 
 	if _, exists := globalLoggingRegistry.providers[name]; exists {
 		delete(globalLoggingRegistry.providers, name)
+		delete(globalLoggingRegistry.factories, name)
 		return true
 	}
 
