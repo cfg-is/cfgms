@@ -88,6 +88,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "configuration",
 		Actions:      []string{"create", "update"},
 	},
+	{
+		Id:           "steward.event.log",
+		Name:         "Emit Steward Event Log",
+		Description:  "Allow steward to stream event log entries to the controller; grants emit-only access with no read capability",
+		ResourceType: "steward",
+		Actions:      []string{"create"},
+	},
 
 	// Tenant Management Permissions
 	{
@@ -267,6 +274,7 @@ var DefaultRoles = []*common.Role{
 			"config.read",
 			"config.validate",
 			"config.status.report",
+			"steward.event.log",
 			"module.execute",
 		},
 		IsSystemRole: true,

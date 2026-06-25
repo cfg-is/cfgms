@@ -102,9 +102,10 @@ type Server struct {
 	registrationTokenStore  pkgRegistration.Store
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 	configHandler           *controllerTransport.ConfigHandler
-	grpcServer              *grpc.Server            // Shared gRPC server for CP+DP (Story #515)
-	quicListener            *quictransport.Listener // Shared QUIC listener (Story #515)
-	signerCertSerial        string                  // Serial number of server cert used for config signing (Story #378)
+	logStreamHandler        *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
+	grpcServer              *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
+	quicListener            *quictransport.Listener               // Shared QUIC listener (Story #515)
+	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
 	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
@@ -1483,7 +1484,14 @@ func (s *Server) Start() error {
 		tenantQueue := controllerTransport.NewTenantQueue()
 		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue)
 		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
-		composite := newCompositeTransportServer(cpHandler, dnaHandler, bulkHandler, s.configHandler, s.logger)
+		logStreamHandler := controllerTransport.NewLogStreamHandler(
+			s.stewardEventManager,
+			s.controllerService,
+			s.logger,
+			controllerTransport.DefaultLogStreamConfig(),
+		)
+		s.logStreamHandler = logStreamHandler
+		composite := newCompositeTransportServer(cpHandler, dnaHandler, bulkHandler, s.configHandler, logStreamHandler, s.logger)
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
 
 		// Start serving on the shared QUIC listener
