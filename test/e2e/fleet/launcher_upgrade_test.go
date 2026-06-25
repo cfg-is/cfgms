@@ -53,12 +53,22 @@ const (
 )
 
 // killBareStewdAndWrapper kills the bare steward process and its docker-compose
-// restart wrapper in container. Errors are intentionally swallowed because
-// either process may already have exited.
+// restart wrapper in container. Errors are logged but not fatal: pkill -f with a
+// pattern that appears in the sh -c cmdline will send SIGKILL to the executing
+// shell as well as the targets (exit 137). The targets (steward + wrapper) have
+// lower PIDs and are killed first, so the operation is effective. The exit-137
+// from the sh process itself is expected and does not indicate a real failure.
 func killBareStewdAndWrapper(t *testing.T, container string) {
 	t.Helper()
-	dockerExecRoot(t, container, "sh", "-c",
-		"pkill -9 -f './steward' 2>/dev/null; pkill -9 -f 'while true' 2>/dev/null; true")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "exec", "--user", "root", container,
+		"sh", "-c",
+		"pkill -9 -f './steward' 2>/dev/null; pkill -9 -f 'while true' 2>/dev/null; true",
+	).CombinedOutput()
+	if err != nil {
+		t.Logf("killBareStewdAndWrapper in %s: %v (output: %s)", container, err, string(out))
+	}
 }
 
 // installLauncherLayout creates the launcher's versioned binary tree under
