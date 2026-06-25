@@ -67,11 +67,13 @@ func (m *windowsManager) IsElevated() bool {
 // Uses the native Windows Service API via golang.org/x/sys/windows/svc/mgr.
 // Does NOT shell out to sc.exe.
 //
+// When controllerURL is non-empty, --controller-url is passed to CreateService
+// args so the steward connects to the specified controller on start.
 // If caCertPEM is non-empty, the CA cert is written to the platform-standard
 // path before the service is started. When expectedFingerprint is also non-empty,
 // fingerprint verification runs first — a mismatch returns an error without any
 // disk writes or service changes.
-func (m *windowsManager) Install(token, caCertPEM, expectedFingerprint string) error {
+func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -125,6 +127,12 @@ func (m *windowsManager) Install(token, caCertPEM, expectedFingerprint string) e
 		}
 	}
 
+	// Build service start arguments; --controller-url is optional (ADR-013 §3).
+	svcArgs := []string{"--regtoken", token}
+	if controllerURL != "" {
+		svcArgs = append(svcArgs, "--controller-url", controllerURL)
+	}
+
 	fmt.Println("Registering Windows service...")
 	newSvc, err := scm.CreateService(
 		windowsServiceName,
@@ -135,7 +143,7 @@ func (m *windowsManager) Install(token, caCertPEM, expectedFingerprint string) e
 			Description: windowsDescription,
 		},
 		// Arguments appended to the binary path; received as os.Args on service start.
-		"--regtoken", token,
+		svcArgs...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create Windows service: %w", err)

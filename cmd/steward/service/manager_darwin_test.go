@@ -33,7 +33,7 @@ func TestDarwinManagerInstallRequiresElevation(t *testing.T) {
 		t.Skip("skipping elevation check — running as root")
 	}
 	m := New("/usr/local/bin/cfgms-steward")
-	err := m.Install("tok_test123", "", "")
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root")
 }
@@ -50,7 +50,7 @@ func TestDarwinInstallFingerprintMismatch(t *testing.T) {
 
 	certPEM, _ := generateTestCACert(t)
 	m := New("/usr/local/bin/cfgms-steward")
-	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	err := m.Install("tok_test123", "", certPEM, "deadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fingerprint mismatch")
 
@@ -100,7 +100,7 @@ func TestDarwinManagerStatusNotInstalled(t *testing.T) {
 
 func TestGenerateLaunchdPlist(t *testing.T) {
 	token := "tok_plist_test_abc123"
-	plist := generateLaunchdPlist(token)
+	plist := generateLaunchdPlist(token, "")
 
 	assert.Contains(t, plist, "<?xml")
 	assert.Contains(t, plist, darwinServiceName)
@@ -110,6 +110,8 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 	assert.Contains(t, plist, "<key>KeepAlive</key>")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>")
 	assert.Contains(t, plist, "<true/>")
+	// Without URL: --controller-url must not appear.
+	assert.NotContains(t, plist, "--controller-url")
 
 	// Token appears exactly once (no duplication).
 	count := strings.Count(plist, token)
@@ -117,9 +119,23 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 }
 
 func TestGenerateLaunchdPlistKeepAliveRequired(t *testing.T) {
-	plist := generateLaunchdPlist("tok_test")
+	plist := generateLaunchdPlist("tok_test", "")
 	assert.Contains(t, plist, "<key>KeepAlive</key>", "KeepAlive required by acceptance criteria")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>", "RunAtLoad required by acceptance criteria")
+}
+
+func TestGenerateLaunchdPlistWithControllerURL(t *testing.T) {
+	token := "tok_url_test"
+	controllerURL := "https://ctrl.example.com"
+	plist := generateLaunchdPlist(token, controllerURL)
+
+	assert.Contains(t, plist, "--controller-url")
+	assert.Contains(t, plist, controllerURL)
+	assert.Contains(t, plist, "--regtoken")
+	assert.Contains(t, plist, token)
+	// Token and URL each appear exactly once.
+	assert.Equal(t, 1, strings.Count(plist, token), "token should appear exactly once")
+	assert.Equal(t, 1, strings.Count(plist, controllerURL), "controller URL should appear exactly once")
 }
 
 func TestDarwinManagerNew(t *testing.T) {

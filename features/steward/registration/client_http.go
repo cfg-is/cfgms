@@ -94,9 +94,13 @@ type HTTPConfig struct {
 	ControllerURL string
 	Timeout       time.Duration
 	// CACertPath is the optional path to a PEM-encoded CA certificate used to verify
-	// the controller's TLS certificate during registration. When empty, system root CAs are used.
+	// the controller's TLS certificate during registration. When empty, system root CAs are used
+	// (unless CAPEM is set).
 	CACertPath string
-	Logger     logging.Logger
+	// CAPEM is an inline PEM-encoded CA certificate. Takes precedence over CACertPath when set.
+	// Used in install-pinned and TOFU modes to provide the pinned CA without requiring a disk read.
+	CAPEM  string
+	Logger logging.Logger
 }
 
 // NewHTTPClient creates a new HTTP-based registration client
@@ -113,13 +117,20 @@ func NewHTTPClient(cfg *HTTPConfig) (*HTTPClient, error) {
 		timeout = 30 * time.Second
 	}
 
-	transport := &http.Transport{}
-	if cfg.CACertPath != "" {
-		caPEM, err := os.ReadFile(cfg.CACertPath)
+	// Resolve CA PEM: inline CAPEM takes precedence over CACertPath.
+	var caPEM []byte
+	if cfg.CAPEM != "" {
+		caPEM = []byte(cfg.CAPEM)
+	} else if cfg.CACertPath != "" {
+		var err error
+		caPEM, err = os.ReadFile(cfg.CACertPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA cert from %q: %w", cfg.CACertPath, err)
 		}
+	}
 
+	transport := &http.Transport{}
+	if len(caPEM) > 0 {
 		parsed, err := url.Parse(cfg.ControllerURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse controller URL: %w", err)

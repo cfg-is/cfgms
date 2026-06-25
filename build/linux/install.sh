@@ -10,21 +10,29 @@
 # service registration.
 #
 # Usage:
-#   sudo bash install.sh --regtoken TOKEN [--fingerprint HEX] [--ca-cert PATH]
+#   sudo bash install.sh --regtoken TOKEN [--controller-url URL] \
+#       [--fingerprint HEX] [--controller-ca PATH]
 #
 # Flags:
-#   --regtoken TOKEN    Registration token (required)
-#   --fingerprint HEX   CA cert SHA-256 fingerprint, lowercase hex no colons;
-#                       skips interactive prompt
-#   --ca-cert PATH      CA cert PEM path (default: ca.crt in script directory
-#                       if present — matches the tar.gz bundle layout)
+#   --regtoken TOKEN        Registration token (required)
+#   --controller-url URL    Controller URL (install-pinned and TOFU modes;
+#                           omit to use the compile-time URL baked into the binary)
+#   --fingerprint HEX       CA cert SHA-256 fingerprint, lowercase hex no colons;
+#                           skips interactive prompt
+#   --controller-ca PATH    CA cert PEM path (default: ca.crt in script directory
+#                           if present — matches the tar.gz bundle layout)
 #
-# Non-interactive example:
-#   sudo bash install.sh --regtoken mytoken --fingerprint aabbcc1122...
+# Non-interactive install-pinned example:
+#   sudo bash install.sh --regtoken TOKEN \
+#       --controller-url https://ctrl.example.com \
+#       --controller-ca ca.crt --fingerprint aabbcc1122...
 #
-# Interactive example:
-#   sudo bash install.sh --regtoken mytoken
+# Interactive example (CA bundled in tar.gz):
+#   sudo bash install.sh --regtoken TOKEN --controller-url https://ctrl.example.com
 #   (Displays the fingerprint from ca.fingerprint, prompts for confirmation)
+#
+# Compile-baked URL (default, binary rebuilt per controller):
+#   sudo bash install.sh --regtoken TOKEN
 #
 # Test isolation:
 #   CFGMS_INSTALL_PREFIX=/tmp/test sudo bash install.sh ...
@@ -38,14 +46,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 REGTOKEN=""
+CONTROLLER_URL=""
 FINGERPRINT=""
 CA_CERT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --regtoken)    REGTOKEN="$2";     shift 2 ;;
-        --fingerprint) FINGERPRINT="$2";  shift 2 ;;
-        --ca-cert)     CA_CERT="$2";      shift 2 ;;
+        --regtoken)        REGTOKEN="$2";        shift 2 ;;
+        --controller-url)  CONTROLLER_URL="$2";  shift 2 ;;
+        --fingerprint)     FINGERPRINT="$2";     shift 2 ;;
+        --controller-ca)   CA_CERT="$2";         shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -53,11 +63,12 @@ done
 # ── Validation ────────────────────────────────────────────────────────────────
 
 if [[ -z "$REGTOKEN" ]]; then
-    echo "Usage: sudo bash install.sh --regtoken TOKEN [--fingerprint HEX] [--ca-cert PATH]" >&2
+    echo "Usage: sudo bash install.sh --regtoken TOKEN [--controller-url URL] [--fingerprint HEX] [--controller-ca PATH]" >&2
     echo "" >&2
-    echo "  --regtoken TOKEN    Registration token (required)" >&2
-    echo "  --fingerprint HEX   CA cert SHA-256 fingerprint for non-interactive install" >&2
-    echo "  --ca-cert PATH      Path to CA cert PEM (default: ca.crt in script directory)" >&2
+    echo "  --regtoken TOKEN        Registration token (required)" >&2
+    echo "  --controller-url URL    Controller URL (install-pinned/TOFU; omit for compile-baked binary)" >&2
+    echo "  --fingerprint HEX       CA cert SHA-256 fingerprint for non-interactive install" >&2
+    echo "  --controller-ca PATH    Path to CA cert PEM (default: ca.crt in script directory)" >&2
     exit 1
 fi
 
@@ -140,8 +151,11 @@ done
 # ── Build and run install command ─────────────────────────────────────────────
 
 INSTALL_ARGS=(install --regtoken "$REGTOKEN")
+if [[ -n "$CONTROLLER_URL" ]]; then
+    INSTALL_ARGS+=(--controller-url "$CONTROLLER_URL")
+fi
 if [[ -n "$CA_CERT" ]]; then
-    INSTALL_ARGS+=(--ca-cert "$CA_CERT")
+    INSTALL_ARGS+=(--controller-ca "$CA_CERT")
 fi
 if [[ -n "$FINGERPRINT" ]]; then
     INSTALL_ARGS+=(--fingerprint "$FINGERPRINT")

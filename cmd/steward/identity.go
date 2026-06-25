@@ -99,6 +99,10 @@ const identityFileName = "steward-identity.json"
 // SigningCertPEM (singular) is kept for backward-compatible reading of identity
 // files written before multi-cert support. loadIdentity migrates it into
 // SigningCertPEMs automatically on read.
+//
+// TrustMode and CAPinFingerprint record the trust anchor established at enrollment
+// (ADR-013 §3). The downgrade guard uses these to ensure trust is never silently
+// weakened across restarts or re-enrollments.
 type StewardIdentity struct {
 	StewardID        string     `json:"steward_id"`
 	TenantID         string     `json:"tenant_id"`
@@ -111,6 +115,9 @@ type StewardIdentity struct {
 	// Device identity fields (Issue #2094): stable across mTLS cert rotations.
 	DeviceID       string `json:"device_id,omitempty"`        // 64-char lowercase hex SHA-256 of Ed25519 public key
 	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (32 bytes)
+	// Trust anchor fields (ADR-013 §3, Issue #1517).
+	TrustMode        string `json:"trust_mode,omitempty"`          // "compile-baked", "install-pinned", "tofu"
+	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"`  // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600

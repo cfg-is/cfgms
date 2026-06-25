@@ -35,7 +35,7 @@ func TestWindowsManagerInstallRequiresElevation(t *testing.T) {
 	if m.IsElevated() {
 		t.Skip("skipping elevation check — running as Administrator")
 	}
-	err := m.Install("tok_test123", "", "")
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Administrator")
 }
@@ -52,7 +52,7 @@ func TestWindowsInstallFingerprintMismatch(t *testing.T) {
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
 
 	certPEM, _ := generateTestCACert(t)
-	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	err := m.Install("tok_test123", "", certPEM, "deadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fingerprint mismatch")
 

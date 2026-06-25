@@ -45,11 +45,12 @@ func (m *linuxManager) IsElevated() bool {
 // enables/starts the service. Running Install on an already-installed service
 // stops it first, replaces the binary, then restarts.
 //
+// When controllerURL is non-empty, it is embedded in ExecStart as --controller-url.
 // If caCertPEM is non-empty, the CA cert is written to the platform-standard
 // path before the service is registered. When expectedFingerprint is also
 // non-empty, fingerprint verification runs first — a mismatch returns an error
 // without any disk writes or service changes.
-func (m *linuxManager) Install(token, caCertPEM, expectedFingerprint string) error {
+func (m *linuxManager) Install(token, controllerURL, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -81,7 +82,7 @@ func (m *linuxManager) Install(token, caCertPEM, expectedFingerprint string) err
 	}
 
 	fmt.Println("Writing systemd unit...")
-	unit := generateSystemdUnit(token)
+	unit := generateSystemdUnit(token, controllerURL)
 	if err := writeSystemdUnit(linuxSystemdUnit, []byte(unit)); err != nil {
 		return fmt.Errorf("failed to write systemd unit %s: %w", linuxSystemdUnit, err)
 	}
@@ -171,13 +172,18 @@ func writeSystemdUnit(path string, content []byte) error {
 }
 
 // generateSystemdUnit returns a systemd unit that runs cfgms-steward with the
-// given registration token. Restart=always and RestartSec=10 ensure the steward
-// recovers from transient failures.
+// given registration token. When controllerURL is non-empty, --controller-url is
+// appended to ExecStart so the steward connects to the specified controller.
+// Restart=always and RestartSec=10 ensure the steward recovers from transient failures.
 //
 // Security note: the token appears in the unit file (readable by root). This
 // mirrors the behaviour of --regtoken in ps output. The token is a one-time
 // registration credential — after registration the steward uses mTLS certs.
-func generateSystemdUnit(token string) string {
+func generateSystemdUnit(token, controllerURL string) string {
+	execStart := fmt.Sprintf(`%s --regtoken "%s"`, linuxInstallPath, token)
+	if controllerURL != "" {
+		execStart += fmt.Sprintf(` --controller-url "%s"`, controllerURL)
+	}
 	return fmt.Sprintf(`[Unit]
 Description=CFGMS Steward
 Documentation=https://docs.cfg.is/steward
@@ -186,7 +192,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s --regtoken "%s"
+ExecStart=%s
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -195,5 +201,5 @@ SyslogIdentifier=cfgms-steward
 
 [Install]
 WantedBy=multi-user.target
-`, linuxInstallPath, token)
+`, execStart)
 }

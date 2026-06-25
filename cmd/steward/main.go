@@ -8,8 +8,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -45,9 +48,131 @@ import (
 
 // ControllerURL is the controller address baked in at build time via ldflags.
 // Set during build: go build -ldflags "-X main.ControllerURL=https://ctrl.example.com"
-// No runtime override is supported — the signed binary is a trust assertion about
-// which controller it connects to.
+// For deployments where the binary is not rebuilt per controller, pass
+// --controller-url at install time (ADR-013 §3, Issue #1517).
 var ControllerURL string
+
+// TrustSource identifies the enrollment channel that established the trust anchor.
+// Higher values denote stronger assurance. A steward never silently accepts a
+// weaker source than it was built or enrolled for (ADR-013 §3, Issue #1517).
+type TrustSource int
+
+const (
+	trustSourceTOFU          TrustSource = 1 // first-registration CA pin
+	trustSourceInstallPinned TrustSource = 2 // --controller-ca at install time
+	trustSourceCompileBaked  TrustSource = 3 // URL baked via ldflags
+)
+
+func trustModeString(ts TrustSource) string {
+	switch ts {
+	case trustSourceCompileBaked:
+		return "compile-baked"
+	case trustSourceInstallPinned:
+		return "install-pinned"
+	case trustSourceTOFU:
+		return "tofu"
+	default:
+		return "unknown"
+	}
+}
+
+func trustSourceFromMode(mode string) TrustSource {
+	switch mode {
+	case "compile-baked":
+		return trustSourceCompileBaked
+	case "install-pinned":
+		return trustSourceInstallPinned
+	case "tofu":
+		return trustSourceTOFU
+	default:
+		return 0
+	}
+}
+
+// computeCAPEMFingerprint returns the SHA-256 hex fingerprint of the DER bytes
+// of the first certificate block in caPEM.
+func computeCAPEMFingerprint(caPEM string) (string, error) {
+	block, _ := pem.Decode([]byte(caPEM))
+	if block == nil {
+		return "", fmt.Errorf("no PEM block found in CA PEM")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", fmt.Errorf("invalid CA certificate: %w", err)
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// resolveTrustSource determines the effective trust level and controller URL.
+//
+// Rules (ADR-013 §3):
+//   - compile-baked: no installURL supplied — use compiledURL
+//   - install-pinned: installURL and installCA both non-empty
+//   - tofu: installURL non-empty, installCA empty
+func resolveTrustSource(compiledURL, installURL, installCA string) (TrustSource, string, error) {
+	if installURL == "" {
+		if compiledURL == "" {
+			return 0, "", fmt.Errorf("controller URL not set: binary must be built with " +
+				"-ldflags \"-X main.ControllerURL=https://your-controller.example.com\". " +
+				"See docs/deployment/ for build instructions")
+		}
+		return trustSourceCompileBaked, compiledURL, nil
+	}
+	if installCA != "" {
+		return trustSourceInstallPinned, installURL, nil
+	}
+	return trustSourceTOFU, installURL, nil
+}
+
+// checkTrustDowngrade rejects an enroll attempt that would weaken the trust
+// anchor recorded in id. Also rejects a same-level re-enroll with a different CA.
+func checkTrustDowngrade(current TrustSource, currentCAPEM string, id *StewardIdentity) error {
+	stored := trustSourceFromMode(id.TrustMode)
+	if stored == 0 {
+		return nil
+	}
+	if current < stored {
+		return fmt.Errorf("trust downgrade rejected: enrolled with %s (level %d); "+
+			"cannot re-enroll with %s (level %d) — wipe identity to change trust anchor",
+			id.TrustMode, stored, trustModeString(current), current)
+	}
+	if current >= trustSourceInstallPinned && id.CAPinFingerprint != "" && currentCAPEM != "" {
+		fp, err := computeCAPEMFingerprint(currentCAPEM)
+		if err != nil {
+			return fmt.Errorf("compute CA fingerprint for downgrade check: %w", err)
+		}
+		if fp != id.CAPinFingerprint {
+			return fmt.Errorf("already enrolled; re-pin requires wipe + re-enroll")
+		}
+	}
+	return nil
+}
+
+// pinTOFUCA pins the controller CA on first TOFU enrollment. On first call it
+// records the fingerprint in id and writes the CA to caPath at 0444 (public,
+// immutable). On subsequent calls it verifies the CA matches the pinned value.
+func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
+	fp, err := computeCAPEMFingerprint(caPEM)
+	if err != nil {
+		return fmt.Errorf("compute TOFU CA fingerprint: %w", err)
+	}
+	if id.CAPinFingerprint != "" {
+		if fp != id.CAPinFingerprint {
+			return fmt.Errorf("already enrolled; re-pin requires wipe + re-enroll")
+		}
+		return nil
+	}
+	id.CAPinFingerprint = fp
+	if caPath != "" {
+		if err := os.MkdirAll(filepath.Dir(caPath), 0755); err != nil {
+			return fmt.Errorf("create TOFU CA cert directory: %w", err)
+		}
+		if err := os.WriteFile(caPath, []byte(caPEM), 0444); err != nil { //#nosec G306 -- 0444 intentional: CA is public material, immutable after TOFU pin
+			return fmt.Errorf("write TOFU CA cert: %w", err)
+		}
+	}
+	return nil
+}
 
 func main() {
 	// On Windows: detect if launched by the Service Control Manager and run as
@@ -65,8 +190,9 @@ func main() {
 // buildRootCommand constructs the cobra command tree for cfgms-steward.
 func buildRootCommand() *cobra.Command {
 	var (
-		configPath string
-		regToken   string
+		configPath    string
+		regToken      string
+		controllerURL string
 	)
 
 	root := &cobra.Command{
@@ -84,13 +210,14 @@ Entry paths:
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, configPath)
+			return runRootCommand(cmd, regToken, controllerURL, configPath)
 		},
 	}
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
 	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
+	root.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (overrides compile-time URL; set at install time via service definition)")
 
 	// Subcommands.
 	root.AddCommand(
@@ -104,7 +231,7 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, configPath string) error {
+func runRootCommand(cmd *cobra.Command, regToken, controllerURL, configPath string) error {
 	// Interactive mode: no flags set and no subcommand selected.
 	noFlags := regToken == "" && configPath == ""
 	if noFlags {
@@ -121,13 +248,13 @@ func runRootCommand(cmd *cobra.Command, regToken, configPath string) error {
 		cancel()
 	}()
 
-	return runSteward(ctx, regToken, configPath)
+	return runSteward(ctx, regToken, controllerURL, configPath)
 }
 
 // runSteward starts the steward with the given configuration and blocks until
 // ctx is cancelled. It is called from both the root cobra command and the
 // Windows service handler.
-func runSteward(ctx context.Context, regToken, configPath string) error {
+func runSteward(ctx context.Context, regToken, controllerURL, configPath string) error {
 	// Initialize global logging provider. File is the only supported provider
 	// for the steward binary. Log level is read from CFGMS_LOG_LEVEL (default INFO).
 	logDir := os.Getenv("CFGMS_LOG_DIR")
@@ -193,7 +320,21 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 			ks = nil
 		}
 
-		transportCl, err := registerAndConnect(runCtx, regToken, ks, logger)
+		// Resolve trust source using the compile-baked URL, install-time URL,
+		// and the CA cert on disk (written by the installer for install-pinned mode).
+		installCACertPath := resolveRegistrationCACertPath(logger)
+		var installCAPEM string
+		if installCACertPath != "" {
+			if caData, caErr := os.ReadFile(installCACertPath); caErr == nil { //#nosec G304 -- path from resolveRegistrationCACertPath
+				installCAPEM = string(caData)
+			}
+		}
+		trustSrc, resolvedURL, trustErr := resolveTrustSource(ControllerURL, controllerURL, installCAPEM)
+		if trustErr != nil {
+			return trustErr
+		}
+
+		transportCl, err := registerAndConnect(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, logger)
 		if err != nil {
 			return fmt.Errorf("failed to register with controller: %w", err)
 		}
@@ -312,7 +453,7 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
-	var regToken, caCertPath, fingerprint string
+	var regToken, controllerURL, caCertPath, fingerprint string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -328,24 +469,30 @@ Platforms:
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
 Install is idempotent: running it again updates the binary and restarts the service.
 
-Standard form (controller certificate issued by a public CA):
+Compile-baked URL (default — binary built with -ldflags):
 
   cfgms-steward install --regtoken TOKEN
 
-Private-CA deployments (Tier 1, internal CA, lab environments):
-  Pass --ca-cert and --fingerprint for fingerprint-verified trust-on-first-use
-  (TOFU) of the controller CA certificate. The fingerprint is printed by the
-  controller during --init and can also be retrieved with:
+Install-pinned (private CA, self-hosted deployments — ADR-013 §3):
 
-    cfg admin ca fingerprint`,
+  cfgms-steward install --regtoken TOKEN \
+    --controller-url https://ctrl.example.com \
+    --controller-ca /path/to/ca.crt \
+    --fingerprint HEXFP
+
+TOFU — trust-on-first-use (lab environments):
+
+  cfgms-steward install --regtoken TOKEN \
+    --controller-url https://ctrl.example.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, caCertPath, fingerprint)
+			return runInstall(regToken, controllerURL, caCertPath, fingerprint)
 		},
 	}
 
 	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
 	_ = cmd.MarkFlagRequired("regtoken")
-	cmd.Flags().StringVar(&caCertPath, "ca-cert", "", "Path to controller CA certificate PEM file (private-CA deployments only)")
+	cmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (install-pinned and TOFU modes; omit to use compile-time URL)")
+	cmd.Flags().StringVar(&caCertPath, "controller-ca", "", "Path to controller CA certificate PEM file (install-pinned mode)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
 
 	return cmd
@@ -385,7 +532,7 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, caCertPath, fingerprint string) error {
+func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -393,7 +540,7 @@ func runInstall(regToken, caCertPath, fingerprint string) error {
 
 	var caCertPEM string
 	if caCertPath != "" {
-		data, readErr := os.ReadFile(caCertPath)
+		data, readErr := os.ReadFile(caCertPath) //#nosec G304 -- path from --controller-ca flag, admin-controlled
 		if readErr != nil {
 			return fmt.Errorf("failed to read CA cert file %s: %w", caCertPath, readErr)
 		}
@@ -408,7 +555,7 @@ func runInstall(regToken, caCertPath, fingerprint string) error {
 			"  Linux/macOS: re-run with sudo")
 	}
 
-	return mgr.Install(regToken, caCertPEM, fingerprint)
+	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
 }
 
 // runUninstall performs the uninstall operation for the current platform.
@@ -512,7 +659,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "")
+		return runInstall(token, "", "", "")
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -525,7 +672,7 @@ func runInteractive() error {
 		}()
 
 		fmt.Println("Running in foreground. Press Ctrl+C to stop.")
-		return runSteward(ctx, token, "")
+		return runSteward(ctx, token, "", "")
 	case "3", "":
 		fmt.Println("Exiting.")
 		return nil
@@ -552,6 +699,17 @@ func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging
 		ControllerURL: controllerURL,
 		Timeout:       timeout,
 		CACertPath:    resolveRegistrationCACertPath(logger),
+		Logger:        logger,
+	}
+}
+
+// buildHTTPConfigForInstallPinned returns an HTTPConfig that pins the TLS CA
+// exclusively to installCAPEM with no web-PKI fallback (ADR-013 §3, Issue #1517).
+func buildHTTPConfigForInstallPinned(controllerURL string, timeout time.Duration, installCAPEM string, logger logging.Logger) *registration.HTTPConfig {
+	return &registration.HTTPConfig{
+		ControllerURL: controllerURL,
+		Timeout:       timeout,
+		CAPEM:         installCAPEM,
 		Logger:        logger,
 	}
 }
@@ -632,13 +790,23 @@ type approvedRegistration struct {
 // persists the pending_id locally and polls GET /api/v1/registration/status/{pending_id}
 // with exponential backoff (5s → 60s max) until approved, denied, or timed out.
 // On restart, the persisted pending_id is resumed rather than creating a new pending record.
-func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyStore, logger logging.Logger) (*client.TransportClient, error) {
+//
+// trustSrc and installCAPEM implement the ADR-013 §3 trust anchoring model (Issue #1517).
+// installCAPEM is non-empty only for install-pinned mode; TOFU and compile-baked pass "".
+func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
 	certStoreDir := defaultCertStoreDir()
 
+	// Downgrade guard: reject if stored enrollment had stronger trust assurance.
+	if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
+		if dgErr := checkTrustDowngrade(trustSrc, installCAPEM, storedID); dgErr != nil {
+			return nil, dgErr
+		}
+	}
+
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
-	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, logger); tc != nil {
+	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, logger); tc != nil {
 		return tc, nil
 	} else if reconnErr != nil {
 		logger.Warn("Stored-identity reconnect failed; checking for expired-cert refresh path", "error", reconnErr)
@@ -655,7 +823,7 @@ func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyS
 			})
 			if certMgrErr == nil {
 				if certs, listErr := certMgr.ListCertificates(); listErr == nil && hasExpiredClientCert(certs) {
-					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, logger)
+					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, controllerURL, logger)
 					if refreshErr == nil {
 						return tc, nil
 					}
@@ -677,14 +845,13 @@ func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyS
 
 	logger.Info("Registering steward via HTTP API")
 
-	controllerURL := ControllerURL
-	if controllerURL == "" {
-		return nil, fmt.Errorf("controller URL not set: binary must be built with " +
-			"-ldflags \"-X main.ControllerURL=https://your-controller.example.com\". " +
-			"See docs/deployment/ for build instructions")
+	var httpCfg *registration.HTTPConfig
+	if trustSrc == trustSourceInstallPinned {
+		httpCfg = buildHTTPConfigForInstallPinned(controllerURL, 30*time.Second, installCAPEM, logger)
+	} else {
+		httpCfg = buildHTTPConfig(controllerURL, 30*time.Second, logger)
 	}
-
-	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
+	httpClient, err := registration.NewHTTPClient(httpCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
@@ -711,7 +878,7 @@ func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyS
 		if approved != nil {
 			enrichApprovedWithDeviceIdentity(approved, ks)
 			_ = clearPendingState(certStoreDir)
-			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, logger)
+			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, logger)
 		}
 		// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
 		logger.Info("Persisted pending record expired on controller; performing fresh registration")
@@ -760,7 +927,7 @@ func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyS
 		}
 		enrichApprovedWithDeviceIdentity(approved, ks)
 		_ = clearPendingState(certStoreDir)
-		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, logger)
+		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, logger)
 	}
 
 	// Immediate approval (HTTP 200): proceed directly to transport setup.
@@ -782,7 +949,7 @@ func registerAndConnect(ctx context.Context, token string, ks *identity.FileKeyS
 		SigningCert:      regResp.SigningCert,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, logger)
 }
 
 // pollForApproval polls GET /api/v1/registration/status/{pendingID} with exponential
@@ -865,10 +1032,16 @@ func pollForApproval(
 // registration (immediate or manual-review poll), then builds and connects the
 // transport client. Shared by the immediate-approval and poll-approval paths to
 // avoid duplication.
+//
+// trustSrc and installCAPEM implement ADR-013 §3 trust anchoring (Issue #1517).
+// For TOFU mode, the CA from reg.CACert is pinned to disk before the identity
+// is saved. For install-pinned, the fingerprint of installCAPEM is recorded.
 func connectWithApprovedRegistration(
 	ctx context.Context,
 	reg approvedRegistration,
 	certStoreDir, token string,
+	trustSrc TrustSource,
+	installCAPEM string,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
 	// Persist the identity record so that a subsequent restart can reconnect
@@ -882,7 +1055,28 @@ func connectWithApprovedRegistration(
 		SigningCertPEM:   reg.SigningCert,
 		DeviceID:         reg.DeviceID,
 		IdentityKeyPub:   reg.IdentityKeyPub,
+		TrustMode:        trustModeString(trustSrc),
 	}
+
+	// Record the CA pin fingerprint for install-pinned and TOFU modes.
+	switch trustSrc {
+	case trustSourceTOFU:
+		if reg.CACert != "" {
+			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, &persistedID); err != nil {
+				logger.Warn("TOFU CA pin failed; identity will not have fingerprint", "error", err)
+			}
+		}
+	case trustSourceInstallPinned:
+		if installCAPEM != "" {
+			fp, fpErr := computeCAPEMFingerprint(installCAPEM)
+			if fpErr == nil {
+				persistedID.CAPinFingerprint = fp
+			} else {
+				logger.Warn("Failed to compute install CA fingerprint; CAPinFingerprint not recorded", "error", fpErr)
+			}
+		}
+	}
+
 	if saveErr := saveIdentity(certStoreDir, persistedID); saveErr != nil {
 		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
 	} else {
@@ -975,7 +1169,7 @@ func connectWithApprovedRegistration(
 // HTTP registration (first run or manually cleared identity).
 // Returns (nil, err) when a stored identity exists but reconnect fails — caller
 // should log the error and fall back to HTTP registration.
-func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, logger logging.Logger) (*client.TransportClient, error) {
+func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, trustSrc TrustSource, logger logging.Logger) (*client.TransportClient, error) {
 	id, err := loadIdentity(certStoreDir)
 	if err != nil {
 		// corrupt/unreadable identity: log and treat as absent so the caller falls through
@@ -984,6 +1178,17 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	}
 	if id == nil {
 		return nil, nil // first run; no stored identity
+	}
+
+	// Trust downgrade guard: reject reconnect if the current trust source would
+	// weaken the assurance level of the stored enrollment (ADR-013 §3, Issue #1517).
+	if id.TrustMode != "" {
+		stored := trustSourceFromMode(id.TrustMode)
+		if stored > 0 && trustSrc > 0 && trustSrc < stored {
+			return nil, fmt.Errorf("trust downgrade rejected: enrolled with %s (level %d); "+
+				"current source is %s (level %d) — wipe identity to change trust anchor",
+				id.TrustMode, stored, trustModeString(trustSrc), trustSrc)
+		}
 	}
 
 	// The reconnect path must be able to verify signed sync_config commands.
@@ -1174,10 +1379,9 @@ func refreshAndConnect(
 	ctx context.Context,
 	id *StewardIdentity,
 	ks *identity.FileKeyStore,
-	certStoreDir, token string,
+	certStoreDir, token, controllerURL string,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
-	controllerURL := ControllerURL
 	if controllerURL == "" {
 		return nil, fmt.Errorf("controller URL not set; cannot perform registration refresh")
 	}
@@ -1259,7 +1463,12 @@ func refreshAndConnect(
 		ServerCert:       updatedID.ServerCertPEM,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, logger)
+	// Preserve the stored trust mode on refresh — the trust anchor is already established.
+	refreshTrustSrc := trustSourceFromMode(id.TrustMode)
+	if refreshTrustSrc == 0 {
+		refreshTrustSrc = trustSourceCompileBaked
+	}
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", logger)
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the

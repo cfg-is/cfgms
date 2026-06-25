@@ -32,11 +32,15 @@ type Manager interface {
 	// binary replaced, and the service restarted.
 	// Requires elevated privileges (root on Linux/macOS, Administrator on Windows).
 	//
+	// When controllerURL is non-empty, it is embedded in the service definition
+	// (ExecStart/launchd args/CreateService args) as --controller-url so the
+	// steward connects to the specified URL on startup (ADR-013 §3, Issue #1517).
+	//
 	// When caCertPEM is non-empty, Install writes the CA cert to the platform-standard
 	// path before registering the service. When expectedFingerprint is also non-empty,
 	// the cert's SHA-256 fingerprint is verified first and Install returns an error
 	// without writing the cert or registering the service if it does not match.
-	Install(token, caCertPEM, expectedFingerprint string) error
+	Install(token, controllerURL, caCertPEM, expectedFingerprint string) error
 
 	// Uninstall stops and removes the OS service definition.
 	// If purge is true the installed binary is also deleted.
