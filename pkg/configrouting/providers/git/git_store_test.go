@@ -4,6 +4,7 @@ package git
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -687,6 +689,37 @@ func TestGitConfigStore_ValidateConfig(t *testing.T) {
 	assert.ErrorIs(t, store.ValidateConfig(ctx, jsonEntry), cfgconfig.ErrInvalidFormat, "non-YAML must return ErrInvalidFormat")
 
 	assert.Error(t, store.ValidateConfig(ctx, nil), "nil entry must return error")
+}
+
+// TestGitConfigStore_RepoDirUsesValidatedBasePath verifies that store.repoDir is
+// constructed from the cleaned return value of security.ValidateAndCleanPath, not the
+// raw tenantID string. The parent of repoDir must equal ValidateAndCleanPath(workDir,
+// tenantID) and the leaf segment must be the hex SHA-256 of the source URL. (#2176)
+func TestGitConfigStore_RepoDirUsesValidatedBasePath(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{
+		"configs/default/app.yaml": []byte("x: 1\n"),
+	})
+
+	workDir := t.TempDir()
+	ss := newMemorySecretStore(nil)
+	const tenantID = "acme-tenant"
+	source := makeSource(remoteDir, "configs")
+
+	store, err := NewGitConfigStore(context.Background(), source, tenantID, ss, workDir, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	// cleanedBase is the canonical path that ValidateAndCleanPath returns for workDir/tenantID.
+	cleanedBase, cleanErr := security.ValidateAndCleanPath(workDir, tenantID)
+	require.NoError(t, cleanErr)
+
+	// repoDir parent must equal cleanedBase (validated path, not raw filepath.Join).
+	assert.Equal(t, cleanedBase, filepath.Dir(store.repoDir),
+		"repoDir parent must equal the cleaned base from ValidateAndCleanPath")
+
+	// repoDir leaf must be the hex-encoded SHA-256 of the source URL.
+	expectedLeaf := fmt.Sprintf("%x", sha256.Sum256([]byte(source.URL)))
+	assert.Equal(t, expectedLeaf, filepath.Base(store.repoDir),
+		"repoDir leaf must be hex-SHA256 of the source URL")
 }
 
 // TestGitConfigStore_ResolveConfigWithInheritance verifies that ResolveConfigWithInheritance

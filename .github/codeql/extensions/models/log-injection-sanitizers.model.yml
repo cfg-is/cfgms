@@ -31,3 +31,18 @@ extensions:
       - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "ReturnValue", "clear-text-logging", "manual"]
       - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "ReturnValue", "log-injection", "manual"]
       - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "ReturnValue", "clear-text-logging", "manual"]
+
+  # Belt-and-suspenders: summaryModel(kind=value) declares that SanitizeLogValue and
+  # RedactedID produce clean output — taint from Argument[0] does NOT propagate to
+  # ReturnValue. This complements the barrierModel entries above: flows that the
+  # barrierModel does not suppress (e.g., json.Decode field-selection sources on some
+  # CodeQL versions) are caught here. Both models must be present; neither alone is
+  # reliable across all taint-flow paths (per testing in pack 0.0.5 / 0.0.6 history).
+  # Alerts #669, #713, #714, #715, #722 — belt-and-suspenders for SanitizeLogValue
+  # log-injection FPs that originate from JSON-decoded request fields.
+  - addsTo:
+      pack: codeql/go-all
+      extensible: summaryModel
+    data:
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "SanitizeLogValue", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/logging", "", false, "RedactedID", "", "", "Argument[0]", "ReturnValue", "value", "manual"]
