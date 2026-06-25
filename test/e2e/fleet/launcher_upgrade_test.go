@@ -64,7 +64,7 @@ func killBareStewdAndWrapper(t *testing.T, container string) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "exec", "--user", "root", container,
 		"sh", "-c",
-		"pkill -9 -f './steward' 2>/dev/null; pkill -9 -f 'while true' 2>/dev/null; true",
+		"pkill -9 -f './steward' 2>/dev/null; pkill -9 -f '/app/steward' 2>/dev/null; pkill -9 -f 'while true' 2>/dev/null; sleep 0.5; true",
 	).CombinedOutput()
 	if err != nil {
 		t.Logf("killBareStewdAndWrapper in %s: %v (output: %s)", container, err, string(out))
