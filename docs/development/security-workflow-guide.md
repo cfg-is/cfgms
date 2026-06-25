@@ -62,13 +62,24 @@ CodeQL cannot see our runtime validators, so it raises false positives where a v
 - **Pack source**: `.github/codeql/extensions/` — `qlpack.yml` (`cfg-is/cfgms-go-extensions`) plus `models/*.model.yml`.
 - **Publish requirement**: the pack is referenced *by name* from `.github/codeql/codeql-config.yml` (`packs:`) and **must be published to the ghcr.io CodeQL pack registry** by `.github/workflows/codeql-pack-publish.yml`. **Local-path pack references are not supported by the codeql-action** — a model file on disk does nothing until the pack is republished.
 - **Bump the version (REQUIRED for every model change)**: editing a `models/*.yml` does nothing on its own. `codeql pack publish` refuses to overwrite an existing `<name>@<version>` and no-ops (`"already exists"`); the publish workflow treats that as a green no-op. You **must bump `version:` in `.github/codeql/extensions/qlpack.yml`** in the same change, or the registry keeps serving the old pack and your model stays inert (it will still *bundle* fine, masking the problem).
-- **Already modeled**: `safeJoin` (path-injection), `SanitizeLogValue` + `RedactedID` (log-injection / clear-text-logging).
+- **Already modeled**: `safeJoin` (path-injection), `ValidateAndCleanPath` (path-injection), `SanitizeLogValue` + `RedactedID` (log-injection / clear-text-logging).
 
 Decision path for a CodeQL alert:
 
 1. **Genuine bug** → fix the code (e.g. wrap operator-supplied values in `logging.SanitizeLogValue`).
-2. **False positive with a real, value-returning sanitizer** (e.g. `safeJoin`) → add/extend a model. Prefer **`barrierModel`** (kind = the sink kind, e.g. `path-injection`; CodeQL ≥ 2.25.2) over the older **`summaryModel(kind=value)`**, which is unreliable on some flow paths. Verify the exact `barrierModel` tuple format against `github/codeql:go/ql/lib/ext/` — the format is finicky and CI is the only reliable verification (CodeQL can't be modeled-and-tested purely locally).
+2. **False positive with a real, value-returning sanitizer** (e.g. `safeJoin`, `ValidateAndCleanPath`) → add/extend a model. Use **both** `barrierModel` (kind = the sink kind, e.g. `path-injection`; CodeQL ≥ 2.25.2) **and** `summaryModel(kind=value)` together — neither is reliable alone across all taint-flow paths (json.Decode field-selection flows bypass barrierModel in some CodeQL versions; summaryModel can miss other paths). Also prefer refactoring the call site to *use the sanitizer's return value* (e.g. `cleanedBase := ValidateAndCleanPath(...)`) rather than discarding it — a code-level taint barrier is more robust than any model. Verify the exact `barrierModel` tuple format against `github/codeql:go/ql/lib/ext/` — the format is finicky and CI is the only reliable verification (CodeQL can't be modeled-and-tested purely locally).
 3. **False positive from a guard-style validator** (returns only `error`, e.g. blobstore `validateKey`/`validateKeyComponent`) or a **heuristic source** (CodeQL flagging a variable *named* `*SecretKey` that holds a SecretStore key *reference*, not a value) → data extensions can't cleanly model these; **dismiss the alert with justification** (or refactor to a value-returning sanitizer that *can* be modeled).
+4. **False positive from struct field-insensitivity** (CodeQL traces taint through a whole struct because one field is a secret — e.g. `APIKey.Key` — even though only non-secret fields are logged) → these **cannot** be fixed by extension-pack models (no field-access barrier primitive exists). Dismiss with justification; confirm via grep that no secret/credential field value is passed to the logger at the flagged site.
+
+#### Model inventory and dismissal log (most recent first)
+
+| Pack version | Alert IDs | Kind | Resolution | Notes |
+|---|---|---|---|---|
+| 0.0.7 | #745, #746 | path-injection | Code fix + model | `git_store.go`: use `cleanedBase` (return value of `ValidateAndCleanPath`) instead of raw `tenantID` in `filepath.Join`. `ValidateAndCleanPath` added as `summaryModel` + `barrierModel` in `path-injection-sanitizers.model.yml`. |
+| 0.0.7 | #669, #713, #714, #715, #722 | log-injection | Model + dismiss | `SanitizeLogValue` `summaryModel(kind=value)` added as belt-and-suspenders over existing `barrierModel` (json.Decode field-selection flows bypass barrierModel alone). Alerts dismissed as FP: all sites already wrap input in `SanitizeLogValue`; the barrierModel is correct but insufficiently reliable. |
+| 0.0.7 | #774, #777 | clear-text-logging | Dismiss | Struct field-insensitivity FP: `keyInfo.ID`/`keyInfo.TenantID` (middleware.go) and `deviceID` (controller_service.go) are non-secret fields; the struct's `Key`/`Token` field is never logged. Cannot be modeled (no field-access barrier primitive). |
+| 0.0.6 | #747–#751 | log-injection | Dismiss | handlers_registration_refresh.go — json.Decode field-selection sources; all sites use `SanitizeLogValue`. Same heuristic-source class as #669–#722. |
+| 0.0.5 | safeJoin | path-injection | Model | `summaryModel` + `barrierModel` for `pkg/storage/providers/flatfile.safeJoin`. |
 
 ## Local Development Workflow
 
