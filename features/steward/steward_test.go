@@ -335,22 +335,21 @@ func TestMonitorCloseRace(t *testing.T) {
 	// goroutines (stdout/stderr pipe copy + ctx-watch). All of these can be
 	// mid-flight when this test's goleak check runs on a slow runner.
 	//
-	// goleak.IgnoreAnyFunction matches goroutines that have the named function
-	// anywhere in their OWN stack — it does NOT match the "created by" line
-	// (goleak explicitly excludes creator functions from the match set). The
-	// os/exec goroutines fall into two families:
-	//
-	//   1. Pipe I/O copiers: top = internal/poll.runtime_pollWait, with
-	//      os/exec.(*Cmd).Start.func2 further down (the goroutine entry point).
-	//      IgnoreTopFunction("writerDescriptor") misses these because the top
-	//      function is the poll wait, not the copier.
-	//
-	//   2. Context watcher: os/exec.(*Cmd).watchCtx on top.
-	//
-	// Match by the actual goroutine entry-point functions visible in the stack.
+	// Match each family by ANY frame in the stack. The os/exec pipe-reader goroutines
+	// are the ones that trip this on Windows: they block in syscall.syscalln (slow I/O)
+	// long after the command exits. goleak.HasFunction checks allFunctions which
+	// excludes the "created by" frame, so IgnoreAnyFunction("os/exec.(*Cmd).Start")
+	// is a no-op. writerDescriptor.func1 IS a regular call-stack frame on all
+	// platforms: on Linux/macOS it sits below internal/poll.runtime_pollWait; on
+	// Windows it sits below syscall.syscalln via Start.func2.
 	goleak.VerifyNone(t, existingGoroutines,
-		goleak.IgnoreAnyFunction("os/exec.(*Cmd).Start.func2"),
-		goleak.IgnoreAnyFunction("os/exec.(*Cmd).watchCtx"),
+		// os/exec pipe-reader goroutines spawned by DNA collection in sibling tests.
+		// goleak.HasFunction checks allFunctions which excludes the "created by"
+		// frame, so IgnoreAnyFunction("os/exec.(*Cmd).Start") is a no-op.
+		// writerDescriptor.func1 IS a regular call-stack frame on all platforms:
+		// on Linux/macOS it appears below internal/poll.runtime_pollWait; on Windows
+		// it appears below syscall.syscalln via Start.func2.
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).writerDescriptor.func1"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSoftwareInfo"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSecurityInfo"),
