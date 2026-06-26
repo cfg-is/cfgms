@@ -33,8 +33,13 @@ For each non-terminal status, list its items and check whether their backing Git
 # Non-terminal statuses worth checking. Done and Blocked are excluded:
 #   Done    — already terminal
 #   Blocked — may be intentionally held by founder action; don't auto-resolve
+# Resolve the project-queue helper from the repo root so this works in both the
+# container (repo at /workspace) and a host session (repo elsewhere). Do NOT
+# hardcode /workspace — that silently no-ops on the host and yields a false
+# "no stale items" reading.
+PQ="$(git rev-parse --show-toplevel)/scripts/project-queue.sh"
 for status in "Draft" "Ready" "In Progress" "Reviewing" "Fix" "Failed"; do
-    /workspace/scripts/project-queue.sh list-by-status "$status" 2>/dev/null \
+    "$PQ" list-by-status "$status" 2>/dev/null \
       | jq -r --arg s "$status" '.[] | "\($s)\t\(.item_id)\t\(.issue_num)\t\(.title)"'
 done > /tmp/pipeline-sweep-nonterm.tsv
 ```
@@ -67,8 +72,9 @@ done < /tmp/pipeline-sweep-nonterm.tsv > /tmp/pipeline-sweep-stale.tsv
 For each stale entry, move the project item to `Done`:
 
 ```bash
+PQ="$(git rev-parse --show-toplevel)/scripts/project-queue.sh"
 while IFS=$'\t' read -r issue_num prev_status item_id title; do
-    /workspace/scripts/project-queue.sh update-field "$item_id" status Done
+    "$PQ" update-field "$item_id" status Done
     echo "Updated #$issue_num ($title): $prev_status → Done"
 done < /tmp/pipeline-sweep-stale.tsv
 ```
@@ -76,7 +82,8 @@ done < /tmp/pipeline-sweep-stale.tsv
 **Special case — Blocked items:** do NOT touch Blocked items even if the backing issue is CLOSED. Blocked is held intentionally by founder action (CLA Assistant configuration, release tagging, etc.); if a Blocked item's issue is closed, that's a state worth surfacing to the founder, not auto-resolving.
 
 ```bash
-/workspace/scripts/project-queue.sh list-by-status Blocked \
+PQ="$(git rev-parse --show-toplevel)/scripts/project-queue.sh"
+"$PQ" list-by-status Blocked \
   | jq -r '.[] | "\(.item_id)\t\(.issue_num)\t\(.title)"' \
   | while IFS=$'\t' read -r item_id issue_num title; do
       state=$(gh issue view "$issue_num" --repo cfg-is/cfgms --json state -q .state 2>/dev/null || echo MISSING)
