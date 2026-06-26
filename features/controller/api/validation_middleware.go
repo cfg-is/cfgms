@@ -153,6 +153,10 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 			case "status":
 				// Status filter validation
 				validator.ValidateString(result, fieldName, value, "charset:alphanumeric_dash", "max_length:32")
+			case "tenant_id":
+				// Hierarchical tenant IDs use '/' as a path separator (e.g., "fleet-root/fleet-child-b").
+				// Must match charset:tenant_path_id which allows letters, digits, hyphens, underscores, and '/'.
+				validator.ValidateString(result, fieldName, value, "charset:tenant_path_id", "max_length:256")
 			default:
 				// Generic query parameter validation
 				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:512", "no_control_chars")

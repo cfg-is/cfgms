@@ -152,6 +152,20 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	s.setStewardStatusByID(t, stewardID, "revoked")
 	t.Logf("Revoked: marked steward %s as revoked", stewardID)
 
+	// Wait for the controller to detect the container stop and mark the steward as
+	// disconnected before proceeding. Without this, the connection registry still
+	// shows "connected" from the pre-stop gRPC session, causing a false positive
+	// in the "must NOT be connected" check below.
+	disconnectDeadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(disconnectDeadline) {
+		state, _ := s.getStewardConnectionState(t, stewardID)
+		if state != "connected" {
+			t.Logf("Revoked: controller detected disconnection (state=%q)", state)
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
 	// Restart — steward attempts refresh challenge, controller returns 403 (revoked-before-PoP).
 	s.containerStart(t, container, 60*time.Second)
 

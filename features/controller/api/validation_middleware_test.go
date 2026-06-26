@@ -183,3 +183,54 @@ func TestValidateURLParameters_TenantPathWithSlash(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateQueryParameters_TenantIDWithSlash verifies that a query parameter named
+// "tenant_id" with a hierarchical value (e.g., "fleet-root/fleet-child-b") passes
+// validation via charset:tenant_path_id. Regression test for BUG 1 in Issue #2098
+// where the default safe_text charset incorrectly rejected tenant IDs containing '/'.
+func TestValidateQueryParameters_TenantIDWithSlash(t *testing.T) {
+	s := &Server{}
+	validator := security.NewEnhancedValidator(nil)
+
+	tests := []struct {
+		name      string
+		queryKey  string
+		queryVal  string
+		wantValid bool
+	}{
+		{
+			name:      "hierarchical tenant_id with slash passes",
+			queryKey:  "tenant_id",
+			queryVal:  "fleet-root/fleet-child-b",
+			wantValid: true,
+		},
+		{
+			name:      "deep hierarchical tenant_id passes",
+			queryKey:  "tenant_id",
+			queryVal:  "root/msp-a/client-1/servers",
+			wantValid: true,
+		},
+		{
+			name:      "tenant_id with dot-dot traversal rejected",
+			queryKey:  "tenant_id",
+			queryVal:  "../etc/passwd",
+			wantValid: false,
+		},
+		{
+			name:      "plain query param still uses safe_text (no slash allowed)",
+			queryKey:  "action",
+			queryVal:  "fleet-root/fleet-child-b",
+			wantValid: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/refresh/pending?"+tc.queryKey+"="+tc.queryVal, nil)
+			result := &security.ValidationResult{Valid: true}
+			s.validateQueryParameters(validator, result, req)
+			assert.Equal(t, tc.wantValid, result.Valid,
+				"%s=%q: expected valid=%v, errors=%v", tc.queryKey, tc.queryVal, tc.wantValid, result.Errors)
+		})
+	}
+}
