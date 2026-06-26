@@ -40,11 +40,9 @@ func TestDarwinManagerInstallRequiresElevation(t *testing.T) {
 
 // TestDarwinInstallFingerprintMismatch verifies that a mismatched CA fingerprint causes
 // Install to return an error before writing the cert or registering the daemon.
-// Runs without root because fingerprint verification is checked before the elevation gate.
+// verifyCACertFingerprint is called before IsElevated(), so the error is returned
+// regardless of whether the caller is root.
 func TestDarwinInstallFingerprintMismatch(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("skipping — running as root would proceed past fingerprint check to service ops")
-	}
 	dir := t.TempDir()
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
 
@@ -61,7 +59,7 @@ func TestDarwinInstallFingerprintMismatch(t *testing.T) {
 }
 
 // TestDarwinInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// platform path with mode 0444 when a correct fingerprint is provided (ADR-013 §3).
 func TestDarwinInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, fingerprint := generateTestCACert(t)
@@ -73,7 +71,7 @@ func TestDarwinInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 per ADR-013 §3")
 }
 
 func TestDarwinManagerUninstallRequiresElevation(t *testing.T) {

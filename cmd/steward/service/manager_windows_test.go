@@ -63,7 +63,7 @@ func TestWindowsInstallFingerprintMismatch(t *testing.T) {
 }
 
 // TestWindowsInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// platform path with mode 0444 when a correct fingerprint is provided (ADR-013 §3).
 func TestWindowsInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
@@ -77,7 +77,7 @@ func TestWindowsInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 per ADR-013 §3")
 }
 
 func TestWindowsManagerUninstallRequiresElevation(t *testing.T) {
