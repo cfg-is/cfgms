@@ -156,15 +156,19 @@ func runControllerAuditList(_ *cobra.Command, _ []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "TIMESTAMP\tSEVERITY\tACTION\tUSER\tRESULT")
+	if _, err := fmt.Fprintln(w, "TIMESTAMP\tSEVERITY\tACTION\tUSER\tRESULT"); err != nil {
+		return err
+	}
 	for _, e := range apiResp.Data {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			e.Timestamp.Format(time.RFC3339),
 			e.Severity,
 			e.Action,
 			e.UserID,
 			e.Result,
-		)
+		); err != nil {
+			return err
+		}
 	}
 	return w.Flush()
 }
