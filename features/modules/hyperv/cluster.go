@@ -22,6 +22,12 @@ import (
 // touched, regardless of ownership.
 var ErrClusterNotDeclared = errors.New("hyperv: cluster not in declared cluster_name scope")
 
+// ErrTransportNotConfigured is returned by getCluster / clusterOwnershipHelper
+// when the module has no transport wired (m.transport == nil). It is distinct
+// from ErrClusterNotDeclared (a scope-cap sentinel) so callers can tell a
+// misconfiguration apart from an out-of-scope cluster name.
+var ErrTransportNotConfigured = errors.New("hyperv: cluster transport not configured")
+
 // ClusterConfig is the DESIRED state of a Hyper-V failover cluster as declared
 // by an operator. S1 manages no cluster mutation; the desired-state struct
 // exists so the executor and DNA layers have a stable ConfigState shape (Set /
@@ -173,7 +179,7 @@ func (m *hypervModule) getCluster(ctx context.Context, name string) (modules.Con
 		return nil, fmt.Errorf("hyperv: get cluster %q: %w", name, ErrClusterNotDeclared)
 	}
 	if m.transport == nil {
-		return nil, ErrClusterNotDeclared
+		return nil, fmt.Errorf("hyperv: get cluster %q: %w", name, ErrTransportNotConfigured)
 	}
 
 	output, err := m.transport.ExecutePS(ctx, psGetCluster, map[string]string{"ClusterName": name})
@@ -262,7 +268,7 @@ func (m *hypervModule) clusterOwnershipHelper(ctx context.Context, clusterName s
 		return false, nil, fmt.Errorf("hyperv: cluster ownership %q: %w", clusterName, ErrClusterNotDeclared)
 	}
 	if m.transport == nil {
-		return false, nil, ErrClusterNotDeclared
+		return false, nil, fmt.Errorf("hyperv: cluster ownership %q: %w", clusterName, ErrTransportNotConfigured)
 	}
 
 	owner := m.readCNOOwner(ctx, clusterName)

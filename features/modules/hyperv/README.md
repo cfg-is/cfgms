@@ -487,8 +487,8 @@ name travels via `ArgumentList`, never composed into PowerShell text.
 | `resource_owner` | Map of each clustered VM role group → its current owner node (`Get-ClusterGroup` where `GroupType -eq 'VirtualMachine'`). |
 | `csv_paths` | Cluster Shared Volume friendly volume paths (`Get-ClusterSharedVolume`). |
 
-The five read-only cmdlets the module invokes — `Get-Cluster`,
-`Get-ClusterNode`, `Get-ClusterGroup`, `Get-ClusterResource`,
+The four read-only cmdlets the module invokes — `Get-Cluster`,
+`Get-ClusterNode`, `Get-ClusterGroup`, and
 `Get-ClusterSharedVolume` — are declared in `module.yaml`'s
 `behavioral_envelope`. No write cmdlet (`Add-*`/`Remove-*`/`New-*`) is declared.
 

@@ -4,6 +4,7 @@ package hyperv
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -59,6 +60,7 @@ func TestClusterConfig_Validate(t *testing.T) {
 func TestClusterScopeCap_UndeclaredCluster(t *testing.T) {
 	transport := &testWinRMTransport{}
 	m, _ := clusterTestModule(t, transport) // m.clusterName == "lab-hv"
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
 	_, err := m.getCluster(context.Background(), "other-cluster")
 	require.Error(t, err)
@@ -122,10 +124,6 @@ func TestClusterOwnershipHelper_NonOwner(t *testing.T) {
 	require.NotNil(t, owners, "role owners must be returned for a present CNO")
 	assert.Equal(t, "NODE2", owners["web-01"])
 	assert.Equal(t, "NODE1", owners["db-01"])
-
-	// S1: a non-owner is a nil-error skip, never an error — assert no error and
-	// that CFGMS is not blocked (the helper merely reports).
-	require.NoError(t, err)
 
 	require.NoError(t, m.auditMgr.Flush(context.Background()))
 	var ownershipEvt *business.AuditEntry
@@ -206,6 +204,14 @@ func TestGetCluster_FoundPopulatesDNA(t *testing.T) {
 	require.True(t, ok, "resource_owner must be a map[string]string")
 	assert.Equal(t, "NODE1", owners["web-01"])
 	assert.Equal(t, "NODE2", owners["db-01"])
+
+	// This node owns the CNO, so getCluster issues exactly three PS queries
+	// (Get-Cluster, the CNO-owner read, the resource-owner read) and no second
+	// CNO-owner read. A regression that adds or drops a PS call is caught here.
+	transport.mu.Lock()
+	callCount := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 3, callCount, "owner node issues exactly three PS queries")
 }
 
 // TestClusterScopeCap_OwnershipHelper verifies the scope cap is ALSO enforced in
@@ -214,6 +220,7 @@ func TestGetCluster_FoundPopulatesDNA(t *testing.T) {
 func TestClusterScopeCap_OwnershipHelper(t *testing.T) {
 	transport := &testWinRMTransport{}
 	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
 	_, _, err := m.clusterOwnershipHelper(context.Background(), "rogue-cluster")
 	require.Error(t, err)
@@ -222,4 +229,151 @@ func TestClusterScopeCap_OwnershipHelper(t *testing.T) {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
 	assert.Len(t, transport.calls, 0, "ownership helper scope cap must not touch the transport")
+}
+
+// TestGetCluster_TransportError verifies that a transport failure on the
+// Get-Cluster query propagates as a wrapped non-nil error (no silent
+// swallowing).
+func TestGetCluster_TransportError(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallErrors: []error{errors.New("winrm: connection refused")},
+	}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.Error(t, err, "a transport failure must surface as an error")
+	assert.Nil(t, state, "no status is returned on a transport failure")
+	assert.Contains(t, err.Error(), "winrm: connection refused",
+		"the underlying transport error must be wrapped, not swallowed")
+}
+
+// TestGetCluster_MalformedJSON verifies the json.Unmarshal error branch in
+// getCluster (cluster.go ~190): non-JSON Get-Cluster output yields a wrapped
+// parse error.
+func TestGetCluster_MalformedJSON(t *testing.T) {
+	transport := &testWinRMTransport{
+		// PowerShell error text instead of JSON.
+		perCallOutputs: []string{"Get-Cluster : Cluster service is not running."},
+	}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.Error(t, err, "malformed Get-Cluster output must surface a parse error")
+	assert.Nil(t, state)
+	assert.Contains(t, err.Error(), "parse get-cluster response",
+		"the parse error must be wrapped with context")
+}
+
+// TestReadResourceOwners_MalformedJSON verifies the json.Unmarshal error branch
+// in readResourceOwners (cluster.go ~303): non-JSON resource-owner output yields
+// a wrapped parse error. Driven through getCluster so the third PS call returns
+// garbage while the prior calls succeed.
+func TestReadResourceOwners_MalformedJSON(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
+			`{"owner":"NODE1"}`, // CNO owner read (this node)
+			"not-json",          // resource-owner read → parse error
+		},
+	}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.Error(t, err, "malformed resource-owner output must surface a parse error")
+	assert.Nil(t, state)
+	assert.Contains(t, err.Error(), "parse cluster resource owners",
+		"the resource-owner parse error must be wrapped with context")
+}
+
+// TestReadCNOOwner_MalformedJSON verifies the json.Unmarshal branch in
+// readCNOOwner (cluster.go ~242). readCNOOwner deliberately swallows transient
+// errors and returns "" — so a malformed owner response yields an empty owner.
+// In the getCluster context, an empty CNO owner is treated as a transient
+// failover (clusterOwnershipHelper returns false,nil,nil), so getCluster
+// succeeds with an empty cno_owner_node and no role owners.
+func TestReadCNOOwner_MalformedJSON(t *testing.T) {
+	// Direct unit assertion on readCNOOwner: malformed JSON → "".
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{"Get-ClusterGroup : The cluster group could not be found."},
+	}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	owner := m.readCNOOwner(context.Background(), "lab-hv")
+	assert.Empty(t, owner, "malformed CNO-owner JSON must be swallowed to an empty owner")
+}
+
+// TestGetCluster_FoundNonCNOOwner verifies the else branch in getCluster: the
+// cluster is found but this node (NODE1) is NOT the CNO owner (NODE2 is), so
+// getCluster re-reads the CNO owner (the 4th transport call) to populate
+// cno_owner_node with the live owner. Asserts the resulting CNOOwnerNode is the
+// other node and the exact transport call count.
+func TestGetCluster_FoundNonCNOOwner(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			// 0: Get-Cluster
+			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2"],"CsvPaths":["C:\\ClusterStorage\\CSV01"]}`,
+			// 1: CNO owner read inside the ownership helper → NODE2 (not this node)
+			`{"owner":"NODE2"}`,
+			// 2: resource-owner read
+			`{"owners":{"web-01":"NODE2"}}`,
+			// 3: second CNO owner read (getCluster else branch) → NODE2
+			`{"owner":"NODE2"}`,
+		},
+	}
+	m, _ := clusterTestModule(t, transport) // m.nodeHostname == "NODE1"
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.NoError(t, err)
+
+	mp := state.AsMap()
+	assert.Equal(t, "NODE2", mp["cno_owner_node"],
+		"a non-owner node must report the live CNO owner (NODE2)")
+
+	owners, ok := mp["resource_owner"].(map[string]string)
+	require.True(t, ok)
+	assert.Equal(t, "NODE2", owners["web-01"])
+
+	// Non-owner path issues four PS queries: Get-Cluster, the helper's CNO read,
+	// the resource-owner read, and the second CNO read in getCluster's else
+	// branch.
+	transport.mu.Lock()
+	callCount := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 4, callCount, "non-owner path issues exactly four PS queries")
+}
+
+// TestGetCluster_NilTransport verifies #7: with no transport wired, getCluster
+// returns the distinct ErrTransportNotConfigured sentinel (a misconfiguration),
+// NOT the ErrClusterNotDeclared scope-cap sentinel.
+func TestGetCluster_NilTransport(t *testing.T) {
+	m, _ := clusterTestModule(t, &testWinRMTransport{})
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+	m.transport = nil
+
+	_, err := m.getCluster(context.Background(), "lab-hv")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransportNotConfigured,
+		"a nil transport is a misconfiguration, not an out-of-scope cluster")
+	assert.NotErrorIs(t, err, ErrClusterNotDeclared,
+		"the nil-transport path must not masquerade as the scope-cap sentinel")
+}
+
+// TestClusterOwnershipHelper_NilTransport verifies #7 for the ownership helper:
+// a nil transport returns ErrTransportNotConfigured, not ErrClusterNotDeclared.
+func TestClusterOwnershipHelper_NilTransport(t *testing.T) {
+	m, _ := clusterTestModule(t, &testWinRMTransport{})
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+	m.transport = nil
+
+	_, _, err := m.clusterOwnershipHelper(context.Background(), "lab-hv")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransportNotConfigured,
+		"a nil transport is a misconfiguration, not an out-of-scope cluster")
+	assert.NotErrorIs(t, err, ErrClusterNotDeclared,
+		"the nil-transport path must not masquerade as the scope-cap sentinel")
 }
