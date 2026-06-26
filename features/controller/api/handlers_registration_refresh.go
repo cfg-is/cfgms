@@ -112,7 +112,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 				business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
-				map[string]interface{}{"reason": "unknown_device"})
+				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
 			http.Error(w, "device not found", http.StatusNotFound)
 			return
 		}
@@ -130,7 +130,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "revoked"})
+			map[string]interface{}{"decision": "denied", "reason": "revoked"})
 		http.Error(w, "device is revoked", http.StatusForbidden)
 		return
 	}
@@ -140,7 +140,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "cross_tenant"})
+			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
 		http.Error(w, "tenant mismatch", http.StatusForbidden)
 		return
 	}
@@ -214,7 +214,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 				business.AuditEventSecurityEvent, "refresh_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
-				map[string]interface{}{"reason": "unknown_device"})
+				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
 			http.Error(w, "device not found", http.StatusNotFound)
 			return
 		}
@@ -232,7 +232,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "revoked"})
+			map[string]interface{}{"decision": "denied", "reason": "revoked"})
 		http.Error(w, "device is revoked", http.StatusForbidden)
 		return
 	}
@@ -242,7 +242,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "cross_tenant"})
+			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
 		http.Error(w, "tenant mismatch", http.StatusForbidden)
 		return
 	}
@@ -399,7 +399,7 @@ func (s *Server) handleRefreshByPolicy(
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventAuthentication, "refresh_cert_issued",
 			business.AuditResultSuccess, business.AuditSeverityHigh,
-			map[string]interface{}{"decision": "approved"})
+			map[string]interface{}{"decision": "approved", "reason": "auto_accept"})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -690,6 +690,20 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			business.AuditResultError, business.AuditSeverityHigh,
 			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "store_error"})
 		http.Error(w, "failed to get steward", http.StatusInternalServerError)
+		return
+	}
+
+	// Gate: revocation re-check before issuing a cert. The challenge and complete
+	// paths reject revoked devices, but a device can be revoked AFTER its refresh
+	// was queued as pending. Approving a now-revoked device must NOT issue a cert —
+	// and must not let buildRefreshClaimResponse promote revoked->registered,
+	// silently un-revoking it. Mirror the challenge/complete revocation gate.
+	if record.Status == business.StewardStatusRevoked {
+		s.emitRefreshAudit(r.Context(), entry.DeviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_admin_approve_rejected",
+			business.AuditResultDenied, business.AuditSeverityCritical,
+			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "decision": "denied", "reason": "revoked"})
+		http.Error(w, "device is revoked", http.StatusForbidden)
 		return
 	}
 

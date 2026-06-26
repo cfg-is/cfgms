@@ -868,6 +868,75 @@ func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
 	assert.True(t, found, "refresh_admin_approved audit event expected")
 }
 
+// TestHandleRefreshApprove_RevokedDeviceRejected verifies the security gate added
+// for Issue #2098: a steward can be revoked AFTER its refresh is queued as pending.
+// The challenge/complete paths reject revoked devices, but the admin approve path
+// previously did not. Approving a now-revoked device must NOT issue a cert, must NOT
+// promote the device back to "registered" (silently un-revoking it via the status
+// persistence added in this story), and must leave the pending entry untouched.
+func TestHandleRefreshApprove_RevokedDeviceRejected(t *testing.T) {
+	pub, _ := newTestEd25519KeyPair(t)
+	ss := newTestStewardStore()
+	ss.add(&business.StewardRecord{
+		ID:             "steward-revoked-pending",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusRevoked, // revoked while a refresh sat pending
+		IdentityKeyPub: []byte(pub),
+	})
+
+	prs := newTestPendingRefreshStore()
+	pendingID := "refresh-revoked-test"
+	require.NoError(t, prs.AddPendingRefresh(context.Background(), &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}))
+
+	server, auditMgr := newRefreshAdminTestServer(t, ss, prs, newTestRefreshPolicyStore())
+	apiKey := NewTestKey(t, server, []string{"refresh:approve"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// Must be rejected — no certificate may be issued to a revoked device.
+	require.Equal(t, http.StatusForbidden, rec.Code, "approving a revoked device must be forbidden: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "BEGIN", "no certificate material may be returned for a revoked device")
+
+	// The steward must remain revoked — the status promotion must NOT un-revoke it.
+	recRev, err := ss.GetStewardByDeviceID(context.Background(), testDeviceID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusRevoked, recRev.Status,
+		"revoked steward must NOT be promoted to registered on approve")
+
+	// The pending entry must remain pending with no claim bundle.
+	entry, err := prs.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status,
+		"pending entry must not be approved for a revoked device")
+	assert.Nil(t, entry.ClaimBundle, "no claim bundle may be stored for a revoked device")
+
+	// A security audit event must record the denial with decision+reason.
+	require.NoError(t, auditMgr.Flush(context.Background()))
+	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{})
+	require.NoError(t, err)
+	found := false
+	for _, e := range entries {
+		if e.Action == "refresh_admin_approve_rejected" {
+			assert.Equal(t, "denied", e.Details["decision"])
+			assert.Equal(t, "revoked", e.Details["reason"])
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "refresh_admin_approve_rejected security audit event expected")
+}
+
 func TestHandleRefreshReject_RejectsEntry(t *testing.T) {
 	pub, _ := newTestEd25519KeyPair(t)
 	ss := newTestStewardStore()
