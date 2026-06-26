@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +16,64 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// recordingLogger implements logging.Logger and captures every log call so
+// tests can assert on what was (or was not) logged.
+var _ logging.Logger = (*recordingLogger)(nil)
+
+type recordingLogger struct {
+	mu      sync.Mutex
+	entries []recordedLogEntry
+}
+
+type recordedLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+func (r *recordingLogger) record(msg string, keysAndValues ...interface{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, recordedLogEntry{msg: msg, kvs: keysAndValues})
+}
+
+// containsAny returns true if any captured message or string value contains s.
+func (r *recordingLogger) containsAny(s string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		if strings.Contains(e.msg, s) {
+			return true
+		}
+		for _, v := range e.kvs {
+			if str, ok := v.(string); ok && strings.Contains(str, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *recordingLogger) Debug(msg string, kvs ...interface{}) { r.record(msg, kvs...) }
+func (r *recordingLogger) Info(msg string, kvs ...interface{})  { r.record(msg, kvs...) }
+func (r *recordingLogger) Warn(msg string, kvs ...interface{})  { r.record(msg, kvs...) }
+func (r *recordingLogger) Error(msg string, kvs ...interface{}) { r.record(msg, kvs...) }
+func (r *recordingLogger) Fatal(msg string, kvs ...interface{}) { r.record(msg, kvs...) }
+func (r *recordingLogger) DebugCtx(_ context.Context, msg string, kvs ...interface{}) {
+	r.record(msg, kvs...)
+}
+func (r *recordingLogger) InfoCtx(_ context.Context, msg string, kvs ...interface{}) {
+	r.record(msg, kvs...)
+}
+func (r *recordingLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
+	r.record(msg, kvs...)
+}
+func (r *recordingLogger) ErrorCtx(_ context.Context, msg string, kvs ...interface{}) {
+	r.record(msg, kvs...)
+}
+func (r *recordingLogger) FatalCtx(_ context.Context, msg string, kvs ...interface{}) {
+	r.record(msg, kvs...)
+}
+
 // hardcodedTestTokens lists the token strings that must never appear in a
 // production-mode controller store.  This list is the source of truth for
 // the no-seeding assertion; update it if token names change.
@@ -23,6 +83,19 @@ var hardcodedTestTokens = []string{
 	"integration_expired",
 	"integration_revoked",
 	"dockertest_fleet",
+}
+
+// allKnownTestTokenValues is the exhaustive set of token values seeded when
+// CFGMS_SEED_TEST_TOKENS=1.  Used by the clear-text-logging test to verify
+// that no raw token value appears in any log output (CodeQL #775).
+var allKnownTestTokenValues = []string{
+	"dockertest_standalone",
+	"integration_reusable",
+	"integration_expired",
+	"integration_revoked",
+	"dockertest_fleet",
+	"dockertest_fleet_child_a",
+	"dockertest_fleet_child_b",
 }
 
 // TestServer_ProductionStartup_NoHardcodedTokens verifies that a controller
@@ -392,4 +465,68 @@ func TestServer_New_Succeeds_BindAll_WithEnvVar(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, srv)
 	t.Cleanup(func() { _ = srv.Stop() })
+}
+
+// TestSeedTestTokens_LogsNoRawTokenValues asserts that when CFGMS_SEED_TEST_TOKENS=1,
+// the controller startup path never writes a raw registration-token value to any log
+// call.  This is the required behavioural test for CodeQL alert #775
+// (go/clear-text-logging, high): a registration token is a credential and must never
+// appear in clear text in log output, even on a dev/test-only path.
+func TestSeedTestTokens_LogsNoRawTokenValues(t *testing.T) {
+	t.Setenv("CFGMS_SEED_TEST_TOKENS", "1")
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+	}
+
+	rec := &recordingLogger{}
+	srv, err := New(cfg, rec)
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	for _, tokenVal := range allKnownTestTokenValues {
+		assert.False(t, rec.containsAny(tokenVal),
+			"raw token %q must not appear in any log output (CodeQL alert #775)", tokenVal)
+	}
+}
+
+// TestSeedTestTokens_LogsUsefulNonSensitiveInfo asserts that even after suppressing
+// raw token values, the seeding path still emits an observable, non-empty log line
+// that includes the tenant ID so operations remain diagnosable.
+func TestSeedTestTokens_LogsUsefulNonSensitiveInfo(t *testing.T) {
+	t.Setenv("CFGMS_SEED_TEST_TOKENS", "1")
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+	}
+
+	rec := &recordingLogger{}
+	srv, err := New(cfg, rec)
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	assert.True(t, rec.containsAny("Seeded test registration token"),
+		"seeding path must emit at least one observable log line")
+	assert.True(t, rec.containsAny("test-tenant"),
+		"seeding log must include the tenant ID for observability")
 }

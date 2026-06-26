@@ -489,10 +489,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			}
 
 			for _, testToken := range testTokens {
+				redactedToken := logging.RedactedID(testToken.Token)
 				if err := regStore.SaveToken(context.Background(), testToken); err != nil {
-					logger.Warn("Failed to seed test token", "error", err, "token", testToken.Token)
+					logger.Warn("Failed to seed test token", "error", err, "token", redactedToken)
 				} else {
-					logger.Info("Seeded test registration token", "token", testToken.Token, "tenant", testToken.TenantID)
+					logger.Info("Seeded test registration token", "token", redactedToken, "tenant", testToken.TenantID)
 				}
 			}
 
