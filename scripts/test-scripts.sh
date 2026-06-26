@@ -1569,6 +1569,128 @@ print(d.get('fields',{}).get('PR',''))
     fi
 }
 
+test_check_cla_signed() {
+    log_test "Testing check-cla-signed.sh: exit 0 for known contributor, exit 1 for absent login..."
+
+    local script
+    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-cla-signed.sh"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "check-cla-signed.sh: Script not found at $script"
+        return
+    fi
+
+    if [[ ! -x "$script" ]]; then
+        log_fail "check-cla-signed.sh: Not executable"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    # Build a temp repo layout: $tmp_dir/CONTRIBUTORS.md + $tmp_dir/scripts/check-cla-signed.sh
+    # The script derives repo root as $(dirname "$0")/.. — so placing it under scripts/ makes
+    # it pick up $tmp_dir/CONTRIBUTORS.md without modifying the script under test.
+    mkdir -p "${tmp_dir}/scripts"
+    cp "$script" "${tmp_dir}/scripts/check-cla-signed.sh"
+
+    cat > "${tmp_dir}/CONTRIBUTORS.md" << 'CONTRIBEOF'
+# Test Contributors
+@alice-contributor
+github.com/bob-contributor
+[carol-contributor] carol@example.com
+CONTRIBEOF
+
+    local exit_code output
+
+    # --- AC7 Part 1: login present via @login pattern → exit 0 ----------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "alice-contributor" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "check-cla-signed.sh: exit 0 for login matched via @login pattern"
+    else
+        log_fail "check-cla-signed.sh: expected exit 0 for @alice-contributor, got $exit_code (output: $output)"
+    fi
+    if echo "$output" | grep -q "CLA_SIGNED:alice-contributor"; then
+        log_pass "check-cla-signed.sh: prints CLA_SIGNED:<login> on success"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_SIGNED:alice-contributor in output, got: $output"
+    fi
+
+    # --- AC7 Part 2: login present via github.com/login pattern → exit 0 ------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "bob-contributor" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "check-cla-signed.sh: exit 0 for login matched via github.com/login pattern"
+    else
+        log_fail "check-cla-signed.sh: expected exit 0 for bob-contributor, got $exit_code"
+    fi
+    if echo "$output" | grep -q "CLA_SIGNED:bob-contributor"; then
+        log_pass "check-cla-signed.sh: prints CLA_SIGNED:<login> for github.com/login pattern"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_SIGNED:bob-contributor in output, got: $output"
+    fi
+
+    # --- AC7 Part 3: login present via [login] pattern → exit 0 ---------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "carol-contributor" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 0 ]]; then
+        log_pass "check-cla-signed.sh: exit 0 for login matched via [login] pattern"
+    else
+        log_fail "check-cla-signed.sh: expected exit 0 for carol-contributor, got $exit_code"
+    fi
+    if echo "$output" | grep -q "CLA_SIGNED:carol-contributor"; then
+        log_pass "check-cla-signed.sh: prints CLA_SIGNED:<login> for [login] pattern"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_SIGNED:carol-contributor in output, got: $output"
+    fi
+
+    # --- AC7 Part 4: login absent from CONTRIBUTORS.md → exit 1 ---------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" "unknown-outsider" 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "check-cla-signed.sh: exit 1 for login absent from CONTRIBUTORS.md"
+    else
+        log_fail "check-cla-signed.sh: expected exit 1 for absent login, got $exit_code"
+    fi
+    if echo "$output" | grep -q "CLA_NOT_SIGNED:unknown-outsider"; then
+        log_pass "check-cla-signed.sh: prints CLA_NOT_SIGNED:<login> when absent"
+    else
+        log_fail "check-cla-signed.sh: expected CLA_NOT_SIGNED:unknown-outsider in output, got: $output"
+    fi
+
+    # --- AC7 Part 5: CONTRIBUTORS.md absent → exit 1 with ERROR message -------
+    local no_contrib_dir
+    no_contrib_dir=$(mktemp -d)
+    mkdir -p "${no_contrib_dir}/scripts"
+    cp "$script" "${no_contrib_dir}/scripts/check-cla-signed.sh"
+    # No CONTRIBUTORS.md created in no_contrib_dir
+
+    exit_code=0
+    output=$("${no_contrib_dir}/scripts/check-cla-signed.sh" "anyone" 2>&1) || exit_code=$?
+    rm -rf "$no_contrib_dir"
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "check-cla-signed.sh: exit 1 when CONTRIBUTORS.md does not exist"
+    else
+        log_fail "check-cla-signed.sh: expected exit 1 for missing CONTRIBUTORS.md, got $exit_code"
+    fi
+    if echo "$output" | grep -q "ERROR:"; then
+        log_pass "check-cla-signed.sh: prints ERROR: message when CONTRIBUTORS.md missing"
+    else
+        log_fail "check-cla-signed.sh: expected ERROR: in output when CONTRIBUTORS.md missing, got: $output"
+    fi
+
+    # --- AC7 Part 6: no argument → non-zero exit (usage guard) ----------------
+    exit_code=0
+    output=$("${tmp_dir}/scripts/check-cla-signed.sh" 2>&1) || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_pass "check-cla-signed.sh: non-zero exit when invoked with no argument"
+    else
+        log_fail "check-cla-signed.sh: expected non-zero exit with no argument, got 0"
+    fi
+}
+
 test_trust_boundary() {
     log_test "Running trust boundary regression suite (test/security/trust_boundary_test.sh)..."
 
@@ -3071,6 +3193,8 @@ echo ""
 test_preflight_acceptance_review_comment_match
 echo ""
 test_preflight_review_verdict_routing
+echo ""
+test_check_cla_signed
 echo ""
 test_trust_boundary
 echo ""
