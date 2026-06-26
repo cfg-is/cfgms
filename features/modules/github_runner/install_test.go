@@ -178,3 +178,21 @@ func TestHTTPInstaller_VerifiesAndExtracts(t *testing.T) {
 		t.Fatalf("install extracted files despite a sha256 mismatch: %d entries", len(entries))
 	}
 }
+
+func TestHTTPInstaller_RejectsNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	dest := t.TempDir()
+	err := newHTTPInstaller().install(context.Background(), installSource{
+		URL: srv.URL, SHA256: sha256Hex([]byte("x")), Version: "2.319.1", WorkDir: dest, Format: "tar.gz",
+	})
+	if err == nil {
+		t.Fatal("install accepted a non-200 download response")
+	}
+	if entries, _ := os.ReadDir(dest); len(entries) != 0 {
+		t.Fatalf("install wrote files despite a failed download: %d entries", len(entries))
+	}
+}

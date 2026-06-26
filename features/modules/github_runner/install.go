@@ -48,6 +48,16 @@ func newHTTPInstaller() agentInstaller {
 	return &httpInstaller{client: http.DefaultClient}
 }
 
+// newHTTPInstallerWithClient returns an installer using the supplied HTTP client.
+// It is a test seam so a test can drive the real install path against a local
+// TLS httptest server (whose self-signed cert the default client would reject).
+func newHTTPInstallerWithClient(c *http.Client) agentInstaller {
+	if c == nil {
+		c = http.DefaultClient
+	}
+	return &httpInstaller{client: c}
+}
+
 // install downloads, verifies, and unpacks the agent archive into src.WorkDir.
 func (h *httpInstaller) install(ctx context.Context, src installSource) error {
 	data, err := h.download(ctx, src.URL)
@@ -212,9 +222,11 @@ func unpackZip(data []byte, dest string) error {
 
 // writeFileFromReader creates target (with parent dirs) and copies up to
 // maxArchiveBytes from r into it. The copy is bounded to guard against a
-// decompression bomb in a single entry.
-func writeFileFromReader(target string, r io.Reader, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+// decompression bomb in a single entry. The deferred Close error is propagated
+// (when no earlier error occurred) because Close is where buffered writes flush —
+// swallowing it could yield a silently truncated agent binary.
+func writeFileFromReader(target string, r io.Reader, mode os.FileMode) (err error) {
+	if err = os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return err
 	}
 	// Constrain file permissions to owner/group; never world-writable.
@@ -222,12 +234,16 @@ func writeFileFromReader(target string, r io.Reader, mode os.FileMode) error {
 	if perm == 0 {
 		perm = 0o640
 	}
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm) // #nosec G304 - target validated by safeJoin
-	if err != nil {
-		return err
+	out, oerr := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm) // #nosec G304 - target validated by safeJoin
+	if oerr != nil {
+		return oerr
 	}
-	defer func() { _ = out.Close() }()
-	if _, err := io.Copy(out, io.LimitReader(r, maxArchiveBytes+1)); err != nil {
+	defer func() {
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	if _, err = io.Copy(out, io.LimitReader(r, maxArchiveBytes+1)); err != nil {
 		return fmt.Errorf("write %s: %w", target, err)
 	}
 	return nil

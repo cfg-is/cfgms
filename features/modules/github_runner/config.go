@@ -89,8 +89,8 @@ func (c *RunnerConfig) Validate() error {
 	if strings.TrimSpace(c.AgentURL) == "" {
 		return fmt.Errorf("%w: agent_url is required", modules.ErrInvalidInput)
 	}
-	if !strings.HasPrefix(c.AgentURL, "https://") && !strings.HasPrefix(c.AgentURL, "http://") {
-		return fmt.Errorf("%w: agent_url must be an http(s) URL", modules.ErrInvalidInput)
+	if !strings.HasPrefix(c.AgentURL, "https://") {
+		return fmt.Errorf("%w: agent_url must be an https:// URL (cleartext http is not permitted)", modules.ErrInvalidInput)
 	}
 	if !sha256HexPattern.MatchString(c.AgentSHA256) {
 		return fmt.Errorf("%w: agent_sha256 must be a 64-character hex SHA-256", modules.ErrInvalidInput)
