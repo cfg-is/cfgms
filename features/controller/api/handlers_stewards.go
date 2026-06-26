@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
 
 // Regex pattern for validating identifiers (prevents log injection)
@@ -688,10 +690,31 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 	s.writeSuccessResponse(w, map[string]interface{}{"modules": modules})
 }
 
+// stewardLogEvent is the per-event shape returned in the logs response.
+type stewardLogEvent struct {
+	Timestamp     time.Time              `json:"timestamp"`
+	Level         string                 `json:"level"`
+	Message       string                 `json:"message"`
+	Component     string                 `json:"component,omitempty"`
+	CorrelationID string                 `json:"correlation_id,omitempty"`
+	Fields        map[string]interface{} `json:"fields,omitempty"`
+}
+
+// stewardLogRecord is one logical event in the logs response. Correlated
+// detection+outcome pairs share a CorrelationID and are rolled into one record.
+// A detection with no outcome in the query window carries PendingOutcome=true
+// (the "monitor fired, convergence never completed" wedge signal from ADR-012 §2).
+type stewardLogRecord struct {
+	CorrelationID  string           `json:"correlation_id,omitempty"`
+	Detection      *stewardLogEvent `json:"detection"`
+	Outcome        *stewardLogEvent `json:"outcome,omitempty"`
+	PendingOutcome bool             `json:"pending_outcome,omitempty"`
+}
+
 // handleGetStewardLogs handles GET /api/v1/stewards/{id}/logs.
-// Validates the steward exists and the query parameters, then returns 501 until a
-// log-pull transport is wired. The follow-up story must implement per-tenant ACL
-// gating, secret redaction via logging.SanitizeLogValue, and documented pagination caps.
+// Reads from the dedicated steward-event LoggingManager via QueryTimeRange,
+// scopes to the path steward by post-filtering on steward_id, rolls up
+// correlated detection+outcome pairs, and gates on the caller's tenant.
 func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -746,16 +769,145 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		"module", logging.SanitizeLogValue(module),
 	)
 
-	_, exists := s.controllerService.GetStewardInfo(stewardID)
-	if !exists {
+	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
+	// principals have TenantID="" meaning no scope restriction.
+	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	info, exists := s.controllerService.GetStewardInfo(stewardID)
+	if callerTenant != "" {
+		stewardTenant := ""
+		if exists {
+			stewardTenant = info.TenantID
+		}
+		sameTenant := stewardTenant == callerTenant
+		ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+		if !exists || (!sameTenant && !ancestorTenant) {
+			// 404 instead of 403 to avoid disclosing steward existence across tenants.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	} else if !exists {
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
 	}
 
-	s.respondJSON(w, http.StatusNotImplemented, map[string]string{
-		"code":    "LOGS_UNAVAILABLE",
-		"message": "steward log pull not yet supported; collect logs directly from the steward host",
-	})
+	// Return empty events when the manager is not yet wired.
+	s.mu.RLock()
+	mgr := s.stewardEventLoggingManager
+	s.mu.RUnlock()
+
+	emptyEvents := []stewardLogRecord{}
+	if mgr == nil {
+		s.writeSuccessResponse(w, map[string]interface{}{"events": emptyEvents})
+		return
+	}
+
+	// Map query params to TimeRangeQuery.
+	startTime := time.Now().Add(-24 * time.Hour) // default: last 24 hours
+	if since != "" {
+		d, _ := time.ParseDuration(since) // already validated above
+		startTime = time.Now().Add(-d)
+	}
+
+	filters := map[string]interface{}{
+		"steward_id": stewardID,
+	}
+	if level != "" {
+		filters["level"] = level
+	}
+	if module != "" {
+		filters["component"] = module
+	}
+
+	query := loggingInterfaces.TimeRangeQuery{
+		StartTime: startTime,
+		EndTime:   time.Now(),
+		Filters:   filters,
+		Limit:     tail,
+	}
+
+	entries, err := mgr.QueryTimeRange(r.Context(), query)
+	if err != nil {
+		s.logger.Error("Failed to query steward event log",
+			"steward_id", stewardIDForLog,
+			"error", err,
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
+		return
+	}
+
+	// Defensive post-filter: the shared steward-event manager co-mingles all stewards;
+	// the ACL gates endpoint access but does not scope the result set. Only entries
+	// whose steward_id field exactly matches the path parameter are returned.
+	filtered := make([]loggingInterfaces.LogEntry, 0, len(entries))
+	for _, e := range entries {
+		if sid, ok := e.Fields["steward_id"].(string); ok && sid == stewardID {
+			filtered = append(filtered, e)
+		}
+	}
+
+	records := rollupStewardLogsByCorrelationID(filtered)
+	s.writeSuccessResponse(w, map[string]interface{}{"events": records})
+}
+
+// rollupStewardLogsByCorrelationID groups log entries by correlation_id.
+// Entries without a correlation_id are standalone records. Correlated pairs
+// are merged into one record (detection = earlier timestamp, outcome = later).
+// A detection with no paired outcome is marked PendingOutcome=true.
+func rollupStewardLogsByCorrelationID(entries []loggingInterfaces.LogEntry) []stewardLogRecord {
+	var records []stewardLogRecord
+
+	// Group entries by correlation_id. Entries with no correlation_id are
+	// immediately emitted as standalone records, preserving source order.
+	grouped := make(map[string][]loggingInterfaces.LogEntry)
+	var corrOrder []string // tracks first-seen order for deterministic output
+	seen := make(map[string]bool)
+
+	for _, e := range entries {
+		if e.CorrelationID == "" {
+			records = append(records, stewardLogRecord{
+				Detection: logEntryToStewardEvent(e),
+			})
+			continue
+		}
+		if !seen[e.CorrelationID] {
+			corrOrder = append(corrOrder, e.CorrelationID)
+			seen[e.CorrelationID] = true
+		}
+		grouped[e.CorrelationID] = append(grouped[e.CorrelationID], e)
+	}
+
+	for _, corrID := range corrOrder {
+		events := grouped[corrID]
+		// Sort by timestamp: earlier = detection, later = outcome.
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].Timestamp.Before(events[j].Timestamp)
+		})
+		record := stewardLogRecord{
+			CorrelationID: corrID,
+			Detection:     logEntryToStewardEvent(events[0]),
+		}
+		if len(events) >= 2 {
+			record.Outcome = logEntryToStewardEvent(events[1])
+		} else {
+			record.PendingOutcome = true
+		}
+		records = append(records, record)
+	}
+
+	return records
+}
+
+// logEntryToStewardEvent converts a LogEntry to the API response event shape.
+func logEntryToStewardEvent(e loggingInterfaces.LogEntry) *stewardLogEvent {
+	return &stewardLogEvent{
+		Timestamp:     e.Timestamp,
+		Level:         e.Level,
+		Message:       e.Message,
+		Component:     e.Component,
+		CorrelationID: e.CorrelationID,
+		Fields:        e.Fields,
+	}
 }
 
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
