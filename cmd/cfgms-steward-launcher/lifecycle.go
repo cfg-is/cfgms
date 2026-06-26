@@ -154,6 +154,15 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			// like a real upgrade failure that happened to coincide
 			// with a cancel. The operator (or the next startup) will
 			// observe the rolled-back state.
+		} else if exitErr == nil {
+			// Detect an intentional upgrade self-exit: the steward called
+			// StageBinary (which advances state.json.current to the new version)
+			// then exited cleanly so the launcher re-execs the staged binary.
+			// This must NOT be treated as a startup failure — skip the rollback
+			// guard and loop to exec the new current version.
+			if after, readErr := s.Layout.ReadCurrent(); readErr == nil && after != current {
+				continue
+			}
 		}
 
 		failedStartup := ranFor < s.StartupWindow

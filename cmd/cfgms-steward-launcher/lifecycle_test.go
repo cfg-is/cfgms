@@ -60,6 +60,17 @@ func TestHelperProcess(t *testing.T) {
 	if mf := os.Getenv("FAKE_STEWARD_RECORD_MANAGED_FILE"); mf != "" {
 		_ = os.WriteFile(mf, []byte(os.Getenv(version.EnvStewardLauncherManaged)), 0o600)
 	}
+	// FAKE_STEWARD_STAGE_VERSION simulates StageBinary: "<root>:<version>:<binary_name>".
+	// When set, the fake-steward advances state.json to the given version before exiting,
+	// mimicking the steward's upgrade handler calling WriteCurrent after staging a binary.
+	// This is idempotent: WriteCurrent is a no-op when current already equals the target.
+	if sv := os.Getenv("FAKE_STEWARD_STAGE_VERSION"); sv != "" {
+		parts := strings.SplitN(sv, ":", 3)
+		if len(parts) == 3 {
+			wl := Layout{Root: parts[0], StewardBinaryName: parts[2]}
+			_ = wl.WriteCurrent(parts[1])
+		}
+	}
 	if sleepMs := os.Getenv("FAKE_STEWARD_SLEEP_MS"); sleepMs != "" {
 		if n, err := strconv.Atoi(sleepMs); err == nil && n > 0 {
 			time.Sleep(time.Duration(n) * time.Millisecond)
@@ -817,5 +828,110 @@ func TestSupervise_ConsecutiveFailures_CountAndReset(t *testing.T) {
 	}
 	if ps2.ConsecutiveFailures != 0 {
 		t.Errorf("after clean startup: consecutive_failures = %d, want 0", ps2.ConsecutiveFailures)
+	}
+}
+
+// upgradeClock is a test clock whose Since method returns a small duration on
+// the first call (so the first child looks like it exited within the startup
+// window) and a large duration on every subsequent call (so later children
+// look like they cleared the window). Used by
+// TestSupervise_UpgradeSelfExit_AdvancesToNewVersion to verify upgrade
+// self-exit detection without any real-time delays.
+type upgradeClock struct {
+	calls atomic.Int32
+}
+
+func (c *upgradeClock) Now() time.Time { return time.Now() }
+func (c *upgradeClock) Since(_ time.Time) time.Duration {
+	if c.calls.Add(1) == 1 {
+		return 10 * time.Millisecond // first child: within startup window
+	}
+	return time.Minute // subsequent children: past startup window
+}
+
+// TestSupervise_UpgradeSelfExit_AdvancesToNewVersion verifies the fix for the
+// upgrade self-exit bug: when the steward calls StageBinary (advancing
+// state.json.current to the new version) and then self-exits cleanly so the
+// launcher re-execs the staged binary, the supervisor must NOT treat this as a
+// failed startup. Without the fix, a clean exit inside StartupWindow triggers
+// MaxRollbackCycles-based failure even when state.json advanced — the upgrade
+// is silently reversed.
+//
+// Test shape:
+//  1. v1 is the current version; v2 is the staged upgrade.
+//  2. v1 (via FAKE_STEWARD_STAGE_VERSION) calls WriteCurrent("v2") before exiting.
+//     The clock returns 10ms for v1's run (inside 50ms StartupWindow).
+//  3. The fix detects that state.json.current changed (v1→v2) on a clean exit and
+//     continues the loop to exec v2 instead of treating the exit as a crash.
+//  4. v2 calls WriteCurrent("v2") (no-op), exits cleanly; the clock returns
+//     time.Minute (past StartupWindow) so it's treated as a committed startup.
+//  5. The supervisor writes the "upgrade-committed" flag file. The test cancels
+//     on that signal, then asserts Supervise returns nil and current is "v2".
+//
+// We use the upgrade-committed flag as the termination signal (rather than a
+// fixed context deadline) so that the test is robust on slow CI runners where
+// the test binary (re-exec'd as the fake steward) can take well over 500ms to
+// load. A fixed 500ms deadline would kill v1 mid-run via exec.CommandContext,
+// turning exitErr from nil to signal:killed and hiding the upgrade detection
+// path entirely.
+func TestSupervise_UpgradeSelfExit_AdvancesToNewVersion(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// All children run WriteCurrent("v2"): v1 advances state.json to v2; v2's
+	// call is a no-op (current already == v2). Both exit cleanly with code 0.
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_STAGE_VERSION": l.Root + ":v2:" + l.StewardBinaryName,
+		"FAKE_STEWARD_SLEEP_MS":      "0",
+		"FAKE_STEWARD_EXIT_CODE":     "0",
+	})
+	certStoreDir := t.TempDir()
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0, // zero-tolerance: any unintended rollback returns an error
+		CertStoreDir:      certStoreDir,
+		clock:             &upgradeClock{},
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// The upgrade-committed flag is written only after v2 exits past StartupWindow
+	// (committed). This can only happen if the fix is in place: without it,
+	// Supervise returns an error immediately (MaxRollbackCycles=0, v1 exited
+	// inside StartupWindow) and the flag never appears.
+	//
+	// Without fix: waitForFile returns false → select detects error on done → Fatalf.
+	// With fix:    flag appears → we cancel → Supervise returns nil → assertions pass.
+	committedFlag := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(committedFlag, 15*time.Second) {
+		select {
+		case err := <-done:
+			t.Fatalf("Supervise returned %v before upgrade committed; upgrade self-exit must not trigger rollback", err)
+		default:
+			t.Fatal("upgrade-committed flag never appeared within 15s")
+		}
+	}
+	cancel()
+
+	err := <-done
+	if err != nil {
+		t.Fatalf("Supervise returned %v after upgrade committed; expected nil", err)
+	}
+	cur, readErr := l.ReadCurrent()
+	if readErr != nil {
+		t.Fatalf("ReadCurrent after upgrade: %v", readErr)
+	}
+	if cur != "v2" {
+		t.Errorf("current = %q, want v2 (no rollback must have occurred)", cur)
 	}
 }
