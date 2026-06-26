@@ -87,6 +87,14 @@ Get → Compare → Set → Verify
 - If current matches desired: report compliant
 - If drifted: emit `drift.detected.monitor` upstream event; skip Set and Verify; report `StatusNonCompliant`
 
+### Convergence Event Emitter (ADR-012)
+
+For every resource check that reaches the drift-comparison step, the execution engine emits a correlated detection+outcome event pair over an out-of-band `LogStream` channel to the controller. The emitter runs on its own goroutine, independent of the module-execution goroutine; the convergence loop enqueues events via a non-blocking call and never waits for the send to complete. When the buffer is full, entries are dropped and counted. The emitter reconnects automatically with exponential back-off if the `LogStream` RPC fails.
+
+**Detection event** — enqueued immediately before `module.Get()`, carrying a newly generated `correlation_id`, the `resource_id`, and the active `drift_mode`. A detection event with no matching outcome event signals that convergence hung inside a module (ADR-012 §2 crash-isolation).
+
+**Outcome event** — enqueued after convergence completes, with the same `correlation_id` and an `action` field: `applied` (convergence succeeded), `drift_reported` (monitor mode), or `error` (Set or Verify failed).
+
 ### Error Handling
 
 Controlled by the cfg's `error_handling` settings (three independent fields: `module_load_failure`, `resource_failure`, `configuration_error`):
