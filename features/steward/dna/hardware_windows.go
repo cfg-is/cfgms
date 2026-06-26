@@ -83,6 +83,13 @@ func (w *WindowsHardwareCollector) CollectMemory(ctx context.Context, attributes
 		"Capacity,Speed,MemoryType,FormFactor", "/format:csv")
 	if err == nil {
 		w.parseWMIMemoryModulesOutput(modOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_PhysicalMemory | Select-Object Capacity,FormFactor,MemoryType,Speed | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMMemoryModules(psOut, attributes)
+		}
 	}
 
 	// Virtual memory — primary: PowerShell (no wmic equivalent)
@@ -102,6 +109,13 @@ func (w *WindowsHardwareCollector) CollectDisk(ctx context.Context, attributes m
 		"Model,Size,MediaType,InterfaceType", "/format:csv")
 	if err == nil {
 		w.parseWMIDiskOutput(diskOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_DiskDrive | Select-Object InterfaceType,MediaType,Model,Size | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMPhysicalDisks(psOut, attributes)
+		}
 	}
 
 	// Logical disk — primary: wmic
@@ -128,6 +142,13 @@ func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attri
 		"Manufacturer,Model,TotalPhysicalMemory", "/format:csv")
 	if err == nil {
 		w.parseWMIComputerSystemOutput(csOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer,Model,TotalPhysicalMemory | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMComputerSystem(psOut, attributes)
+		}
 	}
 
 	// BIOS info — primary: wmic
@@ -135,6 +156,13 @@ func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attri
 		"Manufacturer,SMBIOSBIOSVersion,ReleaseDate", "/format:csv")
 	if err == nil {
 		w.parseWMIBIOSOutput(biosOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_BIOS | Select-Object Manufacturer,ReleaseDate,SMBIOSBIOSVersion | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMBIOS(psOut, attributes)
+		}
 	}
 
 	// Baseboard info — primary: wmic
@@ -142,6 +170,13 @@ func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attri
 		"Manufacturer,Product,Version,SerialNumber", "/format:csv")
 	if err == nil {
 		w.parseWMIMotherboardOutput(bbOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_BaseBoard | Select-Object Manufacturer,Product,SerialNumber,Version | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMBaseboard(psOut, attributes)
+		}
 	}
 
 	// System UUID — primary: wmic
@@ -149,6 +184,13 @@ func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attri
 		"UUID", "/format:csv")
 	if err == nil {
 		w.parseWMIUUIDOutput(uuidOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object UUID | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMSystemUUID(psOut, attributes)
+		}
 	}
 
 	// OS version for hardware context — native registry reads (no process spawn)
