@@ -2223,11 +2223,13 @@ exit 0
 PQEOF
     chmod +x "${fake_repo}/scripts/project-queue.sh"
 
-    # Mock gh: returns an open item-branch PR
+    # Mock gh: returns an open item-branch PR with a trusted internal author.
+    # The CFGMS_TEST_COLLAB_PERM=push env var below satisfies the external-author
+    # gate without a real gh api call, so the test reaches the item-branch scan.
     cat > "${tmp_dir}/gh" << 'GHEOF'
 #!/usr/bin/env bash
 if [[ "$1" == "pr" && "$2" == "view" ]]; then
-    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"}}\n'
+    printf '{"state":"OPEN","headRefName":"feature/item-ABCD12345678-agent","body":"No fixes link","labels":[],"headRepositoryOwner":{"login":"cfg-is"},"author":{"login":"trusted-maintainer"}}\n'
 elif [[ "$1" == "auth" && "$2" == "token" ]]; then
     echo "fake-token"
 else
@@ -2250,6 +2252,7 @@ DOCKEREOF
         CFGMS_TEST_REPO_ROOT="$fake_repo" \
         CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
         CFGMS_TEST_CREDS_STATUS="CREDS_OK:60" \
+        CFGMS_TEST_COLLAB_PERM="push" \
         bash "$dispatch_script" review-pr 77 2>&1
     ) || exit_code=$?
 
@@ -2270,6 +2273,148 @@ DOCKEREOF
         log_pass "review_pr_item_branch: project-queue list-by-status was called (scan attempted)"
     else
         log_fail "review_pr_item_branch: list-by-status not called — item-branch scan path not exercised"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_create_clone_pr_external_author() {
+    log_test "Testing create-clone-pr: external-author gate refuses before git clone..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local worktree_dir="${tmp_dir}/worktrees"
+    mkdir -p "$worktree_dir"
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    # Mock gh: returns an open PR with an external (read-level) author.
+    # The CFGMS_TEST_COLLAB_PERM=read below makes the permission API return "read".
+    cat > "${tmp_dir}/gh" << 'GHEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    printf '{"headRefName":"feature/story-9999-test","body":"Fixes #9999","labels":[],"author":{"login":"external-user"}}\n'
+elif [[ "$1" == "pr" && "$2" == "comment" ]]; then
+    exit 0
+else
+    printf '{}\n'
+fi
+exit 0
+GHEOF
+    chmod +x "${tmp_dir}/gh"
+
+    local fake_repo="${tmp_dir}/repo"
+    git -C "${tmp_dir}" init -q repo
+    git -C "${fake_repo}" remote add origin "https://github.com/cfg-is/cfgms.git"
+
+    local output exit_code=0
+    output=$(
+        PATH="${tmp_dir}:${PATH}" \
+        CFGMS_TEST_REPO_ROOT="$fake_repo" \
+        CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+        CFGMS_TEST_COLLAB_PERM="read" \
+        bash "$dispatch_script" create-clone-pr 9999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "create_clone_pr_external: exits 3 for external author"
+    else
+        log_fail "create_clone_pr_external: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "FIX_REFUSED:9999:external_author"; then
+        log_pass "create_clone_pr_external: emits FIX_REFUSED:9999:external_author*"
+    else
+        log_fail "create_clone_pr_external: expected FIX_REFUSED:9999:external_author* in: ${output}"
+    fi
+
+    if [[ ! -d "${worktree_dir}/pr-fix-9999" ]]; then
+        log_pass "create_clone_pr_external: clone directory not created (gate fired before git clone)"
+    else
+        log_fail "create_clone_pr_external: clone directory must not exist when gate refuses"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_dispatch_fix_external_author() {
+    log_test "Testing po-act.sh dispatch-fix: external-author gate refuses before container launch..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local po_act_script
+    po_act_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-act.sh"
+
+    # Mock dispatch: check-pr-author returns external; any other subcommand fails loudly.
+    cat > "${tmp_dir}/mock-dispatch.sh" << 'DISPEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "check-pr-author" ]]; then
+    echo "AUTHOR_EXTERNAL:${2:-?}:external-user:external:read"
+    exit 3
+fi
+echo "UNEXPECTED_DISPATCH_CALL: $*" >&2
+exit 1
+DISPEOF
+    chmod +x "${tmp_dir}/mock-dispatch.sh"
+
+    local output exit_code=0
+    output=$(
+        CFGMS_TEST_DISPATCH="${tmp_dir}/mock-dispatch.sh" \
+        CFGMS_TEST_WORKTREE_BASE="${tmp_dir}/worktrees" \
+        bash "$po_act_script" dispatch-fix 9999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "dispatch_fix_external: exits 3 for external author"
+    else
+        log_fail "dispatch_fix_external: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "DISPATCH_FIX_REFUSED:9999:external_author"; then
+        log_pass "dispatch_fix_external: emits DISPATCH_FIX_REFUSED:9999:external_author"
+    else
+        log_fail "dispatch_fix_external: expected DISPATCH_FIX_REFUSED:9999:external_author in: ${output}"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
+test_enqueue_external_author_toctou() {
+    log_test "Testing po-act.sh enqueue: TOCTOU re-check refuses external author before merge queue..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local po_act_script
+    po_act_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-act.sh"
+
+    # Mock dispatch: check-pr-author returns external.
+    cat > "${tmp_dir}/mock-dispatch.sh" << 'DISPEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "check-pr-author" ]]; then
+    echo "AUTHOR_EXTERNAL:${2:-?}:external-user:external:read"
+    exit 3
+fi
+echo "UNEXPECTED_DISPATCH_CALL: $*" >&2
+exit 1
+DISPEOF
+    chmod +x "${tmp_dir}/mock-dispatch.sh"
+
+    local output exit_code=0
+    output=$(
+        CFGMS_TEST_DISPATCH="${tmp_dir}/mock-dispatch.sh" \
+        bash "$po_act_script" enqueue 9999 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 3 ]]; then
+        log_pass "enqueue_external_toctou: exits 3 for external author (TOCTOU defense)"
+    else
+        log_fail "enqueue_external_toctou: expected exit 3, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "ENQUEUE_REFUSED:9999:external_author"; then
+        log_pass "enqueue_external_toctou: emits ENQUEUE_REFUSED:9999:external_author"
+    else
+        log_fail "enqueue_external_toctou: expected ENQUEUE_REFUSED:9999:external_author in: ${output}"
     fi
 
     rm -rf "$tmp_dir"
@@ -2904,6 +3049,12 @@ echo ""
 test_cleanup_issue_item_mode
 echo ""
 test_review_pr_item_branch
+echo ""
+test_create_clone_pr_external_author
+echo ""
+test_dispatch_fix_external_author
+echo ""
+test_enqueue_external_author_toctou
 echo ""
 test_entrypoint_set_pr_call
 echo ""

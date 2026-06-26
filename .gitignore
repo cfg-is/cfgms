@@ -23,6 +23,8 @@ test-*
 !.devcontainer/scripts/test-*.sh
 # Shell test scripts in .claude/scripts/tests/ are not binaries — allow them
 !.claude/scripts/tests/test-*.sh
+# Python test scripts in .claude/scripts/tests/ are also tracked
+!.claude/scripts/tests/test-*.py
 
 # Generated protobuf files in wrong location (should be in api/proto/)
 /steward/
