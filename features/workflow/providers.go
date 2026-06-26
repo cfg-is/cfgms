@@ -209,6 +209,7 @@ func (r *ProviderRegistry) registerBuiltinProviders() {
 		"google":      &GoogleProvider{},
 		"salesforce":  &SalesforceProvider{},
 		"connectwise": &ConnectWiseProvider{},
+		"github":      NewGitHubAppProvider(nil, r.logger, nil),
 	}
 	for name, p := range providerOverrides {
 		defaults[name] = p

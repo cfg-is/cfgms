@@ -163,6 +163,11 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 		return fmt.Errorf("dispatcher: subscribe events: %w", err)
 	}
 
+	// Drain any executions queued before Start was called. Running this
+	// synchronously before the goroutine starts ensures callers that queue
+	// executions after Start returns never race with the startup dispatch.
+	d.dispatchAll(d.ctx)
+
 	d.wg.Add(1)
 	go d.pollLoop()
 
@@ -233,12 +238,10 @@ func (d *Dispatcher) releaseDevice(deviceID string) {
 	}
 }
 
-// pollLoop fires dispatchAll immediately on startup, then on each poll interval tick.
+// pollLoop fires dispatchAll on each poll interval tick.
+// The initial dispatch on startup is handled synchronously by Start.
 func (d *Dispatcher) pollLoop() {
 	defer d.wg.Done()
-
-	// Drain on startup without waiting for the first tick.
-	d.dispatchAll(d.ctx)
 
 	ticker := time.NewTicker(d.pollInterval)
 	defer ticker.Stop()
