@@ -19,6 +19,9 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -997,9 +1000,9 @@ func TestHandleGetStewardModules_RejectsCrossTenant(t *testing.T) {
 
 // ---- handleGetStewardLogs tests (from develop) ----
 
-// TestHandleGetStewardLogs_ReturnsNotImplemented verifies that GET /api/v1/stewards/{id}/logs
-// returns 501 with LOGS_UNAVAILABLE error code for a valid steward ID.
-func TestHandleGetStewardLogs_ReturnsNotImplemented(t *testing.T) {
+// TestHandleGetStewardLogs_ReturnsEmpty verifies that GET /api/v1/stewards/{id}/logs
+// returns 200 with an empty event list when no steward event logging manager is wired.
+func TestHandleGetStewardLogs_ReturnsEmpty(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
 
@@ -1012,10 +1015,16 @@ func TestHandleGetStewardLogs_ReturnsNotImplemented(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNotImplemented, rec.Code)
-	var body map[string]string
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body APIResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
-	assert.Equal(t, "LOGS_UNAVAILABLE", body["code"])
+	data, ok := body.Data.(map[string]interface{})
+	require.True(t, ok, "data should be a map")
+	events, ok := data["events"]
+	require.True(t, ok, "data should have events key")
+	eventsSlice, ok := events.([]interface{})
+	require.True(t, ok, "events should be a slice")
+	assert.Empty(t, eventsSlice, "events should be empty when no manager is wired")
 }
 
 // TestHandleGetStewardLogs_StewardNotFound verifies that GET /api/v1/stewards/{id}/logs
@@ -1144,4 +1153,198 @@ func TestHandleCreateAPIKey_AcceptsStewardReadLogs(t *testing.T) {
 	server.handleCreateAPIKey(rec, req)
 
 	assert.Equal(t, http.StatusCreated, rec.Code, "steward:read-logs must be a known permission")
+}
+
+// newTestStewardEventManager creates a synchronous file-backed LoggingManager
+// suitable for test use. Entries are immediately queryable after WriteEntry + Flush.
+func newTestStewardEventManager(t *testing.T) *logging.LoggingManager {
+	t.Helper()
+	mgr, err := logging.NewLoggingManager(&logging.LoggingConfig{
+		Provider: "file",
+		Config: map[string]interface{}{
+			"directory":        t.TempDir(),
+			"file_prefix":      "steward-events",
+			"max_file_size":    10 * 1024 * 1024,
+			"retention_days":   1,
+			"compress_rotated": false,
+		},
+		Level:       "DEBUG",
+		ServiceName: "test-controller",
+		Component:   "test",
+		AsyncWrites: false, // synchronous so entries are visible immediately
+		BatchSize:   1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, mgr.Close()) })
+	return mgr
+}
+
+// writeTestStewardEventAt writes a log entry with the given steward_id and explicit
+// timestamp into the manager. Use explicit timestamps in correlated-pair tests to
+// ensure deterministic detection-before-outcome ordering without relying on wall-clock races.
+func writeTestStewardEventAt(t *testing.T, mgr *logging.LoggingManager, stewardID, level, message, correlationID string, ts time.Time) {
+	t.Helper()
+	entry := loggingInterfaces.LogEntry{
+		Timestamp:     ts,
+		Level:         level,
+		Message:       message,
+		CorrelationID: correlationID,
+		Fields: map[string]interface{}{
+			"steward_id": stewardID,
+		},
+	}
+	require.NoError(t, mgr.WriteEntry(context.Background(), entry))
+	require.NoError(t, mgr.Flush(context.Background()))
+}
+
+// writeTestStewardEvent writes a log entry with the current wall-clock timestamp.
+func writeTestStewardEvent(t *testing.T, mgr *logging.LoggingManager, stewardID, level, message, correlationID string) {
+	t.Helper()
+	writeTestStewardEventAt(t, mgr, stewardID, level, message, correlationID, time.Now())
+}
+
+// TestGetStewardLogs_CrossTenantBlocked verifies that a caller scoped to tenant A
+// cannot read events for a steward belonging to tenant B (AC: cross-tenant blocked).
+func TestGetStewardLogs_CrossTenantBlocked(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Register steward in "tenant-b" (different from the caller's tenant).
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-b")
+	resp, err := server.controllerService.AcceptRegistration(ctx, &controller.RegisterRequest{
+		Version: "v1.0",
+		InitialDna: &common.DNA{
+			Id:         "dna-cross-tenant",
+			Attributes: map[string]string{"hostname": "cross-tenant-host", "os": "linux"},
+		},
+	})
+	require.NoError(t, err)
+	stewardID := resp.StewardId
+
+	mgr := newTestStewardEventManager(t)
+	server.SetStewardEventLoggingManager(mgr)
+
+	// Caller is scoped to "tenant-a" — different from the steward's "tenant-b".
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-logs"}, "tenant-a", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// 404 to avoid disclosing steward existence across tenants (matches the existing ACL pattern).
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestGetStewardLogs_ScopedToPathSteward verifies that when two stewards' events share
+// the same steward-event LoggingManager, GET /stewards/{A}/logs returns only steward A's
+// entries and never steward B's (result-set scoping by steward_id, not just ACL).
+func TestGetStewardLogs_ScopedToPathSteward(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardA := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "scope-host-a", "os": "linux",
+	})
+	stewardB := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "scope-host-b", "os": "linux",
+	})
+
+	mgr := newTestStewardEventManager(t)
+	server.SetStewardEventLoggingManager(mgr)
+
+	// Write one event for steward A and one for steward B.
+	writeTestStewardEvent(t, mgr, stewardA, "INFO", "event from A", "")
+	writeTestStewardEvent(t, mgr, stewardB, "INFO", "event from B", "")
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardA+"/logs?since=1h", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	data := body.Data.(map[string]interface{})
+	events := data["events"].([]interface{})
+
+	// Only steward A's event should appear.
+	require.Len(t, events, 1, "exactly one event expected for steward A")
+	record := events[0].(map[string]interface{})
+	detection := record["detection"].(map[string]interface{})
+	assert.Equal(t, "event from A", detection["message"])
+}
+
+// TestGetStewardLogs_RollupByCorrelationID verifies that two persisted entries sharing
+// a correlation_id are rendered as a single rolled-up record (detection + outcome).
+func TestGetStewardLogs_RollupByCorrelationID(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "rollup-host", "os": "linux",
+	})
+
+	mgr := newTestStewardEventManager(t)
+	server.SetStewardEventLoggingManager(mgr)
+
+	corrID := "corr-abc-123"
+	t0 := time.Now()
+	t1 := t0.Add(time.Millisecond)
+	writeTestStewardEventAt(t, mgr, stewardID, "INFO", "monitor fired", corrID, t0)
+	writeTestStewardEventAt(t, mgr, stewardID, "INFO", "convergence complete", corrID, t1)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?since=1h", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	data := body.Data.(map[string]interface{})
+	events := data["events"].([]interface{})
+
+	// Two entries sharing a correlation_id must roll up into one record.
+	require.Len(t, events, 1, "two correlated entries must produce exactly one rolled-up record")
+	record := events[0].(map[string]interface{})
+	assert.Equal(t, corrID, record["correlation_id"])
+	assert.NotNil(t, record["detection"], "detection must be present")
+	assert.NotNil(t, record["outcome"], "outcome must be present")
+	assert.NotEqual(t, true, record["pending_outcome"], "pending_outcome must not be set when outcome is present")
+}
+
+// TestGetStewardLogs_PendingOutcome verifies that a single correlated event with no
+// paired outcome in the query window is marked pending_outcome=true (the ADR-012 §2
+// "monitor fired, convergence never completed" wedge signal).
+func TestGetStewardLogs_PendingOutcome(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-logs"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "pending-outcome-host", "os": "linux",
+	})
+
+	mgr := newTestStewardEventManager(t)
+	server.SetStewardEventLoggingManager(mgr)
+
+	// Write only the detection event — no paired outcome.
+	corrID := "corr-pending-xyz"
+	writeTestStewardEvent(t, mgr, stewardID, "WARN", "monitor fired, no response yet", corrID)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/logs?since=1h", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	data := body.Data.(map[string]interface{})
+	events := data["events"].([]interface{})
+
+	require.Len(t, events, 1, "one correlated event without outcome must produce one record")
+	record := events[0].(map[string]interface{})
+	assert.Equal(t, corrID, record["correlation_id"])
+	assert.NotNil(t, record["detection"], "detection must be present")
+	assert.Nil(t, record["outcome"], "outcome must be absent")
+	assert.Equal(t, true, record["pending_outcome"], "pending_outcome must be true for a detection with no outcome")
 }
