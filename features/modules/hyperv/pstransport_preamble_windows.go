@@ -503,4 +503,43 @@ function Cfgms-CreateVSwitchExternal {
     )
     New-VMSwitch -Name $Name -SwitchType External -NetAdapterName $NetAdapter -AllowManagementOS $AllowManagementOS | Out-Null
 }
+
+# ── Failover cluster read (read-only, #2199 S1) ───────────────────────
+# Each function wraps a single Get-Cluster* query and emits JSON via
+# ConvertTo-Json so the Go parsers in cluster.go keep working unchanged.
+# $ClusterName travels via ArgumentList — never interpolated. No write
+# cmdlet (Add-*/Remove-*/New-*) appears here; cluster mutation is S2.
+
+# Cfgms-GetCluster mirrors psGetCluster: cluster identity + member node names +
+# CSV friendly volume paths. Emits {"found":false} when the cluster is absent.
+function Cfgms-GetCluster {
+    param([Parameter(Mandatory)][string]$ClusterName)
+    $c = Get-Cluster -Name $ClusterName -ErrorAction SilentlyContinue
+    if (-not $c) { Write-Output '{"found":false}'; return }
+    $nodes = @(Get-ClusterNode -Cluster $ClusterName -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    $csv = @(Get-ClusterSharedVolume -Cluster $ClusterName -ErrorAction SilentlyContinue | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName })
+    ConvertTo-Json @{ found = $true; Name = $c.Name; MemberNodes = $nodes; CsvPaths = $csv } -Compress -Depth 4
+}
+
+# Cfgms-GetClusterOwnerNode mirrors psGetClusterOwnerNode: the current owner
+# node of the core "Cluster Group" (the CNO). Emits {"owner":""} when the group
+# has no current owner (transient failover) so the Go helper treats absence as
+# non-error.
+function Cfgms-GetClusterOwnerNode {
+    param([Parameter(Mandatory)][string]$ClusterName)
+    $g = Get-ClusterGroup -Cluster $ClusterName -Name 'Cluster Group' -ErrorAction SilentlyContinue
+    if (-not $g -or -not $g.OwnerNode) { Write-Output '{"owner":""}'; return }
+    ConvertTo-Json @{ owner = $g.OwnerNode.Name } -Compress
+}
+
+# Cfgms-GetClusterResourceOwner mirrors psGetClusterResourceOwner: the current
+# owner node of every clustered VM role group (GroupType -eq 'VirtualMachine').
+function Cfgms-GetClusterResourceOwner {
+    param([Parameter(Mandatory)][string]$ClusterName)
+    $owners = @{}
+    Get-ClusterGroup -Cluster $ClusterName -ErrorAction SilentlyContinue |
+        Where-Object { $_.GroupType -eq 'VirtualMachine' } |
+        ForEach-Object { $owners[$_.Name] = if ($_.OwnerNode) { $_.OwnerNode.Name } else { '' } }
+    ConvertTo-Json @{ owners = $owners } -Compress -Depth 4
+}
 `

@@ -2,11 +2,25 @@
 
 **Kind:** steward
 
-Remote Hyper-V management via WinRM for CFGMS. Manages VMs and virtual switches on Windows Server hosts running the Hyper-V role. All PowerShell commands are executed over an authenticated, TLS-encrypted WinRM connection.
+Hyper-V management for CFGMS. Manages VMs, virtual switches, and (read-only)
+failover-cluster state on the Windows Server host the steward runs on. The
+module is a **steward** module: it runs in-process on the Hyper-V host's own
+steward and drives Hyper-V through a persistent in-host PowerShell host
+(`psHostTransport`) — a long-lived `powershell.exe` subprocess on the local
+host. It is **not** an outpost module and does **not** manage remote hosts. A
+legacy WinRM transport remains as a named fallback for the off-host case, but
+the default and supported deployment shape is the in-host PS host.
 
 ## Purpose and scope
 
-The Hyper-V module provides desired-state management of Hyper-V resources on Windows Server hosts via WinRM. It enables CFGMS to create, start, stop, resize, and remove virtual machines and configure virtual switches — all through an authenticated, TLS-encrypted WinRM connection. A VM's network connection is declared on the VM itself (`switch_name`); the module converges its adapters to match.
+The Hyper-V module provides desired-state management of Hyper-V resources on the
+Windows Server host the steward runs on. It enables CFGMS to create, start,
+stop, resize, and remove virtual machines, configure virtual switches, and read
+failover-cluster topology and ownership — all by invoking host-native Hyper-V /
+Failover-Clustering PowerShell cmdlets through the in-host `psHostTransport`. A
+VM's network connection is declared on the VM itself (`switch_name`); the module
+converges its adapters to match. All user-supplied values travel via PowerShell
+`ArgumentList` — never composed into script text.
 
 The module's scope includes:
 
@@ -29,6 +43,8 @@ The module accepts the following configuration options via `Configure(cfg)`:
 | `tenant_id` | string | No | Tenant identifier recorded on audit events and DNA (not used to alter host-side resource names) |
 | `steward_id` | string | No | Steward identifier for audit records (defaults to `<tenantID>/hyperv`) |
 | `audit_manager` | `*audit.Manager` | No | Audit manager for recording Hyper-V operations |
+| `cluster_name` | string | No | Failover-cluster **scope cap** (S5): the single cluster this steward is permitted to read. When set, `Get("cluster:<name>")` and the ownership helper reject any other cluster name with `ErrClusterNotDeclared` **before** touching the transport. Empty disables the cap. |
+| `cluster_role_names` | list of strings | No | Bounds the set of clustered VM role names in scope (S5). |
 
 VM resource configuration fields (`vm:<name>`):
 
@@ -410,6 +426,7 @@ resource ID string built by the steward executor:
 |----------|-----------------|----------------------|-----------|
 | `hyperv.vm` | `name: web-01` | `vm:web-01` | Virtual machine management (create, start, stop, remove) |
 | `hyperv.vswitch` | `name: External-Switch` | `vswitch:External-Switch` | Virtual switch management (create External/Internal/Private, remove) |
+| `hyperv.cluster` | `name: lab-hv` | `cluster:lab-hv` | Failover-cluster state (read-only `Get`): member nodes, CNO owner, per-role owners, CSV paths |
 
 ### VM networking (declarative, multi-NIC)
 
@@ -450,6 +467,71 @@ model is the replacement for the removed standalone `vmattach` resource
 (detach / multi-NIC / reattach — #1903, #2021). If `switch_name` is omitted the
 module leaves the VM's existing adapters untouched (it never implicitly strips a
 VM down to zero NICs).
+
+## Failover cluster (read-only)
+
+`hyperv.cluster` exposes the state of a Windows Server **failover cluster** the
+host is a member of. In S1 this resource is **read-only** — `Get` only; there is
+no `Set` (cluster formation, role placement, and live migration are later
+stories). The module reads cluster state by invoking the host-native
+Failover-Clustering cmdlets through the in-host `psHostTransport`; every cluster
+name travels via `ArgumentList`, never composed into PowerShell text.
+
+`Get("cluster:<name>")` returns a `ClusterStatus` whose observed fields are:
+
+| Field (`AsMap` key) | Meaning |
+|---------------------|---------|
+| `name` | The cluster (CNO) name. |
+| `member_nodes` | The cluster's member node names (`Get-ClusterNode`). |
+| `cno_owner_node` | The node currently owning the core *Cluster Group* (the CNO). Empty when the CNO has no current owner (transient failover). |
+| `resource_owner` | Map of each clustered VM role group → its current owner node (`Get-ClusterGroup` where `GroupType -eq 'VirtualMachine'`). |
+| `csv_paths` | Cluster Shared Volume friendly volume paths (`Get-ClusterSharedVolume`). |
+
+The five read-only cmdlets the module invokes — `Get-Cluster`,
+`Get-ClusterNode`, `Get-ClusterGroup`, `Get-ClusterResource`,
+`Get-ClusterSharedVolume` — are declared in `module.yaml`'s
+`behavioral_envelope`. No write cmdlet (`Add-*`/`Remove-*`/`New-*`) is declared.
+
+### Ownership gate (coordination, not authorization)
+
+Every downstream cluster operation consults an **ownership helper** that reports
+whether *this* node currently owns the CNO group and the per-role owner map. The
+gate decides **which** node acts (so a clustered operation runs exactly once
+across the members), never **whether** CFGMS may act:
+
+- A **non-owner** node is a *nil skip* — it returns no error and does not block
+  CFGMS. Ownership is coordination, not authorization (S1).
+- When the CNO group has **no current owner** (a transient failover window), the
+  helper returns "not owner" with **no error and no intra-cycle retry**
+  (Technical Decision) — the node simply treats itself as non-owner this cycle.
+- An **out-of-scope cluster name** (see the scope cap below) returns the
+  `ErrClusterNotDeclared` sentinel **regardless of ownership**, before any cmdlet
+  runs.
+
+Each ownership decision is recorded as a `pkg/audit` event with a Go
+receipt-time `Timestamp` (`time.Now()`, never a PS-reported value) and a
+non-empty node identity (the local hostname captured once at `Configure`).
+
+### Scope cap (`cluster_name`)
+
+Set `cluster_name` to bound this steward to a single cluster. With the cap set,
+both `Get("cluster:<name>")` and the ownership helper reject any other cluster
+name with `ErrClusterNotDeclared` **before invoking any PowerShell cmdlet** — a
+host can never be steered into reading a cluster it was not declared against.
+`cluster_role_names` further bounds the clustered VM roles in scope.
+
+### Module trust: strict
+
+The `hyperv.cluster` surface requires `module_trust.required_mode: strict` (set
+in `module.yaml`). A module that reads failover-cluster ownership and topology
+must be **independently verified by the steward** — the steward must not rely on
+the controller's word alone for it.
+
+```yaml
+- name: lab-hv
+  module: hyperv.cluster
+  config: {}        # read-only; the steward's cluster_name cap declares scope
+```
 
 ## Naming Convention
 

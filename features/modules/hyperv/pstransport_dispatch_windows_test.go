@@ -138,6 +138,12 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-CreateVSwitchInternal -Name " + quoteArg(psArgs, "Name"))
 	case psCreateVSwitchPrivate:
 		return emit("Cfgms-CreateVSwitchPrivate -Name " + quoteArg(psArgs, "Name"))
+	case psGetCluster:
+		return emit("Cfgms-GetCluster -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGetClusterOwnerNode:
+		return emit("Cfgms-GetClusterOwnerNode -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGetClusterResourceOwner:
+		return emit("Cfgms-GetClusterResourceOwner -ClusterName " + quoteArg(psArgs, "ClusterName"))
 	}
 	// Mirror production ExecutePS: an unknown psCommand is an error, not a
 	// silent success — keeps this test mirror honest to the production contract.
@@ -394,6 +400,10 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		// Dynamic psCreateVSwitchExternal (vswitch.go) — both AllowManagementOS values
 		{"psCreateVSwitchExternal/true", psCreateVSwitchExternal(true), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
 		{"psCreateVSwitchExternal/false", psCreateVSwitchExternal(false), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
+		// Failover cluster read-only verbs (cluster.go, #2199 S1)
+		{"psGetCluster", psGetCluster, map[string]string{"ClusterName": "lab-hv"}},
+		{"psGetClusterOwnerNode", psGetClusterOwnerNode, map[string]string{"ClusterName": "lab-hv"}},
+		{"psGetClusterResourceOwner", psGetClusterResourceOwner, map[string]string{"ClusterName": "lab-hv"}},
 	}
 
 	for _, tc := range commands {
