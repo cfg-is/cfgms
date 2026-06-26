@@ -730,16 +730,27 @@ func (s *FleetTestSuite) listPendingRefreshes(t *testing.T, tenantID string) []p
 }
 
 // approveRefreshViaAPI approves a pending refresh entry via the controller REST API.
-func (s *FleetTestSuite) approveRefreshViaAPI(t *testing.T, pendingID string) {
+// approveRefreshViaCLI approves a pending refresh using the operator-facing
+// `cfg steward refresh approve <pending_id>` CLI verb — the acceptance criterion
+// names the CLI command, and the CLI is the user-facing UX (a raw REST call is not
+// an acceptable substitute). Authenticates with the admin bundle over mTLS, the
+// same way the other cfg invocations in this suite do (see uploadConfig).
+func (s *FleetTestSuite) approveRefreshViaCLI(t *testing.T, pendingID string) {
 	t.Helper()
-	url := fmt.Sprintf("%s/api/v1/stewards/refresh/%s/approve", s.controllerURL, pendingID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, nil)
-	require.NoError(t, err, "approveRefreshViaAPI: build request")
-	resp, err := s.httpClient.Do(req)
-	require.NoError(t, err, "approveRefreshViaAPI: send request")
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"approveRefreshViaAPI: unexpected response for pending_id %s: %s", pendingID, resp.Status)
+	require.NotEmpty(t, s.bundlePath, "approveRefreshViaCLI: admin bundle path not set; call rebuildClients first")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// #nosec G204 - cfgBinary() and all args are test-controlled, not user input.
+	cmd := exec.CommandContext(ctx, cfgBinary(),
+		"steward", "refresh", "approve", pendingID,
+		"--bundle", s.bundlePath,
+		"--api-url", s.controllerURL)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "approveRefreshViaCLI: cfg steward refresh approve %s failed: %s",
+		pendingID, strings.TrimSpace(string(out)))
+	t.Logf("Approved pending refresh %s via cfg steward refresh approve: %s",
+		pendingID, strings.TrimSpace(string(out)))
 }
 
 // queryAuditActionCount returns the number of audit entries with the given action

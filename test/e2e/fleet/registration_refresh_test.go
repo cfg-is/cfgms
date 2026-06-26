@@ -288,7 +288,7 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	}
 
 	// Approve via the admin REST API.
-	s.approveRefreshViaAPI(t, pendingID)
+	s.approveRefreshViaCLI(t, pendingID)
 	t.Logf("Archived: approved pending refresh %s", pendingID)
 
 	// Restore steward status to "registered" so the controller accepts the reconnect.
