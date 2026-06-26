@@ -1063,7 +1063,7 @@ func connectWithApprovedRegistration(
 	case trustSourceTOFU:
 		if reg.CACert != "" {
 			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, &persistedID); err != nil {
-				logger.Warn("TOFU CA pin failed; identity will not have fingerprint", "error", err)
+				return nil, fmt.Errorf("TOFU CA pin failed: %w", err)
 			}
 		}
 	case trustSourceInstallPinned:

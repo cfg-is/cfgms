@@ -116,8 +116,8 @@ type StewardIdentity struct {
 	DeviceID       string `json:"device_id,omitempty"`        // 64-char lowercase hex SHA-256 of Ed25519 public key
 	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (32 bytes)
 	// Trust anchor fields (ADR-013 §3, Issue #1517).
-	TrustMode        string `json:"trust_mode,omitempty"`          // "compile-baked", "install-pinned", "tofu"
-	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"`  // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
+	TrustMode        string `json:"trust_mode,omitempty"`         // "compile-baked", "install-pinned", "tofu"
+	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"` // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600

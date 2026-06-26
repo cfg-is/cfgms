@@ -747,6 +747,30 @@ func TestTOFUCAPinImmutable(t *testing.T) {
 	assert.Equal(t, certPEMA, string(got), "CA file must not be modified after rejection")
 }
 
+// TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError verifies that
+// connectWithApprovedRegistration returns a hard error and does NOT persist the
+// identity when pinTOFUCA fails in TOFU mode.  ADR-013 §3 / implementation note:
+// "on error, do not save identity, do not connect."
+func TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	logger := logging.NewLogger("error")
+
+	reg := approvedRegistration{
+		StewardID:        "s1",
+		TenantID:         "t1",
+		TransportAddress: "https://ctrl.example.com",
+		CACert:           "not-a-valid-pem", // invalid PEM → computeCAPEMFingerprint fails → pinTOFUCA returns error
+	}
+
+	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceTOFU, "", logger)
+	require.Error(t, err, "must return a hard error when TOFU CA pin fails")
+
+	// Identity MUST NOT be saved when pinTOFUCA fails.
+	savedID, loadErr := loadIdentity(dir)
+	require.NoError(t, loadErr)
+	assert.Nil(t, savedID, "identity must not be persisted to disk when TOFU CA pin fails")
+}
+
 // TestTrustSourceDowngradeGuard verifies that checkTrustDowngrade enforces the
 // trust level ordering and CA fingerprint immutability (ADR-013 §3, Issue #1517).
 func TestTrustSourceDowngradeGuard(t *testing.T) {
