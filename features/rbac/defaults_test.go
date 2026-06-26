@@ -67,6 +67,30 @@ func TestAgentDevRole_HasNoWriteOrAdminPerms(t *testing.T) {
 	}
 }
 
+// TestStewardEventLogPermission_ExistsAndEmitOnly verifies the steward.event.log
+// permission exists in DefaultPermissions with emit-only (create) access — no read.
+func TestStewardEventLogPermission_ExistsAndEmitOnly(t *testing.T) {
+	var found *common.Permission
+	for _, p := range DefaultPermissions {
+		if p.Id == "steward.event.log" {
+			found = p
+			break
+		}
+	}
+	require.NotNil(t, found, "steward.event.log must exist in DefaultPermissions")
+	assert.Equal(t, []string{"create"}, found.Actions,
+		"steward.event.log must be emit-only (create), no read")
+}
+
+// TestStewardServiceRole_IncludesStewardEventLog verifies steward.service grants
+// steward.event.log but not a corresponding read permission.
+func TestStewardServiceRole_IncludesStewardEventLog(t *testing.T) {
+	role := findDefaultRole("steward.service")
+	require.NotNil(t, role, "steward.service must exist in DefaultRoles")
+	assert.Contains(t, role.PermissionIds, "steward.event.log",
+		"steward.service must include steward.event.log")
+}
+
 // findDefaultRole searches DefaultRoles by ID and returns nil if not found.
 func findDefaultRole(id string) *common.Role {
 	for _, role := range DefaultRoles {

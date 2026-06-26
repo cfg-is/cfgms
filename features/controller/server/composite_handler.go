@@ -15,16 +15,17 @@ import (
 // compositeTransportServer delegates StewardTransport RPCs to the appropriate
 // handler. Control plane RPCs go to the CP handler; SyncConfig is handled
 // directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
-// by the bulk handler. Future RPCs (TaskStream, Terminal, LogStream) fall
-// through to the Unimplemented base.
+// by the bulk handler; LogStream by the log stream handler. Future RPCs
+// (TaskStream, Terminal) fall through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
-	cpHandler     transportpb.StewardTransportServer // Register, Ping, ControlChannel
-	configHandler *controllerTransport.ConfigHandler // SyncConfig (direct handling)
-	dnaHandler    *controllerTransport.DNAHandler    // SyncDNA (direct handling)
-	bulkHandler   *controllerTransport.BulkHandler   // BulkTransfer (direct handling)
-	logger        logging.Logger
+	cpHandler        transportpb.StewardTransportServer    // Register, Ping, ControlChannel
+	configHandler    *controllerTransport.ConfigHandler    // SyncConfig (direct handling)
+	dnaHandler       *controllerTransport.DNAHandler       // SyncDNA (direct handling)
+	bulkHandler      *controllerTransport.BulkHandler      // BulkTransfer (direct handling)
+	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
+	logger           logging.Logger
 }
 
 // newCompositeTransportServer creates a composite handler that delegates RPCs.
@@ -33,14 +34,16 @@ func newCompositeTransportServer(
 	dnaHandler *controllerTransport.DNAHandler,
 	bulkHandler *controllerTransport.BulkHandler,
 	configHandler *controllerTransport.ConfigHandler,
+	logStreamHandler *controllerTransport.LogStreamHandler,
 	logger logging.Logger,
 ) *compositeTransportServer {
 	return &compositeTransportServer{
-		cpHandler:     cpHandler,
-		configHandler: configHandler,
-		dnaHandler:    dnaHandler,
-		bulkHandler:   bulkHandler,
-		logger:        logger,
+		cpHandler:        cpHandler,
+		configHandler:    configHandler,
+		dnaHandler:       dnaHandler,
+		bulkHandler:      bulkHandler,
+		logStreamHandler: logStreamHandler,
+		logger:           logger,
 	}
 }
 
@@ -87,4 +90,15 @@ func (c *compositeTransportServer) BulkTransfer(stream grpc.BidiStreamingServer[
 		return c.bulkHandler.HandleGRPC(stream)
 	}
 	return c.UnimplementedStewardTransportServer.BulkTransfer(stream)
+}
+
+// LogStream is handled directly by the log stream handler. Each ingested
+// LogEntry is CN-matched against the authenticated mTLS peer, tenant-derived
+// server-side from the fleet registry, rate-limited per steward, and written
+// via the dedicated steward-event LoggingManager.
+func (c *compositeTransportServer) LogStream(stream grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse]) error {
+	if c.logStreamHandler != nil {
+		return c.logStreamHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.LogStream(stream)
 }
