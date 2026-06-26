@@ -3,6 +3,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -579,14 +580,34 @@ func (s *FleetTestSuite) expireStewardCerts(t *testing.T, container string) {
 		}
 	}
 
-	// Copy the modified cert store back to the container.
-	// docker cp src/. container:dst copies the CONTENTS of src into dst, overwriting
-	// existing files. The in-place serial-directory replacement above means the docker cp
-	// here overwrites the valid cert files with expired ones — no directory deletion needed.
+	// Copy the modified cert store back to the container — preserving the steward's
+	// ownership. The steward process runs as user cfgms (UID/GID 1001; see
+	// cmd/steward/Dockerfile.debian), and /var/lib/cfgms/steward/certs is chowned to
+	// cfgms at image build. A plain `docker cp src/. container:dst` re-creates the
+	// copied files (and the destination dir) owned by the HOST uid running the test
+	// (empirically the host UID, not the container's), so the steward can no longer
+	// read steward-identity.json or write machine-id in that directory. That silently
+	// disables registration-refresh ("Failed to create device identity key store;
+	// registration-refresh disabled") and the steward falls back to a FULL HTTP
+	// re-registration instead of the refresh handshake — making every refresh-path
+	// assertion fail. To avoid that, stream a tar of the cert store with every entry
+	// forced to 1001:1001 and feed it to `docker cp -`, which extracts to DEST
+	// preserving the tar's uid/gid. This restores the steward's access on restart.
+	const stewardUIDGID = "1001" // cfgms user/group in cmd/steward/Dockerfile.debian
 	cpInCtx, cpInCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	out, err = exec.CommandContext(cpInCtx, "docker", "cp",
-		hostCertDir+"/.", fmt.Sprintf("%s:%s", container, certStoreDir)).CombinedOutput()
-	cpInCancel()
+	defer cpInCancel()
+	var tarBuf bytes.Buffer
+	tarCmd := exec.CommandContext(cpInCtx, "tar", "-C", hostCertDir,
+		"--owner="+stewardUIDGID, "--group="+stewardUIDGID, "-cf", "-", ".")
+	tarCmd.Stdout = &tarBuf
+	var tarErr bytes.Buffer
+	tarCmd.Stderr = &tarErr
+	require.NoError(t, tarCmd.Run(), "expireStewardCerts: tar cert store with cfgms ownership: %s", tarErr.String())
+
+	cpInCmd := exec.CommandContext(cpInCtx, "docker", "cp", "-",
+		fmt.Sprintf("%s:%s", container, certStoreDir))
+	cpInCmd.Stdin = &tarBuf
+	out, err = cpInCmd.CombinedOutput()
 	require.NoError(t, err, "expireStewardCerts: docker cp modified cert store back: %s", string(out))
 
 	t.Logf("expireStewardCerts: replaced %d client cert(s) with expired version in %s (in-place)",
