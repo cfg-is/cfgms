@@ -261,20 +261,37 @@ func TestGitHubAppProvider_ExecuteOperation_E2E(t *testing.T) {
 	const fakeInstallToken = "ghs_testInstallToken"
 	const fakeRegToken = "FAKETOKEN123"
 
+	// Collect handler-goroutine assertion failures for replay in the test goroutine.
+	// Calling t.Errorf from net/http handler goroutines is technically safe (it uses
+	// t.Errorf, not t.Fatal), but assertions that reference t after the test has
+	// exited are undefined. Capturing errors in a slice and replaying them here is
+	// the canonical pattern for httptest handler assertions.
+	var handlerMu sync.Mutex
+	var handlerErrs []string
+	addHandlerErr := func(msg string) {
+		handlerMu.Lock()
+		defer handlerMu.Unlock()
+		handlerErrs = append(handlerErrs, msg)
+	}
+
 	// Single stub server handles both GitHub API endpoints.
 	stubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/app/installations/" + installID + "/access_tokens":
-			assert.Equal(t, http.MethodPost, r.Method)
-			// Verify the request carries an App JWT (RS256 Bearer token).
+			if r.Method != http.MethodPost {
+				addHandlerErr(fmt.Sprintf("installation endpoint: expected POST, got %q", r.Method))
+			}
 			authHeader := r.Header.Get("Authorization")
-			assert.True(t, strings.HasPrefix(authHeader, "Bearer "),
-				"installation-token request must carry a Bearer App JWT, got: %q", authHeader)
+			if !strings.HasPrefix(authHeader, "Bearer ") {
+				addHandlerErr(fmt.Sprintf("installation-token request must carry a Bearer App JWT, got: %q", authHeader))
+			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, `{"token":%q,"expires_at":"2026-12-31T00:00:00Z"}`, fakeInstallToken)
 		case "/repos/test-org/test-repo/actions/runners/registration-token":
-			assert.Equal(t, "Bearer "+fakeInstallToken, r.Header.Get("Authorization"))
+			if got, want := r.Header.Get("Authorization"), "Bearer "+fakeInstallToken; got != want {
+				addHandlerErr(fmt.Sprintf("registration endpoint: expected Authorization %q, got %q", want, got))
+			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, `{"token":%q,"expires_at":"2026-12-31T00:00:00Z"}`, fakeRegToken)
 		default:
@@ -305,6 +322,18 @@ func TestGitHubAppProvider_ExecuteOperation_E2E(t *testing.T) {
 
 	resp, err := provider.ExecuteOperation(ctx, config)
 	require.NoError(t, err)
+
+	// Replay handler assertions in the test goroutine. By the time
+	// ExecuteOperation returns the HTTP response, the handler goroutine has
+	// already written to handlerErrs (response write happens-after error capture).
+	handlerMu.Lock()
+	errs := make([]string, len(handlerErrs))
+	copy(errs, handlerErrs)
+	handlerMu.Unlock()
+	for _, e := range errs {
+		t.Errorf("stub handler assertion: %s", e)
+	}
+
 	assert.True(t, resp.Success)
 	assert.Equal(t, 201, resp.StatusCode)
 	data, ok := resp.Data.(map[string]interface{})
