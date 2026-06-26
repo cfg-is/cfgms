@@ -116,6 +116,7 @@ Modules are organized by execution environment and category:
   - directory/ - Local directory management
   - service/ - Local service management
   - activedirectory/ - Local AD management using system context
+  - github_runner/ - Idempotent GitHub Actions self-hosted runner agent + service state (token-free; registration is the provisioning workflow's job)
 
 ### **Outpost Modules** (Network Resource Management)
 - **Network Directory Modules**: Remote directory management
