@@ -505,7 +505,19 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		resp.ServerCert = string(signingCertPEM) // matches initial registration response field name
 	}
 
-	// Promote steward back to registered status after cert issuance.
+	// Promote steward back to registered status after cert issuance. This must be
+	// written to the PERSISTENT steward store, because the registration-refresh
+	// lifecycle gate reads status via stewardStore.GetStewardByDeviceID. Updating
+	// only the in-memory service registry (below) leaves an admin-approved *archived*
+	// steward looking archived to the next challenge, so it re-queues indefinitely
+	// and only converges via slow background reconciliation
+	// (Issue #2098: TestFleetRegistrationRefresh/Archived).
+	if s.stewardStore != nil {
+		if err := s.stewardStore.UpdateStewardStatus(ctx, record.ID, business.StewardStatusRegistered); err != nil {
+			s.logger.Warn("Failed to persist steward status after refresh cert issuance",
+				"steward_id", record.ID, "error", err)
+		}
+	}
 	if s.controllerService != nil {
 		if err := s.controllerService.UpdateStewardStatus(record.ID, "registered"); err != nil {
 			s.logger.Warn("Failed to update steward status after refresh cert issuance",
