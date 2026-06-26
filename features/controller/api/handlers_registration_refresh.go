@@ -83,6 +83,7 @@ type RefreshCompleteResponse struct {
 	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
 	SigningCert string `json:"signing_cert,omitempty"`
+	ServerCert  string `json:"server_cert,omitempty"` // same value as signing_cert; matches initial registration response field name
 }
 
 // ---- Handlers ---------------------------------------------------------------
@@ -501,6 +502,7 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 
 	if signingCertPEM, sigErr := s.certManager.GetSigningCertificate(); sigErr == nil && len(signingCertPEM) > 0 {
 		resp.SigningCert = string(signingCertPEM)
+		resp.ServerCert = string(signingCertPEM) // matches initial registration response field name
 	}
 
 	// Promote steward back to registered status after cert issuance.

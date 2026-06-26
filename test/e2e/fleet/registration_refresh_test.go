@@ -24,6 +24,19 @@ import (
 func TestFleetRegistrationRefresh(t *testing.T) {
 	suite := setupFleetSuite(t)
 
+	// Top-level cleanup: restore both stewards to "registered" after all subtests so
+	// downstream tests (TestFleetRotation, TestFleetIDSelector) start with both stewards
+	// in a known-good state. Individual subtests register their own cleanups for their
+	// specific mutations, but this catches any residual state from a subtest that panics
+	// or whose cleanup is not yet registered when it fails.
+	t.Cleanup(func() {
+		for _, id := range suite.stewardIDs {
+			if id != "" {
+				suite.setStewardStatusByID(t, id, "registered")
+			}
+		}
+	})
+
 	t.Run("AutoAccept", func(t *testing.T) {
 		suite.testRefreshAutoAccept(t)
 	})
@@ -200,6 +213,13 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	// Stop container, expire certs, mark archived.
 	s.containerStop(t, container)
 	s.expireStewardCerts(t, container)
+
+	// Restore to registered before returning — runs even if t.Fatalf fires below.
+	// Without this cleanup, TestFleetRotation and TestFleetIDSelector fail because
+	// fleet-steward-2 stays archived and never reaches connected state.
+	t.Cleanup(func() {
+		s.setStewardStatusByID(t, stewardID, "registered")
+	})
 
 	// Mark archived — the controller's refresh gate queues archived stewards automatically
 	// (bypasses policy: even auto_accept policy queues archived stewards).
