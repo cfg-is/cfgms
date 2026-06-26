@@ -729,7 +729,6 @@ func (s *FleetTestSuite) listPendingRefreshes(t *testing.T, tenantID string) []p
 	return entries
 }
 
-// approveRefreshViaAPI approves a pending refresh entry via the controller REST API.
 // approveRefreshViaCLI approves a pending refresh using the operator-facing
 // `cfg steward refresh approve <pending_id>` CLI verb — the acceptance criterion
 // names the CLI command, and the CLI is the user-facing UX (a raw REST call is not
