@@ -124,6 +124,18 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			return fmt.Errorf("launcher: steward exe %q for version %q is missing: %w", exe, current, statErr)
 		}
 
+		// Compute the binary hash and determine known-good status before each
+		// exec. Rechecking every iteration catches on-disk replacements that
+		// happen between the initial mark and a subsequent restart.
+		exeHash, hashErr := computeBinaryHash(exe)
+		if hashErr != nil {
+			return fmt.Errorf("launcher: hash steward exe for version %q: %w", current, hashErr)
+		}
+		isKnownGood := false
+		if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
+			isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
+		}
+
 		started := s.clock.Now()
 		exitErr := s.execOnce(ctx, exe)
 		ranFor := s.clock.Since(started)
@@ -150,6 +162,13 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			if !failedStartupOnCancel {
 				return nil
 			}
+			// A known-good version that fast-exits coinciding with a
+			// context cancel is an environmental fault (e.g. WMI race on
+			// boot), not an upgrade failure. Return clean shutdown rather
+			// than rolling back or looping on a cancelled context.
+			if isKnownGood {
+				return nil
+			}
 			// Fall through to the rollback logic below — this looks
 			// like a real upgrade failure that happened to coincide
 			// with a cancel. The operator (or the next startup) will
@@ -170,11 +189,14 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 		if !failedStartup && !nonZeroExit {
 			// Child stayed up past the startup window then exited cleanly.
-			// Reset the failure counter and prune old version directories,
-			// then write the committed flag file last so its presence is a
-			// reliable completion signal for tests and the steward process.
+			// Reset the failure counter, persist the known-good marker, and
+			// prune old version directories. Write the committed flag file
+			// last so its presence is a reliable completion signal for tests
+			// and the steward process.
 			if ps, loadErr := s.Layout.loadState(); loadErr == nil {
 				ps.ConsecutiveFailures = 0
+				ps.KnownGood = current
+				ps.KnownGoodHash = exeHash
 				if saveErr := s.Layout.saveState(ps); saveErr != nil {
 					_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
 				}
@@ -200,6 +222,16 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			}
 		} else {
 			_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
+		}
+
+		// Known-good fast-exit: a proven binary that exits inside the startup
+		// window is suffering a transient environmental fault (e.g. a boot-time
+		// dependency race), not an upgrade regression. Restart it in place so
+		// SCM recovery and the OS backoff handle persistence — never roll back
+		// a binary that has already proven healthy (Issue #2033).
+		if isKnownGood && failedStartup {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — restarting in place after fast exit (ran %s); rollback suppressed\n", current, ranFor)
+			continue
 		}
 
 		// Attempt rollback if we have a previous version AND budget.

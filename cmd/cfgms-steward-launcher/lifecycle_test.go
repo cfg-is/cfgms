@@ -935,3 +935,311 @@ func TestSupervise_UpgradeSelfExit_AdvancesToNewVersion(t *testing.T) {
 		t.Errorf("current = %q, want v2 (no rollback must have occurred)", cur)
 	}
 }
+
+// premarkKnownGood pre-seeds the known-good marker in state.json using the
+// actual hash of the installed binary at the given version. This simulates the
+// launcher having previously run the binary past its startup window.
+func premarkKnownGood(t *testing.T, l Layout, version string) {
+	t.Helper()
+	exe, err := l.StewardExeFor(version)
+	if err != nil {
+		t.Fatalf("StewardExeFor %q: %v", version, err)
+	}
+	hash, err := computeBinaryHash(exe)
+	if err != nil {
+		t.Fatalf("computeBinaryHash for %q: %v", version, err)
+	}
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState before premarkKnownGood: %v", err)
+	}
+	ps.KnownGood = version
+	ps.KnownGoodHash = hash
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState with known-good marker: %v", err)
+	}
+}
+
+// TestSupervise_KnownGood_FastExitRestartsInPlace verifies AC2: a version
+// already marked known-good that exits inside StartupWindow is restarted in
+// place — Rollback() is NOT called and state.json current is unchanged.
+func TestSupervise_KnownGood_FastExitRestartsInPlace(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v0") // previous version (must NOT become current)
+	if err := l.WriteCurrent("v0"); err != nil {
+		t.Fatalf("WriteCurrent v0: %v", err)
+	}
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// State: current=v1, previous=v0. Mark v1 as known-good.
+	premarkKnownGood(t, l, "v1")
+
+	// All children exit immediately with non-zero code — inside startup window.
+	markerFile := filepath.Join(t.TempDir(), "ran")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "1",
+		"FAKE_STEWARD_SLEEP_MS":    "0",
+		"FAKE_STEWARD_MARKER_FILE": markerFile,
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // always inside startup window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	// Run with a short timeout; the known-good loop must not return an error.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := s.Supervise(ctx)
+	// Context timeout is a clean cancel — Supervise must return nil.
+	if err != nil {
+		t.Errorf("Supervise returned %v on known-good fast-exit; want nil (restart in place, not terminal failure)", err)
+	}
+
+	// current must still be v1 — Rollback must NOT have been called.
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after known-good fast-exit: %v", curErr)
+	}
+	if cur != "v1" {
+		t.Errorf("current = %q after known-good fast-exit, want v1 (rollback must be suppressed)", cur)
+	}
+
+	// The child must have run at least once (marker file written).
+	if _, statErr := os.Stat(markerFile); statErr != nil {
+		t.Errorf("child never ran (marker absent): %v", statErr)
+	}
+
+	// Stderr must mention the restart-in-place decision.
+	if !bytes.Contains(stderr.Bytes(), []byte("known-good")) {
+		t.Errorf("stderr did not mention known-good restart:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_Probation_FastExitRollsBack verifies AC3: a freshly staged
+// (not-yet-known-good) version that exits inside StartupWindow still rolls
+// back to the previous version (existing probation behavior preserved).
+func TestSupervise_Probation_FastExitRollsBack(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	// State: current=v2, previous=v1. v2 has NO known-good marker (probation).
+
+	marker := filepath.Join(t.TempDir(), "ran")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "1",
+		"FAKE_STEWARD_SLEEP_MS":    "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // always inside startup window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	err := runSupervisor(t, s, 10*time.Second)
+	if err == nil {
+		t.Fatal("Supervise must return error when non-known-good v2 fails and v1 also fails")
+	}
+
+	// Rollback must have fired: current must be v1 after the rollback.
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after probation rollback: %v", curErr)
+	}
+	if cur != "v1" {
+		t.Errorf("current = %q after probation rollback, want v1", cur)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`rolled back to version "v1"`)) {
+		t.Errorf("stderr did not mention rollback:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_IncidentReplay_KnownGoodNotDemoted verifies AC4: replaying
+// the 2026-06-16 incident. Known-good vA is current; a forced fast-exit on
+// first start does NOT demote to vB. The launcher keeps vA current and retries.
+func TestSupervise_IncidentReplay_KnownGoodNotDemoted(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v0-5-12") // old version — must NOT become current
+	installFakeSteward(t, l, "v0-5-13") // known-good current
+	if err := l.WriteCurrent("v0-5-12"); err != nil {
+		t.Fatalf("WriteCurrent v0-5-12: %v", err)
+	}
+	if err := l.WriteCurrent("v0-5-13"); err != nil {
+		t.Fatalf("WriteCurrent v0-5-13: %v", err)
+	}
+	// Mark v0-5-13 known-good (it was running fine before the reboot).
+	premarkKnownGood(t, l, "v0-5-13")
+
+	// Simulate the boot-time race: v0-5-13 exits in under 2s (0-byte logs).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     30 * time.Second,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: time.Millisecond}, // fast exit inside 30s window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := s.Supervise(ctx)
+	if err != nil {
+		t.Errorf("Supervise returned %v in incident replay; want nil (known-good v0-5-13 never demoted)", err)
+	}
+
+	// v0-5-13 must remain current — no demotion to v0-5-12.
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after incident replay: %v", curErr)
+	}
+	if cur != "v0-5-13" {
+		t.Errorf("current = %q after incident replay, want v0-5-13 (not demoted)", cur)
+	}
+	if bytes.Contains(stderr.Bytes(), []byte("rolled back")) {
+		t.Errorf("rollback must not fire for known-good v0-5-13:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_KnownGoodCutover_NewVersionEntersProbation verifies AC6 (lifecycle
+// side): after a controller cutover to a new version (vB), a vB fast-exit follows
+// probation rules and rolls back to known-good vA — the known-good marker for vA
+// cannot protect vB from rollback.
+func TestSupervise_KnownGoodCutover_NewVersionEntersProbation(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "vA")
+	installFakeSteward(t, l, "vB")
+	if err := l.WriteCurrent("vA"); err != nil {
+		t.Fatalf("WriteCurrent vA: %v", err)
+	}
+	// Mark vA known-good (security-patch pre-condition).
+	premarkKnownGood(t, l, "vA")
+
+	// Controller pushes vB (security patch) via WriteCurrent. This must clear
+	// vA's known-good marker and enter vB into probation.
+	if err := l.WriteCurrent("vB"); err != nil {
+		t.Fatalf("WriteCurrent vB: %v", err)
+	}
+
+	// Verify marker was cleared by cutover.
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if ps.KnownGood != "" || ps.KnownGoodHash != "" {
+		t.Fatalf("cutover to vB must clear known-good marker; got KnownGood=%q KnownGoodHash=%q",
+			ps.KnownGood, ps.KnownGoodHash)
+	}
+
+	// vB fast-exits → must roll back to vA (probation rules apply).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // fast exit inside startup window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	// Both vA and vB fail (same env), so supervise exhausts rollback budget and errors.
+	if err := runSupervisor(t, s, 10*time.Second); err == nil {
+		t.Fatal("Supervise must return error after vB fails and vA also fails")
+	}
+
+	// The rollback to vA must have fired (vB was in probation, not known-good).
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after vB probation rollback: %v", curErr)
+	}
+	if cur != "vA" {
+		t.Errorf("current = %q after vB probation rollback, want vA", cur)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`rolled back to version "vA"`)) {
+		t.Errorf("stderr must mention rollback to vA:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_KnownGood_MarkedAfterHealthyRun verifies that a version which
+// runs past StartupWindow and exits cleanly has the known-good marker written to
+// state.json, and that marker survives a subsequent loadState (AC1 via lifecycle).
+func TestSupervise_KnownGood_MarkedAfterHealthyRun(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+
+	certStoreDir := t.TempDir()
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "0",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0,
+		CertStoreDir:      certStoreDir,
+		clock:             &fakeClock{sinceResult: time.Minute}, // past startup window → clean
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// Wait for upgrade-committed flag (written after mark-known-good).
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag never appeared")
+	}
+	cancel()
+	<-done
+
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState after healthy run: %v", err)
+	}
+	if ps.KnownGood != "v1" {
+		t.Errorf("KnownGood = %q, want v1 — must be set after binary survived StartupWindow", ps.KnownGood)
+	}
+	if ps.KnownGoodHash == "" {
+		t.Error("KnownGoodHash must be non-empty after healthy run")
+	}
+}
