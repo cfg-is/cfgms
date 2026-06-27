@@ -13,8 +13,12 @@ import (
 	"os"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/modules/script"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
+	"github.com/cfgis/cfgms/pkg/audit"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -228,7 +232,56 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 			"stderr":         result.Stderr, // full capped output (up to 1 MB); controller reads this key
 		},
 	})
+
+	// Emit script output via the S3 EventEmitter (additive to the ControlChannel path above).
+	// stdout/stderr previews are secret-redacted then control-char-sanitized before emission.
+	// Enqueue is non-blocking; the caller is never stalled on a slow or full emitter buffer.
+	h.emitScriptOutput(cmd.ID, scriptID, executionID, result.ExitCode, result.Duration, stdoutPreview, stderrPreview)
+
 	return nil
+}
+
+// emitScriptOutput enqueues a script_output LogEntry on the S3 EventEmitter when one is
+// configured. stdout and stderr are the already-bounded preview strings (scriptPreviewMaxBytes).
+// Redaction is applied before sanitization: RedactString catches key=value patterns in free-form
+// text; SanitizeLogValue strips control characters. RedactMap catches any field whose key matches
+// the RedactedKeys deny-list. A nil emitter is a silent no-op.
+func (h *Handler) emitScriptOutput(cmdID, scriptID, executionID string, exitCode int, duration time.Duration, stdout, stderr string) {
+	if h.eventEmitter == nil {
+		return
+	}
+
+	redactedStdout := logging.SanitizeLogValue(audit.RedactString(stdout))
+	redactedStderr := logging.SanitizeLogValue(audit.RedactString(stderr))
+
+	rawFields := map[string]interface{}{
+		"event_kind":   "script_output",
+		"cfg_id":       cmdID,
+		"execution_id": executionID,
+		"exit_code":    fmt.Sprintf("%d", exitCode),
+		"duration_ms":  fmt.Sprintf("%d", duration.Milliseconds()),
+		"stdout":       redactedStdout,
+		"stderr":       redactedStderr,
+	}
+	if scriptID != "" {
+		rawFields["script_id"] = scriptID
+	}
+
+	redactedFields := audit.RedactMap(rawFields)
+	pbFields := make(map[string]string, len(redactedFields))
+	for k, v := range redactedFields {
+		if sv, ok := v.(string); ok {
+			pbFields[k] = sv
+		}
+	}
+
+	h.eventEmitter.Enqueue(&transportpb.LogEntry{
+		StewardId: h.stewardID,
+		Level:     transportpb.Severity_SEVERITY_INFO,
+		Message:   "script_output",
+		Timestamp: timestamppb.Now(),
+		Fields:    pbFields,
+	})
 }
 
 // resolveRelayUID returns the UID the per-execution relay socket should be
