@@ -2,7 +2,18 @@
 // Copyright 2026 Jordan Ritz
 package commands
 
-import "errors"
+import (
+	"errors"
+
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+)
+
+// EventEmitter receives script output LogEntry events via the S3 out-of-band
+// channel. Enqueue must never block the caller — implementations drop and count
+// when the internal buffer is full (ADR-012 §2).
+type EventEmitter interface {
+	Enqueue(entry *transportpb.LogEntry)
+}
 
 // Sentinel errors returned by HandleCommand for each authentication rejection path.
 var (

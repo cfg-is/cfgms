@@ -459,18 +459,22 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
 	controlPlane := c.controlPlane
+	existingEmitter := c.eventEmitter // may already be set by setupCommandHandler (Issue #2143)
 	c.mu.RUnlock()
 
-	// Build the out-of-band event emitter. It shares the control-plane gRPC
-	// connection so no additional TLS setup is required (ADR-012 §2).
-	var emitter *EventEmitter
-	if cp, ok := controlPlane.(*grpcCP.Provider); ok {
-		if tc := cp.TransportClient(); tc != nil {
-			emitter = NewEventEmitter(EventEmitterConfig{
-				Client:    tc,
-				StewardID: stewardID,
-				Logger:    c.logger,
-			})
+	// Reuse the EventEmitter started in setupCommandHandler when available; otherwise
+	// build one now (e.g. standalone InitializeConfigExecutor call without prior Connect).
+	// ADR-012 §2: emitter shares the control-plane gRPC connection.
+	emitter := existingEmitter
+	if emitter == nil {
+		if cp, ok := controlPlane.(*grpcCP.Provider); ok {
+			if tc := cp.TransportClient(); tc != nil {
+				emitter = NewEventEmitter(EventEmitterConfig{
+					Client:    tc,
+					StewardID: stewardID,
+					Logger:    c.logger,
+				})
+			}
 		}
 	}
 
@@ -488,12 +492,15 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 
 	c.mu.Lock()
 	c.configExecutor = executor
-	c.eventEmitter = emitter
+	if emitter != nil && c.eventEmitter == nil {
+		c.eventEmitter = emitter
+	}
 	c.mu.Unlock()
 
 	if emitter != nil {
-		// The emitter uses context.Background() so its reconnect loop outlives
-		// any single request context. Disconnect() calls Close() to drain and stop.
+		// Start is idempotent — a no-op if setupCommandHandler already started this emitter.
+		// Uses context.Background() so the reconnect loop outlives any single request context.
+		// Disconnect() calls Close() to drain and stop.
 		emitter.Start(context.Background())
 		c.logger.Info("Configuration executor initialized with event emitter",
 			"tenant_id", tenantID, "steward_id", logging.RedactedID(stewardID))
@@ -683,6 +690,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	c.mu.RLock()
 	scriptSigning := c.scriptSigning
 	caCertPEM := c.caCertPEM
+	existingEmitter := c.eventEmitter
 	c.mu.RUnlock()
 
 	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
@@ -708,6 +716,33 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			"operator certificate CA-chain verification of inline signed commands will be skipped")
 	}
 
+	// Build the EventEmitter for script output streaming (Issue #2143). Reuse the
+	// already-started emitter when available; otherwise create one now so the command
+	// handler can emit script_output LogEntries from the first connected session.
+	// The emitter shares the control-plane gRPC connection — no extra TLS required.
+	var scriptEmitter commands.EventEmitter // interface — nil unless we successfully build one
+	if existingEmitter != nil {
+		scriptEmitter = existingEmitter
+	} else {
+		c.mu.RLock()
+		cp := c.controlPlane
+		c.mu.RUnlock()
+		if grpcProv, ok := cp.(*grpcCP.Provider); ok {
+			if tc := grpcProv.TransportClient(); tc != nil {
+				built := NewEventEmitter(EventEmitterConfig{
+					Client:    tc,
+					StewardID: stewardID,
+					Logger:    c.logger,
+				})
+				built.Start(context.Background())
+				c.mu.Lock()
+				c.eventEmitter = built
+				c.mu.Unlock()
+				scriptEmitter = built
+			}
+		}
+	}
+
 	handler, err := commands.New(&commands.Config{
 		StewardID:          stewardID,
 		OnStatus:           statusCallback,
@@ -718,6 +753,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		SigningConfig:      signingConfig,
 		RequireSignedAdhoc: scriptSigning.RequireSignedAdhoc,
 		ControllerCARoots:  controllerCARoots,
+		EventEmitter:       scriptEmitter,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)

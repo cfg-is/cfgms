@@ -91,6 +91,10 @@ type Handler struct {
 	// Issue #1675: per-execution relay registry.
 	// relays maps executionID → *scriptrelay.Relay for CommandRelayResponse dispatch.
 	relays sync.Map
+
+	// eventEmitter streams script output events to the controller via LogStream (Issue #2143).
+	// When nil, script output emission is skipped (e.g. tests without a live gRPC connection).
+	eventEmitter EventEmitter
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -146,6 +150,10 @@ type Config struct {
 	// ControllerCARoots is the certificate pool for verifying operator-signed inline
 	// command certs. When nil, CA chain verification of operator certs is skipped.
 	ControllerCARoots *x509.CertPool
+
+	// EventEmitter, when non-nil, receives script output LogEntry events after each
+	// CommandExecuteScript completes (Issue #2143). Enqueue must never block.
+	EventEmitter EventEmitter
 }
 
 const (
@@ -190,6 +198,7 @@ func New(cfg *Config) (*Handler, error) {
 		signingConfig:      cfg.SigningConfig,
 		requireSignedAdhoc: cfg.RequireSignedAdhoc,
 		controllerCARoots:  cfg.ControllerCARoots,
+		eventEmitter:       cfg.EventEmitter,
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".

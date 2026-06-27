@@ -8,16 +8,57 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/modules/script"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// ---------------------------------------------------------------------------
+// recordingEmitter — real in-process EventEmitter for tests (no mocks).
+// ---------------------------------------------------------------------------
+
+// recordingEmitter is a real channel-backed EventEmitter that satisfies the
+// commands.EventEmitter interface. It records every Enqueue call for assertion.
+type recordingEmitter struct {
+	mu      sync.Mutex
+	entries []*transportpb.LogEntry
+}
+
+func (r *recordingEmitter) Enqueue(entry *transportpb.LogEntry) {
+	r.mu.Lock()
+	r.entries = append(r.entries, entry)
+	r.mu.Unlock()
+}
+
+func (r *recordingEmitter) Entries() []*transportpb.LogEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*transportpb.LogEntry, len(r.entries))
+	copy(out, r.entries)
+	return out
+}
+
+// Compile-time check: recordingEmitter implements commands.EventEmitter.
+var _ EventEmitter = (*recordingEmitter)(nil)
+
+// firstScriptOutputEntry returns the first LogEntry with event_kind=script_output,
+// or nil if none was emitted.
+func firstScriptOutputEntry(entries []*transportpb.LogEntry) *transportpb.LogEntry {
+	for _, e := range entries {
+		if e.GetFields()["event_kind"] == "script_output" {
+			return e
+		}
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // Issue #1978 — 1 MB hard cap on exec output.
@@ -304,6 +345,141 @@ func TestExecuteScriptHandler_LibraryScriptNoScope_NoRelaySocket(t *testing.T) {
 
 	assert.Empty(t, socketVal,
 		"library script with empty required_api_scope must NOT create a relay socket")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #2143 — stream script output to controller (secret-redacted).
+// ---------------------------------------------------------------------------
+
+// secretScriptBody returns a script that writes known-sensitive patterns to
+// stdout in the key=value form caught by audit.RedactString.
+func secretScriptBody() string {
+	if runtime.GOOS == "windows" {
+		return `Write-Output "password=hunter2 token=abc123 api_key=secret-key-value"`
+	}
+	return `echo "password=hunter2 token=abc123 api_key=secret-key-value"`
+}
+
+// TestScriptOutput_SecretsRedacted is a required test (Issue #2143 AC):
+// script output containing password=... / token=... / api-key patterns must
+// emit [REDACTED] in the LogEntry fields; cleartext secrets must be absent from
+// the emitted entry.
+func TestScriptOutput_SecretsRedacted(t *testing.T) {
+	emitter := &recordingEmitter{}
+	cb, _ := collectEvents()
+	h, err := New(&Config{
+		StewardID:    "steward-test",
+		OnStatus:     cb,
+		Logger:       newTestLogger(t),
+		EventEmitter: emitter,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	// Inline command (no script_id) so no library-script signature is required.
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(secretScriptBody()))
+	cmd := &cpTypes.Command{
+		ID:        "sec-redact-001",
+		Type:      cpTypes.CommandExecuteScript,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"script_content": scriptContent,
+			"shell":          platformShell(),
+			"execution_id":   "exec-sec-redact-001",
+		},
+	}
+	require.NoError(t, h.handleExecuteScript(context.Background(), cmd))
+
+	entry := firstScriptOutputEntry(emitter.Entries())
+	require.NotNil(t, entry, "expected a script_output LogEntry to be emitted")
+
+	stdout := entry.GetFields()["stdout"]
+
+	// Cleartext secrets must be absent.
+	assert.NotContains(t, stdout, "hunter2",
+		"cleartext password value must not appear in emitted LogEntry stdout")
+	assert.NotContains(t, stdout, "abc123",
+		"cleartext token value must not appear in emitted LogEntry stdout")
+	assert.NotContains(t, stdout, "secret-key-value",
+		"cleartext api_key value must not appear in emitted LogEntry stdout")
+
+	// Redaction placeholder must be present.
+	assert.Contains(t, stdout, "[REDACTED]",
+		"emitted stdout must contain [REDACTED] where secrets appeared")
+}
+
+// TestScriptOutput_BoundedAndAttributed is a required test (Issue #2143 AC):
+// oversized output is truncated to the preview cap; the emitted LogEntry carries
+// correct script_id, cfg_id, exit_code, and duration_ms attribution.
+func TestScriptOutput_BoundedAndAttributed(t *testing.T) {
+	emitter := &recordingEmitter{}
+	cb, _ := collectEvents()
+	h, err := New(&Config{
+		StewardID:    "steward-test",
+		OnStatus:     cb,
+		Logger:       newTestLogger(t),
+		EventEmitter: emitter,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	const wantScriptID = "lib-big-script"
+	const wantExecID = "exec-bounded-001"
+	const cmdID = "bounded-001"
+
+	// Use the existing 2 MB script to produce output well above scriptPreviewMaxBytes.
+	// Call handleExecuteScript directly so we can set script_id without a library-script
+	// signature (signature verification is the preflightScriptSignature concern, not ours here).
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(overCapStdoutScriptBody()))
+	cmd := &cpTypes.Command{
+		ID:        cmdID,
+		Type:      cpTypes.CommandExecuteScript,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"script_content": scriptContent,
+			"shell":          platformShell(),
+			"execution_id":   wantExecID,
+			"script_id":      wantScriptID,
+		},
+	}
+
+	before := time.Now()
+	require.NoError(t, h.handleExecuteScript(context.Background(), cmd))
+	elapsed := time.Since(before)
+
+	entry := firstScriptOutputEntry(emitter.Entries())
+	require.NotNil(t, entry, "expected a script_output LogEntry to be emitted")
+
+	fields := entry.GetFields()
+
+	// Attribution checks.
+	assert.Equal(t, "script_output", fields["event_kind"])
+	assert.Equal(t, wantScriptID, fields["script_id"],
+		"script_id field must match the dispatched script_id param")
+	assert.Equal(t, cmdID, fields["cfg_id"],
+		"cfg_id field must equal the command ID (triggering cfg/script identifier)")
+	assert.Equal(t, "0", fields["exit_code"],
+		"exit_code field must be '0' for a successful script")
+
+	durationMS := fields["duration_ms"]
+	require.NotEmpty(t, durationMS, "duration_ms field must be present")
+	// Sanity: duration_ms must be a non-negative decimal integer.
+	var durVal int64
+	for _, ch := range durationMS {
+		require.True(t, ch >= '0' && ch <= '9',
+			"duration_ms %q contains non-digit character %q", durationMS, ch)
+		durVal = durVal*10 + int64(ch-'0')
+	}
+	assert.GreaterOrEqual(t, durVal, int64(0), "duration_ms must be non-negative")
+	assert.LessOrEqual(t, time.Duration(durVal)*time.Millisecond, elapsed+time.Second,
+		"duration_ms must not exceed wall-clock elapsed time plus slack")
+
+	// Bounds check: stdout field in the LogEntry must be bounded to scriptPreviewMaxBytes.
+	stdout := fields["stdout"]
+	assert.LessOrEqual(t, len(stdout), scriptPreviewMaxBytes,
+		"stdout in the emitted LogEntry must be bounded to scriptPreviewMaxBytes (%d bytes)", scriptPreviewMaxBytes)
 }
 
 // TestExecuteScriptHandler_InlineCommandWithScope_NoRelaySocket is the AC1
