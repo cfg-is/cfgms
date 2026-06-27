@@ -166,6 +166,14 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx, "Cfgms-CreateVSwitchInternal -Name "+quoteArg(psArgs, "Name"))
 	case psCreateVSwitchPrivate:
 		return t.run(ctx, "Cfgms-CreateVSwitchPrivate -Name "+quoteArg(psArgs, "Name"))
+
+	// ── Failover cluster (read-only, #2199 S1) ──────────────────────
+	case psGetCluster:
+		return t.run(ctx, "Cfgms-GetCluster -ClusterName "+quoteArg(psArgs, "ClusterName"))
+	case psGetClusterOwnerNode:
+		return t.run(ctx, "Cfgms-GetClusterOwnerNode -ClusterName "+quoteArg(psArgs, "ClusterName"))
+	case psGetClusterResourceOwner:
+		return t.run(ctx, "Cfgms-GetClusterResourceOwner -ClusterName "+quoteArg(psArgs, "ClusterName"))
 	}
 
 	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table); add a Cfgms-* function and a case here")

@@ -350,6 +350,18 @@ func TestMonitorCloseRace(t *testing.T) {
 		// on Linux/macOS it appears below internal/poll.runtime_pollWait; on Windows
 		// it appears below syscall.syscalln via Start.func2.
 		goleak.IgnoreAnyFunction("os/exec.(*Cmd).writerDescriptor.func1"),
+		// DNA background collection goroutine tree from sibling tests. Each goroutine
+		// is ignored by its OWN function name (top-level closure) so it is caught
+		// regardless of which frame it is currently executing — in particular when the
+		// called method has returned but the deferred cancel/Done hasn't run yet.
+		// Without these, the outer wrapper (Collect.func1.1) can be seen in the brief
+		// window between runBackgroundCollection returning and defer bgCancel() completing
+		// on a slow macOS runner, slipping past the frame-based ignores below.
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).Collect.func1.1"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection.func1"),
+		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection.func2"),
+		// Frame-based ignores: match any goroutine whose stack passes through these
+		// functions (belt-and-suspenders for the common case where the method is active).
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).runBackgroundCollection"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSoftwareInfo"),
 		goleak.IgnoreAnyFunction("github.com/cfgis/cfgms/features/steward/dna.(*Collector).collectSecurityInfo"),

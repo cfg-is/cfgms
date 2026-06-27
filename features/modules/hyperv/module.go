@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,18 @@ type hypervModule struct {
 	passSecretKey string
 	tenantID      string
 	stewardID     string
+
+	// Failover-cluster scope (S1/S5). clusterName is the single cluster this
+	// steward is permitted to read; getCluster / clusterOwnershipHelper reject
+	// any other cluster name with ErrClusterNotDeclared BEFORE touching the
+	// transport (the scope cap). clusterRoleNames bounds the set of clustered VM
+	// role names in scope (S5). nodeHostname is the local node identity captured
+	// once in Configure (os.Hostname) and used as the audit node identity for
+	// ownership decisions — recordHypervOp's host arg is otherwise empty under
+	// the ps-host transport.
+	clusterName      string
+	clusterRoleNames []string
+	nodeHostname     string
 
 	auditMgr  *audit.Manager
 	transport winrmTransport
@@ -242,6 +255,17 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
 	m.seedDir, _ = configMap["seed_dir"].(string)
 
+	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this
+	// steward will read; cluster_role_names bounds the clustered VM roles in
+	// scope. nodeHostname is the local node identity recorded on ownership audit
+	// events (S8) — recordHypervOp's host arg is empty under the ps-host
+	// transport, so capture os.Hostname() once here. A failed os.Hostname()
+	// leaves it "" (non-fatal); audit then records an empty node identity, which
+	// the ownership helper still functions without.
+	m.clusterName, _ = configMap["cluster_name"].(string)
+	m.clusterRoleNames = parseStringList(configMap["cluster_role_names"])
+	m.nodeHostname, _ = os.Hostname()
+
 	// Wire the stored-config-backed profile store when a config store is
 	// supplied (same injection pattern as audit_manager). Operators define
 	// unattended-install profiles in the controller's stored-config backend and
@@ -303,6 +327,8 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 // Supported resource ID prefixes:
 //   - "vm:<name>": retrieve VMConfig for the named virtual machine
 //   - "vswitch:<name>": retrieve VSwitchConfig for the named virtual switch
+//   - "cluster:<name>": retrieve ClusterStatus (read-only) for the named
+//     failover cluster, subject to the cluster_name scope cap (S5)
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if err := m.checkDetection(ctx); err != nil {
 		if errors.Is(err, ErrHostNotHyperV) {
@@ -322,8 +348,32 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 		return m.getVM(ctx, name)
 	case "vswitch":
 		return m.getVSwitch(ctx, name)
+	case "cluster":
+		return m.getCluster(ctx, name)
 	default:
 		return nil, modules.ErrNotImplemented
+	}
+}
+
+// parseStringList normalises a config-map value into a []string. It accepts a
+// native []string (module-decoded YAML) and a []interface{} (executor-supplied
+// generic map). Any other shape — including nil — yields a nil slice.
+func parseStringList(v interface{}) []string {
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, len(t))
+		copy(out, t)
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
 	}
 }
 

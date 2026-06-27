@@ -117,6 +117,7 @@ Modules are organized by execution environment and category:
   - service/ - Local service management
   - activedirectory/ - Local AD management using system context
   - github_runner/ - Idempotent GitHub Actions self-hosted runner agent + service state (token-free; registration is the provisioning workflow's job)
+  - hyperv/ - Hyper-V VM, vswitch, and read-only failover-cluster management on the host's own steward via the in-host PowerShell host (psHostTransport)
 
 ### **Outpost Modules** (Network Resource Management)
 - **Network Directory Modules**: Remote directory management
@@ -124,7 +125,6 @@ Modules are organized by execution environment and category:
 - **Network Infrastructure Modules**: Remote system management
   - ssh_file/ - Remote file management via SSH
   - rest_api/ - Generic REST API management
-  - hyperv/ - Remote Hyper-V VM and vswitch management via WinRM
 
 ### **SaaS Steward Modules** (API-Based Management)
 - **Microsoft 365 Modules**: M365 API management
