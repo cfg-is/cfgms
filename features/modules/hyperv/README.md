@@ -426,7 +426,7 @@ resource ID string built by the steward executor:
 |----------|-----------------|----------------------|-----------|
 | `hyperv.vm` | `name: web-01` | `vm:web-01` | Virtual machine management (create, start, stop, remove) |
 | `hyperv.vswitch` | `name: External-Switch` | `vswitch:External-Switch` | Virtual switch management (create External/Internal/Private, remove) |
-| `hyperv.cluster` | `name: lab-hv` | `cluster:lab-hv` | Failover-cluster state (read-only `Get`): member nodes, CNO owner, per-role owners, CSV paths |
+| `hyperv.cluster` | `name: lab-hv` | `cluster:lab-hv` | Failover-cluster state: `Get` (read-only) member nodes, CNO owner, per-role owners, CSV paths; `Set` clustered VM roles (CNO-gated create + `allow_destructive` removal) |
 
 ### VM networking (declarative, multi-NIC)
 
@@ -468,14 +468,17 @@ model is the replacement for the removed standalone `vmattach` resource
 module leaves the VM's existing adapters untouched (it never implicitly strips a
 VM down to zero NICs).
 
-## Failover cluster (read-only)
+## Failover cluster
 
-`hyperv.cluster` exposes the state of a Windows Server **failover cluster** the
-host is a member of. In S1 this resource is **read-only** — `Get` only; there is
-no `Set` (cluster formation, role placement, and live migration are later
-stories). The module reads cluster state by invoking the host-native
-Failover-Clustering cmdlets through the in-host `psHostTransport`; every cluster
-name travels via `ArgumentList`, never composed into PowerShell text.
+`hyperv.cluster` exposes and manages the state of a Windows Server **failover
+cluster** the host is a member of. `Get` is read-only (member nodes, CNO owner,
+per-role owners, CSV paths); `Set` manages **clustered VM roles** — clustering an
+existing VM as a highly-available role and (gated) removing one. Cluster
+**formation** (`New-Cluster`, `Add-ClusterNode`, `Remove-ClusterNode`, quorum)
+remains out of scope. The module reads and writes cluster state by invoking the
+host-native Failover-Clustering cmdlets through the in-host `psHostTransport`;
+every cluster and role name travels via `ArgumentList`, never composed into
+PowerShell text.
 
 `Get("cluster:<name>")` returns a `ClusterStatus` whose observed fields are:
 
@@ -488,9 +491,38 @@ name travels via `ArgumentList`, never composed into PowerShell text.
 | `csv_paths` | Cluster Shared Volume friendly volume paths (`Get-ClusterSharedVolume`). |
 
 The four read-only cmdlets the module invokes — `Get-Cluster`,
-`Get-ClusterNode`, `Get-ClusterGroup`, and
-`Get-ClusterSharedVolume` — are declared in `module.yaml`'s
-`behavioral_envelope`. No write cmdlet (`Add-*`/`Remove-*`/`New-*`) is declared.
+`Get-ClusterNode`, `Get-ClusterGroup`, and `Get-ClusterSharedVolume` — plus the
+two write cmdlets `Add-ClusterVirtualMachineRole` and `Remove-ClusterResource`
+(S2) are declared in `module.yaml`'s `behavioral_envelope`. No cluster-formation
+cmdlet (`New-Cluster`/`Add-ClusterNode`/`Remove-ClusterNode`/quorum) is declared.
+
+### Managing clustered VM roles (`Set`)
+
+`Set("cluster:<name>", config)` reconciles the **declared** clustered-VM-role set
+(`role_names`). Its decision order is:
+
+| Step | Behaviour |
+|------|-----------|
+| **Scope cap (S5)** | An out-of-scope `<name>` returns `ErrClusterNotDeclared` **before** any cmdlet runs. |
+| **CNO gate (S1)** | Only the **CNO-owner** node mutates. A non-owner records an *ownership-gated-skip* audit event and returns `nil` (coordination, not authorization — never an error, never a PS write). |
+| **Existence check (idempotency)** | Before clustering a role, the owner checks the live per-role owner map (the same `Get-ClusterGroup` read the ownership gate already performs — no extra PS function). An already-clustered role is a no-op. |
+| **Create** | An absent declared role is clustered with `Add-ClusterVirtualMachineRole`. If the cmdlet still reports *already configured / already exists* (a post-failover existence-check↔Add race), that error is normalised to `nil`. **Only** that error class is treated as idempotent — every other PS error surfaces. |
+| **Destructive gate (S6)** | `state: absent` removes the role with `Remove-ClusterResource`, but **only** when `allow_destructive: true`. With the default `allow_destructive: false` it returns `ErrDestructiveOpBlocked` **without** invoking any write cmdlet. |
+| **Drift-not-adopted (S1)** | Only roles named in `role_names` are ever passed to Add/Remove. A role present on the cluster but absent from the config is **never** created, removed, or adopted — even with `allow_destructive: true`. |
+
+Every `Set` path (create / gated-skip / idempotent no-op / destructive / drift)
+records a `pkg/audit` event via the same audit path as `Get`, carrying the node
+identity, the CNO-owner decision, the role, and before/after state maps, with a
+Go receipt-time `Timestamp` (S8).
+
+```yaml
+- name: lab-hv
+  module: hyperv.cluster
+  config:
+    role_names: [web-01, db-01]   # cluster these existing VMs as HA roles
+    # state: absent                # opt into teardown of the named roles, AND:
+    # allow_destructive: true      # ...required for any role removal (default false)
+```
 
 ### Ownership gate (coordination, not authorization)
 
@@ -523,9 +555,15 @@ host can never be steered into reading a cluster it was not declared against.
 ### Module trust: strict
 
 The `hyperv.cluster` surface requires `module_trust.required_mode: strict` (set
-in `module.yaml`). A module that reads failover-cluster ownership and topology
-must be **independently verified by the steward** — the steward must not rely on
-the controller's word alone for it.
+in `module.yaml`). A module that reads failover-cluster ownership and topology —
+and (S2) **writes** clustered VM roles — must be **independently verified by the
+steward**; the steward must not rely on the controller's word alone for it.
+
+Because S2 extends the `behavioral_envelope` with two write cmdlets
+(`Add-ClusterVirtualMachineRole`, `Remove-ClusterResource`), the module bundle
+must be **re-signed by the publisher and re-approved** (ADR-006) before
+`module_trust: strict` stewards will accept the updated module — a strict steward
+re-verifies the signature over the changed manifest independently.
 
 ```yaml
 - name: lab-hv

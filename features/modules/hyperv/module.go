@@ -381,6 +381,9 @@ func parseStringList(v interface{}) []string {
 // Supported resource ID prefixes:
 //   - "vm:<name>": create, update, or delete the named virtual machine
 //   - "vswitch:<name>": create or delete the named virtual switch
+//   - "cluster:<name>": create / remove clustered VM roles on the named
+//     failover cluster (S2). Only the CNO-owner node mutates (coordination, not
+//     authorization); role removal is gated behind allow_destructive (S6).
 //
 // VM network connectivity is declarative on the VM via switch_name (single
 // switch — the common case). Multi-NIC reconciliation is tracked in #2021.
@@ -409,6 +412,11 @@ func (m *hypervModule) Set(ctx context.Context, resourceID string, config module
 			return modules.ErrNotImplemented
 		}
 		return m.setVSwitch(ctx, resourceID, config)
+	case "cluster":
+		if config == nil {
+			return modules.ErrNotImplemented
+		}
+		return m.setCluster(ctx, resourceID, config)
 	default:
 		return modules.ErrNotImplemented
 	}

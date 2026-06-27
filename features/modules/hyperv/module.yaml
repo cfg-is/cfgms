@@ -32,17 +32,31 @@ security:
     required_mode: strict
 
 # behavioral_envelope documents the runtime behaviour of the module for the
-# signing/approval workflow. The hyperv module shells out to powershell.exe; the
-# read-only failover-cluster surface added in #2199 S1 invokes ONLY the four
-# Get-Cluster* cmdlets below — no Add-*/Remove-*/New-* (cluster mutation is S2).
+# signing/approval workflow. The hyperv module shells out to powershell.exe. The
+# read-only failover-cluster surface (#2199 S1) invokes the four Get-Cluster*
+# cmdlets; #2202 S2 adds the two cluster WRITE cmdlets below
+# (Add-ClusterVirtualMachineRole, Remove-ClusterResource) — clustered-VM-role
+# create + destructive teardown. Cluster FORMATION (New-Cluster, Add-ClusterNode,
+# Remove-ClusterNode, quorum cmdlets) is NOT declared and out of scope.
+#
+# ADR-006 re-sign: this envelope change (adding the two write cmdlets) is a
+# material change to the module's behavioural contract. The bundle MUST be
+# re-signed by the publisher and re-approved before module_trust: strict stewards
+# will accept the updated module — strict stewards verify the signature
+# independently of the controller.
 behavioral_envelope:
   shells_out_to:
     - powershell.exe
   lolbin_usage_justification: >-
     Hyper-V and Failover Clustering are managed exclusively through their
-    PowerShell modules; there is no in-process managed API. The ONLY
-    failover-cluster cmdlets the module invokes (#2199 S1, all read-only) are:
-    Get-Cluster, Get-ClusterNode, Get-ClusterGroup,
-    Get-ClusterSharedVolume. All arguments travel via ArgumentList (never
-    string-composed). No write cmdlet (Add-*/Remove-*/New-*) is declared —
-    cluster mutation is a separate, later story.
+    PowerShell modules; there is no in-process managed API. The read-only
+    failover-cluster cmdlets (#2199 S1) are: Get-Cluster, Get-ClusterNode,
+    Get-ClusterGroup, Get-ClusterSharedVolume. The failover-cluster WRITE
+    cmdlets (#2202 S2) are: Add-ClusterVirtualMachineRole (cluster an existing
+    VM as a highly-available role — invoked only by the CNO-owner node, gated
+    exactly-once) and Remove-ClusterResource (remove a clustered role group —
+    gated behind allow_destructive: true, default off). All arguments travel via
+    ArgumentList (never string-composed). Cluster FORMATION cmdlets
+    (New-Cluster, Add-ClusterNode, Remove-ClusterNode, quorum) are NOT declared
+    and out of scope. This envelope change requires ADR-006 module re-signing
+    before module_trust: strict stewards accept the updated module.

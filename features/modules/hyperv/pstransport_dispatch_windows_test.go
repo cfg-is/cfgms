@@ -144,6 +144,11 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-GetClusterOwnerNode -ClusterName " + quoteArg(psArgs, "ClusterName"))
 	case psGetClusterResourceOwner:
 		return emit("Cfgms-GetClusterResourceOwner -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psAddClusterVMRole:
+		return emit("Cfgms-AddClusterVMRole -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -VMName " + quoteArg(psArgs, "VMName"))
+	case psRemoveClusterResource:
+		return emit("Cfgms-RemoveClusterResource -Name " + quoteArg(psArgs, "Name"))
 	}
 	// Mirror production ExecutePS: an unknown psCommand is an error, not a
 	// silent success — keeps this test mirror honest to the production contract.
@@ -350,6 +355,67 @@ func TestPSDispatch_VSwitchVerbs(t *testing.T) {
 	}
 }
 
+// TestPSDispatch_ClusterVerbs covers all FIVE failover-cluster psXxx constants
+// (three read-only + two write) and asserts the EXACT synthesised Cfgms-*
+// invocation string for each, mirroring TestPSDispatch_VMVerbs /
+// TestPSDispatch_VSwitchVerbs. The wrapper parameter names asserted here
+// (-ClusterName / -VMName / -Name) must match the param(...) declarations of the
+// corresponding Cfgms-* functions in pstransport_preamble_windows.go: notably
+// Cfgms-AddClusterVMRole takes -ClusterName/-VMName and internally maps to
+// Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName,
+// so the wrapper param is -ClusterName (NOT the real cmdlet's -Cluster).
+func TestPSDispatch_ClusterVerbs(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		psCommand string
+		psArgs    map[string]string
+		want      string
+	}{
+		{
+			name:      "Get-Cluster",
+			psCommand: psGetCluster,
+			psArgs:    map[string]string{"ClusterName": "lab-hv"},
+			want:      "Cfgms-GetCluster -ClusterName 'lab-hv'",
+		},
+		{
+			name:      "Get-ClusterOwnerNode",
+			psCommand: psGetClusterOwnerNode,
+			psArgs:    map[string]string{"ClusterName": "lab-hv"},
+			want:      "Cfgms-GetClusterOwnerNode -ClusterName 'lab-hv'",
+		},
+		{
+			name:      "Get-ClusterResourceOwner",
+			psCommand: psGetClusterResourceOwner,
+			psArgs:    map[string]string{"ClusterName": "lab-hv"},
+			want:      "Cfgms-GetClusterResourceOwner -ClusterName 'lab-hv'",
+		},
+		{
+			name:      "Add-ClusterVMRole",
+			psCommand: psAddClusterVMRole,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"},
+			want:      "Cfgms-AddClusterVMRole -ClusterName 'lab-hv' -VMName 'web-01'",
+		},
+		{
+			name:      "Remove-ClusterResource",
+			psCommand: psRemoveClusterResource,
+			psArgs:    map[string]string{"Name": "web-01"},
+			want:      "Cfgms-RemoveClusterResource -Name 'web-01'",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &recordingPSTransport{}
+			_, err := tr.ExecutePS(ctx, tc.psCommand, tc.psArgs)
+			require.NoError(t, err)
+			require.Len(t, tr.calls, 1)
+			assert.Equal(t, tc.want, tr.calls[0])
+		})
+	}
+}
+
 // TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
 // psXxx constant defined in vm.go and vswitch.go without silently returning
 // an empty expression. This guards against the production dispatch switch
@@ -404,6 +470,9 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psGetCluster", psGetCluster, map[string]string{"ClusterName": "lab-hv"}},
 		{"psGetClusterOwnerNode", psGetClusterOwnerNode, map[string]string{"ClusterName": "lab-hv"}},
 		{"psGetClusterResourceOwner", psGetClusterResourceOwner, map[string]string{"ClusterName": "lab-hv"}},
+		// Failover cluster write verbs (cluster.go, #2202 S2)
+		{"psAddClusterVMRole", psAddClusterVMRole, map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"}},
+		{"psRemoveClusterResource", psRemoveClusterResource, map[string]string{"Name": "web-01"}},
 	}
 
 	for _, tc := range commands {

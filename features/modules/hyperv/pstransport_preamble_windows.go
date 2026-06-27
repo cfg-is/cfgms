@@ -542,4 +542,28 @@ function Cfgms-GetClusterResourceOwner {
         ForEach-Object { $owners[$_.Name] = if ($_.OwnerNode) { $_.OwnerNode.Name } else { '' } }
     ConvertTo-Json @{ owners = $owners } -Compress -Depth 4
 }
+
+# ── Failover cluster write (#2202 S2) ─────────────────────────────────
+# Each function wraps a single write cmdlet; the exactly-once coordination
+# (only the CNO-owner node calls these), the existence/idempotency check, and
+# the allow_destructive gate all live in Go (setCluster). $ClusterName/$VMName/
+# $Name travel via ArgumentList — never interpolated. Both are dispatched on the
+# persistent host: Add-ClusterVirtualMachineRole / Remove-ClusterResource are
+# synchronous and do not hit the async-VHD deadlock the seed disk ops do.
+
+# Cfgms-AddClusterVMRole mirrors psAddClusterVMRole: cluster an existing Hyper-V
+# VM as a highly-available role. The Go caller normalises an "already
+# registered"/"already exists" error to a no-op (idempotency).
+function Cfgms-AddClusterVMRole {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$VMName)
+    Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName | Out-Null
+}
+
+# Cfgms-RemoveClusterResource mirrors psRemoveClusterResource: remove a clustered
+# role group. Reached only after the Go destructive gate (allow_destructive:
+# true) has confirmed the operator opted in.
+function Cfgms-RemoveClusterResource {
+    param([Parameter(Mandatory)][string]$Name)
+    Remove-ClusterResource -Name $Name -Force
+}
 `
