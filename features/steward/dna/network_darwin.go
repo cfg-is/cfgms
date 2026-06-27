@@ -16,6 +16,12 @@ import (
 
 const darwinNetCmdTimeout = 30 * time.Second
 
+// darwinNetCmdWaitDelay is the maximum time WaitDelay allows for a killed command's
+// I/O to drain before Output() is forced to return. On macOS CI runners, netstat can
+// get stuck in a kernel call that survives SIGKILL at the process level but leaves
+// the stdout pipe open; WaitDelay guarantees Output() returns regardless.
+const darwinNetCmdWaitDelay = 5 * time.Second
+
 // CollectInterfaces gathers detailed network interface information on macOS
 func (d *DarwinNetworkCollector) CollectInterfaces(ctx context.Context, attributes map[string]string) error {
 	// First collect basic interface info using Go's standard library
@@ -43,28 +49,37 @@ func (d *DarwinNetworkCollector) CollectInterfaces(ctx context.Context, attribut
 	return nil
 }
 
+// darwinRunNetCmd runs a command with a timeout context and WaitDelay so that
+// processes stuck in kernel calls (e.g. netstat on CI macOS) do not block
+// Output() indefinitely after SIGKILL. Returns nil output on timeout or error.
+func darwinRunNetCmd(ctx context.Context, timeout time.Duration, name string, args ...string) []byte {
+	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, name, args...)
+	cmd.WaitDelay = darwinNetCmdWaitDelay
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return output
+}
+
 // CollectRouting gathers routing table information on macOS
 func (d *DarwinNetworkCollector) CollectRouting(ctx context.Context, attributes map[string]string) error {
 	// IPv4 routing table
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinNetCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "netstat", "-rn", "-f", "inet").Output(); err == nil {
+	if output := darwinRunNetCmd(ctx, darwinNetCmdTimeout, "netstat", "-rn", "-f", "inet"); output != nil {
 		d.parseRoutingTable(string(output), attributes, "ipv4")
 	}
-	cancel()
 
 	// IPv6 routing table
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinNetCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx2, "netstat", "-rn", "-f", "inet6").Output(); err == nil {
+	if output := darwinRunNetCmd(ctx, darwinNetCmdTimeout, "netstat", "-rn", "-f", "inet6"); output != nil {
 		d.parseRoutingTable(string(output), attributes, "ipv6")
 	}
-	cancel2()
 
 	// Default gateway information
-	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinNetCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx3, "route", "get", "default").Output(); err == nil {
+	if output := darwinRunNetCmd(ctx, darwinNetCmdTimeout, "route", "get", "default"); output != nil {
 		d.parseDefaultGateway(string(output), attributes)
 	}
-	cancel3()
 
 	return nil
 }

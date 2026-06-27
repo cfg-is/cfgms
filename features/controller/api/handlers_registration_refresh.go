@@ -83,6 +83,7 @@ type RefreshCompleteResponse struct {
 	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
 	SigningCert string `json:"signing_cert,omitempty"`
+	ServerCert  string `json:"server_cert,omitempty"` // same value as signing_cert; matches initial registration response field name
 }
 
 // ---- Handlers ---------------------------------------------------------------
@@ -111,7 +112,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 				business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
-				map[string]interface{}{"reason": "unknown_device"})
+				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
 			http.Error(w, "device not found", http.StatusNotFound)
 			return
 		}
@@ -129,7 +130,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "revoked"})
+			map[string]interface{}{"decision": "denied", "reason": "revoked"})
 		http.Error(w, "device is revoked", http.StatusForbidden)
 		return
 	}
@@ -139,7 +140,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSecurityEvent, "refresh_challenge_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "cross_tenant"})
+			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
 		http.Error(w, "tenant mismatch", http.StatusForbidden)
 		return
 	}
@@ -213,7 +214,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 				business.AuditEventSecurityEvent, "refresh_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
-				map[string]interface{}{"reason": "unknown_device"})
+				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
 			http.Error(w, "device not found", http.StatusNotFound)
 			return
 		}
@@ -231,7 +232,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "revoked"})
+			map[string]interface{}{"decision": "denied", "reason": "revoked"})
 		http.Error(w, "device is revoked", http.StatusForbidden)
 		return
 	}
@@ -241,7 +242,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "cross_tenant"})
+			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
 		http.Error(w, "tenant mismatch", http.StatusForbidden)
 		return
 	}
@@ -371,15 +372,20 @@ func (s *Server) handleRefreshByPolicy(
 		http.Error(w, "refresh rejected by tenant policy", http.StatusForbidden)
 
 	case "auto_accept":
-		pm := registration.ProvenanceMatcher{}
-		result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
-		if result.Score < registration.ProvenanceMatchThreshold {
-			// Demote to require_approval (demote-only invariant).
-			s.handleRefreshQueueEntry(w, r, record, deviceID, provenance,
-				result.MatchedFields, result.TotalFields, "auto_accept_demoted")
-			return
+		// Only compare provenance when a baseline exists. A missing baseline (first
+		// refresh after initial registration) is not evidence of device change —
+		// the check is skipped and the cert is issued immediately.
+		if record.LastProvenanceJSON != "" {
+			pm := registration.ProvenanceMatcher{}
+			result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
+			if result.Score < registration.ProvenanceMatchThreshold {
+				// Demote to require_approval (demote-only invariant).
+				s.handleRefreshQueueEntry(w, r, record, deviceID, provenance,
+					result.MatchedFields, result.TotalFields, "auto_accept_demoted")
+				return
+			}
 		}
-		// Sufficient provenance: issue new certificate immediately.
+		// No stored provenance baseline, or sufficient provenance match: issue cert immediately.
 		resp, err := s.buildRefreshClaimResponse(r.Context(), record)
 		if err != nil {
 			s.logger.Error("Failed to issue refresh certificate", "steward_id", record.ID, "error", err)
@@ -393,11 +399,7 @@ func (s *Server) handleRefreshByPolicy(
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventAuthentication, "refresh_cert_issued",
 			business.AuditResultSuccess, business.AuditSeverityHigh,
-			map[string]interface{}{
-				"decision":       "approved",
-				"matched_fields": result.MatchedFields,
-				"total_fields":   result.TotalFields,
-			})
+			map[string]interface{}{"decision": "approved", "reason": "auto_accept"})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -500,9 +502,22 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 
 	if signingCertPEM, sigErr := s.certManager.GetSigningCertificate(); sigErr == nil && len(signingCertPEM) > 0 {
 		resp.SigningCert = string(signingCertPEM)
+		resp.ServerCert = string(signingCertPEM) // matches initial registration response field name
 	}
 
-	// Promote steward back to registered status after cert issuance.
+	// Promote steward back to registered status after cert issuance. This must be
+	// written to the PERSISTENT steward store, because the registration-refresh
+	// lifecycle gate reads status via stewardStore.GetStewardByDeviceID. Updating
+	// only the in-memory service registry (below) leaves an admin-approved *archived*
+	// steward looking archived to the next challenge, so it re-queues indefinitely
+	// and only converges via slow background reconciliation
+	// (Issue #2098: TestFleetRegistrationRefresh/Archived).
+	if s.stewardStore != nil {
+		if err := s.stewardStore.UpdateStewardStatus(ctx, record.ID, business.StewardStatusRegistered); err != nil {
+			s.logger.Warn("Failed to persist steward status after refresh cert issuance",
+				"steward_id", record.ID, "error", err)
+		}
+	}
 	if s.controllerService != nil {
 		if err := s.controllerService.UpdateStewardStatus(record.ID, "registered"); err != nil {
 			s.logger.Warn("Failed to update steward status after refresh cert issuance",
@@ -678,6 +693,20 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Gate: revocation re-check before issuing a cert. The challenge and complete
+	// paths reject revoked devices, but a device can be revoked AFTER its refresh
+	// was queued as pending. Approving a now-revoked device must NOT issue a cert —
+	// and must not let buildRefreshClaimResponse promote revoked->registered,
+	// silently un-revoking it. Mirror the challenge/complete revocation gate.
+	if record.Status == business.StewardStatusRevoked {
+		s.emitRefreshAudit(r.Context(), entry.DeviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_admin_approve_rejected",
+			business.AuditResultDenied, business.AuditSeverityCritical,
+			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "decision": "denied", "reason": "revoked"})
+		http.Error(w, "device is revoked", http.StatusForbidden)
+		return
+	}
+
 	certResp, err := s.buildRefreshClaimResponse(r.Context(), record)
 	if err != nil {
 		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
@@ -793,9 +822,9 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleGetRefreshPolicy handles GET /api/v1/tenants/{id}/refresh-policy.
+// handleGetRefreshPolicy handles GET /api/v1/tenants/{tenant_path}/refresh-policy.
 func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
-	tenantID := mux.Vars(r)["id"]
+	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
@@ -830,9 +859,9 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// handleSetRefreshPolicy handles PUT /api/v1/tenants/{id}/refresh-policy.
+// handleSetRefreshPolicy handles PUT /api/v1/tenants/{tenant_path}/refresh-policy.
 func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) {
-	tenantID := mux.Vars(r)["id"]
+	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)

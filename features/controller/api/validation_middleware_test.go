@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -119,4 +121,116 @@ func TestValidateRequestBody_JSONStillSizeCapped(t *testing.T) {
 		}
 	}
 	assert.True(t, foundSize, "expected max_size rule violation; got %+v", result.Errors)
+}
+
+// TestValidateURLParameters_TenantPathWithSlash verifies that a route variable named
+// "tenant_path" with a hierarchical value (e.g., "fleet-root/fleet-child-a") passes
+// validation. Regression test for the tenant_path_id charset introduced in Issue #2098
+// (validationMiddleware case "id" using charset:alphanumeric_dash incorrectly rejected
+// tenant IDs that contain '/' path separators).
+func TestValidateURLParameters_TenantPathWithSlash(t *testing.T) {
+	s := &Server{}
+	validator := security.NewEnhancedValidator(nil)
+
+	tests := []struct {
+		name      string
+		varName   string
+		value     string
+		wantValid bool
+	}{
+		{
+			name:      "hierarchical tenant path passes",
+			varName:   "tenant_path",
+			value:     "fleet-root/fleet-child-a",
+			wantValid: true,
+		},
+		{
+			name:      "deep hierarchical tenant path passes",
+			varName:   "tenant_path",
+			value:     "root/msp-a/client-1/servers",
+			wantValid: true,
+		},
+		{
+			name:      "tenant path with dot-dot segment rejected",
+			varName:   "tenant_path",
+			value:     "../etc/passwd",
+			wantValid: false,
+		},
+		{
+			name:      "tenant path exceeding global max rejected",
+			varName:   "tenant_path",
+			value:     strings.Repeat("a/", 2049),
+			wantValid: false,
+		},
+		{
+			name:      "plain id still rejects slash",
+			varName:   "id",
+			value:     "fleet-root/fleet-child-a",
+			wantValid: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Use a safe placeholder in the URL; the actual variable value is injected
+			// via mux.SetURLVars so the URL parser never sees unsafe characters.
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/placeholder/refresh-policy", nil)
+			req = mux.SetURLVars(req, map[string]string{tc.varName: tc.value})
+			result := &security.ValidationResult{Valid: true}
+			s.validateURLParameters(validator, result, req)
+			assert.Equal(t, tc.wantValid, result.Valid,
+				"tenant_path=%q: expected valid=%v, errors=%v", tc.value, tc.wantValid, result.Errors)
+		})
+	}
+}
+
+// TestValidateQueryParameters_TenantIDWithSlash verifies that a query parameter named
+// "tenant_id" with a hierarchical value (e.g., "fleet-root/fleet-child-b") passes
+// validation via charset:tenant_path_id. Regression test for BUG 1 in Issue #2098
+// where the default safe_text charset incorrectly rejected tenant IDs containing '/'.
+func TestValidateQueryParameters_TenantIDWithSlash(t *testing.T) {
+	s := &Server{}
+	validator := security.NewEnhancedValidator(nil)
+
+	tests := []struct {
+		name      string
+		queryKey  string
+		queryVal  string
+		wantValid bool
+	}{
+		{
+			name:      "hierarchical tenant_id with slash passes",
+			queryKey:  "tenant_id",
+			queryVal:  "fleet-root/fleet-child-b",
+			wantValid: true,
+		},
+		{
+			name:      "deep hierarchical tenant_id passes",
+			queryKey:  "tenant_id",
+			queryVal:  "root/msp-a/client-1/servers",
+			wantValid: true,
+		},
+		{
+			name:      "tenant_id with dot-dot traversal rejected",
+			queryKey:  "tenant_id",
+			queryVal:  "../etc/passwd",
+			wantValid: false,
+		},
+		{
+			name:      "plain query param still uses safe_text (no slash allowed)",
+			queryKey:  "action",
+			queryVal:  "fleet-root/fleet-child-b",
+			wantValid: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/refresh/pending?"+tc.queryKey+"="+tc.queryVal, nil)
+			result := &security.ValidationResult{Valid: true}
+			s.validateQueryParameters(validator, result, req)
+			assert.Equal(t, tc.wantValid, result.Valid,
+				"%s=%q: expected valid=%v, errors=%v", tc.queryKey, tc.queryVal, tc.wantValid, result.Errors)
+		})
+	}
 }

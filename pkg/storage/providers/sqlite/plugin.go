@@ -326,6 +326,8 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		Trigger:             &SQLiteTriggerStore{db: db},
 		Push:                &SQLitePushStore{db: db},
 		PendingRegistration: &SQLitePendingRegistrationStore{db: db},
+		PendingRefresh:      &SQLitePendingRefreshStore{db: db},
+		RefreshPolicy:       &SQLiteRefreshPolicyStore{db: db},
 	}, nil
 }
 

@@ -403,7 +403,7 @@ func TestRefreshComplete_200_ReturnsCerts(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), deviceID, "nonce123", []byte("signature"))
+	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce123", 1234567890, []byte("signature"))
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, "CERT", resp.ClientCert)
@@ -422,7 +422,7 @@ func TestRefreshComplete_202_ReturnsErrRefreshPending(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), "device-id", "nonce", []byte("sig"))
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshPending)
 }
@@ -437,7 +437,7 @@ func TestRefreshComplete_403_ReturnsErrRefreshRejected(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), "device-id", "nonce", []byte("sig"))
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshRejected)
 }
