@@ -8,6 +8,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -65,6 +66,13 @@ type ExecutorConfig struct {
 	// EventEmitter, when non-nil, receives convergence detection and outcome events.
 	// Enqueue must never block the caller; the concrete implementation drops when full.
 	EventEmitter EventEmitter
+
+	// ModuleCallTimeoutSec is the per-call timeout (in seconds) applied individually
+	// to each module.Get, module.Set, and verifyChanges invocation. Zero or negative
+	// values default to 120 s. There is no "infinite" option — all module calls have
+	// a finite deadline to prevent a hung module from wedging the convergence loop
+	// (ADR-012 §7).
+	ModuleCallTimeoutSec int
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -89,6 +97,11 @@ type Executor struct {
 	// (ADR-012 §2). Enqueue is the only emitter call on the convergence goroutine;
 	// the actual LogStream send runs on the emitter's own goroutine.
 	eventEmitter EventEmitter
+
+	// moduleCallTimeout is the per-call deadline applied to module.Get, module.Set,
+	// and verifyChanges. Derived from ModuleCallTimeoutSec at construction; defaults
+	// to 120 s when the config field is zero or negative (ADR-012 §7).
+	moduleCallTimeout time.Duration
 }
 
 // NewExecutor creates an Executor. When cfg.Factory is nil, an empty registry and
@@ -124,15 +137,21 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		comp = stewardtesting.NewStateComparator()
 	}
 
+	callTimeout := time.Duration(cfg.ModuleCallTimeoutSec) * time.Second
+	if callTimeout <= 0 {
+		callTimeout = 120 * time.Second
+	}
+
 	return &Executor{
-		factory:      f,
-		comparator:   comp,
-		config:       errCfg,
-		tenantID:     cfg.TenantID,
-		stewardID:    cfg.StewardID,
-		logger:       cfg.Logger,
-		driftMode:    cfg.DriftMode,
-		eventEmitter: cfg.EventEmitter,
+		factory:           f,
+		comparator:        comp,
+		config:            errCfg,
+		tenantID:          cfg.TenantID,
+		stewardID:         cfg.StewardID,
+		logger:            cfg.Logger,
+		driftMode:         cfg.DriftMode,
+		eventEmitter:      cfg.EventEmitter,
+		moduleCallTimeout: callTimeout,
 	}, nil
 }
 
@@ -178,7 +197,7 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 			switch result.Status {
 			case StatusSuccess, StatusNoChange:
 				report.SuccessfulCount++
-			case StatusFailed:
+			case StatusFailed, StatusTimeout:
 				report.FailedCount++
 			case StatusSkipped:
 				report.SkippedCount++
@@ -292,10 +311,25 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// the detection observable on the out-of-band channel (ADR-012 §2 crash-isolation).
 	e.enqueueDetection(correlationID, resourceID, driftModeStr)
 
-	currentState, err := module.Get(ctx, resourceID)
+	// module.Get with per-call deadline so a hung module cannot wedge the
+	// convergence loop (ADR-012 §7). The deadline is derived from the ambient ctx
+	// so outer cancellation still propagates.
+	getCtx, getCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer getCancel()
+	currentState, err := module.Get(getCtx, resourceID)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("module.Get did not finish within %s", e.moduleCallTimeout)
+			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			e.logger.Warn("module.Get timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -348,9 +382,22 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		return result
 	}
 
-	if err := module.Set(ctx, resourceID, desiredState); err != nil {
-		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
+	// module.Set with per-call deadline (ADR-012 §7).
+	setCtx, setCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer setCancel()
+	if err := module.Set(setCtx, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("module.Set did not finish within %s", e.moduleCallTimeout)
+			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			e.logger.Warn("module.Set timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
 		// Outcome: Set failed; record before error-handling may continue.
 		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
@@ -362,9 +409,23 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	result.ChangesApplied = true
 
-	if err := e.verifyChanges(ctx, module, resourceID, desiredState); err != nil {
-		result.Error = fmt.Sprintf("verification failed: %v", err)
+	// verifyChanges with per-call deadline (ADR-012 §7). The deadline applies to
+	// the module.Get call inside verifyChanges.
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer verifyCancel()
+	if err := e.verifyChanges(verifyCtx, module, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("verifyChanges did not finish within %s", e.moduleCallTimeout)
+			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			e.logger.Warn("verifyChanges timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("verification failed: %v", err)
 		// Outcome: post-Set verification failed.
 		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
@@ -567,7 +628,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		switch result.Status {
 		case StatusSuccess, StatusNoChange:
 			successCount++
-		case StatusFailed:
+		case StatusFailed, StatusTimeout:
 			errorCount++
 			hasErrors = true
 			moduleStatus.Status = "ERROR"

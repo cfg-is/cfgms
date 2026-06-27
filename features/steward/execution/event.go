@@ -39,6 +39,30 @@ func (e *Executor) enqueueDetection(correlationID, resourceID, driftModeStr stri
 	})
 }
 
+// enqueueTimeoutOutcome emits an outcome event when a per-resource module call
+// (Get, Set, or verifyChanges) exceeds the configured deadline (ADR-012 §7).
+// The event carries both the configured ceiling (timeout_ms) and the actual
+// elapsed time (duration_ms) so the controller can distinguish timeout outcomes
+// from other outcome types and observe proximity to the limit.
+func (e *Executor) enqueueTimeoutOutcome(correlationID string, timeout, elapsed time.Duration) {
+	if e.eventEmitter == nil {
+		return
+	}
+	e.eventEmitter.Enqueue(&transportpb.LogEntry{
+		StewardId:     e.stewardID,
+		Level:         transportpb.Severity_SEVERITY_WARNING,
+		Message:       "convergence outcome",
+		Timestamp:     timestamppb.Now(),
+		CorrelationId: correlationID,
+		Fields: map[string]string{
+			"event_kind":  "outcome",
+			"action":      "did-not-finish(timeout)",
+			"timeout_ms":  fmt.Sprintf("%d", timeout.Milliseconds()),
+			"duration_ms": fmt.Sprintf("%d", elapsed.Milliseconds()),
+		},
+	})
+}
+
 // enqueueOutcome emits an outcome event when convergence completes, errors, or
 // drift is reported without correction (monitor mode). A nil emitter is a no-op.
 func (e *Executor) enqueueOutcome(correlationID, action string, duration time.Duration) {
