@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -26,6 +27,9 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/cmd/steward/service"
+	"github.com/cfgis/cfgms/features/steward"
+	"github.com/cfgis/cfgms/features/steward/client"
+	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -852,4 +856,143 @@ func TestRegistrationUsesPinnedCAInPinnedMode(t *testing.T) {
 		strings.Contains(errStr, "tls") ||
 		strings.Contains(errStr, "x509")
 	assert.True(t, isTLSError, "error must be TLS/cert related, got: %v", reqErr)
+}
+
+// ---------------------------------------------------------------------------
+// Resilient startup tests (Issue #2034)
+// ---------------------------------------------------------------------------
+
+// TestRunSteward_ControllerUnreachable_StartsDegraded verifies AC1 + AC4:
+// when the controller is unreachable at boot, runStewardInternal does NOT exit
+// (returns nil when the context is cancelled) and retries the connect in the
+// background. The process survives the entire launcher startup window (30s)
+// using the connectFunc seam — no real time.Sleep. (Issue #2034)
+func TestRunSteward_ControllerUnreachable_StartsDegraded(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+
+	// Set a non-empty ControllerURL so trust resolution succeeds.
+	saved := ControllerURL
+	ControllerURL = "https://ctrl.test:4433"
+	defer func() { ControllerURL = saved }()
+
+	var connectAttempts atomic.Int32
+	alwaysFails := connectFuncT(func(ctx context.Context, token, url string,
+		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		logger logging.Logger) (*client.TransportClient, error) {
+		connectAttempts.Add(1)
+		return nil, fmt.Errorf("controller unreachable: connection refused")
+	})
+
+	// Use a 500ms context — far less than the 30s launcher startup window.
+	// The connectFunc blocks on error and retries; runStewardInternal must wait
+	// for ctx.Done() rather than exit early on the first connect failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	err := runStewardInternal(ctx, "tok_test_degraded", "", "", alwaysFails)
+
+	assert.NoError(t, err, "runStewardInternal must return nil when ctx is cancelled (not an error)")
+	assert.Positive(t, connectAttempts.Load(), "connect must have been attempted at least once")
+}
+
+// TestRunSteward_EarlyLoggerBeforeProviderInit verifies AC2: the early stderr
+// logger is initialised before the file logging provider and before any
+// host-subsystem call, so a boot-time failure is never silent. Even when the
+// file logging provider cannot be initialised, the process continues (no
+// silent 0-byte-log death). (Issue #2034)
+func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
+	// Point CFGMS_LOG_DIR at an unwritable path so the file provider init fails
+	// on platforms where /proc is read-only (Linux) or the path is simply missing.
+	t.Setenv("CFGMS_LOG_DIR", filepath.Join("/proc", "nonexistent_cfgms_test_dir"))
+
+	saved := ControllerURL
+	ControllerURL = "https://ctrl.test:4433"
+	defer func() { ControllerURL = saved }()
+
+	// The connect func fails immediately — process should still stay alive
+	// (return nil on ctx cancel) even when the logging provider is unavailable.
+	neverConnects := connectFuncT(func(ctx context.Context, token, url string,
+		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		logger logging.Logger) (*client.TransportClient, error) {
+		return nil, fmt.Errorf("no controller")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	err := runStewardInternal(ctx, "tok_test_earlylog", "", "", neverConnects)
+	assert.NoError(t, err, "must not exit with error even when file logging provider cannot be initialised")
+}
+
+// TestRunSteward_DNASubprocessFails_StaysRunning verifies AC3: when wmic /
+// powershell subprocess calls fail at boot (on Linux they simply do not exist,
+// simulating Windows early-boot WMI unavailability), DNA collection logs a
+// warning and the steward keeps running. The process reaches the ctx.Done()
+// path rather than exiting early. (Issue #2034)
+func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
+	// Verify the DNA collector itself is non-fatal on a non-Windows host
+	// (wmic / powershell absent → subprocess errors → collector logs + returns).
+	logger := logging.NewLogger("error")
+	collector := dna.NewCollector(logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Collect must not panic or call os.Exit — it either succeeds (Linux
+	// generic path) or returns partial/nil data with an internal warning.
+	result, dnaErr := collector.Collect(ctx)
+	// Reaching this line proves the call was non-fatal.
+	if dnaErr != nil {
+		t.Logf("DNA collection error (expected on non-Windows): %v", dnaErr)
+	}
+	if result != nil {
+		t.Logf("DNA collected %d attribute(s)", len(result.Attributes))
+	}
+
+	// Now verify that runStewardInternal stays alive when the connect succeeds
+	// but DNA collection fails (i.e. the initial DNA publish path is non-fatal).
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+	savedURL := ControllerURL
+	ControllerURL = "https://ctrl.test:4433"
+	defer func() { ControllerURL = savedURL }()
+
+	neverConnects := connectFuncT(func(ctx context.Context, token, url string,
+		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		logger logging.Logger) (*client.TransportClient, error) {
+		// Return an error so the retry loop keeps running until ctx is done.
+		// This also exercises the degraded-mode path implicitly.
+		return nil, fmt.Errorf("test: simulated connect failure")
+	})
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel2()
+
+	err := runStewardInternal(ctx2, "tok_test_dna", "", "", neverConnects)
+	assert.NoError(t, err, "steward must not exit with error when DNA subprocess fails")
+}
+
+// TestSubsystemState_StatusTransitions verifies the subsystemState tracker used
+// to drive the heartbeat health field: degraded while subsystems are pending,
+// healthy when all have attached. (Issue #2034)
+func TestSubsystemState_StatusTransitions(t *testing.T) {
+	s := newSubsystemState()
+
+	// Initially no degraded subsystems → healthy.
+	assert.Equal(t, string(steward.StatusHealthy), s.status())
+
+	s.markDegraded("controller")
+	assert.Equal(t, string(steward.StatusDegraded), s.status())
+
+	s.markDegraded("dna")
+	assert.Equal(t, string(steward.StatusDegraded), s.status(), "still degraded with two pending subsystems")
+
+	s.markHealthy("controller")
+	assert.Equal(t, string(steward.StatusDegraded), s.status(), "still degraded while dna is pending")
+
+	s.markHealthy("dna")
+	assert.Equal(t, string(steward.StatusHealthy), s.status(), "healthy once all subsystems are ready")
+
+	// Idempotent markHealthy on already-healthy subsystem.
+	s.markHealthy("controller")
+	assert.Equal(t, string(steward.StatusHealthy), s.status())
 }

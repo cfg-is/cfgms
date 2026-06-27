@@ -13,11 +13,36 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 ### Startup
 
-1. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
-2. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
-3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on `drift_mode` received from the controller)
-4. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
-5. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
+The steward starts immediately when the OS service manager launches it and runs
+regardless of what else on the host is ready. Subsystems attach as they become
+available — the process never exits because a dependency is not yet up. (Issue #2034)
+
+1. **Early logger** — A stderr logger is active from the first instruction, before any disk or network call. A file-based logger is initialised next; if that fails (e.g. log dir not yet writable at early boot) the process continues with the stderr fallback.
+2. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
+3. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
+4. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on `drift_mode` received from the controller)
+5. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
+6. **Connect to controller** (if configured) — Attempt a gRPC-over-QUIC transport connection. If the network or controller is not yet reachable, the steward marks itself `degraded` and retries in the background with exponential backoff (5 s → 5 min). The process continues running during the retry period. No `depend=` / delayed-start service ordering is required or relied upon.
+
+#### Health states during startup
+
+| State | Meaning |
+|-------|---------|
+| `degraded` | Process is alive but one or more subsystems (controller, DNA/WMI) are not yet attached |
+| `healthy` | All subsystems have attached and the convergence loop is running normally |
+
+The `degraded` state is reported in the controller-facing heartbeat so operators
+and the launcher's known-good gating can distinguish "started but waiting on
+WMI/network" from "broken". A registered steward that sends no heartbeat for
+≥ 90 s (≈ 3× the 20 s base heartbeat interval + jitter per epic #1664) is
+treated as alertable by the controller.
+
+**Fail-closed during degraded mode:** integrity checks are never relaxed while
+degraded. Config-signature failures remain hard rejections (codes.DataLoss).
+Module trust verification with `module_trust.mode: controller` refuses to load
+modules when the controller is unreachable — it never falls back to `bypass`.
+An unloadable or tampered cert store triggers re-registration or stop, not a
+degraded-but-trusted continue.
 
 ### Normal Operation
 
