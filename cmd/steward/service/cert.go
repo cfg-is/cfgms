@@ -36,11 +36,12 @@ func verifyCACertFingerprint(caCertPEM, expectedFingerprint string) error {
 	return nil
 }
 
-// writeCACert writes caCertPEM to destPath with mode 0644, creating any missing
-// parent directories. The CA cert is public material — 0644 is intentional.
+// writeCACert writes caCertPEM to destPath with mode 0444, creating any missing
+// parent directories. ADR-013 §3: the pinned CA is public material; 0444 (immutable
+// to non-root) makes it tamper-evident without hiding it.
 func writeCACert(caCertPEM, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil { // #nosec G301 -- /etc/cfgms must be world-readable; CA cert is public material
 		return fmt.Errorf("failed to create CA cert directory: %w", err)
 	}
-	return os.WriteFile(destPath, []byte(caCertPEM), 0644) // #nosec G306 -- CA cert is public material
+	return os.WriteFile(destPath, []byte(caCertPEM), 0444) // #nosec G306 -- CA cert is public material; 0444 per ADR-013 §3
 }

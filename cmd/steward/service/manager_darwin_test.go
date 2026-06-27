@@ -33,24 +33,22 @@ func TestDarwinManagerInstallRequiresElevation(t *testing.T) {
 		t.Skip("skipping elevation check — running as root")
 	}
 	m := New("/usr/local/bin/cfgms-steward")
-	err := m.Install("tok_test123", "", "")
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root")
 }
 
 // TestDarwinInstallFingerprintMismatch verifies that a mismatched CA fingerprint causes
 // Install to return an error before writing the cert or registering the daemon.
-// Runs without root because fingerprint verification is checked before the elevation gate.
+// verifyCACertFingerprint is called before IsElevated(), so the error is returned
+// regardless of whether the caller is root.
 func TestDarwinInstallFingerprintMismatch(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("skipping — running as root would proceed past fingerprint check to service ops")
-	}
 	dir := t.TempDir()
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
 
 	certPEM, _ := generateTestCACert(t)
 	m := New("/usr/local/bin/cfgms-steward")
-	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	err := m.Install("tok_test123", "", certPEM, "deadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fingerprint mismatch")
 
@@ -61,7 +59,7 @@ func TestDarwinInstallFingerprintMismatch(t *testing.T) {
 }
 
 // TestDarwinInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// platform path with mode 0444 when a correct fingerprint is provided (ADR-013 §3).
 func TestDarwinInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, fingerprint := generateTestCACert(t)
@@ -73,7 +71,7 @@ func TestDarwinInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 per ADR-013 §3")
 }
 
 func TestDarwinManagerUninstallRequiresElevation(t *testing.T) {
@@ -100,7 +98,7 @@ func TestDarwinManagerStatusNotInstalled(t *testing.T) {
 
 func TestGenerateLaunchdPlist(t *testing.T) {
 	token := "tok_plist_test_abc123"
-	plist := generateLaunchdPlist(token)
+	plist := generateLaunchdPlist(token, "")
 
 	assert.Contains(t, plist, "<?xml")
 	assert.Contains(t, plist, darwinServiceName)
@@ -110,6 +108,8 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 	assert.Contains(t, plist, "<key>KeepAlive</key>")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>")
 	assert.Contains(t, plist, "<true/>")
+	// Without URL: --controller-url must not appear.
+	assert.NotContains(t, plist, "--controller-url")
 
 	// Token appears exactly once (no duplication).
 	count := strings.Count(plist, token)
@@ -117,9 +117,23 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 }
 
 func TestGenerateLaunchdPlistKeepAliveRequired(t *testing.T) {
-	plist := generateLaunchdPlist("tok_test")
+	plist := generateLaunchdPlist("tok_test", "")
 	assert.Contains(t, plist, "<key>KeepAlive</key>", "KeepAlive required by acceptance criteria")
 	assert.Contains(t, plist, "<key>RunAtLoad</key>", "RunAtLoad required by acceptance criteria")
+}
+
+func TestGenerateLaunchdPlistWithControllerURL(t *testing.T) {
+	token := "tok_url_test"
+	controllerURL := "https://ctrl.example.com"
+	plist := generateLaunchdPlist(token, controllerURL)
+
+	assert.Contains(t, plist, "--controller-url")
+	assert.Contains(t, plist, controllerURL)
+	assert.Contains(t, plist, "--regtoken")
+	assert.Contains(t, plist, token)
+	// Token and URL each appear exactly once.
+	assert.Equal(t, 1, strings.Count(plist, token), "token should appear exactly once")
+	assert.Equal(t, 1, strings.Count(plist, controllerURL), "controller URL should appear exactly once")
 }
 
 func TestDarwinManagerNew(t *testing.T) {

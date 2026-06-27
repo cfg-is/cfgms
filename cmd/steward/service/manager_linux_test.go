@@ -26,7 +26,7 @@ func TestLinuxInstallFingerprintMismatch(t *testing.T) {
 
 	certPEM, _ := generateTestCACert(t)
 	m := New("/usr/bin/cfgms-steward")
-	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	err := m.Install("tok_test123", "", certPEM, "deadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fingerprint mismatch")
 
@@ -37,7 +37,7 @@ func TestLinuxInstallFingerprintMismatch(t *testing.T) {
 }
 
 // TestLinuxInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// platform path with mode 0444 (ADR-013 §3: immutable to non-root, tamper-evident).
 func TestLinuxInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, fingerprint := generateTestCACert(t)
@@ -51,7 +51,7 @@ func TestLinuxInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 per ADR-013 §3")
 }
 
 func TestLinuxManagerIsElevated(t *testing.T) {
@@ -67,7 +67,7 @@ func TestLinuxManagerInstallRequiresElevation(t *testing.T) {
 		t.Skip("skipping elevation check — running as root")
 	}
 	m := New("/usr/bin/cfgms-steward")
-	err := m.Install("tok_test123", "", "")
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root")
 }
@@ -99,7 +99,7 @@ func TestLinuxManagerStatusNotInstalled(t *testing.T) {
 
 func TestGenerateSystemdUnit(t *testing.T) {
 	token := "tok_unit_test_abc123"
-	unit := generateSystemdUnit(token)
+	unit := generateSystemdUnit(token, "")
 
 	assert.Contains(t, unit, "[Unit]")
 	assert.Contains(t, unit, "[Service]")
@@ -116,9 +116,29 @@ func TestGenerateSystemdUnit(t *testing.T) {
 }
 
 func TestGenerateSystemdUnitContainsRestartPolicy(t *testing.T) {
-	unit := generateSystemdUnit("tok_test")
+	unit := generateSystemdUnit("tok_test", "")
 	assert.Contains(t, unit, "Restart=always", "Restart=always required by acceptance criteria")
 	assert.Contains(t, unit, "RestartSec=10", "RestartSec=10 required by acceptance criteria")
+}
+
+// TestGenerateSystemdUnitWithControllerURL verifies that generateSystemdUnit embeds
+// --controller-url in ExecStart when a non-empty URL is provided (ADR-013 §3, Issue #1517).
+func TestGenerateSystemdUnitWithControllerURL(t *testing.T) {
+	token := "tok_test_url"
+	controllerURL := "https://ctrl.example.com"
+	unit := generateSystemdUnit(token, controllerURL)
+
+	assert.Contains(t, unit, `--controller-url "`+controllerURL+`"`)
+	assert.Contains(t, unit, `--regtoken "`+token+`"`)
+	assert.Contains(t, unit, linuxInstallPath)
+
+	// Verify token and URL each appear exactly once.
+	assert.Equal(t, 1, strings.Count(unit, token), "token should appear exactly once")
+	assert.Equal(t, 1, strings.Count(unit, controllerURL), "controller URL should appear exactly once")
+
+	// Without URL: --controller-url must not appear.
+	unitNoURL := generateSystemdUnit(token, "")
+	assert.NotContains(t, unitNoURL, "--controller-url")
 }
 
 func TestCopyBinaryPermissions(t *testing.T) {
@@ -136,7 +156,7 @@ func TestCopyBinaryPermissions(t *testing.T) {
 
 func TestSystemdUnitFilePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cfgms-steward.service")
-	content := generateSystemdUnit("tok_test")
+	content := generateSystemdUnit("tok_test", "")
 	require.NoError(t, writeSystemdUnit(path, []byte(content)))
 
 	info, err := os.Stat(path)

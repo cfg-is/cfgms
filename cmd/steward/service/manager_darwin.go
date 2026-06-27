@@ -45,11 +45,12 @@ func (m *darwinManager) IsElevated() bool {
 // loads it via launchctl. If already installed, the existing daemon is unloaded
 // first, the binary replaced, then reloaded.
 //
-// If caCertPEM is non-empty, the CA cert is written to the platform-standard
-// path before the daemon is loaded. When expectedFingerprint is also non-empty,
-// fingerprint verification runs first — a mismatch returns an error without any
-// disk writes or service changes.
-func (m *darwinManager) Install(token, caCertPEM, expectedFingerprint string) error {
+// When controllerURL is non-empty, it is embedded in ProgramArguments as
+// --controller-url. If caCertPEM is non-empty, the CA cert is written to the
+// platform-standard path before the daemon is loaded. When expectedFingerprint is
+// also non-empty, fingerprint verification runs first — a mismatch returns an
+// error without any disk writes or service changes.
+func (m *darwinManager) Install(token, controllerURL, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -84,7 +85,7 @@ func (m *darwinManager) Install(token, caCertPEM, expectedFingerprint string) er
 	}
 
 	fmt.Println("Writing launchd plist...")
-	plist := generateLaunchdPlist(token)
+	plist := generateLaunchdPlist(token, controllerURL)
 	if err := os.WriteFile(darwinPlistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("failed to write plist %s: %w", darwinPlistPath, err)
 	}
@@ -156,12 +157,19 @@ func (m *darwinManager) Status() (*ServiceStatus, error) {
 }
 
 // generateLaunchdPlist returns a macOS launchd plist for the steward daemon.
+// When controllerURL is non-empty, --controller-url is added to ProgramArguments.
 // KeepAlive ensures the daemon restarts on exit; RunAtLoad starts it immediately.
 //
 // Security note: the token appears in the plist (readable by root only for
 // LaunchDaemons). The token is a one-time registration credential — after
 // first registration the steward authenticates via mTLS certificates.
-func generateLaunchdPlist(token string) string {
+func generateLaunchdPlist(token, controllerURL string) string {
+	urlArgs := ""
+	if controllerURL != "" {
+		urlArgs = fmt.Sprintf(`
+    <string>--controller-url</string>
+    <string>%s</string>`, controllerURL)
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -173,7 +181,7 @@ func generateLaunchdPlist(token string) string {
   <array>
     <string>%s</string>
     <string>--regtoken</string>
-    <string>%s</string>
+    <string>%s</string>%s
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -185,6 +193,6 @@ func generateLaunchdPlist(token string) string {
   <string>/var/log/cfgms-steward.log</string>
 </dict>
 </plist>
-`, darwinServiceName, darwinInstallPath, token)
+`, darwinServiceName, darwinInstallPath, token, urlArgs)
 }
 

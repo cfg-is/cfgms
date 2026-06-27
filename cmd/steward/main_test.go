@@ -5,8 +5,17 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -83,31 +92,34 @@ func TestRunInstallRequiresElevation(t *testing.T) {
 	if isElevated() {
 		t.Skip("test requires non-elevated process — running as root")
 	}
-	err := runInstall("tok_test_abc123", "", "")
+	err := runInstall("tok_test_abc123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "elevated privileges")
 }
 
 func TestRunInstallCACertFileNotFound(t *testing.T) {
-	// Verify runInstall returns an error that includes the filename when --ca-cert
+	// Verify runInstall returns an error that includes the filename when --controller-ca
 	// names a path that does not exist.
 	missing := filepath.Join(t.TempDir(), "nonexistent-ca.crt")
-	err := runInstall("tok_test_abc123", missing, "")
+	err := runInstall("tok_test_abc123", "", missing, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nonexistent-ca.crt")
 }
 
 // TestInstallCommandFlagSurface asserts the install subcommand's flag set is
-// exactly {--regtoken, --ca-cert, --fingerprint}. All Hyper-V-specific flags
-// were removed in Issue #1894; no role-specific flags belong on the install command.
+// exactly {--regtoken, --controller-url, --controller-ca, --fingerprint}.
+// All Hyper-V-specific flags were removed in Issue #1894; no role-specific
+// flags belong on the install command. --ca-cert was renamed to --controller-ca
+// (ADR-013 §3, Issue #1517).
 func TestInstallCommandFlagSurface(t *testing.T) {
 	cmd := buildInstallCommand()
 	require.NotNil(t, cmd)
 
 	expected := map[string]bool{
-		"regtoken":    true,
-		"ca-cert":     true,
-		"fingerprint": true,
+		"regtoken":       true,
+		"controller-url": true,
+		"controller-ca":  true,
+		"fingerprint":    true,
 	}
 
 	var flagNames []string
@@ -117,14 +129,14 @@ func TestInstallCommandFlagSurface(t *testing.T) {
 
 	for _, name := range flagNames {
 		assert.True(t, expected[name],
-			"unexpected flag %q on install subcommand — install accepts only --regtoken, --ca-cert, --fingerprint", name)
+			"unexpected flag %q on install subcommand — install accepts only --regtoken, --controller-url, --controller-ca, --fingerprint", name)
 	}
 	for name := range expected {
 		assert.NotNil(t, cmd.Flags().Lookup(name),
 			"required flag %q must be registered on install subcommand", name)
 	}
 	assert.Len(t, flagNames, len(expected),
-		"install command must have exactly %d flags: --regtoken, --ca-cert, --fingerprint", len(expected))
+		"install command must have exactly %d flags: --regtoken, --controller-url, --controller-ca, --fingerprint", len(expected))
 }
 
 func TestRunUninstallRequiresElevation(t *testing.T) {
@@ -212,7 +224,7 @@ func TestTryReconnectWithStoredIdentity_NoStoredIdentity_FallsThrough(t *testing
 	// No identity file on disk — first run. The function returns (nil, nil) so
 	// the caller falls through to HTTP registration without logging an error.
 	dir := t.TempDir()
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	assert.NoError(t, err)
 }
@@ -230,7 +242,7 @@ func TestTryReconnectWithStoredIdentity_MissingServerCert_RejectsAndFallsBack(t 
 		CACertPEM:        "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----",
 	}))
 
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing controller server/signing certificate")
@@ -243,9 +255,30 @@ func TestTryReconnectWithStoredIdentity_CorruptIdentity_FallsThrough(t *testing.
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, identityFileName), []byte("{not json"), 0600))
 
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	assert.NoError(t, err)
+}
+
+func TestTryReconnectWithStoredIdentity_TrustDowngrade_ReturnsError(t *testing.T) {
+	// An identity enrolled with install-pinned (level 2) must not be reconnected
+	// with a TOFU source (level 1) — that would silently weaken the trust anchor.
+	// The downgrade guard at tryReconnectWithStoredIdentity:1177-1184 must fire
+	// and return a non-nil error so the caller does not proceed with the connection.
+	dir := t.TempDir()
+	require.NoError(t, saveIdentity(dir, StewardIdentity{
+		StewardID:        "steward-pinned",
+		TenantID:         "tenant-1",
+		TransportAddress: "controller:4433",
+		TrustMode:        "install-pinned",
+		CACertPEM:        "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----",
+		ServerCertPEM:    "-----BEGIN CERTIFICATE-----\nserver\n-----END CERTIFICATE-----",
+	}))
+
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceTOFU, logging.NewLogger("error"))
+	assert.Nil(t, tc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "trust downgrade rejected")
 }
 
 func TestControllerURLOrUnknown(t *testing.T) {
@@ -296,7 +329,7 @@ func TestStandaloneStartErrorPropagatesToRunSteward(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := runSteward(ctx, "", "/nonexistent/cfgms-config-does-not-exist.yaml")
+	err := runSteward(ctx, "", "", "/nonexistent/cfgms-config-does-not-exist.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create standalone steward")
 }
@@ -488,11 +521,6 @@ func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Temporarily point ControllerURL at the test server.
-	origURL := ControllerURL
-	ControllerURL = srv.URL
-	t.Cleanup(func() { ControllerURL = origURL })
-
 	storedID := &StewardIdentity{
 		StewardID:        "steward-refresh-test",
 		TenantID:         "tenant-1",
@@ -501,7 +529,7 @@ func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 		ServerCertPEM:    "fake-server",
 	}
 
-	_, err = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", logging.NewLogger("error"))
+	_, err = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, logging.NewLogger("error"))
 	require.ErrorIs(t, err, registration.ErrRefreshPending,
 		"HTTP 202 from refresh/complete must return ErrRefreshPending, not a fatal error")
 }
@@ -547,10 +575,6 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 	defer srv.Close()
 	srvURL = srv.URL
 
-	origURL := ControllerURL
-	ControllerURL = srv.URL
-	t.Cleanup(func() { ControllerURL = origURL })
-
 	storedID := &StewardIdentity{
 		StewardID:        "steward-refresh-test",
 		TenantID:         "tenant-1",
@@ -561,7 +585,7 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 
 	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
 	// but saveIdentity is invoked before the transport attempt so the identity file is written.
-	_, _ = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", logging.NewLogger("error"))
+	_, _ = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, logging.NewLogger("error"))
 
 	// The identity file saved by connectWithApprovedRegistration must carry the
 	// DeviceID and IdentityKeyPub from the key store.  An empty DeviceID here
@@ -605,4 +629,227 @@ func TestPollForApproval_BackoffIntervalGrows(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, "CERT", result.ClientCert)
+}
+
+// generateMainTestCACert generates a self-signed ECDSA CA cert for use in main_test.go.
+// Returns the PEM-encoded cert string and its SHA-256 fingerprint as lowercase hex.
+func generateMainTestCACert(t *testing.T) (certPEM, fingerprint string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{Organization: []string{"CFGMS Main Test CA"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	hash := sha256.Sum256(certDER)
+	fingerprint = hex.EncodeToString(hash[:])
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	return
+}
+
+// TestResolveTrustSource verifies the trust-source resolution rules from ADR-013 §3.
+func TestResolveTrustSource(t *testing.T) {
+	cases := []struct {
+		name        string
+		compiledURL string
+		installURL  string
+		installCA   string
+		wantSrc     TrustSource
+		wantURL     string
+		wantErr     bool
+	}{
+		{
+			name: "no URLs at all → error",
+		},
+		{
+			name:        "compile-baked: only compiledURL set",
+			compiledURL: "https://baked.example.com",
+			wantSrc:     trustSourceCompileBaked,
+			wantURL:     "https://baked.example.com",
+		},
+		{
+			name:        "dev flow regression: compiledURL set, no installURL → compile-baked",
+			compiledURL: "https://baked.example.com", installURL: "", installCA: "",
+			wantSrc: trustSourceCompileBaked, wantURL: "https://baked.example.com",
+		},
+		{
+			name:        "install-pinned: installURL + installCA both set",
+			compiledURL: "https://baked.example.com", installURL: "https://install.example.com", installCA: "ca.pem",
+			wantSrc: trustSourceInstallPinned, wantURL: "https://install.example.com",
+		},
+		{
+			name:        "tofu: installURL set but no CA",
+			compiledURL: "", installURL: "https://tofu.example.com",
+			wantSrc: trustSourceTOFU, wantURL: "https://tofu.example.com",
+		},
+		{
+			name:        "tofu: installURL set, compiledURL also set, no CA",
+			compiledURL: "https://baked.example.com", installURL: "https://tofu.example.com",
+			wantSrc: trustSourceTOFU, wantURL: "https://tofu.example.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, url, err := resolveTrustSource(tc.compiledURL, tc.installURL, tc.installCA)
+			if tc.wantErr || (tc.compiledURL == "" && tc.installURL == "") {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSrc, src)
+			assert.Equal(t, tc.wantURL, url)
+		})
+	}
+}
+
+// TestTOFUCAPinImmutable verifies that pinTOFUCA pins the CA on first enroll and
+// rejects a different CA on re-enroll (ADR-013 §3, Issue #1517).
+func TestTOFUCAPinImmutable(t *testing.T) {
+	certPEMA, fingerprintA := generateMainTestCACert(t)
+	certPEMB, _ := generateMainTestCACert(t)
+
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "etc", "cfgms", "controller-ca.crt")
+
+	// First enrollment: pin CA A and record fingerprint.
+	id1 := &StewardIdentity{}
+	require.NoError(t, pinTOFUCA(caPath, certPEMA, id1))
+	assert.Equal(t, fingerprintA, id1.CAPinFingerprint, "fingerprint must be recorded on first pin")
+
+	// CA file must be written at 0444 (public, immutable).
+	info, err := os.Stat(caPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 after TOFU pin")
+
+	// Second call with same CA A: must succeed (fingerprint matches).
+	id2 := &StewardIdentity{CAPinFingerprint: id1.CAPinFingerprint}
+	require.NoError(t, pinTOFUCA(caPath, certPEMA, id2))
+
+	// Second call with different CA B: must be rejected.
+	id3 := &StewardIdentity{CAPinFingerprint: id1.CAPinFingerprint}
+	err = pinTOFUCA(caPath, certPEMB, id3)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "re-pin requires wipe + re-enroll")
+
+	// CA file must be unchanged after rejection.
+	got, readErr := os.ReadFile(caPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, certPEMA, string(got), "CA file must not be modified after rejection")
+}
+
+// TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError verifies that
+// connectWithApprovedRegistration returns a hard error and does NOT persist the
+// identity when pinTOFUCA fails in TOFU mode.  ADR-013 §3 / implementation note:
+// "on error, do not save identity, do not connect."
+func TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	logger := logging.NewLogger("error")
+
+	reg := approvedRegistration{
+		StewardID:        "s1",
+		TenantID:         "t1",
+		TransportAddress: "https://ctrl.example.com",
+		CACert:           "not-a-valid-pem", // invalid PEM → computeCAPEMFingerprint fails → pinTOFUCA returns error
+	}
+
+	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceTOFU, "", logger)
+	require.Error(t, err, "must return a hard error when TOFU CA pin fails")
+
+	// Identity MUST NOT be saved when pinTOFUCA fails.
+	savedID, loadErr := loadIdentity(dir)
+	require.NoError(t, loadErr)
+	assert.Nil(t, savedID, "identity must not be persisted to disk when TOFU CA pin fails")
+}
+
+// TestTrustSourceDowngradeGuard verifies that checkTrustDowngrade enforces the
+// trust level ordering and CA fingerprint immutability (ADR-013 §3, Issue #1517).
+func TestTrustSourceDowngradeGuard(t *testing.T) {
+	certPEM, fingerprint := generateMainTestCACert(t)
+	certPEM2, _ := generateMainTestCACert(t)
+
+	t.Run("no prior enrollment allows any source", func(t *testing.T) {
+		id := &StewardIdentity{}
+		require.NoError(t, checkTrustDowngrade(trustSourceTOFU, "", id))
+		require.NoError(t, checkTrustDowngrade(trustSourceCompileBaked, "", id))
+	})
+
+	t.Run("downgrade from install-pinned to tofu rejected", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "install-pinned", CAPinFingerprint: fingerprint}
+		err := checkTrustDowngrade(trustSourceTOFU, "", id)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "trust downgrade rejected")
+	})
+
+	t.Run("downgrade from compile-baked to install-pinned rejected", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "compile-baked"}
+		err := checkTrustDowngrade(trustSourceInstallPinned, certPEM, id)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "trust downgrade rejected")
+	})
+
+	t.Run("same-level install-pinned with different CA rejected", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "install-pinned", CAPinFingerprint: fingerprint}
+		err := checkTrustDowngrade(trustSourceInstallPinned, certPEM2, id)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "re-pin requires wipe + re-enroll")
+	})
+
+	t.Run("same-level install-pinned with matching CA allowed", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "install-pinned", CAPinFingerprint: fingerprint}
+		require.NoError(t, checkTrustDowngrade(trustSourceInstallPinned, certPEM, id))
+	})
+
+	t.Run("upgrade from tofu to install-pinned allowed", func(t *testing.T) {
+		id := &StewardIdentity{TrustMode: "tofu", CAPinFingerprint: fingerprint}
+		require.NoError(t, checkTrustDowngrade(trustSourceInstallPinned, "", id))
+	})
+}
+
+// TestRegistrationUsesPinnedCAInPinnedMode verifies that buildHTTPConfigForInstallPinned
+// produces a client that exclusively uses the pinned CA and rejects connections to
+// servers whose cert is not signed by that CA (ADR-013 §3, Issue #1517).
+func TestRegistrationUsesPinnedCAInPinnedMode(t *testing.T) {
+	logger := logging.NewLogger("error")
+
+	// Use httptest.NewTLSServer which uses Go's built-in test CA.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	// Extract the server's own TLS certificate to use as the pinned CA.
+	serverCertDER := srv.TLS.Certificates[0].Certificate[0]
+	serverCertPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER}))
+
+	// With the correct server cert as pinned CA: NewHTTPClient must succeed.
+	correctCfg := buildHTTPConfigForInstallPinned(srv.URL, 5*time.Second, serverCertPEM, logger)
+	_, createErr := registration.NewHTTPClient(correctCfg)
+	require.NoError(t, createErr, "NewHTTPClient with matching pinned CA must not error")
+
+	// With a different CA (wrong): the TLS connection must be rejected.
+	wrongCAPEM, _ := generateMainTestCACert(t)
+	wrongCfg := buildHTTPConfigForInstallPinned(srv.URL, 5*time.Second, wrongCAPEM, logger)
+	httpCl, createErr2 := registration.NewHTTPClient(wrongCfg)
+	require.NoError(t, createErr2, "NewHTTPClient itself must not error — TLS error happens at dial time")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, reqErr := httpCl.Register(ctx, registration.RegistrationRequest{Token: "tok_pintest"})
+	require.Error(t, reqErr, "request to server with wrong pinned CA must fail")
+	errStr := reqErr.Error()
+	isTLSError := strings.Contains(errStr, "certificate") ||
+		strings.Contains(errStr, "tls") ||
+		strings.Contains(errStr, "x509")
+	assert.True(t, isTLSError, "error must be TLS/cert related, got: %v", reqErr)
 }

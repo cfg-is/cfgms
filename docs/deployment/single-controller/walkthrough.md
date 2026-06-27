@@ -54,6 +54,14 @@ make build
 
 This produces `bin/controller`, `bin/cfgms-steward`, and `bin/cfg`.
 
+> **Controller URL**: `make build` bakes `localhost:9080` into the steward binary — the
+> correct default for the controller-steward running on the same node. For remote stewards
+> deployed to other machines, you can either rebuild with
+> `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` (compile-baked trust) or
+> pass `--controller-url https://<IP>:9080 --controller-ca ca.crt` to `install.sh` at
+> install time (install-pinned trust, ADR-013 §3). Both are equally secure for a single
+> self-hosted controller.
+
 ## Step 2: Deploy the Controller
 
 Copy the controller binary to the controller VM:
