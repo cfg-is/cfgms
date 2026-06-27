@@ -405,6 +405,43 @@ func countCmd(tr *testWinRMTransport, psCommand string) int {
 	return n
 }
 
+// psArgsForCmd reconstructs the psArgs key→value map for the first recorded
+// call to psCommand. winRMCall stores args as []interface{} in SORTED key order
+// (see testWinRMTransport.ExecutePS), so the caller-known sorted key list for
+// each cluster verb is zipped back against the recorded values. Returns nil if
+// the command was never invoked. Used by W2 to positively assert that the
+// user-supplied names travelled via ArgumentList.
+func psArgsForCmd(tr *testWinRMTransport, psCommand string) map[string]string {
+	// Sorted key order per cluster write verb (matches the dispatch psArgs maps
+	// in setCluster).
+	var keys []string
+	switch psCommand {
+	case psAddClusterVMRole:
+		keys = []string{"ClusterName", "VMName"} // sorted
+	case psRemoveClusterResource:
+		keys = []string{"Name"}
+	default:
+		return nil
+	}
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	for _, c := range tr.calls {
+		if c.scriptBlock != psCommand {
+			continue
+		}
+		out := make(map[string]string, len(keys))
+		for i, k := range keys {
+			if i < len(c.args) {
+				if s, ok := c.args[i].(string); ok {
+					out[k] = s
+				}
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // TestClusterSet_CNOOwner_Create verifies the AC: the CNO-owner node calls
 // Cfgms-AddClusterVMRole (psAddClusterVMRole) exactly once when the named role
 // is absent, and records a create audit event with the owner node identity and
@@ -437,6 +474,17 @@ func TestClusterSet_CNOOwner_Create(t *testing.T) {
 		assert.NotContains(t, sb, "lab-hv",
 			"cluster names must travel via ArgumentList, never composed into the scriptBlock")
 	}
+
+	// W2: positive assertion — the recorded Add call carries the cluster + role
+	// names via psArgs (ClusterName/VMName), complementing the negative
+	// "names absent from scriptBlock text" assertion above. args is sorted by
+	// key: ClusterName before VMName.
+	addArgs := psArgsForCmd(transport, psAddClusterVMRole)
+	require.NotNil(t, addArgs, "the Add call's psArgs must be recorded")
+	assert.Equal(t, "lab-hv", addArgs["ClusterName"],
+		"Add must carry the cluster name in the ClusterName psArg")
+	assert.Equal(t, "web-01", addArgs["VMName"],
+		"Add must carry the role name in the VMName psArg")
 
 	require.NoError(t, m.auditMgr.Flush(context.Background()))
 	var createEvt *business.AuditEntry
@@ -633,4 +681,200 @@ func TestClusterSet_DriftNotAdopted(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ─── B2: setCluster destructive REMOVE success path (state: absent + allow_destructive) ─
+
+// TestClusterSet_Remove_Success verifies B2(a): on the CNO-owner node, a
+// declared role that EXISTS, with state: absent + allow_destructive: true,
+// triggers Remove-ClusterResource exactly once and records a
+// cluster-set-remove audit event with removed: true.
+func TestClusterSet_Remove_Success(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"owner":"NODE1"}`,             // helper CNO owner → this node (NODE1) owns it
+			`{"owners":{"web-01":"NODE1"}}`, // helper resource owners → role present
+			`{"owner":"NODE1"}`,             // setCluster cnoOwner re-read
+			``,                              // Remove-ClusterResource → success
+		},
+	}
+	m, store := clusterTestModule(t, transport) // m.nodeHostname == "NODE1"
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	cfg := &ClusterConfig{
+		Name:             "lab-hv",
+		RoleNames:        []string{"web-01"},
+		State:            "absent",
+		AllowDestructive: true,
+	}
+
+	start := time.Now()
+	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	require.NoError(t, err, "removing an existing role with allow_destructive must succeed")
+
+	// (a) Exactly one Remove cmdlet; zero Adds.
+	assert.Equal(t, 1, countCmd(transport, psRemoveClusterResource),
+		"an existing declared role must be Removed exactly once")
+	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
+		"the destructive path must issue no Add")
+
+	// The Remove carries the role via the Name psArg (never the scriptBlock).
+	rmArgs := psArgsForCmd(transport, psRemoveClusterResource)
+	require.NotNil(t, rmArgs, "the Remove call's psArgs must be recorded")
+	assert.Equal(t, "web-01", rmArgs["Name"],
+		"Remove must carry the role name in the Name psArg")
+	for _, sb := range scriptBlocks(transport) {
+		assert.NotContains(t, sb, "web-01",
+			"role names must travel via ArgumentList, never composed into the scriptBlock")
+	}
+
+	// Audit: a cluster-set-remove event with removed: true and the owner identity.
+	require.NoError(t, m.auditMgr.Flush(context.Background()))
+	var removeEvt *business.AuditEntry
+	for _, e := range store.captured() {
+		if e.Action == "cluster-set-remove" {
+			removeEvt = e
+		}
+	}
+	require.NotNil(t, removeEvt, "a cluster-set-remove audit event must be recorded")
+	assert.WithinDuration(t, start, removeEvt.Timestamp, 5*time.Second,
+		"remove audit Timestamp must be Go receipt-time")
+	host, _ := removeEvt.Details["host"].(string)
+	assert.Equal(t, "NODE1", host, "remove audit must carry the owner node identity")
+	require.NotNil(t, removeEvt.Changes)
+	assert.Equal(t, true, removeEvt.Changes.After["removed"],
+		"the remove audit must record removed: true")
+}
+
+// TestClusterSet_Remove_TransportError verifies B2(b): when the
+// Remove-ClusterResource transport call FAILS, setCluster wraps and returns the
+// error (it does NOT swallow it) — isAlreadyRegistered must NOT be applied to
+// the remove path, so even an "already"-bearing error surfaces.
+func TestClusterSet_Remove_TransportError(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"owner":"NODE1"}`,             // helper CNO owner (this node owns it)
+			`{"owners":{"web-01":"NODE1"}}`, // role present
+			`{"owner":"NODE1"}`,             // cnoOwner re-read
+			``,                              // Remove call (error supplied below)
+		},
+		perCallErrors: []error{
+			nil, nil, nil,
+			// Note the literal "already" substring: the remove path must STILL
+			// surface this, proving isAlreadyRegistered is not applied here.
+			errors.New("Remove-ClusterResource : The cluster resource could not be deleted; it is already in a pending state."),
+		},
+	}
+	m, store := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	cfg := &ClusterConfig{
+		Name:             "lab-hv",
+		RoleNames:        []string{"web-01"},
+		State:            "absent",
+		AllowDestructive: true,
+	}
+	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	require.Error(t, err, "a failed Remove must surface, never be swallowed")
+	assert.Contains(t, err.Error(), "could not be deleted",
+		"the underlying Remove error must be wrapped, not normalised away")
+
+	assert.Equal(t, 1, countCmd(transport, psRemoveClusterResource),
+		"the Remove was attempted once before the error surfaced")
+
+	// The remove failure is audited with removed: false.
+	require.NoError(t, m.auditMgr.Flush(context.Background()))
+	var removeEvt *business.AuditEntry
+	for _, e := range store.captured() {
+		if e.Action == "cluster-set-remove" {
+			removeEvt = e
+		}
+	}
+	require.NotNil(t, removeEvt, "a cluster-set-remove audit event must be recorded for the failure")
+	require.NotNil(t, removeEvt.Changes)
+	assert.Equal(t, false, removeEvt.Changes.After["removed"],
+		"a failed remove must record removed: false")
+}
+
+// TestClusterSet_Remove_AlreadyGone verifies B2(c): a declared role that is NOT
+// present in the resource-owner map, with state: absent + allow_destructive:
+// true, is an idempotent no-op — zero Remove-ClusterResource calls, a
+// cluster-set-remove-noop audit event, and no error.
+func TestClusterSet_Remove_AlreadyGone(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"owner":"NODE1"}`, // helper CNO owner (this node owns it)
+			`{"owners":{}}`,     // resource owners → role already gone
+			`{"owner":"NODE1"}`, // cnoOwner re-read
+		},
+	}
+	m, store := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	cfg := &ClusterConfig{
+		Name:             "lab-hv",
+		RoleNames:        []string{"web-01"},
+		State:            "absent",
+		AllowDestructive: true,
+	}
+	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	require.NoError(t, err, "removing an already-absent role is an idempotent no-op")
+
+	assert.Equal(t, 0, countCmd(transport, psRemoveClusterResource),
+		"an already-gone role must issue zero Remove-ClusterResource calls")
+	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
+		"the destructive no-op path must issue no Add")
+
+	// Audit: a cluster-set-remove-noop event with removed: false.
+	require.NoError(t, m.auditMgr.Flush(context.Background()))
+	var noopEvt *business.AuditEntry
+	for _, e := range store.captured() {
+		if e.Action == "cluster-set-remove-noop" {
+			noopEvt = e
+		}
+	}
+	require.NotNil(t, noopEvt, "an idempotent remove-noop audit event must be recorded")
+	require.NotNil(t, noopEvt.Changes)
+	assert.Equal(t, false, noopEvt.Changes.After["removed"],
+		"the remove-noop audit must record removed: false")
+}
+
+// ─── B3: setCluster scope-cap + nil-transport guards ───────────────────────────
+
+// TestClusterSet_ScopeCap_Undeclared verifies B3: setCluster addressed to a
+// cluster name != the configured cluster_name returns ErrClusterNotDeclared and
+// makes ZERO transport calls — the scope cap rejects BEFORE the transport, even
+// for the write path.
+func TestClusterSet_ScopeCap_Undeclared(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m, _ := clusterTestModule(t, transport) // m.clusterName == "lab-hv"
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	cfg := &ClusterConfig{Name: "other-cluster", RoleNames: []string{"web-01"}, State: "present"}
+	err := m.setCluster(context.Background(), "cluster:other-cluster", cfg)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrClusterNotDeclared,
+		"an out-of-scope cluster name must return the scope-cap sentinel on the write path")
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Len(t, transport.calls, 0,
+		"the scope cap must reject BEFORE touching the transport — zero PS calls")
+}
+
+// TestClusterSet_NilTransport verifies B3: setCluster with no transport wired
+// returns the distinct ErrTransportNotConfigured sentinel (a misconfiguration),
+// NOT the ErrClusterNotDeclared scope-cap sentinel.
+func TestClusterSet_NilTransport(t *testing.T) {
+	m, _ := clusterTestModule(t, &testWinRMTransport{})
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+	m.transport = nil
+
+	cfg := &ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"}
+	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransportNotConfigured,
+		"a nil transport is a misconfiguration, not an out-of-scope cluster")
+	assert.NotErrorIs(t, err, ErrClusterNotDeclared,
+		"the nil-transport path must not masquerade as the scope-cap sentinel")
 }

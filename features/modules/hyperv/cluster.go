@@ -516,16 +516,17 @@ func parseClusterConfig(name string, config modules.ConfigState) *ClusterConfig 
 }
 
 // isAlreadyRegistered reports whether a PS error indicates the clustered role
-// already exists. Matched case-insensitively on "already" or "exists" — the two
-// stable fragments Failover Clustering emits when a VM is already an HA role
-// ("already configured for high availability", "already exists"). Any OTHER
-// error is NOT idempotent and must surface (no blanket swallow).
+// already exists. Matched case-insensitively on "already" ONLY — the stable
+// fragments Failover Clustering emits when a VM is already an HA role both carry
+// it ("already configured for high availability", "already exists"). A bare
+// "exists" match is deliberately NOT used: it would swallow non-idempotent
+// errors such as "The virtual machine 'web-01' does not exist". Any error
+// without "already" is NOT idempotent and must surface (no blanket swallow).
 func isAlreadyRegistered(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "already") || strings.Contains(msg, "exists")
+	return strings.Contains(strings.ToLower(err.Error()), "already")
 }
 
 // firstNonEmpty returns a if non-empty, else b.
