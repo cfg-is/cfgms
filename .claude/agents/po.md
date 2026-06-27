@@ -98,6 +98,8 @@ Also read:
 
 Display sections in this order. **Omit any section with zero items.**
 
+**Section 0.5: EXTERNAL PR QUARANTINE** — PRs quarantined because the author is not a trusted (`push`/`maintain`/`admin`) collaborator. Read `external_prs` from preflight output. For each entry show: PR number, author login, head branch, title, and whether `is_released` (has `human-reviewed:ok` from a push+ actor). Omit if empty.
+
 **Section 1: NEEDS ATTENTION** — project items with `Blocked` status. Flag items older than 7 days as stale.
 
 **Section 2: MERGE DECISIONS** — Open PRs where `has_acceptance_review_comment: false` and CI is not failing (read from `review_recommendations` in the preflight output). Show QA verdict summary and CI status.
@@ -294,6 +296,9 @@ Each step sets project status `Blocked` on unrecoverable failure and continues t
 **Priority order (cap-constrained):** in-flight work is processed before new work. The 7-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
 
 Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of the container cap, since they do not consume container slots.
+
+**Step 0 — External PR triage (Issue #1786):**
+Read `external_prs` from the preflight output (`po-act.sh state '.external_prs'`). For each entry where `is_released == false`, log the quarantine and skip all pipeline actions for that PR. For entries where `is_released == true` (maintainer has applied `human-reviewed:ok` via a push+ actor), treat the PR as internal and allow it through normal review/merge flow. Do NOT call `review-pr`, `dispatch-fix`, or `enqueue` on any PR where `is_released == false`.
 
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `Draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.

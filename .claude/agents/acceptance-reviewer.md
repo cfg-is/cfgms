@@ -27,6 +27,26 @@ You receive a PR number, story issue number, and project item ID as `$ARGUMENTS`
 
 The story issue number is retained for PR linking and assignee operations. `ITEM_ID` is used for body reads and status updates.
 
+## Phase 0.5: External-Author Gate (BLOCKING)
+
+Before any review work, verify that the PR author is a trusted collaborator. Run:
+
+```bash
+.claude/scripts/agent-dispatch.sh check-pr-author <PR_NUM>
+```
+
+If the exit code is non-zero (`AUTHOR_EXTERNAL:…`):
+
+- Do **NOT** run Phase 0–4. Do **NOT** fetch code, check CI, or evaluate acceptance criteria.
+- The `check-pr-author` call already posts a quarantine comment on the PR.
+- Update the project item status back to `In Progress` (not Blocked or Failed):
+  ```bash
+  ./scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
+  ```
+- Exit with verdict `SKIPPED_EXTERNAL_AUTHOR`. Do NOT enqueue or merge.
+
+A maintainer must apply the `human-reviewed:ok` label (verified to push+ actor) before the pipeline will process this PR. See `docs/development/external-contributors.md`.
+
 ## Phase 0: Draft-PR Short-Circuit (BLOCKING)
 
 Before any review work, check if the PR is a draft:
