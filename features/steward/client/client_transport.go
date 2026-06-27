@@ -100,6 +100,10 @@ type TransportClient struct {
 	// Configuration executor (unified engine — same as standalone mode)
 	configExecutor *execution.Executor
 
+	// eventEmitter sends convergence observation events to the controller via LogStream.
+	// Initialised once by InitializeConfigExecutor; nil until then.
+	eventEmitter *EventEmitter
+
 	// Command authentication settings (Story #919)
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
@@ -447,10 +451,30 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 // This must be called after the client is connected but before config sync.
 // Uses the unified execution engine (all 7 modules, Get→Compare→Set→Verify).
 func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
+	c.mu.RLock()
+	stewardID := c.stewardID
+	controlPlane := c.controlPlane
+	c.mu.RUnlock()
+
+	// Build the out-of-band event emitter. It shares the control-plane gRPC
+	// connection so no additional TLS setup is required (ADR-012 §2).
+	var emitter *EventEmitter
+	if cp, ok := controlPlane.(*grpcCP.Provider); ok {
+		if tc := cp.TransportClient(); tc != nil {
+			emitter = NewEventEmitter(EventEmitterConfig{
+				Client:    tc,
+				StewardID: stewardID,
+				Logger:    c.logger,
+			})
+		}
+	}
+
 	execCfg := &execution.ExecutorConfig{
-		TenantID:    tenantID,
-		Logger:      c.logger,
-		SecretStore: c.secretStore,
+		TenantID:     tenantID,
+		Logger:       c.logger,
+		SecretStore:  c.secretStore,
+		StewardID:    stewardID,
+		EventEmitter: emitter,
 	}
 	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
@@ -459,9 +483,18 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 
 	c.mu.Lock()
 	c.configExecutor = executor
+	c.eventEmitter = emitter
 	c.mu.Unlock()
 
-	c.logger.Info("Configuration executor initialized", "tenant_id", tenantID)
+	if emitter != nil {
+		// The emitter uses context.Background() so its reconnect loop outlives
+		// any single request context. Disconnect() calls Close() to drain and stop.
+		emitter.Start(context.Background())
+		c.logger.Info("Configuration executor initialized with event emitter",
+			"tenant_id", tenantID, "steward_id", logging.RedactedID(stewardID))
+	} else {
+		c.logger.Info("Configuration executor initialized", "tenant_id", tenantID)
+	}
 	return nil
 }
 
@@ -1380,6 +1413,12 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 		if c.dnaRefreshStop != nil {
 			close(c.dnaRefreshStop)
 		}
+	}
+
+	// Drain and stop the event emitter before closing the gRPC connection so
+	// buffered convergence events are flushed to the controller first.
+	if c.eventEmitter != nil {
+		c.eventEmitter.Close()
 	}
 
 	// Close data plane session

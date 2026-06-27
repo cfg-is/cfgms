@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -29,6 +30,10 @@ import (
 type ExecutorConfig struct {
 	// TenantID for this steward (controller mode; may be empty in standalone mode)
 	TenantID string
+
+	// StewardID is the registered steward identity stamped into emitted LogEntry
+	// events. Leave empty in standalone mode or when event emission is not configured.
+	StewardID string
 
 	// Logger for execution logging
 	Logger logging.Logger
@@ -56,6 +61,10 @@ type ExecutorConfig struct {
 	// Ignored when Factory is supplied — callers wiring their own factory are
 	// responsible for injecting the secret store themselves.
 	SecretStore secretsif.SecretStore
+
+	// EventEmitter, when non-nil, receives convergence detection and outcome events.
+	// Enqueue must never block the caller; the concrete implementation drops when full.
+	EventEmitter EventEmitter
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -66,6 +75,7 @@ type Executor struct {
 	comparator *stewardtesting.StateComparator
 	config     config.ErrorHandlingConfig
 	tenantID   string
+	stewardID  string
 	logger     logging.Logger
 
 	// mu protects driftHandler and driftMode. Both can be written after construction
@@ -74,6 +84,11 @@ type Executor struct {
 	mu           sync.RWMutex
 	driftHandler DriftEventHandler
 	driftMode    config.DriftMode
+
+	// eventEmitter, when non-nil, receives convergence detection and outcome events
+	// (ADR-012 §2). Enqueue is the only emitter call on the convergence goroutine;
+	// the actual LogStream send runs on the emitter's own goroutine.
+	eventEmitter EventEmitter
 }
 
 // NewExecutor creates an Executor. When cfg.Factory is nil, an empty registry and
@@ -110,12 +125,14 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 	}
 
 	return &Executor{
-		factory:    f,
-		comparator: comp,
-		config:     errCfg,
-		tenantID:   cfg.TenantID,
-		logger:     cfg.Logger,
-		driftMode:  cfg.DriftMode,
+		factory:      f,
+		comparator:   comp,
+		config:       errCfg,
+		tenantID:     cfg.TenantID,
+		stewardID:    cfg.StewardID,
+		logger:       cfg.Logger,
+		driftMode:    cfg.DriftMode,
+		eventEmitter: cfg.EventEmitter,
 	}, nil
 }
 
@@ -208,6 +225,20 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// resource-type selector, not a separate module.
 	bundle, _ := parseModuleRef(resource.Module)
 
+	// Snapshot drift mode and handler once for this resource's execution.
+	// Both may be updated concurrently while the monitor event loop dispatches calls.
+	e.mu.RLock()
+	driftMode := e.driftMode
+	driftHandler := e.driftHandler
+	e.mu.RUnlock()
+
+	// Generate correlation ID for the detection+outcome event pair (ADR-012 §2).
+	correlationID := uuid.New().String()
+	driftModeStr := "apply"
+	if driftMode == config.DriftModeMonitor {
+		driftModeStr = "report"
+	}
+
 	e.logger.Info("Executing resource configuration",
 		"resource", resource.Name,
 		"resource_id", resourceID,
@@ -257,6 +288,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		}
 	}
 
+	// Detection event: enqueued before module.Get so a module hang still leaves
+	// the detection observable on the out-of-band channel (ADR-012 §2 crash-isolation).
+	e.enqueueDetection(correlationID, resourceID, driftModeStr)
+
 	currentState, err := module.Get(ctx, resourceID)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to get current state: %v", err)
@@ -287,14 +322,6 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		"added_fields", stateDiff.GetAddedFieldNames(),
 		"removed_fields", stateDiff.GetRemovedFieldNames())
 
-	// Snapshot drift mode and handler under the read lock. Both may be updated
-	// concurrently (controller delivers new cfg, tests replace the handler) while
-	// the monitor event loop dispatches ExecuteResource calls.
-	e.mu.RLock()
-	driftMode := e.driftMode
-	driftHandler := e.driftHandler
-	e.mu.RUnlock()
-
 	// Tag the event type for upstream telemetry before invoking the handler.
 	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
 	// from apply-mode stewards that simply have not drifted.
@@ -313,6 +340,8 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if driftMode == config.DriftModeMonitor {
 		result.Status = StatusNonCompliant
 		result.ExecutionTime = time.Since(startTime)
+		// Outcome: drift detected and reported; no correction applied.
+		e.enqueueOutcome(correlationID, "drift_reported", result.ExecutionTime)
 		e.logger.Info("Monitor mode: drift detected, skipping Set",
 			"resource", resource.Name,
 			"event_type", stateDiff.EventType)
@@ -322,6 +351,8 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err := module.Set(ctx, resourceID, desiredState); err != nil {
 		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
 		result.ExecutionTime = time.Since(startTime)
+		// Outcome: Set failed; record before error-handling may continue.
+		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -334,6 +365,8 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	if err := e.verifyChanges(ctx, module, resourceID, desiredState); err != nil {
 		result.Error = fmt.Sprintf("verification failed: %v", err)
 		result.ExecutionTime = time.Since(startTime)
+		// Outcome: post-Set verification failed.
+		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -343,6 +376,8 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	result.Status = StatusSuccess
 	result.ExecutionTime = time.Since(startTime)
+	// Outcome: convergence applied and verified successfully.
+	e.enqueueOutcome(correlationID, "applied", result.ExecutionTime)
 
 	e.logger.Info("Resource configuration applied successfully",
 		"resource", resource.Name,

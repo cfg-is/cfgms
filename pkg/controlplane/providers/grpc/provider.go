@@ -1032,6 +1032,15 @@ func (p *Provider) ServerHandler() transportpb.StewardTransportServer {
 	return p.serverImpl
 }
 
+// TransportClient returns the gRPC StewardTransportClient used by this provider.
+// This client shares the same gRPC-over-QUIC connection as the ControlChannel.
+// Returns nil when the provider is running in server mode or before Start().
+func (p *Provider) TransportClient() transportpb.StewardTransportClient {
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
+	return p.grpcClient
+}
+
 // --- gRPC StewardTransportServer implementation ---
 
 // transportServer implements the gRPC StewardTransportServer interface,
