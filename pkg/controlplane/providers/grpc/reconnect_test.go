@@ -329,7 +329,10 @@ func TestReconnectStatsTracking(t *testing.T) {
 	// Kill server to trigger reconnection attempts
 	server.ForceStop()
 
-	// Wait for at least one reconnect attempt
+	// Wait for all reconnect stats to be populated. Capture them in one atomic
+	// snapshot inside the closure to eliminate the TOCTOU window that existed
+	// when a separate GetStats call followed the Eventually condition check.
+	var capturedStats *types.ControlPlaneStats
 	require.Eventually(t, func() bool {
 		stats, err := client.GetStats(context.Background())
 		if err != nil {
@@ -340,16 +343,27 @@ func TestReconnectStatsTracking(t *testing.T) {
 			return false
 		}
 		attempts, ok := v.(int64)
-		return ok && attempts >= 1
-	}, 10*time.Second, 50*time.Millisecond)
+		if !ok || attempts < 1 {
+			return false
+		}
+		if stats.ProviderMetrics["last_connected_at"] == nil {
+			return false
+		}
+		if stats.ProviderMetrics["last_disconnected_at"] == nil {
+			return false
+		}
+		if stats.ProviderMetrics["connection_state"] == "connected" {
+			return false
+		}
+		capturedStats = stats
+		return true
+	}, 10*time.Second, 50*time.Millisecond,
+		"reconnect stats must be fully populated after server kill")
 
-	// Verify stats include reconnect info
-	stats, err := client.GetStats(context.Background())
-	require.NoError(t, err)
-	assert.Greater(t, stats.ProviderMetrics["reconnect_attempts"].(int64), int64(0))
-	assert.NotNil(t, stats.ProviderMetrics["last_connected_at"])
-	assert.NotNil(t, stats.ProviderMetrics["last_disconnected_at"])
-	assert.NotEqual(t, "connected", stats.ProviderMetrics["connection_state"])
+	assert.Greater(t, capturedStats.ProviderMetrics["reconnect_attempts"].(int64), int64(0))
+	assert.NotNil(t, capturedStats.ProviderMetrics["last_connected_at"])
+	assert.NotNil(t, capturedStats.ProviderMetrics["last_disconnected_at"])
+	assert.NotEqual(t, "connected", capturedStats.ProviderMetrics["connection_state"])
 
 	// Restart server so cleanup reconnection stops
 	_ = restartServerAndRepoint(t, client, tc, reg)

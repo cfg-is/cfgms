@@ -343,13 +343,27 @@ func TestMonitorCloseRace(t *testing.T) {
 	// platforms: on Linux/macOS it sits below internal/poll.runtime_pollWait; on
 	// Windows it sits below syscall.syscalln via Start.func2.
 	goleak.VerifyNone(t, existingGoroutines,
-		// os/exec pipe-reader goroutines spawned by DNA collection in sibling tests.
-		// goleak.HasFunction checks allFunctions which excludes the "created by"
-		// frame, so IgnoreAnyFunction("os/exec.(*Cmd).Start") is a no-op.
-		// writerDescriptor.func1 IS a regular call-stack frame on all platforms:
-		// on Linux/macOS it appears below internal/poll.runtime_pollWait; on Windows
-		// it appears below syscall.syscalln via Start.func2.
+		// os/exec goroutines spawned by DNA collection commands in sibling tests.
+		//
+		// goleak.IgnoreAnyFunction uses exact function-name matching against every
+		// non-"created-by" frame in the goroutine's stack (allFunctions map).
+		//
+		// writerDescriptor.func1 — the closure that copies a command's stdout/stderr
+		// pipe to an io.Writer. It IS a regular call-stack frame (not a creator),
+		// so IgnoreAnyFunction matches any goroutine whose stack passes through it,
+		// including the Start.func2 wrapper goroutine it runs inside.
 		goleak.IgnoreAnyFunction("os/exec.(*Cmd).writerDescriptor.func1"),
+		// watchCtx — the context-watching goroutine spawned by exec.CommandContext
+		// for every command that has a non-nil context. It blocks on a select between
+		// the process exiting and the context being cancelled. On slow macOS CI,
+		// background DNA goroutines start new exec commands AFTER IgnoreCurrent()
+		// snapshots (commands execute sequentially within collectSoftwareInfo /
+		// collectSecurityInfo). Each new command creates a new watchCtx goroutine
+		// that is NOT captured by IgnoreCurrent() and can still be blocking when
+		// VerifyNone() runs if the command takes > 0.5s (brew list, find, dscl,
+		// security, etc. all can). Without this ignore the leak check fails with
+		// "os/exec.(*Cmd).watchCtx" as the unexpected goroutine.
+		goleak.IgnoreAnyFunction("os/exec.(*Cmd).watchCtx"),
 		// DNA background collection goroutine tree from sibling tests. Each goroutine
 		// is ignored by its OWN function name (top-level closure) so it is caught
 		// regardless of which frame it is currently executing — in particular when the
