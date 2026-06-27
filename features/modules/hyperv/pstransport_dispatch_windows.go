@@ -174,6 +174,14 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx, "Cfgms-GetClusterOwnerNode -ClusterName "+quoteArg(psArgs, "ClusterName"))
 	case psGetClusterResourceOwner:
 		return t.run(ctx, "Cfgms-GetClusterResourceOwner -ClusterName "+quoteArg(psArgs, "ClusterName"))
+
+	// ── Failover cluster (write, #2202 S2) ──────────────────────────
+	case psAddClusterVMRole:
+		return t.run(ctx,
+			"Cfgms-AddClusterVMRole -ClusterName "+quoteArg(psArgs, "ClusterName")+
+				" -VMName "+quoteArg(psArgs, "VMName"))
+	case psRemoveClusterResource:
+		return t.run(ctx, "Cfgms-RemoveClusterResource -Name "+quoteArg(psArgs, "Name"))
 	}
 
 	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table); add a Cfgms-* function and a case here")

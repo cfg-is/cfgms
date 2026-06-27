@@ -28,6 +28,14 @@ var ErrClusterNotDeclared = errors.New("hyperv: cluster not in declared cluster_
 // misconfiguration apart from an out-of-scope cluster name.
 var ErrTransportNotConfigured = errors.New("hyperv: cluster transport not configured")
 
+// ErrDestructiveOpBlocked is returned by setCluster when a destructive cluster
+// operation (state: absent — role removal) is requested without the operator
+// opting in via allow_destructive: true (S6). It is returned WITHOUT invoking
+// any PowerShell write cmdlet — the destructive gate is checked before the
+// transport is touched, so a default-off config can never delete a clustered
+// role even if the steward owns the CNO.
+var ErrDestructiveOpBlocked = errors.New("hyperv: destructive cluster operation blocked — set allow_destructive: true to proceed")
+
 // ClusterConfig is the DESIRED state of a Hyper-V failover cluster as declared
 // by an operator. S1 manages no cluster mutation; the desired-state struct
 // exists so the executor and DNA layers have a stable ConfigState shape (Set /
@@ -157,6 +165,20 @@ const psGetClusterOwnerNode = `$g = Get-ClusterGroup -Cluster $ClusterName -Name
 // psGetClusterResourceOwner reads the current owner node of every clustered VM
 // role group (GroupType -eq 'VirtualMachine'). It emits {"owners":{name:owner}}.
 const psGetClusterResourceOwner = `$owners = @{}; Get-ClusterGroup -Cluster $ClusterName -ErrorAction SilentlyContinue | Where-Object { $_.GroupType -eq 'VirtualMachine' } | ForEach-Object { $owners[$_.Name] = if ($_.OwnerNode) { $_.OwnerNode.Name } else { '' } }; ConvertTo-Json @{ owners=$owners } -Compress -Depth 4`
+
+// psAddClusterVMRole clusters an existing Hyper-V VM as a highly-available role
+// (S2 create). $ClusterName and $VMName travel via ArgumentList — never
+// interpolated. Add-ClusterVirtualMachineRole is the write cmdlet; only the
+// CNO-owner node invokes it (the ownership gate ensures exactly-once across the
+// members). The Go caller normalises an "already exists"/"already registered"
+// error to nil (idempotency).
+const psAddClusterVMRole = `Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName | Out-Null`
+
+// psRemoveClusterResource removes a clustered role group (S2 destructive teardown,
+// gated behind allow_destructive: true). $Name travels via ArgumentList — never
+// interpolated. Remove-ClusterResource -Force is reached only after the Go
+// destructive gate has confirmed the operator opted in.
+const psRemoveClusterResource = `Remove-ClusterResource -Name $Name -Force`
 
 // getCluster returns the observed state of a failover cluster on the host.
 //
@@ -313,6 +335,197 @@ func (m *hypervModule) readResourceOwners(ctx context.Context, clusterName strin
 		parsed.Owners = map[string]string{}
 	}
 	return parsed.Owners, nil
+}
+
+// setCluster reconciles the declared clustered-VM-role set on a failover
+// cluster (S2). It is the Set("cluster:<name>", config) write path.
+//
+// Decision order (each step short-circuits BEFORE any transport call where it
+// can):
+//
+//  1. Scope cap (S5): an out-of-scope clusterName returns ErrClusterNotDeclared
+//     WITHOUT touching the transport.
+//  2. Transport wired: a nil transport returns ErrTransportNotConfigured.
+//  3. CNO gate (S1): clusterOwnershipHelper decides which node acts. A NON-owner
+//     records an ownership-gated-skip audit event and returns nil — ownership is
+//     coordination, not authorization, so a non-owner never errors or blocks.
+//  4. On the owner, for each role NAMED in the declared RoleNames set
+//     (drift-not-adopted, S1 — roles absent from cfg are never mutated):
+//     - state: absent + allow_destructive=false → ErrDestructiveOpBlocked,
+//     with NO PS write cmdlet (S6 destructive gate, default off).
+//     - state: absent + allow_destructive=true  → Remove-ClusterResource.
+//     - present (default): existence check via the helper's resource-owner
+//     map (reuses S1's readResourceOwners output — no 4th PS function). If
+//     the role already exists → idempotent no-op. Otherwise
+//     Add-ClusterVirtualMachineRole; an "already"/"exists" error is
+//     normalised to nil (post-failover existence-check↔Add race).
+//
+// Every path (create / gated-skip / idempotent no-op / destructive / drift)
+// records a pkg/audit event via recordHypervOp with the node identity
+// (m.nodeHostname), the CNO-owner decision, and before/after state maps;
+// timestamps are Go receipt-time (S8).
+func (m *hypervModule) setCluster(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	_, name, _ := splitResourceID(resourceID)
+
+	cfg := parseClusterConfig(name, config)
+
+	// (1) Scope cap (S5): reject an out-of-scope cluster name before the transport.
+	if m.clusterName != "" && cfg.Name != m.clusterName {
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: declining cluster Set — not in declared cluster_name scope",
+				"requested", logging.SanitizeLogValue(cfg.Name),
+				"declared", logging.SanitizeLogValue(m.clusterName))
+		}
+		return fmt.Errorf("hyperv: set cluster %q: %w", cfg.Name, ErrClusterNotDeclared)
+	}
+
+	// (2) Transport wired.
+	if m.transport == nil {
+		return fmt.Errorf("hyperv: set cluster %q: %w", cfg.Name, ErrTransportNotConfigured)
+	}
+
+	// (3) CNO gate (S1). The helper enforces the scope cap again, audits the
+	// ownership decision, and returns the per-role owner map (its readResourceOwners
+	// output) which doubles as the existence-check oracle below — no 4th PS function.
+	ownsCNO, resourceOwners, err := m.clusterOwnershipHelper(ctx, cfg.Name)
+	if err != nil {
+		return fmt.Errorf("hyperv: set cluster %q: %w", cfg.Name, err)
+	}
+
+	cnoOwner := m.readCNOOwner(ctx, cfg.Name)
+
+	if !ownsCNO {
+		// Non-owner: record an ownership-gated-skip and return nil. Coordination,
+		// not authorization (S1) — never an error, never a PS mutation here.
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"cluster-set-skip", "cluster:"+cfg.Name, nil,
+			map[string]interface{}{
+				"owns_cno":  false,
+				"cno_owner": cnoOwner,
+				"skipped":   true,
+				"roles":     append([]string(nil), cfg.RoleNames...),
+			}, nil)
+		return nil
+	}
+
+	if resourceOwners == nil {
+		resourceOwners = map[string]string{}
+	}
+
+	// (4) Owner path. Mutate ONLY roles named in cfg (drift-not-adopted, S1).
+	for _, role := range cfg.RoleNames {
+		if strings.TrimSpace(role) == "" {
+			continue
+		}
+		_, exists := resourceOwners[role]
+
+		if strings.EqualFold(strings.TrimSpace(cfg.State), "absent") {
+			// S6 destructive gate. Default off: NO PS write cmdlet is issued.
+			if !cfg.AllowDestructive {
+				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+					"cluster-set-remove-blocked", "cluster:"+cfg.Name,
+					map[string]interface{}{"role": role, "exists": exists},
+					map[string]interface{}{"allow_destructive": false, "blocked": true}, ErrDestructiveOpBlocked)
+				return fmt.Errorf("hyperv: set cluster %q role %q: %w", cfg.Name, role, ErrDestructiveOpBlocked)
+			}
+			if !exists {
+				// Already gone — idempotent no-op for the destructive path.
+				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+					"cluster-set-remove-noop", "cluster:"+cfg.Name,
+					map[string]interface{}{"role": role, "exists": false},
+					map[string]interface{}{"removed": false, "cno_owner": cnoOwner}, nil)
+				continue
+			}
+			if _, rmErr := m.transport.ExecutePS(ctx, psRemoveClusterResource, map[string]string{"Name": role}); rmErr != nil {
+				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+					"cluster-set-remove", "cluster:"+cfg.Name,
+					map[string]interface{}{"role": role, "exists": true},
+					map[string]interface{}{"removed": false}, rmErr)
+				return fmt.Errorf("hyperv: set cluster %q remove role %q: %w", cfg.Name, role, rmErr)
+			}
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"cluster-set-remove", "cluster:"+cfg.Name,
+				map[string]interface{}{"role": role, "exists": true},
+				map[string]interface{}{"removed": true, "cno_owner": cnoOwner}, nil)
+			continue
+		}
+
+		// Present (default): existence check BEFORE the Add (idempotency).
+		if exists {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"cluster-set-noop", "cluster:"+cfg.Name,
+				map[string]interface{}{"role": role, "exists": true},
+				map[string]interface{}{"created": false, "cno_owner": cnoOwner}, nil)
+			continue
+		}
+
+		_, addErr := m.transport.ExecutePS(ctx, psAddClusterVMRole, map[string]string{
+			"ClusterName": cfg.Name,
+			"VMName":      role,
+		})
+		if addErr != nil {
+			// Idempotency: an "already registered"/"already exists" error means a
+			// concurrent owner (or a stale existence read post-failover) created the
+			// role — normalise to nil. Only this specific text class is treated as
+			// idempotent; any other PS error is fatal (do NOT swallow).
+			if isAlreadyRegistered(addErr) {
+				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+					"cluster-set-noop", "cluster:"+cfg.Name,
+					map[string]interface{}{"role": role, "exists": false},
+					map[string]interface{}{"created": false, "already_registered": true, "cno_owner": cnoOwner}, nil)
+				continue
+			}
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"cluster-set-create", "cluster:"+cfg.Name,
+				map[string]interface{}{"role": role, "exists": false},
+				map[string]interface{}{"created": false}, addErr)
+			return fmt.Errorf("hyperv: set cluster %q add role %q: %w", cfg.Name, role, addErr)
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"cluster-set-create", "cluster:"+cfg.Name,
+			map[string]interface{}{"role": role, "exists": false},
+			map[string]interface{}{"created": true, "cno_owner": cnoOwner}, nil)
+	}
+
+	return nil
+}
+
+// parseClusterConfig builds a *ClusterConfig from the executor-supplied generic
+// config map (config.AsMap), or copies a *ClusterConfig passed directly. The
+// resource-id name is authoritative for Name so the scope cap always compares
+// the addressed cluster.
+func parseClusterConfig(name string, config modules.ConfigState) *ClusterConfig {
+	cfg := &ClusterConfig{Name: name}
+	if config == nil {
+		return cfg
+	}
+	if cc, ok := config.(*ClusterConfig); ok {
+		*cfg = *cc
+		cfg.Name = name
+		return cfg
+	}
+	cm := config.AsMap()
+	cfg.RoleNames = parseStringList(cm["role_names"])
+	if v, ok := cm["allow_destructive"].(bool); ok {
+		cfg.AllowDestructive = v
+	}
+	if v, ok := cm["state"].(string); ok {
+		cfg.State = v
+	}
+	return cfg
+}
+
+// isAlreadyRegistered reports whether a PS error indicates the clustered role
+// already exists. Matched case-insensitively on "already" or "exists" — the two
+// stable fragments Failover Clustering emits when a VM is already an HA role
+// ("already configured for high availability", "already exists"). Any OTHER
+// error is NOT idempotent and must surface (no blanket swallow).
+func isAlreadyRegistered(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already") || strings.Contains(msg, "exists")
 }
 
 // firstNonEmpty returns a if non-empty, else b.

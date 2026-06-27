@@ -144,6 +144,11 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-GetClusterOwnerNode -ClusterName " + quoteArg(psArgs, "ClusterName"))
 	case psGetClusterResourceOwner:
 		return emit("Cfgms-GetClusterResourceOwner -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psAddClusterVMRole:
+		return emit("Cfgms-AddClusterVMRole -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -VMName " + quoteArg(psArgs, "VMName"))
+	case psRemoveClusterResource:
+		return emit("Cfgms-RemoveClusterResource -Name " + quoteArg(psArgs, "Name"))
 	}
 	// Mirror production ExecutePS: an unknown psCommand is an error, not a
 	// silent success — keeps this test mirror honest to the production contract.
@@ -404,6 +409,9 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psGetCluster", psGetCluster, map[string]string{"ClusterName": "lab-hv"}},
 		{"psGetClusterOwnerNode", psGetClusterOwnerNode, map[string]string{"ClusterName": "lab-hv"}},
 		{"psGetClusterResourceOwner", psGetClusterResourceOwner, map[string]string{"ClusterName": "lab-hv"}},
+		// Failover cluster write verbs (cluster.go, #2202 S2)
+		{"psAddClusterVMRole", psAddClusterVMRole, map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"}},
+		{"psRemoveClusterResource", psRemoveClusterResource, map[string]string{"Name": "web-01"}},
 	}
 
 	for _, tc := range commands {
