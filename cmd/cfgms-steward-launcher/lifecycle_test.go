@@ -1243,3 +1243,179 @@ func TestSupervise_KnownGood_MarkedAfterHealthyRun(t *testing.T) {
 		t.Error("KnownGoodHash must be non-empty after healthy run")
 	}
 }
+
+// TestSupervise_HashFailureAfterCleanRun_SkipsKnownGoodUpdate verifies the
+// post-exec hash-failure code path for a clean (past-startup-window) child exit:
+//  1. Supervision does NOT abort — the loop continues.
+//  2. The upgrade-committed flag is still written (counter-reset path completes).
+//  3. The pre-existing KnownGood marker in state.json is left untouched, not
+//     cleared, when the hash of the just-exited binary cannot be computed.
+//
+// The hash failure is induced by chmod-ing the binary to 0o000 after the child
+// has started (the in-memory child is unaffected) but before it exits. This
+// causes computeBinaryHash to return an error without ever aborting the child.
+func TestSupervise_HashFailureAfterCleanRun_SkipsKnownGoodUpdate(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// Pre-seed a known-good marker to verify it survives the hash failure.
+	premarkKnownGood(t, l, "v1")
+	psInit, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState before test: %v", err)
+	}
+	existingHash := psInit.KnownGoodHash
+	if existingHash == "" {
+		t.Fatal("premarkKnownGood must set a non-empty hash for this test to be meaningful")
+	}
+
+	markerFile := filepath.Join(t.TempDir(), "started")
+	certStoreDir := t.TempDir()
+	// Child sleeps long enough for the test goroutine to chmod the binary
+	// before the child exits. After the sleep it exits cleanly (code 0).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_SLEEP_MS":    "300",
+		"FAKE_STEWARD_MARKER_FILE": markerFile,
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0,
+		CertStoreDir:      certStoreDir,
+		clock:             &fakeClock{sinceResult: time.Minute}, // past startup window → clean exit
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// Wait for the child to start, then make the binary unreadable so
+	// computeBinaryHash fails on the post-exec hash call.
+	if !waitForFile(markerFile, 5*time.Second) {
+		t.Fatal("child never started (marker absent within 5s)")
+	}
+	exe, exeErr := l.StewardExeFor("v1")
+	if exeErr != nil {
+		t.Fatalf("StewardExeFor v1: %v", exeErr)
+	}
+	if chErr := os.Chmod(exe, 0o000); chErr != nil {
+		t.Fatalf("chmod 000 binary: %v", chErr)
+	}
+	// Restore permissions so t.TempDir cleanup can remove the tree.
+	t.Cleanup(func() { _ = os.Chmod(exe, 0o755) })
+
+	// upgrade-committed must be written even when the post-exec hash fails.
+	// It is written at the END of the clean-startup branch, so its presence
+	// proves that the entire clean-startup path (counter reset, prune, flag)
+	// ran to completion.
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag not written after clean run with hash failure (post-exec hash failure must not skip the committed branch)")
+	}
+	cancel()
+	<-done // supervisor exits (nil or error — both are acceptable here)
+
+	// The pre-existing KnownGood marker must be completely untouched.
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState after hash-failure clean run: %v", loadErr)
+	}
+	if ps.KnownGood != "v1" {
+		t.Errorf("KnownGood = %q, want v1 — pre-existing marker must survive post-exec hash failure", ps.KnownGood)
+	}
+	if ps.KnownGoodHash != existingHash {
+		t.Errorf("KnownGoodHash = %q, want %q — pre-existing hash must survive post-exec hash failure", ps.KnownGoodHash, existingHash)
+	}
+}
+
+// TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood verifies that
+// when computeBinaryHash fails (binary unreadable) after a known-good binary
+// fast-exits, the launcher does NOT restart in place. Without the hash the
+// launcher cannot confirm the binary is the proven one — isKnownGood stays false
+// and probation rules apply (rollback fires).
+//
+// Scenario: v1 is known-good; v1 starts, writes a marker, then sleeps. The test
+// goroutine chmod-s the binary to 0o000 after the child is running. When the child
+// exits with code 1 (failed startup), computeBinaryHash fails → isKnownGood=false
+// → rollback to v0 instead of restart-in-place.
+func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v0")
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v0"); err != nil {
+		t.Fatalf("WriteCurrent v0: %v", err)
+	}
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// State: current=v1, previous=v0. Mark v1 known-good.
+	premarkKnownGood(t, l, "v1")
+
+	markerFile := filepath.Join(t.TempDir(), "started")
+	// Child sleeps long enough for the test to chmod the binary, then exits
+	// with code 1 (simulating a crashed steward). The clock will report 0 for
+	// ranFor (always inside startup window), making this look like a fast exit.
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "1",
+		"FAKE_STEWARD_SLEEP_MS":    "300",
+		"FAKE_STEWARD_MARKER_FILE": markerFile,
+	})
+
+	exe, exeErr := l.StewardExeFor("v1")
+	if exeErr != nil {
+		t.Fatalf("StewardExeFor v1: %v", exeErr)
+	}
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // always inside startup window → failedStartup=true
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// Wait for v1 to start, then make its binary unreadable.
+	if !waitForFile(markerFile, 5*time.Second) {
+		t.Fatal("child never started (marker absent within 5s)")
+	}
+	if chErr := os.Chmod(exe, 0o000); chErr != nil {
+		t.Fatalf("chmod 000 v1 binary: %v", chErr)
+	}
+	t.Cleanup(func() { _ = os.Chmod(exe, 0o755) })
+
+	// Supervise must return an error: v1 rolls back to v0 (hash failure → not
+	// known-good → probation), then v0 also fails and budget is exhausted.
+	var superviseErr error
+	select {
+	case superviseErr = <-done:
+	case <-ctx.Done():
+		t.Fatal("Supervise did not exit within 15s — rollback to v0 must have stalled")
+	}
+	if superviseErr == nil {
+		t.Error("Supervise returned nil after hash-failure rollback with exhausted budget; want non-nil error")
+	}
+
+	// current must be v0 — rollback must have fired (not restart-in-place).
+	cur, readErr := l.ReadCurrent()
+	if readErr != nil {
+		t.Fatalf("ReadCurrent after hash-failure rollback: %v", readErr)
+	}
+	if cur != "v0" {
+		t.Errorf("current = %q after v1 hash-failure fast-exit, want v0 (rollback must fire; v1 must NOT restart in place when hash fails)", cur)
+	}
+}

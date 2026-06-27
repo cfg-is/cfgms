@@ -124,21 +124,29 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			return fmt.Errorf("launcher: steward exe %q for version %q is missing: %w", exe, current, statErr)
 		}
 
-		// Compute the binary hash and determine known-good status before each
-		// exec. Rechecking every iteration catches on-disk replacements that
-		// happen between the initial mark and a subsequent restart.
-		exeHash, hashErr := computeBinaryHash(exe)
-		if hashErr != nil {
-			return fmt.Errorf("launcher: hash steward exe for version %q: %w", current, hashErr)
-		}
-		isKnownGood := false
-		if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
-			isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
-		}
-
 		started := s.clock.Now()
 		exitErr := s.execOnce(ctx, exe)
 		ranFor := s.clock.Since(started)
+
+		// Compute the binary hash AFTER the child exits. Hashing before exec
+		// would delay the child launch on every restart — for a large binary
+		// the I/O adds hundreds of milliseconds, creating a window where a
+		// caller that checks connection state may observe stale "connected"
+		// from the previous process and dispatch a command to the dead
+		// connection. Hashing after exec still catches on-disk replacements:
+		// if the binary was swapped while the child ran, the new hash differs
+		// from the stored known-good hash and probation rules apply correctly.
+		exeHash, hashErr := computeBinaryHash(exe)
+		isKnownGood := false
+		if hashErr == nil {
+			if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
+				isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
+			}
+		}
+		// If the binary cannot be hashed (deleted, permission error), isKnownGood
+		// stays false — conservative treatment applies probation rules. This does
+		// not abort supervision; the stat check at the top of the next iteration
+		// will surface a missing-binary error if the file is truly gone.
 
 		// Context cancelled → service manager is shutting us down.
 		// Distinguish two sub-cases:
@@ -195,8 +203,13 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			// and the steward process.
 			if ps, loadErr := s.Layout.loadState(); loadErr == nil {
 				ps.ConsecutiveFailures = 0
-				ps.KnownGood = current
-				ps.KnownGoodHash = exeHash
+				// Only update the known-good marker if the post-exec hash
+				// succeeded; if it failed (binary deleted/unreadable after
+				// run) leave any existing marker untouched.
+				if hashErr == nil {
+					ps.KnownGood = current
+					ps.KnownGoodHash = exeHash
+				}
 				if saveErr := s.Layout.saveState(ps); saveErr != nil {
 					_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
 				}
