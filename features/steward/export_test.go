@@ -66,6 +66,15 @@ var RegisterTestModule = func(s *Steward, name string, mod modules.Module) {
 	s.moduleFactory.RegisterModule(name, mod)
 }
 
+// GetMonitorDNARefreshCount reports how many DNA snapshot refreshes were
+// triggered by monitor-driven targeted reconciles that applied changes. In
+// controller mode the same post-reconcile path updates the heartbeat
+// currentDNAHash before the next scheduled tick; standalone tests read this
+// counter to assert the change is reflected early (AC3).
+var GetMonitorDNARefreshCount = func(s *Steward) int64 {
+	return s.monitorDNARefreshes.Load()
+}
+
 // SetDriftModeForTest sets the executor's drift mode for tests that need to
 // exercise monitor-mode reconcile paths.
 var SetDriftModeForTest = func(s *Steward, mode config.DriftMode) {

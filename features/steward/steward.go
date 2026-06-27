@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -119,6 +120,13 @@ type Steward struct {
 	// Tests set a small value (e.g. 2) to guarantee queue overflow without
 	// relying on scheduler timing. Production code always uses monitorQueueCapacity.
 	monitorFanInCap int
+
+	// monitorDNARefreshes counts DNA snapshot refreshes triggered by a
+	// monitor-driven targeted reconcile that applied changes. In controller mode
+	// the same post-reconcile path updates the heartbeat currentDNAHash; this
+	// counter makes the early (pre-scheduled-tick) refresh observable in
+	// standalone tests. Read via export_test.go.
+	monitorDNARefreshes atomic.Int64
 
 	// wg tracks the convergence loop goroutine and the health monitor goroutine
 	// for clean shutdown.
@@ -680,6 +688,13 @@ func (s *Steward) runTargetedReconcile(ctx context.Context, resourceID string) {
 				s.logger.Info("Targeted reconcile changed state, refreshing DNA snapshot",
 					"resource", resource.Name,
 					"resource_id", logging.SanitizeLogValue(resourceID))
+				// Record the early DNA refresh BEFORE collecting it. In controller
+				// mode the same post-reconcile path updates the heartbeat
+				// currentDNAHash before the next scheduled convergence tick; this
+				// counter makes that observable in tests. It is incremented ahead of
+				// the (potentially slow) collection so the "a monitor-driven refresh
+				// was triggered" signal is observable even while collection runs.
+				s.monitorDNARefreshes.Add(1)
 				if _, err := s.detectUnmanagedDNADrift(ctx); err != nil {
 					s.logger.Warn("DNA refresh after targeted reconcile returned error",
 						"resource", resource.Name,
