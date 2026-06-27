@@ -241,6 +241,11 @@ type TransportClient struct {
 	// timer set an explicit small positive value. Protected by mu. (Issue #2001)
 	upgradeShutdownGraceDelay time.Duration
 
+	// statusFunc returns the current health status string for the periodic heartbeat.
+	// When nil, "healthy" is used as the default. Set via SetStatusFunc after
+	// connection to wire in the subsystem state tracker. (Issue #2034)
+	statusFunc func() string
+
 	// shutdownScheduleFunc schedules trigger to run after delay. When nil the
 	// default real implementation (a timer goroutine) is used. Injectable for
 	// testing so the grace delay is exercised synchronously without time.Sleep
@@ -1476,6 +1481,28 @@ func (c *TransportClient) SetTenantID(id string) {
 	c.tenantID = id
 }
 
+// SetStatusFunc wires a health-status provider into the periodic heartbeat so the
+// controller receives the real subsystem state instead of a hardcoded "healthy".
+// Called from cmd/steward/main.go after connection to pass subsystemState.status.
+// Thread-safe. (Issue #2034)
+func (c *TransportClient) SetStatusFunc(f func() string) {
+	c.mu.Lock()
+	c.statusFunc = f
+	c.mu.Unlock()
+}
+
+// heartbeatStatus returns the current health status string for the heartbeat.
+// Returns the value from statusFunc if set, otherwise "healthy". (Issue #2034)
+func (c *TransportClient) heartbeatStatus() string {
+	c.mu.RLock()
+	fn := c.statusFunc
+	c.mu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return "healthy"
+}
+
 // SetRevokedVersions updates the cached list of revoked steward versions received
 // from the controller. The upgrade handler checks this list before invoking the
 // launcher swap. (Issue #1943)
@@ -1917,7 +1944,7 @@ func (c *TransportClient) startHeartbeat() {
 			return
 		case <-timer.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := c.SendHeartbeat(ctx, "healthy", nil); err != nil {
+			if err := c.SendHeartbeat(ctx, c.heartbeatStatus(), nil); err != nil {
 				c.logger.Warn("Failed to send heartbeat", "error", err)
 			} else {
 				// Heartbeat succeeded — drain any events queued during a

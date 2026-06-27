@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,6 +63,60 @@ const (
 	trustSourceInstallPinned TrustSource = 2 // --controller-ca at install time
 	trustSourceCompileBaked  TrustSource = 3 // URL baked via ldflags
 )
+
+// connectFuncT is the signature of the controller connect function, injectable
+// for testing so tests can simulate a controller-unreachable condition without
+// touching the network. Production code always uses registerAndConnect. (Issue #2034)
+type connectFuncT func(
+	ctx context.Context,
+	token, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM string,
+	ks *identity.FileKeyStore,
+	logger logging.Logger,
+) (*client.TransportClient, error)
+
+// subsystemState tracks which named subsystems are ready. The heartbeat loop
+// reads this to report "degraded" while subsystems are still pending and
+// "healthy" once they all attach. Thread-safe. (Issue #2034)
+type subsystemState struct {
+	mu       sync.Mutex
+	degraded map[string]struct{}
+}
+
+func newSubsystemState() *subsystemState {
+	return &subsystemState{degraded: make(map[string]struct{})}
+}
+
+func (s *subsystemState) markDegraded(subsystem string) {
+	s.mu.Lock()
+	s.degraded[subsystem] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *subsystemState) markHealthy(subsystem string) {
+	s.mu.Lock()
+	delete(s.degraded, subsystem)
+	s.mu.Unlock()
+}
+
+// isTrustDowngrade returns true when err is a trust-source downgrade rejection
+// from checkTrustDowngrade or tryReconnectWithStoredIdentity. These are
+// integrity decisions that must not be silently retried. (Issue #2034)
+func isTrustDowngrade(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "trust downgrade rejected")
+}
+
+// status returns "degraded" when any tracked subsystem is not yet ready,
+// "healthy" when all subsystems have attached. Called by the heartbeat loop.
+func (s *subsystemState) status() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.degraded) > 0 {
+		return string(steward.StatusDegraded)
+	}
+	return string(steward.StatusHealthy)
+}
 
 func trustModeString(ts TrustSource) string {
 	switch ts {
@@ -255,12 +310,30 @@ func runRootCommand(cmd *cobra.Command, regToken, controllerURL, configPath stri
 // ctx is cancelled. It is called from both the root cobra command and the
 // Windows service handler.
 func runSteward(ctx context.Context, regToken, controllerURL, configPath string) error {
-	// Initialize global logging provider. File is the only supported provider
-	// for the steward binary. Log level is read from CFGMS_LOG_LEVEL (default INFO).
+	return runStewardInternal(ctx, regToken, controllerURL, configPath, nil)
+}
+
+// runStewardInternal is the testable core of runSteward. cf is the connect
+// function; when nil, registerAndConnect is used. Tests inject a failing stub
+// to simulate controller-unreachable conditions without network I/O. (Issue #2034)
+func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath string, cf connectFuncT) error {
+	if cf == nil {
+		cf = registerAndConnect
+	}
+
+	// ── Early stderr logger ───────────────────────────────────────────────────
+	// Active BEFORE the file logging provider is initialised so that boot-time
+	// failures are never silent (no more 0-byte log files on fast-exit). (Issue #2034)
+	earlyLog := log.New(os.Stderr, "[cfgms-steward] ", log.Ltime|log.Lmsgprefix)
+	earlyLog.Printf("starting (pid %d)", os.Getpid())
+
+	// ── File logging provider ─────────────────────────────────────────────────
+	// Best-effort: if the file provider fails, fall back to a stdout logger so
+	// the process continues instead of dying with a 0-byte log file. (Issue #2034)
 	logDir := os.Getenv("CFGMS_LOG_DIR")
 	if logDir == "" {
 		logDir = "/tmp/cfgms"
-		log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
+		earlyLog.Printf("WARNING: CFGMS_LOG_DIR not set; using /tmp/cfgms — set for production deployments")
 	}
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
@@ -279,23 +352,27 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 		},
 	}
 
+	var logger logging.Logger
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
-		return fmt.Errorf("failed to initialize global logging: %w", err)
+		// File provider unavailable (e.g. /tmp not writable at early boot).
+		// Log to stderr and continue with a stdout fallback — process liveness
+		// must not depend on the log subsystem being ready. (Issue #2034)
+		earlyLog.Printf("WARNING: file logging unavailable (%v); using stdout fallback", err)
+		logger = logging.NewLogger(logLevelFromEnv())
+	} else {
+		// Flush and close the logger when runStewardInternal returns so that
+		// buffered entries (AsyncWrites=true) reach disk before os.Exit fires.
+		defer func() {
+			if mgr := logging.GetGlobalLoggingManager(); mgr != nil {
+				_ = mgr.Close()
+			}
+		}()
+		(&logging.TelemetryBridge{}).Initialize()
+		logging.InitializeGlobalLoggerFactory("steward", "main")
+		logger = logging.ForComponent("steward")
 	}
-	// Flush and close the logger when runSteward returns so that buffered log
-	// entries (AsyncWrites=true, FlushInterval=5s) reach disk before os.Exit
-	// is called — critical for short-lived exit paths (e.g. ErrRefreshRejected).
-	defer func() {
-		if mgr := logging.GetGlobalLoggingManager(); mgr != nil {
-			_ = mgr.Close()
-		}
-	}()
-	(&logging.TelemetryBridge{}).Initialize()
 
-	logging.InitializeGlobalLoggerFactory("steward", "main")
-	logger := logging.ForComponent("steward")
-
-	// gRPC transport registration flow.
+	// ── gRPC transport registration flow ─────────────────────────────────────
 	if regToken != "" {
 		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
 			"operation", "registration_init",
@@ -308,6 +385,13 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 		// stop) still cancels runCtx too. (Issue #2001)
 		runCtx, runCancel := context.WithCancel(ctx)
 		defer runCancel()
+
+		// ── Subsystem state tracker ───────────────────────────────────────────
+		// Tracks which subsystems are ready so the heartbeat can report the real
+		// health state instead of a hardcoded "healthy". (Issue #2034)
+		subsysState := newSubsystemState()
+		subsysState.markDegraded("controller") // degraded until first connect succeeds
+		subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
 
 		// Initialise device identity key store before registration so the refresh
 		// handshake path (Issue #2094) has a stable key available. Failure here is
@@ -334,10 +418,77 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 			return trustErr
 		}
 
-		transportCl, err := registerAndConnect(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, logger)
-		if err != nil {
-			return fmt.Errorf("failed to register with controller: %w", err)
+		// ── Non-fatal controller connect with exponential backoff ─────────────
+		// A connect failure at boot (network not up, controller not reachable) is
+		// a not-ready condition. The steward marks itself degraded and retries in
+		// the background instead of exiting. Process liveness is never gated on
+		// controller availability. (Issue #2034)
+		connectedCh := make(chan *client.TransportClient, 1)
+		go func() {
+			backoff := 5 * time.Second
+			const maxBackoff = 5 * time.Minute
+			for {
+				if runCtx.Err() != nil {
+					return
+				}
+				tc, connErr := cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, logger)
+				if connErr == nil {
+					subsysState.markHealthy("controller")
+					connectedCh <- tc
+					return
+				}
+				if runCtx.Err() != nil {
+					return
+				}
+				// Terminal security decisions must not be silently retried —
+				// they are integrity failures, not transient not-ready conditions.
+				// Log loudly and stop the retry loop; the operator must take action.
+				if errors.Is(connErr, registration.ErrRefreshRejected) {
+					logger.Error("Registration refresh rejected by controller; steward must be manually re-admitted",
+						"operation", "connect_terminal",
+						"error", connErr)
+					return
+				}
+				if isTrustDowngrade(connErr) {
+					logger.Error("Trust-anchor downgrade rejected; wipe identity to change trust source",
+						"operation", "connect_terminal",
+						"error", connErr)
+					return
+				}
+				logger.Warn("Controller connection failed; running in degraded mode, will retry",
+					"operation", "connect_retry",
+					"error", connErr,
+					"backoff", backoff)
+				select {
+				case <-runCtx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+			}
+		}()
+
+		// Block until connected or shutdown signal — the launcher startup window
+		// (#2033) handles known-good gating; this just ensures we stay alive.
+		var transportCl *client.TransportClient
+		select {
+		case transportCl = <-connectedCh:
+		case <-runCtx.Done():
+			logger.Info("Shutdown before controller connection established",
+				"operation", "steward_shutdown")
+			return nil
 		}
+
+		// Wire real health state into the periodic heartbeat so the controller
+		// can distinguish "started but subsystems pending" from "fully healthy".
+		// Must be called before loops start so the first periodic heartbeat uses
+		// the correct status. (Issue #2034)
+		transportCl.SetStatusFunc(subsysState.status)
 
 		// Wire the graceful-shutdown trigger used after a successful
 		// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer
@@ -363,8 +514,10 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 		// Failures are non-fatal — the steward stays usable for config
 		// convergence even if DNA publication is briefly unavailable; the
 		// controller will pick up DNA on the next convergence-driven publish
-		// in publishConfigStatus.
+		// in publishConfigStatus. On success the DNA subsystem is marked healthy
+		// so the heartbeat transitions from degraded to healthy. (Issue #2034)
 		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(runCtx); dnaErr == nil && currentDNA != nil {
+			subsysState.markHealthy("dna")
 			if pubErr := transportCl.PublishDNAUpdate(runCtx, currentDNA.Attributes, "", ""); pubErr != nil {
 				logger.Warn("Initial DNA publish failed; controller selectors may not find this steward until next config apply",
 					"error", pubErr)
@@ -373,8 +526,12 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 					"attribute_count", len(currentDNA.Attributes))
 			}
 		} else if dnaErr != nil {
+			// DNA subsystem stays degraded; the refresh loop retries on each tick.
 			logger.Warn("DNA collection failed at startup; controller selectors may match no stewards until DNA is collected later",
 				"error", dnaErr)
+		} else {
+			// nil error with nil DNA (empty collector result) — treat as healthy.
+			subsysState.markHealthy("dna")
 		}
 
 		// Check for launcher-written upgrade flag files and emit lifecycle events.
