@@ -2978,8 +2978,10 @@ else:
     print(f"FAIL_B2: review FAIL + no fix got action={action!r}, expected skip")
     sys.exit(1)
 
-# Part C: review PASS + CI green + mergeable -> enqueue_merge (unchanged)
-pr_pass_green = dict(pr_fail_green, pr=2002, latest_review_verdict="pass")
+# Part C: review PASS + CI green + mergeable + no new commit -> enqueue_merge (unchanged)
+# latest_commit_date must predate REVIEW_TS so AC4 (Issue #1977) does not fire.
+pr_pass_green = dict(pr_fail_green, pr=2002, latest_review_verdict="pass",
+                     latest_commit_date="2026-05-21T11:00:00Z")
 recs = mod.compute_review_recommendations([pr_pass_green], set(), set())
 action = recs[0].get("action") if recs else None
 if action == "enqueue_merge":
