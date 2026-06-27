@@ -93,7 +93,9 @@ For every resource check that reaches the drift-comparison step, the execution e
 
 **Detection event** — enqueued immediately before `module.Get()`, carrying a newly generated `correlation_id`, the `resource_id`, and the active `drift_mode`. A detection event with no matching outcome event signals that convergence hung inside a module (ADR-012 §2 crash-isolation).
 
-**Outcome event** — enqueued after convergence completes, with the same `correlation_id` and an `action` field: `applied` (convergence succeeded), `drift_reported` (monitor mode), or `error` (Set or Verify failed).
+**Outcome event** — enqueued after convergence completes, with the same `correlation_id` and an `action` field: `applied` (convergence succeeded), `drift_reported` (monitor mode), `error` (Set or Verify failed), or `did-not-finish(timeout)` (per-call deadline exceeded — see below).
+
+**Per-call module timeout (ADR-012 §7)** — each individual `module.Get`, `module.Set`, and `verifyChanges` call runs under its own `context.WithTimeout` (default 120 s, configurable via `ExecutorConfig.ModuleCallTimeoutSec`; there is no "infinite" option). If a module call exceeds its deadline, the executor emits a `did-not-finish(timeout)` outcome event carrying `timeout_ms` (the configured ceiling) and `duration_ms` (actual elapsed), then returns `StatusTimeout` immediately — converting the former silent wedge into two queryable, correlated events. Errors that return before the deadline continue through the existing `handleResourceError` → `ConfigStatusReport` → `StatusError` path unchanged.
 
 ### Error Handling
 

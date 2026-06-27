@@ -86,6 +86,10 @@ const (
 	// StatusNonCompliant indicates drift was detected in monitor mode.
 	// module.Set() and module.Verify() were NOT called; the drift is reported but not corrected.
 	StatusNonCompliant
+	// StatusTimeout indicates a per-resource module call (Get, Set, or verifyChanges)
+	// exceeded the configured per-call timeout. Treated as a failure in all aggregation
+	// paths. The emitted outcome event carries action=did-not-finish(timeout) (ADR-012 §7).
+	StatusTimeout
 )
 
 // NewConfigState creates a ConfigState from a raw configuration map.
