@@ -128,6 +128,26 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 		exitErr := s.execOnce(ctx, exe)
 		ranFor := s.clock.Since(started)
 
+		// Compute the binary hash AFTER the child exits. Hashing before exec
+		// would delay the child launch on every restart — for a large binary
+		// the I/O adds hundreds of milliseconds, creating a window where a
+		// caller that checks connection state may observe stale "connected"
+		// from the previous process and dispatch a command to the dead
+		// connection. Hashing after exec still catches on-disk replacements:
+		// if the binary was swapped while the child ran, the new hash differs
+		// from the stored known-good hash and probation rules apply correctly.
+		exeHash, hashErr := computeBinaryHash(exe)
+		isKnownGood := false
+		if hashErr == nil {
+			if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
+				isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
+			}
+		}
+		// If the binary cannot be hashed (deleted, permission error), isKnownGood
+		// stays false — conservative treatment applies probation rules. This does
+		// not abort supervision; the stat check at the top of the next iteration
+		// will surface a missing-binary error if the file is truly gone.
+
 		// Context cancelled → service manager is shutting us down.
 		// Distinguish two sub-cases:
 		//   (a) The child was still running when ctx fired and got
@@ -150,6 +170,13 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			if !failedStartupOnCancel {
 				return nil
 			}
+			// A known-good version that fast-exits coinciding with a
+			// context cancel is an environmental fault (e.g. WMI race on
+			// boot), not an upgrade failure. Return clean shutdown rather
+			// than rolling back or looping on a cancelled context.
+			if isKnownGood {
+				return nil
+			}
 			// Fall through to the rollback logic below — this looks
 			// like a real upgrade failure that happened to coincide
 			// with a cancel. The operator (or the next startup) will
@@ -170,11 +197,19 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 		if !failedStartup && !nonZeroExit {
 			// Child stayed up past the startup window then exited cleanly.
-			// Reset the failure counter and prune old version directories,
-			// then write the committed flag file last so its presence is a
-			// reliable completion signal for tests and the steward process.
+			// Reset the failure counter, persist the known-good marker, and
+			// prune old version directories. Write the committed flag file
+			// last so its presence is a reliable completion signal for tests
+			// and the steward process.
 			if ps, loadErr := s.Layout.loadState(); loadErr == nil {
 				ps.ConsecutiveFailures = 0
+				// Only update the known-good marker if the post-exec hash
+				// succeeded; if it failed (binary deleted/unreadable after
+				// run) leave any existing marker untouched.
+				if hashErr == nil {
+					ps.KnownGood = current
+					ps.KnownGoodHash = exeHash
+				}
 				if saveErr := s.Layout.saveState(ps); saveErr != nil {
 					_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
 				}
@@ -200,6 +235,16 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			}
 		} else {
 			_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
+		}
+
+		// Known-good fast-exit: a proven binary that exits inside the startup
+		// window is suffering a transient environmental fault (e.g. a boot-time
+		// dependency race), not an upgrade regression. Restart it in place so
+		// SCM recovery and the OS backoff handle persistence — never roll back
+		// a binary that has already proven healthy (Issue #2033).
+		if isKnownGood && failedStartup {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — restarting in place after fast exit (ran %s); rollback suppressed\n", current, ranFor)
+			continue
 		}
 
 		// Attempt rollback if we have a previous version AND budget.
