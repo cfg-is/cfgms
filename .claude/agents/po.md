@@ -423,11 +423,23 @@ Outcomes:
   ./.claude/scripts/po-act.sh diagnose <PR>
   ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
   ```
-- `REBASE_CONFLICT:<PR>` — real conflicts that need code changes. Set status to Fix and post a comment on the PR with the conflicting files (the script prints them):
+- `REBASE_CONFLICT:<PR>` — real conflicts requiring code understanding. **Immediately** (in this same Step 3 execution, without waiting for the next cycle) dispatch a resolve-conflict agent:
   ```bash
-  ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
+  ./.claude/scripts/po-act.sh resolve-conflict <PR>
   ```
-  Step 5 will pick it up next cycle for dispatch-fix.
+  The resolve-conflict agent: rebases onto `origin/develop`, resolves conflict markers (understanding both sides' intent, deduplicating helpers, preserving both stories' logic), validates (`go build ./...` + affected tests), and force-pushes with `--force-with-lease` to the PR's own branch. **One attempt per PR per cycle** — the inline call here is the only dispatch; the preflight never emits a separate `resolve-conflict` action type.
+
+  After a successful dispatch (`DISPATCHED_RESOLVE_CONFLICT:<PR>`):
+  - The next cycle will see the PR with a new commit (from the rebase). Because the new commit's `committedDate` is newer than any prior review comment, the preflight routes the PR to **`spawn_acceptance_reviewer`** (AC4 re-review) before enqueue — this applies to prior-PASS, prior-FAIL, and never-reviewed PRs alike. No additional status change is needed.
+
+  If the resolve-conflict dispatch fails (author gate refused, validation failure inside the container):
+  - The agent will have posted the conflict files + failure summary on the PR
+  - Set status Fix for human triage:
+    ```bash
+    ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
+    ```
+
+  **Do NOT re-dispatch** if the PR is still DIRTY in the next cycle after a successful push — surface for human triage instead (the resolve-conflict guard in `active_fix_pr_nums` in the preflight suppresses dispatch while the container is in flight, and after that you get at most one attempt per cycle because Step 3 runs once per PR per cycle).
 - `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
 
 This step is REQUIRED before Step 4 because:
@@ -533,6 +545,8 @@ For each story with project status `Fix`, find its PR and dispatch the fix agent
 ./.claude/scripts/po-act.sh dispatch-fix <PR_NUM>
 ```
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
+
+`dispatch-fix` and `resolve-conflict` are sibling modes: `dispatch-fix` addresses review/CI failures on an otherwise-rebased branch; `resolve-conflict` (Step 3) addresses rebase conflicts. The two never run on the same PR simultaneously — the `active_fix_pr_nums` suppression guard in the preflight recognizes both `cfg-agent-pr-fix-<PR>` and `cfg-agent-resolve-conflict-<PR>` containers.
 
 **Step 6 — Dispatch:**
 
