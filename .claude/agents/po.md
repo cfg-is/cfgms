@@ -92,7 +92,9 @@ gh api graphql -f query='
 Also read:
 - `docs/product/roadmap.md` — find the first uncompleted milestone (section without "COMPLETED"). Count `- [x]` vs `- [ ]` items.
 - `./.claude/scripts/agent-dispatch.sh list-running` — running container count and names
-- Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for a trigger named "po-cron". Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
+- `./.claude/scripts/agent-dispatch.sh capacity` — host resource headroom (§4.-1): `CAPACITY_OK:slots=<n>` or `CAPACITY_FULL:<binding>:slots=0`. The binding resource (disk/mem/cpu) tells you what's constraining dispatch on this host.
+- `./scripts/pipeline-helper.sh lease-list` — active distributed leases (multi-host; §4.-1). Each row is `<key>  <holder>  <exp>  <expired>`. Shows what other hosts are currently working.
+- Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for **this host's** trigger, named `po-cron-<CFGMS_HOST_ID>` (multiple hosts each run their own; a bare legacy `po-cron` counts as this host's if `CFGMS_HOST_ID` is unset). Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
 
 ### 1.2 Dashboard Output
 
@@ -113,11 +115,15 @@ the preflight output; for the interactive dashboard (no preflight run) use
 held, not dispatched, on the Linux orchestrator; they are worked on the Windows
 host via Self-Dispatch Mode (§7). Omit if empty.
 
-**Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories.
+**Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories. Include host capacity from the preflight `capacity` field (free slots + binding resource); when `free_slots` is 0, note the binding resource (e.g. "disk full — dispatch paused").
 
 **Section 5: PIPELINE DEPTH** — counts by stage (epics, drafts, ready, fix, review).
 
-**Section 6: CRON PO** — scheduled agent status: enabled/disabled/not configured, last run, next run. If not configured, suggest setting it up. If disabled (idle), explain why.
+**Section 6: CRON PO** — scheduled agent status for this host's trigger
+(`po-cron-<CFGMS_HOST_ID>`): enabled/disabled/not configured, last run, next run.
+If not configured, suggest setting it up. If disabled (idle), explain why. If
+`lease-list` shows leases held by *other* holders, note that other hosts are
+active — that is expected and healthy under multi-host cron (§4.-1).
 
 **Section 7: FORWARD EDGE** — next milestone definition quality. Prompt founder if thin.
 
@@ -192,15 +198,16 @@ Confirm with issue link: "Epic #NNN created. It will appear in the BA queue for 
 
 ### 2.5 Cron Re-Enable
 
-After creating an epic, check if the cron PO trigger is disabled:
+After creating an epic, check if **this host's** cron PO trigger is disabled:
 ```
 RemoteTrigger tool: action: "list"
 ```
-If a trigger named "po-cron" exists and `enabled: false`, re-enable it:
+If a trigger named `po-cron-<CFGMS_HOST_ID>` (or a bare legacy `po-cron` when
+`CFGMS_HOST_ID` is unset) exists and `enabled: false`, re-enable it:
 ```
 RemoteTrigger tool: action: "update", trigger_id: "<id>", body: {"enabled": true}
 ```
-Inform the founder: "Cron PO was paused (idle). Re-enabled — next cycle at <next_run_at>."
+Inform the founder: "Cron PO was paused (idle). Re-enabled — next cycle at <next_run_at>." Only ever enable/disable/cancel **this host's own** trigger — never another host's `po-cron-*`.
 
 -----
 
@@ -225,6 +232,68 @@ Run the full autonomous pipeline cycle once. Use when the founder says "cron", "
 
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
+### 4.-1 Multi-host coordination (stateless cron — run on many hosts at once)
+
+`/po cron` is safe to run **concurrently on multiple hosts**, including homogeneous
+(e.g. several Linux) hosts. There is **no shared local state** between cycles — the
+preflight cache, worktree clones, and docker containers are per-host scratch,
+re-derived every cycle from GitHub (the single source of truth). Cross-host mutual
+exclusion is provided by a **distributed lease**: an atomic git ref under
+`refs/cfgms-lease/<key>` (`pipeline-helper.sh lease-acquire/release/...`). Creating
+a ref is the one server-atomic operation GitHub exposes, so exactly one racing host
+wins a given key regardless of how many attempt it.
+
+**The lease is the hard interlock; project status is the dashboard signal.** Every
+collision-prone action acquires a lease on its work unit BEFORE acting:
+
+| Lease key | Held by | Released by |
+|---|---|---|
+| `story-<item>` | dev dispatch (or §7 self-dispatch claim) | the dev container's entrypoint on exit (`release-story` for §7); TTL reclaim on crash |
+| `pr-<N>` | review / fix / resolve (mutually exclusive on one PR) + inline rebase | the review/fix container's entrypoint on exit; inline rebase releases it itself; TTL on crash |
+| `epic-decompose-<N>` | Step 7 planning team | the host, in-session, after posting the decomposition summary |
+| `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after posting the `po-pin-refresh` marker |
+| `sweep` | Step 7.5 pipeline-sweep | the host, after the sweep returns |
+
+The container-op leases (`story-*`, `pr-*`) are acquired by the script helpers
+automatically (`po-act.sh dispatch` / `dispatch-fix` / `resolve-conflict`,
+`agent-dispatch.sh review-pr`) and released by the container — **you do not manage
+them by hand.** This is the "dispatch locks it, the returning agent unlocks it"
+lifecycle: when a dev agent submits its PR and its container exits, the `story-*`
+lease frees, and whichever cron host's next cycle comes first acquires `pr-<N>` to
+review it. The **inline-op leases** (`epic-decompose-*`, `pin-refresh-*`, `sweep`)
+ARE yours to manage in the steps below — acquire, run, release.
+
+**Host identity.** Export `CFGMS_HOST_ID` (default `hostname`) once per shell on
+each host; it tags lease holders for debugging and names this host's cron trigger
+(§6). Set `CFGMS_LEASE_TTL_STORY` / `CFGMS_LEASE_TTL_PR` only to override the
+defaults (7200s / 3600s).
+
+**Per-host resource admission gate (replaces the old container-count cap).** A new
+agent container is admitted only while the host stays under its ceilings — RAM and
+disk below 90% utilization, committed CPU below 75% of cores, with a `2×ncpu`
+count as a runaway backstop. This is **per-host and self-tuning**: a big box runs
+more agents, a laptop fewer, and it adapts to whatever else is running. It is the
+correct shape for multi-host — resource exhaustion is inherently per-host, so each
+host limits itself to what it can actually hold (no global container budget, and
+no hand-tuned magic number).
+
+- **Enforcement is automatic.** Every launch path (`po-act dispatch` /
+  `dispatch-fix` / `resolve-conflict`, `agent-dispatch review-pr`) calls the gate
+  before leasing/cloning and defers when full — you'll see
+  `DISPATCH_DEFERRED:<id>:resources (…)` / `REVIEW_REFUSED:<pr>:resources`. Trust
+  it; deferred work is picked up a later cycle (or by a host with room).
+- **Planning hint.** The preflight surfaces `capacity` (`free_slots`, `binding`
+  resource); read it to decide how many reviews/dispatches to *attempt* this cycle.
+  Query directly with `./.claude/scripts/agent-dispatch.sh capacity` (→
+  `CAPACITY_OK:slots=<n>` / `CAPACITY_FULL:<binding>:slots=0`).
+- **Knobs** (env, all optional): per-agent `CFGMS_AGENT_MEM_MB` (4096),
+  `CFGMS_AGENT_CPUS` (4), `CFGMS_AGENT_DISK_GB` (8); ceilings `CFGMS_AGENT_MEM_CEIL`
+  (0.90), `CFGMS_AGENT_DISK_CEIL` (0.90), `CFGMS_AGENT_CPU_CEIL` (0.75); bypass
+  `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
+
+**Expired-lease GC** runs inside `agent-dispatch.sh cleanup-stale` (Step 1.5) — no
+separate call needed.
+
 ### Helper scripts (prefer these — one approval per action, no `/tmp` writes)
 
 - `./.claude/scripts/po-act.sh <subcommand>` — every common action is a one-liner:
@@ -239,6 +308,8 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
   - `log <ISSUE> <text>` — post timestamped session log (stdin if text is `-`)
   - `merge-queue` — queue state as JSON
   - `block <ISSUE> <reason>` — set project status Blocked, post escalation comment
+  - `release-story <ITEM_ID>` — release a §7 self-dispatch story lease after the PR is up
+- `./scripts/pipeline-helper.sh lease-{acquire,release,status,list,gc}` — distributed-lease primitive (multi-host coordination, §4.-1). `lease-acquire <key> [ttl]` prints `ACQUIRED`/`RECLAIMED` (rc0), `HELD` (rc1), or `ACQUIRE_ERROR` (rc2). Used directly only for the inline-op leases below; container-op leases are managed by the dispatch helpers.
 - `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
 - `./.claude/scripts/agent-dispatch.sh` — lower-level primitives (called by `po-act.sh`)
 
@@ -293,9 +364,9 @@ The preflight handles all label queries, PR CI summaries, merge queue state, cod
 
 Each step sets project status `Blocked` on unrecoverable failure and continues to the next.
 
-**Priority order (cap-constrained):** in-flight work is processed before new work. The 7-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
+**Priority order (capacity-constrained):** in-flight work is processed before new work. Host capacity (the resource admission gate, §4.-1) is shared across all autonomous activity (dev agents, fix-pr, review containers), so when free slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If capacity is exhausted by Steps 3-5, the gate auto-defers Step 6 dispatches to the next cycle.
 
-Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of the container cap, since they do not consume container slots.
+Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of capacity, since they do not launch agent containers.
 
 **Step 0 — External PR triage (Issue #1786):**
 Read `external_prs` from the preflight output (`po-act.sh state '.external_prs'`). For each entry where `is_released == false`, log the quarantine and skip all pipeline actions for that PR. For entries where `is_released == true` (maintainer has applied `human-reviewed:ok` via a push+ actor), treat the PR as internal and allow it through normal review/merge flow. Do NOT call `review-pr`, `dispatch-fix`, or `enqueue` on any PR where `is_released == false`.
@@ -341,7 +412,15 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    ```
    Run the skill only if `latest_check` is non-empty AND (`last_processed` is empty OR `latest_check > last_processed`) — ISO-8601 UTC strings compare lexicographically. Otherwise report "pins current (last processed <last_processed>)" and skip.
 
-3. Run the skill (empty args = sweep every pin; it is itself idempotent and will comment on, not duplicate, any bump story that already exists):
+3. **Acquire the inline lease** so a second host doesn't sweep the same weekly
+   check concurrently. Key on the check timestamp (sanitized):
+   ```bash
+   ./scripts/pipeline-helper.sh lease-acquire "pin-refresh-<latest_check>" 1200
+   ```
+   On `HELD:*` another host owns this sweep — report "pin refresh in flight on
+   another host" and skip the step. On `ACQUIRED`/`RECLAIMED`, run the skill
+   (empty args = sweep every pin; it is itself idempotent and will comment on, not
+   duplicate, any bump story that already exists):
    ```
    Skill: refresh-pins
    ```
@@ -353,6 +432,7 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    Processed weekly pin check via refresh-pins. Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Drafts enter the Tech Lead queue (Step 2).
    EOF
    ```
+   Then **release the lease**: `./scripts/pipeline-helper.sh lease-release "pin-refresh-<latest_check>"`.
    If the marker post fails (network, etc.), the next cycle re-sweeps the same
    check — harmless, because `refresh-pins` is idempotent (it comments on, never
    duplicates, an existing bump story); the only cost is one redundant network
@@ -410,7 +490,20 @@ The preflight surfaces three actions in `review_recommendations`:
 | `rebase_then_investigate` | CI red (any required check failed) | Run `rebase-pr.sh`. If `REBASE_OK`, wait one cycle for CI to re-run. If `REBASE_NOOP`, the branch was already current → the failure is real → diagnose + dispatch-fix. |
 | `investigate` (legacy) | rare; falls through if neither rebase nor red applies | Same handling as rebase_then_investigate's NOOP branch. |
 
-For each `rebase` or `rebase_then_investigate` recommendation:
+For each `rebase` or `rebase_then_investigate` recommendation, first acquire the
+`pr-<N>` lease (§4.-1) so a concurrent host's review/fix/rebase on the same PR
+can't race the force-push:
+
+```bash
+./scripts/pipeline-helper.sh lease-acquire "pr-<PR_NUM>" 600
+```
+
+On `HELD:*`, another host controls this PR right now — skip it this cycle. On
+`ACQUIRED`/`RECLAIMED`, run the rebase, then **release `pr-<PR_NUM>` immediately
+after `rebase-pr.sh` returns** (`./scripts/pipeline-helper.sh lease-release
+"pr-<PR_NUM>"`) — before acting on the outcome. Releasing first is required so the
+`REBASE_CONFLICT` path's `resolve-conflict` dispatch (which re-acquires `pr-<N>`)
+doesn't self-block:
 
 ```bash
 ./.claude/scripts/rebase-pr.sh <PR_NUM>
@@ -495,11 +588,11 @@ Cross-check the story's project status: skip any story with status `Fix`. Use `p
 
 **Dispatch reviews for ALL eligible PRs each cycle, in parallel.** Iterate the
 `spawn_acceptance_reviewer` PRs in FIFO order (oldest `createdAt` first) and
-dispatch a headless review container for each, up to the 7-container cap
-(`feedback_max_running_agents`). The cap is shared with dev and fix containers;
-reviews are in-flight work, so they claim their slots before Step 6 dispatches
-any new dev. If eligible reviews exceed the free slots, dispatch up to the cap
-and the rest are picked up next cycle.
+dispatch a headless review container for each, until the host runs out of
+capacity (the resource gate, §4.-1, auto-defers with `REVIEW_REFUSED:<pr>:resources`
+once full). Capacity is shared with dev and fix containers; reviews are in-flight
+work, so they claim their slots before Step 6 dispatches any new dev. Reviews the
+gate defers are picked up next cycle (or by a host with room).
 
 ```bash
 ./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
@@ -576,13 +669,17 @@ required execution environment isn't in this host's caps gets `action: "hold"`
 with a `route` hint (e.g. `route: "windows"`) — it is **not** container-dispatched
 here. On the Linux orchestrator, windows-tagged stories therefore stay held and
 appear in the dashboard's Windows queue (§1.2); the Windows host picks them up via
-Self-Dispatch Mode (§7). Because each host works a **disjoint slice by
-environment**, two cron loops on different hosts can run out of phase without ever
-claiming the same story — no distributed lock is required. The per-story claim
-(`po-act.sh dispatch` flips `Ready → In Progress` *before* clone/launch) is the
-backstop that also protects against overlapping cycles on a single host. A story's
-required env comes from a `## Environment` body section and/or a `needs-<env>`
-label (see Reference: Story Body Conventions).
+Self-Dispatch Mode (§7). A story's required env comes from a `## Environment` body
+section and/or a `needs-<env>` label (see Reference: Story Body Conventions).
+
+**Cross-host safety (any number of homogeneous hosts).** Environment routing makes
+hosts work *different* stories when their caps differ, but it is **not** the safety
+mechanism — two identical-caps hosts (or two Linux orchestrators) are fully
+supported. `po-act.sh dispatch` acquires the `story-<item>` lease (§4.-1) BEFORE it
+materializes, claims, clones, or launches, so exactly one host proceeds; a loser
+prints `DISPATCH_SKIPPED:<id>:lease_held` and exits clean. The lease — not the
+`Ready → In Progress` status flip (Projects V2 has no CAS) — is the interlock. You
+do not manage `story-*` leases by hand; just trust the `DISPATCH_SKIPPED` output.
 
 For each story the preflight recommends dispatching:
 ```bash
@@ -591,7 +688,7 @@ For each story the preflight recommends dispatching:
 
 where `<ITEM_ID>` comes from `dispatch_recommendations[*].item_id` in the preflight output. Note: the `dispatch` subcommand handles both issue_nums (all-digits, legacy path) and item_ids (non-numeric) transparently — Story B wired this.
 
-**This step is intentionally last in priority order.** If the 7-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
+**This step is intentionally last in priority order.** If host capacity is exhausted by Steps 3-5 (rebase, review, fix-cycle), the admission gate auto-defers these dispatches (`DISPATCH_DEFERRED:<id>:resources`) to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
 
 **Step 7 — Planning Team (BA + Tech Lead collaboration):**
 Find `epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
@@ -602,7 +699,17 @@ gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
 ```
 Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
 
-**7b. Create the planning team:**
+**7b. Acquire the decompose lease, then create the planning team:**
+
+Decomposition is a multi-minute operation with no mid-flight idempotency marker
+(the decomposed-marker is posted only at the end), so two hosts would otherwise
+both run a full planning team and double-create the story set. Guard it:
+```bash
+./scripts/pipeline-helper.sh lease-acquire "epic-decompose-<NUM>" 2400
+```
+On `HELD:*`, another host is decomposing this epic — skip it. On
+`ACQUIRED`/`RECLAIMED`, proceed. **Release `epic-decompose-<NUM>` after 7g (summary
+posted) or on any early exit** — including the 7i convergence-failure path.
 ```
 TeamCreate(team_name: "planning-epic-<NUM>")
 ```
@@ -679,10 +786,14 @@ SUMMARY_EOF
 rm /tmp/planning-summary.md
 ```
 
-**7h. Shutdown the planning team:**
+**7h. Shutdown the planning team and release the lease:**
 Send shutdown to both teammates: `SendMessage(to: "*", message: {type: "shutdown_request"})`. Then clean up:
 ```
 TeamDelete()
+```
+Release the decompose lease so it doesn't linger until TTL:
+```bash
+./scripts/pipeline-helper.sh lease-release "epic-decompose-<NUM>"
 ```
 
 **7i. Fallback — convergence failure:**
@@ -711,9 +822,18 @@ rm /tmp/convergence-failure-<EPIC_NUM>.md
 
 Run the `pipeline-sweep` skill. It closes every open epic whose sub-tasks are all done AND whose AC verification passes on `origin/develop`, drafts a remediation story under any epic whose sub-tasks are done but AC verification fails, and moves any CLOSED-on-GitHub project item whose status is stale (anything other than `Done`) to `Done`. Runs in both `cycle` and `cron` modes; cheap and idempotent.
 
+Guard with the `sweep` lease so two hosts don't both draft remediation stories
+(the sweep is only *mostly* idempotent — concurrent runs can double-draft, per
+`epic_review_dup_remediation`):
+```bash
+./scripts/pipeline-helper.sh lease-acquire "sweep" 900
+```
+On `HELD:*`, another host is sweeping — skip this step. On `ACQUIRED`/`RECLAIMED`,
+run the skill, then release `sweep`:
 ```
 Skill: pipeline-sweep
 ```
+After it returns: `./scripts/pipeline-helper.sh lease-release "sweep"`.
 
 Include the sweep's headline + verdict tables in the cycle summary you return to the founder. If the sweep surfaces a "Needs founder review" Blocked anomaly (project item Blocked but GH issue closed — e.g. a founder action was completed but the project status was not advanced), flag it in the §6 (Cron PO) section of the cycle report.
 
@@ -767,12 +887,15 @@ this mode lets the **local session** work that host's tagged stories natively �
 no docker container, because a Linux container can't provide a Windows execution
 environment. Stories are worked **one at a time, in-process**.
 
-**Why no distributed lock is needed.** The orchestrator (Linux, docker dispatch)
-and this host serve **disjoint execution-environment slices**, so the
-orchestrator's cron and this host's `/po work` drain never select the same story
-even when interleaved. The only required guard is claiming each story
-(`Ready → In Progress`) **before** working it — `po-act.sh claim` does this with
-the same status check the docker path uses.
+**Cross-host safety.** `po-act.sh claim` acquires the `story-<item>` lease (§4.-1)
+before flipping `Ready → In Progress`, so this in-session drain and every other
+host's cron compete for the same atomic lock — no two hosts work the same story,
+even with identical caps. Because this mode has **no container** to release the
+lease on exit, you MUST release it yourself once the PR is up (step 5 below).
+`CLAIM_LOST` on `claim` means another host won the lease (or the story left
+`Ready`) — skip it and move on. The execution-environment slicing still routes
+*which* stories this host sees, but the lease — not the slicing — is what prevents
+collisions.
 
 ### Drain loop (availability-gated — drain-then-stop, NOT a timer)
 
@@ -830,7 +953,14 @@ Each iteration:
    story start-to-finish; there are no timer ticks mid-story.** This runs natively
    on the host, so the environment's build/test paths are exercised for real.
 
-5. **Loop back to step 1** (fresh preflight). Keep draining until step 2 stops you.
+5. **Release the story lease** once the PR is up — there is no container to do it
+   for you, so the orchestrator can pick up review/fix:
+   ```bash
+   ./.claude/scripts/po-act.sh release-story <ITEM_ID>
+   ```
+   (If the session dies before this, TTL reclaim frees the lease eventually.)
+
+6. **Loop back to step 1** (fresh preflight). Keep draining until step 2 stops you.
 
 **Scope.** This host only **produces** PRs for its environment's stories. Review,
 fix-cycle, merge-queue, and decomposition stay with the Linux orchestrator
