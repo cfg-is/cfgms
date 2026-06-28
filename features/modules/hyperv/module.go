@@ -289,6 +289,14 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 
 	switch transportChoice {
 	case "ps-host":
+		// Reuse an already-established PS host transport. Configure is called on
+		// every convergence/reconcile pass (the executor re-configures before each
+		// Get/Set); spawning a fresh powershell.exe each time would orphan the prior
+		// subprocess (and its stderr-drain goroutine) and leak a handle per cycle.
+		// When a live ps-host transport already exists, keep it.
+		if _, ok := m.transport.(*psHostTransport); ok {
+			return nil
+		}
 		// Try the persistent PS host. On non-Windows this returns
 		// errPSHostUnsupported and we fall through to the WinRM path so
 		// non-Windows builds remain usable for cross-platform tests.

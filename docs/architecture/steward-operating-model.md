@@ -258,6 +258,24 @@ Current adoption:
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
 
+### Monitor Load Budget and Reaction Latency
+
+Measured end-to-end on a live Hyper-V host (Windows Server 2025, CFG-70-02) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
+
+| Metric | Budget / target | Measured |
+|--------|-----------------|----------|
+| Idle goroutines | ≤ 1 reader goroutine per active subscription | +1 (one Event-Log reader pump) |
+| Idle heap allocation delta | < 2 MB | ~9 KB |
+| CFGMS-owned subscription handles | ≤ 2 (the `EvtSubscribe` handle + the auto-reset signal event) | 2 |
+| Total process OS-handle delta around `Monitor()` | observed, not a hard budget | ~16 (the extra ~14 are ALPC/RPC handles the Windows eventing service `wevtsvc` opens beneath `EvtSubscribe`; CFGMS neither owns nor can enumerate them) |
+| Per-extra-VM OS-handle growth (single-subscription invariant) | ~0 | +6 for 3 additional watched VMs (benign service-side churn, **not** new subscriptions — a per-VM subscription regression would add ~16 each) |
+| Idle CPU | < 0.1% | Not asserted in-process — the reader goroutine is idle-blocked in `WaitForSingleObject`; observed negligible. |
+| **Reaction latency — event** | < 2 s (out-of-band change → `ChangeEvent` on `Changes()`) | < 20 ms (sub-poll-granularity) |
+| **Reaction latency — correction** | < 5 s (reconcile applies `Start-VM` once the drift is visible) | ~0.9 s |
+| Teardown | `Close()` joins the reader goroutine; no goroutine leak (`goleak`) | clean (0 leaked goroutines) |
+
+**ps-host state-propagation caveat.** The Hyper-V Event Log signal fires within milliseconds of an out-of-band VM power-state change, but the persistent ps-host PowerShell session's `Get-VM` lags the true VM state by several seconds (≈5 s observed) after such a change — VMMS state propagation to that long-lived session. Because a single out-of-band change is debounced into **one** targeted reconcile, a reconcile whose `Get` runs before propagation reads the stale prior state and no-ops, dropping the correction until the next scheduled convergence tick. The production debounce (1.5 s) does not fully cover the observed lag. Operators relying on sub-tick event-driven correction of Hyper-V VM state should be aware that the *correction* (not the detection) can be delayed to the scheduled `converge_interval` when the propagation lag exceeds the debounce window; the scheduled poll is the guaranteed backstop. Tightening this (e.g. a fresh-CIM query in the ps-host `Cfgms-GetVM` verb, or a short reconcile retry when a change event finds no drift) is tracked as a follow-up.
+
 ## Self-Awareness
 
 The steward continuously knows about itself. This information is collected independently of the convergence loop.
