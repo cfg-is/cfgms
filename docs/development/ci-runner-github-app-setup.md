@@ -1,6 +1,6 @@
 # CI Runner GitHub App — Setup Runbook
 
-**Status:** DRAFT (epic #565 MVP — self-hosted Hyper-V CI runners managed by CFGMS).
+**Scope:** self-hosted Hyper-V CI runners managed by CFGMS.
 
 This runbook covers the **one-time** GitHub App bootstrap and documents the **fully-automated** per-runner registration the controller performs. The App is created once; every runner thereafter registers with no human in the loop.
 
@@ -82,11 +82,11 @@ For each runner the controller provisions, with **no human involvement**:
 1. **App JWT** — sign a short-lived (≤10 min) RS256 JWT with the private key (`iss = app_id`).
 2. **Installation token** — `POST /app/installations/{installation_id}/access_tokens` → a 1-hour installation token.
 3. **Registration token** — `POST /repos/cfg-is/cfgms/actions/runners/registration-token` (using the installation token) → a short-lived runner registration token.
-4. **Inject + register** — deliver the registration token to the fresh Hyper-V VM via the existing controller-supplied-config path (the #2080 token-delivery pattern), then on the VM:
+4. **Inject + register** — deliver the registration token to the fresh Hyper-V VM via the existing controller-supplied-config path (the controller's standard mechanism for pushing config and secrets to a managed host), then on the VM:
    ```
    ./config.sh --url https://github.com/cfg-is/cfgms --token <reg-token> \
                --labels self-hosted,linux,hyperv --unattended --replace
-   ./run.sh    # (persistent MVP) — or run as a service, see story 4
+   ./run.sh    # runs persistently in the foreground — or install as a service for unattended operation
    ```
 5. **Deregister on teardown** — `DELETE /repos/.../actions/runners/{runner_id}` (or `--ephemeral` self-deregisters after one job).
 
@@ -94,12 +94,12 @@ For each runner the controller provisions, with **no human involvement**:
 
 ---
 
-## 5. Public-repo safety (load-bearing — see epic #565)
+## 5. Public-repo safety (load-bearing)
 
 Self-hosted runners must never execute untrusted fork-PR code on this PUBLIC repo. The CI workflow gates self-hosted jobs on:
 
 ```yaml
-if: github.event.pull_request.head.repo.fork == false   # internal feature/* branches only
+if: github.event.pull_request.head.repo.fork == false   # non-fork PRs only (same-repo branches)
 ```
 
 External fork PRs fall back to GitHub-hosted runners. Additionally set **repo → Actions → "Approval for running fork pull request workflows" = require approval for all external contributors**. No repo secrets are exposed to fork-PR contexts.
@@ -109,4 +109,4 @@ External fork PRs fall back to GitHub-hosted runners. Additionally set **repo �
 ## 6. What the founder does vs what the agent builds
 
 - **Founder (one-time prereq):** run §1 (≈1 click) and §3 (drop 3 secrets). That's it, forever.
-- **Agent / stories (#565):** the manifest-flow helper (optional), the controller token-minting integration (§4), the VM provisioning + registration wiring, steward management of the runners, and the gated CI-workflow routing (§5).
+- **Automated build-out:** the manifest-flow helper (optional), the controller token-minting integration (§4), the VM provisioning + registration wiring, steward management of the runners, and the gated CI-workflow routing (§5).
