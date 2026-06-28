@@ -779,6 +779,14 @@ case "$cmd" in
     real_path=$(realpath "$clone_dir")
     gh_token=$(gh auth token)
 
+    # Forward the distributed lease key (set by po-act dispatch-fix/resolve-conflict)
+    # so the container's entrypoint releases the pr-<N> lease on exit. Empty when
+    # launch-generic is used outside the cron (e.g. branch mode) — then no lease.
+    lease_env=()
+    if [[ -n "${CFGMS_LEASE_KEY:-}" ]]; then
+      lease_env=(-e "CFGMS_LEASE_KEY=${CFGMS_LEASE_KEY}")
+    fi
+
     # Derive mode and metadata labels from entrypoint args
     mode_label="branch"
     fix_pr_num=""
@@ -806,6 +814,7 @@ case "$cmd" in
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AUTONOMOUS=true" \
+      "${lease_env[@]}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${entrypoint_args[@]}" 2>&1); then
@@ -1419,6 +1428,7 @@ else:
     clone_dir="${WORKTREE_BASE}/review-pr-${pr_num}"
 
     # Container conflict gate: refuse if the review container already exists.
+    # (Same-host fast path; the cross-host interlock is the pr-<N> lease below.)
     if docker ps -a --filter "name=^/${container_name}$" --format "{{.Names}}" 2>/dev/null | grep -qx "$container_name"; then
       echo "REVIEW_REFUSED:${pr_num}:container_exists"
       exit 3
@@ -1486,6 +1496,25 @@ for i in items:
         exit 3
       fi
     fi
+
+    # Cross-host PR lease — pr-<N> is shared by review/fix/resolve (mutually
+    # exclusive ops on one PR). Acquired only now that this is a confirmed,
+    # story-linked, reviewable PR (after the no_story_link / no_project_item
+    # refusals above, before any clone/launch). Another host already
+    # reviewing/fixing this PR holds it, and its local docker check above is
+    # invisible to us. The review container's review-entrypoint.sh releases the
+    # lease on exit; until then a pre-launch failure must release it, so we arm an
+    # EXIT trap and disarm it only after a successful detached launch (then the
+    # container owns release).
+    PIPELINE_HELPER="${CFGMS_TEST_PIPELINE_HELPER:-${REPO_ROOT}/scripts/pipeline-helper.sh}"
+    review_lease_out=$(bash "$PIPELINE_HELPER" lease-acquire "pr-${pr_num}" "${CFGMS_LEASE_TTL_PR:-3600}" 2>/dev/null || true)
+    case "$review_lease_out" in
+      ACQUIRED:*|RECLAIMED:*) ;;
+      HELD:*) echo "REVIEW_REFUSED:${pr_num}:lease_held"; exit 3 ;;
+      *)      echo "REVIEW_REFUSED:${pr_num}:lease_error"; exit 3 ;;
+    esac
+    REVIEW_LEASE_RELEASE_ON_EXIT="pr-${pr_num}"
+    trap '[ -n "${REVIEW_LEASE_RELEASE_ON_EXIT:-}" ] && bash "$PIPELINE_HELPER" lease-release "$REVIEW_LEASE_RELEASE_ON_EXIT" >/dev/null 2>&1; true' EXIT
 
     # Stale clone cleanup (previous run crashed before docker rm got the dir).
     rm -rf "$clone_dir" 2>/dev/null || true
@@ -1587,14 +1616,19 @@ PROMPT_EOF
       -v "${REPO_ROOT}/.devcontainer/scripts/review-entrypoint.sh:/usr/local/bin/review-entrypoint.sh:ro" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_LEASE_KEY=pr-${pr_num}" \
       --cap-add NET_ADMIN \
       --entrypoint /usr/local/bin/review-entrypoint.sh \
       cfg-agent:latest 2>&1); then
+      # Launch succeeded — the container now owns the pr-<N> lease and releases it
+      # on exit. Disarm the host-side release trap.
+      unset REVIEW_LEASE_RELEASE_ON_EXIT
       echo "REVIEW_DISPATCHED:${pr_num}:${review_story_label}:${container_id}"
       # Best-effort PR dashboard label via REST API (see launch-generic note above).
       gh api --method POST "repos/cfg-is/cfgms/issues/${pr_num}/labels" \
         -f "labels[]=review-agent" >/dev/null 2>&1 || true
     else
+      # Launch failed — the EXIT trap releases the lease.
       echo "LAUNCH_FAILED:${container_name}:${container_id}"
       rm -rf "$clone_dir"
       echo "CLEANED:clone:${clone_dir}"
@@ -1755,6 +1789,13 @@ PROMPT_EOF
         fi
       done
     done
+
+    # --- Expired distributed-lease GC (multi-host cron coordination) ---
+    # Reap lease refs whose holder died past TTL. acquire-time reclaim already
+    # frees a key when it is re-acquired directly; this collects the rest (e.g. a
+    # crashed dev whose story was picked up by stalled-dispatch recovery under a
+    # different code path). Idempotent; best-effort.
+    bash "${REPO_ROOT}/scripts/pipeline-helper.sh" lease-gc 2>/dev/null || true
 
     echo "CLEANUP_STALE_DONE:cleaned=${cleaned}"
     ;;
