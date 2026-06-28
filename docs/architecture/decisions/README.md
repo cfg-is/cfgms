@@ -56,6 +56,9 @@ What becomes easier or harder by making this decision?
 | [009](009-hyperv-vm-provisioning-from-install-media.md) | Hyper-V VM Provisioning from Install Media (ISO → Managed Endpoint) | 2026-06-18 | Accepted |
 | [010](010-steward-side-provisioning-enrollment.md) | Steward-Side Provisioning Enrollment — Controller-Supplied Join Token, IP-Trust Admission, Media Cleanup | 2026-06-19 | Accepted |
 | [011](011-registration-refresh.md) | Registration-Refresh for Stewards Offline Past mTLS Cert Expiry | 2026-06-20 | Accepted |
+| [012](012-steward-event-telemetry-stream.md) | Steward Event/Telemetry Stream to Controller | 2026-06-23 | Accepted |
+| [013](013-steward-controller-trust-and-distribution.md) | Steward Controller-Trust Anchoring and Binary Distribution | 2026-06-24 | Accepted |
+| [014](014-cfg-sessions-and-credential-unlock.md) | cfg Admin Sessions and Credential Storage (Zero Standing Privilege) | 2026-06-28 | Accepted |
 
 ### Superseded/Deprecated
 
