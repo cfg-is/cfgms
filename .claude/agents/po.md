@@ -92,6 +92,7 @@ gh api graphql -f query='
 Also read:
 - `docs/product/roadmap.md` — find the first uncompleted milestone (section without "COMPLETED"). Count `- [x]` vs `- [ ]` items.
 - `./.claude/scripts/agent-dispatch.sh list-running` — running container count and names
+- `./.claude/scripts/agent-dispatch.sh capacity` — host resource headroom (§4.-1): `CAPACITY_OK:slots=<n>` or `CAPACITY_FULL:<binding>:slots=0`. The binding resource (disk/mem/cpu) tells you what's constraining dispatch on this host.
 - `./scripts/pipeline-helper.sh lease-list` — active distributed leases (multi-host; §4.-1). Each row is `<key>  <holder>  <exp>  <expired>`. Shows what other hosts are currently working.
 - Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for **this host's** trigger, named `po-cron-<CFGMS_HOST_ID>` (multiple hosts each run their own; a bare legacy `po-cron` counts as this host's if `CFGMS_HOST_ID` is unset). Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
 
@@ -114,7 +115,7 @@ the preflight output; for the interactive dashboard (no preflight run) use
 held, not dispatched, on the Linux orchestrator; they are worked on the Windows
 host via Self-Dispatch Mode (§7). Omit if empty.
 
-**Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories.
+**Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories. Include host capacity from the preflight `capacity` field (free slots + binding resource); when `free_slots` is 0, note the binding resource (e.g. "disk full — dispatch paused").
 
 **Section 5: PIPELINE DEPTH** — counts by stage (epics, drafts, ready, fix, review).
 
@@ -267,10 +268,28 @@ each host; it tags lease holders for debugging and names this host's cron trigge
 (§6). Set `CFGMS_LEASE_TTL_STORY` / `CFGMS_LEASE_TTL_PR` only to override the
 defaults (7200s / 3600s).
 
-**Per-host container cap.** The 7-container cap (`feedback_max_running_agents`) is
-counted **per host** (`agent-dispatch.sh list-running` sees only local containers).
-N hosts therefore run up to 7N containers total. That is intentional — each host
-honors its own cap; there is no global container budget.
+**Per-host resource admission gate (replaces the old container-count cap).** A new
+agent container is admitted only while the host stays under its ceilings — RAM and
+disk below 90% utilization, committed CPU below 75% of cores, with a `2×ncpu`
+count as a runaway backstop. This is **per-host and self-tuning**: a big box runs
+more agents, a laptop fewer, and it adapts to whatever else is running. It is the
+correct shape for multi-host — resource exhaustion is inherently per-host, so each
+host limits itself to what it can actually hold (no global container budget, and
+no hand-tuned magic number).
+
+- **Enforcement is automatic.** Every launch path (`po-act dispatch` /
+  `dispatch-fix` / `resolve-conflict`, `agent-dispatch review-pr`) calls the gate
+  before leasing/cloning and defers when full — you'll see
+  `DISPATCH_DEFERRED:<id>:resources (…)` / `REVIEW_REFUSED:<pr>:resources`. Trust
+  it; deferred work is picked up a later cycle (or by a host with room).
+- **Planning hint.** The preflight surfaces `capacity` (`free_slots`, `binding`
+  resource); read it to decide how many reviews/dispatches to *attempt* this cycle.
+  Query directly with `./.claude/scripts/agent-dispatch.sh capacity` (→
+  `CAPACITY_OK:slots=<n>` / `CAPACITY_FULL:<binding>:slots=0`).
+- **Knobs** (env, all optional): per-agent `CFGMS_AGENT_MEM_MB` (4096),
+  `CFGMS_AGENT_CPUS` (4), `CFGMS_AGENT_DISK_GB` (8); ceilings `CFGMS_AGENT_MEM_CEIL`
+  (0.90), `CFGMS_AGENT_DISK_CEIL` (0.90), `CFGMS_AGENT_CPU_CEIL` (0.75); bypass
+  `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
 
 **Expired-lease GC** runs inside `agent-dispatch.sh cleanup-stale` (Step 1.5) — no
 separate call needed.
@@ -345,9 +364,9 @@ The preflight handles all label queries, PR CI summaries, merge queue state, cod
 
 Each step sets project status `Blocked` on unrecoverable failure and continues to the next.
 
-**Priority order (cap-constrained):** in-flight work is processed before new work. The 7-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
+**Priority order (capacity-constrained):** in-flight work is processed before new work. Host capacity (the resource admission gate, §4.-1) is shared across all autonomous activity (dev agents, fix-pr, review containers), so when free slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If capacity is exhausted by Steps 3-5, the gate auto-defers Step 6 dispatches to the next cycle.
 
-Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of the container cap, since they do not consume container slots.
+Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of capacity, since they do not launch agent containers.
 
 **Step 0 — External PR triage (Issue #1786):**
 Read `external_prs` from the preflight output (`po-act.sh state '.external_prs'`). For each entry where `is_released == false`, log the quarantine and skip all pipeline actions for that PR. For entries where `is_released == true` (maintainer has applied `human-reviewed:ok` via a push+ actor), treat the PR as internal and allow it through normal review/merge flow. Do NOT call `review-pr`, `dispatch-fix`, or `enqueue` on any PR where `is_released == false`.
@@ -569,11 +588,11 @@ Cross-check the story's project status: skip any story with status `Fix`. Use `p
 
 **Dispatch reviews for ALL eligible PRs each cycle, in parallel.** Iterate the
 `spawn_acceptance_reviewer` PRs in FIFO order (oldest `createdAt` first) and
-dispatch a headless review container for each, up to the 7-container cap
-(`feedback_max_running_agents`). The cap is shared with dev and fix containers;
-reviews are in-flight work, so they claim their slots before Step 6 dispatches
-any new dev. If eligible reviews exceed the free slots, dispatch up to the cap
-and the rest are picked up next cycle.
+dispatch a headless review container for each, until the host runs out of
+capacity (the resource gate, §4.-1, auto-defers with `REVIEW_REFUSED:<pr>:resources`
+once full). Capacity is shared with dev and fix containers; reviews are in-flight
+work, so they claim their slots before Step 6 dispatches any new dev. Reviews the
+gate defers are picked up next cycle (or by a host with room).
 
 ```bash
 ./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
@@ -669,7 +688,7 @@ For each story the preflight recommends dispatching:
 
 where `<ITEM_ID>` comes from `dispatch_recommendations[*].item_id` in the preflight output. Note: the `dispatch` subcommand handles both issue_nums (all-digits, legacy path) and item_ids (non-numeric) transparently — Story B wired this.
 
-**This step is intentionally last in priority order.** If the 7-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
+**This step is intentionally last in priority order.** If host capacity is exhausted by Steps 3-5 (rebase, review, fix-cycle), the admission gate auto-defers these dispatches (`DISPATCH_DEFERRED:<id>:resources`) to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
 
 **Step 7 — Planning Team (BA + Tech Lead collaboration):**
 Find `epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.

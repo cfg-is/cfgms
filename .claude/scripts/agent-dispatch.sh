@@ -12,6 +12,114 @@ WORKTREE_BASE="${CFGMS_TEST_WORKTREE_BASE:-$(cd "$REPO_ROOT/.." && pwd)/worktree
 AGENT_CRED_BASE="${CFGMS_TEST_CRED_BASE:-/run/cfgms/agent-cred}"
 
 # ---------------------------------------------------------------------------
+# Resource-based admission gate (replaces the hand-tuned container count).
+# A new agent container is admitted only if launching one keeps the host within
+# its ceilings: RAM and disk under 90% utilization, committed CPU under 75% of
+# cores. Per-host and self-tuning — a big box runs more, a laptop fewer, and it
+# adapts to whatever else is already running. A coarse 2×ncpu count ceiling is a
+# runaway-loop backstop, not the primary limit.
+#
+# All thresholds are env-overridable; the per-agent figures default to the
+# docker run reservations (--memory=4g --cpus=4) plus a disk allowance covering
+# the clone + go build/mod cache growth.
+# ---------------------------------------------------------------------------
+_capacity_compute() {
+  # _capacity_compute <line|json>
+  # Prints CAPACITY_OK:slots=<n> / CAPACITY_FULL:<reason>:slots=0 (line mode) or a
+  # JSON object (json mode). Returns 0 when at least one slot is free, else 1.
+  local mode="${1:-line}" running docker_root
+  running=$(docker ps --filter "label=cfg-agent=true" -q 2>/dev/null | wc -l | tr -d ' ')
+  docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+  CAP_MODE="$mode" CAP_RUNNING="${running:-0}" CAP_DOCKER_ROOT="$docker_root" \
+  CAP_WORKTREE="$WORKTREE_BASE" python3 - <<'PY'
+import os
+def f(k, d):
+    try: return float(os.environ[k])
+    except Exception: return d
+per_mem  = f("CFGMS_AGENT_MEM_MB", 4096) * 1024 * 1024
+per_cpu  = f("CFGMS_AGENT_CPUS", 4)
+per_disk = f("CFGMS_AGENT_DISK_GB", 8) * 1024**3
+mem_ceil  = f("CFGMS_AGENT_MEM_CEIL", 0.90)
+disk_ceil = f("CFGMS_AGENT_DISK_CEIL", 0.90)
+cpu_ceil  = f("CFGMS_AGENT_CPU_CEIL", 0.75)
+running = int(float(os.environ.get("CAP_RUNNING", "0") or 0))
+ncpu = os.cpu_count() or 1
+
+# Memory (skip the gate where /proc/meminfo is absent, e.g. a non-Linux host —
+# those don't launch containers anyway).
+mt = ma = 0
+try:
+    for ln in open("/proc/meminfo"):
+        if ln.startswith("MemTotal:"):     mt = int(ln.split()[1]) * 1024
+        elif ln.startswith("MemAvailable:"): ma = int(ln.split()[1]) * 1024
+except Exception:
+    pass
+
+def slots_for(budget, used, per):
+    # how many more `per`-sized units fit under `budget` given current `used`
+    if per <= 0: return 999
+    return int((budget - used) // per)
+
+slots = {}
+# RAM: bind on the worse of live utilisation and agent reservation (the latter
+# guards a from-idle thundering herd where current usage hasn't ballooned yet).
+if mt > 0:
+    used_mem = max(mt - ma, running * per_mem)
+    slots["mem"] = max(0, slots_for(mem_ceil * mt, used_mem, per_mem))
+# Disk: worst filesystem among the clone dir and the docker data root.
+disk_slot = 999
+for p in {os.environ.get("CAP_WORKTREE", ""), os.environ.get("CAP_DOCKER_ROOT", "")}:
+    if not p: continue
+    try:
+        s = os.statvfs(p)
+        tot = s.f_blocks * s.f_frsize
+        used = tot - s.f_bavail * s.f_frsize
+        disk_slot = min(disk_slot, max(0, slots_for(disk_ceil * tot, used, per_disk)))
+    except Exception:
+        pass
+slots["disk"] = disk_slot
+# CPU: committed cores (reservation-based; deterministic, prevents herd). Also
+# refuse outright if the 1-min load already exceeds the ceiling.
+slots["cpu"] = max(0, slots_for(cpu_ceil * ncpu, running * per_cpu, per_cpu))
+try:
+    if os.getloadavg()[0] > cpu_ceil * ncpu:
+        slots["cpu"] = 0
+except Exception:
+    pass
+# Runaway backstop: never more than 2×ncpu agents regardless of headroom.
+slots["count"] = max(0, int(2 * ncpu) - running)
+
+free = min(slots.values()) if slots else 0
+reason = min(slots, key=slots.get) if slots else "unknown"
+if os.environ.get("CAP_MODE") == "json":
+    import json
+    print(json.dumps({"can_launch": free >= 1, "free_slots": free,
+                      "binding": reason, "running": running, "per_slot": slots}))
+else:
+    if free >= 1:
+        print(f"CAPACITY_OK:slots={free}")
+    else:
+        print(f"CAPACITY_FULL:{reason}:slots=0")
+raise SystemExit(0 if free >= 1 else 1)
+PY
+}
+
+# _capacity_gate <skip_label> <emit_prefix>
+#   Admission gate for a launch path. On capacity, returns 0 silently. When full,
+#   prints "<emit_prefix>:<label>:resources (<reason>)" and returns 1 — the caller
+#   should exit cleanly (defer to a later cycle/host). Bypass with
+#   CFGMS_AGENT_CAPACITY_GATE=off (e.g. tests).
+_capacity_gate() {
+  local label="$1" prefix="$2" out
+  [[ "${CFGMS_AGENT_CAPACITY_GATE:-on}" == "off" ]] && return 0
+  out=$(_capacity_compute line 2>/dev/null) || {
+    echo "${prefix}:${label}:resources (${out:-capacity full})"
+    return 1
+  }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Tier 1 credential lifecycle helpers (Issue #2124)
 # ---------------------------------------------------------------------------
 
@@ -471,6 +579,7 @@ Commands:
   cleanup-container <NAME>                  Remove container and associated clone by name
   cleanup-stale                             Remove containers/clones for closed, blocked, or failed stories
   list-running                              List running agent containers
+  capacity [--json]                         Resource admission gate: CAPACITY_OK:slots=<n> (rc0) / CAPACITY_FULL:<binding>:slots=0 (rc1)
   list-exited                               List exited agent containers
   inspect-exit    <NUM>                     Print exit code of container
   inspect-detail  <NUM>                     Print stats + last 30 log lines
@@ -1205,6 +1314,18 @@ else:
       --format "{{.Names}}\t{{.Status}}\t{{.Label \"issue\"}}\t{{.Label \"mode\"}}\t{{.Label \"branch\"}}\t{{.Label \"pr\"}}" 2>/dev/null || true
     ;;
 
+  capacity)
+    # Resource admission gate. `capacity` → CAPACITY_OK:slots=<n> (rc0) or
+    # CAPACITY_FULL:<binding>:slots=0 (rc1). `capacity --json` → full detail for
+    # the preflight. Used by every launch path to bound host resource use without
+    # a hand-tuned container count (RAM/disk 90%, CPU 75%, 2×ncpu backstop).
+    if [[ "${1:-}" == "--json" ]]; then
+      _capacity_compute json
+    else
+      _capacity_compute line
+    fi
+    ;;
+
   list-exited)
     docker ps -a --filter "label=cfg-agent=true" --filter "status=exited" \
       --format "{{.Names}}\t{{.Label \"issue\"}}\t{{.Label \"mode\"}}\t{{.Label \"branch\"}}\t{{.Label \"pr\"}}" 2>/dev/null || true
@@ -1495,6 +1616,11 @@ for i in items:
         echo "REVIEW_REFUSED:${pr_num}:no_project_item_for_story_${story_num}"
         exit 3
       fi
+    fi
+
+    # Resource admission gate before claiming the lease / cloning.
+    if ! _capacity_gate "${pr_num}" "REVIEW_REFUSED"; then
+      exit 3
     fi
 
     # Cross-host PR lease — pr-<N> is shared by review/fix/resolve (mutually

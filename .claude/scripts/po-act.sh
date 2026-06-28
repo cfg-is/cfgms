@@ -89,6 +89,18 @@ _release_lease() {
   bash "$PIPELINE_HELPER" lease-release "$key" >/dev/null 2>&1 || true
 }
 
+# _capacity_ok
+#   Resource admission gate (delegates to agent-dispatch.sh capacity). Returns 0
+#   when the host has room for another agent container; on no room, echoes the
+#   CAPACITY_FULL line and returns 1. Bypass with CFGMS_AGENT_CAPACITY_GATE=off.
+_capacity_ok() {
+  [[ "${CFGMS_AGENT_CAPACITY_GATE:-on}" == "off" ]] && return 0
+  local out
+  out=$("$DISPATCH" capacity 2>/dev/null) && return 0
+  echo "$out"
+  return 1
+}
+
 # _claim_item <item_id>
 #   Re-read status; proceed only if still Ready; set it to In Progress. Prints
 #   CLAIMED:<item> (rc 0) or CLAIM_LOST:<item> (rc 1). This is the dashboard-state
@@ -153,6 +165,13 @@ case "$cmd" in
   dispatch)
     arg="${1:?story number or item_id required}"
     PROJECT_QUEUE="$(cd "$(dirname "$0")/../.." && pwd)/scripts/project-queue.sh"
+
+    # Resource admission gate (before any lease/materialize/clone). Defer if the
+    # host has no room for another agent container — RAM/disk 90%, CPU 75%.
+    if ! cap=$(_capacity_ok); then
+      echo "DISPATCH_DEFERRED:${arg}:resources (${cap})"
+      exit 0
+    fi
 
     # If arg is an item_id (non-numeric), resolve it to the underlying GitHub
     # issue number. A project item linked to a public issue carries `issue_num`;
@@ -362,6 +381,11 @@ except Exception: print('')" 2>/dev/null || echo "")
       echo "DISPATCH_FIX_REFUSED:${pr}:external_author"
       exit 3
     fi
+    # Resource admission gate before claiming the lease.
+    if ! cap=$(_capacity_ok); then
+      echo "DISPATCH_FIX_DEFERRED:${pr}:resources (${cap})"
+      exit 0
+    fi
     # Cross-host PR lease — pr-<N> is shared by review/fix/resolve (mutually
     # exclusive ops on one PR). If another host already holds it, skip cleanly.
     _acquire_lease "pr-${pr}" "$LEASE_TTL_PR" "pr-${pr}" || exit 0
@@ -388,6 +412,11 @@ except Exception: print('')" 2>/dev/null || echo "")
     if ! "$DISPATCH" check-pr-author "$pr"; then
       echo "RESOLVE_CONFLICT_REFUSED:${pr}:external_author"
       exit 3
+    fi
+    # Resource admission gate before claiming the lease.
+    if ! cap=$(_capacity_ok); then
+      echo "RESOLVE_CONFLICT_DEFERRED:${pr}:resources (${cap})"
+      exit 0
     fi
     # Cross-host PR lease (same pr-<N> key as review/fix — they never run together
     # on one PR). Skip cleanly if another host holds it.
