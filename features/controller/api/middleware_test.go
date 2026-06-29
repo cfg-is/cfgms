@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -439,6 +440,20 @@ func requestWithTLSCert(method, path string, peerCert *x509.Certificate) *http.R
 	req := httptest.NewRequest(method, path, nil)
 	req.TLS = &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{peerCert},
+	}
+	return req
+}
+
+// makeAdminRequest creates an httptest.Request authenticated as an mTLS admin cert principal.
+// Pass a non-nil body for requests that require a payload (json-encoded etc.).
+// Use this helper in tests that call Tier-3 endpoints — those require IsAdmin: true which
+// only an mTLS admin cert provides.
+func makeAdminRequest(t *testing.T, method, path string, body io.Reader) *http.Request {
+	t.Helper()
+	adminCert := makeSelfSignedAdminCert(t)
+	req := httptest.NewRequest(method, path, body)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{adminCert},
 	}
 	return req
 }

@@ -302,10 +302,7 @@ func TestListStewards(t *testing.T) {
 func TestAPIKeyManagement(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Use ephemeral key for API key management (more secure for testing)
-	adminAPIKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list"})
-
-	// Test creating a new API key
+	// POST /api/v1/api-keys is Tier-3 (mTLS-only): use admin cert.
 	createReq := APIKeyCreateRequest{
 		Name:        "Test Key",
 		Permissions: []string{"steward:read"},
@@ -315,8 +312,7 @@ func TestAPIKeyManagement(t *testing.T) {
 	reqBody, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
-	req.Header.Set("X-API-Key", adminAPIKey)
+	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -335,9 +331,10 @@ func TestAPIKeyManagement(t *testing.T) {
 	assert.Contains(t, keyData, "key") // Should include the actual key on creation
 	assert.Contains(t, keyData, "id")
 
-	// Test listing API keys
+	// Test listing API keys (GET /api/v1/api-keys is Tier-1)
+	listKey := NewTestKey(t, server, []string{"api-key:list"})
 	req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
-	req.Header.Set("X-API-Key", adminAPIKey)
+	req.Header.Set("X-API-Key", listKey)
 	rec = httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
@@ -439,13 +436,8 @@ func TestConfigurationValidation(t *testing.T) {
 func TestErrorResponses(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Use ephemeral keys for error response testing (more secure)
-	apiKeyCreateKey := NewTestKey(t, server, []string{"api-key:create"})
-	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
-
-	// Test invalid JSON
-	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
-	req.Header.Set("X-API-Key", apiKeyCreateKey)
+	// Test invalid JSON on POST /api/v1/api-keys (Tier-3: use admin cert to reach the handler).
+	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -458,7 +450,8 @@ func TestErrorResponses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "INVALID_JSON", errorResponse.Error.Code)
 
-	// Test not found
+	// Test not found on a Tier-1 endpoint (API key sufficient).
+	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
 	req = httptest.NewRequest("GET", "/api/v1/stewards/nonexistent", nil)
 	req.Header.Set("X-API-Key", stewardReadKey)
 	rec = httptest.NewRecorder()
@@ -478,6 +471,7 @@ func TestPermissionDenial(t *testing.T) {
 		method         string
 		permissions    []string
 		expectedStatus int
+		expectedCode   string
 		body           []byte
 	}{
 		{
@@ -486,13 +480,16 @@ func TestPermissionDenial(t *testing.T) {
 			method:         "GET",
 			permissions:    []string{"api-key:read"}, // Wrong permission
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 		},
 		{
-			name:           "Insufficient permissions for API key creation",
+			// POST /api/v1/api-keys is Tier-3: API keys get MTLS_REQUIRED regardless of permissions.
+			name:           "API key cannot access Tier-3 endpoint (api-key creation)",
 			endpoint:       "/api/v1/api-keys",
 			method:         "POST",
-			permissions:    []string{"steward:list"}, // Wrong permission
+			permissions:    []string{"steward:list"},
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "MTLS_REQUIRED",
 			body:           []byte(`{"name":"Test","permissions":["test"],"tenant_id":"test"}`),
 		},
 		{
@@ -501,13 +498,13 @@ func TestPermissionDenial(t *testing.T) {
 			method:         "POST",
 			permissions:    []string{"steward:list"}, // Wrong permission
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 			body:           []byte(`{"config":{},"version":"1.0.0"}`),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create key with insufficient permissions
 			insufficientKey := NewTestKey(t, server, tt.permissions)
 
 			var req *http.Request
@@ -528,7 +525,7 @@ func TestPermissionDenial(t *testing.T) {
 				var errorResponse ErrorResponse
 				err := json.Unmarshal(rec.Body.Bytes(), &errorResponse)
 				require.NoError(t, err)
-				assert.Contains(t, errorResponse.Error.Code, "INSUFFICIENT_PERMISSIONS")
+				assert.Equal(t, tt.expectedCode, errorResponse.Error.Code)
 			}
 		})
 	}
@@ -539,10 +536,11 @@ func TestActualAPIFunctionality(t *testing.T) {
 	server := setupTestServer(t)
 
 	t.Run("API Key CRUD operations work with proper permissions", func(t *testing.T) {
-		// Use proper admin permissions for full API key management
-		adminKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list", "api-key:read", "api-key:delete"})
+		// POST/DELETE /api/v1/api-keys are Tier-3 (mTLS-only): use admin cert.
+		// GET /api/v1/api-keys and GET /api/v1/api-keys/{id} are Tier-1: API key suffices.
+		listReadKey := NewTestKey(t, server, []string{"api-key:list", "api-key:read"})
 
-		// 1. Create a new API key
+		// 1. Create a new API key (Tier-3: admin cert required).
 		createReq := APIKeyCreateRequest{
 			Name:        "Functional Test Key",
 			Permissions: []string{"steward:list"},
@@ -552,14 +550,13 @@ func TestActualAPIFunctionality(t *testing.T) {
 		reqBody, err := json.Marshal(createReq)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
-		req.Header.Set("X-API-Key", adminKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with proper permissions")
+		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with admin cert")
 
 		var createResponse APIResponse
 		err = json.Unmarshal(rec.Body.Bytes(), &createResponse)
@@ -570,7 +567,7 @@ func TestActualAPIFunctionality(t *testing.T) {
 		createdKeyID := keyData["id"].(string)
 		actualKey := keyData["key"].(string)
 
-		// 2. Verify the created key actually works for its intended purpose
+		// 2. Verify the created key actually works for its intended purpose.
 		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", actualKey)
 		rec = httptest.NewRecorder()
@@ -578,9 +575,9 @@ func TestActualAPIFunctionality(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code, "New API key should work for steward:list")
 
-		// 3. List API keys should include the created key
+		// 3. List API keys should include the created key (Tier-1).
 		req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
-		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("X-API-Key", listReadKey)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -594,9 +591,9 @@ func TestActualAPIFunctionality(t *testing.T) {
 		require.True(t, ok)
 		assert.GreaterOrEqual(t, len(keys), 1, "Should have at least one key")
 
-		// 4. Get specific API key by ID
+		// 4. Get specific API key by ID (Tier-1).
 		req = httptest.NewRequest("GET", "/api/v1/api-keys/"+createdKeyID, nil)
-		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("X-API-Key", listReadKey)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -610,16 +607,15 @@ func TestActualAPIFunctionality(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "Functional Test Key", keyDetails["name"])
 
-		// 5. Delete the API key
-		req = httptest.NewRequest("DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
-		req.Header.Set("X-API-Key", adminKey)
+		// 5. Delete the API key (Tier-3: admin cert required).
+		req = makeAdminRequest(t, "DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work")
+		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work with admin cert")
 
-		// 6. Verify deleted key no longer works
+		// 6. Verify deleted key no longer works.
 		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", actualKey)
 		rec = httptest.NewRecorder()

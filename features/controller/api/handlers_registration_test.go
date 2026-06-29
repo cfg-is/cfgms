@@ -520,18 +520,15 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 }
 
 func TestHandleApproveRegistration(t *testing.T) {
-	_, ts, pendingStore := newRegistrationApprovalServer(t)
+	server, ts, pendingStore := newRegistrationApprovalServer(t)
 	defer ts.Close()
 
-	makeApprove := func(t *testing.T, pendingID string) *http.Response {
+	makeApprove := func(t *testing.T, pendingID string) *httptest.ResponseRecorder {
 		t.Helper()
-		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			ts.URL+"/api/v1/registration/"+pendingID+"/approve", nil)
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer reg-approval-key")
-		resp, err := ts.Client().Do(req)
-		require.NoError(t, err)
-		return resp
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/approve", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
 	}
 
 	t.Run("happy path - marks pending entry as approved", func(t *testing.T) {
@@ -548,10 +545,9 @@ func TestHandleApproveRegistration(t *testing.T) {
 		}
 		require.NoError(t, pendingStore.AddPending(context.Background(), entry))
 
-		resp := makeApprove(t, "pending-approve-1")
-		defer func() { _ = resp.Body.Close() }()
+		rec := makeApprove(t, "pending-approve-1")
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, http.StatusOK, rec.Code)
 
 		// Entry status must be updated to "approved" in the durable store.
 		got, err := pendingStore.GetPendingByID(context.Background(), "pending-approve-1")
@@ -560,11 +556,10 @@ func TestHandleApproveRegistration(t *testing.T) {
 	})
 
 	t.Run("not found returns 404", func(t *testing.T) {
-		resp := makeApprove(t, "nonexistent-pending-id")
-		defer func() { _ = resp.Body.Close() }()
+		rec := makeApprove(t, "nonexistent-pending-id")
 
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-		assert.Contains(t, resp.Header.Get("Content-Type"), "text/plain")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Contains(t, rec.Header().Get("Content-Type"), "text/plain")
 	})
 }
 
@@ -1004,7 +999,7 @@ func addPendingEntry(t *testing.T, store business.PendingRegistrationStore, pend
 // TestApproveByCIDR_FiltersCorrectly verifies that only entries whose source IP is in the
 // CIDR are approved; entries outside it remain pending (required test from AC).
 func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
-	_, ts, pendingStore := newBulkApprovalServer(t)
+	server, ts, pendingStore := newBulkApprovalServer(t)
 	defer ts.Close()
 
 	// Two entries inside the CIDR 192.168.1.0/24, one outside.
@@ -1012,24 +1007,18 @@ func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
 	addPendingEntry(t, pendingStore, "pending-cidr-in-2", "steward-in-2", "tenant-a", "192.168.1.200")
 	addPendingEntry(t, pendingStore, "pending-cidr-out-1", "steward-out-1", "tenant-a", "10.0.0.5")
 
-	body := `{"cidr":"192.168.1.0/24"}`
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-by-cidr",
-		strings.NewReader(body))
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
+		strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
 	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var result struct {
 		Approved int `json:"approved"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
 	assert.Equal(t, 2, result.Approved, "only two entries inside the CIDR should be approved")
 
 	// Verify store state: inside entries approved, outside entry still pending.
@@ -1050,7 +1039,7 @@ func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
 // TestApproveAll_Idempotent verifies that calling approve-all twice does not error and
 // the second call returns 0 approved (required test from AC).
 func TestApproveAll_Idempotent(t *testing.T) {
-	_, ts, pendingStore := newBulkApprovalServer(t)
+	server, ts, pendingStore := newBulkApprovalServer(t)
 	defer ts.Close()
 
 	addPendingEntry(t, pendingStore, "pending-idem-1", "steward-idem-1", "tenant-a", "10.0.0.1")
@@ -1058,21 +1047,16 @@ func TestApproveAll_Idempotent(t *testing.T) {
 
 	doApproveAll := func(t *testing.T) int {
 		t.Helper()
-		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			ts.URL+"/api/v1/registration/approve-all", nil)
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer bulk-key")
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
 
-		resp, err := ts.Client().Do(req)
-		require.NoError(t, err)
-		defer func() { _ = resp.Body.Close() }()
-
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, http.StatusOK, rec.Code)
 
 		var result struct {
 			Approved int `json:"approved"`
 		}
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
 		return result.Approved
 	}
 
@@ -1087,21 +1071,16 @@ func TestApproveAll_Idempotent(t *testing.T) {
 
 // TestHandleApproveByCIDR_InvalidCIDR verifies that a malformed CIDR returns 400.
 func TestHandleApproveByCIDR_InvalidCIDR(t *testing.T) {
-	_, ts, _ := newBulkApprovalServer(t)
+	server, ts, _ := newBulkApprovalServer(t)
 	defer ts.Close()
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-by-cidr",
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"not-a-cidr"}`))
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
 	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // TestHandleApproveByCIDR_NoPendingStore verifies 503 when pendingStore is nil.
@@ -1109,27 +1088,14 @@ func TestHandleApproveByCIDR_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 	// Do NOT set pendingStore.
-	server.apiKeys["bulk-key"] = &APIKey{
-		ID:          "bulk-key-id",
-		Key:         "bulk-key",
-		Permissions: []string{"registration:approve"},
-		TenantID:    "default",
-	}
-	ts := httptest.NewServer(server.router)
-	defer ts.Close()
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-by-cidr",
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
 	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
 // TestHandleApproveAll_NoPendingStore verifies 503 when pendingStore is nil.
@@ -1137,25 +1103,12 @@ func TestHandleApproveAll_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
 	// Do NOT set pendingStore.
-	server.apiKeys["bulk-key"] = &APIKey{
-		ID:          "bulk-key-id",
-		Key:         "bulk-key",
-		Permissions: []string{"registration:approve"},
-		TenantID:    "default",
-	}
-	ts := httptest.NewServer(server.router)
-	defer ts.Close()
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		ts.URL+"/api/v1/registration/approve-all", nil)
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer bulk-key")
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-	resp, err := ts.Client().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
 // TestGetTransportAddress_ExternalAddressConfig verifies that transport.external_address
