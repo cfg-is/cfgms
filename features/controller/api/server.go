@@ -250,6 +250,11 @@ func New(
 		logger.Warn("Failed to load API keys from store", "error", err)
 	}
 
+	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
+	if err := server.scanAPIKeysForPrivilegedAccess(context.Background()); err != nil {
+		logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
+	}
+
 	// Seed test API keys only when explicitly requested via environment variable.
 	// Never runs in production — must be set deliberately in test environments.
 	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") == "1" {
@@ -1444,6 +1449,43 @@ func (s *Server) loadAPIKeysFromStore() error {
 	// This lazy-loading approach provides better performance and security
 
 	s.logger.Info("Secret store ready - API keys will be loaded on first access")
+	return nil
+}
+
+// Issue #2226: scanAPIKeysForPrivilegedAccess reports API keys that hold permissions in the
+// Tier-3 (mTLS-only) set. Those permissions are now unreachable via API key; operators should
+// revoke or reprovision the affected keys. The scan consumes tier3Permissions from auth_tiers.go
+// so the two sources can never drift.
+func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+		},
+	})
+	if err != nil {
+		s.logger.Warn("Startup scan: failed to list API keys from secret store", "error", err)
+		return err
+	}
+	for _, meta := range secrets {
+		var overlapping []string
+		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
+			if _, isT3 := tier3Permissions[p]; isT3 {
+				overlapping = append(overlapping, p)
+			}
+		}
+		if len(overlapping) > 0 {
+			s.logger.Warn(
+				"API key holds permissions that overlap Tier-3 (mTLS-only) endpoints; "+
+					"these are now unreachable via API key — consider revoking this key",
+				"key_id", logging.SanitizeLogValue(meta.Metadata["id"]),
+				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
+				"overlapping_permissions", logging.SanitizeLogValue(strings.Join(overlapping, ",")),
+			)
+		}
+	}
 	return nil
 }
 
