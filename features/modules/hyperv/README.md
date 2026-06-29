@@ -699,6 +699,49 @@ The tests exercise:
 
 Tests skip automatically if `CFGMS_HYPERV_HOST` is not set; `TestHypervIntegration_VSwitch` also skips if no UP physical network adapter is found on the host.
 
+### Failover-cluster HA tests (`integration && windows`)
+
+The cluster HA tests (`cluster_integration_test.go`) validate the SC6 lab
+criterion of epic #2198 against the live **cfg-lab** 3-node S2D failover cluster
+(`lab.cfg.is`; CSV at `C:\ClusterStorage\CSV01`). They are tagged
+`//go:build integration && windows` — excluded from `make test-complete` (Linux
+CI cannot host Failover Clustering) and run **on a cluster node, from an elevated
+(cluster-admin) shell** because they create VMs, cluster roles, and force
+failovers.
+
+Required and optional environment:
+
+```powershell
+$env:CFGMS_HYPERV_CLUSTER       = 'lab-hv'                  # required — failover cluster (CNO) name
+$env:CFGMS_HYPERV_CLUSTER_NODES = 'CFG-70-02,CFG-AB-02,CFG-C3-02'  # optional — informational; nodes are also auto-discovered via Get-ClusterNode
+$env:CFGMS_HYPERV_CSV_PATH      = 'C:\ClusterStorage\CSV01' # optional — CSV dir for failover-capable VM config (default shown)
+$env:CFGMS_HYPERV_SEED_DIR      = 'C:\cfgms-seeds'          # optional — host-local (non-CSV) seed dir (default shown)
+```
+
+Run:
+
+```powershell
+go test -tags="integration windows" -run TestClusterHA ./features/modules/hyperv/...
+```
+
+The tests exercise:
+- **`TestClusterHA_CreateFailoverReconverge`** — cluster a VM as an HA role
+  (created exactly once), force a node failover via `Move-ClusterGroup`, assert
+  the DNA Monitor emits a `ChangeEvent` with the updated `resource_owner`, confirm
+  a second converge is an idempotent no-op, then remove the role with
+  `allow_destructive: true`.
+- **`TestClusterHA_DriftNotAdopted`** (S1) — an out-of-band clustered role absent
+  from `cluster_role_names` is observed by `Get` (flagged as drift) but never
+  mutated by `Set`.
+- **`TestClusterHA_DestructiveGate`** (S6) — `state: absent` with
+  `allow_destructive: false` returns `ErrDestructiveOpBlocked`; the role persists.
+
+All audit events recorded during these tests carry receipt-time `Timestamp`
+within 5s of the test clock (S8). Each test skips when `CFGMS_HYPERV_CLUSTER` is
+unset; `TestClusterHA_CreateFailoverReconverge` also skips on a single-node
+cluster. Every test removes the VMs and clustered roles it creates via
+`t.Cleanup`, so a failure leaves the lab recoverable.
+
 ## Out of Scope
 
 The following are **not** managed by this module:
