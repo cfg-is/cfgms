@@ -2784,11 +2784,16 @@ test_preflight_acceptance_review_comment_match() {
 import sys, importlib.util, os
 
 script_path = os.environ["PREFLIGHT_SCRIPT"]
+# Stub collaborator API: jrdnr is push+ (trusted); any other login is not in the
+# map (None → external). Required since Issue #2228 added author-trust as a
+# mandatory AND condition alongside text-match.
+os.environ["CFGMS_TEST_COLLAB_PERM_MAP"] = '{"jrdnr": "push"}'
 spec = importlib.util.spec_from_file_location("preflight", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-# Part A: sentinel in body matches regardless of author (forward-compat path)
+# Part A: sentinel in body from a push+ collaborator (jrdnr) is trusted — both
+# conditions (text-match AND author-trust) must hold since Issue #2228.
 sentinel_comment = {
     "author": {"login": "jrdnr"},
     "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n\nAll checks passing.",
