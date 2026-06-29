@@ -376,3 +376,41 @@ make security-scan           # Security validation
 ```
 
 For automation of these commands, use the CFGMS slash commands: `/story-start`, `/story-commit`, `/story-complete`.
+
+## Connection Management
+
+The `cfg connections` commands manage the local registry of known controller connections. The registry stores non-secret metadata only — no credentials, tokens, or keys are ever written to this file.
+
+Registry location:
+
+| Platform | Path |
+|----------|------|
+| Linux | `$XDG_CONFIG_HOME/cfgms/connections.json` |
+| macOS | `~/Library/Application Support/cfgms/connections.json` |
+| Windows | `%APPDATA%\cfgms\connections.json` |
+
+File permissions: directory at `0700`, `connections.json` at `0600`.
+
+### cfg connections list
+
+List all registered controller connections.
+
+```bash
+# Print a table of known connections (name, URL, identity, last-used)
+cfg connections list
+
+# Emit a JSON array
+cfg connections list --json
+```
+
+When no connections are registered, exits 0 and prints:
+
+```
+No connections configured.
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Emit a JSON array instead of a human-readable table |
