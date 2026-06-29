@@ -1,0 +1,121 @@
+name: cirunner-provision
+description: >
+  One-time, NON-idempotent provisioning sequence that turns an already-enrolled
+  CI host into a registered, running GitHub Actions self-hosted runner:
+
+    1. api    — mint a single-use registration token (github_app provider).
+    2. stage  — stage the stable per-OS register script from the controller
+                script library and bind the token as a secret-store param
+                (the token never lands in a command string or on disk).
+    3. http   — POST the controller config-push endpoint to sync config to the
+                steward, which runs the staged register script.
+    4. while  — poll the steward DNA until the github_runner module reports the
+                runner service enrolled and running (state-driven, not a sleep).
+
+  Loaded by the workflow engine (engine.loadWorkflowFromPath -> yaml.Unmarshal
+  into workflow.Workflow); this is the flat descriptor format the engine runs,
+  the same shape as github-app-runner-token.yaml. App credentials and the
+  steward secret token come from the secrets provider — never this file.
+  See docs/development/ci-runner-github-app-setup.md for operator setup.
+version: "1.0"
+
+# The whole sequence is bounded by the workflow-level timeout; the await step's
+# poll loop is bound by this and by max_iterations, never a fixed sleep.
+timeout: 30m
+on_failure: stop
+
+variables:
+  github_owner: "your-org"
+  github_repo: "your-repo"
+  repo_url: "https://github.com/your-org/your-repo"
+  controller_url: "https://controller.example.com:8443"
+  steward_id: "your-steward-id"
+  runner_os: "linux"
+  runner_labels: "self-hosted,linux,cfgms"
+  register_script_id: "register-github-runner-linux"
+  register_script_version: "1.0.0"
+  # Secret-store key the staging step binds to the RUNNER_TOKEN script param.
+  runner_token_secret_key: "cfgms/cirunner/registration-token"
+
+steps:
+  # 1. Mint a fresh single-use runner registration token (~1h lifetime).
+  - name: mint-runner-token
+    type: api
+    timeout: 30s
+    api:
+      provider: github
+      service: runners
+      operation: registration-token
+      parameters:
+        owner: "{{ .github_owner }}"
+        repo: "{{ .github_repo }}"
+      retry:
+        max_attempts: 2
+        initial_delay: 2s
+        backoff_multiplier: 2.0
+
+  # 2. Stage the stable per-OS register script from the library and bind the
+  #    just-minted token as a SECRET param (from: secret-store). The script is
+  #    referenced by id + version — NOT generated per standup. The token value
+  #    is resolved at execution time and injected as CFGMS_SECRET_RUNNER_TOKEN;
+  #    it is never written here.
+  - name: stage-register-script
+    type: task
+    module: script
+    config:
+      action: stage
+      script_id: "{{ .register_script_id }}"
+      script_version: "{{ .register_script_version }}"
+      param_bindings:
+        - name: RUNNER_TOKEN
+          from: secret-store
+          key: "{{ .runner_token_secret_key }}"
+        - name: REPO_URL
+          from: literal
+          value: "{{ .repo_url }}"
+        - name: RUNNER_LABELS
+          from: literal
+          value: "{{ .runner_labels }}"
+
+  # 3. Trigger a config sync to the steward via the controller's existing
+  #    config-push endpoint (StepTypeHTTP -> handleConfigPush -> push.Fanout ->
+  #    CommandSyncConfig). This is the data-defined path; the workflow never
+  #    calls commands.Publisher.TriggerConfigSync directly.
+  - name: trigger-config-sync
+    type: http
+    timeout: 30s
+    http:
+      method: POST
+      url: "{{ .controller_url }}/api/v1/config/push"
+      headers:
+        Content-Type: application/json
+      body:
+        steward_id: "{{ .steward_id }}"
+      expected_status:
+        - 200
+        - 202
+
+  # 4. Wait for enrollment by polling the steward DNA until the github_runner
+  #    module reports the runner service enrolled AND running. State-driven:
+  #    each iteration is an HTTP GET of the steward DNA, and the loop continues
+  #    WHILE the module is not yet enrolled+running. Bounded by max_iterations
+  #    and the workflow timeout — never a fixed sleep.
+  - name: await-runner-enrollment
+    type: while
+    loop:
+      type: while
+      max_iterations: 60
+      condition:
+        type: expression
+        # Keep looping while the github_runner module has not yet reported the
+        # service enrolled and running in the polled steward DNA.
+        expression: '{{ ne (index .poll_steward_dna_http_response.modules "github_runner").state "enrolled-running" }}'
+    steps:
+      - name: poll-steward-dna
+        type: http
+        timeout: 15s
+        http:
+          method: GET
+          url: "{{ .controller_url }}/api/v1/stewards/{{ .steward_id }}/dna"
+          expected_status:
+            - 200
