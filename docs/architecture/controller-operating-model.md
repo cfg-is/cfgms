@@ -612,6 +612,33 @@ Three authentication mechanisms, used for different purposes.
 - Scoped, expirable tokens for the steward registration flow described in [Steward Registration](#steward-registration)
 - Not usable for general API authentication after bootstrap
 
+### Admin Session Model
+
+The zero-standing-privilege session model (ADR-014) eliminates long-lived admin credentials: a human admin authenticates once with a short-lived mTLS certificate, receives a rolling bearer token, and the token automatically expires if unused.
+
+**Session lifecycle:**
+
+1. `POST /api/v1/sessions` — admin mTLS only; returns `{session_id, token, issued_at, idle_ttl, absolute_expiry}` (HTTP 201). The token is a 43-char base64url string (32 random bytes from `crypto/rand`, 256 bits of entropy).
+2. Every authenticated request carrying `Authorization: Bearer <session-token>` resets the idle TTL and returns a refreshed token in the `X-Session-Token` response header. The client replaces its stored token with the refreshed value on each response.
+3. `DELETE /api/v1/sessions/{id}` — revokes immediately; callable with a valid session token or an admin mTLS cert.
+
+**Token lifecycle parameters (ADR-014 ratified defaults):**
+
+| Parameter | Default | Description |
+|---|---|---|
+| Idle TTL | 15 minutes | Session expires if no request is made within this window |
+| Absolute cap | 8 hours | Hard ceiling from original connect, regardless of activity |
+| Grace window | 30 seconds | Prior token remains valid this long after a renewal (tolerates racing requests from a stateless CLI) |
+
+**Rolling-token model:** On each successful request, the controller generates a fresh token (current token → new token, old token moves to grace slot). Concurrent requests carrying the prior token during the grace window are accepted without triggering a second rotation. After the grace window, the prior token is rejected (HTTP 401).
+
+**Security properties:**
+- The controller stores only SHA-256(token) — raw token values are never persisted or logged.
+- Token values are sanitized from all log output via `logging.SanitizeLogValue()`.
+- Session-token principals carry `IsAdmin=true` with the same tenant scope as the originating mTLS cert (typically empty for admin certs, meaning no tenant restriction).
+- Session tokens are length-distinguishable from API keys: session tokens are 43 chars (base64url without padding), API keys are 44 chars (base64url with padding). The middleware uses this length difference to route auth correctly.
+- A controller restart drops all sessions (re-auth required); durable session store is deferred to the SaaS cluster story (#2051).
+
 ## Multi-Tenancy
 
 The controller enforces strict tenant isolation across all operations.
