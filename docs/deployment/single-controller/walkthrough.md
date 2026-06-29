@@ -180,6 +180,33 @@ sudo journalctl -u cfgms-controller --no-pager -n 20
 
 Look for: `Certificate manager initialized`, `Transport server listening on :4433`, `REST API server listening on :9080`.
 
+### Startup Warnings
+
+On each startup the controller scans all stored API keys for permissions that overlap the Tier-3 (mTLS-only) endpoint surface. If any key holds such a permission, it cannot be used to reach those endpoints — the tier gate blocks it regardless of what permissions the key carries. The controller logs a warning at `WARN` level for each affected key:
+
+```
+WARN  API key holds permissions that overlap Tier-3 (mTLS-only) endpoints;
+      these are now unreachable via API key — consider revoking this key
+      key_id=<id>  tenant_id=<tenant>  overlapping_permissions=<perm1,perm2,...>
+```
+
+**Remediation:**
+
+1. Identify the key from the `key_id` field in the warning.
+2. Decide whether the key needs those permissions. If not, revoke it and issue a replacement with only the permissions it actually requires:
+
+   ```bash
+   # Revoke the over-privileged key
+   cfg api-keys delete --id <key_id>
+
+   # Issue a replacement with only the permissions the caller needs
+   cfg api-keys create --name <name> --permissions <perm1,perm2,...>
+   ```
+
+3. If the key legitimately needs to call a Tier-3 operation, the caller must use an mTLS admin credential bundle instead. Issue a bundle with `cfgms-controller bootstrap-admin` and update the caller to use it.
+
+These warnings do not prevent the controller from starting or serving requests. They are informational alerts that help operators identify over-privileged keys before a Tier-3 call fails at runtime.
+
 ## Step 3: Deploy the Controller-Steward
 
 The controller-steward is the first steward in your environment. It manages the controller node itself — directories, packages, firewall rules, systemd service, and the controller config file. If anything drifts from the desired state, the steward converges it back.
