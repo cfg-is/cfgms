@@ -1295,3 +1295,165 @@ func TestSetVM_SetVMMemory_TransportError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Set-VMMemory")
 }
+
+// ─── HA-role tests (Issue #2240) ───────────────────────────────────────────────
+
+// TestVMConfig_HARole_SeedDirValidation verifies the CSV seed-dir rule: when an
+// HA-role VM places its primary VHDX on a Cluster Shared Volume, Validate()
+// rejects an empty or also-on-CSV seed_dir and accepts a host-local one.
+func TestVMConfig_HARole_SeedDirValidation(t *testing.T) {
+	base := func() *VMConfig {
+		return &VMConfig{
+			Name:    "ha-vm",
+			VHDPath: `C:\ClusterStorage\CSV01\ha-vm.vhdx`,
+			HARole:  &HARoleConfig{ClusterName: "lab-hv"},
+		}
+	}
+
+	// Empty seed_dir → reject.
+	c := base()
+	c.seedDir = ""
+	require.ErrorIs(t, c.Validate(), ErrInvalidHARoleSeedDir,
+		"CSV vhd_path with empty seed_dir must be rejected")
+
+	// seed_dir also on CSV → reject.
+	c = base()
+	c.seedDir = `C:\ClusterStorage\CSV01\seed`
+	require.ErrorIs(t, c.Validate(), ErrInvalidHARoleSeedDir,
+		"CSV vhd_path with a CSV seed_dir must be rejected")
+
+	// Case-insensitive CSV prefix is still detected.
+	c = base()
+	c.VHDPath = `c:\clusterstorage\csv01\ha-vm.vhdx`
+	c.seedDir = ""
+	require.ErrorIs(t, c.Validate(), ErrInvalidHARoleSeedDir,
+		"the CSV prefix check must be case-insensitive")
+
+	// Host-local seed_dir → pass.
+	c = base()
+	c.seedDir = `C:\ProgramData\cfgms\seed`
+	require.NoError(t, c.Validate(),
+		"CSV vhd_path with a host-local seed_dir must pass")
+}
+
+// TestVMConfig_HARole_NonCSV_Unaffected verifies the seed-dir rule applies only
+// to CSV VHDX paths, and that non-HA VMConfigs round-trip through AsMap/ToYAML/
+// FromYAML unchanged (no ha_role key) while HA configs round-trip ha_role.
+func TestVMConfig_HARole_NonCSV_Unaffected(t *testing.T) {
+	// HA role with a local (non-CSV) vhd_path: the seed-dir rule does not apply,
+	// so an empty seed_dir is fine.
+	local := &VMConfig{
+		Name:    "ha-vm",
+		VHDPath: `C:\VMs\ha-vm.vhdx`,
+		HARole:  &HARoleConfig{ClusterName: "lab-hv"},
+	}
+	local.seedDir = ""
+	require.NoError(t, local.Validate(),
+		"a non-CSV vhd_path must not trigger the HA seed-dir rule")
+
+	// Non-HA VMConfig: AsMap must NOT emit ha_role, and YAML round-trips unchanged.
+	plain := &VMConfig{
+		Name: "plain", MemoryMB: 2048, CPUCount: 2,
+		VHDPath: `C:\VMs\plain.vhdx`, Generation: 2, State: "running",
+	}
+	if _, ok := plain.AsMap()["ha_role"]; ok {
+		t.Fatal("non-HA AsMap must not emit ha_role")
+	}
+	y, err := plain.ToYAML()
+	require.NoError(t, err)
+	var plainBack VMConfig
+	require.NoError(t, plainBack.FromYAML(y))
+	assert.Nil(t, plainBack.HARole, "non-HA config must round-trip with nil HARole")
+	assert.Equal(t, plain.Name, plainBack.Name)
+
+	// HA VMConfig: ha_role round-trips through AsMap and YAML.
+	ha := &VMConfig{
+		Name: "ha2", VHDPath: `C:\VMs\ha2.vhdx`,
+		HARole: &HARoleConfig{ClusterName: "lab-hv", ResourceGroupName: "rg-ha2"},
+	}
+	haMap, ok := ha.AsMap()["ha_role"].(map[string]interface{})
+	require.True(t, ok, "HA AsMap must emit an ha_role map")
+	assert.Equal(t, "lab-hv", haMap["cluster_name"])
+	assert.Equal(t, "rg-ha2", haMap["resource_group_name"])
+
+	hy, err := ha.ToYAML()
+	require.NoError(t, err)
+	var haBack VMConfig
+	require.NoError(t, haBack.FromYAML(hy))
+	require.NotNil(t, haBack.HARole)
+	assert.Equal(t, "lab-hv", haBack.HARole.ClusterName)
+	assert.Equal(t, "rg-ha2", haBack.HARole.ResourceGroupName)
+}
+
+// TestSetVM_HARole_RegistersClusteredRole verifies that on the create path an
+// HA-role VM is registered as a clustered role exactly once (the CNO owner calls
+// Add-ClusterVirtualMachineRole), and that a re-converge where the role already
+// exists cluster-wide is an idempotent no-op (S2's existence gate).
+func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
+	const vmName = "ha-vm"
+	const cluster = "lab-hv"
+
+	haCfg := func() *VMConfig {
+		return &VMConfig{
+			Name:       vmName,
+			MemoryMB:   4096,
+			CPUCount:   2,
+			VHDPath:    `C:\VMs\ha-vm.vhdx`, // non-CSV: seed-dir rule not triggered
+			SwitchName: "Default Switch",
+			Generation: 2,
+			State:      "stopped",
+			HARole:     &HARoleConfig{ClusterName: cluster},
+		}
+	}
+
+	// First converge: role absent → exactly one Add-ClusterVirtualMachineRole.
+	t.Run("first_converge_registers_once", func(t *testing.T) {
+		transport := &testWinRMTransport{perCallOutputs: []string{
+			`{"found":false}`,   // getVM: VM absent
+			``,                  // New-VM: create succeeds
+			`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
+			`{"owners":{}}`,     // ownership helper: resource owners (role absent)
+			`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read
+			``,                  // Add-ClusterVirtualMachineRole: success
+		}}
+		m := vmModuleWithTransport(transport, "t-ha")
+		m.clusterName = cluster
+		m.nodeHostname = "NODE1"
+
+		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, haCfg()))
+
+		assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
+			"the create path must register the clustered role exactly once")
+
+		// Names travel via psArgs only, never composed into the scriptBlock (S3).
+		for _, sb := range scriptBlocks(transport) {
+			assert.NotContains(t, sb, vmName,
+				"VM/role name must travel via ArgumentList, never the scriptBlock")
+			assert.NotContains(t, sb, cluster,
+				"cluster name must travel via ArgumentList, never the scriptBlock")
+		}
+		addArgs := psArgsForCmd(transport, psAddClusterVMRole)
+		require.NotNil(t, addArgs, "the Add call's psArgs must be recorded")
+		assert.Equal(t, cluster, addArgs["ClusterName"])
+		assert.Equal(t, vmName, addArgs["VMName"])
+	})
+
+	// Re-converge with the role already present cluster-wide → idempotent no-op.
+	t.Run("role_present_is_noop", func(t *testing.T) {
+		transport := &testWinRMTransport{perCallOutputs: []string{
+			`{"found":false}`,              // getVM: VM absent on this node
+			``,                             // New-VM
+			`{"owner":"NODE1"}`,            // CNO owner read
+			`{"owners":{"ha-vm":"NODE1"}}`, // resource owners: role ALREADY present
+			`{"owner":"NODE1"}`,            // cnoOwner re-read
+		}}
+		m := vmModuleWithTransport(transport, "t-ha")
+		m.clusterName = cluster
+		m.nodeHostname = "NODE1"
+
+		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, haCfg()))
+
+		assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
+			"an already-registered role must not be added again (S2 idempotency)")
+	})
+}

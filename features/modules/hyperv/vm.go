@@ -56,7 +56,19 @@ var (
 
 	// ErrInvalidSourceOnExisting is returned when source on_existing is not never or recreate.
 	ErrInvalidSourceOnExisting = errors.New("hyperv: invalid source on_existing: must be never or recreate")
+
+	// ErrInvalidHARoleSeedDir is returned when an HA-role VM places its primary
+	// VHDX on a Cluster Shared Volume but the module-level seed_dir is empty or
+	// also on CSV. The provisioning seed directory must be host-local so the
+	// ephemeral seed media never lands on the clustered volume (which would hang
+	// the build); this is enforced eagerly at validate-time rather than letting
+	// the provisioning path stall (see vm_provision.go CSV seed-dir hang).
+	ErrInvalidHARoleSeedDir = errors.New("hyperv: invalid ha_role: a CSV primary vhd_path requires a host-local seed_dir (seed_dir must be set and not under C:\\ClusterStorage\\)")
 )
+
+// csvPathPrefix is the Cluster Shared Volume mount root. A VHDX or seed dir under
+// this prefix lives on shared cluster storage.
+const csvPathPrefix = `C:\ClusterStorage\`
 
 // vmNamePattern is the allowlist for user-supplied VM names. It is an injection
 // safety guard only — the name is used verbatim as the host-side VM name.
@@ -138,6 +150,30 @@ type VMConfig struct {
 	// Source, when non-nil, activates the ISO provisioning state machine.
 	// Absent source: block leaves the VM managed by the existing lifecycle only.
 	Source *SourceConfig `yaml:"source,omitempty"`
+	// HARole, when non-nil, registers the VM as a clustered HA role on the named
+	// failover cluster after creation (see setVM). Absent: the VM is a standalone
+	// (non-HA) resource with unchanged behavior.
+	HARole *HARoleConfig `yaml:"ha_role,omitempty"`
+
+	// seedDir is the module-level provisioning seed directory (m.seedDir),
+	// injected by setVM before Validate so the HA-role CSV seed-dir rule can be
+	// checked. It is NOT a per-VM YAML field (seed_dir is module-level config) —
+	// hence unexported and untagged so it never round-trips through YAML/AsMap.
+	seedDir string
+}
+
+// HARoleConfig declares that a vm resource is a highly-available clustered role.
+// When present on a VMConfig, setVM registers the VM as a clustered VM role on
+// the named failover cluster after creation, reusing the cluster module's CNO
+// gate and idempotency (registered exactly once cluster-wide; a no-op on a
+// non-owner node).
+type HARoleConfig struct {
+	// ClusterName is the target failover cluster (must equal the module's
+	// declared cluster_name; setCluster enforces the scope cap).
+	ClusterName string `yaml:"cluster_name"`
+	// ResourceGroupName is the optional cluster resource-group name. It defaults
+	// to the VM name (the clustered role is registered under the VM name).
+	ResourceGroupName string `yaml:"resource_group_name,omitempty"`
 }
 
 // stringOrStringList is a YAML scalar-or-sequence: switch_name may be a single
@@ -308,7 +344,21 @@ func (c *VMConfig) Validate() error {
 			return err
 		}
 	}
+	// HA-role CSV seed-dir rule: when the primary VHDX is on a Cluster Shared
+	// Volume, the provisioning seed_dir must be host-local — empty or also-on-CSV
+	// would hang the build, so reject it eagerly here.
+	if c.HARole != nil && isUnderCSV(c.VHDPath) {
+		if c.seedDir == "" || isUnderCSV(c.seedDir) {
+			return ErrInvalidHARoleSeedDir
+		}
+	}
 	return nil
+}
+
+// isUnderCSV reports whether a Windows path is under the Cluster Shared Volume
+// root (case-insensitive).
+func isUnderCSV(path string) bool {
+	return strings.HasPrefix(strings.ToLower(path), strings.ToLower(csvPathPrefix))
 }
 
 // isCloudInit reports whether this source uses the cloud-init/NoCloud path: a
@@ -439,6 +489,14 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 			"edition":     c.Source.Edition,
 		}
 	}
+	// ha_role is only emitted when present so a non-HA VMConfig round-trips
+	// unchanged (omitempty parity with the YAML tag).
+	if c.HARole != nil {
+		m["ha_role"] = map[string]interface{}{
+			"cluster_name":        c.HARole.ClusterName,
+			"resource_group_name": c.HARole.ResourceGroupName,
+		}
+	}
 	return m
 }
 
@@ -482,7 +540,7 @@ func (c *VMConfig) FromYAML(data []byte) error {
 
 // GetManagedFields returns the list of fields this configuration manages.
 func (c *VMConfig) GetManagedFields() []string {
-	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source"}
+	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source", "ha_role"}
 }
 
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
@@ -741,6 +799,11 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// YAML, not on this executor-supplied map.
 	cfg.Source = parseSourceMap(configMap["source"])
 
+	// ha_role (the clustered HA-role block) arrives as a nested map on the
+	// executor-supplied config map. Parse it so the create path registers the VM
+	// as a clustered role; absent ⇒ standalone VM (unchanged behavior).
+	cfg.HARole = parseHARoleMap(configMap["ha_role"])
+
 	// Also handle *VMConfig passed directly
 	if vc, ok := config.(*VMConfig); ok {
 		*cfg = *vc
@@ -781,6 +844,9 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// the update path now routes switch names to Add/Remove-VMNetworkAdapter,
 	// so a malformed name must be rejected before reconcileNetwork, not only on
 	// create (defense-in-depth, even though values also travel via ArgumentList).
+	// Inject the module-level seed_dir so the HA-role CSV seed-dir rule can be
+	// enforced in Validate (seed_dir is module-level config, not a per-VM field).
+	cfg.seedDir = m.seedDir
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -811,6 +877,16 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		return err
 	}
 
+	// HA-role registration: after the VM is created and before the power-state
+	// transition, register it as a clustered VM role. Reuses the cluster module's
+	// CNO gate + idempotency — registered exactly once cluster-wide, a no-op on a
+	// non-owner node.
+	if cfg.HARole != nil {
+		if err := m.registerClusteredRole(ctx, cfg); err != nil {
+			return err
+		}
+	}
+
 	if state == "running" {
 		if err := m.execStartVM(ctx, "vm:"+vmName, hostName,
 			map[string]interface{}{"state": "stopped"},
@@ -827,6 +903,37 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	m.vmsMu.Unlock()
 
 	return nil
+}
+
+// parseHARoleMap extracts an HARoleConfig from the generic executor-supplied
+// config map. Returns nil when no ha_role block is present (standalone VM).
+func parseHARoleMap(v interface{}) *HARoleConfig {
+	m, ok := v.(map[string]interface{})
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	cluster, _ := m["cluster_name"].(string)
+	if strings.TrimSpace(cluster) == "" {
+		return nil
+	}
+	rg, _ := m["resource_group_name"].(string)
+	return &HARoleConfig{ClusterName: cluster, ResourceGroupName: rg}
+}
+
+// registerClusteredRole registers a just-created VM as a clustered HA role by
+// delegating to the cluster module's setCluster write path. The clustered role
+// name is the VM name (the default cluster group name Add-ClusterVirtualMachineRole
+// assigns); resource_group_name is reserved for an explicit group name and
+// currently defaults to the VM name. setCluster applies the S5 scope cap, the
+// CNO ownership gate, and existence-based idempotency — so the role is added
+// exactly once cluster-wide and re-converges are no-ops.
+func (m *hypervModule) registerClusteredRole(ctx context.Context, cfg *VMConfig) error {
+	cc := &ClusterConfig{
+		Name:      cfg.HARole.ClusterName,
+		RoleNames: []string{cfg.Name},
+		State:     "present",
+	}
+	return m.setCluster(ctx, "cluster:"+cfg.HARole.ClusterName, cc)
 }
 
 // applySourceGated enforces the ADR-009 §2 existence-gating safety invariant for

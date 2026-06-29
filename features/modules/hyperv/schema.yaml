@@ -98,6 +98,25 @@ resources:
               - never
               - recreate
             default: never
+      ha_role:
+        type: object
+        description: >
+          When present, registers the VM as a clustered HA role on the named
+          failover cluster after creation (reuses the cluster CNO ownership gate
+          and existence-based idempotency). Absent: the VM is a standalone
+          (non-HA) resource. When the primary vhd_path is on a Cluster Shared
+          Volume (C:\ClusterStorage\...), the module-level seed_dir must be set
+          and host-local (not under CSV) or the resource is rejected at validate
+          time.
+        required:
+          - cluster_name
+        properties:
+          cluster_name:
+            type: string
+            description: Target failover cluster (must equal the module's declared cluster_name).
+          resource_group_name:
+            type: string
+            description: Optional cluster resource-group name (defaults to the VM name).
 
   vswitch:
     description: Hyper-V virtual switch (external, internal, or private)
