@@ -417,6 +417,8 @@ func TestConnectReconnectDisconnect(t *testing.T) {
 		)
 		require.NoError(t, rErr, "command %d: request error", i)
 		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode,
+			"command %d: session Bearer token must be accepted by the controller", i)
 	}
 
 	assert.Equal(t, int64(1), atomic.LoadInt64(&unlockCount),
