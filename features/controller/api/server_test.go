@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -1606,4 +1608,111 @@ func TestSetupRouter_Tier1Routes_RequireAuthentication(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"Tier-1 route GET /api/v1/stewards must return 401 with no auth credentials")
+}
+
+// errListSecretStore wraps a real SecretStore and forces ListSecrets to return an error.
+// Used by TestStartupScan_ContinuesOnListError to exercise the error path in
+// scanAPIKeysForPrivilegedAccess without mocking unrelated store operations.
+type errListSecretStore struct {
+	secretsif.SecretStore
+	listErr error
+}
+
+func (s *errListSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, s.listErr
+}
+
+// TestStartupScan_ContinuesOnListError verifies that scanAPIKeysForPrivilegedAccess emits
+// a Warn and returns the error when ListSecrets fails, and that the caller (New()) treats
+// this as non-fatal — confirmed by the server being fully constructed in every other test
+// whose setup calls New() with the scan wired in (Issue #2226).
+func TestStartupScan_ContinuesOnListError(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear entries from server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Replace the secret store with one whose ListSecrets always fails.
+	listErr := fmt.Errorf("simulated store failure")
+	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
+
+	err := server.scanAPIKeysForPrivilegedAccess(context.Background())
+	assert.ErrorIs(t, err, listErr, "scan must return the ListSecrets error to the caller")
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn when ListSecrets fails")
+}
+
+// TestStartupScan_WarnsOnPrivilegedAPIKey verifies that scanAPIKeysForPrivilegedAccess
+// emits a Warn entry containing key_id and overlapping_permissions when a stored API key
+// holds at least one Tier-3 permission (Issue #2226).
+func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear any entries accumulated during server construction (scan ran against empty store).
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Seed a key that holds the Tier-3 permission "api-key:create".
+	const keyID = "test-privileged-key-id"
+	const tenantID = "default"
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-privileged-test-key",
+		Value:     "hash-privileged-test-key",
+		TenantID:  tenantID,
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   "steward:read,api-key:create",
+		},
+	})
+	require.NoError(t, err, "seeding privileged key into secret store must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn entry for a key with Tier-3 permissions")
+	assert.Equal(t, keyID, capLog.kvValue("key_id"),
+		"Warn entry must include the key_id of the over-privileged key")
+	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
+	assert.Contains(t, overlapping, "api-key:create",
+		"overlapping_permissions must name the Tier-3 permission held by the key")
+}
+
+// TestStartupScan_NoWarnForUnprivilegedKey verifies that scanAPIKeysForPrivilegedAccess
+// does not emit a Tier-3 over-privilege warning when the stored API key only holds
+// non-Tier-3 permissions (Issue #2226).
+func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear any entries accumulated during server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Seed a key that holds only the non-Tier-3 permission "steward:read".
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-unprivileged-test-key",
+		Value:     "hash-unprivileged-test-key",
+		TenantID:  "default",
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            "test-unprivileged-key-id",
+			"permissions":                   "steward:read",
+		},
+	})
+	require.NoError(t, err, "seeding unprivileged key into secret store must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	// No Warn entry whose overlapping_permissions field is populated — the key is clean.
+	assert.Nil(t, capLog.kvValue("overlapping_permissions"),
+		"scan must not emit an overlapping_permissions warning for a key with no Tier-3 permissions")
 }
