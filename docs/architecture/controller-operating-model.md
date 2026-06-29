@@ -616,11 +616,13 @@ Three authentication mechanisms, used for different purposes.
 
 The zero-standing-privilege session model (ADR-014) eliminates long-lived admin credentials: a human admin authenticates once with a short-lived mTLS certificate, receives a rolling bearer token, and the token automatically expires if unused.
 
+For the operator-facing CLI workflow (first connect, reconnect, session status, disconnect), see the [cfg Operator Guide](../../deployment/cfg-operator-guide.md). This section documents the server-side mechanics.
+
 **Session lifecycle:**
 
-1. `POST /api/v1/sessions` — admin mTLS only; returns `{session_id, token, issued_at, idle_ttl, absolute_expiry}` (HTTP 201). The token is a 43-char base64url string (32 random bytes from `crypto/rand`, 256 bits of entropy).
-2. Every authenticated request carrying `Authorization: Bearer <session-token>` resets the idle TTL and returns a refreshed token in the `X-Session-Token` response header. The client replaces its stored token with the refreshed value on each response.
-3. `DELETE /api/v1/sessions/{id}` — revokes immediately; callable with a valid session token or an admin mTLS cert.
+1. `POST /api/v1/sessions` — admin mTLS only; returns `{session_id, token, issued_at, idle_ttl, absolute_expiry}` (HTTP 201). The token is a 43-char base64url string (32 random bytes from `crypto/rand`, 256 bits of entropy). The `cfg connect` command drives this call.
+2. Every authenticated request carrying `Authorization: Bearer <session-token>` resets the idle TTL and returns a refreshed token in the `X-Session-Token` response header. The client replaces its stored token with the refreshed value on each response. The `cfg` CLI handles token rotation transparently — each subcommand that makes an API call automatically updates the stored token.
+3. `DELETE /api/v1/sessions/{id}` — revokes immediately; callable with a valid session token or an admin mTLS cert. The `cfg disconnect` command drives this call.
 
 **Token lifecycle parameters (ADR-014 ratified defaults):**
 
@@ -638,6 +640,7 @@ The zero-standing-privilege session model (ADR-014) eliminates long-lived admin 
 - Session-token principals carry `IsAdmin=true` with the same tenant scope as the originating mTLS cert (typically empty for admin certs, meaning no tenant restriction).
 - Session tokens are length-distinguishable from API keys: session tokens are 43 chars (base64url without padding), API keys are 44 chars (base64url with padding). The middleware uses this length difference to route auth correctly.
 - A controller restart drops all sessions (re-auth required); durable session store is deferred to the SaaS cluster story (#2051).
+- The `cfg` CLI stores the session token in the OS-native secret store (Windows Credential Manager, macOS Keychain, Linux Secret Service or kernel keyring) — never in a file on disk. The encrypted admin bundle stored alongside it is machine-bound and cannot be reused from another machine.
 
 ## Multi-Tenancy
 
