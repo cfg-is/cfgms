@@ -232,6 +232,10 @@ Run the full autonomous pipeline cycle once. Use when the founder says "cron", "
 
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
+**Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because they need the Planning Team (`TeamCreate`/`SendMessage`), which a subagent lacks. When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
+- **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
+- **Nested spawns are async.** The Tech Lead pass (Step 2) `Agent` spawn is backgrounded by the harness, which re-invokes you on its completion. Hold the relevant inline-op lease (e.g. `epic-decompose-*`, or just the cycle's own work) across the gap and act on the result on the completion turn. The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
+
 ### 4.-1 Multi-host coordination (stateless cron — run on many hosts at once)
 
 `/po cron` is safe to run **concurrently on multiple hosts**, including homogeneous
