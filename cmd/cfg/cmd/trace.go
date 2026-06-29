@@ -66,7 +66,7 @@ func getTraceClient() (*APIClient, error) {
 	}
 
 	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveBundleClient(apiURL)
+	client, err := resolveSessionOrBundleClient(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}

@@ -61,6 +61,8 @@ func init() {
 	rootCmd.AddCommand(installerCmd)
 	rootCmd.AddCommand(moduleCmd)
 	rootCmd.AddCommand(connectionsCmd)
+	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(disconnectCmd)
 }
 
 // versionCmd represents the version command

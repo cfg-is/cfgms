@@ -12,6 +12,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
+// credentialStoreUnlockerFn creates the CredentialUnlocker for newCredentialStore.
+// Overridable in tests to inject a counting or stub unlocker.
+var credentialStoreUnlockerFn = func(dir string) (credential.CredentialUnlocker, error) {
+	return credential.NewMachineUnlocker(dir)
+}
+
 // credentialsDirFn is overridable in tests to avoid touching real user config directories.
 var credentialsDirFn = defaultCredentialsDir
 
@@ -48,7 +54,7 @@ func newCredentialStore() (*CredentialStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("credential store: init encryptor: %w", err)
 	}
-	unlocker, err := credential.NewMachineUnlocker(dir)
+	unlocker, err := credentialStoreUnlockerFn(dir)
 	if err != nil {
 		return nil, fmt.Errorf("credential store: init unlocker: %w", err)
 	}

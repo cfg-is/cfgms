@@ -379,6 +379,74 @@ For automation of these commands, use the CFGMS slash commands: `/story-start`, 
 
 ## Connection Management
 
+`cfg connect` and `cfg disconnect` manage zero-standing-privilege controller sessions. The session token is stored exclusively in the OS-native secret store (macOS Keychain, Windows Credential Manager, Linux Secret Service) — never written to any file on disk.
+
+### cfg connect (first-time import)
+
+Import an admin bundle and start a controller session.
+
+```bash
+cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443
+cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443 --name prod
+```
+
+The `--url` value must be HTTPS for any non-loopback address. On success the bundle is stored encrypted (machine-bound), a session token is issued via `POST /api/v1/sessions`, and the token is written to the OS keychain.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--bundle` | — | Path to the admin bundle YAML (required for first-time import) |
+| `--url` | — | Controller HTTPS URL (required with `--bundle`; must be HTTPS for non-loopback) |
+| `--name` | derived from URL host | Human-readable connection name stored in the local registry |
+
+### cfg connect (reconnect)
+
+Re-use a previously registered connection without re-importing the bundle.
+
+```bash
+# Reconnect by name
+cfg connect prod
+
+# Auto-select when exactly one connection is registered
+cfg connect
+
+# Interactive numbered selection when multiple connections are registered
+cfg connect
+```
+
+The encrypted bundle is unlocked with the machine-bound key, a new session token is issued, and the token replaces the previous entry in the OS keychain.
+
+### cfg disconnect
+
+Revoke the active session and remove its token from the OS keychain.
+
+```bash
+cfg disconnect
+```
+
+Sends `DELETE /api/v1/sessions/{id}` to the controller (best-effort — proceeds even on network error), then removes the token from the OS keychain. Exits 0 with a notice when no active session is found.
+
+### cfg connections current
+
+Show the active session from the OS keychain.
+
+```bash
+cfg connections current
+```
+
+Prints the connection name, controller URL, session ID, and absolute expiry. Prints `no active session` and exits 0 when no valid session is stored.
+
+### Session lifecycle and rolling renewal
+
+After `cfg connect`, all admin commands transparently use the stored session token (Bearer auth). The controller sets an `X-Session-Token` response header on each authenticated request; the CLI automatically writes the new token back to the OS keychain, keeping sessions alive without explicit re-authentication.
+
+When the token is revoked server-side (401 response), the CLI falls back to bundle auth and prints `session expired or revoked — falling back to bundle auth` on stderr.
+
+Use `--bundle` or `--no-bundle` on any command to bypass the session entirely for one-shot overrides.
+
+---
+
 The `cfg connections` commands manage the local registry of known controller connections. The registry stores non-secret metadata only — no credentials, tokens, or keys are ever written to this file.
 
 Registry location:
