@@ -78,11 +78,14 @@ func TestManagerRevoke(t *testing.T) {
 	mgr, _ := newTestManager(t, cfg, clock)
 	ctx := context.Background()
 
-	sess, token, _ := mgr.Issue(ctx, "bob", "ctrl", "")
+	sess, token, err := mgr.Issue(ctx, "bob", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
 	if err := mgr.Revoke(ctx, sess.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	_, err := mgr.Validate(ctx, token)
+	_, err = mgr.Validate(ctx, token)
 	if !errors.Is(err, session.ErrSessionRevoked) {
 		t.Errorf("after Revoke, Validate: got %v, want ErrSessionRevoked", err)
 	}
@@ -98,10 +101,13 @@ func TestManagerIdleTTL(t *testing.T) {
 	mgr, _ := newTestManager(t, cfg, clock)
 	ctx := context.Background()
 
-	_, token, _ := mgr.Issue(ctx, "carol", "ctrl", "")
+	_, token, err := mgr.Issue(ctx, "carol", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
 	// Advance past idle TTL without any Validate call.
 	clock.advance(200 * time.Millisecond)
-	_, err := mgr.Validate(ctx, token)
+	_, err = mgr.Validate(ctx, token)
 	if !errors.Is(err, session.ErrSessionExpired) {
 		t.Errorf("idle TTL exceeded: got %v, want ErrSessionExpired", err)
 	}
@@ -119,7 +125,10 @@ func TestSessionAbsoluteCap(t *testing.T) {
 	mgr, _ := newTestManager(t, cfg, clock)
 	ctx := context.Background()
 
-	_, token, _ := mgr.Issue(ctx, "dave", "ctrl", "")
+	_, token, err := mgr.Issue(ctx, "dave", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
 
 	// Continuously renew while advancing time, keeping idle TTL fresh.
 	// Advance in 100ms increments, renewing each time, until past absolute cap.
@@ -139,7 +148,7 @@ func TestSessionAbsoluteCap(t *testing.T) {
 	}
 
 	// After > 500ms total, the session must be expired.
-	_, err := mgr.Validate(ctx, token)
+	_, err = mgr.Validate(ctx, token)
 	if !errors.Is(err, session.ErrSessionExpired) {
 		t.Errorf("absolute cap: Validate returned %v, want ErrSessionExpired", err)
 	}
@@ -159,7 +168,10 @@ func TestRollingTokenGraceWindow(t *testing.T) {
 	mgr, _ := newTestManager(t, cfg, clock)
 	ctx := context.Background()
 
-	_, tokenA, _ := mgr.Issue(ctx, "eve", "ctrl", "")
+	_, tokenA, err := mgr.Issue(ctx, "eve", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
 
 	// Renew with tokenA → get tokenB.
 	_, tokenB, err := mgr.Renew(ctx, tokenA)
