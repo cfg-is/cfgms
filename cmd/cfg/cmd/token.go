@@ -212,10 +212,10 @@ func getAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveBundleClient(apiURL)
+	// Try active session token first, then admin bundle (mTLS auto-discovery).
+	client, err := resolveSessionOrBundleClient(apiURL)
 	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+		return nil, fmt.Errorf("client lookup failed: %w", err)
 	}
 	if client != nil {
 		return client, nil

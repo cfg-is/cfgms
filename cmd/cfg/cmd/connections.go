@@ -46,6 +46,7 @@ Examples:
 func init() {
 	connectionsListCmd.Flags().BoolVar(&connectionsListJSON, "json", false, "Emit JSON array instead of human-readable table")
 	connectionsCmd.AddCommand(connectionsListCmd)
+	connectionsCmd.AddCommand(connectionsCurrentCmd)
 }
 
 func runConnectionsList(cmd *cobra.Command, args []string) error {
@@ -87,4 +88,38 @@ func runConnectionsList(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return w.Flush()
+}
+
+var connectionsCurrentCmd = &cobra.Command{
+	Use:   "current",
+	Short: "Show the active session from the token store and connection registry",
+	Long: `Print the active session details (connection name, controller URL, session ID, expiry)
+sourced from the OS-native secret store.
+
+Exits 0 and prints "no active session" when no session token is stored or the
+stored token has passed its absolute expiry.`,
+	RunE: runConnectionsCurrent,
+}
+
+func runConnectionsCurrent(cmd *cobra.Command, args []string) error {
+	rec, err := loadSessionToken()
+	if err != nil {
+		return fmt.Errorf("load session token: %w", err)
+	}
+	if rec == nil {
+		fmt.Println("no active session")
+		return nil
+	}
+
+	// Treat an expired token the same as absent.
+	if rec.AbsoluteExpiry.Before(time.Now()) {
+		fmt.Println("no active session (token expired)")
+		return nil
+	}
+
+	fmt.Printf("Connection: %s\n", rec.ConnectionName)
+	fmt.Printf("URL:        %s\n", rec.ControllerURL)
+	fmt.Printf("Session ID: %s\n", rec.SessionID)
+	fmt.Printf("Expires:    %s\n", rec.AbsoluteExpiry.Format(time.RFC3339))
+	return nil
 }
