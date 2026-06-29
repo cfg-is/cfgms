@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -259,7 +261,63 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// State (c)/(d): no admin cert presented — use API-key path.
+		// State (c)/(d): no admin cert presented.
+
+		// Session-token path (Issue #2232): intercept Bearer tokens that are 43 chars
+		// (base64url without padding for 32 random bytes — length-distinguishable from
+		// API keys, which use base64url with padding: 44 chars). Only attempted when a
+		// sessionManager is wired; falls through to API-key path otherwise.
+		//
+		// Contract:
+		//   - Token present, 43 chars, manager wired, valid   → admin Principal from session + X-Session-Token header
+		//   - Token present, 43 chars, manager wired, invalid → 401 (no fallthrough to API-key)
+		//   - Token present, non-43 chars OR manager nil       → fall through to API-key path
+		if s.sessionManager != nil {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+				// sessionTokenLen is the exact length of a session token:
+				// base64.RawURLEncoding of 32 bytes = 43 chars (no padding).
+				const sessionTokenLen = 43
+				if len(bearerToken) == sessionTokenLen {
+					sess, err := s.sessionManager.Validate(r.Context(), bearerToken)
+					if err != nil {
+						switch {
+						case errors.Is(err, session.ErrSessionRevoked):
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						case errors.Is(err, session.ErrSessionExpired):
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
+						default:
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+						}
+						return
+					}
+					// Renew the session to reset idle TTL; set X-Session-Token when
+					// a new token is issued (empty string = prior-token grace path,
+					// no new token to publish). The raw new token is never logged.
+					_, newToken, renewErr := s.sessionManager.Renew(r.Context(), bearerToken)
+					if renewErr == nil && newToken != "" {
+						w.Header().Set("X-Session-Token", newToken)
+					}
+					// Build an admin Principal from session state.
+					sessionPrincipal := &Principal{
+						ID:      sess.PrincipalID,
+						Name:    "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						IsAdmin: true,
+						// TenantID mirrors the issuing admin cert; "" means no tenant scope
+						// (same semantics as extractAdminPrincipal for mTLS admin certs).
+						TenantID: sess.TenantID,
+					}
+					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
+					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
+					ctx = context.WithValue(ctx, ctxkeys.TenantID, sess.TenantID)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+		}
+
+		// API-key path.
 
 		// Extract API key from header
 		apiKeyStr := r.Header.Get("X-API-Key")

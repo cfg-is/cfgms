@@ -44,6 +44,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -114,6 +115,8 @@ type Server struct {
 	popVerifier                    PoPVerifier                           // Issue #2096: injectable for revoked-before-PoP testing
 	isolationEngine                *tenantsecurity.TenantIsolationEngine // Issue #2123: tenant isolation enforcement for scoped API keys
 	stewardEventLoggingManager     *logging.LoggingManager               // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
+	sessionManager                 session.Manager                       // Issue #2232: admin session token issuance/revocation
+	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
@@ -214,6 +217,7 @@ func New(
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
 		nonceCache:              newNonceCache(),          // Issue #2096: nonce store for registration-refresh
 		popVerifier:             ed25519PoPVerifier{},     // Issue #2096: default PoP verifier; override in tests
+		sessionCfg:              session.DefaultConfig(),  // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -500,6 +504,13 @@ func (s *Server) setupRouter() {
 	apiKeys.Handle("", s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey))).Methods("POST")
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
+
+	// Admin session endpoints (Issue #2232). POST requires an admin principal (IsAdmin==true);
+	// DELETE accepts either a valid session token or an admin mTLS cert.
+	// Both handlers check principal.IsAdmin internally — no tier-3 wrapper needed because
+	// session-token principals also have IsAdmin==true.
+	api.Handle("/sessions", http.HandlerFunc(s.handleSessionCreate)).Methods("POST")
+	api.Handle("/sessions/{id}", http.HandlerFunc(s.handleSessionRevoke)).Methods("DELETE")
 
 	// Registration token management endpoints (Story #264)
 	regTokens := api.PathPrefix("/registration/tokens").Subrouter()
@@ -1017,6 +1028,15 @@ func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signingRotationService = svc
+}
+
+// SetSessionManager wires the session Manager for admin session-token issuance and
+// revocation (Issue #2232). When nil (default), POST /api/v1/sessions and
+// DELETE /api/v1/sessions/{id} return 503. Call after New() but before Start().
+func (s *Server) SetSessionManager(mgr session.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionManager = mgr
 }
 
 // SetStewardEventLoggingManager injects the dedicated steward-event
