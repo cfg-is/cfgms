@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh install-cfg uninstall-cfg test-install-cfg
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -270,6 +270,68 @@ test-install-sh:
 	@echo "=================================="
 	@bash build/linux/install_test.sh
 	@echo "✅ Linux install.sh tests passed"
+
+# Install cfg CLI binary onto PATH (Issue #2216)
+# Depends on build-cli so the installed binary is always current.
+# Linux/macOS: delegates to scripts/install-cfg.sh (root → /usr/local/bin, non-root → ~/.local/bin).
+# Windows: copies bin/cfg.exe to %GOPATH%/bin.
+install-cfg: build-cli
+	@DETECTED_OS="$$(go env GOOS)"; \
+	if [ "$$DETECTED_OS" = "windows" ]; then \
+		GOPATH_BIN="$$(go env GOPATH | tr '\\' '/')/bin"; \
+		mkdir -p "$$GOPATH_BIN"; \
+		cp bin/cfg.exe "$$GOPATH_BIN/cfg.exe"; \
+		echo "cfg installed to $$GOPATH_BIN/cfg.exe"; \
+		case ":$$PATH:" in \
+			*":$$GOPATH_BIN:"*) ;; \
+			*) \
+				echo ""; \
+				echo "Note: $$GOPATH_BIN is not on your PATH."; \
+				echo "To add it permanently, run in PowerShell:"; \
+				echo "  setx PATH \"%PATH%;$$GOPATH_BIN\""; \
+				;; \
+		esac; \
+	else \
+		bash scripts/install-cfg.sh; \
+	fi
+
+# Remove the cfg CLI binary installed by install-cfg (Issue #2216)
+# Accepts an optional PREFIX= override: make uninstall-cfg PREFIX=/opt/cfgms/bin
+# Without PREFIX, removes from /usr/local/bin and ~/.local/bin (the two defaults).
+uninstall-cfg:
+	@DETECTED_OS="$$(go env GOOS)"; \
+	if [ "$$DETECTED_OS" = "windows" ]; then \
+		GOPATH_BIN="$$(go env GOPATH | tr '\\' '/')/bin"; \
+		TARGET="$$GOPATH_BIN/cfg.exe"; \
+		rm -f "$$TARGET"; \
+		echo "cfg uninstalled from $$GOPATH_BIN"; \
+	elif [ -n "$(PREFIX)" ]; then \
+		TARGET="$(PREFIX)/cfg"; \
+		rm -f "$$TARGET"; \
+		echo "cfg uninstalled from $(PREFIX)"; \
+	else \
+		REMOVED=""; \
+		if [ -f "/usr/local/bin/cfg" ]; then \
+			rm -f /usr/local/bin/cfg; \
+			REMOVED="$${REMOVED:+$$REMOVED, }/usr/local/bin/cfg"; \
+		fi; \
+		if [ -f "$$HOME/.local/bin/cfg" ]; then \
+			rm -f "$$HOME/.local/bin/cfg"; \
+			REMOVED="$${REMOVED:+$$REMOVED, }$$HOME/.local/bin/cfg"; \
+		fi; \
+		if [ -n "$$REMOVED" ]; then \
+			echo "cfg uninstalled from: $$REMOVED"; \
+		else \
+			echo "cfg not found in /usr/local/bin or $$HOME/.local/bin (nothing removed)"; \
+		fi; \
+	fi
+
+# Run cfg install script integration tests (Issue #2216)
+test-install-cfg: build-cli
+	@echo "🧪 Testing scripts/install-cfg.sh"
+	@echo "=================================="
+	@bash scripts/install-cfg-test.sh
+	@echo "✅ cfg install tests passed"
 
 # Smart test - core modules + changed modules only
 test: fix-git-bare
