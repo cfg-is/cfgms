@@ -380,9 +380,21 @@ func (s *Server) setupRouter() {
 
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
-	api.Use(s.authDefense.Middleware) // Story #380: Rate limiting before auth
-	api.Use(s.authenticationMiddleware)
+	api.Use(s.authDefense.Middleware)   // Story #380: rate limiting before auth
+	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
+	api.Use(s.requireTier(TierAny))     // Issue #1419: explicit Tier-1 default for the api subrouter
 	api.Use(s.validationMiddleware)
+
+	// --- Tier 0 (TierPublic) — no authentication required ---
+	//   GET  /api/v1/health
+	//   GET  /api/v1/ready
+	//   POST /api/v1/register
+	//   GET  /api/v1/registration/status/{pending_id}
+	//   POST /api/v1/stewards/{device_id}/refresh/challenge   (PoP-auth in handler)
+	//   POST /api/v1/stewards/{device_id}/refresh/complete    (PoP-auth in handler)
+	//   GET  /api/v1/installer/download/{platform}/{arch}
+	//   GET  /api/v1/public/steward-binaries/{version}/{platform}/{arch}
+	//   POST /raft/message                                     (internal mTLS peer CN in handler)
 
 	// Health check (no auth required) — liveness / object-presence.
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
@@ -411,6 +423,10 @@ func (s *Server) setupRouter() {
 	// Registered on the base router like /api/v1/register (Issue #2096).
 	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/challenge", s.handleRefreshChallenge).Methods("POST", "OPTIONS")
 	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/complete", s.handleRefreshComplete).Methods("POST", "OPTIONS")
+
+	// --- Tier 1 (TierAny) — any valid credential: API key OR mTLS admin cert ---
+	// Default for all routes on the api subrouter. Tier-3 (TierMTLSOnly) endpoints are
+	// additionally wrapped with requireTier(TierMTLSOnly); see Issue #1419 story S3.
 
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()

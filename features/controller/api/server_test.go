@@ -1579,3 +1579,35 @@ func TestSeedTestAPIKeys(t *testing.T) {
 		}
 	})
 }
+
+// TestSetupRouter_Tier0Routes_AccessibleWithoutCredentials verifies that Tier-0 routes
+// registered on the base router (not the api subrouter) are reachable without any
+// authentication credentials (Issue #2224).
+func TestSetupRouter_Tier0Routes_AccessibleWithoutCredentials(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"Tier-0 route GET /api/v1/health must return 200 with no auth credentials")
+}
+
+// TestSetupRouter_Tier1Routes_RequireAuthentication verifies that Tier-1 routes on the
+// api subrouter reject unauthenticated callers with HTTP 401 (Issue #2224). The
+// requireTier(TierAny) middleware added to the api subrouter is pass-through (tier < 3),
+// so authentication is enforced by authenticationMiddleware, not requireTier — this test
+// confirms the full middleware chain rejects anonymous callers as expected.
+func TestSetupRouter_Tier1Routes_RequireAuthentication(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"Tier-1 route GET /api/v1/stewards must return 401 with no auth credentials")
+}
