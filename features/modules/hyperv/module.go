@@ -126,6 +126,19 @@ type hypervModule struct {
 	// signal handles. It is set by the platform establish routine when the
 	// subscription is created and cleared on Close. nil means "no subscription".
 	monTeardown func() error //nolint:unused // written and read by monitor_windows.go; invisible to non-Windows builds
+
+	// Cluster DNA Monitor (#2241) state. Unlike the VM monitor (one host-level
+	// Event Log subscription), each watched cluster gets its own polling
+	// goroutine — there is no FailoverCluster event channel, so ownership /
+	// membership is polled on a ticker and emitted as a ChangeEvent with a
+	// *ClusterStatus payload (the epic #415 DNA contract). Fields are guarded by
+	// monMu; the pollers are owned by the Monitor()/Close() lifecycle.
+	monClusterInterest map[string]struct{}      //nolint:unused // written and read by monitor_windows.go / cluster_windows.go
+	monClusterStop     map[string]chan struct{} //nolint:unused // per-cluster poller stop channels
+	monClusterWG       sync.WaitGroup           //nolint:unused // joins cluster pollers before the changes channel is closed
+	// clusterPollInterval overrides the cluster DNA poll cadence (Configure key
+	// "cluster_poll_interval", a Go duration string). Zero ⇒ the 30s default.
+	clusterPollInterval time.Duration //nolint:unused // read by monitor_windows.go (cluster poller)
 }
 
 // HypervOption configures a hypervModule at construction time.
@@ -265,6 +278,13 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.clusterName, _ = configMap["cluster_name"].(string)
 	m.clusterRoleNames = parseStringList(configMap["cluster_role_names"])
 	m.nodeHostname, _ = os.Hostname()
+	// Optional cluster DNA poll cadence (#2241). Accept a Go duration string;
+	// an unset/invalid value leaves the 30s default in place.
+	if pollStr, ok := configMap["cluster_poll_interval"].(string); ok && pollStr != "" {
+		if d, derr := time.ParseDuration(pollStr); derr == nil && d > 0 {
+			m.clusterPollInterval = d
+		}
+	}
 
 	// Wire the stored-config-backed profile store when a config store is
 	// supplied (same injection pattern as audit_manager). Operators define
