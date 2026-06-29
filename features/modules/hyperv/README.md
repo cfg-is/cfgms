@@ -112,6 +112,41 @@ The resource type is selected via the `module` field as `hyperv.<type>`
     state: running
 ```
 
+### Highly-available (clustered) VM
+
+Add an optional `ha_role` block to register the VM as a clustered HA role on a
+failover cluster after it is created. The primary VHDX lives on a Cluster Shared
+Volume (`C:\ClusterStorage\...`) so it is reachable from every node; after
+`New-VM`, the module registers the VM as a clustered role via the cluster write
+path, reusing the **CNO ownership gate** and **existence idempotency** — the role
+is added exactly once cluster-wide and a non-owner node is a no-op. Standalone
+(non-HA) VMs omit `ha_role` and behave exactly as before.
+
+```yaml
+- name: ci-runner-01
+  module: hyperv.vm
+  config:
+    memory_mb: 8192
+    cpu_count: 4
+    # Primary VHDX on a Cluster Shared Volume — reachable from every cluster node.
+    vhd_path: C:\ClusterStorage\CSV01\ci-runner-01.vhdx
+    switch_name: External
+    generation: 2
+    state: running
+    ha_role:
+      # Must equal the module-level cluster_name scope cap.
+      cluster_name: lab-hv
+      # Optional cluster resource-group name; defaults to the VM name.
+      resource_group_name: ci-runner-01
+```
+
+> **CSV seed-dir constraint.** When `vhd_path` is on a Cluster Shared Volume, the
+> module-level **`seed_dir`** (configure-time) must be set and **host-local** —
+> not under `C:\ClusterStorage\`. A CSV (or empty) seed directory would hang the
+> provisioning build, so the resource is rejected at validate time with
+> `ErrInvalidHARoleSeedDir`. Set `seed_dir` to a per-node path such as
+> `C:\ProgramData\cfgms\seed`.
+
 ### Create an external virtual switch
 
 ```yaml
