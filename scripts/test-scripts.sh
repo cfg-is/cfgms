@@ -2784,11 +2784,16 @@ test_preflight_acceptance_review_comment_match() {
 import sys, importlib.util, os
 
 script_path = os.environ["PREFLIGHT_SCRIPT"]
+# Stub collaborator API: jrdnr is push+ (trusted); any other login is not in the
+# map (None → external). Required since Issue #2228 added author-trust as a
+# mandatory AND condition alongside text-match.
+os.environ["CFGMS_TEST_COLLAB_PERM_MAP"] = '{"jrdnr": "push"}'
 spec = importlib.util.spec_from_file_location("preflight", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-# Part A: sentinel in body matches regardless of author (forward-compat path)
+# Part A: sentinel in body from a push+ collaborator (jrdnr) is trusted — both
+# conditions (text-match AND author-trust) must hold since Issue #2228.
 sentinel_comment = {
     "author": {"login": "jrdnr"},
     "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n\nAll checks passing.",
@@ -2893,16 +2898,24 @@ test_preflight_review_verdict_routing() {
 import sys, importlib.util, os
 
 script_path = os.environ["PREFLIGHT_SCRIPT"]
+# Stub collaborator permission so the acceptance-reviewer identity (jrdnr) is
+# trusted by is_trusted_review_comment() — required since Issue #2228 added
+# author-trust as a mandatory condition alongside text-match.
+os.environ["CFGMS_TEST_COLLAB_PERM_MAP"] = '{"jrdnr": "push"}'
 spec = importlib.util.spec_from_file_location("preflight", script_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+mod._perm_cache.clear()  # ensure env var is picked up, not a stale cache
 
 # createdAt drives the commit-vs-review timestamp comparison (issue #1731):
 # a fix counts as landed only when its commit is newer than the review comment.
 REVIEW_TS = "2026-05-21T12:00:00Z"
-fail_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n",
+# author matches the real GraphQL node shape: nested author.login (Issue #2228).
+fail_c = {"author": {"login": "jrdnr"},
+          "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL\n",
           "createdAt": REVIEW_TS}
-pass_c = {"body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n",
+pass_c = {"author": {"login": "jrdnr"},
+          "body": "<!-- cfgms-acceptance-review -->\n## Acceptance Review — PASS\n",
           "createdAt": REVIEW_TS}
 
 # Part A: latest_review_verdict extracts fail/pass/None
