@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -48,6 +50,48 @@ func setupTestServerWithSession(t *testing.T) (*Server, session.Manager, *sessio
 	mgr := session.NewManager(cfg, store, time.Now)
 	srv.SetSessionManager(mgr)
 	return srv, mgr, store
+}
+
+// captureAllLogger records every log call at every level into a buffer so tests
+// can assert that sensitive values (e.g. raw session tokens) never appear in logs.
+type captureAllLogger struct {
+	logging.NoopLogger
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *captureAllLogger) record(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.buf.WriteString(msg)
+	for _, v := range kvs {
+		fmt.Fprintf(&l.buf, " %v", v)
+	}
+	l.buf.WriteByte('\n')
+}
+
+func (l *captureAllLogger) captured() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func (l *captureAllLogger) Debug(msg string, kvs ...interface{}) { l.record(msg, kvs...) }
+func (l *captureAllLogger) Info(msg string, kvs ...interface{})  { l.record(msg, kvs...) }
+func (l *captureAllLogger) Warn(msg string, kvs ...interface{})  { l.record(msg, kvs...) }
+func (l *captureAllLogger) Error(msg string, kvs ...interface{}) { l.record(msg, kvs...) }
+
+func (l *captureAllLogger) DebugCtx(_ context.Context, msg string, kvs ...interface{}) {
+	l.record(msg, kvs...)
+}
+func (l *captureAllLogger) InfoCtx(_ context.Context, msg string, kvs ...interface{}) {
+	l.record(msg, kvs...)
+}
+func (l *captureAllLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
+	l.record(msg, kvs...)
+}
+func (l *captureAllLogger) ErrorCtx(_ context.Context, msg string, kvs ...interface{}) {
+	l.record(msg, kvs...)
 }
 
 // injectAdminPrincipal returns a copy of r with an admin Principal set in context.
@@ -322,48 +366,66 @@ func TestSessionTokenAuthMiddleware_FallsThrough_NonSessionToken(t *testing.T) {
 	}
 }
 
-// TestSessionTokenNotInLogs verifies that raw token values do not appear in HTTP
-// response bodies or error messages — the logging assertion for the controller layer.
-// The pkg/session package has no logging; token sanitization is verified at the
-// handler level by inspecting that error responses never echo the raw token.
+// TestSessionTokenNotInLogs verifies that raw token values never appear in any
+// controller log line across a full connect/renew/revoke cycle.  It wires a
+// buffer-backed logger (captureAllLogger) so every Info/Error/Warn/Debug call is
+// recorded, then asserts that neither the original token nor the renewed token is
+// present in the captured output.
 func TestSessionTokenNotInLogs(t *testing.T) {
-	srv, mgr, _ := setupTestServerWithSession(t)
+	// Wire a capture logger so we can inspect every log line produced during
+	// the connect/renew/revoke cycle.
+	clog := &captureAllLogger{}
+	srv := setupTestServerWithLogger(t, clog)
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+	srv.SetSessionManager(mgr)
 
-	sess, token, err := mgr.Issue(context.Background(), "eve", "ctrl", "")
-	if err != nil {
-		t.Fatalf("Issue: %v", err)
+	// Connect: issue session via the handler so "Session issued" is logged.
+	createBody := `{"connection_name":"log-test-ctrl"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(createBody))
+	createReq = injectAdminPrincipal(createReq, "log-user")
+	createRec := httptest.NewRecorder()
+	srv.handleSessionCreate(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("handleSessionCreate: status = %d, want 201; body: %s", createRec.Code, createRec.Body.String())
 	}
+	var createResp sessionCreateResponse
+	if err := json.NewDecoder(createRec.Body).Decode(&createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	token := createResp.Token
+	sessID := createResp.SessionID
 
-	// Trigger middleware renew cycle; capture X-Session-Token.
-	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Renew: trigger the middleware path that calls Renew internally.
+	// Per the middleware comment, the raw new token is never logged.
+	renewHandler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	newToken := rec.Header().Get("X-Session-Token")
+	renewReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	renewReq.Header.Set("Authorization", "Bearer "+token)
+	renewRec := httptest.NewRecorder()
+	renewHandler.ServeHTTP(renewRec, renewReq)
+	newToken := renewRec.Header().Get("X-Session-Token")
 
-	// Revoke.
-	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sess.ID, nil)
-	revokeReq = injectAdminPrincipal(revokeReq, "eve")
-	revokeReq = injectSessionMuxVars(revokeReq, map[string]string{"id": sess.ID})
-	srv.handleSessionRevoke(httptest.NewRecorder(), revokeReq)
-
-	// Attempt to use the revoked token — the error response must not echo back the token.
-	errReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	errReq.Header.Set("Authorization", "Bearer "+token)
-	errRec := httptest.NewRecorder()
-	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})).ServeHTTP(errRec, errReq)
-
-	errBody := errRec.Body.String()
-	if strings.Contains(errBody, token) {
-		t.Errorf("error response body contains raw token value — must not echo tokens")
+	// Revoke: revoke via handler so "Session revoked" is logged.
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sessID, nil)
+	revokeReq = injectAdminPrincipal(revokeReq, "log-user")
+	revokeReq = injectSessionMuxVars(revokeReq, map[string]string{"id": sessID})
+	revokeRec := httptest.NewRecorder()
+	srv.handleSessionRevoke(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("handleSessionRevoke: status = %d, want 200", revokeRec.Code)
 	}
-	if newToken != "" && strings.Contains(errBody, newToken) {
-		t.Errorf("error response body contains renewed token value — must not echo tokens")
+
+	// Assert: inspect every captured log line for raw token values.
+	logOutput := clog.captured()
+	if strings.Contains(logOutput, token) {
+		t.Errorf("log output contains raw session token — tokens must not be logged\nlog:\n%s", logOutput)
+	}
+	if newToken != "" && strings.Contains(logOutput, newToken) {
+		t.Errorf("log output contains renewed token value — tokens must not be logged\nlog:\n%s", logOutput)
 	}
 }
 

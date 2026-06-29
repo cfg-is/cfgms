@@ -109,7 +109,7 @@ func TestMemStore_ListAll(t *testing.T) {
 		t.Fatalf("Set s1: %v", err)
 	}
 
-	// s2: two hash entries (simulates current + prior-token grace slot after a Renew).
+	// s2: two hash entries — current token + prior-token grace slot, as produced by a Renew.
 	t2a, err := session.GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken t2a: %v", err)

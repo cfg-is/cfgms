@@ -38,8 +38,9 @@ extensions:
   # barrierModel does not suppress (e.g., json.Decode field-selection sources on some
   # CodeQL versions) are caught here. Both models must be present; neither alone is
   # reliable across all taint-flow paths (per testing in pack 0.0.5 / 0.0.6 history).
-  # Alerts #669, #713, #714, #715, #722 — belt-and-suspenders for SanitizeLogValue
-  # log-injection FPs that originate from JSON-decoded request fields.
+  # Alerts #669, #713, #714, #715, #722, #998, #999, #1000 — belt-and-suspenders for
+  # SanitizeLogValue log-injection FPs (mux.Vars URL params + JSON-decoded struct
+  # fields returned from interface calls, e.g. session.Manager.Issue → sess.ConnectionName).
   - addsTo:
       pack: codeql/go-all
       extensible: summaryModel
