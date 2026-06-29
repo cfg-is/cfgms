@@ -828,10 +828,9 @@ func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
 	}))
 
 	server, auditMgr := newRefreshAdminTestServer(t, ss, prs, newTestRefreshPolicyStore())
-	apiKey := NewTestKey(t, server, []string{"refresh:approve"})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// POST /api/v1/stewards/refresh/{id}/approve is Tier-3 (mTLS-only).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -897,10 +896,10 @@ func TestHandleRefreshApprove_RevokedDeviceRejected(t *testing.T) {
 	}))
 
 	server, auditMgr := newRefreshAdminTestServer(t, ss, prs, newTestRefreshPolicyStore())
-	apiKey := NewTestKey(t, server, []string{"refresh:approve"})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// POST /api/v1/stewards/refresh/{id}/approve is Tier-3 (mTLS-only).
+	// Use admin cert so the handler's own revocation check is exercised.
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1036,11 +1035,10 @@ func TestHandleGetRefreshPolicy_ReturnsDefault(t *testing.T) {
 func TestHandleSetRefreshPolicy_SetsMode(t *testing.T) {
 	ps := newTestRefreshPolicyStore()
 	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, ps)
-	apiKey := NewTestKey(t, server, []string{"refresh:set-policy"})
 
+	// PUT /api/v1/tenants/{tenant}/refresh-policy is Tier-3 (mTLS-only).
 	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "auto_accept"})
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -1054,11 +1052,10 @@ func TestHandleSetRefreshPolicy_SetsMode(t *testing.T) {
 
 func TestHandleSetRefreshPolicy_InvalidMode_Returns400(t *testing.T) {
 	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, newTestRefreshPolicyStore())
-	apiKey := NewTestKey(t, server, []string{"refresh:set-policy"})
 
+	// PUT /api/v1/tenants/{tenant}/refresh-policy is Tier-3 (mTLS-only).
 	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "invalid_mode"})
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/"+testTenantID+"/refresh-policy", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -1068,10 +1065,9 @@ func TestHandleSetRefreshPolicy_InvalidMode_Returns400(t *testing.T) {
 
 func TestHandleRefreshApprove_NotFound(t *testing.T) {
 	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), newTestPendingRefreshStore(), nil)
-	apiKey := NewTestKey(t, server, []string{"refresh:approve"})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/nonexistent-id/approve", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// POST /api/v1/stewards/refresh/{id}/approve is Tier-3 (mTLS-only).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/nonexistent-id/approve", nil)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1105,7 +1101,8 @@ func TestHandleApproveRefresh_CrossTenantReturns404(t *testing.T) {
 	}))
 
 	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), prs, nil)
-	// API key scoped to a different tenant.
+	// API key from a different tenant — Tier-3 enforcement blocks at the gate (403 MTLS_REQUIRED)
+	// before the handler's own cross-tenant check can fire.
 	apiKey := NewEphemeralTestKey(t, server, []string{"refresh:approve"}, "other-tenant", 5*time.Minute)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
@@ -1113,8 +1110,8 @@ func TestHandleApproveRefresh_CrossTenantReturns404(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
-	// 404 rather than 403 to avoid disclosing pending-refresh existence across tenants.
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// Tier-3: API keys are rejected with 403 MTLS_REQUIRED regardless of tenant.
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Entry must remain pending — nothing was mutated.
 	entry, err := prs.GetPendingRefreshByID(context.Background(), pendingID)
@@ -1203,7 +1200,8 @@ func TestHandleGetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
 func TestHandleSetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
 	ps := newTestRefreshPolicyStore()
 	server, _ := newRefreshAdminTestServer(t, newTestStewardStore(), nil, ps)
-	// Key scoped to "other-tenant" — must not write policy for testTenantID.
+	// API key scoped to "other-tenant" — Tier-3 enforcement blocks at the gate (403 MTLS_REQUIRED)
+	// before the handler's own cross-tenant check can fire.
 	apiKey := NewEphemeralTestKey(t, server, []string{"refresh:set-policy"}, "other-tenant", 5*time.Minute)
 
 	body, _ := json.Marshal(AdminRefreshPolicyRequest{Mode: "reject"})
@@ -1213,7 +1211,8 @@ func TestHandleSetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// Tier-3: API keys are rejected with 403 MTLS_REQUIRED regardless of tenant.
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Policy for testTenantID must remain at default — nothing mutated.
 	policy, err := ps.GetPolicy(context.Background(), testTenantID)

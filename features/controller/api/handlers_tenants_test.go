@@ -20,12 +20,10 @@ import (
 
 func TestHandleCreateTenant_ExplicitID(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:create"})
 
 	body, _ := json.Marshal(map[string]string{"id": "team-root"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", apiKey)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -42,7 +40,6 @@ func TestHandleCreateTenant_ExplicitID(t *testing.T) {
 
 func TestHandleCreateTenant_DuplicateID(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:create"})
 
 	// Create the tenant once
 	ctx := context.Background()
@@ -51,9 +48,8 @@ func TestHandleCreateTenant_DuplicateID(t *testing.T) {
 
 	// Attempt to create with the same ID — must return 409
 	body, _ := json.Marshal(map[string]string{"id": "dup-tenant"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", apiKey)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -63,11 +59,9 @@ func TestHandleCreateTenant_DuplicateID(t *testing.T) {
 
 func TestHandleCreateTenant_InvalidBody(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:create"})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", bytes.NewBufferString("not-json"))
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants", bytes.NewBufferString("not-json"))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", apiKey)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -77,12 +71,10 @@ func TestHandleCreateTenant_InvalidBody(t *testing.T) {
 
 func TestHandleCreateTenant_InvalidExplicitID(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:create"})
 
 	body, _ := json.Marshal(map[string]string{"id": "Team_Root"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", apiKey)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)

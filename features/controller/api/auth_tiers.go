@@ -35,6 +35,8 @@ var tier3Permissions = map[string]struct{}{
 	"registration:approve":         {}, // POST /registration/{id}/approve, /approve-all, /approve-by-cidr
 	"registration:manage-ip-trust": {}, // POST + DELETE /registration/ip-trust
 	"tenant:create":                {}, // POST /tenants
+	"refresh:approve":              {}, // POST /stewards/refresh/{pending_id}/approve
+	"refresh:set-policy":           {}, // PUT /tenants/{tenant_path}/refresh-policy
 }
 
 // requireTier returns middleware that enforces the given authentication tier.
