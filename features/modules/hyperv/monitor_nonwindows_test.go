@@ -25,3 +25,15 @@ func TestHypervMonitorNotSupportedOnNonWindows(t *testing.T) {
 	require.Nil(t, m.Changes(), "Changes() is nil when monitoring is unsupported")
 	require.NoError(t, m.Close(), "Close is a no-op on non-Windows")
 }
+
+// TestHypervClusterMonitorNotSupportedOnNonWindows verifies the #2241 AC: a
+// cluster:<name> Monitor on a non-Windows build returns ErrNotSupported via the
+// existing generic stub — no new non-Windows code is required.
+func TestHypervClusterMonitorNotSupportedOnNonWindows(t *testing.T) {
+	m, ok := New(nil).(*hypervModule)
+	require.True(t, ok, "New must return *hypervModule")
+
+	err := m.Monitor(context.Background(), "cluster:lab-hv", nil)
+	require.ErrorIs(t, err, ErrNotSupported,
+		"cluster monitoring is Windows-only; non-Windows must report ErrNotSupported")
+}

@@ -606,6 +606,51 @@ re-verifies the signature over the changed manifest independently.
   config: {}        # read-only; the steward's cluster_name cap declares scope
 ```
 
+### Cluster DNA Monitor (`cluster:<name>`)
+
+`Monitor("cluster:<name>", nil)` registers interest in a failover cluster's
+membership and ownership and starts a **per-cluster polling goroutine**. Unlike
+the VM Monitor (one host-level Event Log subscription), there is no
+FailoverCluster event channel, so the module polls the read-only S1 cmdlets on a
+ticker and emits a `modules.ChangeEvent` on the `Changes()` channel whenever
+ownership or membership changes. The poller stops cleanly on `Close()` (the
+goroutine is joined before the channel is closed — no leak, no send on a closed
+channel). On non-Windows builds `Monitor("cluster:<name>", …)` returns
+`ErrNotSupported`, exactly as it does for `vm:`/`vswitch:`.
+
+- **Poll cadence.** Default **30s**; override with the `cluster_poll_interval`
+  Configure key (a Go duration string, e.g. `"15s"`).
+- **Anti-flap hysteresis (S8).** A detected change is emitted only after it is
+  observed on **two consecutive polls** — a mid-failover CNO transient that
+  reverts within one poll interval emits nothing. The first poll establishes the
+  baseline and emits nothing (read the initial state via `Get`).
+- **Receipt-time (S8).** `ChangeEvent.Timestamp` is `time.Now().Unix()` at
+  emission, never a cluster-reported time.
+
+Unlike the VM `ChangeEvent` (`Details: nil` — a re-check signal), the cluster
+event carries the observed `*ClusterStatus` as **`Details`** (a
+`modules.ConfigState`), the DNA payload the controller-side reconciler (epic
+\#415) reads. `Details.AsMap()` exposes the stable keys:
+
+| Key | Meaning |
+|-----|---------|
+| `member_nodes` | cluster member node names |
+| `resource_owner` | per-clustered-VM-role → current owner node |
+| `cno_owner_node` | node owning the core Cluster Group (CNO) |
+| `csv_paths` | Cluster Shared Volume friendly volume paths |
+| `name` | cluster (CNO) name |
+
+```go
+// Steward-side consumer (illustrative):
+_ = mod.Monitor(ctx, "cluster:lab-hv", nil)
+for ev := range mod.Changes() {
+    if ev.ResourceID == "cluster:lab-hv" && ev.Details != nil {
+        dna := ev.Details.AsMap() // member_nodes, resource_owner, cno_owner_node, ...
+        _ = dna
+    }
+}
+```
+
 ## Naming Convention
 
 Resources are created on the host with the **exact** name specified in the config — CFGMS never adds a prefix or suffix. A VM named `web-01` in the config appears as `web-01` in Hyper-V; a switch named `External` appears as `External`. Admins specify the name they expect to see on the host.

@@ -352,6 +352,14 @@ func (m *hypervModule) Monitor(_ context.Context, resourceID string, _ modules.C
 	if m.monChanges == nil {
 		m.monChanges = make(chan modules.ChangeEvent, monitorChannelDepth)
 	}
+
+	// cluster:<name> resources are watched by a per-cluster polling goroutine
+	// (#2241), NOT the host Event Log subscription. Route them before the VM
+	// path so a cluster monitor never establishes the VM EvtSubscribe handle.
+	if strings.HasPrefix(resourceID, "cluster:") {
+		return m.startClusterMonitorLocked(resourceID)
+	}
+
 	if m.monInterest == nil {
 		m.monInterest = make(map[string]struct{})
 	}
@@ -364,6 +372,40 @@ func (m *hypervModule) Monitor(_ context.Context, resourceID string, _ modules.C
 			return err
 		}
 	}
+	return nil
+}
+
+// startClusterMonitorLocked registers interest in a cluster:<name> resource and
+// starts its polling goroutine. The caller holds m.monMu. Idempotent: a second
+// Monitor for the same cluster reuses the running poller. The poller is joined
+// and stopped by Close().
+func (m *hypervModule) startClusterMonitorLocked(resourceID string) error {
+	if m.monClusterInterest == nil {
+		m.monClusterInterest = make(map[string]struct{})
+	}
+	if m.monClusterStop == nil {
+		m.monClusterStop = make(map[string]chan struct{})
+	}
+	m.monClusterInterest[resourceID] = struct{}{}
+	if _, running := m.monClusterStop[resourceID]; running {
+		return nil // already polling this cluster
+	}
+
+	clusterName := strings.TrimPrefix(resourceID, "cluster:")
+	interval := m.clusterPollInterval
+	if interval <= 0 {
+		interval = defaultClusterPollInterval
+	}
+	stop := make(chan struct{})
+	m.monClusterStop[resourceID] = stop
+
+	m.monClusterWG.Add(1)
+	go func() {
+		defer m.monClusterWG.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		m.monitorClusterLoop(clusterName, ticker.C, stop)
+	}()
 	return nil
 }
 
@@ -388,7 +430,21 @@ func (m *hypervModule) Close() error {
 	m.monClosed = true
 	ch := m.monChanges
 	m.monChanges = nil
+	// Collect the cluster poller stop channels to signal after unlocking (#2241).
+	clusterStops := make([]chan struct{}, 0, len(m.monClusterStop))
+	for k, s := range m.monClusterStop {
+		clusterStops = append(clusterStops, s)
+		delete(m.monClusterStop, k)
+	}
 	m.monMu.Unlock()
+
+	// Stop and JOIN the cluster pollers BEFORE closing the changes channel, so no
+	// poller goroutine can send on a closed channel. monClosed is already set, so
+	// any in-flight dispatchCluster also short-circuits without sending.
+	for _, s := range clusterStops {
+		close(s)
+	}
+	m.monClusterWG.Wait()
 
 	var err error
 	if teardown != nil {
