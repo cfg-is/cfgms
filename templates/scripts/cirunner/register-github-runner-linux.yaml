@@ -1,0 +1,64 @@
+metadata:
+  id: register-github-runner-linux
+  name: Register GitHub Actions Runner (Linux)
+  description: >
+    Registers this already-enrolled Linux host as a GitHub Actions self-hosted
+    runner by invoking the runner's own config.sh against the on-disk
+    actions-runner directory. The single-use registration token is supplied by
+    the provisioning workflow's staging step as the secret env var
+    CFGMS_SECRET_RUNNER_TOKEN (secret-store param binding); it is never written
+    into this file nor composed into a command string.
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - cirunner
+    - github-actions
+    - registration
+    - linux
+  category: ci-runner
+  platform:
+    - linux
+  shell: bash
+  parameters:
+    - name: REPO_URL
+      type: string
+      description: GitHub repository (or org) URL the runner registers against. Injected as CFGMS_PARAM_REPO_URL.
+      required: true
+    - name: RUNNER_LABELS
+      type: string
+      description: Comma-separated runner labels. Injected as CFGMS_PARAM_RUNNER_LABELS.
+      required: false
+      default: "self-hosted,linux,cfgms"
+    - name: RUNNER_TOKEN
+      type: string
+      description: >
+        Single-use GitHub Actions registration token. Bound at staging from the
+        secret store and injected as the secret env var CFGMS_SECRET_RUNNER_TOKEN
+        — never passed on the command line or stored in this file.
+      required: true
+  created_at: 2026-06-29T00:00:00Z
+  updated_at: 2026-06-29T00:00:00Z
+content: |
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  # Register this host as a GitHub Actions self-hosted runner.
+  #
+  # The registration token arrives as the secret environment variable
+  # CFGMS_SECRET_RUNNER_TOKEN (resolved by the staging step's secret-store param
+  # binding). It is referenced here only as an environment variable — it is
+  # never interpolated into a command string, logged, or written to disk.
+
+  repo_url="${CFGMS_PARAM_REPO_URL:?REPO_URL is required}"
+  runner_labels="${CFGMS_PARAM_RUNNER_LABELS:-self-hosted,linux,cfgms}"
+
+  cd ./actions-runner
+  ./config.sh \
+    --url "$repo_url" \
+    --token "$CFGMS_SECRET_RUNNER_TOKEN" \
+    --labels "$runner_labels" \
+    --unattended \
+    --replace
