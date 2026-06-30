@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
@@ -68,51 +69,70 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 	}
 
 	ctx := context.Background()
+	out := cmd.OutOrStdout()
 
 	if migrateDryRun {
-		fmt.Fprintf(cmd.OutOrStdout(), "Dry-run: planning migration %s → %s (provider: %s)\n",
+		if _, err := fmt.Fprintf(out, "Dry-run: planning migration %s → %s (provider: %s)\n",
 			logging.SanitizeLogValue(migrateFrom2),
 			logging.SanitizeLogValue(migrateTo2),
-			logging.SanitizeLogValue(migrateProvider))
+			logging.SanitizeLogValue(migrateProvider)); err != nil {
+			return err
+		}
 
 		report, err := m.Plan(ctx)
 		if err != nil {
 			return fmt.Errorf("migration plan failed: %w", err)
 		}
 
-		fmt.Fprintln(cmd.OutOrStdout(), "Migration plan (no writes performed):")
-		printMigrateReport(cmd, report)
-		return nil
+		if _, err := fmt.Fprintln(out, "Migration plan (no writes performed):"); err != nil {
+			return err
+		}
+		return printMigrateReport(out, report)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Migrating %s → %s (provider: %s)\n",
+	if _, err := fmt.Fprintf(out, "Migrating %s → %s (provider: %s)\n",
 		logging.SanitizeLogValue(migrateFrom2),
 		logging.SanitizeLogValue(migrateTo2),
-		logging.SanitizeLogValue(migrateProvider))
+		logging.SanitizeLogValue(migrateProvider)); err != nil {
+		return err
+	}
 
 	report, err := m.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "Migration complete:")
-	printMigrateReport(cmd, report)
+	if _, err := fmt.Fprintln(out, "Migration complete:"); err != nil {
+		return err
+	}
+	if err := printMigrateReport(out, report); err != nil {
+		return err
+	}
 
 	if len(report.Errors) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "\nWarnings (non-fatal):")
+		if _, err := fmt.Fprintln(out, "\nWarnings (non-fatal):"); err != nil {
+			return err
+		}
 		for store, werr := range report.Errors {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s: %v\n", store, werr)
+			if _, err := fmt.Fprintf(out, "  %s: %v\n", store, werr); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-func printMigrateReport(cmd *cobra.Command, report migrate.Report) {
+func printMigrateReport(out io.Writer, report migrate.Report) error {
 	total := 0
 	for store, count := range report.Counts {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %-30s %d records\n", store+":", count)
+		if _, err := fmt.Fprintf(out, "  %-30s %d records\n", store+":", count); err != nil {
+			return err
+		}
 		total += count
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %-30s %d records\n", "Total:", total)
+	if _, err := fmt.Fprintf(out, "  %-30s %d records\n", "Total:", total); err != nil {
+		return err
+	}
+	return nil
 }
