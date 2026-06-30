@@ -61,6 +61,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 				ID:       res.ID,
 				Status:   res.Status,
 				LastSeen: res.LastHeartbeat,
+				Version:  res.DNAAttributes["steward.version"],
 			}
 			if len(res.DNAAttributes) > 0 {
 				info.DNA = &DNAInfo{

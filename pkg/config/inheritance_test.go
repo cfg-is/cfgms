@@ -314,3 +314,107 @@ func TestApplyConfigurationWithSource_OverrideKeepsPositionAppendsNew(t *testing
 	}
 	assert.Equal(t, 4, vm1.Config["cpu_count"], "child layer must override the base resource in place")
 }
+
+// TestResolveConfiguration_PropagatesDesiredVersionFromParent verifies that
+// steward.upgrade.desired_version set at a parent tenant cascades to child
+// stewards via applyConfigurationWithSource. (Issue #2260)
+func TestResolveConfiguration_PropagatesDesiredVersionFromParent(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	// Parent (root) sets desired_version; child tenant has no upgrade config.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				Upgrade: stewardconfig.UpgradeConfig{DesiredVersion: "v0.5.21"},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
+		"desired_version set at parent tenant must cascade to descendant stewards")
+	assert.NotNil(t, effective.Sources["steward.upgrade.desired_version"],
+		"inheritance source for desired_version must be recorded")
+}
+
+// TestApplyConfigurationWithSource_DesiredVersionInherited verifies the
+// applyConfigurationWithSource primitive: a parent config's desired_version is
+// carried into the effective config and its source is tracked. (Issue #2260)
+func TestApplyConfigurationWithSource_DesiredVersionInherited(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	parentSrc := &InheritanceSource{Source: "parent", TenantID: "root"}
+	parentCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			Upgrade: stewardconfig.UpgradeConfig{
+				DesiredVersion: "v0.5.21",
+				AllowDowngrade: true,
+			},
+		},
+	}
+	ir.applyConfigurationWithSource(effective, parentCfg, parentSrc)
+
+	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
+		"desired_version must be applied from parent config")
+	assert.True(t, effective.Config.Steward.Upgrade.AllowDowngrade,
+		"allow_downgrade must be applied from parent config")
+	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.desired_version"],
+		"desired_version source must be tracked")
+	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.allow_downgrade"],
+		"allow_downgrade source must be tracked")
+
+	// A child config with no desired_version must not clobber the inherited value.
+	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
+	childCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{ID: "child-steward"},
+	}
+	ir.applyConfigurationWithSource(effective, childCfg, childSrc)
+
+	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
+		"child with empty desired_version must not clobber inherited value")
+}
+
+// TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins pins the
+// intentional "more-permissive-wins" semantics: once a parent sets allow_downgrade=true
+// a child that sets allow_downgrade=false cannot revoke it within the same inheritance
+// pass. This is consistent with other bool fields in applyConfigurationWithSource and
+// is deliberate policy for this security control. (Issue #2260)
+func TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	parentSrc := &InheritanceSource{Source: "root", TenantID: "root"}
+	parentCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			Upgrade: stewardconfig.UpgradeConfig{AllowDowngrade: true},
+		},
+	}
+	ir.applyConfigurationWithSource(effective, parentCfg, parentSrc)
+	require.True(t, effective.Config.Steward.Upgrade.AllowDowngrade, "parent sets allow_downgrade=true")
+
+	// Child explicitly sets allow_downgrade=false (zero-value for bool) — it cannot
+	// revoke the parent-granted permission via applyConfigurationWithSource.
+	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
+	childCfg := &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{
+			Upgrade: stewardconfig.UpgradeConfig{AllowDowngrade: false},
+		},
+	}
+	ir.applyConfigurationWithSource(effective, childCfg, childSrc)
+
+	assert.True(t, effective.Config.Steward.Upgrade.AllowDowngrade,
+		"more-permissive-wins: child false cannot revoke parent true")
+	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.allow_downgrade"],
+		"source must remain the parent that set the permissive value")
+}
