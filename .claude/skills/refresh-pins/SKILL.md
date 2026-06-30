@@ -66,6 +66,7 @@ For each pin (run in parallel where independent — separate Bash calls in one a
    done
    ```
    Then for each artifact URL, download, unzip, and grep the SARIF for `"Installed Version": "<current_pin>"`. A match means the gate is currently failing on this exact pin → flag for cooldown override.
+4. **MCP pins only (`kind: mcp`, e.g. serena)** — research the **consumed-tool delta**: the set of `mcp__<server>__<tool>` names we use (`grep -rhoE 'mcp__<server>__[a-z_]+' .claude/agents/ .mcp.json | sort -u`) versus any tool renamed/removed/signature-changed between `current` and `latest` (WebFetch the release notes for each intervening tag). This is what Phase 3 needs to classify the bump as mechanical vs. breaking. Release notes are also the CVE source for these pins (GHSA rarely resolves a git-installed server; `ecosystem`/`package` are null).
 
 ## Phase 3: Justify (apply the decision matrix)
 
@@ -88,6 +89,8 @@ If `$ARGUMENTS` started with `--urgent`, force BUMP NOW for the named pin regard
 ## Phase 4: Create stories
 
 For each pin with verdict BUMP or BUMP NOW:
+
+> **`kind: mcp` pins** carry an extra blast-radius classification (decision-matrix.md "MCP server pins"). If the consumed-tool delta (Phase 2 step 4) shows a tool we use was renamed/removed/changed, this is a **REWIRE story** — expand the scope to every `.claude/agents/*.md` that names the tool (allowlist + prose) plus `.mcp.json`, title it `deps: rewire <server> ... (breaking: ...)`, require a fresh-spawn smoke test in the ACs, and mark it **not auto-mergeable** (human-reviewed). A non-breaking `mcp` bump uses the standard one-line template below.
 
 1. Read `assets/story-template.md` (lazy load)
 2. Substitute placeholders:
