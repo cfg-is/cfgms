@@ -145,13 +145,18 @@ The git storage provider was removed in Issue #664. Existing deployments running
 
 **One-shot migration command:**
 
+Use the general-purpose migration path (`cfg migrate --provider storage`) or the legacy alias
+`cfg storage migrate`; both delegate through the same provider-agnostic migration seam (Issue #2258):
+
 ```bash
-cfg storage migrate \
+cfg migrate --provider storage \
   --from git \
   --to flatfile \
   --git-root  /var/lib/cfgms/git-storage \
   --flatfile-root /var/lib/cfgms/flatfile
 ```
+
+`cfg storage migrate` also works and delegates to the same seam when a `storage` migrator is registered.
 
 What this does:
 

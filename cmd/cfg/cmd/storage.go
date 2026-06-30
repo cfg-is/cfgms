@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cfgis/cfgms/pkg/migrate"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -74,7 +75,39 @@ func init() {
 }
 
 // runStorageMigrate performs the storage migration.
+// It first checks whether a "storage" migrator is registered in pkg/migrate
+// (wired by S2 and later stories). If found, it delegates to that migrator so
+// all provider-agnostic migration logic flows through the central seam. When no
+// "storage" migrator is registered (S1-only), it falls back to the inline git
+// migration logic below to preserve backward compatibility.
 func runStorageMigrate(cmd *cobra.Command, args []string) error {
+	if factory, err := migrate.Lookup("storage"); err == nil {
+		m, err := factory(migrateFrom, migrateTo)
+		if err != nil {
+			return fmt.Errorf("storage migrator: %w", err)
+		}
+		ctx := context.Background()
+		report, err := m.Run(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Migration complete:")
+		total := 0
+		for store, count := range report.Counts {
+			fmt.Printf("  %-30s %d records\n", store+":", count)
+			total += count
+		}
+		fmt.Printf("  %-30s %d records\n", "Total:", total)
+		if len(report.Errors) > 0 {
+			fmt.Println("\nWarnings (non-fatal):")
+			for store, werr := range report.Errors {
+				fmt.Printf("  %s: %v\n", store, werr)
+			}
+		}
+		return nil
+	}
+
+	// Fallback: inline git migration (no "storage" migrator registered yet).
 	if migrateFrom != "git" {
 		return fmt.Errorf("unsupported source provider %q; only 'git' is supported", migrateFrom)
 	}

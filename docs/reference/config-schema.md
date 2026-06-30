@@ -149,7 +149,7 @@ If no file is found, built-in defaults are used and environment variable overrid
 Setting `flatfile_root` and `sqlite_path` together activates the OSS composite storage manager
 (flat-file + SQLite). If only one is set the provider falls through to the single-provider path.
 
-The `git` provider is deprecated. Migrate with: `cfg storage migrate --from git --to flatfile`
+The `git` provider is deprecated. Migrate with: `cfg migrate --provider storage --from git --to flatfile` (or the legacy alias `cfg storage migrate --from git --to flatfile`)
 
 **Environment overrides for `storage`:**
 
@@ -407,7 +407,7 @@ chosen provider.
 | `sqlite` | Supported | Provider-specific (see provider documentation) |
 | `git` | **Deprecated** | `path`, `url`, `branch`, `username`, `password`, `token` |
 
-Migrate away from git: `cfg storage migrate --from git --to flatfile`
+Migrate away from git: `cfg migrate --provider storage --from git --to flatfile` (or `cfg storage migrate --from git --to flatfile`)
 
 ### Logging providers (controller)
 
