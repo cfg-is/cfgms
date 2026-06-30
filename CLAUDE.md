@@ -259,9 +259,17 @@ docs/          # Documentation
 - Committing test artifacts — use `git add <specific files>`
 - Logging unsanitized input — use `logging.SanitizeLogValue()`
 
-### Code Navigation (serena MCP)
+### Code Navigation (serena MCP + grep)
 
-When the `serena` MCP server is connected (interactive, PO, and dev-agent sessions), prefer its semantic tools over text search for navigating and editing Go code: `find_symbol`, `get_symbols_overview`, and `find_referencing_symbols` to locate code; `replace_symbol_body` / `insert_after_symbol` / `insert_before_symbol` for symbol-level edits. They are more precise and burn far less context than `Grep` + `Read` + whole-file `Edit`. Fall back to grep/read only when the target isn't a code symbol (config, docs, generated files) or serena is unavailable. Serena ships its own usage manual — call its `initial_instructions` tool at the start of a coding task to load it.
+Use the right tool per question; never trust one weak query for "what's been done" (this is measured — see [code-navigation-tooling](docs/development/code-navigation-tooling.md)). Each tool has a distinct, reproducible failure mode, so combine them:
+
+- **Structure → serena.** `get_symbols_overview` / `find_symbol` for a file/type's surface + signatures; `replace_symbol_body` / `insert_after_symbol` / `insert_before_symbol` for symbol-level edits. Cheap, precise, low-context — serena's strongest use.
+- **Every caller / usage / import → grep, exhaustively.** serena's `find_referencing_symbols` / `find_implementations` are *hints, not a complete set*: they (1) under-report on a **cold gopls index** — prime gopls first (a `get_symbols_overview` on the target + likely caller packages) and union a re-run; (2) `find_implementations` includes test doubles — filter them and reconcile with a `var _ Iface = (*T)(nil)` grep. Always cross-check a "complete caller/impl set" with grep.
+- **gopls sees ONE build configuration.** Linux dev containers default to `GOOS=linux`, so serena is **blind to `//go:build windows` code** (verified: a Linux gopls drops `pollClusterStatus`→`getCluster` because `cluster_windows.go` is excluded from the package). For build-tagged packages — the hyperv `*_windows.go` cluster/monitor/PS-dispatch surface especially — **grep is authoritative; serena is not.** grep reads text regardless of `GOOS`.
+- **"Real or a stub?" → read the body** + grep stub markers (`ErrNotImplemented`, `panic("TODO")`, bare `return nil`) + run the real gate (`go vet`, `make check-architecture`, the tests). A symbol existing is not evidence it's implemented; not having read it is not evidence it's a stub. When an authoritative gate exists, run it instead of inferring.
+- **Calibrate confidence to verification depth.** One grep keyword or one relational query → *low* confidence until cross-verified; "read the body and two independent methods agree" → *high*.
+
+Call serena's `initial_instructions` at the start of a coding task to load its manual.
 
 ## Desired State Development (DSD)
 
