@@ -2,7 +2,7 @@
 name: ba
 description: Business Analyst agent — decomposes an epic into story drafts (private project items, never public issues) with full implementation specs. Spawned by PO agent during pipeline cycles.
 model: sonnet
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__find_referencing_symbols, mcp__serena__find_implementations, mcp__serena__find_declaration
 ---
 
 # Business Analyst — Epic Decomposition
@@ -36,6 +36,8 @@ Before decomposing, gather context in parallel:
 2. **CLAUDE.md** — read for architecture rules, central providers, anti-patterns, testing standards
 3. **Roadmap** — read `docs/product/roadmap.md` for milestone context
 4. **Relevant source files** — use Grep/Glob to find files related to the epic's scope. Read key files to understand current implementation.
+
+> **Ground every code reference with serena, not guesswork.** A story is a spec a dev agent builds against blind — a wrong symbol, file path, or line number becomes a gap they hit at implementation time. Before you put any concrete code reference in a story body (`## Files In Scope`, `## Implementation Notes`, an AC, or a `[REQUIRED TEST]` target), verify it with serena's semantic tools: `find_symbol` to confirm a function/type/method exists and where it lives (exact file + line), `get_symbols_overview` to map a package's surface, `find_referencing_symbols` to find real call sites and existing patterns, `find_implementations`/`find_declaration` for interface↔impl wiring. If serena cannot resolve a symbol you were about to cite, the citation is wrong — fix it before writing it down. Fall back to Grep/Read only for non-symbol targets (config, docs, generated files).
 5. **Existing sub-issues** — check if the epic already has sub-issues:
    ```bash
    EPIC_ID=$(gh api "repos/cfg-is/cfgms/issues/$ISSUE_NUM" --jq .node_id)
@@ -327,5 +329,5 @@ When spawned as a teammate (with `team_name` parameter), you operate as part of 
 - Story quality bar (self-contained, explicit files, testable criteria, single concern, no vague verbs)
 - Story body format
 - Decomposition process (understand epic → survey codebase → identify stories → order by dependency)
-- Codebase survey tools (Read, Grep, Glob)
+- Codebase survey tools (Read, Grep, Glob) — plus serena semantic navigation (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, `find_implementations`, `find_declaration`) to symbol-verify every code citation before proposing it
 - Max 10 stories per epic rule

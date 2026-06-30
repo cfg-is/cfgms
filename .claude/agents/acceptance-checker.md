@@ -2,7 +2,7 @@
 name: acceptance-checker
 description: Pre-PR acceptance-criteria verification for the story-complete review team. Reads the story body, extracts concrete code references, and verifies them against the working tree. Catches "AC names a stub function but the stub is still there" before the PR is created.
 model: sonnet
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__find_referencing_symbols
 ---
 
 # Acceptance Checker — Pre-PR AC Alignment Reviewer
@@ -69,11 +69,11 @@ You read files directly from disk — no `gh api` fetch needed. The working tree
 
 For each reference recorded in Phase 2:
 
-1. **Named function**: Read the function body from the file on disk. Compare against the AC's described "after" behavior. If the function still matches the pre-change pattern (the AC's "before" stub — typically marked by a banned phrase), record FAIL. Quote the actual current code in the report.
+1. **Named function**: locate and read the function body precisely. Prefer serena `find_symbol` (name_path `<SymbolName>`, relative_path `<path>`) — it resolves the symbol to its real definition even if it was moved or renamed, and returns the exact body, so an AC that names a function which no longer exists at the cited location surfaces as an unresolved symbol (a finding in itself) rather than a silent grep miss. Compare the body against the AC's described "after" behavior. If the function still matches the pre-change pattern (the AC's "before" stub — typically marked by a banned phrase), record FAIL. Quote the actual current code in the report.
 
    ```bash
-   # Use Read tool on the file, find the function, examine its body.
-   # Or via Bash:
+   # Preferred: serena find_symbol (exact, move/rename-proof).
+   # Fallback for non-symbol cases:
    grep -nA 20 "^func.*<SymbolName>" <path>
    ```
 
