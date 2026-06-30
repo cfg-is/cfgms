@@ -153,7 +153,7 @@ Tracked under the epic referenced in [Code Changes Required](#code-changes-requi
 ### Mitigations
 
 - **Backup guidance**: flat-file provider ships with a documented `cfg backup` CLI helper that wraps standard tools (tar, restic). Listed in the provider's README.
-- **Migration tool**: sub-issue B delivers `cfg storage migrate --from git --to flatfile|postgres` before the git provider is removed.
+- **Migration tool**: sub-issue B delivers `cfg migrate --provider storage --from git --to flatfile|postgres` (also available as `cfg storage migrate --from git --to flatfile|postgres`) before the git provider is removed.
 - **Git-sync reliability**: idempotent imports, per-scope error isolation, exponential backoff on origin failure. Covered in the git-sync sub-issue's acceptance criteria.
 
 ## Alternatives Considered
