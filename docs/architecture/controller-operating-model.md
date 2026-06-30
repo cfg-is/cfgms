@@ -202,6 +202,7 @@ For each steward, the controller tracks:
 | Compliance status | Convergence result reports | After each convergence run |
 | DNA hash | Heartbeat payload | With each heartbeat |
 | DNA snapshot | Full sync (data plane) or deltas (control plane) | On hash mismatch, initial registration, or as changes occur |
+| Steward version | Heartbeat `Version` field + `steward.version` DNA attribute | With each heartbeat and DNA delta |
 | Performance metrics | Steward metric uploads | Periodic + on-demand |
 
 ### Heartbeat Monitoring
@@ -273,6 +274,35 @@ The controller can send commands to stewards over the gRPC control plane service
 | `execute_script` | Run an ad-hoc script (outside the cfg) — [GAP: not implemented as a control-plane command — see issue #1523. Script execution is available via the REST API (`POST /api/v1/stewards/{id}/scripts`).] |
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
+
+### Steward Auto-Upgrade via `desired_version` (Issue #2260)
+
+Operators pin the steward version fleet-wide or per-tenant via the `steward.upgrade` cfg block:
+
+```yaml
+steward:
+  upgrade:
+    desired_version: "v1.4.2"
+    allow_downgrade: false   # default; set true to permit rollback
+```
+
+**Inheritance:** `desired_version` and `allow_downgrade` flow through the normal cfg-inheritance tree (root → tenant → group → device). A child setting overrides the parent. Absence at a level means the parent value is inherited unchanged.
+
+**How a steward converges to `desired_version`:**
+
+1. The controller pushes a new steward binary to the endpoint via the `push_steward_binary` data-plane command. The steward downloads, verifies, and stages the binary under `{Root}/versions/{version}/{binaryName}`, then invokes the launcher's `swap` sub-command. On success, the staged version and path are recorded internally (`lastStagedVersion` / `lastStagedBinaryPath`).
+2. On every cfg-convergence cycle (`TriggerConvergence`), the steward reads `desired_version` from its last received cfg. If it differs from the running version, the steward re-invokes the launcher swap against the already-staged binary without downloading again.
+3. If `allow_downgrade` is `false` (the default) and `desired_version` is older than the running version, the swap is blocked. Set `allow_downgrade: true` to permit explicit rollbacks.
+
+**Downgrade guard:**
+- Blocked unless `allow_downgrade` is `true` in either the running cfg or the controller-synced config cache (`upgradeAllowDowngrade`).
+- This prevents accidental downgrades from misconfigured cfg pushes.
+
+**Version tracking in DNA and heartbeats:**
+- `steward.version` is injected into every DNA delta before publish. The controller stores it as a DNA attribute and exposes it in the fleet list API (`GET /api/v1/stewards`).
+- Every heartbeat now carries a `Version` field, which `RecordHeartbeat` uses to keep the in-memory fleet registry current.
+
+**Fleet visibility:** the steward API list response includes `version` (from `steward.version` DNA attribute) alongside `id`, `status`, and `last_seen`. Operators can filter and audit version skew across the fleet without a separate inventory tool.
 
 ## Orchestration
 

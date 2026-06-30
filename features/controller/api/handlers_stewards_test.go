@@ -363,6 +363,37 @@ func TestHandleListStewards_HTTPRegistration_NoDuplicates(t *testing.T) {
 	assert.Equal(t, "quarantined", resp.Data[0].Status)
 }
 
+// TestHandleListStewards_FleetQuery_VersionFromDNAAttributes verifies that the
+// filtered fleet query path (handleListStewards with a filter) populates the
+// Version field in StewardInfo from the steward.version DNA attribute. (Issue #2260)
+func TestHandleListStewards_FleetQuery_VersionFromDNAAttributes(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	// Register a steward whose DNA includes steward.version — this simulates
+	// what a steward publishes after the Issue #2260 change.
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname":        "host-versioned",
+		"os":              "linux",
+		"steward.version": "v1.4.2",
+	})
+
+	// Use a filter to trigger the fleetQuery code path (not the no-filter path).
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1, "exactly one steward must match the os=linux filter")
+	assert.Equal(t, "v1.4.2", resp.Data[0].Version,
+		"Version must be populated from steward.version DNA attribute in the filtered fleet query path")
+}
+
 // noopSender is a minimal transport stub that satisfies registry.MessageSender
 // so that registry.Register's nil-Sender guard passes in tests. It is not a
 // mock of a CFGMS business component — MessageSender is a low-level transport

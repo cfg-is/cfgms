@@ -315,6 +315,22 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.drift_mode"] = source
 	}
 
+	// Upgrade settings — carry desired_version and allow_downgrade through the
+	// tenant hierarchy so MSP-level upgrade policy propagates to child stewards.
+	if config.Steward.Upgrade.DesiredVersion != "" {
+		effective.Config.Steward.Upgrade.DesiredVersion = config.Steward.Upgrade.DesiredVersion
+		effective.Sources["steward.upgrade.desired_version"] = source
+	}
+	// allow_downgrade uses "more-permissive-wins" semantics (a child cannot
+	// revoke a parent-granted permission within a single inheritance pass).
+	// This matches the existing bool-inheritance pattern in this function and
+	// is intentional: MSPs opt tenants into downgrade by setting it true;
+	// steward-level override is not supported for this field.
+	if config.Steward.Upgrade.AllowDowngrade {
+		effective.Config.Steward.Upgrade.AllowDowngrade = true
+		effective.Sources["steward.upgrade.allow_downgrade"] = source
+	}
+
 	// Apply logging settings
 	if config.Steward.Logging.Level != "" {
 		effective.Config.Steward.Logging.Level = config.Steward.Logging.Level

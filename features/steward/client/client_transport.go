@@ -183,6 +183,14 @@ type TransportClient struct {
 	// From steward.cfg upgrade.allow_downgrade. Protected by mu. (Issue #1943)
 	upgradeAllowDowngrade bool
 
+	// lastStagedVersion and lastStagedBinaryPath record the version and on-disk
+	// path of the binary most recently staged by handlePushStewardBinary.
+	// TriggerConvergence uses them to re-issue the launcher swap when the
+	// desired_version config key is set and the running binary hasn't changed yet.
+	// Protected by mu. (Issue #2260)
+	lastStagedVersion    string
+	lastStagedBinaryPath string
+
 	// launcherSwapFunc is the function invoked to call the launcher swap subcommand.
 	// When nil the default exec.CommandContext implementation is used. Injectable
 	// for testing so tests do not require the launcher binary on disk. (Issue #1943)
@@ -975,6 +983,12 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// cannot set it (the local-file loading path clears the field).
 	executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
 
+	// Thread allow_downgrade from the controller-delivered cfg so both
+	// handlePushStewardBinary and triggerVersionConvergence use the current value.
+	c.mu.Lock()
+	c.upgradeAllowDowngrade = goConfig.Steward.Upgrade.AllowDowngrade
+	c.mu.Unlock()
+
 	// Marshal to YAML for executor.
 	configYAML, err := yaml.Marshal(goConfig)
 	if err != nil {
@@ -1119,6 +1133,7 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		DNAHash:         currentDNAHash,
 		ActiveSessions:  activeSessions,
 		ConnectionState: connectionState,
+		Version:         version.Short(),
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {
@@ -1137,6 +1152,15 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 // the data plane.
 // If the controller is unreachable the event is queued locally and delivered on reconnect (Issue #419).
 func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[string]string, configHash, syncFingerprint string) error {
+	// Always inject the running binary version so the controller fleet view is
+	// always current. Copy to avoid mutating the caller's map. (Issue #2260)
+	enriched := make(map[string]string, len(dnaAttrs)+1)
+	for k, v := range dnaAttrs {
+		enriched[k] = v
+	}
+	enriched["steward.version"] = version.Short()
+	dnaAttrs = enriched
+
 	// Always update local DNA state first so the hash is available for heartbeats
 	// even when the control plane is temporarily unavailable.
 	c.dnaMu.Lock()
@@ -1359,7 +1383,89 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 	} else {
 		c.logger.Info("Convergence run completed", "version", lastVersion)
 	}
+
+	// Version auto-convergence: when desired_version is set and differs from
+	// the running binary, retry the launcher swap for the already-staged binary.
+	// Errors are non-fatal — the next convergence tick will retry. (Issue #2260)
+	var parsedCfg stewardconfig.StewardConfig
+	if unmarshalErr := yaml.Unmarshal(lastCfg, &parsedCfg); unmarshalErr == nil {
+		c.triggerVersionConvergence(ctx, parsedCfg.Steward.Upgrade.DesiredVersion, parsedCfg.Steward.Upgrade.AllowDowngrade)
+	}
+
 	return nil
+}
+
+// triggerVersionConvergence checks whether the running binary version matches
+// the controller-declared desired_version and, if not, re-issues the launcher
+// swap using the last staged binary. It is idempotent: a no-op when versions
+// already match, when desired_version is absent, or when no binary has been
+// staged for the desired version yet. (Issue #2260)
+func (c *TransportClient) triggerVersionConvergence(ctx context.Context, desiredVersion string, cfgAllowDowngrade bool) {
+	if desiredVersion == "" {
+		return
+	}
+
+	if !stewardBinaryVersionRe.MatchString(desiredVersion) {
+		c.logger.Warn("desired_version has invalid format; skipping version convergence",
+			"desired_version", logging.SanitizeLogValue(desiredVersion))
+		return
+	}
+
+	runningVersion := version.Short()
+	if desiredVersion == runningVersion {
+		return
+	}
+
+	// Downgrade guard: refuse if desired_version is older and downgrade is not
+	// permitted. cfgAllowDowngrade covers inheritance from the controller cfg;
+	// c.upgradeAllowDowngrade covers the initial local steward.cfg value.
+	c.mu.RLock()
+	allowDowngrade := c.upgradeAllowDowngrade || cfgAllowDowngrade
+	stagedVersion := c.lastStagedVersion
+	stagedPath := c.lastStagedBinaryPath
+	lPathOverride := c.launcherPathOverride
+	c.mu.RUnlock()
+
+	if !allowDowngrade && !isNewerVersion(desiredVersion, version.Version) {
+		c.logger.Warn("desired_version is not newer than running version and downgrade is not permitted",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"running_version", runningVersion)
+		return
+	}
+
+	if stagedVersion != desiredVersion || stagedPath == "" {
+		c.logger.Info("Version convergence: desired_version differs from running; awaiting controller binary push",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"running_version", runningVersion,
+			"staged_version", logging.SanitizeLogValue(stagedVersion))
+		return
+	}
+
+	lPath := lPathOverride
+	if lPath == "" {
+		lPath = launcherPath()
+	}
+
+	c.logger.Info("Version convergence: retrying launcher swap for desired version",
+		"desired_version", logging.SanitizeLogValue(desiredVersion),
+		"running_version", runningVersion)
+
+	if err := c.execLauncherSwap(ctx, lPath, desiredVersion, stagedPath); err != nil {
+		c.logger.Warn("Version convergence: launcher swap failed",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"error", err)
+		return
+	}
+
+	c.logger.Info("Version convergence: launcher swap succeeded",
+		"desired_version", logging.SanitizeLogValue(desiredVersion))
+
+	c.mu.RLock()
+	launcherManaged := c.launcherManaged
+	c.mu.RUnlock()
+	if launcherManaged {
+		c.scheduleGracefulShutdownAfterSwap()
+	}
 }
 
 // StartDNARefreshLoop starts a background goroutine that re-collects system DNA

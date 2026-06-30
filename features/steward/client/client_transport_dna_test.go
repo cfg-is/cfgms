@@ -18,6 +18,7 @@ import (
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -260,8 +261,10 @@ func TestPublishDNAUpdate_NoDeltaSkipsPublish(t *testing.T) {
 	c.stewardID = "steward-1"
 	c.tenantID = "tenant-1"
 	// Seed state so delta is empty on second call.
+	// Include steward.version because PublishDNAUpdate always enriches the
+	// incoming attrs with the running version before computing the delta.
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = map[string]string{"k": "v"}
+	c.lastPublishedDNA = map[string]string{"k": "v", "steward.version": version.Short()}
 	c.currentDNAHash = "some-hash"
 	c.dnaMu.Unlock()
 
@@ -357,7 +360,9 @@ func TestDNARefreshLoop_NoDeltaSkipsPublish(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
 	// Seed last-published DNA so the collector returns the same snapshot.
-	attrs := map[string]string{"hostname": "host-a", "os": "linux"}
+	// Include steward.version because PublishDNAUpdate enriches incoming attrs
+	// with the running version; the seed must match to produce an empty delta.
+	attrs := map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
 	c.dnaMu.Lock()
 	c.lastPublishedDNA = copyStringMap(attrs)
 	c.dnaMu.Unlock()
@@ -387,8 +392,9 @@ func TestDNARefreshLoop_ChangedAttributePublishesOne(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
 	// Seed a prior snapshot; collector will return a single changed value.
+	// Include steward.version so only the hostname change produces a delta.
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = map[string]string{"hostname": "host-a", "os": "linux"}
+	c.lastPublishedDNA = map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
 	c.dnaMu.Unlock()
 
 	stub := &stubDNACollector{attrs: map[string]string{"hostname": "host-b", "os": "linux"}}
@@ -431,7 +437,8 @@ func TestDNARefreshLoop_StopsOnContextCancel(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
 	// Seed prior state so the first tick produces no event (stable baseline).
-	initial := map[string]string{"os": "linux"}
+	// Include steward.version to match what PublishDNAUpdate enriches the attrs with.
+	initial := map[string]string{"os": "linux", "steward.version": version.Short()}
 	c.dnaMu.Lock()
 	c.lastPublishedDNA = copyStringMap(initial)
 	c.dnaMu.Unlock()
@@ -465,7 +472,8 @@ func TestDNARefreshLoop_StopsOnDNARefreshStop(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
 	// Seed prior state so the first tick produces no event (stable baseline).
-	initial := map[string]string{"os": "linux"}
+	// Include steward.version to match what PublishDNAUpdate enriches the attrs with.
+	initial := map[string]string{"os": "linux", "steward.version": version.Short()}
 	c.dnaMu.Lock()
 	c.lastPublishedDNA = copyStringMap(initial)
 	c.dnaMu.Unlock()

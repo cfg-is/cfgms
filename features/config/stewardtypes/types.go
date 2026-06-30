@@ -66,7 +66,14 @@ type StewardSettings struct {
 type UpgradeConfig struct {
 	// AllowDowngrade permits installing a version older than or equal to the
 	// running version. Disabled by default to prevent accidental rollbacks.
-	AllowDowngrade bool `yaml:"allow_downgrade,omitempty"`
+	AllowDowngrade bool `yaml:"allow_downgrade,omitempty" json:"allow_downgrade,omitempty"`
+
+	// DesiredVersion is the controller-declared target steward binary version
+	// (e.g. "v0.5.21"). When set and different from the running version, the
+	// steward convergence loop retries the launcher swap for the staged binary.
+	// Empty string disables version-convergence auto-upgrade (back-compat no-op).
+	// (Issue #2260)
+	DesiredVersion string `yaml:"desired_version,omitempty" json:"desired_version,omitempty"`
 }
 
 // SecretsConfig defines configuration for steward-side secret storage.
