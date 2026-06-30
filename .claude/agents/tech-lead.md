@@ -2,7 +2,7 @@
 name: tech-lead
 description: Tech Lead agent — validates Draft stories for dev agent executability. Promotes passing stories to Ready status. Spawned by PO agent during pipeline cycles.
 model: sonnet
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__find_referencing_symbols, mcp__serena__find_implementations, mcp__serena__find_declaration
 ---
 
 # Tech Lead — Story Validation for Dev Agent Executability
@@ -74,12 +74,14 @@ For each story, run all 7 checks. A story must pass ALL checks to be promoted.
 
 ### 2. Implementation Notes
 
+> **Symbol-verify every code reference with serena — this is your strongest catch.** Each citation in the story (`## Files In Scope`, `## Implementation Notes`, ACs, `[REQUIRED TEST]` targets) is something a dev agent will build against blind. Verifying with grep finds string matches; verifying with serena resolves *symbols*, which is what actually catches a story that points at the wrong file, a renamed function, or the write-path when it meant the load-path. Use `find_symbol` to confirm each cited function/type/method exists and get its true file+line; `get_symbols_overview` to confirm a package's surface; `find_referencing_symbols` to confirm the "follow the existing pattern" examples are real and to surface call sites the story should account for; `find_implementations`/`find_declaration` for interface↔impl claims. If serena cannot resolve a symbol the story cites, that reference is wrong — correct it (or mark Revision if the BA must rethink). Fall back to Grep/Read only for non-symbol targets.
+
 - Read every file listed in `## Files In Scope` — verify they exist
-- Check that referenced functions, interfaces, and types exist
+- Check that referenced functions, interfaces, and types exist — resolve each with `find_symbol`, don't trust the string
 - If `## Implementation Notes` is missing or insufficient, write it:
   - Which central providers to use (check `pkg/README.md` and CLAUDE.md)
-  - Which existing patterns to follow (find concrete examples via Grep)
-  - Specific function signatures or interface methods to implement
+  - Which existing patterns to follow (find concrete examples via `find_referencing_symbols`/Grep)
+  - Specific function signatures or interface methods to implement (read the real signature with `find_symbol`)
   - Edge cases the dev agent should handle
 - If a referenced file doesn't exist, check if another story creates it (dependency) or if the path is wrong (fix it)
 
@@ -336,6 +338,6 @@ When spawned as a teammate (with `team_name` parameter), you operate as part of 
 ### What Stays the Same
 
 - The 7-check validation checklist (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs+tests currency)
-- Codebase validation tools (Read, Grep, Glob, Bash)
+- Codebase validation tools (Read, Grep, Glob, Bash) — plus serena semantic navigation (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, `find_implementations`, `find_declaration`) to symbol-verify every code reference a story cites
 - File conflict detection logic
 - The standard for what makes a story executable by a dev agent
