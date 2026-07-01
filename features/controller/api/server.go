@@ -568,10 +568,12 @@ func (s *Server) setupRouter() {
 	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
 	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
 
-	// Cluster node lifecycle endpoints (Issue #2283)
+	// Cluster node lifecycle endpoints (Issue #2283, Issue #2288)
 	clusterRouter := api.PathPrefix("/cluster").Subrouter()
 	clusterRouter.Handle("/nodes/{id}/drain",
 		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDrain))).Methods("POST")
+	clusterRouter.Handle("/nodes/{id}/decommission",
+		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDecommission))).Methods("POST")
 
 	// Compliance reporting endpoints (Story #212)
 	// Steward-specific compliance endpoints

@@ -99,6 +99,37 @@ and an error message. The command prints the resulting state on success:
 Node <node-id> is now decommissioned.
 ```
 
+**Timeout behaviour.** The controller waits up to five minutes for all active
+steward sessions on the local node to reach zero before marking the node
+decommissioned. If sessions have not drained by the end of that window the
+node is force-decommissioned and the controller logs a warning at `WARN` level:
+
+```
+decommission timeout: sessions still active on node, proceeding
+  active_sessions=<n>  node_id=<node-id>
+```
+
+Force-decommission on timeout is by design — it bounds the time a rolling
+upgrade step can block while still allowing a clean drain in the common case.
+
+### 6a. Verify the node is excluded from active nodes
+
+After the decommission command returns, confirm the node no longer appears in
+the active node list (available via the cluster status command in a future
+story). You can also query the API directly:
+
+```bash
+# Must return an empty list or a list that does not include <node-id>
+curl --cert ~/.config/cfgms/admin.crt \
+     --key  ~/.config/cfgms/admin.key \
+     --cacert ~/.config/cfgms/ca.crt \
+     https://controller.example.com/api/v1/cluster/nodes
+```
+
+A decommissioned node has state `"decommissioned"` and is not returned by
+`ListActiveNodes`. If the node still appears as active, do not proceed — check
+the controller logs for errors.
+
 ### 7. Repeat for each remaining node
 
 Repeat steps 2–6 for each remaining node, one at a time.
