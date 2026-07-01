@@ -482,3 +482,98 @@ No connections configured.
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit a JSON array instead of a human-readable table |
+
+## Workflow Management
+
+`cfg workflow` subcommands manage workflow definitions and their executions on the controller.
+
+### cfg workflow list
+
+List all workflow definitions registered on the controller.
+
+```bash
+cfg workflow list --url=https://controller.example.com
+cfg workflow list --url=https://controller.example.com --api-key=mykey
+```
+
+Prints a plain-text table with columns: NAME, VERSION, STEPS.
+
+Example output:
+
+```
+NAME         VERSION  STEPS
+deploy-ring  1.2.0    4
+sync-entra   2.0.0    7
+```
+
+When no workflows are registered, exits 0 and prints:
+
+```
+No workflows registered.
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--url` | — | Controller API URL (required) |
+| `--api-key` | — | API key for authentication |
+| `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+
+### cfg workflow status
+
+Show the status of a single workflow execution.
+
+```bash
+cfg workflow status <execution-id> --workflow <name> --url=https://controller.example.com
+```
+
+The `<execution-id>` is returned by `cfg workflow run`.
+
+Example output:
+
+```
+execution_id:  exec_1782879897336049056_1
+workflow:      deploy-ring
+status:        running
+current_step:  step-canary
+started_at:    2026-07-01T10:00:00Z
+error:         -
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workflow` | — | Workflow name (required) |
+| `--url` | — | Controller API URL (required) |
+| `--api-key` | — | API key for authentication |
+| `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+
+### cfg workflow cancel
+
+Cancel a running workflow execution.
+
+```bash
+cfg workflow cancel <execution-id> --workflow <name> --url=https://controller.example.com
+```
+
+Returns an error if the execution is already in a terminal state (completed, failed, or cancelled).
+
+On success:
+
+```
+Cancelled execution exec_1782879897336049056_1
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workflow` | — | Workflow name (required) |
+| `--url` | — | Controller API URL (required) |
+| `--api-key` | — | API key for authentication |
+| `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
