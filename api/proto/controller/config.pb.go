@@ -772,10 +772,9 @@ type StewardSettings struct {
 	ConvergeInterval *durationpb.Duration `protobuf:"bytes,7,opt,name=converge_interval,json=convergeInterval,proto3" json:"converge_interval,omitempty"`
 	// script_signing configures script signing policy and trust configuration.
 	ScriptSigning *ScriptSigningConfig `protobuf:"bytes,8,opt,name=script_signing,json=scriptSigning,proto3" json:"script_signing,omitempty"`
-	// DesiredVersion is the ring-resolved target steward binary version (Issue #2271).
-	// Not yet in the wire descriptor — pending protoc regeneration after proto is updated.
-	// Populated by ToProto / read by FromProto via direct struct access only.
-	DesiredVersion string         `json:"desired_version,omitempty"`
+	// desired_version is the ring-resolved target steward binary version (Issue #2271).
+	// When set, the steward convergence loop upgrades or downgrades to this version.
+	DesiredVersion string `protobuf:"bytes,9,opt,name=desired_version,json=desiredVersion,proto3" json:"desired_version,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -884,8 +883,6 @@ type ScriptSigningConfig struct {
 	TrustedKeys []*TrustedKeyRef `protobuf:"bytes,3,rep,name=trusted_keys,json=trustedKeys,proto3" json:"trusted_keys,omitempty"`
 	// allow_public_ca, when true alongside trusted_keys_and_public mode, also accepts public CAs.
 	AllowPublicCa bool `protobuf:"varint,4,opt,name=allow_public_ca,json=allowPublicCa,proto3" json:"allow_public_ca,omitempty"`
-	// Deprecated: reserved in proto (field 5). Keep for binary-descriptor compatibility until protoc regeneration.
-	ScriptRepoUrl string `protobuf:"bytes,5,opt,name=script_repo_url,json=scriptRepoUrl,proto3" json:"script_repo_url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -946,14 +943,6 @@ func (x *ScriptSigningConfig) GetAllowPublicCa() bool {
 		return x.AllowPublicCa
 	}
 	return false
-}
-
-// Deprecated: GetScriptRepoUrl is reserved; use ScriptPrivilegeMetadata in the controller API instead.
-func (x *ScriptSigningConfig) GetScriptRepoUrl() string {
-	if x != nil {
-		return x.ScriptRepoUrl
-	}
-	return ""
 }
 
 // TrustedKeyRef identifies a trusted signing key or certificate.
@@ -1390,7 +1379,7 @@ const file_controller_config_proto_rawDesc = "" +
 	"\amodules\x18\x03 \x03(\v20.cfgms.api.controller.StewardConfig.ModulesEntryR\amodules\x1a:\n" +
 	"\fModulesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb6\x04\n" +
 	"\x0fStewardSettings\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\tR\x04mode\x12!\n" +
@@ -1399,17 +1388,17 @@ const file_controller_config_proto_rawDesc = "" +
 	"\x0eerror_handling\x18\x05 \x01(\v2).cfgms.api.controller.ErrorHandlingConfigR\rerrorHandling\x12L\n" +
 	"\asecrets\x18\x06 \x03(\v22.cfgms.api.controller.StewardSettings.SecretsEntryR\asecrets\x12F\n" +
 	"\x11converge_interval\x18\a \x01(\v2\x19.google.protobuf.DurationR\x10convergeInterval\x12P\n" +
-	"\x0escript_signing\x18\b \x01(\v2).cfgms.api.controller.ScriptSigningConfigR\rscriptSigning\x1a:\n" +
+	"\x0escript_signing\x18\b \x01(\v2).cfgms.api.controller.ScriptSigningConfigR\rscriptSigning\x12'\n" +
+	"\x0fdesired_version\x18\t \x01(\tR\x0edesiredVersion\x1a:\n" +
 	"\fSecretsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe4\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\x01\n" +
 	"\x13ScriptSigningConfig\x12\x16\n" +
 	"\x06policy\x18\x01 \x01(\tR\x06policy\x12\x1d\n" +
 	"\n" +
 	"trust_mode\x18\x02 \x01(\tR\ttrustMode\x12F\n" +
 	"\ftrusted_keys\x18\x03 \x03(\v2#.cfgms.api.controller.TrustedKeyRefR\vtrustedKeys\x12&\n" +
-	"\x0fallow_public_ca\x18\x04 \x01(\bR\rallowPublicCa\x12&\n" +
-	"\x0fscript_repo_url\x18\x05 \x01(\tR\rscriptRepoUrl\"i\n" +
+	"\x0fallow_public_ca\x18\x04 \x01(\bR\rallowPublicCaJ\x04\b\x05\x10\x06R\x0fscript_repo_url\"i\n" +
 	"\rTrustedKeyRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
 	"\n" +

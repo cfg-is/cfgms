@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	protobuf "google.golang.org/protobuf/proto"
 )
 
 // TestToProtoFromProto_RoundTrip verifies that the basic StewardConfig fields
@@ -61,6 +63,42 @@ func TestToProtoFromProto_RoundTrip(t *testing.T) {
 	require.Len(t, restored.Resources, 1)
 	assert.Equal(t, "test-resource", restored.Resources[0].Name)
 	assert.Equal(t, "file", restored.Resources[0].Module)
+}
+
+// TestToProtoFromProto_DesiredVersion_WireRoundTrip verifies that the ring-resolved
+// desired_version survives a full gRPC wire round-trip (Marshal→Unmarshal), not merely
+// the in-process ToProto/FromProto struct copy. Regression guard for Issue #2271: the
+// field previously carried only a JSON struct tag with no protobuf tag or descriptor
+// entry, so it was silently dropped during wire marshaling — the in-process converter
+// tests passed while the field never reached the steward over gRPC.
+func TestToProtoFromProto_DesiredVersion_WireRoundTrip(t *testing.T) {
+	original := &StewardConfig{
+		Steward: StewardSettings{
+			ID:   "wire-steward",
+			Mode: ModeStandalone,
+			Upgrade: UpgradeConfig{
+				DesiredVersion: "v0.5.21",
+			},
+		},
+	}
+
+	msg, err := ToProto(original)
+	require.NoError(t, err)
+	require.Equal(t, "v0.5.21", msg.Steward.GetDesiredVersion())
+
+	// Marshal over the wire and back — the path gRPC actually uses. A missing
+	// protobuf tag/descriptor entry silently drops the field here.
+	wire, err := protobuf.Marshal(msg)
+	require.NoError(t, err)
+
+	decoded := &controller.StewardConfig{}
+	require.NoError(t, protobuf.Unmarshal(wire, decoded))
+	require.Equal(t, "v0.5.21", decoded.Steward.GetDesiredVersion(),
+		"desired_version must survive gRPC wire marshaling")
+
+	restored, err := FromProto(decoded)
+	require.NoError(t, err)
+	assert.Equal(t, "v0.5.21", restored.Steward.Upgrade.DesiredVersion)
 }
 
 // TestToProtoFromProto_Secrets verifies the Secrets field survives a round-trip.
