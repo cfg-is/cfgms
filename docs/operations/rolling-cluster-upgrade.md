@@ -39,9 +39,41 @@ Wait for the drain to complete. The command prints the resulting node state:
 Node <node-id> is now draining.
 ```
 
-### 3. Upgrade the binary on the drained node
+### 3. Verify the load balancer health gate
 
-SSH to the node and run the upgrade (see `controller-upgrade.md` for the full
+After drain, confirm `GET /api/v1/health` on the draining node returns HTTP 503.
+Poll the node directly (not through the load balancer):
+
+```bash
+curl -o /dev/null -w "%{http_code}\n" \
+    --cert ~/.config/cfgms/admin.crt \
+    --key ~/.config/cfgms/admin.key \
+    --cacert ~/.config/cfgms/ca.crt \
+    https://<node-host>:9080/api/v1/health
+# Expected: 503
+```
+
+The `"services"` field in the response body will include `"drain": "draining"`.
+The load balancer stops routing new steward connections once it sees the 503.
+
+### 4. Observe session drain
+
+Existing steward sessions established before the drain continue until they close
+naturally. Monitor the active session count until it reaches zero before
+stopping the process (optional but minimises reconnect storms):
+
+```bash
+# Run on the draining node — repeat until count is 0
+cfg controller status --url=https://<node-host>:9080
+```
+
+In environments where brief reconnect storms are acceptable, you can stop
+the controller immediately after the 503 is confirmed; stewards reconnect to
+remaining nodes within one heartbeat interval.
+
+### 5. Upgrade the binary on the drained node
+
+SSH to the node and run the upgrade (see [controller-upgrade.md](controller-upgrade.md) for the full
 single-node upgrade runbook):
 
 ```bash
@@ -50,7 +82,7 @@ cfg controller upgrade run \
     --config /etc/cfgms/controller.cfg
 ```
 
-### 4. Decommission the old node entry
+### 6. Decommission the old node entry
 
 After the upgraded node has rejoined the cluster under a new node ID, remove
 the old node entry:
@@ -67,9 +99,9 @@ and an error message. The command prints the resulting state on success:
 Node <node-id> is now decommissioned.
 ```
 
-### 5. Repeat for each remaining node
+### 7. Repeat for each remaining node
 
-Repeat steps 2–4 for each remaining node, one at a time.
+Repeat steps 2–6 for each remaining node, one at a time.
 
 ## Error handling
 

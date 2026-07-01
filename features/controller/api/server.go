@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -117,9 +119,19 @@ type Server struct {
 	stewardEventLoggingManager     *logging.LoggingManager               // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
 	sessionManager                 session.Manager                       // Issue #2232: admin session token issuance/revocation
 	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
+	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
+	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
+}
+
+// SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
+// GET /api/v1/health returns HTTP 503 so the load balancer stops routing new
+// steward connections to this node. Called by cluster.Drain() after setting the
+// membership state; safe to call concurrently with handleHealth.
+func (s *Server) SetDraining(draining bool) {
+	s.clusterDraining.Store(draining)
 }
 
 // APIKey represents an API key for external authentication
@@ -555,6 +567,11 @@ func (s *Server) setupRouter() {
 	ha.Handle("/cluster", s.requirePermission("ha", "read-cluster")(http.HandlerFunc(s.handleHACluster))).Methods("GET")
 	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
 	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
+
+	// Cluster node lifecycle endpoints (Issue #2283)
+	clusterRouter := api.PathPrefix("/cluster").Subrouter()
+	clusterRouter.Handle("/nodes/{id}/drain",
+		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDrain))).Methods("POST")
 
 	// Compliance reporting endpoints (Story #212)
 	// Steward-specific compliance endpoints
@@ -1042,6 +1059,15 @@ func (s *Server) SetSessionManager(mgr session.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessionManager = mgr
+}
+
+// SetMembershipStore wires the cluster MembershipStore used by the drain endpoint
+// (Issue #2283). When nil (default), POST /api/v1/cluster/nodes/{id}/drain returns
+// 503. Call after New() but before Start().
+func (s *Server) SetMembershipStore(store cluster.MembershipStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.membershipStore = store
 }
 
 // SetStewardEventLoggingManager injects the dedicated steward-event
