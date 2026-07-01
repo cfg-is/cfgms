@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -133,6 +134,48 @@ Examples:
 	RunE: runSigningCertRotate,
 }
 
+// clusterCmd groups cluster node management operations.
+var clusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Cluster node management",
+	Long: `Manage controller cluster nodes.
+
+Subcommands:
+  drain         Drain a cluster node, preventing it from accepting new work
+  decommission  Decommission a drained cluster node, removing it from the cluster`,
+}
+
+// clusterDrainCmd drains a cluster node.
+var clusterDrainCmd = &cobra.Command{
+	Use:   "drain <node-id>",
+	Short: "Drain a cluster node",
+	Long: `Drain a cluster node, preventing it from accepting new work.
+
+The node continues running until all in-flight requests complete,
+then transitions to the 'draining' state. Run decommission after
+drain completes to remove the node from the cluster.
+
+Examples:
+  cfg controller cluster drain node-1 --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runClusterDrain,
+}
+
+// clusterDecommissionCmd decommissions a drained cluster node.
+var clusterDecommissionCmd = &cobra.Command{
+	Use:   "decommission <node-id>",
+	Short: "Decommission a cluster node",
+	Long: `Decommission a drained cluster node, removing it from the cluster.
+
+The node must be in 'draining' state before it can be decommissioned.
+Returns an error (HTTP 409) if the node is not in 'draining' state.
+
+Examples:
+  cfg controller cluster decommission node-1 --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runClusterDecommission,
+}
+
 func init() {
 	// Controller command flags
 	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
@@ -150,10 +193,14 @@ func init() {
 	// signing-cert subcommand tree
 	signingCertCmd.AddCommand(signingCertRotateCmd)
 
+	// cluster subcommand tree
+	clusterCmd.AddCommand(clusterDrainCmd, clusterDecommissionCmd)
+
 	// Add subcommands
 	controllerCmd.AddCommand(controllerStatusCmd)
 	controllerCmd.AddCommand(controllerMetricsCmd)
 	controllerCmd.AddCommand(signingCertCmd)
+	controllerCmd.AddCommand(clusterCmd)
 }
 
 // getControllerClient creates an API client using bundle auth (mTLS) when available,
@@ -479,6 +526,84 @@ func runSigningCertRotate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Overlap days:      %d\n", result.OverlapDays)
 	fmt.Printf("Stewards notified: %d\n", result.StewardsNotified)
 	return nil
+}
+
+func runClusterDrain(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/cluster/nodes/" + url.PathEscape(nodeID) + "/drain"
+	resp, err := client.doRequest(context.Background(), "POST", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to drain node: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("admin mTLS certificate required")
+	case http.StatusOK:
+		var result struct {
+			State string `json:"state"`
+		}
+		state := "draining"
+		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.State != "" {
+			state = result.State
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Node %s is now %s.\n", nodeID, state)
+		return nil
+	default:
+		return fmt.Errorf("%s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func runClusterDecommission(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/cluster/nodes/" + url.PathEscape(nodeID) + "/decommission"
+	resp, err := client.doRequest(context.Background(), "POST", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decommission node: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("admin mTLS certificate required")
+	case http.StatusConflict:
+		return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+	case http.StatusOK:
+		var result struct {
+			State string `json:"state"`
+		}
+		state := "decommissioned"
+		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.State != "" {
+			state = result.State
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Node %s is now %s.\n", nodeID, state)
+		return nil
+	default:
+		return fmt.Errorf("%s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
 }
 
 func getStatusIcon(status string) string {
