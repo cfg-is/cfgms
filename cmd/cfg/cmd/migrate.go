@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/migrate"
+	_ "github.com/cfgis/cfgms/pkg/migrate/secrets" // register "secrets" migrator
 	_ "github.com/cfgis/cfgms/pkg/migrate/storage" // register "storage" migrator
 )
 
