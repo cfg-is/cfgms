@@ -105,6 +105,10 @@ message StewardSettings {
 
   // script_signing configures script signing policy and trust configuration.
   ScriptSigningConfig script_signing = 8;
+
+  // desired_version is the ring-resolved target steward binary version (Issue #2271).
+  // When set, the steward convergence loop upgrades or downgrades to this version.
+  string desired_version = 9;
 }
 
 // ScriptSigningConfig defines the steward-level script signing policy and trust configuration.

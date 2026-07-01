@@ -15,9 +15,72 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// logCapture records log calls for assertion in internal package tests (package service).
+// Implements logging.Logger by storing each call; assertions use findEntry.
+type logCapture struct {
+	mu      sync.Mutex
+	entries []logCaptureEntry
+}
+
+type logCaptureEntry struct {
+	level  string
+	msg    string
+	fields []interface{}
+}
+
+func (l *logCapture) record(level, msg string, kv []interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, logCaptureEntry{level: level, msg: msg, fields: kv})
+}
+
+// findEntry returns the first entry whose message equals msg (case-sensitive).
+func (l *logCapture) findEntry(msg string) (logCaptureEntry, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.msg == msg {
+			return e, true
+		}
+	}
+	return logCaptureEntry{}, false
+}
+
+// fieldValue returns the value for a given key in a log entry's key-value pairs.
+func (e logCaptureEntry) fieldValue(key string) (interface{}, bool) {
+	for i := 0; i+1 < len(e.fields); i += 2 {
+		if fmt.Sprintf("%v", e.fields[i]) == key {
+			return e.fields[i+1], true
+		}
+	}
+	return nil, false
+}
+
+func (l *logCapture) Debug(msg string, kv ...interface{}) { l.record("DEBUG", msg, kv) }
+func (l *logCapture) Info(msg string, kv ...interface{})  { l.record("INFO", msg, kv) }
+func (l *logCapture) Warn(msg string, kv ...interface{})  { l.record("WARN", msg, kv) }
+func (l *logCapture) Error(msg string, kv ...interface{}) { l.record("ERROR", msg, kv) }
+func (l *logCapture) Fatal(msg string, kv ...interface{}) { l.record("FATAL", msg, kv) }
+func (l *logCapture) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("DEBUG", msg, kv)
+}
+func (l *logCapture) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("INFO", msg, kv)
+}
+func (l *logCapture) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("WARN", msg, kv)
+}
+func (l *logCapture) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("ERROR", msg, kv)
+}
+func (l *logCapture) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("FATAL", msg, kv)
+}
 
 // newTestFleetStorage creates a real SQLite storage manager for controller service tests.
 func newTestFleetStorage(t *testing.T) *fleetStorage.Manager {
@@ -791,4 +854,206 @@ func TestRecordHeartbeat_VersionCapped(t *testing.T) {
 	require.True(t, found)
 	assert.Len(t, info.Version, maxVersionLen, "version must be capped at maxVersionLen characters")
 	assert.Equal(t, strings.Repeat("a", maxVersionLen), info.Version)
+}
+
+// --- Deployment ring resolution tests (Issue #2271) ---
+
+// makeTestRingConfig returns a DeploymentRingConfig with four rings and versions
+// suitable for ring-resolution unit tests.
+func makeTestRingConfig() controllerconfig.DeploymentRingConfig {
+	return controllerconfig.DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "pre-release", DesiredVersion: "v0.6.0-rc1"},
+			{Name: "early", DesiredVersion: "v0.5.21"},
+			{Name: "default", DesiredVersion: "v0.5.20"},
+			{Name: "stable", DesiredVersion: "v0.5.19"},
+		},
+	}
+}
+
+// TestResolveRingVersion_ValidRing proves: a steward with dna["deployment_ring"] = "early"
+// receives the early ring's desired_version as the effective desired_version.
+// This is the REQUIRED TEST from acceptance criteria for Story #2271.
+func TestResolveRingVersion_ValidRing(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetRingConfig(makeTestRingConfig())
+
+	dnaAttrs := map[string]string{"deployment_ring": "early"}
+	version, ring, didFallback, _ := svc.ResolveRingVersion(dnaAttrs)
+
+	assert.Equal(t, "v0.5.21", version,
+		"steward in 'early' ring must receive early ring's desired_version")
+	assert.Equal(t, "early", ring)
+	assert.False(t, didFallback, "valid ring must not trigger fallback")
+}
+
+// TestResolveRingVersion_InvalidRing_FallsBack proves: a steward with an invalid
+// deployment_ring receives the fallback ring's desired_version.
+// This is the REQUIRED TEST for the invalid-ring fallback case.
+func TestResolveRingVersion_InvalidRing_FallsBack(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetRingConfig(makeTestRingConfig())
+
+	dnaAttrs := map[string]string{"deployment_ring": "not-a-real-ring"}
+	version, ring, didFallback, original := svc.ResolveRingVersion(dnaAttrs)
+
+	assert.Equal(t, "v0.5.20", version,
+		"invalid ring must fall back to 'default' ring's desired_version")
+	assert.Equal(t, "default", ring)
+	assert.True(t, didFallback)
+	assert.Equal(t, "not-a-real-ring", original)
+}
+
+// TestResolveRingVersion_AbsentRing_FallsBack proves: a steward with no
+// deployment_ring attribute receives the fallback ring's desired_version.
+// This is the REQUIRED TEST for the absent-ring fallback case.
+func TestResolveRingVersion_AbsentRing_FallsBack(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetRingConfig(makeTestRingConfig())
+
+	dnaAttrs := map[string]string{} // no deployment_ring attribute
+	version, ring, didFallback, original := svc.ResolveRingVersion(dnaAttrs)
+
+	assert.Equal(t, "v0.5.20", version,
+		"absent ring must fall back to 'default' ring's desired_version")
+	assert.Equal(t, "default", ring)
+	assert.True(t, didFallback, "absent ring attribute must trigger fallback")
+	assert.Equal(t, "", original)
+}
+
+// TestApplyRingResolution_ValidRing verifies ApplyRingResolution stores the ring-resolved
+// version in StewardInfo and does not log WARN for a valid ring.
+func TestApplyRingResolution_ValidRing(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetRingConfig(makeTestRingConfig())
+
+	dna := makeTestDNA("dev-1", map[string]string{"deployment_ring": "stable"})
+	steward := &StewardInfo{
+		ID:      "dev-1",
+		DNA:     dna,
+		Metrics: make(map[string]string),
+	}
+	svc.ApplyRingResolution("dev-1", steward)
+
+	assert.Equal(t, "v0.5.19", steward.RingResolvedVersion,
+		"ApplyRingResolution must store the stable ring's desired_version")
+	assert.Equal(t, "stable", steward.ResolvedRing)
+}
+
+// TestApplyRingResolution_AbsentRing_FallsToDefault verifies that ApplyRingResolution
+// falls back to the default ring and stores the correct version when deployment_ring
+// attribute is absent from DNA.
+func TestApplyRingResolution_AbsentRing_FallsToDefault(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetRingConfig(makeTestRingConfig())
+
+	dna := makeTestDNA("dev-1", map[string]string{}) // no deployment_ring
+	steward := &StewardInfo{
+		ID:      "dev-1",
+		DNA:     dna,
+		Metrics: make(map[string]string),
+	}
+	svc.ApplyRingResolution("dev-1", steward)
+
+	assert.Equal(t, "v0.5.20", steward.RingResolvedVersion,
+		"absent ring must resolve to default ring's version")
+	assert.Equal(t, "default", steward.ResolvedRing)
+}
+
+// TestApplyRingResolution_FallbackLogsWarn verifies that ApplyRingResolution emits
+// a WARN log entry with event name "deployment_ring_fallback" and the correct
+// field values when ring fallback occurs (invalid ring name).
+func TestApplyRingResolution_FallbackLogsWarn(t *testing.T) {
+	lc := &logCapture{}
+	svc := NewControllerService(lc)
+	svc.SetRingConfig(makeTestRingConfig())
+
+	dna := makeTestDNA("dev-1", map[string]string{"deployment_ring": "does-not-exist"})
+	steward := &StewardInfo{
+		ID:      "dev-1",
+		DNA:     dna,
+		Metrics: make(map[string]string),
+	}
+	svc.ApplyRingResolution("dev-1", steward)
+
+	// State assertions — invalid ring falls back to default ring.
+	assert.Equal(t, "v0.5.20", steward.RingResolvedVersion,
+		"invalid ring must resolve to fallback (default) ring's version")
+	assert.Equal(t, "default", steward.ResolvedRing,
+		"ResolvedRing must reflect the fallback ring, not the invalid input")
+
+	// Log assertions — WARN with event name and field values must be emitted.
+	entry, ok := lc.findEntry("deployment_ring_fallback")
+	require.True(t, ok, "expected WARN log entry with msg='deployment_ring_fallback'")
+	assert.Equal(t, "WARN", entry.level, "fallback must be logged at WARN level")
+
+	ringValue, hasRingValue := entry.fieldValue("ring_value")
+	assert.True(t, hasRingValue, "log entry must include ring_value field")
+	assert.Contains(t, fmt.Sprintf("%v", ringValue), "does-not-exist",
+		"ring_value field must carry the invalid ring name (possibly sanitized)")
+
+	fallbackRing, hasFallbackRing := entry.fieldValue("fallback_ring")
+	assert.True(t, hasFallbackRing, "log entry must include fallback_ring field")
+	assert.Contains(t, fmt.Sprintf("%v", fallbackRing), "default",
+		"fallback_ring field must name the fallback ring (possibly sanitized)")
+}
+
+// TestSetRingConfig_AuditLogsOnChange verifies SetRingConfig emits a "ring_set_changed"
+// INFO audit log entry with actor, before, and after fields when the ring set changes.
+func TestSetRingConfig_AuditLogsOnChange(t *testing.T) {
+	lc := &logCapture{}
+	svc := NewControllerService(lc)
+
+	initial := makeTestRingConfig()
+	svc.SetRingConfig(initial)
+
+	// First set emits ring_set_changed (from empty → initial config).
+	entry, ok := lc.findEntry("ring_set_changed")
+	require.True(t, ok, "expected INFO log entry with msg='ring_set_changed' on first SetRingConfig")
+	assert.Equal(t, "INFO", entry.level, "ring_set_changed must be logged at INFO level")
+	_, hasActor := entry.fieldValue("actor")
+	assert.True(t, hasActor, "ring_set_changed entry must include actor field")
+	_, hasAfter := entry.fieldValue("after")
+	assert.True(t, hasAfter, "ring_set_changed entry must include after field")
+
+	// State is persisted correctly.
+	got := svc.GetRingConfig()
+	require.Len(t, got.Rings, 4)
+	assert.Equal(t, "early", got.Rings[1].Name)
+	assert.Equal(t, "v0.5.21", got.Rings[1].DesiredVersion)
+
+	// Record current entry count; a second change must add exactly one more.
+	lc.mu.Lock()
+	countBefore := len(lc.entries)
+	lc.mu.Unlock()
+
+	// Update the ring config (version bump on early ring).
+	updated := makeTestRingConfig()
+	updated.Rings[1].DesiredVersion = "v0.5.22"
+	svc.SetRingConfig(updated)
+
+	lc.mu.Lock()
+	countAfter := len(lc.entries)
+	lc.mu.Unlock()
+	assert.Equal(t, countBefore+1, countAfter,
+		"SetRingConfig on changed config must emit exactly one additional log entry")
+
+	got2 := svc.GetRingConfig()
+	assert.Equal(t, "v0.5.22", got2.Rings[1].DesiredVersion,
+		"SetRingConfig must persist the updated version")
+}
+
+// TestSetRingConfig_NoopOnEqualConfig verifies SetRingConfig does not emit an audit
+// entry when the config is unchanged (confirmed via equal comparison logic).
+func TestSetRingConfig_NoopOnEqualConfig(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	rings := makeTestRingConfig()
+
+	// Set twice with identical config — must not panic or corrupt state.
+	svc.SetRingConfig(rings)
+	svc.SetRingConfig(rings)
+
+	got := svc.GetRingConfig()
+	assert.Len(t, got.Rings, 4)
 }

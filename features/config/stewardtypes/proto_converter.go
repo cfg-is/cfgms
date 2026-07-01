@@ -49,6 +49,8 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 		stewardSettings.ConvergeInterval = durationpb.New(d)
 	}
 
+	stewardSettings.DesiredVersion = config.Steward.Upgrade.DesiredVersion
+
 	ss := config.Steward.ScriptSigning
 	protoSS := &controller.ScriptSigningConfig{
 		Policy:        string(ss.Policy),
@@ -95,6 +97,9 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 			ID:          proto.Steward.Id,
 			Mode:        OperationMode(proto.Steward.Mode),
 			ModulePaths: proto.Steward.ModulePaths,
+			Upgrade: UpgradeConfig{
+				DesiredVersion: proto.Steward.DesiredVersion,
+			},
 		},
 		Modules: proto.Modules,
 	}

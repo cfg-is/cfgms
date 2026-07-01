@@ -7,12 +7,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"google.golang.org/protobuf/proto"
@@ -24,6 +27,9 @@ type ControllerService struct {
 	mu         sync.RWMutex
 	stewards   map[string]*StewardInfo
 	dnaStorage *fleetStorage.Manager
+
+	ringMu     sync.RWMutex
+	ringConfig controllerconfig.DeploymentRingConfig
 }
 
 // StewardInfo holds connection/heartbeat state for a registered steward.
@@ -37,6 +43,14 @@ type StewardInfo struct {
 	Status        string
 	Metrics       map[string]string
 	Token         string
+
+	// RingResolvedVersion is the desired_version resolved from the steward's
+	// deployment_ring DNA attribute and the controller ring config. Empty when
+	// the resolved ring has no version set. Applied as an override over any
+	// tenant-path desired_version when delivering config to the steward.
+	RingResolvedVersion string
+	// ResolvedRing is the ring name that was matched (or fell back to).
+	ResolvedRing string
 }
 
 // maxVersionLen is the maximum number of bytes stored for a steward-supplied
@@ -561,6 +575,94 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"status", logging.SanitizeLogValue(status))
+}
+
+// SetRingConfig updates the deployment ring set. If the ring set has changed,
+// an audit log entry is written with actor, before-state, and after-state.
+// Ring-set mutation in this story happens only via controller config reload or restart.
+func (s *ControllerService) SetRingConfig(rings controllerconfig.DeploymentRingConfig) {
+	s.ringMu.Lock()
+	prev := s.ringConfig
+	s.ringConfig = rings
+	s.ringMu.Unlock()
+	s.logRingSetChange(prev, rings)
+}
+
+// GetRingConfig returns the current deployment ring configuration.
+func (s *ControllerService) GetRingConfig() controllerconfig.DeploymentRingConfig {
+	s.ringMu.RLock()
+	defer s.ringMu.RUnlock()
+	return s.ringConfig
+}
+
+// ResolveRingVersion resolves the effective desired_version and ring name for a steward
+// given its DNA attributes and the current ring configuration.
+// Returns (version, resolvedRing, didFallback, originalRingValue).
+func (s *ControllerService) ResolveRingVersion(dnaAttrs map[string]string) (version, ring string, didFallback bool, originalValue string) {
+	s.ringMu.RLock()
+	rings := s.ringConfig
+	s.ringMu.RUnlock()
+	return pkgconfig.ResolveRingVersion(dnaAttrs, rings)
+}
+
+// ApplyRingResolution resolves the deployment ring for a steward, stores the result in
+// the StewardInfo, and logs a WARN when ring fallback occurs (absent or invalid ring).
+// steward must be the live registry entry; caller must hold s.mu (at least read lock
+// for reading DNA, write lock if updating RingResolvedVersion).
+func (s *ControllerService) ApplyRingResolution(stewardID string, steward *StewardInfo) {
+	if steward.DNA == nil {
+		return
+	}
+	version, ring, didFallback, original := s.ResolveRingVersion(steward.DNA.Attributes)
+	steward.RingResolvedVersion = version
+	steward.ResolvedRing = ring
+	if didFallback {
+		s.logger.Warn("deployment_ring_fallback",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"ring_value", logging.SanitizeLogValue(original),
+			"fallback_ring", logging.SanitizeLogValue(ring),
+		)
+	}
+}
+
+// logRingSetChange emits a structured audit entry when the ring set changes.
+// actor is always "controller" (ring changes come from config reload/restart).
+func (s *ControllerService) logRingSetChange(prev, next controllerconfig.DeploymentRingConfig) {
+	if ringConfigEqual(prev, next) {
+		return
+	}
+	s.logger.Info("ring_set_changed",
+		"actor", "controller",
+		"before", ringConfigSummary(prev),
+		"after", ringConfigSummary(next),
+	)
+}
+
+// ringConfigSummary produces a compact human-readable representation for audit log entries.
+func ringConfigSummary(rc controllerconfig.DeploymentRingConfig) string {
+	parts := make([]string, len(rc.Rings))
+	for i, r := range rc.Rings {
+		if r.DesiredVersion != "" {
+			parts[i] = r.Name + "=" + r.DesiredVersion
+		} else {
+			parts[i] = r.Name
+		}
+	}
+	return fmt.Sprintf("[%s] fallback=%s", strings.Join(parts, ","), rc.FallbackRing)
+}
+
+// ringConfigEqual returns true when two ring configs are semantically identical
+// (same ring order, names, versions, and fallback ring).
+func ringConfigEqual(a, b controllerconfig.DeploymentRingConfig) bool {
+	if a.FallbackRing != b.FallbackRing || len(a.Rings) != len(b.Rings) {
+		return false
+	}
+	for i := range a.Rings {
+		if a.Rings[i].Name != b.Rings[i].Name || a.Rings[i].DesiredVersion != b.Rings[i].DesiredVersion {
+			return false
+		}
+	}
+	return true
 }
 
 // lookupDurableTenant resolves a steward's authoritative tenant (and last DNA

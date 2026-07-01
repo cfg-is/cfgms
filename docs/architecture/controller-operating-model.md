@@ -169,7 +169,80 @@ The controller decides which steward gets which cfg based on:
 - **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression — tags exist on steward records (fleet query supports tag filtering for device lists), but tag-based cfg distribution fanout is not yet implemented; the current fanout sends to all active stewards
 - **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) — desired state; not currently implemented in cfg distribution
 
-**Deployment rings (convention):** operators commonly tag stewards with ring identifiers (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) and author phased rollouts as separate cfgs or staged target lists. v1 is convention; auto-progressive ring machinery (with bake time + health gating) is a future enhancement.
+**Deployment rings:** see the Deployment Rings section below for the v1 mechanism. Operator-tagged phased rollouts using separate cfgs are still supported alongside rings.
+
+## Deployment Rings
+
+Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; each steward subscribes to a ring via its DNA attribute `deployment_ring`; and config delivery resolves the effective `desired_version` from the ring.
+
+### Ring Configuration
+
+Rings are declared in the controller config under `deployment_rings:`. Example with the four default rings:
+
+```yaml
+deployment_rings:
+  fallback_ring: default          # ring used for stewards with no/invalid ring attribute
+  rings:
+    - name: pre-release           # name must match ^[a-z][a-z0-9-]{0,31}$
+      desired_version: "v0.6.0"   # version targeted at this ring; empty = no override
+    - name: early
+      desired_version: "v0.5.21"
+      soak: 24h                   # Story S3: minimum soak before promotion
+      halt_threshold: 0.05        # Story S3: error-rate threshold that halts promotion
+      concurrency_limit: 10       # Story S3: max simultaneous upgrades in this ring
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+```
+
+When `deployment_rings:` is absent from controller config, the default four-ring set is applied automatically: `pre-release → early → default → stable`, with `default` as the fallback ring.
+
+**Validation at startup:** ring names must be non-empty, unique within the set, and match `^[a-z][a-z0-9-]{0,31}$`. The `fallback_ring` must name a declared ring. Invalid config causes a startup error.
+
+### Steward Ring Subscription
+
+A steward subscribes to a ring via the `deployment_ring` DNA attribute, set by the operator:
+
+```
+cfg dna set <steward-id> deployment_ring early
+```
+
+The controller validates the attribute value at config-delivery time (not at DNA-write time). The `deployment_ring` attribute is a plain string set by the operator — stewards do not self-assign rings.
+
+### Ring-Resolved Config Delivery
+
+When the controller delivers config to a steward (`GetConfiguration`):
+
+1. The inheritance resolver walks the tenant hierarchy and produces the effective config, including any `desired_version` set at the tenant-config path.
+2. The controller reads the steward's DNA `deployment_ring` attribute.
+3. `ResolveRingVersion` (`pkg/config/inheritance.go`) looks up the ring in the declared ring set.
+4. If the resolved ring has a non-empty `desired_version`, that value **overrides** the tenant-path `desired_version`. This makes rings the authoritative targeting vocabulary for version rollouts.
+5. If `desired_version` is empty for the resolved ring, no override is applied and the tenant-path value is used unchanged.
+
+### Fallback Behavior
+
+When a steward's `deployment_ring` is absent or names a ring not in the declared set, the controller falls back to the `fallback_ring`. The fallback is logged as a structured WARN:
+
+```
+deployment_ring_fallback  steward_id=<id>  ring_value=<original or empty>  fallback_ring=default
+```
+
+This is the v1 anomaly surface; a metric/alert layer is a follow-on story. Operators should assign all fleet stewards to rings to suppress this warning.
+
+### Ring-Set Change Audit
+
+Every change to the ring set (add/remove/reorder/version change) is logged at INFO level via the structured audit logger with actor, before-state, and after-state:
+
+```
+ring_set_changed  actor=controller  before=[pre-release=v0.5.20,...] fallback=default  after=[...]
+```
+
+Ring-set mutation happens only via controller config file reload or restart. No live-mutation REST API exists in this version.
+
+### Ordered Promotion Model
+
+The ring order in `deployment_rings.rings` defines the promotion sequence: the operator advances a version from earlier rings (pre-release → early → default → stable) by setting `desired_version` on each ring. The rollout workflow that automates this advancement based on soak time and health gates is implemented in Story S3.
 
 ### Config Signing
 
