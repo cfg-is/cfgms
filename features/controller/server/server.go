@@ -402,7 +402,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize HA manager
 	logger.Info("Initializing HA manager...")
-	haManager, err := initializeHAManager(logger, storageManager)
+	haManager, err := initializeHAManager(cfg, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
@@ -1963,9 +1963,29 @@ func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (
 	return manager, nil
 }
 
-// initializeHAManager initializes the HA manager using ha.DefaultConfig().
-func initializeHAManager(logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
-	haManager, err := ha.NewManager(ha.DefaultConfig(), logger, storageManager)
+// initializeHAManager initializes the HA manager, transferring the deployment
+// mode from the YAML config before loading environment overrides. This ordering
+// is required because ha.NewManager calls Validate() before LoadFromEnvironment(),
+// and Validate() requires Node.ID for non-single modes; Node.ID comes exclusively
+// from CFGMS_NODE_ID (env), never from YAML. Pre-loading env here populates
+// Node.ID first so the subsequent NewManager call does not fail Validate().
+// CFGMS_HA_MODE env overrides YAML (env > YAML precedence) via the re-run inside NewManager.
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
+	haConfig := ha.DefaultConfig()
+
+	if cfg != nil && cfg.HA != nil && cfg.HA.Mode != "" {
+		mode, err := ha.ModeFromString(cfg.HA.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ha.mode in config: %w", err)
+		}
+		haConfig.Mode = mode
+	}
+
+	if err := haConfig.LoadFromEnvironment(); err != nil {
+		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
+	}
+
+	haManager, err := ha.NewManager(haConfig, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
