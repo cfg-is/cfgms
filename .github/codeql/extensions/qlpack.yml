@@ -1,9 +1,18 @@
 name: cfg-is/cfgms-go-extensions
-version: 0.0.9
+version: 0.0.10
 library: true
 
 # Apply our model extensions on top of the standard Go query pack so that
 # CodeQL Go data-flow / taint queries pick them up.
+#
+# NOTE: log-injection (CWE-117) and clear-text-logging (CWE-312) sanitizers are
+# NOT modeled here. Verified against upstream github/codeql — both queries
+# hardcode their sanitizer classes and do NOT consult Models-as-Data barrier
+# extensions, so a data-extension pack cannot suppress those alerts. That
+# sanitization is instead made CodeQL-legible in pkg/logging/sanitize.go
+# (SanitizeLogValue routes its result through strings.ReplaceAll, the form the
+# built-in ReplaceSanitizer recognizes). The removed 0.0.9 log-injection model
+# was inert and produced ~45 false positives that had to be hand-dismissed.
 extensionTargets:
   codeql/go-all: '*'
 
