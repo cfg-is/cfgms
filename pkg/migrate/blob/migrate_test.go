@@ -130,7 +130,9 @@ func TestBlobMigrate_FilesystemToS3RoundTrip(t *testing.T) {
 	ensureTestBucket(t, cfg)
 
 	ctx := context.Background()
-	tenantID := fmt.Sprintf("root/integration-%d", time.Now().UnixNano())
+	// S3 provider rejects "/" in TenantID (breaks parseObjectKey's SplitN logic);
+	// use a flat ID valid for both filesystem and S3 providers.
+	tenantID := fmt.Sprintf("integration%d", time.Now().UnixNano())
 
 	// Source: real filesystem store.
 	src, err := blobstore.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{
