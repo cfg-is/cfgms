@@ -476,6 +476,7 @@ The workflow engine must support the following capabilities to fulfill its role 
 - **Debugging** — failed workflow runs retain full execution detail (inputs, outputs, and API request/response at every node) so failures can be diagnosed from history without re-execution. Successful runs retain summary-level traces. Debug depth and retention are configurable per workflow. Step-through execution with breakpoints available during development. Resume or re-run from any failed node without restarting the entire workflow
 - **Testing** — sandbox execution, replay failed runs, input/output inspection per node
 - **Versioning** — workflow version history, rollback to previous versions
+- **Operability** — operators can inspect and control running executions via the `cfg` CLI: `cfg workflow list` (definitions), `cfg workflow status <exec-id> --workflow <name>` (per-execution state and current step), `cfg workflow cancel <exec-id> --workflow <name>` (cancel a running execution). See [commands reference](../development/commands-reference.md#workflow-management).
 
 ### Workflow vs Cfg Summary
 
