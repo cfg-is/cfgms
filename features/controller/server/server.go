@@ -210,6 +210,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
 		}
 		logger.Info("Cluster storage backend initialized")
+		if backendErr := assertClusterBackendsReady(cfg, storageManager); backendErr != nil {
+			return nil, backendErr
+		}
 	} else if cfg.Storage.FlatfileRoot != "" {
 		logger.Info("Initializing OSS composite storage backend...",
 			"flatfile_root", cfg.Storage.FlatfileRoot,
@@ -883,10 +886,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var installerBlobStore blob.BlobStore
 	var blobErr error
 	if isClusterMode {
-		bucket := os.Getenv("CFGMS_S3_INSTALLER_BUCKET")
-		if bucket == "" {
-			return nil, fmt.Errorf("cluster mode requires CFGMS_S3_INSTALLER_BUCKET to be set for installer artifact storage")
-		}
+		bucket := os.Getenv("CFGMS_S3_INSTALLER_BUCKET") // guaranteed non-empty by assertClusterBackendsReady
 		s3Cfg := map[string]interface{}{
 			"bucket": bucket,
 		}
@@ -2266,4 +2266,22 @@ resources:
 	} else {
 		logger.Info("fleet cascade seed: MSP-level parent policy stored under fleet-root")
 	}
+}
+
+// assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
+// or written. Called immediately after CreateClusterStorageManager in New(), still inside
+// the cfg.HA.IsClusterMode() block, so callers need not re-check the mode.
+//
+// Gates (in order):
+//  1. Storage provider must be cluster-capable (shared state across controller nodes).
+//  2. CFGMS_S3_INSTALLER_BUCKET must be set (S3-compatible blob store for installer artifacts).
+func assertClusterBackendsReady(cfg *config.Config, storageManager *interfaces.StorageManager) error {
+	if p := storageManager.GetProvider(); p != nil && !p.ClusterCapable() {
+		return fmt.Errorf("cluster mode requires a cluster-capable storage backend; provider %q does not support cluster coordination", storageManager.GetProviderName())
+	}
+	if os.Getenv("CFGMS_S3_INSTALLER_BUCKET") == "" {
+		return fmt.Errorf("cluster mode requires S3-compatible blob storage: set CFGMS_S3_INSTALLER_BUCKET")
+	}
+	_ = cfg // reserved for future per-config gate extensions
+	return nil
 }
