@@ -53,6 +53,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Services:  make(map[string]string),
 	}
 
+	// Issue #2283: drain gate — must be first so the LB health check fails
+	// as soon as an operator initiates a drain, before any session drains.
+	if s.clusterDraining {
+		health.Status = "degraded"
+		health.Services["drain"] = "draining"
+	}
+
 	// Check gRPC services
 	if s.controllerService != nil {
 		health.Services["controller"] = "healthy"
