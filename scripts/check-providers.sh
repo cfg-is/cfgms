@@ -33,6 +33,7 @@ is_allowed() {
     [[ "$file" == cmd/cfg/cmd/storage.go ]] && return 0
     [[ "$file" == pkg/migrate/storage/* ]] && return 0
     [[ "$file" == pkg/migrate/secrets/* ]] && return 0
+    [[ "$file" == pkg/migrate/blob/* ]] && return 0
     [[ "$file" == features/controller/initialization/initialization.go ]] && return 0
     [[ "$file" == features/controller/server/server.go ]] && return 0
     [[ "$file" == */providers_test.go ]] && return 0
@@ -74,6 +75,7 @@ else
     echo "  cmd/cfg/cmd/storage.go                                      (CLI registry bootstrap)"
     echo "  pkg/migrate/storage/                                        (migration engine registry bootstrap)"
     echo "  pkg/migrate/secrets/                                        (migration engine registry bootstrap)"
+    echo "  pkg/migrate/blob/                                           (migration engine registry bootstrap)"
     echo "  features/controller/initialization/initialization.go        (registry bootstrap)"
     echo "  features/controller/server/server.go                        (registry bootstrap)"
     echo "  */providers_test.go                                         (per-package test provider registration)"
