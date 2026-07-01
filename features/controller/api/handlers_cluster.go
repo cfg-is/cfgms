@@ -5,12 +5,17 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// defaultDecommissionTimeout is the maximum time Decommission waits for
+// steward sessions to drain before force-marking the node decommissioned.
+const defaultDecommissionTimeout = 5 * time.Minute
 
 // clusterNodeDrainResponse is the JSON body for a successful drain request.
 type clusterNodeDrainResponse struct {
@@ -66,5 +71,68 @@ func (s *Server) handleClusterNodeDrain(w http.ResponseWriter, r *http.Request) 
 	s.respondJSON(w, http.StatusAccepted, clusterNodeDrainResponse{
 		NodeID: nodeID,
 		State:  string(cluster.StateDraining),
+	})
+}
+
+// clusterNodeDecommissionResponse is the JSON body for a successful decommission.
+type clusterNodeDecommissionResponse struct {
+	NodeID string `json:"node_id"`
+	State  string `json:"state"`
+}
+
+// handleClusterNodeDecommission handles POST /api/v1/cluster/nodes/{id}/decommission.
+//
+// Requires an admin mTLS principal. Non-admin callers receive HTTP 403 before
+// any membership state is touched. The node must be in StateDraining; any
+// other state returns HTTP 409.
+//
+// The handler blocks until all active steward sessions on the local node drain
+// or defaultDecommissionTimeout elapses, then marks the node StateDecommissioned
+// and returns HTTP 200: {"node_id": "...", "state": "decommissioned"}.
+func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Request) {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
+		s.respondError(w, http.StatusForbidden, "authentication required")
+		return
+	}
+	if !principal.IsAdmin {
+		s.respondError(w, http.StatusForbidden, "admin mTLS certificate required")
+		return
+	}
+
+	nodeID := mux.Vars(r)["id"]
+
+	if s.membershipStore == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "cluster membership not configured")
+		return
+	}
+
+	if s.registry == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "session registry not configured")
+		return
+	}
+
+	if err := cluster.Decommission(r.Context(), nodeID, s.membershipStore, s.registry, s.logger, defaultDecommissionTimeout); err != nil {
+		switch {
+		case errors.Is(err, cluster.ErrNodeNotFound):
+			s.respondError(w, http.StatusNotFound, "node not found")
+		case errors.Is(err, cluster.ErrNodeNotDraining):
+			s.respondError(w, http.StatusConflict, "node is not in draining state")
+		default:
+			s.logger.Error("cluster decommission failed",
+				"node_id", logging.SanitizeLogValue(nodeID),
+				"error", err)
+			s.respondError(w, http.StatusInternalServerError, "decommission failed")
+		}
+		return
+	}
+
+	s.logger.Info("cluster node decommissioned",
+		"node_id", logging.SanitizeLogValue(nodeID),
+		"principal_id", logging.SanitizeLogValue(principal.ID))
+
+	s.respondJSON(w, http.StatusOK, clusterNodeDecommissionResponse{
+		NodeID: nodeID,
+		State:  string(cluster.StateDecommissioned),
 	})
 }
