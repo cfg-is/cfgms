@@ -52,7 +52,7 @@ func Decommission(ctx context.Context, nodeID string, store MembershipStore, cou
 	if !waitForSessionDrain(pollCtx, counter) {
 		logger.Warn("decommission timeout: sessions still active on node, proceeding",
 			"active_sessions", counter.Count(),
-			"node_id", nodeID)
+			"node_id", logging.SanitizeLogValue(nodeID))
 	}
 
 	if err := store.SetState(nodeID, StateDecommissioned); err != nil {

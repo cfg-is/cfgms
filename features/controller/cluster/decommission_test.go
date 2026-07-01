@@ -12,16 +12,24 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
-// stubCounter is a minimal SessionCounter for testing. It returns a fixed
-// count, simulating a node with no sessions (count=0) or sessions that never
-// drain (count>0). The real SessionCounter is registry.Registry; using a stub
-// here avoids a circular import while the integration path is covered by
-// features/controller/api/handlers_cluster_test.go.
-type stubCounter struct{ count int }
+// noopSender is a minimal registry.MessageSender for tests that need a
+// non-nil Sender to register a StewardConnection.
+type noopSender struct{}
 
-func (s *stubCounter) Count() int { return s.count }
+func (noopSender) SendMsg(_ interface{}) error { return nil }
+
+// registerConn registers a StewardConnection with the given ID so that
+// reg.Count() returns a non-zero value.
+func registerConn(t *testing.T, reg registry.Registry, stewardID string) {
+	t.Helper()
+	require.NoError(t, reg.Register(&registry.StewardConnection{
+		StewardID: stewardID,
+		Sender:    noopSender{},
+	}))
+}
 
 // TestDecommission_MarksDecommissionedAfterSessionsDrain is a required AC test:
 // when reg.Count()==0 from the start, Decommission returns nil, the node state
@@ -30,10 +38,10 @@ func TestDecommission_MarksDecommissionedAfterSessionsDrain(t *testing.T) {
 	store := NewInMemoryMembershipStore()
 	require.NoError(t, store.Register(NodeRecord{ID: "node-1", State: StateDraining}))
 
-	counter := &stubCounter{count: 0}
+	reg := registry.NewRegistry() // no connections registered → Count() == 0
 	logger := logging.NewNoopLogger()
 
-	err := Decommission(context.Background(), "node-1", store, counter, logger, 5*time.Minute)
+	err := Decommission(context.Background(), "node-1", store, reg, logger, 5*time.Minute)
 	require.NoError(t, err)
 
 	got, err := store.GetNode("node-1")
@@ -52,10 +60,12 @@ func TestDecommission_TimeoutForcesDecommission(t *testing.T) {
 	store := NewInMemoryMembershipStore()
 	require.NoError(t, store.Register(NodeRecord{ID: "node-1", State: StateDraining}))
 
-	counter := &stubCounter{count: 1} // sessions never drain
+	reg := registry.NewRegistry()
+	registerConn(t, reg, "steward-1") // Count() == 1, never drains within timeout
+
 	logger := logging.NewNoopLogger()
 
-	err := Decommission(context.Background(), "node-1", store, counter, logger, 50*time.Millisecond)
+	err := Decommission(context.Background(), "node-1", store, reg, logger, 50*time.Millisecond)
 	require.NoError(t, err, "forced decommission on timeout must succeed")
 
 	got, err := store.GetNode("node-1")
@@ -69,10 +79,10 @@ func TestDecommission_TimeoutForcesDecommission(t *testing.T) {
 
 func TestDecommission_NodeNotFound_ReturnsError(t *testing.T) {
 	store := NewInMemoryMembershipStore()
-	counter := &stubCounter{count: 0}
+	reg := registry.NewRegistry()
 	logger := logging.NewNoopLogger()
 
-	err := Decommission(context.Background(), "ghost", store, counter, logger, 5*time.Minute)
+	err := Decommission(context.Background(), "ghost", store, reg, logger, 5*time.Minute)
 	assert.True(t, errors.Is(err, ErrNodeNotFound))
 }
 
@@ -80,10 +90,10 @@ func TestDecommission_NodeNotDraining_ReturnsError(t *testing.T) {
 	store := NewInMemoryMembershipStore()
 	require.NoError(t, store.Register(NodeRecord{ID: "node-1", State: StateActive}))
 
-	counter := &stubCounter{count: 0}
+	reg := registry.NewRegistry()
 	logger := logging.NewNoopLogger()
 
-	err := Decommission(context.Background(), "node-1", store, counter, logger, 5*time.Minute)
+	err := Decommission(context.Background(), "node-1", store, reg, logger, 5*time.Minute)
 	assert.True(t, errors.Is(err, ErrNodeNotDraining), "active node should return ErrNodeNotDraining")
 }
 
@@ -91,10 +101,10 @@ func TestDecommission_AlreadyDecommissioned_ReturnsError(t *testing.T) {
 	store := NewInMemoryMembershipStore()
 	require.NoError(t, store.Register(NodeRecord{ID: "node-1", State: StateDecommissioned}))
 
-	counter := &stubCounter{count: 0}
+	reg := registry.NewRegistry()
 	logger := logging.NewNoopLogger()
 
-	err := Decommission(context.Background(), "node-1", store, counter, logger, 5*time.Minute)
+	err := Decommission(context.Background(), "node-1", store, reg, logger, 5*time.Minute)
 	assert.True(t, errors.Is(err, ErrNodeNotDraining), "already-decommissioned node should return ErrNodeNotDraining")
 }
 
@@ -102,7 +112,9 @@ func TestDecommission_CancelledContext_ForcesDecommission(t *testing.T) {
 	store := NewInMemoryMembershipStore()
 	require.NoError(t, store.Register(NodeRecord{ID: "node-1", State: StateDraining}))
 
-	counter := &stubCounter{count: 1} // sessions never drain
+	reg := registry.NewRegistry()
+	registerConn(t, reg, "steward-1") // Count() == 1, never drains
+
 	logger := logging.NewNoopLogger()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -110,7 +122,7 @@ func TestDecommission_CancelledContext_ForcesDecommission(t *testing.T) {
 
 	// Forced decommission proceeds even when the context is cancelled, consistent
 	// with the timeout path: both exit waitForSessionDrain and call SetState.
-	err := Decommission(ctx, "node-1", store, counter, logger, 5*time.Minute)
+	err := Decommission(ctx, "node-1", store, reg, logger, 5*time.Minute)
 	require.NoError(t, err)
 
 	got, err := store.GetNode("node-1")

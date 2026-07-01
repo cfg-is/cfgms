@@ -58,7 +58,7 @@ func (s *Server) handleClusterNodeDrain(w http.ResponseWriter, r *http.Request) 
 		default:
 			s.logger.Error("cluster drain failed",
 				"node_id", logging.SanitizeLogValue(nodeID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 			s.respondError(w, http.StatusInternalServerError, "drain failed")
 		}
 		return
@@ -121,7 +121,7 @@ func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Re
 		default:
 			s.logger.Error("cluster decommission failed",
 				"node_id", logging.SanitizeLogValue(nodeID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 			s.respondError(w, http.StatusInternalServerError, "decommission failed")
 		}
 		return
