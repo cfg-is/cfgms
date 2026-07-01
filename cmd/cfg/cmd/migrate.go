@@ -7,9 +7,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/migrate"
 	_ "github.com/cfgis/cfgms/pkg/migrate/blob"    // register "blob" migrator
@@ -59,7 +61,29 @@ func init() {
 	rootCmd.AddCommand(migrateCmd)
 }
 
+// clusterCapableMigrationBackend reports whether the named storage migrator backend
+// can serve as shared state in a multi-node CFGMS cluster.
+// "database" (Postgres) is the only cluster-capable backend; "oss" (flatfile+sqlite
+// composite), "flatfile", "sqlite", and any other names are not.
+func clusterCapableMigrationBackend(name string) bool {
+	return strings.ToLower(name) == "database"
+}
+
 func runMigrate(cmd *cobra.Command, _ []string) error {
+	// CFGMS_HA_MODE is the canonical cluster-mode signal in the CLI context —
+	// consistent with features/controller/config/config.go. No controller config
+	// file is loaded; the env var alone determines mode.
+	haConfig := ha.DefaultConfig()
+	if err := haConfig.LoadFromEnvironment(); err != nil {
+		return fmt.Errorf("failed to read HA configuration from environment: %w", err)
+	}
+	if haConfig.IsClusterMode() && !clusterCapableMigrationBackend(migrateTo2) {
+		return fmt.Errorf("cfg migrate: target backend %q is not cluster-capable; "+
+			"in cluster mode only cluster-capable backends may be used "+
+			"(cluster-capable: database)",
+			logging.SanitizeLogValue(migrateTo2))
+	}
+
 	factory, err := migrate.Lookup(migrateProvider)
 	if err != nil {
 		return err
