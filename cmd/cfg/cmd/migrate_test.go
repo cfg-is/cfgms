@@ -153,6 +153,106 @@ func TestPrintMigrateReport_WithoutBytes(t *testing.T) {
 	assert.NotContains(t, out, " B", "output must not include byte suffix when Bytes is nil")
 }
 
+// TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget verifies that
+// runMigrate returns an error containing "not cluster-capable" when
+// CFGMS_HA_MODE=cluster and --to names a non-cluster-capable backend,
+// and that the gate is a no-op when cluster mode is not active.
+func TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget(t *testing.T) {
+	// Restore package-level vars after all subtests complete to avoid
+	// test-ordering dependency with other top-level test functions.
+	origProvider, origFrom, origTo, origDryRun := migrateProvider, migrateFrom2, migrateTo2, migrateDryRun
+	t.Cleanup(func() {
+		migrateProvider, migrateFrom2, migrateTo2, migrateDryRun = origProvider, origFrom, origTo, origDryRun
+	})
+
+	// sub-case 1: cluster mode + non-cluster-capable backend -> gate error
+	t.Run("cluster_mode_oss_rejected", func(t *testing.T) {
+		t.Setenv("CFGMS_HA_MODE", "cluster")
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "oss"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not cluster-capable",
+			"error must identify the cluster-capable gate")
+	})
+
+	// sub-case 2: cluster mode + cluster-capable backend -> gate passes.
+	// The storage migrator will still fail (openBackend rejects "git" as a source),
+	// but the error must NOT name the cluster-capable gate.
+	t.Run("cluster_mode_database_passes_gate", func(t *testing.T) {
+		t.Setenv("CFGMS_HA_MODE", "cluster")
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "database"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err, "storage migrator rejects unknown source backend")
+		assert.NotContains(t, err.Error(), "not cluster-capable",
+			"cluster-capable backend must pass the gate")
+	})
+
+	// sub-case 3: no CFGMS_HA_MODE set -> gate is a no-op regardless of --to.
+	// The storage migrator still fails (unknown source backend), but that is not
+	// the cluster-capable gate.
+	t.Run("single_mode_no_gate_error", func(t *testing.T) {
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "oss"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err, "storage migrator rejects unknown source backend")
+		assert.NotContains(t, err.Error(), "not cluster-capable",
+			"non-cluster mode must not trigger the cluster-capable gate")
+	})
+
+	// sub-case 4: invalid CFGMS_HA_MODE -> LoadFromEnvironment error surfaces
+	// before the gate or factory are reached.
+	t.Run("invalid_ha_mode_returns_error", func(t *testing.T) {
+		t.Setenv("CFGMS_HA_MODE", "garbage")
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "oss"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to read HA configuration from environment")
+	})
+
+	// sub-case 5: blue-green mode -> gate is a no-op; only ClusterMode activates it.
+	t.Run("blue_green_mode_no_gate_error", func(t *testing.T) {
+		t.Setenv("CFGMS_HA_MODE", "blue-green")
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "oss"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err, "storage migrator rejects unknown source backend")
+		assert.NotContains(t, err.Error(), "not cluster-capable",
+			"blue-green mode must not trigger the cluster-capable gate")
+	})
+
+	// sub-case 6: clusterCapableMigrationBackend is case-insensitive.
+	t.Run("cluster_mode_DATABASE_uppercase_passes_gate", func(t *testing.T) {
+		t.Setenv("CFGMS_HA_MODE", "cluster")
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "DATABASE"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err, "storage migrator rejects unknown source backend")
+		assert.NotContains(t, err.Error(), "not cluster-capable",
+			"case-insensitive match must pass the gate for DATABASE")
+	})
+}
+
 // TestMigrateCmd_RunWritesRecords verifies that without --dry-run, Run is
 // invoked and the importer receives the exported records.
 func TestMigrateCmd_RunWritesRecords(t *testing.T) {
