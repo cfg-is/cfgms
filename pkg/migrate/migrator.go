@@ -20,10 +20,11 @@ type Record struct {
 	Data []byte
 }
 
-// Report carries per-kind record counts and non-fatal errors, mirroring the
-// counts/errors maps used in cmd/cfg/cmd/storage.go.
+// Report carries per-kind record counts, optional byte totals, and non-fatal errors.
+// Bytes is nil for migrators that do not track byte sizes (e.g. storage, secrets).
 type Report struct {
 	Counts map[string]int
+	Bytes  map[string]int64 // per-namespace byte totals; nil when not tracked
 	Errors map[string]error
 }
 

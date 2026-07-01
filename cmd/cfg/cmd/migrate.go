@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/migrate"
+	_ "github.com/cfgis/cfgms/pkg/migrate/blob"    // register "blob" migrator
 	_ "github.com/cfgis/cfgms/pkg/migrate/secrets" // register "secrets" migrator
 	_ "github.com/cfgis/cfgms/pkg/migrate/storage" // register "storage" migrator
 )
@@ -127,14 +128,29 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 
 func printMigrateReport(out io.Writer, report migrate.Report) error {
 	total := 0
+	var totalBytes int64
 	for store, count := range report.Counts {
-		if _, err := fmt.Fprintf(out, "  %-30s %d records\n", store+":", count); err != nil {
+		total += count
+		b := report.Bytes[store] // zero when Bytes is nil (reading nil map is safe in Go)
+		totalBytes += b
+		if report.Bytes != nil {
+			if _, err := fmt.Fprintf(out, "  %-30s %d records (%s)\n", store+":", count, formatBytes(b)); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(out, "  %-30s %d records\n", store+":", count); err != nil {
+				return err
+			}
+		}
+	}
+	if report.Bytes != nil {
+		if _, err := fmt.Fprintf(out, "  %-30s %d records (%s)\n", "Total:", total, formatBytes(totalBytes)); err != nil {
 			return err
 		}
-		total += count
-	}
-	if _, err := fmt.Fprintf(out, "  %-30s %d records\n", "Total:", total); err != nil {
-		return err
+	} else {
+		if _, err := fmt.Fprintf(out, "  %-30s %d records\n", "Total:", total); err != nil {
+			return err
+		}
 	}
 	return nil
 }
