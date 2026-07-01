@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -119,7 +120,7 @@ type Server struct {
 	sessionManager                 session.Manager                       // Issue #2232: admin session token issuance/revocation
 	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
 	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
-	clusterDraining                bool                                  // Issue #2283: true after drain is initiated; causes /health to return 503
+	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
@@ -128,9 +129,9 @@ type Server struct {
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
 // GET /api/v1/health returns HTTP 503 so the load balancer stops routing new
 // steward connections to this node. Called by cluster.Drain() after setting the
-// membership state; never called directly by handlers.
+// membership state; safe to call concurrently with handleHealth.
 func (s *Server) SetDraining(draining bool) {
-	s.clusterDraining = draining
+	s.clusterDraining.Store(draining)
 }
 
 // APIKey represents an API key for external authentication
@@ -1058,6 +1059,15 @@ func (s *Server) SetSessionManager(mgr session.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessionManager = mgr
+}
+
+// SetMembershipStore wires the cluster MembershipStore used by the drain endpoint
+// (Issue #2283). When nil (default), POST /api/v1/cluster/nodes/{id}/drain returns
+// 503. Call after New() but before Start().
+func (s *Server) SetMembershipStore(store cluster.MembershipStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.membershipStore = store
 }
 
 // SetStewardEventLoggingManager injects the dedicated steward-event

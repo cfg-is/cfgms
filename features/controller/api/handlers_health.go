@@ -55,7 +55,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Issue #2283: drain gate — must be first so the LB health check fails
 	// as soon as an operator initiates a drain, before any session drains.
-	if s.clusterDraining {
+	if s.clusterDraining.Load() {
 		health.Status = "degraded"
 		health.Services["drain"] = "draining"
 	}
