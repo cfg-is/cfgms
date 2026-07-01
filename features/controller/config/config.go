@@ -20,6 +20,92 @@ import (
 // It excludes ${VAR:-default} and ${VAR:=default} patterns
 var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
 
+// ringNamePattern validates deployment ring names:
+// lowercase letter followed by up to 31 lowercase letters, digits, or hyphens.
+var ringNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// DefaultRingNames is the ordered default deployment ring set applied when
+// deployment_rings is absent from controller config.
+var DefaultRingNames = []string{"pre-release", "early", "default", "stable"}
+
+// DefaultFallbackRing is the ring used when a steward has no or invalid
+// deployment_ring DNA attribute and no explicit fallback_ring is configured.
+const DefaultFallbackRing = "default"
+
+// RingSpec defines a single deployment ring within the ordered ring set.
+type RingSpec struct {
+	// Name is the ring identifier matched against the deployment_ring DNA attribute.
+	// Must match ^[a-z][a-z0-9-]{0,31}$.
+	Name string `yaml:"name"`
+
+	// DesiredVersion is the target steward binary version for this ring (e.g. "v0.5.21").
+	// When non-empty, overrides any tenant-path desired_version for stewards in this ring.
+	// Empty means no ring-level version override applies.
+	DesiredVersion string `yaml:"desired_version,omitempty"`
+
+	// Soak is the minimum time a version must run in this ring before Story S3 advances it.
+	// Declared here to avoid a second structural migration when S3 adds the rollout workflow.
+	Soak Duration `yaml:"soak,omitempty"`
+
+	// HaltThreshold is the error-rate (0.0–1.0) above which S3 halts promotion.
+	// Declared here to avoid a second structural migration when S3 adds the rollout workflow.
+	HaltThreshold float64 `yaml:"halt_threshold,omitempty"`
+
+	// ConcurrencyLimit caps simultaneous steward upgrades in this ring.
+	// Declared here to avoid a second structural migration when S3 adds the rollout workflow.
+	ConcurrencyLimit int `yaml:"concurrency_limit,omitempty"`
+}
+
+// DeploymentRingConfig holds the ordered set of deployment rings and fallback policy.
+// It is a controller-global governance object; individual tenant configs carry only
+// desired_version (from the inheritance resolver or ring resolution).
+type DeploymentRingConfig struct {
+	// Rings is the ordered list of ring specs. Earlier rings receive updates first.
+	Rings []RingSpec `yaml:"rings,omitempty"`
+
+	// FallbackRing is the ring name used when a steward has no or invalid
+	// deployment_ring DNA attribute. Must be a declared ring name.
+	// Defaults to "default" when empty.
+	FallbackRing string `yaml:"fallback_ring,omitempty"`
+}
+
+// DefaultDeploymentRingConfig returns the default four-ring configuration with
+// empty desired_version fields (no version override until the operator sets one).
+func DefaultDeploymentRingConfig() DeploymentRingConfig {
+	rings := make([]RingSpec, len(DefaultRingNames))
+	for i, name := range DefaultRingNames {
+		rings[i] = RingSpec{Name: name}
+	}
+	return DeploymentRingConfig{
+		Rings:        rings,
+		FallbackRing: DefaultFallbackRing,
+	}
+}
+
+// ValidateDeploymentRingConfig validates a DeploymentRingConfig for controller startup.
+// Returns nil when rings is the zero value (absent in config — defaults apply).
+func ValidateDeploymentRingConfig(rc DeploymentRingConfig) error {
+	seen := make(map[string]struct{}, len(rc.Rings))
+	for i, ring := range rc.Rings {
+		if ring.Name == "" {
+			return fmt.Errorf("deployment_rings.rings[%d]: name must not be empty", i)
+		}
+		if !ringNamePattern.MatchString(ring.Name) {
+			return fmt.Errorf("deployment_rings.rings[%d]: name %q must match ^[a-z][a-z0-9-]{0,31}$", i, ring.Name)
+		}
+		if _, dup := seen[ring.Name]; dup {
+			return fmt.Errorf("deployment_rings.rings[%d]: duplicate ring name %q", i, ring.Name)
+		}
+		seen[ring.Name] = struct{}{}
+	}
+	if rc.FallbackRing != "" {
+		if _, ok := seen[rc.FallbackRing]; !ok {
+			return fmt.Errorf("deployment_rings.fallback_ring: %q is not a declared ring name", rc.FallbackRing)
+		}
+	}
+	return nil
+}
+
 // envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
 var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
 
@@ -122,6 +208,33 @@ type Config struct {
 	// Override ha.mode via CFGMS_HA_MODE environment variable.
 	// Valid modes: "single" (default), "blue-green", "cluster".
 	HA *HAConfig `yaml:"ha,omitempty"`
+
+	// DeploymentRings configures the ordered deployment ring set for fleet version management.
+	// When absent, the default four-ring set (pre-release, early, default, stable) is applied
+	// with "default" as the fallback ring.
+	DeploymentRings *DeploymentRingConfig `yaml:"deployment_rings,omitempty"`
+}
+
+// EffectiveRings returns the deployment ring configuration with defaults applied.
+// When DeploymentRings is nil or has no rings, the default four-ring set is returned.
+func (c *Config) EffectiveRings() DeploymentRingConfig {
+	if c.DeploymentRings != nil && len(c.DeploymentRings.Rings) > 0 {
+		rc := *c.DeploymentRings
+		if rc.FallbackRing == "" {
+			rc.FallbackRing = DefaultFallbackRing
+		}
+		return rc
+	}
+	return DefaultDeploymentRingConfig()
+}
+
+// ValidateDeploymentRings validates the ring configuration at controller startup.
+// Returns nil when DeploymentRings is absent (defaults apply and are always valid).
+func (c *Config) ValidateDeploymentRings() error {
+	if c.DeploymentRings == nil || len(c.DeploymentRings.Rings) == 0 {
+		return nil
+	}
+	return ValidateDeploymentRingConfig(*c.DeploymentRings)
 }
 
 // RegistrationConfig holds registration approval workflow settings.

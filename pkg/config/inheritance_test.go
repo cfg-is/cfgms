@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -417,4 +418,149 @@ func TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins(t *testi
 		"more-permissive-wins: child false cannot revoke parent true")
 	assert.Equal(t, parentSrc, effective.Sources["steward.upgrade.allow_downgrade"],
 		"source must remain the parent that set the permissive value")
+}
+
+// --- ResolveRingVersion tests (Issue #2271) ---
+
+// makeTestRings returns a DeploymentRingConfig with four rings and versions set
+// for "early" and "default" to exercise the resolution logic.
+func makeTestRings() controllerconfig.DeploymentRingConfig {
+	return controllerconfig.DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "pre-release", DesiredVersion: "v0.6.0-rc1"},
+			{Name: "early", DesiredVersion: "v0.5.21"},
+			{Name: "default", DesiredVersion: "v0.5.20"},
+			{Name: "stable", DesiredVersion: "v0.5.19"},
+		},
+	}
+}
+
+// TestResolveRingVersion_ValidRing proves: a steward with dna["deployment_ring"] = "early"
+// receives the early ring's desired_version as effective desired_version.
+func TestResolveRingVersion_ValidRing(t *testing.T) {
+	rings := makeTestRings()
+	attrs := map[string]string{"deployment_ring": "early"}
+
+	version, ring, didFallback, original := ResolveRingVersion(attrs, rings)
+
+	assert.Equal(t, "v0.5.21", version, "must return early ring's desired_version")
+	assert.Equal(t, "early", ring)
+	assert.False(t, didFallback, "valid ring must not trigger fallback")
+	assert.Equal(t, "early", original)
+}
+
+// TestResolveRingVersion_InvalidRing_FallsBack proves: a steward with an invalid
+// deployment_ring value receives the fallback ring's desired_version and triggers fallback.
+func TestResolveRingVersion_InvalidRing_FallsBack(t *testing.T) {
+	rings := makeTestRings()
+	attrs := map[string]string{"deployment_ring": "nonexistent-ring"}
+
+	version, ring, didFallback, original := ResolveRingVersion(attrs, rings)
+
+	assert.Equal(t, "v0.5.20", version, "invalid ring must fall back to default ring's version")
+	assert.Equal(t, "default", ring)
+	assert.True(t, didFallback, "invalid ring must trigger fallback")
+	assert.Equal(t, "nonexistent-ring", original)
+}
+
+// TestResolveRingVersion_AbsentRing_FallsBack proves: a steward with no deployment_ring
+// attribute receives the fallback ring's desired_version and triggers fallback.
+func TestResolveRingVersion_AbsentRing_FallsBack(t *testing.T) {
+	rings := makeTestRings()
+	attrs := map[string]string{} // no deployment_ring
+
+	version, ring, didFallback, original := ResolveRingVersion(attrs, rings)
+
+	assert.Equal(t, "v0.5.20", version, "absent ring must fall back to default ring's version")
+	assert.Equal(t, "default", ring)
+	assert.True(t, didFallback, "absent ring must trigger fallback")
+	assert.Equal(t, "", original, "original must be empty when attribute is absent")
+}
+
+// TestResolveRingVersion_OverridesTenantPathVersion proves: the ring-resolved
+// desired_version overrides any tenant-path desired_version when the ring has a non-empty version.
+// This is the REQUIRED TEST from the acceptance criteria for Story #2271.
+func TestResolveRingVersion_OverridesTenantPathVersion(t *testing.T) {
+	rings := makeTestRings()
+
+	// Simulate a steward in the "early" ring. Tenant-path has its own desired_version.
+	tenantPathVersion := "v0.4.0" // lower version from tenant hierarchy
+	attrs := map[string]string{"deployment_ring": "early"}
+
+	version, _, didFallback, _ := ResolveRingVersion(attrs, rings)
+
+	// Ring version must win when non-empty — caller applies override.
+	require.NotEmpty(t, version, "early ring must have a non-empty desired_version")
+	assert.Equal(t, "v0.5.21", version,
+		"ring-resolved version must override the tenant-path version %q", tenantPathVersion)
+	assert.False(t, didFallback)
+}
+
+// TestResolveRingVersion_EmptyVersionRing proves: when the resolved ring has no
+// desired_version set, ResolveRingVersion returns empty string (no override).
+func TestResolveRingVersion_EmptyVersionRing(t *testing.T) {
+	rings := controllerconfig.DeploymentRingConfig{
+		FallbackRing: "stable",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "stable"}, // no desired_version
+		},
+	}
+	attrs := map[string]string{"deployment_ring": "stable"}
+
+	version, ring, didFallback, _ := ResolveRingVersion(attrs, rings)
+
+	assert.Equal(t, "", version, "ring with no desired_version must return empty (no override)")
+	assert.Equal(t, "stable", ring)
+	assert.False(t, didFallback)
+}
+
+// TestResolveRingVersion_CustomFallbackRing verifies fallback_ring is honoured when
+// explicitly configured to a ring other than "default".
+func TestResolveRingVersion_CustomFallbackRing(t *testing.T) {
+	rings := controllerconfig.DeploymentRingConfig{
+		FallbackRing: "stable",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "early", DesiredVersion: "v0.6.0"},
+			{Name: "stable", DesiredVersion: "v0.5.19"},
+		},
+	}
+	attrs := map[string]string{} // no ring attribute
+
+	version, ring, didFallback, _ := ResolveRingVersion(attrs, rings)
+
+	assert.Equal(t, "v0.5.19", version)
+	assert.Equal(t, "stable", ring)
+	assert.True(t, didFallback)
+}
+
+// TestResolveRingVersion_DefaultFallbackWhenFallbackRingEmpty verifies that an empty
+// fallback_ring defaults to controllerconfig.DefaultFallbackRing ("default").
+func TestResolveRingVersion_DefaultFallbackWhenFallbackRingEmpty(t *testing.T) {
+	rings := controllerconfig.DeploymentRingConfig{
+		// FallbackRing intentionally empty
+		Rings: []controllerconfig.RingSpec{
+			{Name: "early", DesiredVersion: "v0.6.0"},
+			{Name: "default", DesiredVersion: "v0.5.20"}, // must be the automatic fallback
+		},
+	}
+	attrs := map[string]string{"deployment_ring": "unknown"}
+
+	version, ring, didFallback, _ := ResolveRingVersion(attrs, rings)
+
+	assert.Equal(t, "v0.5.20", version, "empty fallback_ring must default to 'default' ring")
+	assert.Equal(t, "default", ring)
+	assert.True(t, didFallback)
+}
+
+// TestResolveRingVersion_NilDNAAttrs verifies nil attrs does not panic.
+func TestResolveRingVersion_NilDNAAttrs(t *testing.T) {
+	rings := makeTestRings()
+
+	version, ring, didFallback, original := ResolveRingVersion(nil, rings)
+
+	assert.Equal(t, "v0.5.20", version)
+	assert.Equal(t, "default", ring)
+	assert.True(t, didFallback)
+	assert.Equal(t, "", original)
 }

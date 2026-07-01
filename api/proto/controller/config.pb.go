@@ -772,8 +772,12 @@ type StewardSettings struct {
 	ConvergeInterval *durationpb.Duration `protobuf:"bytes,7,opt,name=converge_interval,json=convergeInterval,proto3" json:"converge_interval,omitempty"`
 	// script_signing configures script signing policy and trust configuration.
 	ScriptSigning *ScriptSigningConfig `protobuf:"bytes,8,opt,name=script_signing,json=scriptSigning,proto3" json:"script_signing,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// DesiredVersion is the ring-resolved target steward binary version (Issue #2271).
+	// Not yet in the wire descriptor — pending protoc regeneration after proto is updated.
+	// Populated by ToProto / read by FromProto via direct struct access only.
+	DesiredVersion string         `json:"desired_version,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *StewardSettings) Reset() {
@@ -860,6 +864,13 @@ func (x *StewardSettings) GetScriptSigning() *ScriptSigningConfig {
 		return x.ScriptSigning
 	}
 	return nil
+}
+
+func (x *StewardSettings) GetDesiredVersion() string {
+	if x != nil {
+		return x.DesiredVersion
+	}
+	return ""
 }
 
 // ScriptSigningConfig defines the steward-level script signing policy and trust configuration.

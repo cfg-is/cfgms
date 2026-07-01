@@ -312,6 +312,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		controllerService = service.NewControllerService(logger)
 	}
 
+	// Wire deployment ring config into controller service (Issue #2271).
+	if err := cfg.ValidateDeploymentRings(); err != nil {
+		return nil, fmt.Errorf("invalid deployment_rings config: %w", err)
+	}
+	controllerService.SetRingConfig(cfg.EffectiveRings())
+
 	// Create the configuration service (V2: durable storage via StorageManager)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 

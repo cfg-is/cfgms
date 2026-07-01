@@ -153,6 +153,24 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		}, nil
 	}
 
+	// Apply ring-resolved desired_version override. The ring takes precedence over any
+	// tenant-path desired_version when the steward belongs to a ring with a non-empty version.
+	if s.controllerSvc != nil {
+		if info, exists := s.controllerSvc.GetStewardInfo(req.StewardId); exists && info.DNA != nil {
+			version, ring, didFallback, original := s.controllerSvc.ResolveRingVersion(info.DNA.Attributes)
+			if didFallback {
+				s.logger.Warn("deployment_ring_fallback",
+					"steward_id", logging.SanitizeLogValue(req.StewardId),
+					"ring_value", logging.SanitizeLogValue(original),
+					"fallback_ring", logging.SanitizeLogValue(ring),
+				)
+			}
+			if version != "" {
+				effective.Config.Steward.Upgrade.DesiredVersion = version
+			}
+		}
+	}
+
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(effective.Config, req.Modules)
 
