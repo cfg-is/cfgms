@@ -301,6 +301,7 @@ func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 		tempDir+"/cfgms.db",
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
 
 	cfg := &config.Config{
 		HA: &config.HAConfig{
@@ -311,6 +312,7 @@ func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm)
 	require.NoError(t, err, "initializeHAManager must succeed with ha.mode=cluster and CFGMS_NODE_ID set")
 	require.NotNil(t, haManager)
+	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
 
 	assert.Equal(t, ha.ClusterMode, haManager.GetDeploymentMode(),
 		"HA manager must report ClusterMode when cfg.HA.Mode is \"cluster\"")
@@ -325,6 +327,7 @@ func TestInitializeHAManager_InvalidMode(t *testing.T) {
 		tempDir+"/cfgms.db",
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
 
 	cfg := &config.Config{
 		HA: &config.HAConfig{
