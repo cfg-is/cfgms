@@ -193,6 +193,11 @@ func TestBlobMigrate_FilesystemToS3RoundTrip(t *testing.T) {
 	assert.Equal(t, 2, report.Counts["installers"], "installer count must match")
 	assert.Equal(t, 1, report.Counts["reports"], "reports count must match")
 	assert.Empty(t, report.Errors, "no errors expected")
+	require.NotNil(t, report.Bytes, "run report must include Bytes map")
+	assert.Equal(t, int64(len(blobs[0].content)+len(blobs[1].content)), report.Bytes["installers"],
+		"installer byte total must equal sum of installer blob sizes")
+	assert.Equal(t, int64(len(blobs[2].content)), report.Bytes["reports"],
+		"reports byte total must equal size of the report blob")
 
 	// Verify all blobs are readable from S3 with matching content and checksums.
 	for _, b := range blobs {

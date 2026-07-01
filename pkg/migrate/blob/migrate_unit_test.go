@@ -129,7 +129,7 @@ func TestNewBlobMigrator_EmptyTenantsPanics(t *testing.T) {
 	})
 }
 
-// TestBlobMigrator_Plan_Empty verifies that Plan on an empty source returns zero counts.
+// TestBlobMigrator_Plan_Empty verifies that Plan on an empty source returns zero counts and an empty Bytes map.
 func TestBlobMigrator_Plan_Empty(t *testing.T) {
 	src := newFilesystemStore(t)
 	dst := newFilesystemStore(t)
@@ -143,9 +143,11 @@ func TestBlobMigrator_Plan_Empty(t *testing.T) {
 		total += c
 	}
 	assert.Equal(t, 0, total, "empty source must produce zero-count plan")
+	require.NotNil(t, report.Bytes, "Bytes map must be non-nil even for empty source")
+	assert.Empty(t, report.Bytes, "empty source must produce empty Bytes map")
 }
 
-// TestBlobMigrator_Plan_WithBlobs verifies per-namespace counts without writing.
+// TestBlobMigrator_Plan_WithBlobs verifies per-namespace counts and byte totals without writing.
 func TestBlobMigrator_Plan_WithBlobs(t *testing.T) {
 	ctx := context.Background()
 	src := newFilesystemStore(t)
@@ -163,13 +165,17 @@ func TestBlobMigrator_Plan_WithBlobs(t *testing.T) {
 	assert.Equal(t, 2, report.Counts["installers"], "plan must count installers namespace")
 	assert.Equal(t, 1, report.Counts["reports"], "plan must count reports namespace")
 
+	require.NotNil(t, report.Bytes, "plan report must include Bytes map")
+	assert.Equal(t, int64(2+2), report.Bytes["installers"], "plan must sum installer bytes")
+	assert.Equal(t, int64(3), report.Bytes["reports"], "plan must sum report bytes")
+
 	// Plan must not write to destination.
 	dstList, err := dst.ListBlobs(ctx, blobstore.BlobKey{TenantID: tenantID})
 	require.NoError(t, err)
 	assert.Empty(t, dstList, "plan must not write to destination")
 }
 
-// TestBlobMigrator_Run_Empty verifies that migrating an empty source succeeds.
+// TestBlobMigrator_Run_Empty verifies that migrating an empty source succeeds with an empty Bytes map.
 func TestBlobMigrator_Run_Empty(t *testing.T) {
 	src := newFilesystemStore(t)
 	dst := newFilesystemStore(t)
@@ -183,6 +189,8 @@ func TestBlobMigrator_Run_Empty(t *testing.T) {
 		total += c
 	}
 	assert.Equal(t, 0, total, "empty source must produce zero-count report")
+	require.NotNil(t, report.Bytes, "Bytes map must be non-nil even for empty source")
+	assert.Empty(t, report.Bytes, "empty source must produce empty Bytes map")
 }
 
 // TestBlobMigrator_Run_FilesystemToFilesystem verifies a basic filesystem→filesystem roundtrip.
@@ -200,6 +208,8 @@ func TestBlobMigrator_Run_FilesystemToFilesystem(t *testing.T) {
 	report, err := m.Run(ctx)
 	require.NoError(t, err, "migration must succeed")
 	assert.Equal(t, 1, report.Counts["installers"])
+	require.NotNil(t, report.Bytes, "run report must include Bytes map")
+	assert.Equal(t, int64(len(content)), report.Bytes["installers"], "run report must sum installer bytes")
 
 	// Verify the blob is readable from the destination.
 	rc, meta, err := dst.GetBlob(ctx, key)
@@ -243,7 +253,7 @@ func TestBlobMigrator_Run_PreservesChecksum(t *testing.T) {
 	assert.Equal(t, srcChecksum, dstList[0].Meta.Checksum, "destination checksum must match source")
 }
 
-// TestBlobMigrator_Run_MultipleNamespaces verifies per-namespace counts.
+// TestBlobMigrator_Run_MultipleNamespaces verifies per-namespace counts and byte totals.
 func TestBlobMigrator_Run_MultipleNamespaces(t *testing.T) {
 	ctx := context.Background()
 	src := newFilesystemStore(t)
@@ -260,11 +270,45 @@ func TestBlobMigrator_Run_MultipleNamespaces(t *testing.T) {
 
 	assert.Equal(t, 2, report.Counts["installers"], "must count installers namespace")
 	assert.Equal(t, 1, report.Counts["reports"], "must count reports namespace")
+	require.NotNil(t, report.Bytes, "run report must include Bytes map")
+	assert.Equal(t, int64(1+1), report.Bytes["installers"], "must sum installer bytes")
+	assert.Equal(t, int64(1), report.Bytes["reports"], "must sum report bytes")
 
 	// All blobs must be in destination.
 	dstList, err := dst.ListBlobs(ctx, blobstore.BlobKey{TenantID: tenantID})
 	require.NoError(t, err)
 	assert.Len(t, dstList, 3)
+}
+
+// TestBlobMigrator_ReportBytes verifies that Bytes in the report reflects the
+// actual byte size of each blob accumulated per namespace.
+func TestBlobMigrator_ReportBytes(t *testing.T) {
+	ctx := context.Background()
+	src := newFilesystemStore(t)
+	dst := newFilesystemStore(t)
+
+	tenantID := fmt.Sprintf("tenant-%d", time.Now().UnixNano())
+	small := []byte("small")            // 5 bytes
+	large := []byte("larger payload!!") // 16 bytes
+
+	putTestBlob(t, src, blobstore.BlobKey{TenantID: tenantID, Namespace: "installers", Name: "s.pkg"}, small, nil)
+	putTestBlob(t, src, blobstore.BlobKey{TenantID: tenantID, Namespace: "installers", Name: "l.pkg"}, large, nil)
+
+	m := blobmigrate.NewBlobMigrator(src, dst, []string{tenantID})
+
+	// Verify Plan reflects bytes without writing.
+	planReport, err := m.Plan(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, planReport.Bytes, "Bytes map must be non-nil")
+	assert.Equal(t, int64(len(small)+len(large)), planReport.Bytes["installers"],
+		"Plan must accumulate bytes for all blobs in namespace")
+
+	// Verify Run report reflects the same bytes.
+	runReport, err := m.Run(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, runReport.Bytes, "Bytes map must be non-nil after Run")
+	assert.Equal(t, planReport.Bytes["installers"], runReport.Bytes["installers"],
+		"Run Bytes must match Plan Bytes for the same source blobs")
 }
 
 // TestBlobMigrator_Run_MultipleTenants verifies that blobs from multiple tenants
@@ -286,6 +330,9 @@ func TestBlobMigrator_Run_MultipleTenants(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 2, report.Counts["installers"], "both tenant blobs must be counted")
+	require.NotNil(t, report.Bytes, "Bytes map must be non-nil")
+	assert.Equal(t, int64(len("tenant-a blob")+len("tenant-b blob")), report.Bytes["installers"],
+		"byte total must sum blobs from all tenants in the same namespace")
 
 	// Each tenant's blob must land in the correct tenant namespace in the destination.
 	listA, err := dst.ListBlobs(ctx, blobstore.BlobKey{TenantID: tenantA})

@@ -105,6 +105,54 @@ func TestMigrateCmd_DryRunDoesNotWrite(t *testing.T) {
 	assert.Contains(t, buf.String(), "no writes performed")
 }
 
+// TestPrintMigrateReport_WithBytes verifies that printMigrateReport includes
+// byte totals per namespace when report.Bytes is populated.
+func TestPrintMigrateReport_WithBytes(t *testing.T) {
+	report := migrate.Report{
+		Counts: map[string]int{
+			"installers": 2,
+			"reports":    1,
+		},
+		Bytes: map[string]int64{
+			"installers": 1024,
+			"reports":    512,
+		},
+		Errors: make(map[string]error),
+	}
+
+	var buf bytes.Buffer
+	err := printMigrateReport(&buf, report)
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "installers", "output must name the installers namespace")
+	assert.Contains(t, out, "reports", "output must name the reports namespace")
+	assert.Contains(t, out, "1.0 KB", "output must show installer bytes in human-readable form")
+	assert.Contains(t, out, "512 B", "output must show report bytes in human-readable form")
+	assert.Contains(t, out, "Total:", "output must include a Total summary line")
+	assert.Contains(t, out, "1.5 KB", "Total line must show combined byte total in human-readable form")
+}
+
+// TestPrintMigrateReport_WithoutBytes verifies backward compatibility: when Bytes
+// is nil, printMigrateReport omits byte information and still prints record counts.
+func TestPrintMigrateReport_WithoutBytes(t *testing.T) {
+	report := migrate.Report{
+		Counts: map[string]int{
+			"config_store": 3,
+		},
+		Errors: make(map[string]error),
+	}
+
+	var buf bytes.Buffer
+	err := printMigrateReport(&buf, report)
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "config_store", "output must name the config_store kind")
+	assert.Contains(t, out, "3 records", "output must show record count")
+	assert.NotContains(t, out, " B", "output must not include byte suffix when Bytes is nil")
+}
+
 // TestMigrateCmd_RunWritesRecords verifies that without --dry-run, Run is
 // invoked and the importer receives the exported records.
 func TestMigrateCmd_RunWritesRecords(t *testing.T) {

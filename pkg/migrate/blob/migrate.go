@@ -130,14 +130,15 @@ func NewBlobMigrator(src, dst blobstore.BlobStore, tenants []string) *BlobMigrat
 	return &BlobMigrator{src: src, dst: dst, tenants: tenants}
 }
 
-// Plan lists all blobs from the source and returns per-namespace counts.
+// Plan lists all blobs from the source and returns per-namespace counts and byte totals.
 // No writes to the target are performed.
 func (m *BlobMigrator) Plan(ctx context.Context) (migrate.Report, error) {
 	infos, err := m.listAll(ctx)
 	if err != nil {
 		return migrate.Report{}, fmt.Errorf("blob plan: %w", err)
 	}
-	return migrate.Report{Counts: countByNamespace(infos), Errors: make(map[string]error)}, nil
+	counts, bytes := collectNamespaceStats(infos)
+	return migrate.Report{Counts: counts, Bytes: bytes, Errors: make(map[string]error)}, nil
 }
 
 // Run copies all blobs from the source to the target, preserving BlobKey, BlobMeta,
@@ -156,7 +157,8 @@ func (m *BlobMigrator) Run(ctx context.Context) (migrate.Report, error) {
 		}
 	}
 
-	return migrate.Report{Counts: countByNamespace(infos), Errors: make(map[string]error)}, nil
+	counts, bytes := collectNamespaceStats(infos)
+	return migrate.Report{Counts: counts, Bytes: bytes, Errors: make(map[string]error)}, nil
 }
 
 // listAll enumerates all blobs across all configured tenants from the source.
@@ -191,11 +193,13 @@ func (m *BlobMigrator) copyBlob(ctx context.Context, key blobstore.BlobKey, srcM
 	return nil
 }
 
-// countByNamespace returns a map of namespace → blob count.
-func countByNamespace(infos []blobstore.BlobInfo) map[string]int {
+// collectNamespaceStats returns per-namespace blob counts and total byte sizes.
+func collectNamespaceStats(infos []blobstore.BlobInfo) (map[string]int, map[string]int64) {
 	counts := make(map[string]int)
+	bytes := make(map[string]int64)
 	for _, info := range infos {
 		counts[info.Key.Namespace]++
+		bytes[info.Key.Namespace] += info.Meta.Size
 	}
-	return counts
+	return counts, bytes
 }
