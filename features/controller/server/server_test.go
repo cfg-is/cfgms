@@ -13,7 +13,9 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // recordingLogger implements logging.Logger and captures every log call so
@@ -280,6 +282,63 @@ func TestInitializeHAManager_UsesDefaultConfig(t *testing.T) {
 	node := haManager.GetLocalNode()
 	require.NotNil(t, node)
 	assert.NotEmpty(t, node.ID, "auto-generated node ID must not be empty")
+}
+
+// TestInitializeHAManager_UsesConfigMode verifies that initializeHAManager transfers
+// the YAML-configured deployment mode into the ha.Config before calling ha.NewManager.
+// This is the root-cause fix for the split-brain where every node assumed SingleServerMode
+// because DefaultConfig() hardcodes it regardless of the YAML ha.mode field.
+//
+// The env pre-load ordering is also verified: CFGMS_NODE_ID (required by Validate() for
+// non-single modes) must be set in the environment before NewManager's Validate() runs,
+// or every cluster-mode controller crashes at startup.
+func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
+	t.Setenv("CFGMS_NODE_ID", "test-cluster-node-uses-config-mode")
+
+	tempDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(
+		tempDir+"/flatfile",
+		tempDir+"/cfgms.db",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	cfg := &config.Config{
+		HA: &config.HAConfig{
+			Mode: "cluster",
+		},
+	}
+
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm)
+	require.NoError(t, err, "initializeHAManager must succeed with ha.mode=cluster and CFGMS_NODE_ID set")
+	require.NotNil(t, haManager)
+	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
+
+	assert.Equal(t, ha.ClusterMode, haManager.GetDeploymentMode(),
+		"HA manager must report ClusterMode when cfg.HA.Mode is \"cluster\"")
+}
+
+// TestInitializeHAManager_InvalidMode verifies that an unrecognised ha.mode string
+// surfaces an error instead of silently falling back to single-server mode.
+func TestInitializeHAManager_InvalidMode(t *testing.T) {
+	tempDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(
+		tempDir+"/flatfile",
+		tempDir+"/cfgms.db",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	cfg := &config.Config{
+		HA: &config.HAConfig{
+			Mode: "clustr", // deliberate typo
+		},
+	}
+
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm)
+	require.Error(t, err, "initializeHAManager must return error for invalid ha.mode")
+	assert.Contains(t, err.Error(), "invalid HA mode",
+		"error must identify the bad mode string")
 }
 
 // TestBuiltinWorkflowSeedingIPTrust verifies that a controller started with no

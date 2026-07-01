@@ -62,20 +62,31 @@ func DefaultConfig() *Config {
 	}
 }
 
+// ModeFromString parses a deployment mode string into a DeploymentMode.
+// Valid values (case-insensitive): "single", "blue-green", "cluster".
+// Returns SingleServerMode and an error for unrecognised values.
+func ModeFromString(s string) (DeploymentMode, error) {
+	switch strings.ToLower(s) {
+	case "single":
+		return SingleServerMode, nil
+	case "blue-green":
+		return BlueGreenMode, nil
+	case "cluster":
+		return ClusterMode, nil
+	default:
+		return SingleServerMode, fmt.Errorf("invalid HA mode: %s", s)
+	}
+}
+
 // LoadFromEnvironment loads HA configuration from environment variables
 func (c *Config) LoadFromEnvironment() error {
 	// Load deployment mode
 	if mode := os.Getenv("CFGMS_HA_MODE"); mode != "" {
-		switch strings.ToLower(mode) {
-		case "single":
-			c.Mode = SingleServerMode
-		case "blue-green":
-			c.Mode = BlueGreenMode
-		case "cluster":
-			c.Mode = ClusterMode
-		default:
-			return fmt.Errorf("invalid HA mode: %s", mode)
+		m, err := ModeFromString(mode)
+		if err != nil {
+			return err
 		}
+		c.Mode = m
 	}
 
 	// Load CA certificate path for TLS verification between HA nodes
