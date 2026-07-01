@@ -484,7 +484,7 @@ func TestResolveRingVersion_AbsentRing_FallsBack(t *testing.T) {
 func TestResolveRingVersion_OverridesTenantPathVersion(t *testing.T) {
 	rings := makeTestRings()
 
-	// Simulate a steward in the "early" ring. Tenant-path has its own desired_version.
+	// Test case: steward subscribed to "early" ring; tenant path carries an older version.
 	tenantPathVersion := "v0.4.0" // lower version from tenant hierarchy
 	attrs := map[string]string{"deployment_ring": "early"}
 

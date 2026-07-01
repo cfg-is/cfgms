@@ -20,6 +20,68 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// logCapture records log calls for assertion in internal package tests (package service).
+// Implements logging.Logger by storing each call; assertions use findEntry.
+type logCapture struct {
+	mu      sync.Mutex
+	entries []logCaptureEntry
+}
+
+type logCaptureEntry struct {
+	level  string
+	msg    string
+	fields []interface{}
+}
+
+func (l *logCapture) record(level, msg string, kv []interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, logCaptureEntry{level: level, msg: msg, fields: kv})
+}
+
+// findEntry returns the first entry whose message equals msg (case-sensitive).
+func (l *logCapture) findEntry(msg string) (logCaptureEntry, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.msg == msg {
+			return e, true
+		}
+	}
+	return logCaptureEntry{}, false
+}
+
+// fieldValue returns the value for a given key in a log entry's key-value pairs.
+func (e logCaptureEntry) fieldValue(key string) (interface{}, bool) {
+	for i := 0; i+1 < len(e.fields); i += 2 {
+		if fmt.Sprintf("%v", e.fields[i]) == key {
+			return e.fields[i+1], true
+		}
+	}
+	return nil, false
+}
+
+func (l *logCapture) Debug(msg string, kv ...interface{}) { l.record("DEBUG", msg, kv) }
+func (l *logCapture) Info(msg string, kv ...interface{})  { l.record("INFO", msg, kv) }
+func (l *logCapture) Warn(msg string, kv ...interface{})  { l.record("WARN", msg, kv) }
+func (l *logCapture) Error(msg string, kv ...interface{}) { l.record("ERROR", msg, kv) }
+func (l *logCapture) Fatal(msg string, kv ...interface{}) { l.record("FATAL", msg, kv) }
+func (l *logCapture) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("DEBUG", msg, kv)
+}
+func (l *logCapture) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("INFO", msg, kv)
+}
+func (l *logCapture) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("WARN", msg, kv)
+}
+func (l *logCapture) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("ERROR", msg, kv)
+}
+func (l *logCapture) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record("FATAL", msg, kv)
+}
+
 // newTestFleetStorage creates a real SQLite storage manager for controller service tests.
 func newTestFleetStorage(t *testing.T) *fleetStorage.Manager {
 	t.Helper()
@@ -899,19 +961,12 @@ func TestApplyRingResolution_AbsentRing_FallsToDefault(t *testing.T) {
 	assert.Equal(t, "default", steward.ResolvedRing)
 }
 
-// TestApplyRingResolution_FallbackLogsWarn verifies that ApplyRingResolution calls
-// the logger with "deployment_ring_fallback" when ring fallback occurs.
-// Uses a real file-backed logger so the log output can be inspected.
+// TestApplyRingResolution_FallbackLogsWarn verifies that ApplyRingResolution emits
+// a WARN log entry with event name "deployment_ring_fallback" and the correct
+// field values when ring fallback occurs (invalid ring name).
 func TestApplyRingResolution_FallbackLogsWarn(t *testing.T) {
-	logFile := t.TempDir() + "/test.log"
-	logger := logging.NewLogger("debug")
-	// Redirect via the default logger; the NoopLogger is not suitable here.
-	// We verify the fallback indirectly via steward state + the fact that WARN
-	// is called with the right event name. A production log capture test would
-	// use a custom Logger implementation; here we verify the call path is
-	// exercised correctly by checking the resolved state.
-	svc := NewControllerService(logger)
-	_ = logFile // logger writes to stderr; state verification below is the contract
+	lc := &logCapture{}
+	svc := NewControllerService(lc)
 	svc.SetRingConfig(makeTestRingConfig())
 
 	dna := makeTestDNA("dev-1", map[string]string{"deployment_ring": "does-not-exist"})
@@ -922,32 +977,67 @@ func TestApplyRingResolution_FallbackLogsWarn(t *testing.T) {
 	}
 	svc.ApplyRingResolution("dev-1", steward)
 
-	// The WARN must be emitted (exercised without panic) and state must be correct.
+	// State assertions — invalid ring falls back to default ring.
 	assert.Equal(t, "v0.5.20", steward.RingResolvedVersion,
 		"invalid ring must resolve to fallback (default) ring's version")
 	assert.Equal(t, "default", steward.ResolvedRing,
 		"ResolvedRing must reflect the fallback ring, not the invalid input")
+
+	// Log assertions — WARN with event name and field values must be emitted.
+	entry, ok := lc.findEntry("deployment_ring_fallback")
+	require.True(t, ok, "expected WARN log entry with msg='deployment_ring_fallback'")
+	assert.Equal(t, "WARN", entry.level, "fallback must be logged at WARN level")
+
+	ringValue, hasRingValue := entry.fieldValue("ring_value")
+	assert.True(t, hasRingValue, "log entry must include ring_value field")
+	assert.Contains(t, fmt.Sprintf("%v", ringValue), "does-not-exist",
+		"ring_value field must carry the invalid ring name (possibly sanitized)")
+
+	fallbackRing, hasFallbackRing := entry.fieldValue("fallback_ring")
+	assert.True(t, hasFallbackRing, "log entry must include fallback_ring field")
+	assert.Contains(t, fmt.Sprintf("%v", fallbackRing), "default",
+		"fallback_ring field must name the fallback ring (possibly sanitized)")
 }
 
-// TestSetRingConfig_AuditLogsOnChange verifies SetRingConfig logs ring_set_changed
-// when the ring set actually changes (audit entry emitted).
+// TestSetRingConfig_AuditLogsOnChange verifies SetRingConfig emits a "ring_set_changed"
+// INFO audit log entry with actor, before, and after fields when the ring set changes.
 func TestSetRingConfig_AuditLogsOnChange(t *testing.T) {
-	// SetRingConfig is a no-op audit-wise on equal configs. We confirm the state
-	// transitions correctly and the service stays consistent.
-	svc := NewControllerService(logging.NewNoopLogger())
+	lc := &logCapture{}
+	svc := NewControllerService(lc)
 
 	initial := makeTestRingConfig()
 	svc.SetRingConfig(initial)
 
+	// First set emits ring_set_changed (from empty → initial config).
+	entry, ok := lc.findEntry("ring_set_changed")
+	require.True(t, ok, "expected INFO log entry with msg='ring_set_changed' on first SetRingConfig")
+	assert.Equal(t, "INFO", entry.level, "ring_set_changed must be logged at INFO level")
+	_, hasActor := entry.fieldValue("actor")
+	assert.True(t, hasActor, "ring_set_changed entry must include actor field")
+	_, hasAfter := entry.fieldValue("after")
+	assert.True(t, hasAfter, "ring_set_changed entry must include after field")
+
+	// State is persisted correctly.
 	got := svc.GetRingConfig()
 	require.Len(t, got.Rings, 4)
 	assert.Equal(t, "early", got.Rings[1].Name)
 	assert.Equal(t, "v0.5.21", got.Rings[1].DesiredVersion)
 
+	// Record current entry count; a second change must add exactly one more.
+	lc.mu.Lock()
+	countBefore := len(lc.entries)
+	lc.mu.Unlock()
+
 	// Update the ring config (version bump on early ring).
 	updated := makeTestRingConfig()
 	updated.Rings[1].DesiredVersion = "v0.5.22"
 	svc.SetRingConfig(updated)
+
+	lc.mu.Lock()
+	countAfter := len(lc.entries)
+	lc.mu.Unlock()
+	assert.Equal(t, countBefore+1, countAfter,
+		"SetRingConfig on changed config must emit exactly one additional log entry")
 
 	got2 := svc.GetRingConfig()
 	assert.Equal(t, "v0.5.22", got2.Rings[1].DesiredVersion,
