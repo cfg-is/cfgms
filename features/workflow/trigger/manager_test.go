@@ -146,6 +146,8 @@ func (m *MockStorageProvider) GetVersion() string {
 	return args.String(0)
 }
 
+func (m *MockStorageProvider) ClusterCapable() bool { return false }
+
 // MockScheduler implements Scheduler for testing
 type MockScheduler struct {
 	mock.Mock

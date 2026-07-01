@@ -52,6 +52,10 @@ func (p *DatabaseProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *DatabaseProvider) ClusterCapable() bool { return true }
+
 // Available checks if PostgreSQL is available and accessible
 func (p *DatabaseProvider) Available() (bool, error) {
 	// Assumes PostgreSQL driver is available; live connection ping is deferred.

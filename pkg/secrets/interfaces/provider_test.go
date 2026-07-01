@@ -81,6 +81,7 @@ func (m *mockSecretProvider) Available() (bool, error) {
 func (m *mockSecretProvider) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{}
 }
+func (m *mockSecretProvider) ClusterCapable() bool { return false }
 func (m *mockSecretProvider) CreateSecretStore(_ map[string]interface{}) (SecretStore, error) {
 	return nil, nil
 }

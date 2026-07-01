@@ -115,6 +115,10 @@ func (p *FlatFileProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *FlatFileProvider) ClusterCapable() bool { return false }
+
 // Available returns true if the flat-file provider can operate on this system.
 // The flat-file provider only requires the OS filesystem and is always available.
 func (p *FlatFileProvider) Available() (bool, error) {

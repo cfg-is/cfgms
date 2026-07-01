@@ -336,3 +336,8 @@ func randHex(t *testing.T, n int) string {
 	require.NoError(t, err)
 	return hex.EncodeToString(buf)
 }
+
+func TestOSKeychainProvider_ClusterCapable_False(t *testing.T) {
+	p := &Provider{}
+	assert.False(t, p.ClusterCapable(), "Provider must not be cluster-capable (OS keychain is host-local, inaccessible from other controller nodes)")
+}

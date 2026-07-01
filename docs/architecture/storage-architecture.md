@@ -390,6 +390,29 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 - `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables added to the shared SQLite schema. This is the OSS default.
 - `pkg/storage/providers/flatfile`, `database`, `git`: return `ErrNotSupported` — command state is business data, not config data.
 
+## Cluster Mode Provider Compatibility
+
+Controllers in cluster mode require a storage backend that supports shared state across multiple concurrent controller nodes. Each storage provider and secrets provider declares this via `ClusterCapable() bool` on its respective interface (`StorageProvider`, `SecretProvider`).
+
+### Storage providers
+
+| Provider | `ClusterCapable()` | Reason |
+|----------|--------------------|--------|
+| `pkg/storage/providers/database` (PostgreSQL) | `true` | Postgres handles concurrent writers from multiple controller nodes via its transaction and locking model; the same DSN is accessible from all nodes |
+| `pkg/storage/providers/flatfile` | `false` | Local filesystem — concurrent writes across nodes are not coordinated; last-writer-wins semantics are unsafe for multi-active cluster mode |
+| `pkg/storage/providers/sqlite` | `false` | Single-file SQLite is node-local; no cross-node access or coordination |
+
+### Secrets providers
+
+| Provider | `ClusterCapable()` | Reason |
+|----------|--------------------|--------|
+| `pkg/secrets/providers/openbao` | `true` | OpenBao cluster exposes a shared KV service reachable by all controller nodes |
+| `pkg/secrets/providers/sops` | `false` | Git-backed file store is node-local at runtime; no shared-state coordination |
+| `pkg/secrets/providers/oskeychain` | `false` | Host OS keychain — per-host only, inaccessible from other nodes |
+| `pkg/secrets/providers/steward` | `false` | Steward-local encrypted store on the endpoint host, not a controller backend |
+
+The startup gate (sibling Story B) uses `ClusterCapable()` to reject misconfigured cluster deployments early, before any state is written.
+
 ## References
 
 - [ADR-003: Storage Data Taxonomy](decisions/003-storage-data-taxonomy.md) — authoritative design document

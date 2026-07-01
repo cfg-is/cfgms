@@ -73,6 +73,12 @@ func TestProviderDescription(t *testing.T) {
 	assert.NotEmpty(t, p.Description())
 }
 
+func TestFlatFileProvider_ClusterCapable_False(t *testing.T) {
+	p, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+	assert.False(t, p.ClusterCapable(), "FlatFileProvider must not be cluster-capable (no shared-state coordination across controller nodes)")
+}
+
 func TestUnsupportedStoresReturnErrNotSupported(t *testing.T) {
 	p, err := interfaces.GetStorageProvider("flatfile")
 	require.NoError(t, err)
