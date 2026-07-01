@@ -15,15 +15,15 @@ The PO manages the autonomous pipeline: dashboard, intent capture, targeted unbl
 
 Three execution paths depending on `$ARGUMENTS`. The dividing line is what the action needs:
 
-- **Agent teams** (`TeamCreate`/`SendMessage`) — only the main session has these, so anything that spawns the Planning Team runs **inline** (Path A).
+- **Live agent team** (named `Agent` teammates coordinated via `SendMessage`, addressing the orchestrator as `main`) — the team is driven from the main conversation, so anything that spawns the Planning Team runs **inline** (Path A).
 - **Clean per-run context, no teams** — the autonomous `cron` cycle skips the Planning Team, so it runs as a **clean-context subagent** (Path B) to keep the main session free of per-cycle bloat.
 - **Ongoing conversation** — `status`/`intent`/`next` spawn a long-lived PO subagent (Path C).
 
-> **Subagents CAN nest subagents and run bash under `mode: auto` with no approval prompts** (empirically validated 2026-06-29: a `po` subagent ran a full cron cycle — Tech Lead nested-spawn worked, `po-act.sh dispatch`/`gh`/lease ops all prompt-free, docker access intact since it's the same host). What a subagent **cannot** do is `TeamCreate`/`SendMessage` — so the **only** reason to stay inline is the Planning Team. This corrects the earlier (now-stale) `feedback_po_run_inline` rationale.
+> **Subagents CAN nest subagents and run bash under `mode: auto` with no approval prompts** (empirically validated 2026-06-29: a `po` subagent ran a full cron cycle — Tech Lead nested-spawn worked, `po-act.sh dispatch`/`gh`/lease ops all prompt-free, docker access intact since it's the same host). What a backgrounded subagent **cannot** host is the **live Planning Team**: its named teammates report to the `main` conversation via `SendMessage`, so the team must be driven from the main session — that is the **only** reason `decompose`/`cycle` stay inline. (Note: the old `TeamCreate`/`TeamDelete` tools no longer exist — the session has a single implicit team; you spawn named background `Agent` teammates directly. See `.claude/agents/po.md` §4.1 Step 7.) This corrects the earlier (now-stale) `feedback_po_run_inline` rationale.
 
 ### Path A — needs agent teams (run inline in the main session)
 
-If `$ARGUMENTS` starts with `cycle`, `decompose`, or `plan`, do **NOT** spawn a subagent — execute directly in the main session, because these invoke the **Planning Team** (`TeamCreate` + `SendMessage`), which a subagent's toolset lacks. `work` also runs inline (in-process self-dispatch, no docker).
+If `$ARGUMENTS` starts with `cycle`, `decompose`, or `plan`, do **NOT** spawn a subagent — execute directly in the main session, because these invoke the **Planning Team** — a live team of named `Agent` teammates coordinated via `SendMessage` to the `main` conversation, which a backgrounded subagent can't host. `work` also runs inline (in-process self-dispatch, no docker).
 
 **Routing within Path A:**
 
@@ -38,7 +38,7 @@ If `$ARGUMENTS` starts with `cycle`, `decompose`, or `plan`, do **NOT** spawn a 
 1. Read `.claude/agents/po.md` to load the PO's behavioral rules and the relevant section.
 2. Execute the section directly in the main session in priority order — preflight, unblock check, agent cleanup, pin refresh (§4.1 Step 1.6), Tech Lead pass, rebase (§4.1 Step 3), Acceptance Reviewer (§4.1 Step 4), fix cycle (§4.1 Step 5), dispatch (§4.1 Step 6), Planning Team (§4.1 Step 7), forward edge, session log.
 3. Host capacity is enforced automatically by the resource admission gate (`.claude/agents/po.md` §4.-1) — every launch path defers when the host is out of RAM/disk/CPU headroom.
-4. Spawn nested subagents via the Agent tool with `mode: auto`. Spawn the Planning Team via `TeamCreate` + Agent calls with `team_name` (per `.claude/agents/po.md` §4.1 Step 7c).
+4. Spawn nested subagents via the Agent tool with `mode: auto`. Spawn the Planning Team as named background `Agent` teammates (`name` + `run_in_background: true`) and coordinate via `SendMessage` — no `TeamCreate` (per `.claude/agents/po.md` §4.1 Step 7c).
 5. Report the summary back to the founder using the same format the PO subagent uses.
 
 ### Path B — autonomous cron (clean-context subagent)

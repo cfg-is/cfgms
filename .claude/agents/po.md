@@ -232,7 +232,7 @@ Run the full autonomous pipeline cycle once. Use when the founder says "cron", "
 
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
-**Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because they need the Planning Team (`TeamCreate`/`SendMessage`), which a subagent lacks. When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
+**Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because the Planning Team is a **live team of named `Agent` teammates that coordinate via `SendMessage`** — teammates address the orchestrator as `main`, so the team is driven from the main conversation, not from a backgrounded `po` subagent. (The old `TeamCreate`/`TeamDelete` tools no longer exist; the session has a **single implicit team** — you create teammates simply by spawning named background `Agent`s. See Step 7.) When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
 - **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
 - **Nested spawns are async.** The Tech Lead pass (Step 2) `Agent` spawn is backgrounded by the harness, which re-invokes you on its completion. Hold the relevant inline-op lease (e.g. `epic-decompose-*`, or just the cycle's own work) across the gap and act on the result on the completion turn. The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
 - **Reap your nested `Agent` subagents before you exit.** Every nested `Agent` you spawn (the pin-refresh runner in Step 1.6, the pipeline-sweep runner in Step 7.5, the Tech Lead in Step 2) returns its `agentId` in the spawn result — **record every one**. A nested `Agent` that finishes *after* you have moved to your closing turn is left as a done-but-unreaped orphan the harness keeps counting as "running" (you cannot reap it later — only its parent can, and once you exit it has none). So as the **final action of the cycle**, immediately before you emit the cycle summary: for every nested `Agent` agentId you recorded this cycle, call `TaskStop(task_id: <agentId>)`. This is safe and idempotent — you have already consumed each result on its completion re-invocation turn, so stopping only clears the registry entry (a `No task found` result means it was already reaped — fine, continue). **Only reap `Agent` subagents you spawned. Never `TaskStop` the docker dispatch/review/fix containers** (`cfg-agent-*`) — those are meant to outlive the cycle and are managed by the dispatch helpers, not by `TaskStop`.
@@ -704,7 +704,7 @@ gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
 ```
 Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
 
-**7b. Acquire the decompose lease, then create the planning team:**
+**7b. Acquire the decompose lease:**
 
 Decomposition is a multi-minute operation with no mid-flight idempotency marker
 (the decomposed-marker is posted only at the end), so two hosts would otherwise
@@ -715,20 +715,33 @@ both run a full planning team and double-create the story set. Guard it:
 On `HELD:*`, another host is decomposing this epic — skip it. On
 `ACQUIRED`/`RECLAIMED`, proceed. **Release `epic-decompose-<NUM>` after 7g (summary
 posted) or on any early exit** — including the 7i convergence-failure path.
-```
-TeamCreate(team_name: "planning-epic-<NUM>")
-```
+
+There is **no separate team-creation step**. The session has a **single implicit
+team** (the `Agent` tool's `team_name` parameter is deprecated and ignored), so you
+create teammates simply by spawning named background `Agent`s in 7c; they become
+addressable for `SendMessage` the moment they start.
 
 **7c. Spawn BA and Tech Lead as teammates (in parallel):**
 
-Spawn both using the **Agent tool** with `team_name` and `name` parameters. Read each agent's `.claude/agents/*.md` file and include the **Team Mode** section instructions in the prompt. Use `subagent_type: "general-purpose"`, `model: "sonnet"`, `mode: "auto"`.
+Spawn both using the **Agent tool** with a `name` (their handle for `SendMessage`)
+and `run_in_background: true` (so they stay live and addressable while you
+orchestrate). Read each agent's `.claude/agents/*.md` file and include the **Team
+Mode** section instructions in the prompt. Use `subagent_type: "general-purpose"`,
+`model: "sonnet"`, `mode: "auto"`. Do **not** pass `team_name` — it is deprecated
+and ignored.
 
-- BA: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "ba", model: "sonnet", mode: "auto", prompt: <ba.md Team Mode instructions>)`
-- Tech Lead: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "tech-lead", model: "sonnet", mode: "auto", prompt: <tech-lead.md Team Mode instructions>)`
+- BA: `Agent(subagent_type: "general-purpose", name: "ba", run_in_background: true, model: "sonnet", mode: "auto", prompt: <ba.md Team Mode instructions>)`
+- Tech Lead: `Agent(subagent_type: "general-purpose", name: "tech-lead", run_in_background: true, model: "sonnet", mode: "auto", prompt: <tech-lead.md Team Mode instructions>)`
 
-**7d. Broadcast epic context to the team:**
+Teammates address you as `main` (`SendMessage(to: "main", ...)`) and each other by
+name; you address them by name.
+
+**7d. Send epic context to the team:**
+There is no `to: "*"` broadcast in the implicit-team model — send the context to
+each teammate by name:
 ```
-SendMessage(to: "*", summary: "Epic context for planning", message: <epic body + architectural context from CLAUDE.md>)
+SendMessage(to: "ba", summary: "Epic context for planning", message: <epic body + architectural context from CLAUDE.md>)
+SendMessage(to: "tech-lead", summary: "Epic context for planning", message: <same context>)
 ```
 
 **7e. Orchestrate the planning conversation:**
@@ -739,7 +752,7 @@ The conversation follows this protocol:
 2. **PO relays to Tech Lead** — forward BA's proposals: `SendMessage(to: "tech-lead", message: <proposals>)`
 3. **Tech Lead reviews** — validates proposals against the codebase (5-check validation) and sends per-story verdicts (APPROVED / REVISION NEEDED) to PO. Tech Lead may also message BA directly for clarifications.
 4. **If revisions needed** — PO relays Tech Lead feedback to BA: `SendMessage(to: "ba", message: <feedback>)`. BA revises and re-proposes. PO relays to Tech Lead for re-review. Only unresolved stories iterate — approved stories are locked.
-5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to both: `SendMessage(to: "*", message: "PO DECISION: ...")`
+5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to each teammate by name: `SendMessage(to: "ba", message: "PO DECISION: ...")` and `SendMessage(to: "tech-lead", message: "PO DECISION: ...")`
 
 **Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document the convergence failure by blocking the epic (use `po-act.sh block <EPIC_NUM> "<reason>"`). Do NOT create a parallel tracking issue — the epic's Blocked status + comment IS the escalation.
 
@@ -791,11 +804,15 @@ SUMMARY_EOF
 rm /tmp/planning-summary.md
 ```
 
-**7h. Shutdown the planning team and release the lease:**
-Send shutdown to both teammates: `SendMessage(to: "*", message: {type: "shutdown_request"})`. Then clean up:
+**7h. Shut down the planning team and release the lease:**
+Send each still-live teammate a shutdown request by name (no `to: "*"` broadcast, and
+no `TeamDelete` — there is no explicit team object to tear down):
 ```
-TeamDelete()
+SendMessage(to: "ba", message: {type: "shutdown_request"})
+SendMessage(to: "tech-lead", message: {type: "shutdown_request"})
 ```
+A background teammate that has already returned its PROPOSALS FINAL / verdicts has
+exited and needs no shutdown — shutdown only matters for one still running.
 Release the decompose lease so it doesn't linger until TTL:
 ```bash
 ./scripts/pipeline-helper.sh lease-release "epic-decompose-<NUM>"
