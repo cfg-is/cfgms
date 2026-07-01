@@ -39,6 +39,11 @@ func TestOpenBaoProvider_GetCapabilities(t *testing.T) {
 	assert.Greater(t, caps.MaxKeyLength, 0)
 }
 
+func TestOpenBaoProvider_ClusterCapable_True(t *testing.T) {
+	p := &OpenBaoProvider{}
+	assert.True(t, p.ClusterCapable(), "OpenBaoProvider must be cluster-capable (OpenBao cluster supports shared state across controller nodes)")
+}
+
 // TestProductionGuard_Reject verifies that a dev-mode token is refused when
 // CFGMS_TELEMETRY_ENVIRONMENT=production.
 func TestProductionGuard_Reject(t *testing.T) {

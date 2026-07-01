@@ -120,6 +120,8 @@ func (m *MockStorageProvider) GetCapabilities() ProviderCapabilities {
 	return m.MockCapabilities
 }
 
+func (m *MockStorageProvider) ClusterCapable() bool { return false }
+
 func (m *MockStorageProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
 	return newMockClientTenantStore(), nil
 }
@@ -1060,6 +1062,7 @@ func (m *MockOSSProvider) Available() (bool, error) {
 	return true, nil
 }
 func (m *MockOSSProvider) GetCapabilities() ProviderCapabilities { return ProviderCapabilities{} }
+func (m *MockOSSProvider) ClusterCapable() bool                  { return false }
 
 func (m *MockOSSProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
 	return &MockConfigStore{}, nil
@@ -1119,6 +1122,7 @@ func (m *MockOSSProviderWithError) Available() (bool, error) { return true, nil 
 func (m *MockOSSProviderWithError) GetCapabilities() ProviderCapabilities {
 	return ProviderCapabilities{}
 }
+func (m *MockOSSProviderWithError) ClusterCapable() bool { return false }
 
 func (m *MockOSSProviderWithError) mayFail(method string) error {
 	if m.failMethod == method {

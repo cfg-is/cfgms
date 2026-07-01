@@ -70,6 +70,10 @@ func (p *OpenBaoProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *OpenBaoProvider) ClusterCapable() bool { return true }
+
 // Available performs a connectivity check against the configured OpenBao instance.
 // It returns true if the health endpoint responds successfully.
 func (p *OpenBaoProvider) Available() (bool, error) {

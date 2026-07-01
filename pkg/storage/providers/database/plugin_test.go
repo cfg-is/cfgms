@@ -20,6 +20,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
+func TestDatabaseProvider_ClusterCapable_True(t *testing.T) {
+	p := &DatabaseProvider{}
+	assert.True(t, p.ClusterCapable(), "DatabaseProvider must be cluster-capable (Postgres supports shared state across controller nodes)")
+}
+
 // buildTestDSN creates a DSN string from test configuration
 func buildTestDSN() string {
 	config := getTestConfig()

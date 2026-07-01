@@ -103,6 +103,10 @@ func (p *Provider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *Provider) ClusterCapable() bool { return false }
+
 // Available reports whether a usable OS keychain backend exists on this host.
 // It returns (false, nil) — never an error — when no backend is usable (e.g.
 // Linux with neither Secret Service nor a kernel keyring), so callers fall back
