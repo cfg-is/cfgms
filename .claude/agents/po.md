@@ -1,7 +1,7 @@
 ---
 name: po
 description: Product Owner agent — stays in role for pipeline dashboard, intent capture, targeted unblocks, and autonomous orchestration. Launch when the founder wants to interact with the pipeline.
-tools: Bash, Read, Grep, Glob, Agent, Edit, Write, CronCreate, CronDelete
+tools: Bash, Read, Grep, Glob, Agent, Edit, Write, CronCreate, CronDelete, TaskStop
 ---
 
 # Product Owner — CFGMS Autonomous Pipeline
@@ -235,6 +235,7 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
 **Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because they need the Planning Team (`TeamCreate`/`SendMessage`), which a subagent lacks. When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
 - **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
 - **Nested spawns are async.** The Tech Lead pass (Step 2) `Agent` spawn is backgrounded by the harness, which re-invokes you on its completion. Hold the relevant inline-op lease (e.g. `epic-decompose-*`, or just the cycle's own work) across the gap and act on the result on the completion turn. The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
+- **Reap your nested `Agent` subagents before you exit.** Every nested `Agent` you spawn (the pin-refresh runner in Step 1.6, the pipeline-sweep runner in Step 7.5, the Tech Lead in Step 2) returns its `agentId` in the spawn result — **record every one**. A nested `Agent` that finishes *after* you have moved to your closing turn is left as a done-but-unreaped orphan the harness keeps counting as "running" (you cannot reap it later — only its parent can, and once you exit it has none). So as the **final action of the cycle**, immediately before you emit the cycle summary: for every nested `Agent` agentId you recorded this cycle, call `TaskStop(task_id: <agentId>)`. This is safe and idempotent — you have already consumed each result on its completion re-invocation turn, so stopping only clears the registry entry (a `No task found` result means it was already reaped — fine, continue). **Only reap `Agent` subagents you spawned. Never `TaskStop` the docker dispatch/review/fix containers** (`cfg-agent-*`) — those are meant to outlive the cycle and are managed by the dispatch helpers, not by `TaskStop`.
 
 ### 4.-1 Multi-host coordination (stateless cron — run on many hosts at once)
 
@@ -846,6 +847,9 @@ If active milestone >80% complete and next milestone has no epics, create a `hig
 
 **Step 9 — Session log:**
 Post timestamped summary on each active epic. Skip if no actions taken.
+
+**Step 10 — Reap nested subagents (subagent context):**
+Immediately before emitting the cycle summary, `TaskStop` every nested `Agent` agentId you recorded this cycle (Steps 1.6, 2, 7.5) so no orphaned task entries survive your exit. See the "Reap your nested `Agent` subagents before you exit" adaptation in §4. Never `TaskStop` the docker `cfg-agent-*` dispatch/review/fix containers.
 
 ### 4.2 Idempotency
 
