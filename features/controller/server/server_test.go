@@ -16,7 +16,121 @@ import (
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// testNonClusterProvider implements interfaces.StorageProvider with ClusterCapable() == false.
+// All store factory methods return business.ErrNotSupported. Used to verify that
+// assertClusterBackendsReady rejects non-cluster-capable backends.
+type testNonClusterProvider struct{}
+
+var _ interfaces.StorageProvider = (*testNonClusterProvider)(nil)
+
+func (p *testNonClusterProvider) Name() string { return "test-noncluster" }
+func (p *testNonClusterProvider) Description() string {
+	return "test-only non-cluster-capable provider"
+}
+func (p *testNonClusterProvider) GetVersion() string       { return "0.0.1-test" }
+func (p *testNonClusterProvider) Available() (bool, error) { return true, nil }
+func (p *testNonClusterProvider) ClusterCapable() bool     { return false }
+func (p *testNonClusterProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	return interfaces.ProviderCapabilities{}
+}
+func (p *testNonClusterProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNonClusterProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+// testClusterProvider implements interfaces.StorageProvider with ClusterCapable() == true.
+// All store factory methods return business.ErrNotSupported. Used to isolate the S3 gate
+// in assertClusterBackendsReady without requiring a real Postgres connection.
+type testClusterProvider struct{}
+
+var _ interfaces.StorageProvider = (*testClusterProvider)(nil)
+
+func (p *testClusterProvider) Name() string             { return "test-cluster" }
+func (p *testClusterProvider) Description() string      { return "test-only cluster-capable provider" }
+func (p *testClusterProvider) GetVersion() string       { return "0.0.1-test" }
+func (p *testClusterProvider) Available() (bool, error) { return true, nil }
+func (p *testClusterProvider) ClusterCapable() bool     { return true }
+func (p *testClusterProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	return interfaces.ProviderCapabilities{}
+}
+func (p *testClusterProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
 
 // recordingLogger implements logging.Logger and captures every log call so
 // tests can assert on what was (or was not) logged.
@@ -339,6 +453,76 @@ func TestInitializeHAManager_InvalidMode(t *testing.T) {
 	require.Error(t, err, "initializeHAManager must return error for invalid ha.mode")
 	assert.Contains(t, err.Error(), "invalid HA mode",
 		"error must identify the bad mode string")
+}
+
+// TestNew_ClusterModeRequiresClusterCapableProviders verifies that assertClusterBackendsReady
+// rejects a non-cluster-capable storage provider and a missing S3 bucket, and that the gate
+// is not triggered in non-cluster mode, leaving New() free to succeed with a flatfile backend.
+func TestNew_ClusterModeRequiresClusterCapableProviders(t *testing.T) {
+	t.Run("cluster mode with non-cluster-capable provider returns error", func(t *testing.T) {
+		t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "")
+
+		// Register a non-cluster-capable test provider and create a StorageManager from it.
+		// CreateAllStoresFromConfig accepts ErrNotSupported from individual store factories,
+		// so the resulting manager is valid but has nil stores — sufficient for the gate check.
+		interfaces.RegisterStorageProvider(&testNonClusterProvider{})
+		t.Cleanup(func() { interfaces.UnregisterStorageProvider("test-noncluster") })
+		//nolint:staticcheck // CreateAllStoresFromConfig is retained for single-provider and test use
+		sm, err := interfaces.CreateAllStoresFromConfig("test-noncluster", nil)
+		require.NoError(t, err, "test-noncluster storage manager must initialise without error")
+
+		backendErr := assertClusterBackendsReady(nil, sm)
+		require.Error(t, backendErr, "cluster mode with non-cluster-capable provider must fail")
+		assert.Contains(t, backendErr.Error(), "cluster-capable",
+			"error must explain that a cluster-capable backend is required")
+		assert.Contains(t, backendErr.Error(), "test-noncluster",
+			"error must name the offending provider")
+	})
+
+	t.Run("cluster mode with cluster-capable provider but no S3 bucket returns error", func(t *testing.T) {
+		t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "")
+
+		// database provider is cluster-capable; use it directly via NewStorageManagerFromStores
+		// with a nil provider override constructed manually to avoid a real Postgres connection.
+		// We need a StorageManager whose GetProvider() is cluster-capable, so register a
+		// cluster-capable test provider instead.
+		clusterProvider := &testClusterProvider{}
+		interfaces.RegisterStorageProvider(clusterProvider)
+		t.Cleanup(func() { interfaces.UnregisterStorageProvider("test-cluster") })
+		//nolint:staticcheck // CreateAllStoresFromConfig is retained for single-provider and test use
+		sm, err := interfaces.CreateAllStoresFromConfig("test-cluster", nil)
+		require.NoError(t, err, "test-cluster storage manager must initialise without error")
+
+		backendErr := assertClusterBackendsReady(nil, sm)
+		require.Error(t, backendErr, "cluster mode with no S3 bucket must fail")
+		assert.Contains(t, backendErr.Error(), "CFGMS_S3_INSTALLER_BUCKET",
+			"error must name the missing environment variable")
+	})
+
+	t.Run("non-cluster mode does not invoke cluster gate", func(t *testing.T) {
+		// CFGMS_S3_INSTALLER_BUCKET is deliberately unset: if the cluster gate fired,
+		// New() would fail on the S3 prerequisite. Passing here proves the gate is
+		// not called for non-cluster deployments.
+		t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "")
+
+		tempDir := t.TempDir()
+		cfg := &config.Config{
+			ListenAddr: "127.0.0.1:0",
+			Certificate: &config.CertificateConfig{
+				EnableCertManagement: false,
+			},
+			Storage: &config.StorageConfig{
+				Provider:     "flatfile",
+				FlatfileRoot: tempDir + "/flatfile",
+				SQLitePath:   tempDir + "/cfgms.db",
+			},
+		}
+
+		srv, err := New(cfg, logging.NewNoopLogger())
+		require.NoError(t, err, "non-cluster mode with flatfile must not trigger the cluster-capable gate")
+		require.NotNil(t, srv)
+		t.Cleanup(func() { _ = srv.Stop() })
+	})
 }
 
 // TestBuiltinWorkflowSeedingIPTrust verifies that a controller started with no
