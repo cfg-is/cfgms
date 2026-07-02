@@ -381,7 +381,30 @@ steward:
 
 The controller coordinates operations that span multiple stewards. Individual stewards apply their own cfgs; the controller determines sequencing and timing.
 
-> [GAP: No orchestration engine is implemented in the current codebase. This section describes the desired-state design for multi-node operation coordination. The REST API category and model below are aspirational — they define the intended behavior for future implementation tracking.]
+### Batch Job Dispatch (Issue #2296)
+
+Rolling-batch jobs are the primary orchestration primitive. A batch job:
+
+1. Resolves a fleet selector to a list of steward IDs.
+2. Partitions the list into waves of `batch_size` stewards.
+3. Dispatches a `ConfigSyncBatch` command to each wave via the `RollingBatchExecutor`.
+4. Tracks per-step status in `BatchJobStore` (pending → running → completed/failed).
+
+**REST API:**
+
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| `POST` | `/api/v1/jobs` | `jobs:write` | Submit a rolling-batch job; returns 202 Accepted with job ID |
+| `GET`  | `/api/v1/jobs/{id}` | `jobs:write` | Poll job status and step table |
+
+**CLI:**
+
+```
+cfg job submit --selector <expr> [--batch-size <n>]   # default batch-size 10
+cfg job status <job-id>
+```
+
+The executor runs asynchronously — the HTTP response returns immediately with the job ID. Callers poll `GET /api/v1/jobs/{id}` for progress.
 
 ### Orchestration Model
 

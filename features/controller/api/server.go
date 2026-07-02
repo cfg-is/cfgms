@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -121,6 +122,8 @@ type Server struct {
 	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
 	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
 	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
+	batchJobStore                  business.BatchJobStore                // Issue #2296: durable batch-job persistence
+	batchJobExecutor               *batchjob.RollingBatchExecutor        // Issue #2296: rolling-batch executor for fleet-wide updates
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
@@ -656,6 +659,12 @@ func (s *Server) setupRouter() {
 	runs.Handle("/{run_id}/jobs", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRunJobs))).Methods("GET")
 	runs.Handle("/{run_id}", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handleDeleteRun))).Methods("DELETE")
 
+	// Batch job endpoints (Issue #2296). Always registered — returns 503 when
+	// batchJobStore is nil (nil-safe by design).
+	jobs := api.PathPrefix("/jobs").Subrouter()
+	jobs.Handle("", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleCreateJob))).Methods("POST")
+	jobs.Handle("/{id}", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleGetJob))).Methods("GET")
+
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
 	// handler is explicitly wired in after server creation.
@@ -1070,6 +1079,24 @@ func (s *Server) SetMembershipStore(store cluster.MembershipStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.membershipStore = store
+}
+
+// SetBatchJobStore wires the durable BatchJobStore used by the batch job endpoints
+// (Issue #2296). When nil (default), POST /api/v1/jobs and GET /api/v1/jobs/{id}
+// return 503. Call after New() but before Start().
+func (s *Server) SetBatchJobStore(store business.BatchJobStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchJobStore = store
+}
+
+// SetBatchJobExecutor wires the rolling-batch executor used to run batch jobs
+// asynchronously (Issue #2296). When nil (default), job creation still persists
+// the record but does not start execution. Call after New() but before Start().
+func (s *Server) SetBatchJobExecutor(exec *batchjob.RollingBatchExecutor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchJobExecutor = exec
 }
 
 // SetStewardEventLoggingManager injects the dedicated steward-event

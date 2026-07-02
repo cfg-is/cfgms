@@ -24,9 +24,11 @@ import (
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
+	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/dispatcher"
+	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
 	dnaStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
@@ -59,6 +61,7 @@ import (
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
 	dnadrift "github.com/cfgis/cfgms/pkg/dna/drift"
+	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -70,7 +73,7 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
-	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948)
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948) and batch job store (Issue #2296)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -977,6 +980,23 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// records are short-lived (< 60s) and not required to survive a controller restart.
 	httpServer.SetUpgradeStore(memoryprovider.NewUpgradeStore())
 	logger.Info("In-memory upgrade store wired to HTTP API server (Issue #1948)")
+
+	// Issue #2296: Wire batch job store and rolling-batch executor so that
+	// POST /api/v1/jobs and GET /api/v1/jobs/{id} are operational.
+	// The in-memory store is used for the OSS composite deployment; a durable
+	// SQLite-backed store is a follow-on story that shares batchjob/store_sqlite.go.
+	batchJobStore := memoryprovider.NewBatchJobStore()
+	batchJobFleetQuery := &serverBatchjobFleetQuery{svc: controllerService}
+	batchJobExecutor := batchjob.NewRollingBatchExecutor(
+		batchJobStore,
+		batchJobFleetQuery,
+		commandPublisher,
+		nil, // quorumCheck — nil uses naive round-robin; wired by quorum story
+		logger,
+	)
+	httpServer.SetBatchJobStore(batchJobStore)
+	httpServer.SetBatchJobExecutor(batchJobExecutor)
+	logger.Info("Batch job store and executor wired to HTTP API server (Issue #2296)")
 
 	// Wire the shared connection registry into the API server so
 	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
@@ -2272,6 +2292,56 @@ resources:
 	} else {
 		logger.Info("fleet cascade seed: MSP-level parent policy stored under fleet-root")
 	}
+}
+
+// serverBatchjobFleetQuery adapts *service.ControllerService to batchjob.FleetQuery
+// so the rolling-batch executor can resolve fleet selectors without importing the
+// api package (which would create an import cycle). Issue #2296.
+type serverBatchjobFleetQuery struct {
+	svc *service.ControllerService
+}
+
+func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tenantID string) ([]string, error) {
+	filter, err := fleetSelector.Parse(selectorStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
+	}
+	filter.TenantID = tenantID
+	q := controllerFleet.NewMemoryQuery(&serverFleetStewardProvider{svc: a.svc})
+	results, err := q.Search(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
+}
+
+// serverFleetStewardProvider adapts *service.ControllerService to
+// controllerFleet.StewardProvider for use by MemoryQuery.
+type serverFleetStewardProvider struct {
+	svc *service.ControllerService
+}
+
+func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardData {
+	infos := p.svc.GetAllStewards()
+	result := make([]controllerFleet.StewardData, 0, len(infos))
+	for _, info := range infos {
+		var attrs map[string]string
+		if info.DNA != nil {
+			attrs = info.DNA.Attributes
+		}
+		result = append(result, controllerFleet.StewardData{
+			ID:            info.ID,
+			TenantID:      info.TenantID,
+			Status:        info.Status,
+			LastHeartbeat: info.LastHeartbeat,
+			DNAAttributes: attrs,
+		})
+	}
+	return result
 }
 
 // assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
