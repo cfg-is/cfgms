@@ -46,16 +46,24 @@ func RunSteps(ctx context.Context, dryRun bool, steps []Step) []Report {
 
 // PrintReport writes a human-readable per-step summary to w. Successful steps
 // show their record count; failed steps show a WARNING line. A Total line
-// sums counts from all successful steps.
-func PrintReport(w io.Writer, reports []Report) {
+// sums counts from all successful steps. It returns the first write error
+// encountered, if any.
+func PrintReport(w io.Writer, reports []Report) error {
 	total := 0
 	for _, r := range reports {
 		if r.Err != nil {
-			fmt.Fprintf(w, "  %-30s WARNING: %v\n", r.Name+":", r.Err)
+			if _, err := fmt.Fprintf(w, "  %-30s WARNING: %v\n", r.Name+":", r.Err); err != nil {
+				return err
+			}
 		} else {
-			fmt.Fprintf(w, "  %-30s %d records\n", r.Name+":", r.Count)
+			if _, err := fmt.Fprintf(w, "  %-30s %d records\n", r.Name+":", r.Count); err != nil {
+				return err
+			}
 			total += r.Count
 		}
 	}
-	fmt.Fprintf(w, "  %-30s %d records\n", "Total:", total)
+	if _, err := fmt.Fprintf(w, "  %-30s %d records\n", "Total:", total); err != nil {
+		return err
+	}
+	return nil
 }

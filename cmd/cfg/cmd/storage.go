@@ -21,12 +21,12 @@ import (
 )
 
 var (
-	migrateFrom           string
-	migrateTo             string
-	migrateGitRoot        string
-	migrateFlatfileRoot   string
-	migrateSQLitePath     string
-	storageMigrateDryRun  bool
+	migrateFrom          string
+	migrateTo            string
+	migrateGitRoot       string
+	migrateFlatfileRoot  string
+	migrateSQLitePath    string
+	storageMigrateDryRun bool
 )
 
 // storageCmd represents the storage command group
@@ -192,7 +192,9 @@ func runStorageMigrate(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Migration complete:")
 		}
-		migrate.PrintReport(os.Stdout, reports)
+		if err := migrate.PrintReport(os.Stdout, reports); err != nil {
+			return err
+		}
 	case "postgres":
 		return fmt.Errorf("postgres migration is not supported; migrate to flatfile first, then switch backend")
 	}

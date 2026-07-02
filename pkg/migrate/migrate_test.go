@@ -105,7 +105,7 @@ func TestPrintReport_OutputFormat(t *testing.T) {
 	}
 
 	var b strings.Builder
-	migrate.PrintReport(&b, reports)
+	require.NoError(t, migrate.PrintReport(&b, reports))
 	out := b.String()
 
 	assert.Contains(t, out, "config_store", "must include config_store step")
