@@ -34,7 +34,8 @@ type QuorumChecker interface {
 
 // RollingBatchExecutor dispatches CommandSyncConfig to stewards in sequential batches,
 // advancing to the next batch only when all members of the current batch succeed.
-// On any batch failure the job transitions to paused and execution stops.
+// On any batch failure the job transitions to rolled_back (when PreviousConfigRef is set,
+// compensating dispatches are sent to already-completed batches) or paused (no baseline).
 type RollingBatchExecutor struct {
 	store       BatchJobStore
 	fleetQuery  FleetQuery
@@ -61,13 +62,14 @@ func NewRollingBatchExecutor(
 	}
 }
 
-// Execute runs the rolling batch job to completion (or pause on failure).
+// Execute runs the rolling batch job to completion (or stops on failure).
 //
 // Algorithm:
 //  1. Resolve job.Selector via fleetQuery scoped to job.TenantID; persist Targets.
 //  2. Partition steward IDs into batches (quorum-aware or naive round-robin).
 //  3. For each batch: dispatch CommandSyncConfig with callback; wait for all results.
-//     All succeeded → advance. Any failed → set job status paused, return nil.
+//     All succeeded → advance. Any failed → rollback applied steps if PreviousConfigRef
+//     is set (job → rolled_back or failed), else set job status paused; return nil.
 //  4. All batches done → set job status completed.
 func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error {
 	// 1. Resolve fleet selector scoped to the job's tenant.
@@ -131,7 +133,7 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 		step.CompletedAt = &completedAt
 
 		if len(failedIDs) > 0 {
-			// e. At least one steward failed → pause.
+			// e. At least one steward failed.
 			step.Status = BatchStepStatusFailed
 			step.FailedIDs = failedIDs
 			if persistErr := e.store.UpdateBatchStep(ctx, job.ID, step); persistErr != nil {
@@ -139,15 +141,23 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 					"job_id", logging.SanitizeLogValue(job.ID),
 					"step", i, "error", persistErr)
 			}
-			if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); pauseErr != nil {
-				e.logger.Error("Failed to set job paused",
-					"job_id", logging.SanitizeLogValue(job.ID),
-					"error", pauseErr)
-			}
-			job.Status = BatchJobStatusPaused
-			e.logger.Info("Batch step failed; job paused",
+			e.logger.Info("Batch step failed",
 				"job_id", logging.SanitizeLogValue(job.ID),
 				"step", i, "failed_count", len(failedIDs))
+			if job.Config.PreviousConfigRef != "" {
+				// Baseline captured: compensating dispatch to already-applied stewards.
+				e.rollbackAppliedSteps(ctx, job)
+			} else {
+				// No baseline: pause for operator action.
+				if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); pauseErr != nil {
+					e.logger.Error("Failed to set job paused",
+						"job_id", logging.SanitizeLogValue(job.ID),
+						"error", pauseErr)
+				}
+				job.Status = BatchJobStatusPaused
+				e.logger.Info("Job paused (no PreviousConfigRef; rollback skipped)",
+					"job_id", logging.SanitizeLogValue(job.ID))
+			}
 			return nil
 		}
 

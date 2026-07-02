@@ -121,6 +121,21 @@ func (p *executorTestCP) sentCount() int {
 	return len(p.sent)
 }
 
+// sentWithParam returns sent commands that have the given string param key=value.
+func (p *executorTestCP) sentWithParam(key, value string) []*controlplaneTypes.SignedCommand {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var result []*controlplaneTypes.SignedCommand
+	for _, cmd := range p.sent {
+		if v, ok := cmd.Command.Params[key]; ok {
+			if sv, ok2 := v.(string); ok2 && sv == value {
+				result = append(result, cmd)
+			}
+		}
+	}
+	return result
+}
+
 // ----------------------------------------------------------------------------
 // Fleet adapter — bridges fleet.FleetQuery to batchjob.FleetQuery.
 // The import from fleet is only in this test file; executor.go avoids it to
@@ -446,6 +461,175 @@ func TestRollingBatchExecutor_TargetsPersisted(t *testing.T) {
 	got, err := f.store.GetBatchJob(f.ctx, "job-targets")
 	require.NoError(t, err)
 	assert.Len(t, got.Targets, 3, "resolved targets must be persisted")
+}
+
+// TestRollingBatchExecutor_RollbackOnBatchFailure is the REQUIRED test:
+// 4 stewards, 2 batches of 2, PreviousConfigRef="v1"; batch 0 succeeds, batch 1 fails
+// → CommandSyncConfig with config_ref="v1" dispatched to batch-0 stewards,
+// batch-0 step status = rolled_back, job status = rolled_back.
+func TestRollingBatchExecutor_RollbackOnBatchFailure(t *testing.T) {
+	f := newExecutorFixture(t, "s-0", "s-1", "s-2", "s-3")
+	defer f.cleanup()
+
+	job := newPendingJob("job-rollback", 2)
+	job.Config.PreviousConfigRef = "v1"
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	// Fail s-2 and s-3 (batch 1) on every dispatch; succeed s-0 and s-1 (batch 0) always.
+	batch1 := map[string]bool{"s-2": true, "s-3": true}
+	d := newCompletionDriver(t, f.cp, f.publisher, func(stewardID string) bool {
+		return batch1[stewardID]
+	})
+	d.start(f.ctx)
+	defer d.stop()
+
+	require.NoError(t, f.executor.Execute(f.ctx, job))
+
+	got, err := f.store.GetBatchJob(f.ctx, "job-rollback")
+	require.NoError(t, err)
+
+	// [REQUIRED]: job must be rolled_back.
+	assert.Equal(t, batchjob.BatchJobStatusRolledBack, got.Status)
+
+	// [REQUIRED]: batch-0 step must be rolled_back.
+	require.Len(t, got.Steps, 2, "step 0 (rolled_back) + step 1 (failed) must be persisted")
+	var step0 *batchjob.BatchStep
+	for i := range got.Steps {
+		if got.Steps[i].Index == 0 {
+			step0 = &got.Steps[i]
+		}
+	}
+	require.NotNil(t, step0, "step 0 must be persisted")
+	assert.Equal(t, batchjob.BatchStepStatusRolledBack, step0.Status)
+
+	// [REQUIRED]: 6 total commands — 2 forward batch 0, 2 forward batch 1, 2 rollback batch 0.
+	assert.Equal(t, 6, f.cp.sentCount())
+
+	// [REQUIRED]: 2 rollback commands carry config_ref="v1", targeting s-0 and s-1.
+	rollbackCmds := f.cp.sentWithParam("config_ref", "v1")
+	require.Len(t, rollbackCmds, 2, "exactly 2 rollback dispatches must carry config_ref=v1")
+	targets := map[string]bool{}
+	for _, cmd := range rollbackCmds {
+		targets[cmd.Command.StewardID] = true
+	}
+	assert.True(t, targets["s-0"], "rollback must target s-0")
+	assert.True(t, targets["s-1"], "rollback must target s-1")
+}
+
+// TestRollingBatchExecutor_NoRollbackWhenNoPreviousConfigRef is the REQUIRED test:
+// PreviousConfigRef empty → batch failure transitions job to paused only;
+// no rollback dispatch is sent.
+func TestRollingBatchExecutor_NoRollbackWhenNoPreviousConfigRef(t *testing.T) {
+	f := newExecutorFixture(t, "s-0", "s-1", "s-2", "s-3")
+	defer f.cleanup()
+
+	job := newPendingJob("job-no-rollback", 2)
+	// PreviousConfigRef intentionally left empty.
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	batch1 := map[string]bool{"s-2": true, "s-3": true}
+	d := newCompletionDriver(t, f.cp, f.publisher, func(stewardID string) bool {
+		return batch1[stewardID]
+	})
+	d.start(f.ctx)
+	defer d.stop()
+
+	require.NoError(t, f.executor.Execute(f.ctx, job))
+
+	got, err := f.store.GetBatchJob(f.ctx, "job-no-rollback")
+	require.NoError(t, err)
+
+	// [REQUIRED]: job must be paused — not rolled_back, not failed.
+	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status)
+
+	// [REQUIRED]: only 4 commands sent (batch 0 + batch 1 forward), no rollback dispatch.
+	assert.Equal(t, 4, f.cp.sentCount(),
+		"no rollback commands must be sent when PreviousConfigRef is empty")
+
+	// No command carries a config_ref param.
+	assert.Empty(t, f.cp.sentWithParam("config_ref", "v1"),
+		"no rollback dispatch must be sent when PreviousConfigRef is empty")
+}
+
+// TestRollingBatchExecutor_RollbackBatchZeroFailurePauses is the REQUIRED test for
+// the len(completedSteps) == 0 branch in rollbackAppliedSteps: PreviousConfigRef is
+// set AND batch 0 itself fails, so rollbackAppliedSteps is invoked but finds no
+// completed steps to undo → job → paused, no compensating dispatch is sent.
+func TestRollingBatchExecutor_RollbackBatchZeroFailurePauses(t *testing.T) {
+	f := newExecutorFixture(t, "s-0", "s-1", "s-2", "s-3")
+	defer f.cleanup()
+
+	job := newPendingJob("job-rollback-batch0", 2)
+	job.Config.PreviousConfigRef = "v1" // baseline set → routes through rollbackAppliedSteps
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	// Fail the first steward seen (in batch 0), so batch 0 fails before any step completes.
+	d := f.driveFirstFails(t)
+	defer d.stop()
+
+	require.NoError(t, f.executor.Execute(f.ctx, job))
+
+	got, err := f.store.GetBatchJob(f.ctx, "job-rollback-batch0")
+	require.NoError(t, err)
+
+	// [REQUIRED]: rollbackAppliedSteps entered with zero completed steps → job paused.
+	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status,
+		"job must be paused when batch 0 fails with no prior completed steps")
+
+	// [REQUIRED]: only batch 0 dispatched (2 commands); batch 1 never dispatched and
+	// no compensating rollback dispatch is sent (nothing to undo).
+	assert.Equal(t, 2, f.cp.sentCount(),
+		"only batch 0 forward dispatch; no rollback or batch 1 commands")
+
+	// No command carries a config_ref param — no compensating dispatch occurred.
+	assert.Empty(t, f.cp.sentWithParam("config_ref", "v1"),
+		"no rollback dispatch when there are no completed steps to undo")
+
+	// Only step 0 persisted, and it is failed.
+	require.Len(t, got.Steps, 1, "only step 0 should be persisted")
+	assert.Equal(t, batchjob.BatchStepStatusFailed, got.Steps[0].Status)
+	assert.NotEmpty(t, got.Steps[0].FailedIDs, "failed IDs must be recorded")
+}
+
+// TestRollingBatchExecutor_RollbackDispatchFailureTransitionsJobFailed verifies that
+// when compensating dispatch fails for all target stewards, the job transitions to
+// failed rather than rolled_back.
+func TestRollingBatchExecutor_RollbackDispatchFailureTransitionsJobFailed(t *testing.T) {
+	f := newExecutorFixture(t, "s-0", "s-1", "s-2", "s-3")
+	defer f.cleanup()
+
+	job := newPendingJob("job-rollback-fail", 2)
+	job.Config.PreviousConfigRef = "v1"
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	// Stateful driver: track per-steward dispatch count.
+	// s-2, s-3: always fail (trigger rollback).
+	// s-0, s-1: succeed forward (1st dispatch), fail rollback (2nd dispatch).
+	var mu sync.Mutex
+	dispatchCount := make(map[string]int)
+	d := newCompletionDriver(t, f.cp, f.publisher, func(stewardID string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		dispatchCount[stewardID]++
+		n := dispatchCount[stewardID]
+		if stewardID == "s-2" || stewardID == "s-3" {
+			return true // always fail
+		}
+		return n > 1 // s-0, s-1: fail on 2nd dispatch (rollback)
+	})
+	d.start(f.ctx)
+	defer d.stop()
+
+	require.NoError(t, f.executor.Execute(f.ctx, job))
+
+	got, err := f.store.GetBatchJob(f.ctx, "job-rollback-fail")
+	require.NoError(t, err)
+
+	// Rollback dispatch failed → job must be failed, not rolled_back.
+	assert.Equal(t, batchjob.BatchJobStatusFailed, got.Status)
+
+	// 6 total commands: 2 forward batch 0, 2 forward batch 1, 2 rollback batch 0.
+	assert.Equal(t, 6, f.cp.sentCount())
 }
 
 // TestRollingBatchExecutor_ContextCancellation verifies that Execute returns
