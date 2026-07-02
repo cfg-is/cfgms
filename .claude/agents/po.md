@@ -744,15 +744,18 @@ SendMessage(to: "ba", summary: "Epic context for planning", message: <epic body 
 SendMessage(to: "tech-lead", summary: "Epic context for planning", message: <same context>)
 ```
 
-**7e. Orchestrate the planning conversation:**
+**7e. Run the collaborative planning conversation:**
 
-The conversation follows this protocol:
+This is a **three-way adversarial collaboration**, not a relay through the PO. The BA and Tech Lead talk **directly** to each other; the PO (addressed by teammates as `main`) participates as a full member and owns the final product synthesis. The goal is for all three to converge on the right answer together.
 
-1. **BA proposes** — BA surveys the codebase and sends story proposals to PO via `SendMessage`
-2. **PO relays to Tech Lead** — forward BA's proposals: `SendMessage(to: "tech-lead", message: <proposals>)`
-3. **Tech Lead reviews** — validates proposals against the codebase (5-check validation) and sends per-story verdicts (APPROVED / REVISION NEEDED) to PO. Tech Lead may also message BA directly for clarifications.
-4. **If revisions needed** — PO relays Tech Lead feedback to BA: `SendMessage(to: "ba", message: <feedback>)`. BA revises and re-proposes. PO relays to Tech Lead for re-review. Only unresolved stories iterate — approved stories are locked.
-5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to each teammate by name: `SendMessage(to: "ba", message: "PO DECISION: ...")` and `SendMessage(to: "tech-lead", message: "PO DECISION: ...")`
+1. **BA proposes** — BA surveys the codebase and sends story proposals to **both** the Tech Lead (`SendMessage(to: "tech-lead")`) and the PO (`SendMessage(to: "main")`).
+2. **Tech Lead challenges directly** — the Tech Lead validates against the codebase (7-check validation) and sends per-story verdicts (APPROVED / REVISION NEEDED, with codebase evidence) **directly to the BA**, copying `main`. The BA defends or revises **directly** with the Tech Lead — they iterate between themselves without waiting on a PO relay.
+3. **PO interjects** — the PO reads the exchange and weighs in whenever a **product** question is at stake (scope, priority, an AC that misreads intent, a split that's wrong for the roadmap) or when the two are converging on something the PO disagrees with. The PO can challenge either agent, and either agent can challenge the PO. Send product calls to each teammate by name: `SendMessage(to: "ba", ...)` and `SendMessage(to: "tech-lead", ...)`.
+4. **Converge** — an item is locked when the BA and Tech Lead agree AND the PO has no product objection. Only unresolved items keep iterating.
+
+**Everyone can challenge everyone.** The value of the team is adversarial cross-examination — the Tech Lead catching a BA mis-grounding, the BA out-verifying a Tech Lead claim, the PO catching a scope drift both agents missed. Encourage disagreement backed by evidence; the PO adjudicates genuine deadlocks.
+
+**File handoff for large artifacts.** Teammate `SendMessage` bodies over a few paragraphs reach the PO only as truncated idle-notification summaries. Instruct both agents up front to **write big artifacts** (full story proposals, full verdicts) to `/tmp/<role>-<epic>-*.md` and send a short `SendMessage` with just the file path + headline; the reader `Read`s the file.
 
 **Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document the convergence failure by blocking the epic (use `po-act.sh block <EPIC_NUM> "<reason>"`). Do NOT create a parallel tracking issue — the epic's Blocked status + comment IS the escalation.
 
