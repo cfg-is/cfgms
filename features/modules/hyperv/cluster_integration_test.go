@@ -116,7 +116,7 @@ const cfgmsMoveClusterGroup = `Move-ClusterGroup -Cluster $env:CFGMS_T_CLUSTER -
 
 // psTestOtherUpNode returns the name of an Up cluster node other than
 // $env:CFGMS_T_NODE, or empty when no such node exists (single-node cluster).
-const psTestOtherUpNode = `Get-ClusterNode -Cluster $env:CFGMS_T_CLUSTER | Where-Object { $_.State -eq 'Up' -and $_.Name -ne $env:CFGMS_T_NODE } | Select-Object -First 1 -ExpandProperty Name`
+const psTestOtherUpNode = `$n = @(Get-ClusterNode -Cluster $env:CFGMS_T_CLUSTER | Where-Object { $_.State -eq 'Up' -and $_.Name -ne $env:CFGMS_T_NODE }); if ($n.Count -gt 0) { $n[0].Name }`
 
 // psTestRemoveClusteredVM tears the clustered role group down (if present) and
 // removes the VM, leaving the lab recoverable after the test. Best-effort:
@@ -247,6 +247,7 @@ func TestClusterHA_CreateFailoverReconverge(t *testing.T) {
 	status := getClusterStatus(t, m, p.cluster)
 	origOwner := status.RoleOwners[role]
 	require.NotEmptyf(t, origOwner, "resource_owner[%s] must be non-empty after clustering", role)
+	require.NotEmpty(t, status.CNOOwnerNode, "CNOOwnerNode must be non-empty after clustering the role")
 
 	// The create must have recorded exactly one successful cluster-set-create.
 	require.NoError(t, m.auditMgr.Flush(ctx))

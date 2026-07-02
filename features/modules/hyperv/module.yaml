@@ -34,8 +34,8 @@ security:
 # behavioral_envelope documents the runtime behaviour of the module for the
 # signing/approval workflow. The hyperv module shells out to powershell.exe. The
 # read-only failover-cluster surface (#2199 S1) invokes the four Get-Cluster*
-# cmdlets; #2202 S2 adds the two cluster WRITE cmdlets below
-# (Add-ClusterVirtualMachineRole, Remove-ClusterResource) — clustered-VM-role
+# cmdlets; #2202 S2 adds the cluster WRITE cmdlets below
+# (Add-ClusterVirtualMachineRole, Remove-ClusterGroup, Get-VM) — clustered-VM-role
 # create + destructive teardown. Cluster FORMATION (New-Cluster, Add-ClusterNode,
 # Remove-ClusterNode, quorum cmdlets) is NOT declared and out of scope.
 #
@@ -54,8 +54,11 @@ behavioral_envelope:
     Get-ClusterGroup, Get-ClusterSharedVolume. The failover-cluster WRITE
     cmdlets (#2202 S2) are: Add-ClusterVirtualMachineRole (cluster an existing
     VM as a highly-available role — invoked only by the CNO-owner node, gated
-    exactly-once) and Remove-ClusterResource (remove a clustered role group —
-    gated behind allow_destructive: true, default off). All arguments travel via
+    exactly-once; the VM is resolved to its Id via a local Get-VM and clustered
+    by -VMId, avoiding a cross-node WMI name-enumeration that is denied when the
+    module runs as the LocalSystem steward) and Remove-ClusterGroup
+    -RemoveResources (remove a clustered VM role group by name — gated behind
+    allow_destructive: true, default off). All arguments travel via
     ArgumentList (never string-composed). Cluster FORMATION cmdlets
     (New-Cluster, Add-ClusterNode, Remove-ClusterNode, quorum) are NOT declared
     and out of scope. This envelope change requires ADR-006 module re-signing
