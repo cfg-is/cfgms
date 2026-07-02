@@ -1735,19 +1735,14 @@ test-integration-complete: test-integration-setup test-with-real-storage test-in
 test-integration-docker:
 	@echo "🐳 Running Docker Integration Tests"
 	@echo "===================================="
-	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
-		echo "⏭️  Docker daemon not available — skipping Docker integration tests"; \
-		echo "   Headless agent containers without a Docker daemon take this path;"; \
-		echo "   CI runners and dev hosts with Docker run the full suite (see cross-platform-build.yml)."; \
-	else \
-		if [ ! -f .env.test ]; then \
-			echo "ℹ️  .env.test not found — provisioning Docker test environment..."; \
-			$(MAKE) test-integration-setup; \
-		fi; \
-		set -a && . ./.env.test && set +a && \
-			go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/... || exit 1; \
-		echo "✅ Docker integration tests passed"; \
+	@if [ ! -f .env.test ]; then \
+		echo "❌ Docker test environment not set up"; \
+		echo "   Run: make test-integration-setup"; \
+		exit 1; \
 	fi
+	@set -a && source .env.test && set +a && \
+		go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
+	@echo "✅ Docker integration tests passed"
 
 # Transport Integration Testing (Story #519: replaces MQTT+QUIC tests)
 # Tests gRPC-over-QUIC transport architecture with real Docker infrastructure
