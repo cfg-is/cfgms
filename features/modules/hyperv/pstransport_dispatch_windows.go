@@ -184,6 +184,23 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 				" -VMName "+quoteArg(psArgs, "VMName"))
 	case psRemoveClusterResource:
 		return t.run(ctx, "Cfgms-RemoveClusterResource -Name "+quoteArg(psArgs, "Name"))
+
+	// ── Failover cluster-role properties (write, #2306 PROPERTIES-B) ─
+	case psSetClusterRolePreferredOwners:
+		return t.run(ctx, "Cfgms-SetClusterRolePreferredOwners -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -GroupName "+quoteArg(psArgs, "GroupName")+" -Owners "+quoteArg(psArgs, "Owners"))
+	case psSetClusterRolePossibleOwners:
+		return t.run(ctx, "Cfgms-SetClusterRolePossibleOwners -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -ResourceName "+quoteArg(psArgs, "ResourceName")+" -Owners "+quoteArg(psArgs, "Owners"))
+	case psSetClusterGroupPriority:
+		return t.run(ctx, "Cfgms-SetClusterGroupPriority -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -GroupName "+quoteArg(psArgs, "GroupName")+" -Priority "+quoteArg(psArgs, "Priority"))
+	case psSetClusterGroupAutoStart:
+		return t.run(ctx, "Cfgms-SetClusterGroupAutoStart -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -GroupName "+quoteArg(psArgs, "GroupName")+" -AutoStart "+quoteArg(psArgs, "AutoStart"))
+	case psSetClusterGroupAntiAffinity:
+		return t.run(ctx, "Cfgms-SetClusterGroupAntiAffinity -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -GroupName "+quoteArg(psArgs, "GroupName")+" -ClassName "+quoteArg(psArgs, "ClassName"))
 	}
 
 	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table); add a Cfgms-* function and a case here")

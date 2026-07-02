@@ -149,6 +149,21 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 			" -VMName " + quoteArg(psArgs, "VMName"))
 	case psRemoveClusterResource:
 		return emit("Cfgms-RemoveClusterResource -Name " + quoteArg(psArgs, "Name"))
+	case psSetClusterRolePreferredOwners:
+		return emit("Cfgms-SetClusterRolePreferredOwners -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -Owners " + quoteArg(psArgs, "Owners"))
+	case psSetClusterRolePossibleOwners:
+		return emit("Cfgms-SetClusterRolePossibleOwners -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -ResourceName " + quoteArg(psArgs, "ResourceName") + " -Owners " + quoteArg(psArgs, "Owners"))
+	case psSetClusterGroupPriority:
+		return emit("Cfgms-SetClusterGroupPriority -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -Priority " + quoteArg(psArgs, "Priority"))
+	case psSetClusterGroupAutoStart:
+		return emit("Cfgms-SetClusterGroupAutoStart -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -AutoStart " + quoteArg(psArgs, "AutoStart"))
+	case psSetClusterGroupAntiAffinity:
+		return emit("Cfgms-SetClusterGroupAntiAffinity -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -ClassName " + quoteArg(psArgs, "ClassName"))
 	}
 	// Mirror production ExecutePS: an unknown psCommand is an error, not a
 	// silent success — keeps this test mirror honest to the production contract.
@@ -402,6 +417,36 @@ func TestPSDispatch_ClusterVerbs(t *testing.T) {
 			psCommand: psRemoveClusterResource,
 			psArgs:    map[string]string{"Name": "web-01"},
 			want:      "Cfgms-RemoveClusterResource -Name 'web-01'",
+		},
+		{
+			name:      "SetClusterRolePreferredOwners",
+			psCommand: psSetClusterRolePreferredOwners,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "Owners": "NODE1,NODE2"},
+			want:      "Cfgms-SetClusterRolePreferredOwners -ClusterName 'lab-hv' -GroupName 'web-01' -Owners 'NODE1,NODE2'",
+		},
+		{
+			name:      "SetClusterRolePossibleOwners",
+			psCommand: psSetClusterRolePossibleOwners,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "ResourceName": "web-01", "Owners": "NODE1"},
+			want:      "Cfgms-SetClusterRolePossibleOwners -ClusterName 'lab-hv' -ResourceName 'web-01' -Owners 'NODE1'",
+		},
+		{
+			name:      "SetClusterGroupPriority",
+			psCommand: psSetClusterGroupPriority,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "Priority": "2000"},
+			want:      "Cfgms-SetClusterGroupPriority -ClusterName 'lab-hv' -GroupName 'web-01' -Priority '2000'",
+		},
+		{
+			name:      "SetClusterGroupAutoStart",
+			psCommand: psSetClusterGroupAutoStart,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "AutoStart": "1"},
+			want:      "Cfgms-SetClusterGroupAutoStart -ClusterName 'lab-hv' -GroupName 'web-01' -AutoStart '1'",
+		},
+		{
+			name:      "SetClusterGroupAntiAffinity",
+			psCommand: psSetClusterGroupAntiAffinity,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "ClassName": "db-tier"},
+			want:      "Cfgms-SetClusterGroupAntiAffinity -ClusterName 'lab-hv' -GroupName 'web-01' -ClassName 'db-tier'",
 		},
 	}
 

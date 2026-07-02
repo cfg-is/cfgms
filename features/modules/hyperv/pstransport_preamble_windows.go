@@ -591,4 +591,43 @@ function Cfgms-RemoveClusterResource {
     # group and all its resources (unclustering the VM; the VM itself persists).
     Remove-ClusterGroup -Name $Name -RemoveResources -Force
 }
+
+# ── Failover cluster-role properties (#2306 PROPERTIES-B) ──────────────
+# Declarative placement/scheduling properties for a clustered VM role. Reconciled
+# only on the CNO-owner node, after the role exists (Go gate in setCluster). All
+# args travel via ArgumentList; comma-joined owner lists are split here, never
+# composed into the command text.
+
+function Cfgms-SetClusterRolePreferredOwners {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$GroupName, [Parameter(Mandatory)][string]$Owners)
+    Set-ClusterOwnerNode -Cluster $ClusterName -Group $GroupName -Owners ($Owners -split ',')
+}
+
+function Cfgms-SetClusterRolePossibleOwners {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$ResourceName, [Parameter(Mandatory)][string]$Owners)
+    # Possible owners apply to the VM RESOURCE inside the role group; $ResourceName
+    # is the role (group) name — resolve its Virtual Machine resource. Materialise
+    # the match into an array (no Select -First, which trips the FailoverClusters
+    # provider with "pipeline has been stopped").
+    $res = @(Get-ClusterResource -Cluster $ClusterName -ErrorAction SilentlyContinue | Where-Object { $_.OwnerGroup.Name -eq $ResourceName -and $_.ResourceType.Name -eq 'Virtual Machine' })
+    if ($res.Count -gt 0) { Set-ClusterOwnerNode -Cluster $ClusterName -Resource $res[0].Name -Owners ($Owners -split ',') }
+}
+
+function Cfgms-SetClusterGroupPriority {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$GroupName, [Parameter(Mandatory)][int]$Priority)
+    $g = Get-ClusterGroup -Cluster $ClusterName -Name $GroupName -ErrorAction Stop
+    $g.Priority = $Priority
+}
+
+function Cfgms-SetClusterGroupAutoStart {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$GroupName, [Parameter(Mandatory)][int]$AutoStart)
+    $g = Get-ClusterGroup -Cluster $ClusterName -Name $GroupName -ErrorAction Stop
+    $g.AutoStart = $AutoStart
+}
+
+function Cfgms-SetClusterGroupAntiAffinity {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$GroupName, [Parameter(Mandatory)][string]$ClassName)
+    $g = Get-ClusterGroup -Cluster $ClusterName -Name $GroupName -ErrorAction Stop
+    $g.AntiAffinityClassNames = if ($ClassName) { @($ClassName) } else { @() }
+}
 `

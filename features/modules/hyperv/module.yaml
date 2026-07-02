@@ -60,7 +60,11 @@ behavioral_envelope:
     by -VMId, avoiding a cross-node WMI name-enumeration that is denied when the
     module runs as the LocalSystem steward) and Remove-ClusterGroup
     -RemoveResources (remove a clustered VM role group by name — gated behind
-    allow_destructive: true, default off). All arguments travel via
+    allow_destructive: true, default off). The cluster-role PROPERTY write
+    cmdlets (#2306) are: Set-ClusterOwnerNode (preferred owners on the role group,
+    possible owners on the VM resource) and Set-ClusterGroup group-property
+    assignment (Priority, AutoStart, AntiAffinityClassNames) — reconciled only on
+    the CNO-owner node after the role exists, idempotent. All arguments travel via
     ArgumentList (never string-composed). Cluster FORMATION cmdlets
     (New-Cluster, Add-ClusterNode, Remove-ClusterNode, quorum) are NOT declared
     and out of scope. This envelope change requires ADR-006 module re-signing
