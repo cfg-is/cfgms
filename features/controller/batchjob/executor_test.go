@@ -16,7 +16,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
-	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -250,7 +249,7 @@ func (d *completionDriver) stop() {
 
 type executorFixture struct {
 	cp        *executorTestCP
-	store     *memory.BatchJobStore
+	store     batchjob.BatchJobStore
 	publisher *commands.Publisher
 	executor  *batchjob.RollingBatchExecutor
 	ctx       context.Context
@@ -271,7 +270,7 @@ func newExecutorFixture(t *testing.T, stewardIDs ...string) *executorFixture {
 	require.NoError(t, err)
 	require.NoError(t, pub.Start(ctx))
 
-	store := memory.NewBatchJobStore()
+	store := newTestBatchJobStore()
 	require.NoError(t, store.Initialize(ctx))
 
 	exec := batchjob.NewRollingBatchExecutor(
@@ -458,7 +457,7 @@ func TestRollingBatchExecutor_ContextCancellation(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, pub.Start(ctx))
 
-	store := memory.NewBatchJobStore()
+	store := newTestBatchJobStore()
 	require.NoError(t, store.Initialize(ctx))
 
 	exec := batchjob.NewRollingBatchExecutor(
