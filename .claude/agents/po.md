@@ -233,9 +233,8 @@ Run the full autonomous pipeline cycle once. Use when the founder says "cron", "
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
 **Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because the Planning Team is a **live team of named `Agent` teammates that coordinate via `SendMessage`** — teammates address the orchestrator as `main`, so the team is driven from the main conversation, not from a backgrounded `po` subagent. (The old `TeamCreate`/`TeamDelete` tools no longer exist; the session has a **single implicit team** — you create teammates simply by spawning named background `Agent`s. See Step 7.) When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
-- **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
-- **Nested spawns are async.** The Tech Lead pass (Step 2) `Agent` spawn is backgrounded by the harness, which re-invokes you on its completion. Hold the relevant inline-op lease (e.g. `epic-decompose-*`, or just the cycle's own work) across the gap and act on the result on the completion turn. The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
-- **Reap your nested `Agent` subagents before you exit.** Every nested `Agent` you spawn (the pin-refresh runner in Step 1.6, the pipeline-sweep runner in Step 7.5, the Tech Lead in Step 2) returns its `agentId` in the spawn result — **record every one**. A nested `Agent` that finishes *after* you have moved to your closing turn is left as a done-but-unreaped orphan the harness keeps counting as "running" (you cannot reap it later — only its parent can, and once you exit it has none). So as the **final action of the cycle**, immediately before you emit the cycle summary: for every nested `Agent` agentId you recorded this cycle, call `TaskStop(task_id: <agentId>)`. This is safe and idempotent — you have already consumed each result on its completion re-invocation turn, so stopping only clears the registry entry (a `No task found` result means it was already reaped — fine, continue). **Only reap `Agent` subagents you spawned. Never `TaskStop` the docker dispatch/review/fix containers** (`cfg-agent-*`) — those are meant to outlive the cycle and are managed by the dispatch helpers, not by `TaskStop`.
+- **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent (synchronous — see next bullet) that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
+- **Nested `Agent` spawns are synchronous — never background them.** Spawn every nested `Agent` this cycle needs (the pin-refresh runner in Step 1.6, the pipeline-sweep runner in Step 7.5, and the Tech Lead in Step 2) with `run_in_background: false` (the default). A foreground spawn **blocks and returns its result on the same turn**, so you consume each result inline and move straight to the next step — no waiting, no orphaned task entries, nothing to reap. Do **NOT** set `run_in_background: true`, and do **NOT** end your turn after spawning in the expectation that the harness will re-invoke you when the child finishes: a backgrounded `po` subagent parent is **not** re-invoked on a nested child's completion, so the cycle stalls in a spawn-and-pause loop (this is the failure the async model in earlier revisions caused; verified 2026-07-02 that a `run_in_background: false` nested spawn from a `po` subagent completes and returns control inline in ~2s). The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
 
 ### 4.-1 Multi-host coordination (stateless cron — run on many hosts at once)
 
@@ -459,7 +458,8 @@ the queue when its body is updated. For the remaining drafts, collect their issu
 numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech
 Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent
 executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item
-<ITEM_ID_NNN>"`, mode `auto`.
+<ITEM_ID_NNN>"`, mode `auto`, `run_in_background: false` (synchronous — the
+verdicts return on the same turn; see the §4 nested-spawn adaptation).
 
 The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency
 ordering, implementation notes, scope, constraints, and ambiguity, and resolves
@@ -868,8 +868,8 @@ If active milestone >80% complete and next milestone has no epics, create a `hig
 **Step 9 — Session log:**
 Post timestamped summary on each active epic. Skip if no actions taken.
 
-**Step 10 — Reap nested subagents (subagent context):**
-Immediately before emitting the cycle summary, `TaskStop` every nested `Agent` agentId you recorded this cycle (Steps 1.6, 2, 7.5) so no orphaned task entries survive your exit. See the "Reap your nested `Agent` subagents before you exit" adaptation in §4. Never `TaskStop` the docker `cfg-agent-*` dispatch/review/fix containers.
+**Step 10 — (no reap needed):**
+Nested `Agent` spawns are now **synchronous** (§4): they complete and are consumed on the same turn, leaving no orphaned task-registry entries. There is nothing to `TaskStop`. Do **not** re-introduce a background-spawn + reap step — that was a workaround for the abandoned async-spawn model that caused the cron subagent to stall.
 
 ### 4.2 Idempotency
 
