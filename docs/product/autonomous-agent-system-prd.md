@@ -33,7 +33,7 @@ The system mirrors a standard product delivery org. Each role is either a Claude
 | **Developer** | Container Agent | `make test-complete`, `gh pr create` | PR against develop (existing infrastructure, unchanged) |
 | **QA** | Subagent | `gh pr review`, `gh issue edit` | Structured verdict comment on PR; `pipeline:review` or `pipeline:fix` label |
 
-> **Planning Team model:** During epic decomposition, the PO creates a temporary team (via `TeamCreate`) with BA and Tech Lead as teammates. All three communicate via `SendMessage` — BA proposes stories, Tech Lead challenges and validates, PO mediates and makes product decisions. Stories are only created on GitHub after all three agree. This replaces the previous sequential model where BA and Tech Lead operated independently.
+> **Planning Team model:** During epic decomposition, the PO spawns BA and Tech Lead as named background agents in the session's implicit team. All three collaborate adversarially via `SendMessage`, communicating **directly with each other**: BA proposes stories, Tech Lead challenges and validates directly with the BA, and the PO participates as a full member — interjecting on product questions and owning the final synthesis. Everyone can challenge everyone with evidence. Stories are only created on GitHub after all three converge; the team dissolves when its agents shut down.
 
 ### 2.1 PO Split — Interactive vs. Cron
 
@@ -156,26 +156,24 @@ Work moves through the pipeline in one direction. Each stage is triggered by a l
 
 ### 5.2 Collaborative Planning (Planning Team, async)
 
-The PO creates a temporary team for epic decomposition. BA and Tech Lead collaborate in real time via `SendMessage`, with the PO mediating and making product decisions. Stories are only created on GitHub after all three agree.
+The PO forms a planning team for epic decomposition by spawning BA and Tech Lead as named background agents in the session's implicit team. All three collaborate adversarially and in real time via `SendMessage`, **communicating directly with each other**. The PO participates as a full member and owns the final synthesis. Stories are only created on GitHub after all three converge.
 
-- PO cron cycle finds `pipeline:epic` Issues with no child stories
+- PO cron cycle finds epic Issues with no child stories
 - PO reads the epic body and gathers architectural context
-- PO creates a planning team: `TeamCreate(team_name: "planning-epic-<NUM>")`
-- PO spawns BA and Tech Lead as teammates (in parallel, both using `SendMessage` for communication)
-- PO broadcasts epic context (goal, success criteria, non-goals, constraints, PM notes) to both teammates
+- PO spawns BA and Tech Lead **together** as named background agents (`Agent` with `name` + `run_in_background: true`), introducing each to its teammates by name
+- PO sends epic context (goal, success criteria, non-goals, constraints, PM notes) to each teammate individually
 
-**Planning conversation:**
-1. BA surveys the codebase and sends story proposals to PO via `SendMessage`
-2. PO relays proposals to Tech Lead for validation
-3. Tech Lead validates each proposal against the codebase (dependency ordering, implementation notes, scope, constraints, ambiguity) and sends per-story verdicts: APPROVED or REVISION NEEDED
-4. If revisions needed: PO relays feedback to BA → BA revises → PO relays to Tech Lead → repeat (max 3 rounds)
-5. BA and Tech Lead can also message each other directly for quick clarifications
-6. PO makes product decisions when BA and Tech Lead disagree on scope or priority
+**Planning conversation (three-way, not hub-and-spoke):**
+1. BA surveys the codebase and sends story proposals to **both** the Tech Lead and the PO (large artifacts via a `/tmp` file + a short path message)
+2. Tech Lead validates each proposal against the codebase (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs currency — including verifying every cited code anchor) and sends per-story verdicts (APPROVED / REVISION NEEDED with file:line evidence) **directly to the BA**, copying the PO
+3. BA and Tech Lead iterate **directly** — BA revises or defends with codebase evidence; Tech Lead re-reviews only changed stories (max 3 rounds)
+4. The PO interjects on any product question (scope, priority, an AC that misreads intent) and can challenge either agent; either agent can challenge the PO or the other with evidence
+5. An item locks when BA and Tech Lead agree and the PO has no product objection
 
 **After consensus:**
-- PO creates all agreed stories on GitHub via `pipeline-helper.sh create-ready-story` with labels `pipeline:story` + `agent:ready` — stories skip `pipeline:draft` entirely since the Tech Lead already validated them
+- PO creates all agreed stories as private project items (never `gh issue create`); for dependency chains it materializes them early with real `#NNN` deps so the dispatcher's dep-gate self-sequences
 - PO posts a planning summary comment on the epic
-- PO shuts down the team (`TeamDelete`)
+- PO shuts down the team by sending a `shutdown_request` to each teammate individually
 
 **Convergence failure:** If BA and Tech Lead cannot agree after 3 revision rounds, PO makes a unilateral decision — accept, modify, or drop the disputed stories. Dropped stories produce a `pipeline:blocked` Issue with both perspectives documented.
 
@@ -408,7 +406,7 @@ Docker containers, git worktrees, credential mounting, `cfg-agent:latest` image,
 
 Agents operate in two modes depending on the pipeline phase:
 
-**Team mode (Planning Team — BA + Tech Lead):** During epic decomposition, BA and Tech Lead are spawned as teammates via `TeamCreate`/`Agent` with `team_name` and `name` parameters. They communicate with each other and the PO via `SendMessage`. Team communication is ephemeral — not persisted to GitHub. The PO creates all GitHub state after the team reaches consensus. Teams are temporary and cleaned up via `TeamDelete` after each planning session.
+**Team mode (Planning Team — BA + Tech Lead):** During epic decomposition, BA and Tech Lead are spawned as named background agents (`Agent` with `name` + `run_in_background: true`) in the session's implicit team. They communicate **directly with each other and the PO** via `SendMessage` (adversarial cross-examination). Team communication is ephemeral — not persisted to GitHub. The PO creates all GitHub state after the team converges. The team dissolves when its agents shut down via `shutdown_request`.
 
 **Standalone subagent mode (QA, legacy Tech Lead pass):** QA runs as an independent subagent spawned by the PO with `mode: "auto"` (no approval prompts). It has read-only access to the repo and read/write access to GitHub via `gh`. The PO receives its response directly and knows if it completed or failed. The legacy standalone Tech Lead pass uses the same model for processing pre-existing `pipeline:draft` stories.
 

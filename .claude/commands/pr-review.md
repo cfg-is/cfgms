@@ -39,10 +39,10 @@ Parse output:
 
 ### 3. Launch PR Reviewer Agent
 
-Spawn the **pr-reviewer** agent via the Task tool:
+Spawn the **pr-reviewer** agent via the Agent tool:
 
 ```
-Task tool:
+Agent tool:
   subagent_type: pr-reviewer
   prompt: "Review PR #[number] for the CFGMS project. Execute all 6 phases of the review methodology."
 ```
