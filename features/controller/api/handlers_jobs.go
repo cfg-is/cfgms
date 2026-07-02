@@ -21,8 +21,9 @@ import (
 
 // createJobRequest is the JSON body for POST /api/v1/jobs.
 type createJobRequest struct {
-	Selector  string `json:"selector"`
-	BatchSize int    `json:"batch_size"`
+	Selector          string `json:"selector"`
+	BatchSize         int    `json:"batch_size"`
+	PreviousConfigRef string `json:"previous_config_ref,omitempty"`
 }
 
 // createJobResponse is the JSON body returned on 202 Accepted.
@@ -101,7 +102,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		TenantID: tenantID,
 		Selector: req.Selector,
 		Config: batchjob.BatchJobConfig{
-			BatchSize: batchSize,
+			BatchSize:         batchSize,
+			PreviousConfigRef: req.PreviousConfigRef,
 		},
 		Targets:   targetIDs,
 		Status:    batchjob.BatchJobStatusPending,
