@@ -420,6 +420,16 @@ func psArgsForCmd(tr *testWinRMTransport, psCommand string) map[string]string {
 		keys = []string{"ClusterName", "VMName"} // sorted
 	case psRemoveClusterResource:
 		keys = []string{"Name"}
+	case psSetClusterRolePreferredOwners:
+		keys = []string{"ClusterName", "GroupName", "Owners"} // sorted
+	case psSetClusterRolePossibleOwners:
+		keys = []string{"ClusterName", "Owners", "ResourceName"} // sorted
+	case psSetClusterGroupPriority:
+		keys = []string{"ClusterName", "GroupName", "Priority"} // sorted
+	case psSetClusterGroupAutoStart:
+		keys = []string{"AutoStart", "ClusterName", "GroupName"} // sorted
+	case psSetClusterGroupAntiAffinity:
+		keys = []string{"ClassName", "ClusterName", "GroupName"} // sorted
 	default:
 		return nil
 	}
@@ -440,6 +450,133 @@ func psArgsForCmd(tr *testWinRMTransport, psCommand string) map[string]string {
 		return out
 	}
 	return nil
+}
+
+// intPtr / boolPtr are small helpers for the optional ClusterRoleProperties.
+func intPtr(v int) *int    { return &v }
+func boolPtr(v bool) *bool { return &v }
+
+// TestSetCluster_EmptyRoles_Noop verifies (#2306) that a present-Set with no
+// cfg.Roles entries dispatches ZERO property-set PS consts — properties are left
+// at cluster defaults when the operator declares none.
+func TestSetCluster_EmptyRoles_Noop(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"owner":"NODE1"}`,             // CNO owner → this node
+			`{"owners":{"web-01":"NODE1"}}`, // resource owners → role present
+			`{"owner":"NODE1"}`,             // cnoOwner re-read
+		},
+	}
+	m, _ := clusterTestModule(t, transport) // nodeHostname NODE1, clusterName lab-hv
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	// Roles is nil.
+	cfg := &ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"}
+	require.NoError(t, m.setCluster(context.Background(), "cluster:lab-hv", cfg))
+
+	for _, c := range []string{
+		psSetClusterRolePreferredOwners, psSetClusterRolePossibleOwners,
+		psSetClusterGroupPriority, psSetClusterGroupAutoStart, psSetClusterGroupAntiAffinity,
+	} {
+		assert.Equal(t, 0, countCmd(transport, c), "no property set must be dispatched when Roles is empty")
+	}
+}
+
+// TestSetCluster_OwnerReconcileDispatches verifies (#2306) that on the CNO-owner
+// node a role with declared properties dispatches exactly the matching property
+// PS consts, with the operator values travelling via ArgumentList (never in the
+// scriptBlock text).
+func TestSetCluster_OwnerReconcileDispatches(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"owner":"NODE1"}`,             // CNO owner → this node
+			`{"owners":{"web-01":"NODE1"}}`, // resource owners → role present (no Add)
+			`{"owner":"NODE1"}`,             // cnoOwner re-read
+			``,                              // preferred_owners set → ok
+			``,                              // priority set → ok
+		},
+	}
+	m, store := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	cfg := &ClusterConfig{
+		Name:      "lab-hv",
+		RoleNames: []string{"web-01"},
+		State:     "present",
+		Roles: map[string]ClusterRoleProperties{
+			"web-01": {PreferredOwners: []string{"NODE1", "NODE2"}, Priority: intPtr(2000)},
+		},
+	}
+	require.NoError(t, m.setCluster(context.Background(), "cluster:lab-hv", cfg))
+
+	// Exactly the two declared properties dispatched; the others not.
+	assert.Equal(t, 1, countCmd(transport, psSetClusterRolePreferredOwners))
+	assert.Equal(t, 1, countCmd(transport, psSetClusterGroupPriority))
+	assert.Equal(t, 0, countCmd(transport, psSetClusterRolePossibleOwners))
+	assert.Equal(t, 0, countCmd(transport, psSetClusterGroupAutoStart))
+	assert.Equal(t, 0, countCmd(transport, psSetClusterGroupAntiAffinity))
+
+	// Values travelled via ArgumentList (S3): role name + owners + priority never
+	// composed into the scriptBlock text.
+	po := psArgsForCmd(transport, psSetClusterRolePreferredOwners)
+	require.NotNil(t, po)
+	assert.Equal(t, "lab-hv", po["ClusterName"])
+	assert.Equal(t, "web-01", po["GroupName"])
+	assert.Equal(t, "NODE1,NODE2", po["Owners"])
+	pr := psArgsForCmd(transport, psSetClusterGroupPriority)
+	require.NotNil(t, pr)
+	assert.Equal(t, "2000", pr["Priority"])
+
+	// A property-reconcile audit event is recorded.
+	require.NoError(t, m.auditMgr.Flush(context.Background()))
+	var found bool
+	for _, e := range store.captured() {
+		if e.Action == "cluster-set-role-properties" {
+			found = true
+		}
+	}
+	assert.True(t, found, "a cluster-set-role-properties audit event must be recorded")
+}
+
+// TestSetCluster_NonOwnerSkipsProperties verifies (#2306) that a NON-owner node
+// records the ownership-gated skip and dispatches NO property sets (the gate is
+// upstream of the property reconcile).
+func TestSetCluster_NonOwnerSkipsProperties(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"owner":"NODE2"}`,             // CNO owner → NODE2 (this node is NODE1 → non-owner)
+			`{"owners":{"web-01":"NODE2"}}`, // resource owners
+			`{"owner":"NODE2"}`,             // cnoOwner re-read
+		},
+	}
+	m, store := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	cfg := &ClusterConfig{
+		Name:      "lab-hv",
+		RoleNames: []string{"web-01"},
+		State:     "present",
+		Roles: map[string]ClusterRoleProperties{
+			"web-01": {Priority: intPtr(3000), AutoStart: boolPtr(true)},
+		},
+	}
+	require.NoError(t, m.setCluster(context.Background(), "cluster:lab-hv", cfg))
+
+	for _, c := range []string{
+		psSetClusterRolePreferredOwners, psSetClusterRolePossibleOwners,
+		psSetClusterGroupPriority, psSetClusterGroupAutoStart, psSetClusterGroupAntiAffinity,
+	} {
+		assert.Equal(t, 0, countCmd(transport, c), "a non-owner must dispatch no property sets")
+	}
+
+	require.NoError(t, m.auditMgr.Flush(context.Background()))
+	var skip bool
+	for _, e := range store.captured() {
+		if e.Action == "cluster-set-skip" {
+			skip = true
+		}
+	}
+	assert.True(t, skip, "a non-owner must record cluster-set-skip")
 }
 
 // TestClusterSet_CNOOwner_Create verifies the AC: the CNO-owner node calls
