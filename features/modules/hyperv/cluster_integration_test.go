@@ -325,6 +325,57 @@ func TestClusterHA_GetRead(t *testing.T) {
 	}
 }
 
+// TestClusterHA_CNOGatingNonOwner is the [REQUIRED TEST] (#2306 V3): a Set on a
+// node that does NOT own the CNO records exactly one cluster-set-skip, issues zero
+// write cmdlets, and leaves the VM unclustered — the coordination gate that gives
+// exactly-once execution when the same cluster config reaches every node's steward.
+//
+// The module reads CNO ownership; it never moves the CNO (the cluster owns that),
+// so neither does this test. It runs the non-owner assertion only when the local
+// node is NATURALLY a non-owner, and skips on the CNO-owner node (that is the
+// owner path, proven by TestClusterHA_CreateFailoverReconverge). The non-owner Go
+// gate is additionally unit-covered (TestClusterSet_NonOwner*, clusterOwnership).
+func TestClusterHA_CNOGatingNonOwner(t *testing.T) {
+	p := requireClusterEnv(t)
+	const role = "cfgms-ha-gating-test"
+
+	m, auditStore := newClusterHAModule(t, p, []string{role})
+	ctx := context.Background()
+	local := m.nodeHostname
+
+	// Only assert the non-owner path when this node is naturally a non-owner — no
+	// CNO manipulation. On the owner node (or when ownership can't be determined),
+	// there is nothing for this test to assert.
+	status := getClusterStatus(t, m, p.cluster)
+	if local == "" || strings.EqualFold(status.CNOOwnerNode, local) {
+		t.Skipf("local node %q owns the CNO (owner=%q) — the non-owner skip is asserted only from a non-owner node",
+			local, status.CNOOwnerNode)
+	}
+
+	t.Cleanup(func() {
+		_ = m.Close()
+		runTestPS(t, psTestRemoveClusteredVM, map[string]string{"CFGMS_T_CLUSTER": p.cluster, "CFGMS_T_VM": role})
+	})
+
+	// Create an unclustered VM on the CSV; the local node is already a non-owner.
+	runTestPS(t, psTestCreateClusteredCapableVM, map[string]string{"CFGMS_T_VM": role, "CFGMS_T_CSV": p.csvPath})
+
+	// Non-owner Set: coordination, not authorization — must return nil, mutate nothing.
+	err := m.Set(ctx, "cluster:"+p.cluster,
+		&ClusterConfig{Name: p.cluster, RoleNames: []string{role}, State: "present"})
+	require.NoError(t, err, "non-owner Set must return nil — ownership is coordination, never an error")
+
+	require.NoError(t, m.auditMgr.Flush(ctx))
+	require.Len(t, auditEntriesByAction(auditStore.captured(), "cluster-set-skip"), 1,
+		"a non-owner must record exactly one cluster-set-skip")
+	require.Empty(t, auditEntriesByAction(auditStore.captured(), "cluster-set-create"),
+		"a non-owner must issue no Add-ClusterVirtualMachineRole")
+
+	status = getClusterStatus(t, m, p.cluster)
+	assert.Emptyf(t, status.RoleOwners[role],
+		"the VM must NOT be clustered after a non-owner Set — role %q", role)
+}
+
 // TestClusterHA_DriftNotAdopted is the S1 [REQUIRED TEST]: an out-of-band
 // clustered role absent from the declared cluster_role_names is observed by Get
 // (so it can be flagged as drift) but is NEVER mutated by Set.
