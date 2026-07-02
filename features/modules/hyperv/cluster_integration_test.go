@@ -123,6 +123,13 @@ const psTestOtherUpNode = `$n = @(Get-ClusterNode -Cluster $env:CFGMS_T_CLUSTER 
 // SilentlyContinue throughout so cleanup never fails a passing test.
 const psTestRemoveClusteredVM = `$g = Get-ClusterGroup -Cluster $env:CFGMS_T_CLUSTER -Name $env:CFGMS_T_VM -ErrorAction SilentlyContinue; if ($g) { Remove-ClusterGroup -Cluster $env:CFGMS_T_CLUSTER -Name $env:CFGMS_T_VM -RemoveResources -Force -ErrorAction SilentlyContinue }; $vm = Get-VM -Name $env:CFGMS_T_VM -ErrorAction SilentlyContinue; if ($vm) { Stop-VM -Name $env:CFGMS_T_VM -Force -ErrorAction SilentlyContinue; Remove-VM -Name $env:CFGMS_T_VM -Force -ErrorAction SilentlyContinue }; 'ok'`
 
+// psTestReadGroupPriority reads the clustered role group's Priority (#2306 PROP-B).
+const psTestReadGroupPriority = `(Get-ClusterGroup -Cluster $env:CFGMS_T_CLUSTER -Name $env:CFGMS_T_VM -ErrorAction Stop).Priority`
+
+// psTestReadPreferredOwners reads the role group's ordered preferred owner nodes,
+// comma-joined (#2306 PROP-B).
+const psTestReadPreferredOwners = `(Get-ClusterOwnerNode -Cluster $env:CFGMS_T_CLUSTER -Group $env:CFGMS_T_VM -ErrorAction Stop).OwnerNodes.Name -join ','`
+
 // runTestPS executes a test-local PS helper in a freshly-spawned powershell.exe
 // (NOT the module's closed-dispatch ps-host transport, which would reject an
 // arbitrary script with "unknown psCommand"). Names are passed via CFGMS_T_*
@@ -475,6 +482,41 @@ func TestClusterHA_DestructiveGate(t *testing.T) {
 		"re-add after true-path removal must succeed")
 	assert.NotEmptyf(t, getClusterStatus(t, m, p.cluster).RoleOwners[role],
 		"role %q must reappear in RoleOwners after re-add", role)
+}
+
+// TestClusterHA_RoleProperties is the [REQUIRED TEST] (#2306 PROPERTIES-B): on the
+// CNO-owner node, a Set that declares role properties (preferred_owners + priority)
+// reconciles them onto the live clustered group, verified by reading the group back.
+func TestClusterHA_RoleProperties(t *testing.T) {
+	p := requireClusterEnv(t)
+	const role = "cfgms-ha-props-test"
+
+	m, _ := newClusterHAModule(t, p, []string{role})
+	ctx := context.Background()
+
+	t.Cleanup(func() {
+		runTestPS(t, psTestRemoveClusteredVM, map[string]string{"CFGMS_T_CLUSTER": p.cluster, "CFGMS_T_VM": role})
+	})
+
+	local := m.nodeHostname
+	runTestPS(t, psTestEnsureCNOOwner, map[string]string{"CFGMS_T_CLUSTER": p.cluster, "CFGMS_T_NODE": local})
+	runTestPS(t, psTestCreateClusteredCapableVM, map[string]string{"CFGMS_T_VM": role, "CFGMS_T_CSV": p.csvPath})
+
+	// Cluster the VM AND reconcile properties in a single owner-node Set.
+	require.NoError(t, m.Set(ctx, "cluster:"+p.cluster, &ClusterConfig{
+		Name:      p.cluster,
+		RoleNames: []string{role},
+		State:     "present",
+		Roles: map[string]ClusterRoleProperties{
+			role: {PreferredOwners: []string{local}, Priority: intPtr(2000)},
+		},
+	}), "clustering + property reconcile must succeed on the CNO owner")
+
+	// Read the live group back and assert the declared properties applied.
+	prio := strings.TrimSpace(runTestPS(t, psTestReadGroupPriority, map[string]string{"CFGMS_T_CLUSTER": p.cluster, "CFGMS_T_VM": role}))
+	assert.Equal(t, "2000", prio, "the cluster group Priority must reflect the declared value")
+	owners := runTestPS(t, psTestReadPreferredOwners, map[string]string{"CFGMS_T_CLUSTER": p.cluster, "CFGMS_T_VM": role})
+	assert.Containsf(t, owners, local, "preferred owners %q must include the declared node %q", owners, local)
 }
 
 // auditEntriesByAction returns the captured entries whose Action matches, in order.
