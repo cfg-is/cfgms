@@ -15,7 +15,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// inMemBatchJobStore is a minimal in-memory BatchJobStore for contract testing only.
+// inMemBatchJobStore is a minimal in-memory BatchJobStore used to validate the
+// shared contract harness (BatchJobStoreContract). It is not a substitute for
+// production implementations — the real memory provider and SQLite store each
+// run the same contract in their own test packages where provider imports are
+// permitted by the architecture rules.
 type inMemBatchJobStore struct {
 	mu   sync.RWMutex
 	jobs map[string]*batchjob.BatchJob
@@ -47,6 +51,18 @@ func (s *inMemBatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, 
 		return business.ErrBatchJobNotFound
 	}
 	j.Status = status
+	j.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (s *inMemBatchJobStore) UpdateBatchTargets(_ context.Context, id string, targets []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return business.ErrBatchJobNotFound
+	}
+	j.Targets = append([]string(nil), targets...)
 	j.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -207,6 +223,23 @@ func TestBatchJobStore_Contract(t *testing.T) {
 
 	t.Run("UpdateBatchJobStatus not found", func(t *testing.T) {
 		err := store.UpdateBatchJobStatus(ctx, "ghost", batchjob.BatchJobStatusFailed)
+		assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
+	})
+
+	t.Run("UpdateBatchTargets reflects in Get", func(t *testing.T) {
+		job := newTestBatchJob("job-targets", "tenant-1")
+		require.NoError(t, store.CreateBatchJob(ctx, job))
+
+		newTargets := []string{"s-10", "s-11", "s-12"}
+		require.NoError(t, store.UpdateBatchTargets(ctx, "job-targets", newTargets))
+
+		got, err := store.GetBatchJob(ctx, "job-targets")
+		require.NoError(t, err)
+		assert.Equal(t, newTargets, got.Targets)
+	})
+
+	t.Run("UpdateBatchTargets not found", func(t *testing.T) {
+		err := store.UpdateBatchTargets(ctx, "ghost-targets", []string{"s-1"})
 		assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
 	})
 
