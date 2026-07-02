@@ -556,7 +556,14 @@ function Cfgms-GetClusterResourceOwner {
 # registered"/"already exists" error to a no-op (idempotency).
 function Cfgms-AddClusterVMRole {
     param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$VMName)
-    Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName | Out-Null
+    # Cluster by -VMId, NOT -VirtualMachine <name>: the by-name path makes
+    # Add-ClusterVirtualMachineRole resolve the VM via a cross-node WMI
+    # enumeration (ViridianVirtualMachine.GetAllVirtualMachinesByName ->
+    # ManagementScope.Initialize), which fails "Access is denied" when the module
+    # runs as the LocalSystem steward. Get-VM -Name is a local WMI call that
+    # succeeds; clustering by the resolved -VMId skips the enumeration.
+    $vmid = (Get-VM -Name $VMName -ErrorAction Stop).Id
+    Add-ClusterVirtualMachineRole -Cluster $ClusterName -VMId $vmid | Out-Null
 }
 
 # Cfgms-RemoveClusterResource mirrors psRemoveClusterResource: remove a clustered
@@ -564,6 +571,12 @@ function Cfgms-AddClusterVMRole {
 # true) has confirmed the operator opted in.
 function Cfgms-RemoveClusterResource {
     param([Parameter(Mandatory)][string]$Name)
-    Remove-ClusterResource -Name $Name -Force
+    # Remove the clustered VM ROLE by its GROUP name. Add-ClusterVirtualMachineRole
+    # creates a cluster group named after the VM whose resources are named
+    # "Virtual Machine <name>" / "Virtual Machine Configuration <name>" — so
+    # Remove-ClusterResource -Name <VMname> is ObjectNotFound (that is the group
+    # name, not a resource name). Remove-ClusterGroup -RemoveResources removes the
+    # group and all its resources (unclustering the VM; the VM itself persists).
+    Remove-ClusterGroup -Name $Name -RemoveResources -Force
 }
 `

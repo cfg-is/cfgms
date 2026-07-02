@@ -172,13 +172,24 @@ const psGetClusterResourceOwner = `$owners = @{}; Get-ClusterGroup -Cluster $Clu
 // CNO-owner node invokes it (the ownership gate ensures exactly-once across the
 // members). The Go caller normalises an "already exists"/"already registered"
 // error to nil (idempotency).
-const psAddClusterVMRole = `Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName | Out-Null`
+//
+// Cluster by -VMId, NOT -VirtualMachine <name>: the by-name path makes
+// Add-ClusterVirtualMachineRole resolve the VM via a WMI enumeration across
+// cluster nodes (ViridianVirtualMachine.GetAllVirtualMachinesByName ->
+// ManagementScope.Initialize), which fails "Access is denied" when the module
+// runs as the LocalSystem steward — cross-node WMI as the machine identity is
+// denied. Resolving the VM to its Id locally (Get-VM -Name is a local WMI call
+// that succeeds) and clustering by -VMId skips that enumeration and works as
+// SYSTEM. $VMName still travels via ArgumentList (never interpolated).
+const psAddClusterVMRole = `$vmid = (Get-VM -Name $VMName -ErrorAction Stop).Id; Add-ClusterVirtualMachineRole -Cluster $ClusterName -VMId $vmid | Out-Null`
 
-// psRemoveClusterResource removes a clustered role group (S2 destructive teardown,
-// gated behind allow_destructive: true). $Name travels via ArgumentList — never
-// interpolated. Remove-ClusterResource -Force is reached only after the Go
-// destructive gate has confirmed the operator opted in.
-const psRemoveClusterResource = `Remove-ClusterResource -Name $Name -Force`
+// psRemoveClusterResource removes a clustered VM role group (S2 destructive
+// teardown, gated behind allow_destructive: true). $Name travels via
+// ArgumentList — never interpolated. This const is a dispatch key; the executed
+// command is Cfgms-RemoveClusterResource in the preamble, which uses
+// Remove-ClusterGroup -RemoveResources (the VM role's GROUP name, not a resource
+// name — see that function). Reached only after the Go destructive gate.
+const psRemoveClusterResource = `Remove-ClusterGroup -Name $Name -RemoveResources -Force`
 
 // getCluster returns the observed state of a failover cluster on the host.
 //
