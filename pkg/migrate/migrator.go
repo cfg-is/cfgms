@@ -20,9 +20,9 @@ type Record struct {
 	Data []byte
 }
 
-// Report carries per-kind record counts, optional byte totals, and non-fatal errors.
+// MigrationReport carries per-kind record counts, optional byte totals, and non-fatal errors.
 // Bytes is nil for migrators that do not track byte sizes (e.g. storage, secrets).
-type Report struct {
+type MigrationReport struct {
 	Counts map[string]int
 	Bytes  map[string]int64 // per-namespace byte totals; nil when not tracked
 	Errors map[string]error
@@ -43,10 +43,10 @@ type Importer interface {
 // Migrator orchestrates a dry-run plan and an idempotent apply run.
 type Migrator interface {
 	// Plan performs a dry-run: it counts what would be migrated without writing.
-	Plan(ctx context.Context) (Report, error)
+	Plan(ctx context.Context) (MigrationReport, error)
 	// Run applies the migration. Run is idempotent: a second call yields identical
 	// counts and no duplicates in the target backend.
-	Run(ctx context.Context) (Report, error)
+	Run(ctx context.Context) (MigrationReport, error)
 }
 
 // MigratorFactory creates a Migrator for the given source and target backend names.
@@ -71,31 +71,31 @@ func NewBaseMigrator(e Exporter, i Importer) *BaseMigrator {
 }
 
 // Plan exports all records and returns their counts by kind; no writes are performed.
-func (m *BaseMigrator) Plan(ctx context.Context) (Report, error) {
+func (m *BaseMigrator) Plan(ctx context.Context) (MigrationReport, error) {
 	records, err := m.exporter.Export(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("export failed: %w", err)
+		return MigrationReport{}, fmt.Errorf("export failed: %w", err)
 	}
 	counts := make(map[string]int, 4)
 	for _, r := range records {
 		counts[r.Kind]++
 	}
-	return Report{Counts: counts, Errors: make(map[string]error)}, nil
+	return MigrationReport{Counts: counts, Errors: make(map[string]error)}, nil
 }
 
 // Run exports all records and imports them into the target; returns counts by kind.
 // A second call to Run must produce identical counts with no duplicates.
-func (m *BaseMigrator) Run(ctx context.Context) (Report, error) {
+func (m *BaseMigrator) Run(ctx context.Context) (MigrationReport, error) {
 	records, err := m.exporter.Export(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("export failed: %w", err)
+		return MigrationReport{}, fmt.Errorf("export failed: %w", err)
 	}
 	if err := m.importer.Import(ctx, records); err != nil {
-		return Report{}, fmt.Errorf("import failed: %w", err)
+		return MigrationReport{}, fmt.Errorf("import failed: %w", err)
 	}
 	counts := make(map[string]int, 4)
 	for _, r := range records {
 		counts[r.Kind]++
 	}
-	return Report{Counts: counts, Errors: make(map[string]error)}, nil
+	return MigrationReport{Counts: counts, Errors: make(map[string]error)}, nil
 }

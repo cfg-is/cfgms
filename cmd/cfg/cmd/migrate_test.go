@@ -108,7 +108,7 @@ func TestMigrateCmd_DryRunDoesNotWrite(t *testing.T) {
 // TestPrintMigrateReport_WithBytes verifies that printMigrateReport includes
 // byte totals per namespace when report.Bytes is populated.
 func TestPrintMigrateReport_WithBytes(t *testing.T) {
-	report := migrate.Report{
+	report := migrate.MigrationReport{
 		Counts: map[string]int{
 			"installers": 2,
 			"reports":    1,
@@ -136,7 +136,7 @@ func TestPrintMigrateReport_WithBytes(t *testing.T) {
 // TestPrintMigrateReport_WithoutBytes verifies backward compatibility: when Bytes
 // is nil, printMigrateReport omits byte information and still prints record counts.
 func TestPrintMigrateReport_WithoutBytes(t *testing.T) {
-	report := migrate.Report{
+	report := migrate.MigrationReport{
 		Counts: map[string]int{
 			"config_store": 3,
 		},

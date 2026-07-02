@@ -21,11 +21,12 @@ import (
 )
 
 var (
-	migrateFrom         string
-	migrateTo           string
-	migrateGitRoot      string
-	migrateFlatfileRoot string
-	migrateSQLitePath   string
+	migrateFrom           string
+	migrateTo             string
+	migrateGitRoot        string
+	migrateFlatfileRoot   string
+	migrateSQLitePath     string
+	storageMigrateDryRun  bool
 )
 
 // storageCmd represents the storage command group
@@ -50,7 +51,13 @@ The migration reads all data from the source provider and writes it to the
 target provider. The command is idempotent: running it twice produces the same
 record count with no duplicates.
 
+Use --dry-run to preview what would be migrated without writing any data.
+
 Examples:
+  # Preview migration from git to flatfile+sqlite (dry run)
+  cfg storage migrate --from git --to flatfile --git-root /data/cfgms-git \
+    --flatfile-root /data/cfgms-flatfile --sqlite-path /data/cfgms.db --dry-run
+
   # Migrate from git to flatfile+sqlite (OSS composite)
   cfg storage migrate --from git --to flatfile --git-root /data/cfgms-git \
     --flatfile-root /data/cfgms-flatfile --sqlite-path /data/cfgms.db
@@ -67,6 +74,7 @@ func init() {
 	storageMigrateCmd.Flags().StringVar(&migrateGitRoot, "git-root", "", "Path to git repository root (required when --from=git)")
 	storageMigrateCmd.Flags().StringVar(&migrateFlatfileRoot, "flatfile-root", "", "Flatfile root directory (required when --to=flatfile)")
 	storageMigrateCmd.Flags().StringVar(&migrateSQLitePath, "sqlite-path", "", "SQLite database path (used with --to=flatfile for business data)")
+	storageMigrateCmd.Flags().BoolVar(&storageMigrateDryRun, "dry-run", false, "Preview migration plan without writing any data")
 
 	_ = storageMigrateCmd.MarkFlagRequired("from")
 	_ = storageMigrateCmd.MarkFlagRequired("to")
@@ -87,11 +95,20 @@ func runStorageMigrate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("storage migrator: %w", err)
 		}
 		ctx := context.Background()
-		report, err := m.Run(ctx)
+		var report migrate.MigrationReport
+		if storageMigrateDryRun {
+			report, err = m.Plan(ctx)
+		} else {
+			report, err = m.Run(ctx)
+		}
 		if err != nil {
 			return err
 		}
-		fmt.Println("Migration complete:")
+		if storageMigrateDryRun {
+			fmt.Println("Dry-run complete (no data written):")
+		} else {
+			fmt.Println("Migration complete:")
+		}
 		total := 0
 		for store, count := range report.Counts {
 			fmt.Printf("  %-30s %d records\n", store+":", count)
@@ -163,43 +180,33 @@ func runStorageMigrate(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	counts := make(map[string]int)
-	errors := make(map[string]error)
 
 	switch migrateTo {
 	case "flatfile":
-		if err := migrateToFlatfile(ctx, gitProvider, gitConfig, counts, errors); err != nil {
+		reports, err := migrateToFlatfile(ctx, gitProvider, gitConfig, storageMigrateDryRun)
+		if err != nil {
 			return err
 		}
+		if storageMigrateDryRun {
+			fmt.Println("Dry-run complete (no data written):")
+		} else {
+			fmt.Println("Migration complete:")
+		}
+		migrate.PrintReport(os.Stdout, reports)
 	case "postgres":
 		return fmt.Errorf("postgres migration is not supported; migrate to flatfile first, then switch backend")
-	}
-
-	// Report results
-	fmt.Println("Migration complete:")
-	total := 0
-	for store, count := range counts {
-		fmt.Printf("  %-30s %d records\n", store+":", count)
-		total += count
-	}
-	fmt.Printf("  %-30s %d records\n", "Total:", total)
-
-	if len(errors) > 0 {
-		fmt.Println("\nWarnings (non-fatal):")
-		for store, err := range errors {
-			fmt.Printf("  %s: %v\n", store, err)
-		}
 	}
 
 	return nil
 }
 
 // migrateToFlatfile migrates all compatible stores from the git provider to
-// the flatfile+sqlite OSS composite target.
-func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, counts map[string]int, errors map[string]error) error {
+// the flatfile+sqlite OSS composite target using step-based execution.
+// When dryRun is true each step reads from source and counts records without writing.
+func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, dryRun bool) ([]migrate.Report, error) {
 	// Ensure target directories exist
 	if err := os.MkdirAll(migrateFlatfileRoot, 0755); err != nil {
-		return fmt.Errorf("failed to create flatfile root directory: %w", err)
+		return nil, fmt.Errorf("failed to create flatfile root directory: %w", err)
 	}
 
 	sqlitePath := migrateSQLitePath
@@ -210,40 +217,34 @@ func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvid
 
 	targetManager, err := interfaces.CreateOSSStorageManager(migrateFlatfileRoot, sqlitePath)
 	if err != nil {
-		return fmt.Errorf("failed to initialize target storage: %w", err)
+		return nil, fmt.Errorf("failed to initialize target storage: %w", err)
 	}
 
-	fmt.Println("Migrating config store...")
-	if n, err := migrateConfigStore(ctx, gitProvider, gitConfig, targetManager); err != nil {
-		errors["config_store"] = err
-		fmt.Printf("  WARNING: config store migration incomplete: %v\n", err)
-	} else {
-		counts["config_store"] = n
-		fmt.Printf("  Config store: %d records migrated\n", n)
+	steps := []migrate.Step{
+		{
+			Name: "config_store",
+			Run: func(ctx context.Context, dryRun bool) (int, error) {
+				return migrateConfigStore(ctx, gitProvider, gitConfig, targetManager, dryRun)
+			},
+		},
+		{
+			Name: "registration_token_store",
+			Run: func(ctx context.Context, dryRun bool) (int, error) {
+				return migrateRegistrationTokenStore(ctx, gitProvider, gitConfig, targetManager, dryRun)
+			},
+		},
+		{
+			Name: "tenant_store",
+			Run: func(ctx context.Context, dryRun bool) (int, error) {
+				return migrateTenantStore(ctx, gitProvider, gitConfig, targetManager, dryRun)
+			},
+		},
 	}
 
-	fmt.Println("Migrating registration token store...")
-	if n, err := migrateRegistrationTokenStore(ctx, gitProvider, gitConfig, targetManager); err != nil {
-		errors["registration_token_store"] = err
-		fmt.Printf("  WARNING: registration token store migration incomplete: %v\n", err)
-	} else {
-		counts["registration_token_store"] = n
-		fmt.Printf("  Registration token store: %d records migrated\n", n)
-	}
-
-	fmt.Println("Migrating tenant store...")
-	if n, err := migrateTenantStore(ctx, gitProvider, gitConfig, targetManager); err != nil {
-		errors["tenant_store"] = err
-		fmt.Printf("  WARNING: tenant store migration incomplete: %v\n", err)
-	} else {
-		counts["tenant_store"] = n
-		fmt.Printf("  Tenant store: %d records migrated\n", n)
-	}
-
-	return nil
+	return migrate.RunSteps(ctx, dryRun, steps), nil
 }
 
-func migrateConfigStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager) (int, error) {
+func migrateConfigStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager, dryRun bool) (int, error) {
 	src, err := gitProvider.CreateConfigStore(gitConfig)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open git config store: %w", err)
@@ -261,6 +262,10 @@ func migrateConfigStore(ctx context.Context, gitProvider interfaces.StorageProvi
 
 	n := 0
 	for _, entry := range entries {
+		if dryRun {
+			n++
+			continue
+		}
 		entry.UpdatedAt = time.Now()
 		if err := dst.StoreConfig(ctx, entry); err != nil {
 			return n, fmt.Errorf("failed to store config %v: %w", entry.Key, err)
@@ -270,7 +275,7 @@ func migrateConfigStore(ctx context.Context, gitProvider interfaces.StorageProvi
 	return n, nil
 }
 
-func migrateRegistrationTokenStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager) (int, error) {
+func migrateRegistrationTokenStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager, dryRun bool) (int, error) {
 	src, err := gitProvider.CreateRegistrationTokenStore(gitConfig)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open git registration token store: %w", err)
@@ -293,6 +298,10 @@ func migrateRegistrationTokenStore(ctx context.Context, gitProvider interfaces.S
 
 	n := 0
 	for _, token := range tokens {
+		if dryRun {
+			n++
+			continue
+		}
 		if err := dst.SaveToken(ctx, token); err != nil {
 			return n, fmt.Errorf("failed to store token: %w", err)
 		}
@@ -301,7 +310,7 @@ func migrateRegistrationTokenStore(ctx context.Context, gitProvider interfaces.S
 	return n, nil
 }
 
-func migrateTenantStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager) (int, error) {
+func migrateTenantStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager, dryRun bool) (int, error) {
 	src, err := gitProvider.CreateTenantStore(gitConfig)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open git tenant store: %w", err)
@@ -329,6 +338,10 @@ func migrateTenantStore(ctx context.Context, gitProvider interfaces.StorageProvi
 
 	n := 0
 	for _, tenantItem := range tenants {
+		if dryRun {
+			n++
+			continue
+		}
 		if err := dst.CreateTenant(ctx, tenantItem); err != nil {
 			// If already exists, try update (idempotency)
 			if err2 := dst.UpdateTenant(ctx, tenantItem); err2 != nil {

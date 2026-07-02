@@ -124,27 +124,27 @@ func NewSecretsMigrator(src, dst secretsinterfaces.SecretStore, caStoragePath, c
 
 // Plan exports secrets from the source and returns per-kind counts.
 // No writes to the target are performed.
-func (m *SecretsMigrator) Plan(ctx context.Context) (migrate.Report, error) {
+func (m *SecretsMigrator) Plan(ctx context.Context) (migrate.MigrationReport, error) {
 	records, err := m.exportSecrets(ctx)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("secrets plan: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("secrets plan: %w", err)
 	}
 	counts := countByKind(records)
 	if m.caStoragePath != "" {
 		counts[kindCA] = 1
 	}
-	return migrate.Report{Counts: counts, Errors: make(map[string]error)}, nil
+	return migrate.MigrationReport{Counts: counts, Errors: make(map[string]error)}, nil
 }
 
 // Run migrates all secrets and (if configured) the file-based CA private key.
 // Idempotent: re-running overwrites with identical values using upsert semantics.
-func (m *SecretsMigrator) Run(ctx context.Context) (migrate.Report, error) {
+func (m *SecretsMigrator) Run(ctx context.Context) (migrate.MigrationReport, error) {
 	records, err := m.exportSecrets(ctx)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("secrets run: export failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("secrets run: export failed: %w", err)
 	}
 	if err := m.importSecrets(ctx, records); err != nil {
-		return migrate.Report{}, fmt.Errorf("secrets run: import failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("secrets run: import failed: %w", err)
 	}
 
 	counts := countByKind(records)
@@ -153,7 +153,7 @@ func (m *SecretsMigrator) Run(ctx context.Context) (migrate.Report, error) {
 	if m.caStoragePath != "" {
 		sourceKeyFile, err := m.migrateCA(ctx)
 		if err != nil {
-			return migrate.Report{Counts: counts, Errors: errs},
+			return migrate.MigrationReport{Counts: counts, Errors: errs},
 				fmt.Errorf("secrets run: CA migration failed: %w", err)
 		}
 		counts[kindCA] = 1
@@ -161,7 +161,7 @@ func (m *SecretsMigrator) Run(ctx context.Context) (migrate.Report, error) {
 		errs["ca_source_key_path"] = fmt.Errorf("residual CA private key requires manual removal: %s", sourceKeyFile)
 	}
 
-	return migrate.Report{Counts: counts, Errors: errs}, nil
+	return migrate.MigrationReport{Counts: counts, Errors: errs}, nil
 }
 
 // exportSecrets lists and fetches all secrets from the source store.

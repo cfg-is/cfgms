@@ -150,7 +150,7 @@ func runMigrate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func printMigrateReport(out io.Writer, report migrate.Report) error {
+func printMigrateReport(out io.Writer, report migrate.MigrationReport) error {
 	total := 0
 	var totalBytes int64
 	for store, count := range report.Counts {
