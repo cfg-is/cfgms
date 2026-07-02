@@ -247,6 +247,7 @@ func TestClusterHA_CreateFailoverReconverge(t *testing.T) {
 	status := getClusterStatus(t, m, p.cluster)
 	origOwner := status.RoleOwners[role]
 	require.NotEmptyf(t, origOwner, "resource_owner[%s] must be non-empty after clustering", role)
+	require.NotEmpty(t, status.CNOOwnerNode, "CNOOwnerNode must be non-empty after clustering the role")
 
 	// The create must have recorded exactly one successful cluster-set-create.
 	require.NoError(t, m.auditMgr.Flush(ctx))
