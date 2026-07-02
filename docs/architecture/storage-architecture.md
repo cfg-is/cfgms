@@ -167,6 +167,17 @@ What this does:
 
 **Idempotent**: running the command twice against the same target produces the same record count with no duplicates. Safe to rehearse against a copy of production data before cutting over.
 
+**Dry-run preview**: pass `--dry-run` to read all source records and report per-store counts without writing anything to the target. Use this to confirm expected counts before scheduling downtime:
+
+```bash
+cfg storage migrate --from git --to flatfile \
+  --git-root /var/lib/cfgms/git-storage \
+  --flatfile-root /var/lib/cfgms/flatfile \
+  --dry-run
+```
+
+See [docs/operations/backend-migration.md](../operations/backend-migration.md) for the full offline-cutover procedure and downtime envelope.
+
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
 ```yaml

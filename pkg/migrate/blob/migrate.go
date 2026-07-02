@@ -132,33 +132,33 @@ func NewBlobMigrator(src, dst blobstore.BlobStore, tenants []string) *BlobMigrat
 
 // Plan lists all blobs from the source and returns per-namespace counts and byte totals.
 // No writes to the target are performed.
-func (m *BlobMigrator) Plan(ctx context.Context) (migrate.Report, error) {
+func (m *BlobMigrator) Plan(ctx context.Context) (migrate.MigrationReport, error) {
 	infos, err := m.listAll(ctx)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("blob plan: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("blob plan: %w", err)
 	}
 	counts, bytes := collectNamespaceStats(infos)
-	return migrate.Report{Counts: counts, Bytes: bytes, Errors: make(map[string]error)}, nil
+	return migrate.MigrationReport{Counts: counts, Bytes: bytes, Errors: make(map[string]error)}, nil
 }
 
 // Run copies all blobs from the source to the target, preserving BlobKey, BlobMeta,
 // and checksums. A checksum mismatch on any source blob fails the migration immediately.
 // Run is idempotent: re-running with the same source overwrites with identical content.
-func (m *BlobMigrator) Run(ctx context.Context) (migrate.Report, error) {
+func (m *BlobMigrator) Run(ctx context.Context) (migrate.MigrationReport, error) {
 	infos, err := m.listAll(ctx)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("blob run: list failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("blob run: list failed: %w", err)
 	}
 
 	for _, info := range infos {
 		if err := m.copyBlob(ctx, info.Key, info.Meta); err != nil {
-			return migrate.Report{}, fmt.Errorf("blob run: copy %s/%s/%s: %w",
+			return migrate.MigrationReport{}, fmt.Errorf("blob run: copy %s/%s/%s: %w",
 				info.Key.TenantID, info.Key.Namespace, info.Key.Name, err)
 		}
 	}
 
 	counts, bytes := collectNamespaceStats(infos)
-	return migrate.Report{Counts: counts, Bytes: bytes, Errors: make(map[string]error)}, nil
+	return migrate.MigrationReport{Counts: counts, Bytes: bytes, Errors: make(map[string]error)}, nil
 }
 
 // listAll enumerates all blobs across all configured tenants from the source.

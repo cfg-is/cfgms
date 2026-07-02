@@ -98,26 +98,26 @@ func NewStorageMigrator(src, dst *interfaces.StorageManager) *StorageMigrator {
 
 // Plan exports all records from the source and returns per-kind counts.
 // No writes to the target are performed.
-func (m *StorageMigrator) Plan(ctx context.Context) (migrate.Report, error) {
+func (m *StorageMigrator) Plan(ctx context.Context) (migrate.MigrationReport, error) {
 	records, err := exportAll(ctx, m.src)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("storage plan: export failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("storage plan: export failed: %w", err)
 	}
 	counts := countByKind(records)
-	return migrate.Report{Counts: counts, Errors: make(map[string]error)}, nil
+	return migrate.MigrationReport{Counts: counts, Errors: make(map[string]error)}, nil
 }
 
 // Run exports all records from the source, imports them into the target with
 // upsert semantics, and then verifies that per-kind counts match. A count
 // mismatch returns a non-nil error that lists all mismatched kinds.
-func (m *StorageMigrator) Run(ctx context.Context) (migrate.Report, error) {
+func (m *StorageMigrator) Run(ctx context.Context) (migrate.MigrationReport, error) {
 	records, err := exportAll(ctx, m.src)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("storage run: export failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("storage run: export failed: %w", err)
 	}
 
 	if err := importAll(ctx, m.dst, records); err != nil {
-		return migrate.Report{}, fmt.Errorf("storage run: import failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("storage run: import failed: %w", err)
 	}
 
 	srcCounts := countByKind(records)
@@ -125,7 +125,7 @@ func (m *StorageMigrator) Run(ctx context.Context) (migrate.Report, error) {
 	// Integrity check: re-export from target and compare counts.
 	dstRecords, err := exportAll(ctx, m.dst)
 	if err != nil {
-		return migrate.Report{}, fmt.Errorf("storage run: integrity check export failed: %w", err)
+		return migrate.MigrationReport{}, fmt.Errorf("storage run: integrity check export failed: %w", err)
 	}
 	dstCounts := countByKind(dstRecords)
 
@@ -136,11 +136,11 @@ func (m *StorageMigrator) Run(ctx context.Context) (migrate.Report, error) {
 		}
 	}
 	if len(mismatch) > 0 {
-		return migrate.Report{Counts: srcCounts, Errors: make(map[string]error)},
+		return migrate.MigrationReport{Counts: srcCounts, Errors: make(map[string]error)},
 			fmt.Errorf("storage migration integrity check failed: %v", mismatch)
 	}
 
-	return migrate.Report{Counts: srcCounts, Errors: make(map[string]error)}, nil
+	return migrate.MigrationReport{Counts: srcCounts, Errors: make(map[string]error)}, nil
 }
 
 // ─── kind constants ─────────────────────────────────────────────────────────
