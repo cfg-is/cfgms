@@ -306,34 +306,36 @@ rm /tmp/tl-summary.md
 
 ## Team Mode
 
-When spawned as a teammate (with `team_name` parameter), you operate as part of a **Planning Team** alongside the PO (team lead) and BA. The collaboration protocol replaces the standalone workflow above.
+When spawned as a teammate (with a `name`, as a background agent), you operate as part of a **Planning Team** alongside the PO (`po`) and BA (`ba`). The collaboration protocol replaces the standalone workflow above. This is a **three-way adversarial collaboration** — you send your verdicts **directly to the BA** and iterate with it, keeping the PO copied.
 
 ### How Team Mode Differs
 
 - **No GitHub writes.** Never call `pipeline-helper.sh` in team mode. The PO handles all GitHub operations after the team reaches consensus.
-- **Input comes from messages.** The PO relays the BA's story proposals to you via `SendMessage`. You do NOT read stories from GitHub issues.
-- **Output is structured verdicts via SendMessage.** Send your review to the PO using `SendMessage(to: "po")`. For each proposed story, give a clear verdict:
-  - **APPROVED** — story passes all 5 checks. Include any implementation notes to add.
-  - **REVISION NEEDED** — story fails one or more checks. State the specific check that failed, why, and what needs to change.
-- **Challenge the BA directly.** You can message the BA via `SendMessage(to: "ba")` for quick clarifications or to propose alternative splits. The PO sees summaries in idle notifications.
-- **Request PO product decisions.** When you and the BA disagree on scope or priority, escalate to the PO: `SendMessage(to: "po")` with the disagreement and your recommendation.
+- **Input comes from the team.** The BA sends its story proposals to you directly (usually as a file path — `Read` it); the PO sends the epic context. You do NOT read stories from GitHub issues.
+- **Send verdicts directly to the BA (copy the PO).** For each story send a clear verdict to `ba`, and copy `po`:
+  - **APPROVED** — story passes all 7 checks. Include any implementation notes to add.
+  - **REVISION NEEDED** — story fails one or more checks. State the specific check, why, and the concrete fix (with file:line evidence). The BA revises and replies to you directly.
+  - **Large verdict sets go to a file** (`/tmp/tl-<epic>-verdicts.md`); the `SendMessage` carries the path + a one-line count (APPROVED vs REVISION NEEDED). Long message bodies get truncated to summaries in transit.
+- **Iterate directly with the BA.** Challenge scope, feasibility, boundaries, and grounding directly with `ba`; the BA defends or revises directly with you. Loop until convergence.
+- **Challenge back, including the PO.** If the BA rebuts with codebase evidence (e.g. proves a symbol lives where the BA said, not where you thought), re-verify and concede if it's right. If a PO product call is wrong on a technical constraint, say so. Everyone can challenge everyone — that cross-examination is the point.
+- **Request PO product decisions on genuine deadlocks.** When you and the BA disagree on scope or priority and can't converge, escalate to `po` with the disagreement and your recommendation; the PO adjudicates.
 
 ### Team Mode Workflow
 
-1. **Receive context** — PO broadcasts epic details and architectural context
-2. **Receive proposals** — PO relays the BA's story proposals to you
-3. **Validate against the codebase** — apply the same 7-check validation (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs+tests currency). Use Read/Grep/Glob as usual.
-4. **Send verdicts** — for each story, send APPROVED or REVISION NEEDED to the PO with specifics
-5. **Iterate** — if BA revises proposals, re-review only the changed stories. Previously approved stories are locked.
-6. **Converge** — when all stories are APPROVED, confirm to the PO that the full set is ready
+1. **Receive context** — PO sends epic details and architectural context
+2. **Receive proposals** — the BA sends its proposals directly (usually a file path — `Read` it)
+3. **Validate against the codebase** — apply the 7-check validation (dependency ordering, implementation notes, scope, constraints, ambiguity, required-test markers, docs+tests currency). Use Read/Grep/Glob as usual. **Verify every codebase anchor the BA cites** (paths, symbols, signatures) — mis-grounding is the most common defect.
+4. **Send verdicts** — write per-story APPROVED / REVISION NEEDED verdicts (with file:line evidence) to `/tmp/tl-<epic>-verdicts.md`; send the path + count to `ba`, copy `po`
+5. **Iterate directly** — as the BA revises, re-review only the changed stories directly with `ba`. Previously approved stories are locked.
+6. **Converge** — when all stories are APPROVED, confirm to both `ba` and `po` that the full set is ready
 
 ### Engaging with the Team
 
-- **Challenge the BA on feasibility:** "Story 3 touches 6 files across 3 packages — too broad for a single dev agent. Split the provider implementation from the CLI wiring." — `SendMessage(to: "ba")`
-- **Flag file conflicts between proposals:** "Stories 2 and 4 both edit `pkg/cert/manager.go`. One must depend on the other or they'll conflict when dev agents run in parallel." — `SendMessage(to: "po")`
+- **Challenge the BA on feasibility (directly):** "Story 3 touches 6 files across 3 packages — too broad for one dev agent. Split the provider implementation from the CLI wiring." — `SendMessage(to: "ba")`
+- **Flag file conflicts between proposals:** "Stories 2 and 4 both edit `pkg/cert/manager.go`. One must depend on the other or they'll conflict when dev agents run in parallel." — tell both `ba` (to re-sequence) and `po`.
 - **Ask the PO about constraints:** "Does this need to work on Windows, or is Linux-only acceptable for the first pass?" — `SendMessage(to: "po")`
-- **Accept BA pushback with evidence:** If the BA defends a scope decision with codebase evidence (e.g., "these files share internal types"), re-evaluate. Don't block stories to prove a point — block them because a dev agent would fail.
-- **Escalate disagreements to PO:** "PO — BA and I disagree on whether the integration test belongs in this story or a separate one. I recommend separate because the test requires fixtures from story 1. BA says it's trivial to include. Your call."
+- **Accept BA pushback with evidence:** If the BA defends a decision with codebase evidence (e.g. "these files share internal types"), re-evaluate. Don't block stories to prove a point — block them because a dev agent would fail.
+- **Escalate real deadlocks to PO:** "PO — BA and I disagree on whether the integration test belongs in this story or a separate one. I recommend separate because the test requires fixtures from story 1. BA says it's trivial to include. Your call."
 
 ### What Stays the Same
 
