@@ -129,7 +129,7 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 		step.CompletedAt = &completedAt
 
 		if len(failedIDs) > 0 {
-			// e. At least one steward failed → pause.
+			// e. At least one steward failed.
 			step.Status = BatchStepStatusFailed
 			step.FailedIDs = failedIDs
 			if persistErr := e.store.UpdateBatchStep(ctx, job.ID, step); persistErr != nil {
@@ -137,15 +137,23 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 					"job_id", logging.SanitizeLogValue(job.ID),
 					"step", i, "error", persistErr)
 			}
-			if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); pauseErr != nil {
-				e.logger.Error("Failed to set job paused",
-					"job_id", logging.SanitizeLogValue(job.ID),
-					"error", pauseErr)
-			}
-			job.Status = BatchJobStatusPaused
-			e.logger.Info("Batch step failed; job paused",
+			e.logger.Info("Batch step failed",
 				"job_id", logging.SanitizeLogValue(job.ID),
 				"step", i, "failed_count", len(failedIDs))
+			if job.Config.PreviousConfigRef != "" {
+				// Baseline captured: compensating dispatch to already-applied stewards.
+				e.rollbackAppliedSteps(ctx, job)
+			} else {
+				// No baseline: pause for operator action.
+				if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); pauseErr != nil {
+					e.logger.Error("Failed to set job paused",
+						"job_id", logging.SanitizeLogValue(job.ID),
+						"error", pauseErr)
+				}
+				job.Status = BatchJobStatusPaused
+				e.logger.Info("Job paused (no PreviousConfigRef; rollback skipped)",
+					"job_id", logging.SanitizeLogValue(job.ID))
+			}
 			return nil
 		}
 
