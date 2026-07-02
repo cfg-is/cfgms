@@ -446,6 +446,35 @@ The controller can establish an interactive terminal session through the steward
 
 The steward participates in multi-node operations coordinated by the controller (rolling updates, coordinated reboots, cluster-aware operations). The steward applies its own cfg — the controller determines sequencing and timing across devices. See the [controller operating model](controller-operating-model.md) for orchestration details.
 
+#### Cluster-Role Quorum (`dna.cluster_role`)
+
+When multiple stewards form a redundancy cluster (Hyper-V cluster, SQL Availability Group, domain controller site, etc.), rolling updates must never take down all cluster members simultaneously. The controller enforces this via the `dna.cluster_role` DNA attribute and the `DnaRoleQuorumChecker`.
+
+**Setting the attribute:**
+
+Add `cluster_role` to the steward's DNA configuration:
+
+```yaml
+dna:
+  cluster_role: hyperv-cluster
+```
+
+The value is a free-form string — pick a name that identifies the redundancy domain. All stewards that share a value form one group; stewards with no `cluster_role` are treated as independent.
+
+**Example role values:**
+
+| Value | Typical members |
+|-------|----------------|
+| `hyperv-cluster` | Hyper-V failover cluster nodes |
+| `sql-ag-primary` | SQL Server Availability Group members |
+| `dc-site-a` | Domain controllers in site A |
+
+**Quorum guarantee:**
+
+When a rolling batch job runs, the `DnaRoleQuorumChecker` partitions the fleet such that **no two stewards with the same non-empty `cluster_role` appear in the same batch wave**. A cluster with four Hyper-V nodes gets one node per wave regardless of the requested batch size — ensuring at least three nodes remain operational during any wave.
+
+Stewards without a `cluster_role` are placed freely into available slots alongside role-bearing stewards, filling up to the requested batch size.
+
 ## Registration
 
 How a steward joins a controller.
