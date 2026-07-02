@@ -296,6 +296,35 @@ func TestClusterHA_CreateFailoverReconverge(t *testing.T) {
 	assertReceiptTimestamps(t, auditStore.captured(), testStart, time.Now())
 }
 
+// TestClusterHA_GetRead is the read-surface [REQUIRED TEST] (#2306 V2): it
+// asserts every ClusterStatus field returned by getCluster against live cfg-lab
+// state, and that the DNA Monitor emits no ChangeEvent on a quiescent cluster.
+func TestClusterHA_GetRead(t *testing.T) {
+	p := requireClusterEnv(t)
+	m, _ := newClusterHAModule(t, p, nil) // no role scope — read the whole cluster
+	t.Cleanup(func() { _ = m.Close() })
+	ctx := context.Background()
+
+	// getClusterStatus already require's Found==true; assert the rest of the shape.
+	status := getClusterStatus(t, m, p.cluster)
+	assert.Equal(t, p.cluster, status.Name, "cluster name must match the declared cluster")
+	assert.NotEmpty(t, status.CNOOwnerNode, "the CNO group must have an owner on a healthy cluster")
+	assert.GreaterOrEqual(t, len(status.MemberNodes), 1, "cluster must report at least one member node")
+	assert.GreaterOrEqual(t, len(status.CSVPaths), 1, "cluster must report at least one CSV path (CSV01)")
+
+	// DNA Monitor: a quiescent cluster must not emit a ChangeEvent. Register the
+	// Monitor, let it take its baseline poll (no emit on the first poll), and
+	// confirm nothing fires over two poll intervals.
+	require.NoError(t, m.Monitor(ctx, "cluster:"+p.cluster, nil))
+	changes := m.Changes()
+	time.Sleep(2 * pollDuration(t))
+	select {
+	case ev := <-changes:
+		t.Errorf("DNA Monitor emitted an unexpected ChangeEvent on a quiescent cluster: %+v", ev)
+	default:
+	}
+}
+
 // TestClusterHA_DriftNotAdopted is the S1 [REQUIRED TEST]: an out-of-band
 // clustered role absent from the declared cluster_role_names is observed by Get
 // (so it can be flagged as drift) but is NEVER mutated by Set.
