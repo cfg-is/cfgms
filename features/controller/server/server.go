@@ -991,7 +991,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		batchJobStore,
 		batchJobFleetQuery,
 		commandPublisher,
-		nil, // quorumCheck — nil uses naive round-robin; wired by quorum story
+		batchjob.NewDnaRoleQuorumChecker(),
 		logger,
 	)
 	httpServer.SetBatchJobStore(batchJobStore)
@@ -2301,7 +2301,7 @@ type serverBatchjobFleetQuery struct {
 	svc *service.ControllerService
 }
 
-func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tenantID string) ([]string, error) {
+func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tenantID string) ([]batchjob.StewardMeta, error) {
 	filter, err := fleetSelector.Parse(selectorStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
@@ -2312,11 +2312,14 @@ func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tena
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(results))
+	metas := make([]batchjob.StewardMeta, 0, len(results))
 	for _, r := range results {
-		ids = append(ids, r.ID)
+		metas = append(metas, batchjob.StewardMeta{
+			ID:            r.ID,
+			DNAAttributes: r.DNAAttributes,
+		})
 	}
-	return ids, nil
+	return metas, nil
 }
 
 // serverFleetStewardProvider adapts *service.ControllerService to

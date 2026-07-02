@@ -16,7 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ----------------------------------------------------------------------------
@@ -131,7 +131,7 @@ type fleetQueryAdapter struct {
 	q fleet.FleetQuery
 }
 
-func (a *fleetQueryAdapter) Search(ctx context.Context, selector, tenantID string) ([]string, error) {
+func (a *fleetQueryAdapter) Search(ctx context.Context, selector, tenantID string) ([]batchjob.StewardMeta, error) {
 	filter, err := fleet.ParseTargetSelector(selector)
 	if err != nil {
 		return nil, err
@@ -141,11 +141,14 @@ func (a *fleetQueryAdapter) Search(ctx context.Context, selector, tenantID strin
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, len(results))
+	metas := make([]batchjob.StewardMeta, len(results))
 	for i, r := range results {
-		ids[i] = r.ID
+		metas[i] = batchjob.StewardMeta{
+			ID:            r.ID,
+			DNAAttributes: r.DNAAttributes,
+		}
 	}
-	return ids, nil
+	return metas, nil
 }
 
 type staticFleetProvider struct {
@@ -261,7 +264,7 @@ func newExecutorFixture(t *testing.T, stewardIDs ...string) *executorFixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 
 	cp := newExecutorTestCP()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 
 	pub, err := commands.New(&commands.Config{
 		ControlPlane: cp,
@@ -452,7 +455,7 @@ func TestRollingBatchExecutor_ContextCancellation(t *testing.T) {
 	defer cancel()
 
 	cp := newExecutorTestCP()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	pub, err := commands.New(&commands.Config{ControlPlane: cp, Logger: logger})
 	require.NoError(t, err)
 	require.NoError(t, pub.Start(ctx))

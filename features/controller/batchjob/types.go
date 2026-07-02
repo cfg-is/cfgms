@@ -8,6 +8,17 @@ package batchjob
 
 import "time"
 
+// StewardMeta carries the minimal per-steward context the executor and
+// QuorumChecker need. Using a local type keeps the batchjob package free of
+// the fleet import — avoiding the potential cycle batchjob → fleet → business → batchjob.
+type StewardMeta struct {
+	// ID is the steward's unique identifier.
+	ID string
+
+	// DNAAttributes holds device DNA key/value pairs (e.g. "cluster_role": "hyperv-cluster").
+	DNAAttributes map[string]string
+}
+
 // BatchJobStatus is the lifecycle state of a batch job.
 type BatchJobStatus string
 

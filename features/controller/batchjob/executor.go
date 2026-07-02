@@ -20,18 +20,16 @@ const batchStepTimeout = 10 * time.Minute
 //	batchjob → fleet → business → batchjob
 //
 // The real wiring uses a thin adapter around fleet.FleetQuery; tests use a
-// staticFleetQuery that returns a fixed list of IDs.
+// staticFleetQuery that returns a fixed list of StewardMeta.
 type FleetQuery interface {
-	// Search resolves selector scoped to tenantID and returns the matching steward IDs.
-	Search(ctx context.Context, selector, tenantID string) ([]string, error)
+	// Search resolves selector scoped to tenantID and returns matching steward metadata.
+	Search(ctx context.Context, selector, tenantID string) ([]StewardMeta, error)
 }
 
 // QuorumChecker partitions a steward list so no batch violates cluster-quorum rules.
 // A nil QuorumChecker performs naive round-robin partitioning only.
-// The quorum story will implement this interface using fleet.StewardResult context;
-// for now (nil) the executor uses naivePartition.
 type QuorumChecker interface {
-	Partition(stewardIDs []string, batchSize int) [][]string
+	Partition(stewards []StewardMeta, batchSize int) [][]string
 }
 
 // RollingBatchExecutor dispatches CommandSyncConfig to stewards in sequential batches,
@@ -73,9 +71,13 @@ func NewRollingBatchExecutor(
 //  4. All batches done → set job status completed.
 func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error {
 	// 1. Resolve fleet selector scoped to the job's tenant.
-	ids, err := e.fleetQuery.Search(ctx, job.Selector, job.TenantID)
+	stewards, err := e.fleetQuery.Search(ctx, job.Selector, job.TenantID)
 	if err != nil {
 		return fmt.Errorf("executor: fleet search: %w", err)
+	}
+	ids := make([]string, len(stewards))
+	for i, s := range stewards {
+		ids[i] = s.ID
 	}
 	job.Targets = ids
 
@@ -86,7 +88,7 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 	// 2. Partition into batches.
 	var batches [][]string
 	if e.quorumCheck != nil {
-		batches = e.quorumCheck.Partition(ids, job.Config.BatchSize)
+		batches = e.quorumCheck.Partition(stewards, job.Config.BatchSize)
 	} else {
 		batches = naivePartition(ids, job.Config.BatchSize)
 	}
