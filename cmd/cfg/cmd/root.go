@@ -63,6 +63,7 @@ func init() {
 	rootCmd.AddCommand(connectionsCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
+	rootCmd.AddCommand(jobCmd)
 }
 
 // versionCmd represents the version command

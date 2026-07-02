@@ -88,6 +88,8 @@ var knownPermissions = map[string]bool{
 	"registration:approve-refresh":       true,
 	"registration:deny-refresh":          true,
 	"registration:manage-refresh-policy": true,
+	// Batch job management (Issue #2296)
+	"jobs:write": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
