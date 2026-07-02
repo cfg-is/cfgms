@@ -51,6 +51,19 @@ func (s *BatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, statu
 	return nil
 }
 
+// UpdateBatchTargets replaces the resolved target steward IDs for the job.
+func (s *BatchJobStore) UpdateBatchTargets(_ context.Context, id string, targets []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return business.ErrBatchJobNotFound
+	}
+	j.Targets = append([]string(nil), targets...)
+	j.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
 // UpdateBatchStep upserts the step identified by step.Index within the job.
 // A matching index is replaced in-place; an unrecognised index appends a new step.
 func (s *BatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step batchjob.BatchStep) error {
