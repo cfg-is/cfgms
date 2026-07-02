@@ -205,13 +205,14 @@ func TestGetCluster_FoundPopulatesDNA(t *testing.T) {
 	assert.Equal(t, "NODE1", owners["web-01"])
 	assert.Equal(t, "NODE2", owners["db-01"])
 
-	// This node owns the CNO, so getCluster issues exactly three PS queries
-	// (Get-Cluster, the CNO-owner read, the resource-owner read) and no second
-	// CNO-owner read. A regression that adds or drops a PS call is caught here.
+	// This node owns the CNO, so getCluster issues exactly four PS queries
+	// (Get-Cluster, the CNO-owner read, the resource-owner read, the cluster-access
+	// self-check) and no second CNO-owner read. A regression that adds or drops a
+	// PS call is caught here.
 	transport.mu.Lock()
 	callCount := len(transport.calls)
 	transport.mu.Unlock()
-	assert.Equal(t, 3, callCount, "owner node issues exactly three PS queries")
+	assert.Equal(t, 4, callCount, "owner node issues exactly four PS queries")
 }
 
 // TestClusterScopeCap_OwnershipHelper verifies the scope cap is ALSO enforced in
@@ -338,13 +339,78 @@ func TestGetCluster_FoundNonCNOOwner(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "NODE2", owners["web-01"])
 
-	// Non-owner path issues four PS queries: Get-Cluster, the helper's CNO read,
-	// the resource-owner read, and the second CNO read in getCluster's else
-	// branch.
+	// Non-owner path issues five PS queries: Get-Cluster, the helper's CNO read,
+	// the resource-owner read, the second CNO read in getCluster's else branch,
+	// and the cluster-access self-check.
 	transport.mu.Lock()
 	callCount := len(transport.calls)
 	transport.mu.Unlock()
-	assert.Equal(t, 4, callCount, "non-owner path issues exactly four PS queries")
+	assert.Equal(t, 5, callCount, "non-owner path issues exactly five PS queries")
+}
+
+// TestGetCluster_ClusterAccessOK is the [REQUIRED TEST] (#2306 onboarding): when
+// the node's computer account holds cluster access, getCluster reports
+// ClusterAccessOK=true, no remediation, and surfaces cluster_access_ok on the DNA.
+func TestGetCluster_ClusterAccessOK(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1","NODE2"],"CsvPaths":["C:\\ClusterStorage\\CSV01"]}`,
+			`{"owner":"NODE1"}`, // CNO owner (this node)
+			`{"owners":{}}`,     // resource owners
+			`{"account":"LAB\\NODE1$","access_ok":true,"remediation":"Grant-ClusterAccess -Cluster lab-hv -User 'LAB\\NODE1$' -Full"}`,
+		},
+	}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.NoError(t, err)
+	status := state.(*ClusterStatus)
+	assert.True(t, status.ClusterAccessOK, "a granted node reports access OK")
+	assert.Empty(t, status.ClusterAccessRemediation, "no remediation when access is OK")
+	assert.Equal(t, true, status.AsMap()["cluster_access_ok"], "DNA exposes cluster_access_ok=true")
+}
+
+// TestGetCluster_ClusterAccessMissing is the [REQUIRED TEST] (#2306 onboarding):
+// when the node lacks cluster access, getCluster reports ClusterAccessOK=false and
+// an actionable remediation naming the Grant-ClusterAccess command.
+func TestGetCluster_ClusterAccessMissing(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":true,"Name":"lab-hv","MemberNodes":["NODE1"],"CsvPaths":[]}`,
+			`{"owner":"NODE1"}`,
+			`{"owners":{}}`,
+			`{"account":"LAB\\NODE1$","access_ok":false,"remediation":"Grant-ClusterAccess -Cluster lab-hv -User 'LAB\\NODE1$' -Full"}`,
+		},
+	}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.NoError(t, err)
+	status := state.(*ClusterStatus)
+	assert.False(t, status.ClusterAccessOK, "an ungranted node reports access missing")
+	assert.Contains(t, status.ClusterAccessRemediation, "Grant-ClusterAccess", "remediation names the grant command")
+	assert.Equal(t, false, status.AsMap()["cluster_access_ok"], "DNA exposes cluster_access_ok=false")
+}
+
+// TestGetCluster_Standalone_NoAccessAlert is the [REQUIRED TEST] (#2306
+// onboarding): a standalone (non-cluster) host never raises a cluster-access
+// alert and skips the probe entirely.
+func TestGetCluster_Standalone_NoAccessAlert(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m, _ := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	state, err := m.getCluster(context.Background(), "lab-hv")
+	require.NoError(t, err)
+	status := state.(*ClusterStatus)
+	assert.False(t, status.Found)
+	assert.True(t, status.ClusterAccessOK, "a standalone host never raises a cluster-access alert")
+	transport.mu.Lock()
+	n := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 1, n, "a standalone host skips the access probe (one Get-Cluster query only)")
 }
 
 // TestGetCluster_NilTransport verifies #7: with no transport wired, getCluster

@@ -543,6 +543,18 @@ function Cfgms-GetClusterResourceOwner {
     ConvertTo-Json @{ owners = $owners } -Compress -Depth 4
 }
 
+# Cfgms-GetClusterAccessSelf mirrors psGetClusterAccessSelf: reports whether THIS
+# node's computer account holds cluster-management access (#2306 onboarding).
+# Read-only; a denied/absent Get-ClusterAccess read yields access_ok=false. The
+# account and the exact remediation grant come from here, never composed in Go.
+function Cfgms-GetClusterAccessSelf {
+    param([Parameter(Mandatory)][string]$ClusterName)
+    $me = '{0}\{1}$' -f $env:USERDOMAIN, $env:COMPUTERNAME
+    $acl = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue)
+    $ok = @($acl | Where-Object { $_.IdentityReference -ieq $me }).Count -gt 0
+    ConvertTo-Json @{ account = $me; access_ok = $ok; remediation = ("Grant-ClusterAccess -Cluster {0} -User '{1}' -Full" -f $ClusterName, $me) } -Compress
+}
+
 # ── Failover cluster write (#2202 S2) ─────────────────────────────────
 # Each function wraps a single write cmdlet; the exactly-once coordination
 # (only the CNO-owner node calls these), the existence/idempotency check, and

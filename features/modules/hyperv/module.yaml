@@ -50,8 +50,10 @@ behavioral_envelope:
   lolbin_usage_justification: >-
     Hyper-V and Failover Clustering are managed exclusively through their
     PowerShell modules; there is no in-process managed API. The read-only
-    failover-cluster cmdlets (#2199 S1) are: Get-Cluster, Get-ClusterNode,
-    Get-ClusterGroup, Get-ClusterSharedVolume. The failover-cluster WRITE
+    failover-cluster cmdlets (#2199 S1, #2306) are: Get-Cluster, Get-ClusterNode,
+    Get-ClusterGroup, Get-ClusterSharedVolume, Get-ClusterAccess (the last is the
+    onboarding self-check reading whether this node's computer account holds
+    cluster-management access). The failover-cluster WRITE
     cmdlets (#2202 S2) are: Add-ClusterVirtualMachineRole (cluster an existing
     VM as a highly-available role — invoked only by the CNO-owner node, gated
     exactly-once; the VM is resolved to its Id via a local Get-VM and clustered
