@@ -174,6 +174,8 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.run(ctx, "Cfgms-GetClusterOwnerNode -ClusterName "+quoteArg(psArgs, "ClusterName"))
 	case psGetClusterResourceOwner:
 		return t.run(ctx, "Cfgms-GetClusterResourceOwner -ClusterName "+quoteArg(psArgs, "ClusterName"))
+	case psGetClusterAccessSelf:
+		return t.run(ctx, "Cfgms-GetClusterAccessSelf -ClusterName "+quoteArg(psArgs, "ClusterName"))
 
 	// ── Failover cluster (write, #2202 S2) ──────────────────────────
 	case psAddClusterVMRole:

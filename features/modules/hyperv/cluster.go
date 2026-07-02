@@ -165,6 +165,15 @@ type ClusterStatus struct {
 	CSVPaths []string
 	// Found reports whether the cluster exists / was queryable on the host.
 	Found bool
+	// ClusterAccessOK reports whether this node's computer account holds the
+	// cluster-management access HA role operations require (#2306). True on a
+	// standalone host (no cluster to gate) and when the probe cannot determine
+	// access (unknown ⇒ no false alert). False only on a confirmed missing grant.
+	ClusterAccessOK bool
+	// ClusterAccessRemediation is the exact operator command to grant this node
+	// cluster access when ClusterAccessOK is false; empty otherwise. Surfaced as a
+	// controller-visible onboarding alert.
+	ClusterAccessRemediation string
 }
 
 // Validate implements modules.ConfigState. Observed status carries no operator
@@ -184,12 +193,14 @@ func (s *ClusterStatus) AsMap() map[string]interface{} {
 		owners[k] = v
 	}
 	return map[string]interface{}{
-		"name":           s.Name,
-		"cno_owner_node": s.CNOOwnerNode,
-		"member_nodes":   members,
-		"resource_owner": owners,
-		"csv_paths":      csv,
-		"found":          s.Found,
+		"name":                       s.Name,
+		"cno_owner_node":             s.CNOOwnerNode,
+		"member_nodes":               members,
+		"resource_owner":             owners,
+		"csv_paths":                  csv,
+		"found":                      s.Found,
+		"cluster_access_ok":          s.ClusterAccessOK,
+		"cluster_access_remediation": s.ClusterAccessRemediation,
 	}
 }
 
@@ -204,7 +215,7 @@ func (s *ClusterStatus) FromYAML(_ []byte) error { return nil }
 
 // GetManagedFields implements modules.ConfigState.
 func (s *ClusterStatus) GetManagedFields() []string {
-	return []string{"name", "cno_owner_node", "member_nodes", "resource_owner", "csv_paths"}
+	return []string{"name", "cno_owner_node", "member_nodes", "resource_owner", "csv_paths", "cluster_access_ok"}
 }
 
 // psGetCluster reads the cluster identity, member node names, and CSV friendly
@@ -246,6 +257,12 @@ const psAddClusterVMRole = `$vmid = (Get-VM -Name $VMName -ErrorAction Stop).Id;
 // Remove-ClusterGroup -RemoveResources (the VM role's GROUP name, not a resource
 // name — see that function). Reached only after the Go destructive gate.
 const psRemoveClusterResource = `Remove-ClusterGroup -Name $Name -RemoveResources -Force`
+
+// psGetClusterAccessSelf reads whether THIS node's computer account holds
+// cluster-management access (#2306 onboarding). Read-only; a denied/absent read
+// (Get-ClusterAccess SilentlyContinue) yields access_ok:false. The account and
+// the exact remediation grant come from PowerShell, never Go string composition.
+const psGetClusterAccessSelf = `$me = '{0}\{1}$' -f $env:USERDOMAIN, $env:COMPUTERNAME; $acl = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue); $ok = @($acl | Where-Object { $_.IdentityReference -ieq $me }).Count -gt 0; ConvertTo-Json @{ account=$me; access_ok=$ok; remediation=("Grant-ClusterAccess -Cluster {0} -User '{1}' -Full" -f $ClusterName, $me) } -Compress`
 
 // Declarative cluster-role property set commands (#2306). These consts are
 // dispatch KEYS — the executed PowerShell lives in the Cfgms-Set* preamble
@@ -309,7 +326,8 @@ func (m *hypervModule) getCluster(ctx context.Context, name string) (modules.Con
 		return nil, fmt.Errorf("hyperv: parse get-cluster response for %q: %w", name, jsonErr)
 	}
 	if !parsed.Found {
-		return &ClusterStatus{Name: name, Found: false}, nil
+		// Standalone host: no cluster to gate access on — never alert.
+		return &ClusterStatus{Name: name, Found: false, ClusterAccessOK: true}, nil
 	}
 
 	status := &ClusterStatus{
@@ -337,10 +355,44 @@ func (m *hypervModule) getCluster(ctx context.Context, name string) (modules.Con
 		status.CNOOwnerNode = m.readCNOOwner(ctx, name)
 	}
 
+	// Cluster-access self-check (#2306 onboarding): does this node's computer
+	// account hold the cluster-management access HA role ops require? A missing
+	// grant surfaces (via the DNA cluster_access_ok field + the Monitor) as a
+	// controller-visible onboarding alert with the exact remediation command.
+	status.ClusterAccessOK, status.ClusterAccessRemediation = m.probeClusterAccess(ctx, name)
+
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 		"Get-Cluster", "cluster:"+name, nil, nil, nil)
 
 	return status, nil
+}
+
+// probeClusterAccess reports whether this node's computer account holds
+// cluster-management access, and (when it does not) the exact operator command
+// to grant it. Read-only. A transport or parse error is treated as UNKNOWN —
+// access OK, no remediation — so a transient probe failure never raises a false
+// onboarding alert (only a confirmed missing grant does).
+func (m *hypervModule) probeClusterAccess(ctx context.Context, name string) (bool, string) {
+	out, err := m.transport.ExecutePS(ctx, psGetClusterAccessSelf, map[string]string{"ClusterName": name})
+	if err != nil {
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: cluster-access self-check probe failed; treating as access OK",
+				"cluster", logging.SanitizeLogValue(name))
+		}
+		return true, ""
+	}
+	var r struct {
+		Account     string `json:"account"`
+		AccessOK    bool   `json:"access_ok"`
+		Remediation string `json:"remediation"`
+	}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &r); jsonErr != nil {
+		return true, ""
+	}
+	if r.AccessOK {
+		return true, ""
+	}
+	return false, r.Remediation
 }
 
 // readCNOOwner queries the current CNO owner node name, returning "" on any

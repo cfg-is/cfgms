@@ -142,6 +142,10 @@ func clusterSignature(s *ClusterStatus) string {
 	var b strings.Builder
 	b.WriteString("found=")
 	b.WriteString(strconv.FormatBool(s.Found))
+	b.WriteString(";access=")
+	// cluster_access_ok is part of the signature so a grant/revoke transition
+	// emits a DNA change and the onboarding alert clears/raises (#2306).
+	b.WriteString(strconv.FormatBool(s.ClusterAccessOK))
 	b.WriteString(";cno=")
 	b.WriteString(s.CNOOwnerNode)
 	b.WriteString(";members=")
