@@ -548,6 +548,46 @@ func TestRollingBatchExecutor_NoRollbackWhenNoPreviousConfigRef(t *testing.T) {
 		"no rollback dispatch must be sent when PreviousConfigRef is empty")
 }
 
+// TestRollingBatchExecutor_RollbackBatchZeroFailurePauses is the REQUIRED test for
+// the len(completedSteps) == 0 branch in rollbackAppliedSteps: PreviousConfigRef is
+// set AND batch 0 itself fails, so rollbackAppliedSteps is invoked but finds no
+// completed steps to undo → job → paused, no compensating dispatch is sent.
+func TestRollingBatchExecutor_RollbackBatchZeroFailurePauses(t *testing.T) {
+	f := newExecutorFixture(t, "s-0", "s-1", "s-2", "s-3")
+	defer f.cleanup()
+
+	job := newPendingJob("job-rollback-batch0", 2)
+	job.Config.PreviousConfigRef = "v1" // baseline set → routes through rollbackAppliedSteps
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	// Fail the first steward seen (in batch 0), so batch 0 fails before any step completes.
+	d := f.driveFirstFails(t)
+	defer d.stop()
+
+	require.NoError(t, f.executor.Execute(f.ctx, job))
+
+	got, err := f.store.GetBatchJob(f.ctx, "job-rollback-batch0")
+	require.NoError(t, err)
+
+	// [REQUIRED]: rollbackAppliedSteps entered with zero completed steps → job paused.
+	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status,
+		"job must be paused when batch 0 fails with no prior completed steps")
+
+	// [REQUIRED]: only batch 0 dispatched (2 commands); batch 1 never dispatched and
+	// no compensating rollback dispatch is sent (nothing to undo).
+	assert.Equal(t, 2, f.cp.sentCount(),
+		"only batch 0 forward dispatch; no rollback or batch 1 commands")
+
+	// No command carries a config_ref param — no compensating dispatch occurred.
+	assert.Empty(t, f.cp.sentWithParam("config_ref", "v1"),
+		"no rollback dispatch when there are no completed steps to undo")
+
+	// Only step 0 persisted, and it is failed.
+	require.Len(t, got.Steps, 1, "only step 0 should be persisted")
+	assert.Equal(t, batchjob.BatchStepStatusFailed, got.Steps[0].Status)
+	assert.NotEmpty(t, got.Steps[0].FailedIDs, "failed IDs must be recorded")
+}
+
 // TestRollingBatchExecutor_RollbackDispatchFailureTransitionsJobFailed verifies that
 // when compensating dispatch fails for all target stewards, the job transitions to
 // failed rather than rolled_back.
