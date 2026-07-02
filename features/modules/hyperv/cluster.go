@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -53,6 +54,30 @@ type ClusterConfig struct {
 	// State is the desired lifecycle: present (default) — cluster formation /
 	// teardown is out of scope for S1.
 	State string `yaml:"state,omitempty"`
+	// Roles maps a clustered VM role name (a member of RoleNames) to its desired
+	// failover-cluster placement/scheduling properties. Reconciled on the CNO
+	// owner AFTER the role exists. Absent/empty ⇒ leave properties at cluster
+	// defaults. (#2306 declarative cluster-role properties.)
+	Roles map[string]ClusterRoleProperties `yaml:"roles,omitempty"`
+}
+
+// ClusterRoleProperties is the desired placement and scheduling properties for
+// one clustered VM role. All fields are optional; a nil pointer or empty slice
+// means "leave at the cluster default".
+type ClusterRoleProperties struct {
+	// PreferredOwners is the ordered list of preferred failover nodes for the
+	// role group. Reconciled via Set-ClusterOwnerNode -Group.
+	PreferredOwners []string `yaml:"preferred_owners,omitempty"`
+	// PossibleOwners restricts which nodes may own the role's VM resource.
+	// Reconciled via Set-ClusterOwnerNode -Resource.
+	PossibleOwners []string `yaml:"possible_owners,omitempty"`
+	// Priority is the cluster group priority (0, 1000, 2000, or 3000).
+	Priority *int `yaml:"priority,omitempty"`
+	// AutoStart controls whether the cluster starts the group at node startup.
+	AutoStart *bool `yaml:"auto_start,omitempty"`
+	// AntiAffinityClass is an anti-affinity token the scheduler uses to separate
+	// sibling roles across nodes.
+	AntiAffinityClass string `yaml:"anti_affinity_class,omitempty"`
 }
 
 // Validate checks the ClusterConfig fields. Name is required.
@@ -65,14 +90,45 @@ func (c *ClusterConfig) Validate() error {
 
 // AsMap implements modules.ConfigState.
 func (c *ClusterConfig) AsMap() map[string]interface{} {
-	roles := make([]string, len(c.RoleNames))
-	copy(roles, c.RoleNames)
-	return map[string]interface{}{
+	roleNames := make([]string, len(c.RoleNames))
+	copy(roleNames, c.RoleNames)
+	m := map[string]interface{}{
 		"name":              c.Name,
-		"role_names":        roles,
+		"role_names":        roleNames,
 		"allow_destructive": c.AllowDestructive,
 		"state":             c.State,
 	}
+	if len(c.Roles) > 0 {
+		roles := make(map[string]interface{}, len(c.Roles))
+		for name, p := range c.Roles {
+			roles[name] = p.asMap()
+		}
+		m["roles"] = roles
+	}
+	return m
+}
+
+// asMap serialises one role's properties to the stable declarative keys. Only
+// set fields are included so the map round-trips through parseClusterConfig
+// without inventing defaults.
+func (p ClusterRoleProperties) asMap() map[string]interface{} {
+	out := map[string]interface{}{}
+	if len(p.PreferredOwners) > 0 {
+		out["preferred_owners"] = append([]string(nil), p.PreferredOwners...)
+	}
+	if len(p.PossibleOwners) > 0 {
+		out["possible_owners"] = append([]string(nil), p.PossibleOwners...)
+	}
+	if p.Priority != nil {
+		out["priority"] = *p.Priority
+	}
+	if p.AutoStart != nil {
+		out["auto_start"] = *p.AutoStart
+	}
+	if p.AntiAffinityClass != "" {
+		out["anti_affinity_class"] = p.AntiAffinityClass
+	}
+	return out
 }
 
 // ToYAML implements modules.ConfigState.
@@ -87,7 +143,7 @@ func (c *ClusterConfig) FromYAML(data []byte) error {
 
 // GetManagedFields implements modules.ConfigState.
 func (c *ClusterConfig) GetManagedFields() []string {
-	return []string{"name", "role_names", "allow_destructive", "state"}
+	return []string{"name", "role_names", "allow_destructive", "state", "roles"}
 }
 
 // ClusterStatus is the OBSERVED state of a Hyper-V failover cluster returned by
@@ -190,6 +246,29 @@ const psAddClusterVMRole = `$vmid = (Get-VM -Name $VMName -ErrorAction Stop).Id;
 // Remove-ClusterGroup -RemoveResources (the VM role's GROUP name, not a resource
 // name — see that function). Reached only after the Go destructive gate.
 const psRemoveClusterResource = `Remove-ClusterGroup -Name $Name -RemoveResources -Force`
+
+// Declarative cluster-role property set commands (#2306). These consts are
+// dispatch KEYS — the executed PowerShell lives in the Cfgms-Set* preamble
+// functions wired by the PS-transport story (PROPERTIES-B); the reconcile below
+// dispatches them via m.transport.ExecutePS with ArgumentList args (never
+// interpolated). Reconciled ONLY on the CNO-owner node, AFTER the role exists.
+const (
+	// psSetClusterRolePreferredOwners sets the ordered preferred owners of the
+	// role GROUP. Args: ClusterName, GroupName, Owners (comma-joined node list).
+	psSetClusterRolePreferredOwners = `Set-ClusterOwnerNode -Cluster $ClusterName -Group $GroupName -Owners $Owners`
+	// psSetClusterRolePossibleOwners restricts the possible owners of the role's
+	// VM RESOURCE. Args: ClusterName, ResourceName, Owners.
+	psSetClusterRolePossibleOwners = `Set-ClusterOwnerNode -Cluster $ClusterName -Resource $ResourceName -Owners $Owners`
+	// psSetClusterGroupPriority sets the cluster group priority. Args:
+	// ClusterName, GroupName, Priority.
+	psSetClusterGroupPriority = `Set-ClusterGroup -Cluster $ClusterName -Name $GroupName -Priority $Priority`
+	// psSetClusterGroupAutoStart sets the group's AutoStart. Args: ClusterName,
+	// GroupName, AutoStart (0|1).
+	psSetClusterGroupAutoStart = `Set-ClusterGroup -Cluster $ClusterName -Name $GroupName -AutoStart $AutoStart`
+	// psSetClusterGroupAntiAffinity sets the group's AntiAffinityClassNames.
+	// Args: ClusterName, GroupName, ClassName.
+	psSetClusterGroupAntiAffinity = `Set-ClusterGroup -Cluster $ClusterName -Name $GroupName -AntiAffinityClass $ClassName`
+)
 
 // getCluster returns the observed state of a failover cluster on the host.
 //
@@ -467,37 +546,118 @@ func (m *hypervModule) setCluster(ctx context.Context, resourceID string, config
 				"cluster-set-noop", "cluster:"+cfg.Name,
 				map[string]interface{}{"role": role, "exists": true},
 				map[string]interface{}{"created": false, "cno_owner": cnoOwner}, nil)
-			continue
-		}
-
-		_, addErr := m.transport.ExecutePS(ctx, psAddClusterVMRole, map[string]string{
-			"ClusterName": cfg.Name,
-			"VMName":      role,
-		})
-		if addErr != nil {
-			// Idempotency: an "already registered"/"already exists" error means a
-			// concurrent owner (or a stale existence read post-failover) created the
-			// role — normalise to nil. Only this specific text class is treated as
-			// idempotent; any other PS error is fatal (do NOT swallow).
-			if isAlreadyRegistered(addErr) {
+		} else {
+			_, addErr := m.transport.ExecutePS(ctx, psAddClusterVMRole, map[string]string{
+				"ClusterName": cfg.Name,
+				"VMName":      role,
+			})
+			switch {
+			case addErr == nil:
+				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+					"cluster-set-create", "cluster:"+cfg.Name,
+					map[string]interface{}{"role": role, "exists": false},
+					map[string]interface{}{"created": true, "cno_owner": cnoOwner}, nil)
+			case isAlreadyRegistered(addErr):
+				// Idempotency: an "already registered"/"already exists" error means a
+				// concurrent owner (or a stale existence read post-failover) created
+				// the role — normalise to nil. Only this text class is idempotent.
 				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 					"cluster-set-noop", "cluster:"+cfg.Name,
 					map[string]interface{}{"role": role, "exists": false},
 					map[string]interface{}{"created": false, "already_registered": true, "cno_owner": cnoOwner}, nil)
-				continue
+			default:
+				recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+					"cluster-set-create", "cluster:"+cfg.Name,
+					map[string]interface{}{"role": role, "exists": false},
+					map[string]interface{}{"created": false}, addErr)
+				return fmt.Errorf("hyperv: set cluster %q add role %q: %w", cfg.Name, role, addErr)
 			}
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-				"cluster-set-create", "cluster:"+cfg.Name,
-				map[string]interface{}{"role": role, "exists": false},
-				map[string]interface{}{"created": false}, addErr)
-			return fmt.Errorf("hyperv: set cluster %q add role %q: %w", cfg.Name, role, addErr)
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-			"cluster-set-create", "cluster:"+cfg.Name,
-			map[string]interface{}{"role": role, "exists": false},
-			map[string]interface{}{"created": true, "cno_owner": cnoOwner}, nil)
+
+		// Declarative property reconcile (#2306): the role now exists on this
+		// (CNO-owner) node — converge its placement/scheduling properties. A role
+		// with no cfg.Roles entry is left at cluster defaults (no dispatch).
+		if props, ok := cfg.Roles[role]; ok {
+			if err := m.reconcileRoleProperties(ctx, cfg.Name, role, props); err != nil {
+				return fmt.Errorf("hyperv: set cluster %q role %q properties: %w", cfg.Name, role, err)
+			}
+		}
 	}
 
+	return nil
+}
+
+// reconcileRoleProperties converges the declarative placement/scheduling
+// properties of one clustered VM role on the CNO-owner node. It is called by
+// setCluster only after the role exists and only on the owner (the ownership
+// gate is upstream). Each set is dispatched to the transport via ArgumentList
+// args — never string-composed. The underlying Set-ClusterOwnerNode /
+// Set-ClusterGroup cmdlets are idempotent, so re-applying an unchanged value is
+// a harmless no-op. An audit event records what was reconciled (#2306).
+func (m *hypervModule) reconcileRoleProperties(ctx context.Context, clusterName, role string, props ClusterRoleProperties) error {
+	applied := map[string]interface{}{}
+
+	if len(props.PreferredOwners) > 0 {
+		if _, err := m.transport.ExecutePS(ctx, psSetClusterRolePreferredOwners, map[string]string{
+			"ClusterName": clusterName,
+			"GroupName":   role,
+			"Owners":      strings.Join(props.PreferredOwners, ","),
+		}); err != nil {
+			return fmt.Errorf("preferred_owners: %w", err)
+		}
+		applied["preferred_owners"] = append([]string(nil), props.PreferredOwners...)
+	}
+	if len(props.PossibleOwners) > 0 {
+		if _, err := m.transport.ExecutePS(ctx, psSetClusterRolePossibleOwners, map[string]string{
+			"ClusterName":  clusterName,
+			"ResourceName": role,
+			"Owners":       strings.Join(props.PossibleOwners, ","),
+		}); err != nil {
+			return fmt.Errorf("possible_owners: %w", err)
+		}
+		applied["possible_owners"] = append([]string(nil), props.PossibleOwners...)
+	}
+	if props.Priority != nil {
+		if _, err := m.transport.ExecutePS(ctx, psSetClusterGroupPriority, map[string]string{
+			"ClusterName": clusterName,
+			"GroupName":   role,
+			"Priority":    strconv.Itoa(*props.Priority),
+		}); err != nil {
+			return fmt.Errorf("priority: %w", err)
+		}
+		applied["priority"] = *props.Priority
+	}
+	if props.AutoStart != nil {
+		autoStart := "0"
+		if *props.AutoStart {
+			autoStart = "1"
+		}
+		if _, err := m.transport.ExecutePS(ctx, psSetClusterGroupAutoStart, map[string]string{
+			"ClusterName": clusterName,
+			"GroupName":   role,
+			"AutoStart":   autoStart,
+		}); err != nil {
+			return fmt.Errorf("auto_start: %w", err)
+		}
+		applied["auto_start"] = *props.AutoStart
+	}
+	if props.AntiAffinityClass != "" {
+		if _, err := m.transport.ExecutePS(ctx, psSetClusterGroupAntiAffinity, map[string]string{
+			"ClusterName": clusterName,
+			"GroupName":   role,
+			"ClassName":   props.AntiAffinityClass,
+		}); err != nil {
+			return fmt.Errorf("anti_affinity_class: %w", err)
+		}
+		applied["anti_affinity_class"] = props.AntiAffinityClass
+	}
+
+	if len(applied) > 0 {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"cluster-set-role-properties", "cluster:"+clusterName,
+			map[string]interface{}{"role": role},
+			map[string]interface{}{"applied": applied}, nil)
+	}
 	return nil
 }
 
@@ -523,7 +683,54 @@ func parseClusterConfig(name string, config modules.ConfigState) *ClusterConfig 
 	if v, ok := cm["state"].(string); ok {
 		cfg.State = v
 	}
+	cfg.Roles = parseClusterRoles(cm["roles"])
 	return cfg
+}
+
+// parseClusterRoles builds the per-role properties map from the generic
+// config map value at key "roles" (map[roleName]map[propertyKey]value). Unknown
+// or malformed entries are skipped; a nil/empty input yields a nil map.
+func parseClusterRoles(v interface{}) map[string]ClusterRoleProperties {
+	raw, ok := v.(map[string]interface{})
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	roles := make(map[string]ClusterRoleProperties, len(raw))
+	for name, pv := range raw {
+		pm, ok := pv.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		var p ClusterRoleProperties
+		p.PreferredOwners = parseStringList(pm["preferred_owners"])
+		p.PossibleOwners = parseStringList(pm["possible_owners"])
+		if pr, ok := parseInt(pm["priority"]); ok {
+			p.Priority = &pr
+		}
+		if as, ok := pm["auto_start"].(bool); ok {
+			p.AutoStart = &as
+		}
+		if ac, ok := pm["anti_affinity_class"].(string); ok {
+			p.AntiAffinityClass = ac
+		}
+		roles[name] = p
+	}
+	return roles
+}
+
+// parseInt coerces a config-map numeric (int, int64, or float64 from JSON) to an
+// int. Returns ok=false when the value is absent or not numeric.
+func parseInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 // isAlreadyRegistered reports whether a PS error indicates the clustered role

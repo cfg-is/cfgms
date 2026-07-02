@@ -153,3 +153,66 @@ resources:
           - present
           - absent
         default: present
+
+  cluster:
+    description: >
+      Hyper-V failover-cluster HA VM role management. Declares which VMs are
+      clustered as highly-available roles on the named cluster and their
+      placement/scheduling properties. Mutation is CNO-owner-gated and
+      idempotent; role teardown requires allow_destructive. Cluster formation is
+      out of scope.
+    required:
+      - name
+    properties:
+      name:
+        type: string
+        description: Failover cluster (CNO) name; must equal the module's declared cluster_name.
+      role_names:
+        type: array
+        description: Bounded set of clustered VM role names this resource manages. Empty means all roles in scope.
+        items:
+          type: string
+      allow_destructive:
+        type: boolean
+        description: Opt in to destructive cluster operations (role teardown). Default false.
+        default: false
+      state:
+        type: string
+        description: Desired lifecycle. Cluster formation/teardown is out of scope.
+        enum:
+          - present
+          - absent
+        default: present
+      roles:
+        type: object
+        description: >
+          Per-role declarative placement/scheduling properties, keyed by role
+          (VM) name. Reconciled on the CNO-owner node after the role exists;
+          absent keys leave properties at cluster defaults.
+        additionalProperties:
+          type: object
+          properties:
+            preferred_owners:
+              type: array
+              description: Ordered preferred failover nodes for the role group (Set-ClusterOwnerNode -Group).
+              items:
+                type: string
+            possible_owners:
+              type: array
+              description: Nodes permitted to own the role's VM resource (Set-ClusterOwnerNode -Resource).
+              items:
+                type: string
+            priority:
+              type: integer
+              description: Cluster group priority.
+              enum:
+                - 0
+                - 1000
+                - 2000
+                - 3000
+            auto_start:
+              type: boolean
+              description: Whether the cluster starts the group at node startup.
+            anti_affinity_class:
+              type: string
+              description: Anti-affinity token used to separate sibling roles across nodes.
