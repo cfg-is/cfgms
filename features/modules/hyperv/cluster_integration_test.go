@@ -108,7 +108,7 @@ const psTestCreateClusteredCapableVM = `if (-not (Get-VM -Name $env:CFGMS_T_VM -
 // psTestCreateClusteredRole creates a VM and clusters it as an HA role WITHOUT
 // going through the module — used to stand up the declared role (so a present-Set
 // is a clean no-op) and the undeclared "drift" role the module must never adopt.
-const psTestCreateClusteredRole = `if (-not (Get-VM -Name $env:CFGMS_T_VM -ErrorAction SilentlyContinue)) { New-VM -Name $env:CFGMS_T_VM -MemoryStartupBytes 512MB -Generation 2 -NoVHD -Path $env:CFGMS_T_CSV -ErrorAction Stop | Out-Null }; if (-not (Get-ClusterGroup -Cluster $env:CFGMS_T_CLUSTER -Name $env:CFGMS_T_VM -ErrorAction SilentlyContinue)) { Add-ClusterVirtualMachineRole -Cluster $env:CFGMS_T_CLUSTER -VirtualMachine $env:CFGMS_T_VM -ErrorAction Stop | Out-Null }; 'ok'`
+const psTestCreateClusteredRole = `if (-not (Get-VM -Name $env:CFGMS_T_VM -ErrorAction SilentlyContinue)) { New-VM -Name $env:CFGMS_T_VM -MemoryStartupBytes 512MB -Generation 2 -NoVHD -Path $env:CFGMS_T_CSV -ErrorAction Stop | Out-Null }; if (-not (Get-ClusterGroup -Cluster $env:CFGMS_T_CLUSTER -Name $env:CFGMS_T_VM -ErrorAction SilentlyContinue)) { Add-ClusterVirtualMachineRole -Cluster $env:CFGMS_T_CLUSTER -VMId (Get-VM -Name $env:CFGMS_T_VM).Id -ErrorAction Stop | Out-Null }; 'ok'`
 
 // cfgmsMoveClusterGroup forces an out-of-band failover of the clustered role
 // group $env:CFGMS_T_GROUP to $env:CFGMS_T_NODE — the test's failover trigger.
@@ -405,6 +405,25 @@ func TestClusterHA_DestructiveGate(t *testing.T) {
 	// The role must still exist — the gate runs before any PS write cmdlet.
 	assert.NotEmptyf(t, getClusterStatus(t, m, p.cluster).RoleOwners[role],
 		"role %q must persist after a blocked destructive op", role)
+
+	// True path (#2306 V4): allow_destructive:true must remove the clustered VM
+	// role group (Remove-ClusterGroup -RemoveResources). The VM itself persists —
+	// only the cluster group/resources are removed — so t.Cleanup still finds it.
+	err = m.Set(ctx, "cluster:"+p.cluster,
+		&ClusterConfig{Name: p.cluster, RoleNames: []string{role}, State: "absent", AllowDestructive: true})
+	require.NoError(t, err, "destructive removal with allow_destructive:true must succeed")
+
+	afterRemove := getClusterStatus(t, m, p.cluster)
+	assert.Emptyf(t, afterRemove.RoleOwners[role],
+		"role %q must be absent from RoleOwners after allow_destructive:true removal", role)
+
+	// Re-add the role (present-Set) so the VM is a clustered role again before
+	// t.Cleanup tears it down — proves the create path works post-removal.
+	require.NoError(t, m.Set(ctx, "cluster:"+p.cluster,
+		&ClusterConfig{Name: p.cluster, RoleNames: []string{role}, State: "present"}),
+		"re-add after true-path removal must succeed")
+	assert.NotEmptyf(t, getClusterStatus(t, m, p.cluster).RoleOwners[role],
+		"role %q must reappear in RoleOwners after re-add", role)
 }
 
 // auditEntriesByAction returns the captured entries whose Action matches, in order.
