@@ -191,6 +191,29 @@ func TestHandleCreateJob_AllSelector_Returns202AndPersists(t *testing.T) {
 	assert.Equal(t, string(batchjob.BatchJobStatusPending), string(job.Status))
 }
 
+// TestHandleCreateJob_PreviousConfigRef_Passthrough verifies that previous_config_ref
+// is wired from the JSON request body through to BatchJobConfig.PreviousConfigRef.
+func TestHandleCreateJob_PreviousConfigRef_Passthrough(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+
+	rec := postCreateJob(server, `{"selector":"all","batch_size":1,"previous_config_ref":"v1"}`)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var apiResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
+	dataMap, ok := apiResp.Data.(map[string]interface{})
+	require.True(t, ok, "response data must be a JSON object")
+	jobID, ok := dataMap["job_id"].(string)
+	require.True(t, ok, "response must contain a non-empty job_id")
+
+	job, err := store.GetBatchJob(context.Background(), jobID)
+	require.NoError(t, err, "GetBatchJob must find the persisted record")
+	assert.Equal(t, "v1", job.Config.PreviousConfigRef,
+		"Config.PreviousConfigRef must equal the requested previous_config_ref")
+}
+
 // TestHandleCreateJob_DefaultBatchSize uses batch_size 0 (omitted) and verifies
 // the handler applies the default of 10.
 func TestHandleCreateJob_DefaultBatchSize(t *testing.T) {
