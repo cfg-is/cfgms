@@ -164,6 +164,14 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psSetClusterGroupAntiAffinity:
 		return emit("Cfgms-SetClusterGroupAntiAffinity -ClusterName " + quoteArg(psArgs, "ClusterName") +
 			" -GroupName " + quoteArg(psArgs, "GroupName") + " -ClassName " + quoteArg(psArgs, "ClassName"))
+	case psListClusterAccessNodes:
+		return emit("Cfgms-ListClusterAccessNodes -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGrantClusterAccess:
+		return emit("Cfgms-GrantClusterAccess -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -NodeName " + quoteArg(psArgs, "NodeName"))
+	case psRevokeClusterAccess:
+		return emit("Cfgms-RevokeClusterAccess -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -NodeName " + quoteArg(psArgs, "NodeName"))
 	}
 	// Mirror production ExecutePS: an unknown psCommand is an error, not a
 	// silent success — keeps this test mirror honest to the production contract.

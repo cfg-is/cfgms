@@ -519,6 +519,25 @@ func TestClusterHA_RoleProperties(t *testing.T) {
 	assert.Containsf(t, owners, local, "preferred owners %q must include the declared node %q", owners, local)
 }
 
+// TestClusterHA_AccessReconcileNoOp validates the cluster-access lifecycle reconcile
+// live (#2306 option 3) without mutating the ACL: reconciling against the CURRENT
+// member set on a fully-onboarded cluster must be a no-op — zero grants, zero
+// revokes — exercising the live ACL read + compute path.
+func TestClusterHA_AccessReconcileNoOp(t *testing.T) {
+	p := requireClusterEnv(t)
+	m, _ := newClusterHAModule(t, p, nil)
+	t.Cleanup(func() { _ = m.Close() })
+	ctx := context.Background()
+
+	status := getClusterStatus(t, m, p.cluster)
+	require.NotEmpty(t, status.MemberNodes, "cluster must report members")
+
+	res, err := m.ReconcileClusterAccess(ctx, p.cluster, status.MemberNodes)
+	require.NoError(t, err)
+	assert.Emptyf(t, res.Granted, "a fully-onboarded cluster needs no grants, got %v", res.Granted)
+	assert.Emptyf(t, res.Revoked, "reconciling against the current member set revokes nothing, got %v", res.Revoked)
+}
+
 // auditEntriesByAction returns the captured entries whose Action matches, in order.
 func auditEntriesByAction(entries []*business.AuditEntry, action string) []*business.AuditEntry {
 	var out []*business.AuditEntry

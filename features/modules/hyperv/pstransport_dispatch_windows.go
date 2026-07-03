@@ -201,6 +201,16 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 	case psSetClusterGroupAntiAffinity:
 		return t.run(ctx, "Cfgms-SetClusterGroupAntiAffinity -ClusterName "+quoteArg(psArgs, "ClusterName")+
 			" -GroupName "+quoteArg(psArgs, "GroupName")+" -ClassName "+quoteArg(psArgs, "ClassName"))
+
+	// ── Cluster-access lifecycle (write, #2306 option 3, privileged) ─
+	case psListClusterAccessNodes:
+		return t.run(ctx, "Cfgms-ListClusterAccessNodes -ClusterName "+quoteArg(psArgs, "ClusterName"))
+	case psGrantClusterAccess:
+		return t.run(ctx, "Cfgms-GrantClusterAccess -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -NodeName "+quoteArg(psArgs, "NodeName"))
+	case psRevokeClusterAccess:
+		return t.run(ctx, "Cfgms-RevokeClusterAccess -ClusterName "+quoteArg(psArgs, "ClusterName")+
+			" -NodeName "+quoteArg(psArgs, "NodeName"))
 	}
 
 	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table); add a Cfgms-* function and a case here")

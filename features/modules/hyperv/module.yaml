@@ -64,7 +64,12 @@ behavioral_envelope:
     cmdlets (#2306) are: Set-ClusterOwnerNode (preferred owners on the role group,
     possible owners on the VM resource) and Set-ClusterGroup group-property
     assignment (Priority, AutoStart, AntiAffinityClassNames) — reconciled only on
-    the CNO-owner node after the role exists, idempotent. All arguments travel via
+    the CNO-owner node after the role exists, idempotent. The cluster-ACCESS
+    lifecycle cmdlets (#2306 option 3) are: Grant-ClusterAccess and
+    Remove-ClusterAccess (grant/revoke a node computer account's cluster-management
+    access) — a PRIVILEGED, controller-orchestrated action tied to node lifecycle,
+    NOT reachable from routine cluster cfg convergence (a lateral-movement
+    primitive). All arguments travel via
     ArgumentList (never string-composed). Cluster FORMATION cmdlets
     (New-Cluster, Add-ClusterNode, Remove-ClusterNode, quorum) are NOT declared
     and out of scope. This envelope change requires ADR-006 module re-signing

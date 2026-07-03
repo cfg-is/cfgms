@@ -630,4 +630,28 @@ function Cfgms-SetClusterGroupAntiAffinity {
     $g = Get-ClusterGroup -Cluster $ClusterName -Name $GroupName -ErrorAction Stop
     $g.AntiAffinityClassNames = if ($ClassName) { @($ClassName) } else { @() }
 }
+
+# ── Cluster-access lifecycle (#2306 option 3, PRIVILEGED) ──────────────
+# Controller-orchestrated grant/revoke of node computer accounts, tied to node
+# lifecycle. NOT reachable from routine cluster cfg convergence. $NodeName is a
+# short node name; the DOMAIN\<node>$ computer account is built here from
+# $env:USERDOMAIN, never composed in Go.
+
+function Cfgms-ListClusterAccessNodes {
+    param([Parameter(Mandatory)][string]$ClusterName)
+    $nodes = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue | Where-Object { $_.IdentityReference -match '\$$' } | ForEach-Object { ($_.IdentityReference -replace '.*\\','') -replace '\$$','' })
+    ConvertTo-Json @{ nodes = $nodes } -Compress
+}
+
+function Cfgms-GrantClusterAccess {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$NodeName)
+    $acct = '{0}\{1}$' -f $env:USERDOMAIN, $NodeName
+    Grant-ClusterAccess -Cluster $ClusterName -User $acct -Full
+}
+
+function Cfgms-RevokeClusterAccess {
+    param([Parameter(Mandatory)][string]$ClusterName, [Parameter(Mandatory)][string]$NodeName)
+    $acct = '{0}\{1}$' -f $env:USERDOMAIN, $NodeName
+    Remove-ClusterAccess -Cluster $ClusterName -User $acct
+}
 `
