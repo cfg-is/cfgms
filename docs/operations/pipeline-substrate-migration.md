@@ -25,15 +25,18 @@ Labels still in use: `epic`, `story`, `internal`, `community`, `high-priority`, 
 
 ## Issue Classes & Materialization (2026-06-24)
 
-Work-items no longer originate as public issues. The pipeline plans and refines on the **private project board**; the public issue tracker is treated as injection + leak surface and is kept minimal.
+> **Revised 2026-07-03 (ADR-015):** materialization moved from dispatch time to decomposition time; `--defer` retains the dispatch-time path for sensitive bodies.
+
+Work-items originate on the **private project board** and become public issues only through the convert-based materialize path — **at decomposition** by default, at dispatch for `--defer` drafts.
 
 | Class | Created by | Public? | Locked? | Labels |
 |-------|-----------|---------|---------|--------|
-| Pipeline story | `project-queue.sh materialize` **at dispatch** (convert draft→issue) | yes | **locked** | `story` + `internal` |
+| Pipeline story | `pipeline-helper.sh create-story` **at decomposition** (convert draft→issue; ADR-015) | yes | **locked** | `story` + `internal` |
+| Pipeline story (`--defer`) | `project-queue.sh materialize` **at dispatch** (sensitive bodies held private while queued) | yes | **locked** | `story` + `internal` |
 | Epic | `pipeline-helper.sh create-epic` (PO, interactive) | yes | **locked** | `epic` + `internal` |
 | Community | `pipeline-helper.sh create-community-issue` (human, interactive) | yes | **unlocked** | `community` |
 
-- **Decomposition** writes private **drafts** (`pipeline-helper.sh create-story`). A draft becomes a GitHub issue **only when dispatched** — `po-act.sh dispatch` calls `materialize-issue`, which converts the draft in place (`convertProjectV2DraftIssueItemToIssue`), locks it, and tags `internal`. Issues stay first-class for the dev/PR/review/merge machinery while nothing un-worked sits on the public tracker.
+- **Decomposition** (`pipeline-helper.sh create-story`) creates a draft and immediately converts it in place (`convertProjectV2DraftIssueItemToIssue`), locks it, tags `internal` + `story`, and sub-issue-links it under its epic. Early materialization gives every story a real `#NNN` at authoring time (dependencies, dep-gating, sub-issue decomposition tracking) — see [ADR-015](../architecture/decisions/015-story-materialization-at-decomposition.md). Story bodies are **world-readable at creation**: no secrets, no customer/business specifics, no exploit-grade vulnerability detail. Bodies that can't be public while queued use `create-story ... --defer`, which keeps the old behavior: a private draft, materialized by `po-act.sh dispatch` when work starts.
 - **Autonomous agents never run `gh issue create`** — enforced by a PreToolUse hook (`.claude/hooks/block-autonomous-issue-create.sh`, fires when `CFGMS_AUTONOMOUS=true`) and a CI gate (`label-decommission-gate.yml`). The only sanctioned creators are the `pipeline-helper.sh` subcommands above; the `materialize` path uses *convert*, not create.
 - **Locking** closes the write/injection vector. `pipeline-helper.sh lock-sweep` (run from the PO cron) locks pipeline PRs and re-locks any unlocked `internal` issue.
 

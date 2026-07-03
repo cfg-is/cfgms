@@ -706,9 +706,10 @@ Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes.
 
 **7b. Acquire the decompose lease:**
 
-Decomposition is a multi-minute operation with no mid-flight idempotency marker
-(the decomposed-marker is posted only at the end), so two hosts would otherwise
-both run a full planning team and double-create the story set. Guard it:
+Decomposition is a multi-minute operation; sub-issue links only appear once the
+planning conversation converges and `create-story` runs, so two hosts starting
+near-simultaneously would both run a full planning team and double-create the
+story set. Guard it:
 ```bash
 ./scripts/pipeline-helper.sh lease-acquire "epic-decompose-<NUM>" 2400
 ```
@@ -763,9 +764,9 @@ This is a **three-way adversarial collaboration**, not a relay through the PO. T
 
 Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
 
-Once all stories are APPROVED (or PO-decided), create them as **project items — never public GitHub issues.** Decomposition has exactly one path.
+Once all stories are APPROVED (or PO-decided), create them via `create-story` — **never `gh issue create`.** Decomposition has exactly one path.
 
-**Decomposition NEVER runs `gh issue create`.** Use `create-story`, which produces a private project draft:
+**Create stories in dependency order** — foundational stories first. Each `create-story` call returns the real issue number immediately, so later siblings reference real `#NNN` in their `## Dependencies` sections. No placeholders, no two-pass edit flow.
 
 ```bash
 cat > /tmp/story-body.md <<'STORY_EOF'
@@ -773,28 +774,31 @@ cat > /tmp/story-body.md <<'STORY_EOF'
 STORY_EOF
 
 ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
-# Returns: CREATED_DRAFT:<item_id>
+# Returns: CREATED_ISSUE:<item_id>:#NNN  — locked `internal` issue, sub-issue-linked under the epic
 rm /tmp/story-body.md
 
 bash ./scripts/project-queue.sh update-field <item_id> status "Ready"
 ```
 
-**Why no public issue here.** The public issue tracker is injection + leak surface (epic #1469). **All pipeline work originates from the private project.** A dev work-item becomes a GitHub issue *only when it is dispatched*, and *only* via the privileged materialize step (`po-act.sh dispatch` → `pipeline-helper.sh materialize-issue`), which creates the issue **already locked** and labelled **`internal`**, with a dev-focused body, then dispatches it normally (`feature/story-<N>`). This keeps issues first-class for the dev/PR/review/merge machinery while keeping everything that isn't being actively worked off the public tracker. There is no "create the issue now" path during decomposition.
+**Materialize-at-decomposition (ADR-015).** `create-story` converts the story into a GitHub issue **at creation** — born **locked**, labelled **`internal` + `story`**, and sub-issue-linked under its epic. The issue is created by *convert* (`project-queue.sh materialize`), never `gh issue create`, so the autonomous-creation gate stays intact. The lock is what closes the injection surface (locked issues take no external comments); deferring creation never added protection. Early `#NNN` makes dependencies real at authoring time and decomposition machine-visible via `sub_issues_total` — no marker comment needed.
 
-**Work-product test — what may EVER become an issue.** If the deliverable is a **repo artifact** (code, docs, config that lives in the repo), it may be materialized as an issue at dispatch. If the deliverable does **not** live in the repo (business setup, legal/licensing review as a decision, ops, finance), it stays a project item forever and is **never** an issue. License-*file* edits are repo artifacts (OK); "have a lawyer review licensing" is not.
+**Public-body hygiene (MANDATORY).** Story bodies are world-readable the moment they're created. No secrets, no credentials, no customer/business specifics, and no exploit-grade detail about unfixed vulnerabilities in any materialized body.
+
+**`--defer` — the exception path.** A story whose body cannot be public while queued (a security fix describing a live vulnerability, business-adjacent content) is created with `create-story <EPIC_NUM> "<title>" <body_file> --defer`. It stays a private project draft (returns `CREATED_DRAFT:<item_id>`) and is materialized by `po-act.sh dispatch` when work starts. Use it deliberately, not by default. If an epic decomposes ENTIRELY into `--defer` drafts, post a decomposition-complete marker comment on the epic — deferred drafts aren't sub-issues, so the preflight can't see them.
+
+**Work-product test — what may EVER become an issue.** If the deliverable is a **repo artifact** (code, docs, config that lives in the repo), it becomes an issue via create-story. If the deliverable does **not** live in the repo (business setup, legal/licensing review as a decision, ops, finance), it stays a project item forever and is **never** an issue. License-*file* edits are repo artifacts (OK); "have a lawyer review licensing" is not.
 
 **Never apply `pipeline:*` / `agent:*` labels** — those are decommissioned; the board **Status** field is the only queue signal. Dev issues carry only `story` (+ `epic` for epics) and `internal` (applied by the materialize step).
-
-Epic undecomposed-detection: drafts aren't sub-issues, so `sub_issues_total` stays 0 — mark the epic decomposed with a decomposition-complete marker comment (or close it) so the preflight doesn't re-flag it.
 
 **7g. Post summary on epic:**
 ```bash
 cat > /tmp/planning-summary.md <<'SUMMARY_EOF'
 ## Planning Team — Decomposition Complete
 
-Stories created (Ready status in project queue):
+Stories created (locked internal issues, Ready status in project queue):
 - #NNN — <title>
 - #NNN — <title>
+(--defer drafts, if any: <item_id> — <title> — reason held private)
 
 Dependency order: #A → #B → #C
 
