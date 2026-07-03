@@ -101,7 +101,7 @@ func TestStorageMigrator_OSStoOSSRoundTrip(t *testing.T) {
 	require.NoError(t, err, "OSS→OSS migration must succeed")
 
 	// Verify counts for the non-RBAC stores we seeded.
-	wantKinds := []string{"tenant", "config", "audit", "registration_token", "session", "steward", "command", "trigger", "push", "ip_trust"}
+	wantKinds := []string{"tenant", "config", "audit", "registration_token", "session", "steward", "command", "trigger", "push", "ip_trust", "refresh_policy", "pending_refresh"}
 	for _, kind := range wantKinds {
 		c, ok := report.Counts[kind]
 		assert.True(t, ok, "expected kind %q in OSS→OSS report", kind)

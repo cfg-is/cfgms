@@ -168,4 +168,29 @@ func seedOSSManager(t *testing.T, mgr *interfaces.StorageManager) {
 	ipts := mgr.GetIPTrustStore()
 	require.NotNil(t, ipts, "ip trust store")
 	require.NoError(t, ipts.AddTrustedRange(ctx, "tenant-seed-1", "192.168.1.0/24", false))
+
+	// refresh policy (explicit, non-default)
+	rps := mgr.GetRefreshPolicyStore()
+	require.NotNil(t, rps, "refresh policy store")
+	dormancy := 30
+	require.NoError(t, rps.SetPolicy(ctx, &business.RefreshPolicy{
+		TenantID:        "tenant-seed-1",
+		Mode:            "auto_accept",
+		MaxDormancyDays: &dormancy,
+	}))
+
+	// pending refresh entry
+	prs := mgr.GetPendingRefreshStore()
+	require.NotNil(t, prs, "pending refresh store")
+	require.NoError(t, prs.AddPendingRefresh(ctx, &business.PendingRefreshEntry{
+		PendingID:               "pending-refresh-seed-1",
+		DeviceID:                "device-seed-1",
+		TenantID:                "tenant-seed-1",
+		SourceIP:                "10.0.0.1",
+		ProvenanceMatchedFields: 4,
+		ProvenanceTotalFields:   5,
+		Status:                  business.PendingRefreshStatusPending,
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(24 * time.Hour),
+	}))
 }

@@ -178,6 +178,27 @@ cfg storage migrate --from git --to flatfile \
 
 See [docs/operations/backend-migration.md](../operations/backend-migration.md) for the full offline-cutover procedure and downtime envelope.
 
+### Stores covered by the storage migrator
+
+The `cfg migrate --provider storage` pathway covers the following store kinds. Each row shows whether the OSS (flatfile+SQLite) and database (PostgreSQL) backends support export and import for that kind.
+
+| Store kind | OSS | PostgreSQL | Notes |
+|---|---|---|---|
+| `tenant` | ✓ | ✓ | Tenant tree |
+| `config` | ✓ | ✓ | Config entries |
+| `audit` | ✓ | ✓ | Audit log entries |
+| `registration_token` | ✓ | ✓ | Steward registration tokens |
+| `session` | ✓ | ✓ | Admin sessions |
+| `steward` | ✓ | ✓ | Steward fleet records |
+| `command` | ✓ | ✓ | Command records |
+| `trigger` | ✓ | — | OSS only; Postgres backend does not expose a `TriggerStore` |
+| `push` | ✓ | — | OSS only; Postgres backend does not expose a `PushStore` |
+| `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
+| `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
+| `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
+
+Kinds marked `—` are silently skipped when the destination backend does not support that store. The integrity check at the end of a `Run` only compares kinds that both source and destination support, so a cross-backend migration (OSS → Postgres) will not fail on `trigger` or `push` records.
+
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
 ```yaml

@@ -60,6 +60,14 @@ type BusinessStoreOpener interface {
 	OpenBusinessStores(path string) (*BusinessStoreBundle, error)
 }
 
+// RefreshStoreCreator is an optional StorageProvider extension for backends that
+// support the per-tenant refresh policy and pending-refresh approval queue (Issue #2329).
+// Backends that do not implement this interface leave those stores nil in the manager.
+type RefreshStoreCreator interface {
+	CreateRefreshPolicyStore(config map[string]interface{}) (business.RefreshPolicyStore, error)
+	CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error)
+}
+
 // StorageProvider defines the interface that all storage backends must implement.
 // Providers now return sub-package types from pkg/storage/interfaces/{business,config}.
 type StorageProvider interface {
@@ -693,6 +701,9 @@ func (sm *StorageManager) Close() error {
 		sm.triggerStore,
 		sm.pushStore,
 		sm.pendingRegistrationStore,
+		sm.ipTrustStore,
+		sm.refreshPolicyStore,
+		sm.pendingRefreshStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -878,6 +889,23 @@ func CreateClusterStorageManager(pgConnStr string, _ map[string]interface{}) (*S
 	}
 	if pendingRegStore != nil {
 		sm.SetPendingRegistrationStore(pendingRegStore)
+	}
+	// Wire refresh stores if the provider implements the optional RefreshStoreCreator extension.
+	if rsc, ok := provider.(RefreshStoreCreator); ok {
+		refreshPolicyStore, err := rsc.CreateRefreshPolicyStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create refresh policy store: %w", err)
+		}
+		if refreshPolicyStore != nil {
+			sm.SetRefreshPolicyStore(refreshPolicyStore)
+		}
+		pendingRefreshStore, err := rsc.CreatePendingRefreshStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create pending refresh store: %w", err)
+		}
+		if pendingRefreshStore != nil {
+			sm.SetPendingRefreshStore(pendingRefreshStore)
+		}
 	}
 	return sm, nil
 }
