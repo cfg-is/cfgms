@@ -2,7 +2,7 @@
 
 This document describes how issues are triaged and prioritized in the CFGMS project.
 
-> **Scope:** triage applies to **`community`** issues (public, externally filed). **`internal`** issues come from the private development pipeline already planned and validated (BA + Tech Lead) and are materialized locked at dispatch — they do **not** pass through this triage queue. See [pipeline-substrate-migration](../operations/pipeline-substrate-migration.md#issue-classes--materialization-2026-06-24). (Note: automatic `triage`-label issue templates referenced below are not yet configured.)
+> **Scope:** triage applies to **`community`** issues (public, externally filed). **`internal`** issues come from the private development pipeline already planned and validated (BA + Tech Lead) and are materialized locked at decomposition (ADR-015; `--defer` drafts at dispatch) — they do **not** pass through this triage queue. See [pipeline-substrate-migration](../operations/pipeline-substrate-migration.md#issue-classes--materialization-2026-06-24). (Note: automatic `triage`-label issue templates referenced below are not yet configured.)
 
 ## Triage Workflow
 

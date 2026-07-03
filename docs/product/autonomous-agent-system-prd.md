@@ -171,7 +171,7 @@ The PO forms a planning team for epic decomposition by spawning BA and Tech Lead
 5. An item locks when BA and Tech Lead agree and the PO has no product objection
 
 **After consensus:**
-- PO creates all agreed stories as private project items (never `gh issue create`); for dependency chains it materializes them early with real `#NNN` deps so the dispatcher's dep-gate self-sequences
+- PO creates all agreed stories via `create-story`, which materializes each as a locked `internal` issue sub-issue-linked under the epic (ADR-015; never `gh issue create`). Stories are created in dependency order so every `## Dependencies` cites real `#NNN` and the dispatcher's dep-gate self-sequences; sensitive bodies use `--defer` and stay private drafts until dispatch
 - PO posts a planning summary comment on the epic
 - PO shuts down the team by sending a `shutdown_request` to each teammate individually
 
