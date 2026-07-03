@@ -413,6 +413,59 @@ func TestGetCluster_Standalone_NoAccessAlert(t *testing.T) {
 	assert.Equal(t, 1, n, "a standalone host skips the access probe (one Get-Cluster query only)")
 }
 
+// TestComputeClusterAccessReconcile is the [REQUIRED TEST] (#2306 lifecycle): the
+// pure reconcile computes the correct grant-set (desired members lacking access)
+// and revoke-set (granted nodes no longer members — drift), case-insensitively.
+func TestComputeClusterAccessReconcile(t *testing.T) {
+	// Desired A,B,C; ACL holds A, c (different case), X (retired drift).
+	grants, revokes := computeClusterAccessReconcile(
+		[]string{"CFG-A", "CFG-B", "CFG-C"}, []string{"CFG-A", "cfg-c", "CFG-X"})
+	assert.ElementsMatch(t, []string{"CFG-B"}, grants, "a desired member absent from the ACL is granted")
+	assert.ElementsMatch(t, []string{"CFG-X"}, revokes, "a granted node no longer a member is revoked (drift)")
+
+	// Steady state: desired == current (any case/order) → no changes.
+	g, r := computeClusterAccessReconcile([]string{"CFG-A", "CFG-B"}, []string{"cfg-b", "CFG-A"})
+	assert.Empty(t, g, "steady state grants nothing")
+	assert.Empty(t, r, "steady state revokes nothing")
+}
+
+// TestReconcileClusterAccess drives the reconcile through the transport: it reads
+// the ACL, grants the missing member and revokes the drift node, exactly once each.
+func TestReconcileClusterAccess(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"nodes":["NODE1","NODE3"]}`, // current ACL: NODE1, NODE3
+			``,                            // grant NODE2
+			``,                            // revoke NODE3
+		},
+	}
+	m, store := clusterTestModule(t, transport)
+	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
+
+	res, err := m.ReconcileClusterAccess(context.Background(), "lab-hv", []string{"NODE1", "NODE2"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"NODE2"}, res.Granted)
+	assert.ElementsMatch(t, []string{"NODE3"}, res.Revoked)
+	assert.Equal(t, 1, countCmd(transport, psGrantClusterAccess), "one grant issued")
+	assert.Equal(t, 1, countCmd(transport, psRevokeClusterAccess), "one revoke issued")
+
+	require.NoError(t, m.auditMgr.Flush(context.Background()))
+	assert.Len(t, auditEntriesByActionCT(store.captured(), "cluster-access-grant"), 1)
+	assert.Len(t, auditEntriesByActionCT(store.captured(), "cluster-access-revoke"), 1)
+}
+
+// auditEntriesByActionCT counts captured audit entries by action (unit-test copy;
+// the integration file has its own auditEntriesByAction under a different tag).
+func auditEntriesByActionCT(entries []*business.AuditEntry, action string) []*business.AuditEntry {
+	var out []*business.AuditEntry
+	for _, e := range entries {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // TestGetCluster_NilTransport verifies #7: with no transport wired, getCluster
 // returns the distinct ErrTransportNotConfigured sentinel (a misconfiguration),
 // NOT the ErrClusterNotDeclared scope-cap sentinel.

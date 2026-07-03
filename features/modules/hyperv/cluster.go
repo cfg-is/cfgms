@@ -264,6 +264,22 @@ const psRemoveClusterResource = `Remove-ClusterGroup -Name $Name -RemoveResource
 // the exact remediation grant come from PowerShell, never Go string composition.
 const psGetClusterAccessSelf = `$me = '{0}\{1}$' -f $env:USERDOMAIN, $env:COMPUTERNAME; $acl = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue); $ok = @($acl | Where-Object { $_.IdentityReference -ieq $me }).Count -gt 0; ConvertTo-Json @{ account=$me; access_ok=$ok; remediation=("Grant-ClusterAccess -Cluster {0} -User '{1}' -Full" -f $ClusterName, $me) } -Compress`
 
+// Cluster-access lifecycle commands (#2306 PROPERTIES/lifecycle, option 3).
+// These are PRIVILEGED, controller-orchestrated grant/revoke primitives — NOT
+// reachable from routine hyperv.cluster Set convergence. $NodeName is a cluster
+// node's short name; the computer account (DOMAIN\<node>$) is built in PowerShell
+// from $env:USERDOMAIN, never composed in Go. Dispatch keys.
+const (
+	// psListClusterAccessNodes returns the node short-names of the computer
+	// accounts currently granted cluster access (drift-detection source).
+	psListClusterAccessNodes = `ConvertTo-Json @{ nodes = @(Get-ClusterAccess -Cluster $ClusterName -ErrorAction SilentlyContinue | Where-Object { $_.IdentityReference -match '\$$' } | ForEach-Object { ($_.IdentityReference -replace '.*\\','') -replace '\$$','' }) } -Compress`
+	// psGrantClusterAccess grants $NodeName's computer account Full cluster access
+	// (the DOMAIN\<node>$ account is built in the preamble from $env:USERDOMAIN).
+	psGrantClusterAccess = `Grant-ClusterAccess -Cluster $ClusterName -User (DOMAIN\$NodeName$) -Full`
+	// psRevokeClusterAccess removes $NodeName's computer account from the cluster ACL.
+	psRevokeClusterAccess = `Remove-ClusterAccess -Cluster $ClusterName -User (DOMAIN\$NodeName$)`
+)
+
 // Declarative cluster-role property set commands (#2306). These consts are
 // dispatch KEYS — the executed PowerShell lives in the Cfgms-Set* preamble
 // functions wired by the PS-transport story (PROPERTIES-B); the reconcile below
@@ -393,6 +409,101 @@ func (m *hypervModule) probeClusterAccess(ctx context.Context, name string) (boo
 		return true, ""
 	}
 	return false, r.Remediation
+}
+
+// ClusterAccessReconcile is the outcome of a cluster-access lifecycle reconcile:
+// the node computer accounts granted and revoked to make the cluster ACL match
+// the desired member set.
+type ClusterAccessReconcile struct {
+	Granted []string
+	Revoked []string
+}
+
+// computeClusterAccessReconcile computes, case-insensitively, which member nodes
+// need a grant (a desired member whose computer account is not in the ACL) and
+// which granted nodes need a revoke (in the ACL but no longer a desired member —
+// drift, e.g. a retired node). Pure: no I/O, deterministic sets.
+func computeClusterAccessReconcile(desiredMembers, currentGranted []string) (grants, revokes []string) {
+	cur := map[string]string{} // lower(node) -> original
+	for _, n := range currentGranted {
+		if s := strings.TrimSpace(n); s != "" {
+			cur[strings.ToLower(s)] = s
+		}
+	}
+	des := map[string]struct{}{}
+	for _, n := range desiredMembers {
+		s := strings.TrimSpace(n)
+		if s == "" {
+			continue
+		}
+		des[strings.ToLower(s)] = struct{}{}
+		if _, ok := cur[strings.ToLower(s)]; !ok {
+			grants = append(grants, s)
+		}
+	}
+	for lower, orig := range cur {
+		if _, ok := des[lower]; !ok {
+			revokes = append(revokes, orig)
+		}
+	}
+	return grants, revokes
+}
+
+// ReconcileClusterAccess is the PRIVILEGED cluster-access lifecycle reconcile
+// (#2306 option 3): make the cluster ACL's node computer-account grants match the
+// desired member set. It reads the current grants, computes grants (desired
+// members lacking access) + revokes (granted nodes no longer members), applies
+// them via Grant-/Remove-ClusterAccess, and audits each. It is invoked by the
+// CONTROLLER's cluster-access lifecycle — NOT by routine hyperv.cluster Set
+// convergence — and runs on a node whose steward already holds cluster access.
+// Grant/revoke of an already-consistent account is a no-op (idempotent).
+func (m *hypervModule) ReconcileClusterAccess(ctx context.Context, clusterName string, desiredMembers []string) (ClusterAccessReconcile, error) {
+	var result ClusterAccessReconcile
+	if m.transport == nil {
+		return result, fmt.Errorf("hyperv: reconcile cluster access %q: %w", clusterName, ErrTransportNotConfigured)
+	}
+	out, err := m.transport.ExecutePS(ctx, psListClusterAccessNodes, map[string]string{"ClusterName": clusterName})
+	if err != nil {
+		return result, fmt.Errorf("hyperv: list cluster access %q: %w", clusterName, err)
+	}
+	var parsed struct {
+		Nodes []string `json:"nodes"`
+	}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); jsonErr != nil {
+		return result, fmt.Errorf("hyperv: parse cluster access list %q: %w", clusterName, jsonErr)
+	}
+
+	grants, revokes := computeClusterAccessReconcile(desiredMembers, parsed.Nodes)
+
+	for _, node := range grants {
+		if _, err := m.transport.ExecutePS(ctx, psGrantClusterAccess, map[string]string{"ClusterName": clusterName, "NodeName": node}); err != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"cluster-access-grant", "cluster:"+clusterName,
+				map[string]interface{}{"node": logging.SanitizeLogValue(node)},
+				map[string]interface{}{"granted": false}, err)
+			return result, fmt.Errorf("hyperv: grant cluster access to %q: %w", node, err)
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"cluster-access-grant", "cluster:"+clusterName,
+			map[string]interface{}{"node": logging.SanitizeLogValue(node)},
+			map[string]interface{}{"granted": true}, nil)
+		result.Granted = append(result.Granted, node)
+	}
+	for _, node := range revokes {
+		if _, err := m.transport.ExecutePS(ctx, psRevokeClusterAccess, map[string]string{"ClusterName": clusterName, "NodeName": node}); err != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"cluster-access-revoke", "cluster:"+clusterName,
+				map[string]interface{}{"node": logging.SanitizeLogValue(node)},
+				map[string]interface{}{"revoked": false}, err)
+			return result, fmt.Errorf("hyperv: revoke cluster access from %q: %w", node, err)
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"cluster-access-revoke", "cluster:"+clusterName,
+			map[string]interface{}{"node": logging.SanitizeLogValue(node)},
+			map[string]interface{}{"revoked": true}, nil)
+		result.Revoked = append(result.Revoked, node)
+	}
+	return result, nil
 }
 
 // readCNOOwner queries the current CNO owner node name, returning "" on any

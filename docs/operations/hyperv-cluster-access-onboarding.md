@@ -61,8 +61,30 @@ Remove-ClusterAccess -Cluster <cluster> -User "<DOMAIN>\<NODE>$"
 ```
 
 Full machine decommission (disabling/deleting the computer account) revokes all of
-its access instantly. See the cluster-access lifecycle work for the controller-
-orchestrated grant/revoke tied to node lifecycle.
+its access instantly.
+
+## Controller-orchestrated lifecycle (option 3)
+
+Beyond the manual grant, the controller can **reconcile** cluster-management access
+to the cluster's member set automatically. The hyperv module exposes a privileged
+`ReconcileClusterAccess(cluster, desiredMembers)` action that:
+
+1. reads the node computer accounts currently in the cluster ACL,
+2. computes **grants** (a desired member whose account is not in the ACL) and
+   **revokes** (an account whose node is no longer a member — drift, e.g. a
+   retired or evicted node),
+3. applies them via `Grant-ClusterAccess` / `Remove-ClusterAccess`, auditing each.
+
+The controller invokes this as a **privileged lifecycle action** on a node whose
+steward already holds cluster access (bootstrap: the first grant is manual, driven
+by the onboarding alert above). It is **not** reachable from routine `hyperv.cluster`
+Set convergence — `Grant-ClusterAccess` is a lateral-movement primitive and is kept
+out of the cfg path deliberately. Grant/revoke of an already-consistent account is a
+no-op, so the reconcile is idempotent and safe to run repeatedly.
+
+Node retirement therefore revokes access two ways: the reconcile removes a
+no-longer-member account from the ACL, and full machine decommission
+(disabling/deleting the computer account) is the immediate, total revoke.
 
 ## Notes
 
