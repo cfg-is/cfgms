@@ -145,7 +145,8 @@ func TestStorageMigrate_DatabasePlan(t *testing.T) {
 }
 
 // assertMigrationCounts checks that all expected store kinds appear in the
-// report with at least one record.
+// report with at least one record. Only kinds that all tested backends support
+// are listed here — trigger and push are OSS-only and intentionally absent.
 func assertMigrationCounts(t *testing.T, counts map[string]int, label string) {
 	t.Helper()
 	wantKinds := []string{
@@ -156,9 +157,9 @@ func assertMigrationCounts(t *testing.T, counts map[string]int, label string) {
 		"session",
 		"steward",
 		"command",
-		"trigger",
-		"push",
 		"ip_trust",
+		"refresh_policy",
+		"pending_refresh",
 	}
 	for _, kind := range wantKinds {
 		c, ok := counts[kind]

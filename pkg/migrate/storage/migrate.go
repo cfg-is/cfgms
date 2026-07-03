@@ -129,8 +129,14 @@ func (m *StorageMigrator) Run(ctx context.Context) (migrate.MigrationReport, err
 	}
 	dstCounts := countByKind(dstRecords)
 
+	dstSupported := supportedKindsByManager(m.dst)
+
 	var mismatch []string
 	for kind, srcN := range srcCounts {
+		if !dstSupported[kind] {
+			// Destination backend does not support this store; data skip is expected.
+			continue
+		}
 		if dstN := dstCounts[kind]; dstN != srcN {
 			mismatch = append(mismatch, fmt.Sprintf("%s: want %d got %d", kind, srcN, dstN))
 		}
@@ -161,6 +167,8 @@ const (
 	kindTrigger           = "trigger"
 	kindPush              = "push"
 	kindIPTrust           = "ip_trust"
+	kindRefreshPolicy     = "refresh_policy"
+	kindPendingRefresh    = "pending_refresh"
 )
 
 // ─── export ──────────────────────────────────────────────────────────────────
@@ -243,6 +251,20 @@ func exportAll(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.R
 		return nil, err
 	}
 	out = append(out, ipRecs...)
+
+	// Refresh-policy records are per-tenant; export after tenants so that the
+	// tenant IDs are available for scoping (FK ordering).
+	rpRecs, err := exportRefreshPolicies(ctx, mgr, tenantIDs)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, rpRecs...)
+
+	prRecs, err := exportPendingRefresh(ctx, mgr)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, prRecs...)
 
 	return out, nil
 }
@@ -575,6 +597,50 @@ func exportIPTrust(ctx context.Context, mgr *interfaces.StorageManager, tenantID
 	return recs, nil
 }
 
+// exportRefreshPolicies exports the per-tenant refresh policy for each known
+// tenant. GetPolicy returns a default when no explicit record exists, so the
+// export is always one record per tenant — the count matches the tenant count.
+func exportRefreshPolicies(ctx context.Context, mgr *interfaces.StorageManager, tenantIDs []string) ([]migrate.Record, error) {
+	store := mgr.GetRefreshPolicyStore()
+	if store == nil {
+		return nil, nil
+	}
+	recs := make([]migrate.Record, 0, len(tenantIDs))
+	for _, tid := range tenantIDs {
+		p, err := store.GetPolicy(ctx, tid)
+		if err != nil {
+			return nil, fmt.Errorf("get refresh policy for tenant %s: %w", tid, err)
+		}
+		data, err := marshal(p)
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, migrate.Record{Kind: kindRefreshPolicy, ID: tid, Data: data})
+	}
+	return recs, nil
+}
+
+// exportPendingRefresh exports all pending-refresh entries across all tenants.
+func exportPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
+	store := mgr.GetPendingRefreshStore()
+	if store == nil {
+		return nil, nil
+	}
+	entries, err := store.ListPendingRefresh(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("list pending refresh entries: %w", err)
+	}
+	recs := make([]migrate.Record, 0, len(entries))
+	for _, e := range entries {
+		data, err := marshal(e)
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, migrate.Record{Kind: kindPendingRefresh, ID: e.PendingID, Data: data})
+	}
+	return recs, nil
+}
+
 // ─── import ──────────────────────────────────────────────────────────────────
 
 // importAll writes all records to mgr using upsert semantics so that calling
@@ -620,6 +686,10 @@ func importRecord(ctx context.Context, mgr *interfaces.StorageManager, rec migra
 		return importPush(ctx, mgr, rec)
 	case kindIPTrust:
 		return importIPTrust(ctx, mgr, rec)
+	case kindRefreshPolicy:
+		return importRefreshPolicy(ctx, mgr, rec)
+	case kindPendingRefresh:
+		return importPendingRefresh(ctx, mgr, rec)
 	default:
 		return fmt.Errorf("unknown record kind %q", rec.Kind)
 	}
@@ -857,7 +927,7 @@ func importCommand(ctx context.Context, mgr *interfaces.StorageManager, rec migr
 func importTrigger(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetTriggerStore()
 	if store == nil {
-		return fmt.Errorf("trigger store not available")
+		return nil // backend does not support trigger records — skip silently
 	}
 	var tr business.TriggerRecord
 	if err := json.Unmarshal(rec.Data, &tr); err != nil {
@@ -869,7 +939,7 @@ func importTrigger(ctx context.Context, mgr *interfaces.StorageManager, rec migr
 func importPush(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetPushStore()
 	if store == nil {
-		return fmt.Errorf("push store not available")
+		return nil // backend does not support push records — skip silently
 	}
 	var p business.PushRecord
 	if err := json.Unmarshal(rec.Data, &p); err != nil {
@@ -910,6 +980,34 @@ func importIPTrust(ctx context.Context, mgr *interfaces.StorageManager, rec migr
 	return nil
 }
 
+func importRefreshPolicy(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
+	store := mgr.GetRefreshPolicyStore()
+	if store == nil {
+		return nil // backend does not support refresh policies — skip silently
+	}
+	var policy business.RefreshPolicy
+	if err := json.Unmarshal(rec.Data, &policy); err != nil {
+		return fmt.Errorf("unmarshal refresh policy: %w", err)
+	}
+	return store.SetPolicy(ctx, &policy)
+}
+
+func importPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
+	store := mgr.GetPendingRefreshStore()
+	if store == nil {
+		return nil // backend does not support pending refresh — skip silently
+	}
+	var entry business.PendingRefreshEntry
+	if err := json.Unmarshal(rec.Data, &entry); err != nil {
+		return fmt.Errorf("unmarshal pending refresh entry: %w", err)
+	}
+	// Check existence to avoid duplicate-constraint violations on idempotent re-run.
+	if existing, err := store.GetPendingRefreshByID(ctx, entry.PendingID); err == nil && existing != nil {
+		return nil // already present
+	}
+	return store.AddPendingRefresh(ctx, &entry)
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func countByKind(records []migrate.Record) map[string]int {
@@ -918,4 +1016,30 @@ func countByKind(records []migrate.Record) map[string]int {
 		counts[r.Kind]++
 	}
 	return counts
+}
+
+// supportedKindsByManager returns the set of record kinds the manager's stores
+// can accept. Kinds whose store is nil (backend does not support them) are omitted
+// so that the integrity check does not flag expected data-skip as a mismatch.
+func supportedKindsByManager(mgr *interfaces.StorageManager) map[string]bool {
+	rbac := mgr.GetRBACStore() != nil
+	return map[string]bool{
+		kindConfig:            mgr.GetConfigStore() != nil,
+		kindAudit:             mgr.GetAuditStore() != nil,
+		kindRBACPermission:    rbac,
+		kindRBACRole:          rbac,
+		kindRBACSubject:       rbac,
+		kindRBACAssignment:    rbac,
+		kindTenant:            mgr.GetTenantStore() != nil,
+		kindClientTenant:      mgr.GetClientTenantStore() != nil,
+		kindRegistrationToken: mgr.GetRegistrationTokenStore() != nil,
+		kindSession:           mgr.GetSessionStore() != nil,
+		kindSteward:           mgr.GetStewardStore() != nil,
+		kindCommand:           mgr.GetCommandStore() != nil,
+		kindTrigger:           mgr.GetTriggerStore() != nil,
+		kindPush:              mgr.GetPushStore() != nil,
+		kindIPTrust:           mgr.GetIPTrustStore() != nil,
+		kindRefreshPolicy:     mgr.GetRefreshPolicyStore() != nil,
+		kindPendingRefresh:    mgr.GetPendingRefreshStore() != nil,
+	}
 }

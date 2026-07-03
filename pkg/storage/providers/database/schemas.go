@@ -733,6 +733,60 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateRefreshPoliciesTable(ctx, db); err != nil {
+		return err
+	}
+
+	if err := s.CreatePendingRefreshRequestsTable(ctx, db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// CreateRefreshPoliciesTable creates the refresh_policies table (Issue #2329).
+func (s DatabaseSchemas) CreateRefreshPoliciesTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS refresh_policies (
+			tenant_id           TEXT NOT NULL PRIMARY KEY,
+			mode                TEXT NOT NULL DEFAULT 'require_approval',
+			max_dormancy_days   INTEGER
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create refresh_policies table: %w", err)
+	}
+	return nil
+}
+
+// CreatePendingRefreshRequestsTable creates the pending_refresh_requests table (Issue #2329).
+func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS pending_refresh_requests (
+			pending_id                  TEXT NOT NULL PRIMARY KEY,
+			device_id                   TEXT NOT NULL,
+			tenant_id                   TEXT NOT NULL,
+			source_ip                   TEXT NOT NULL DEFAULT '',
+			provenance_matched_fields   INTEGER NOT NULL DEFAULT 0,
+			provenance_total_fields     INTEGER NOT NULL DEFAULT 0,
+			claim_bundle                BYTEA NOT NULL DEFAULT ''::bytea,
+			status                      TEXT NOT NULL DEFAULT 'pending',
+			created_at                  TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at                  TIMESTAMP WITH TIME ZONE NOT NULL,
+			resolved_at                 TIMESTAMP WITH TIME ZONE
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create pending_refresh_requests table: %w", err)
+	}
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_pending_refresh_tenant_id  ON pending_refresh_requests(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_pending_refresh_status     ON pending_refresh_requests(status);",
+		"CREATE INDEX IF NOT EXISTS idx_pending_refresh_expires_at ON pending_refresh_requests(expires_at);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create pending_refresh_requests index: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -963,6 +1017,8 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key
 		"DROP TABLE IF EXISTS rbac_permissions;",
+		"DROP TABLE IF EXISTS pending_refresh_requests;",
+		"DROP TABLE IF EXISTS refresh_policies;",
 		"DROP TABLE IF EXISTS command_transitions;",
 		"DROP TABLE IF EXISTS command_records;",
 		"DROP TABLE IF EXISTS steward_records;",

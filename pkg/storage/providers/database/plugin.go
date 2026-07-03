@@ -204,6 +204,32 @@ func (p *DatabaseProvider) CreatePendingRegistrationStore(config map[string]inte
 	return nil, business.ErrNotSupported
 }
 
+// CreateRefreshPolicyStore creates a PostgreSQL-backed RefreshPolicyStore (Issue #2329).
+func (p *DatabaseProvider) CreateRefreshPolicyStore(config map[string]interface{}) (business.RefreshPolicyStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseRefreshPolicyStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database refresh policy store: %w", err)
+	}
+	return store, nil
+}
+
+// CreatePendingRefreshStore creates a PostgreSQL-backed PendingRefreshStore (Issue #2329).
+func (p *DatabaseProvider) CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabasePendingRefreshStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database pending refresh store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateIPTrustStore creates a PostgreSQL-backed IPTrustStore.
 func (p *DatabaseProvider) CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error) {
 	dsn, err := p.getDSN(config)
