@@ -110,8 +110,8 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	// Launcher-managed: ExecStart runs the launcher, which supervises the steward
 	// and forwards the token via --child-args. This is what makes the steward
 	// push-upgradeable.
-	assert.Contains(t, unit, linuxLauncherPath)
-	assert.Contains(t, unit, "run --child-args")
+	assert.Contains(t, unit, linuxLauncherPath+" run ")
+	assert.Contains(t, unit, "--child-args")
 	assert.NotContains(t, unit, linuxInstallPath+" --regtoken", "ExecStart must run the launcher, not the bare steward")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 
