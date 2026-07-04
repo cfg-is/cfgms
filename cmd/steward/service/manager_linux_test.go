@@ -94,7 +94,7 @@ func TestLinuxManagerStatusNotInstalled(t *testing.T) {
 		assert.False(t, status.Running, "should not be running when unit file is absent")
 	}
 	assert.Equal(t, linuxServiceName, status.ServiceName)
-	assert.Equal(t, linuxInstallPath, status.InstallPath)
+	assert.Equal(t, linuxLauncherPath, status.InstallPath)
 }
 
 func TestGenerateSystemdUnit(t *testing.T) {
@@ -106,8 +106,13 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	assert.Contains(t, unit, "[Install]")
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=10")
-	assert.Contains(t, unit, `--regtoken "`+token+`"`)
-	assert.Contains(t, unit, linuxInstallPath)
+	assert.Contains(t, unit, "--regtoken "+token)
+	// Launcher-managed: ExecStart runs the launcher, which supervises the steward
+	// and forwards the token via --child-args. This is what makes the steward
+	// push-upgradeable.
+	assert.Contains(t, unit, linuxLauncherPath)
+	assert.Contains(t, unit, "run --child-args")
+	assert.NotContains(t, unit, linuxInstallPath+" --regtoken", "ExecStart must run the launcher, not the bare steward")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 
 	// Verify token appears exactly once (no duplication).
@@ -128,9 +133,9 @@ func TestGenerateSystemdUnitWithControllerURL(t *testing.T) {
 	controllerURL := "https://ctrl.example.com"
 	unit := generateSystemdUnit(token, controllerURL)
 
-	assert.Contains(t, unit, `--controller-url "`+controllerURL+`"`)
-	assert.Contains(t, unit, `--regtoken "`+token+`"`)
-	assert.Contains(t, unit, linuxInstallPath)
+	assert.Contains(t, unit, "--controller-url "+controllerURL)
+	assert.Contains(t, unit, "--regtoken "+token)
+	assert.Contains(t, unit, linuxLauncherPath)
 
 	// Verify token and URL each appear exactly once.
 	assert.Equal(t, 1, strings.Count(unit, token), "token should appear exactly once")

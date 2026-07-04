@@ -9,6 +9,12 @@
 # use), and delegates to cfgms-steward install for cert placement and systemd
 # service registration.
 #
+# The bundle MUST also contain the cfgms-steward-launcher binary alongside
+# cfgms-steward: `cfgms-steward install` performs a launcher-managed install
+# (steward supervised by cfgms-launcher, staged under /opt/cfgms/versions/), which
+# is what makes the steward upgradeable via the control plane. It fails with a
+# clear error if the launcher binary is missing.
+#
 # Usage:
 #   sudo bash install.sh --regtoken TOKEN [--controller-url URL] \
 #       [--fingerprint HEX] [--controller-ca PATH]
