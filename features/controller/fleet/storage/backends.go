@@ -703,11 +703,19 @@ func (b *DatabaseBackend) prepareStatements() error {
 		return fmt.Errorf("failed to prepare PostgreSQL insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			content_hash=EXCLUDED.content_hash,
+			timestamp=EXCLUDED.timestamp,
+			shard_id=EXCLUDED.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert reference statement: %w", err)

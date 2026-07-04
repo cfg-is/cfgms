@@ -68,3 +68,42 @@ func TestSQLiteBackend_DuplicateVersionUpserts(t *testing.T) {
 		t.Fatalf("superseded hash-A row still present — upsert should have replaced it")
 	}
 }
+
+// TestSQLiteBackend_DuplicateReferenceVersionUpserts covers the deduplication path:
+// dna_references carries the same UNIQUE(device_id, version) constraint, and
+// Manager.Store takes the storeReference branch when a republished snapshot's content
+// already exists — the likely collision path on reconnect double-fires (identical DNA
+// = dedup hit). StoreReference must be idempotent on (device_id, version) too.
+func TestSQLiteBackend_DuplicateReferenceVersionUpserts(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+
+	backend, err := NewBackend(BackendSQLite, config, logger)
+	if err != nil {
+		t.Fatalf("failed to create sqlite backend: %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+
+	ctx := context.Background()
+	const device = "collision-ref-device"
+
+	ref := func(hash string) *DNARecord {
+		return &DNARecord{
+			DeviceID:    device,
+			DNA:         createTestDNA(device, map[string]string{"os": "linux"}),
+			StoredAt:    time.Now(),
+			ContentHash: hash,
+			Version:     1, // identical version — the racing/duplicate dedup publish
+			ShardID:     "default",
+		}
+	}
+
+	if err := backend.StoreReference(ctx, ref("ref-hash-A")); err != nil {
+		t.Fatalf("first StoreReference failed: %v", err)
+	}
+	// Second reference lands on the same (device_id, version). Before the fix this
+	// returned "UNIQUE constraint failed: dna_references.device_id, dna_references.version".
+	if err := backend.StoreReference(ctx, ref("ref-hash-B")); err != nil {
+		t.Fatalf("duplicate (device_id, version) reference must upsert, not error: %v", err)
+	}
+}

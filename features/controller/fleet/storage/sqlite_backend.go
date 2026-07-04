@@ -398,11 +398,19 @@ func (b *SQLiteBackend) prepareStatements() error {
 		return fmt.Errorf("failed to prepare insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(device_id, version) DO UPDATE SET
+			content_hash=excluded.content_hash,
+			timestamp=excluded.timestamp,
+			shard_id=excluded.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert reference statement: %w", err)
