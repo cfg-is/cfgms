@@ -32,6 +32,7 @@ This directory contains detailed development guides, standards, and workflows fo
 ### Code Quality
 
 - [Go Coding Standards](standards/go-coding-standards.md) - Go code style and patterns
+- [Casing Conventions](standards/casing-conventions.md) - snake_case config vs PascalCase PowerShell surfaces
 - [Testing Standards](standards/testing-standards.md) - Testing requirements and patterns
 - [Documentation Standards](standards/documentation-standards.md) - Documentation guidelines
 - [Review Process](standards/review-process.md) - Code review standards
