@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-05-25
+**Last Updated**: 2026-07-04
 
 ## Versioning Strategy
 
@@ -451,6 +451,20 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 - [ ] Implement Cluster-Aware Patching
 - [ ] Explore further specialized integrations and features
 
+## Captured Backlog (unscheduled)
+
+Founder-captured todos awaiting placement in a versioned milestone. Each carries enough context to decompose later; suggested homes are notes, not commitments.
+
+- [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* live service read/control overlaps the existing `service` stdlib module (which does desired-state enforcement, not live read/control) — clarify the boundary. *Suggested home:* Web UI backend APIs (Epic #2343) + Web UI Foundation (Epic #2344), plus a steward monitoring/streaming capability epic.
+
+- [ ] **Full OSquery support** — Integrate osquery as a first-class endpoint data source for inventory/DNA enrichment and ad-hoc fleet queries. Decisions to make: bundled vs. host-detected binary, query scheduling, how results flow into DNA and monitoring, and the security envelope (osquery is a declared, signed, predictable binary — fits the four-execution-paths model). *Suggested home:* its own monitoring/DNA epic.
+
+- [ ] **Define & build the standard-library steward modules** — Enumerate the canonical stdlib set (per CLAUDE.md/ADR-006: `file`, `service`, `package`, `script`, `firewall`, `patch`), audit that each is actually implemented and shipped in the installer payload, and document the governance boundary (stdlib = installer payload using the module contract, never compiled-in). Gap audit + build-out of anything missing. *Suggested home:* near-term module foundation; pairs with the split below.
+
+- [ ] **Split non-stdlib modules into an on-demand directory** — Reorganize the module layout so stdlib modules ship in the installer while non-stdlib modules live in a separate directory/registry pulled and loaded **on demand** (controller-cached, publisher-signed per ADR-006). Establishes the canonical module-packaging directory structure. *Suggested home:* same module-foundation milestone as the stdlib definition above.
+
+- [ ] **Controller baseline DNA per steward** — Define the canonical DNA the controller should hold for **every** steward by default — the always-collected baseline independent of per-module DNA. Decide the minimum attribute set, refresh cadence, and storage. *Suggested home:* DNA model foundation.
+
 ## Architectural Concepts
 
 The following concepts represent the foundation for future architectural decisions and provide a framework for evaluating new features and capabilities as the system evolves.
@@ -500,7 +514,7 @@ Multi-layered validation approach:
 ## Version Information
 
 - **Document Version**: 4.0
-- **Last Updated**: 2026-05-25
+- **Last Updated**: 2026-07-04
 
 ### Related Documentation
 
