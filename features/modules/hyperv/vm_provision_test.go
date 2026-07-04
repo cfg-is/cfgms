@@ -381,8 +381,10 @@ func cloudInitVMConfigMap(generation int) map[string]interface{} {
 func TestProvisionVM_CloudInitPath(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
 	m := provisionModuleWithTransport(transport)
-	// The linux steward binary + CA host paths the seed stages (ADR-010).
+	// The linux steward + launcher binaries + CA host paths the seed stages (ADR-010).
+	// The launcher is required for a launcher-managed (push-upgradeable) install.
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
 	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
@@ -411,6 +413,8 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 	assert.True(t, argsContain(copyCall, "user-data"), "seed carries user-data")
 	assert.True(t, argsContain(copyCall, "meta-data"), "seed carries meta-data")
 	assert.True(t, argsContain(copyCall, "cfgms-steward"), "seed stages the linux steward (dest cfgms-steward)")
+	assert.True(t, argsContain(copyCall, "cfgms-steward-launcher"),
+		"seed stages the launcher so the guest performs a launcher-managed (push-upgradeable) install")
 
 	// OS disk made first boot; no installer media; no keypress.
 	require.Len(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"), 1,
@@ -471,6 +475,7 @@ func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
 	require.NotEmpty(t, userData, "rendered cloud-config user-data must be present in the copy args")
 	assert.Contains(t, userData, "runcmd", "user-data must carry runcmd")
 	assert.Contains(t, userData, "cfgms-steward", "user-data must install the steward")
+	assert.Contains(t, userData, "/opt/cfgms-steward-launcher", "user-data must stage the launcher for a launcher-managed install")
 	assert.Contains(t, userData, "install", "user-data must run the steward install command")
 	assert.Contains(t, userData, "reg-token-stub-value", "controller-supplied token must be rendered into user-data")
 	assert.Contains(t, userData, "abc123fingerprint", "CA fingerprint must be rendered into user-data")

@@ -95,10 +95,14 @@ type hypervModule struct {
 	// enrollCAFingerprint is the controller CA's SHA-256 for the guest's
 	// install-time TOFU; enrollStewardPath / enrollCAPath are host paths to the
 	// steward binary and CA cert staged onto the seed VHDX so the guest can
-	// self-install without guest network/installer infra.
+	// self-install without guest network/installer infra. enrollLauncherPath is
+	// the host path to the cfgms-steward-launcher binary, staged alongside the
+	// steward so the guest performs a launcher-managed (push-upgradeable) install
+	// — Linux `cfgms-steward install` requires the launcher next to it.
 	enrollToken         string
 	enrollCAFingerprint string
 	enrollStewardPath   string
+	enrollLauncherPath  string
 	enrollCAPath        string
 
 	// seedDir is a host-local directory for the ephemeral provisioning seed
@@ -265,6 +269,7 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.enrollToken, _ = configMap["enroll_token"].(string)
 	m.enrollCAFingerprint, _ = configMap["enroll_ca_fingerprint"].(string)
 	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
+	m.enrollLauncherPath, _ = configMap["enroll_launcher_path"].(string)
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
 	m.seedDir, _ = configMap["seed_dir"].(string)
 
