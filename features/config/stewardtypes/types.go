@@ -20,46 +20,46 @@ type StewardConfig struct {
 
 // StewardSettings contains steward-specific configuration options.
 type StewardSettings struct {
-	ID          string        `yaml:"id"`
-	Mode        OperationMode `yaml:"mode"`
-	ModulePaths []string      `yaml:"module_paths,omitempty"`
-	Logging     LoggingConfig `yaml:"logging"`
+	ID          string        `yaml:"id" json:"id"`
+	Mode        OperationMode `yaml:"mode" json:"mode"`
+	ModulePaths []string      `yaml:"module_paths,omitempty" json:"module_paths,omitempty"`
+	Logging     LoggingConfig `yaml:"logging" json:"logging"`
 
-	ErrorHandling ErrorHandlingConfig `yaml:"error_handling"`
-	Secrets       SecretsConfig       `yaml:"secrets,omitempty"`
+	ErrorHandling ErrorHandlingConfig `yaml:"error_handling" json:"error_handling"`
+	Secrets       SecretsConfig       `yaml:"secrets,omitempty" json:"secrets,omitempty"`
 
 	// ConvergeInterval is how often the steward re-converges (e.g. "30m").
-	ConvergeInterval string `yaml:"converge_interval,omitempty"`
+	ConvergeInterval string `yaml:"converge_interval,omitempty" json:"converge_interval,omitempty"`
 
 	// ScriptSigning configures script signing policy and trusted keys.
 	// Child tenants may only tighten (not loosen) the inherited policy.
-	ScriptSigning ScriptSigningConfig `yaml:"script_signing,omitempty"`
+	ScriptSigning ScriptSigningConfig `yaml:"script_signing,omitempty" json:"script_signing,omitempty"`
 
 	// ModuleTrust configures module trust policy and additional trusted publishers.
-	ModuleTrust ModuleTrustConfig `yaml:"module_trust,omitempty"`
+	ModuleTrust ModuleTrustConfig `yaml:"module_trust,omitempty" json:"module_trust,omitempty"`
 
 	// SignedCommandReplayWindow is the maximum age of an accepted command timestamp.
-	SignedCommandReplayWindow time.Duration `yaml:"signed_command_replay_window,omitempty"`
+	SignedCommandReplayWindow time.Duration `yaml:"signed_command_replay_window,omitempty" json:"signed_command_replay_window,omitempty"`
 
 	// SignedCommandMaxParamsBytes is the maximum JSON-serialized size of Command.Params.
-	SignedCommandMaxParamsBytes int `yaml:"signed_command_max_params_bytes,omitempty"`
+	SignedCommandMaxParamsBytes int `yaml:"signed_command_max_params_bytes,omitempty" json:"signed_command_max_params_bytes,omitempty"`
 
 	// DriftMode controls how the steward responds to detected configuration drift.
 	// Must be sourced exclusively from the controller-delivered cfg.
-	DriftMode DriftMode `yaml:"drift_mode,omitempty"`
+	DriftMode DriftMode `yaml:"drift_mode,omitempty" json:"drift_mode,omitempty"`
 
 	// Upgrade configures the steward upgrade policy. (Issue #1943)
-	Upgrade UpgradeConfig `yaml:"upgrade,omitempty"`
+	Upgrade UpgradeConfig `yaml:"upgrade,omitempty" json:"upgrade,omitempty"`
 
 	// RegistrationPollTimeout is the maximum time to wait for manual registration
 	// approval when the controller uses registration.workflow: manual (Issue #1899).
 	// Default is 24h. Set to 0 to use the default.
-	RegistrationPollTimeout time.Duration `yaml:"registration_poll_timeout,omitempty"`
+	RegistrationPollTimeout time.Duration `yaml:"registration_poll_timeout,omitempty" json:"registration_poll_timeout,omitempty"`
 
 	// DNARefreshInterval is how often the steward re-collects and publishes DNA
 	// attribute deltas while connected to the controller (Issue #1915).
 	// Accepts Go duration strings (e.g. "30m", "1h"). Default: 30m.
-	DNARefreshInterval string `yaml:"dna_refresh_interval,omitempty"`
+	DNARefreshInterval string `yaml:"dna_refresh_interval,omitempty" json:"dna_refresh_interval,omitempty"`
 }
 
 // UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)
@@ -78,8 +78,8 @@ type UpgradeConfig struct {
 
 // SecretsConfig defines configuration for steward-side secret storage.
 type SecretsConfig struct {
-	SecretsDir string `yaml:"secrets_dir,omitempty"`
-	Provider   string `yaml:"provider,omitempty"`
+	SecretsDir string `yaml:"secrets_dir,omitempty" json:"secrets_dir,omitempty"`
+	Provider   string `yaml:"provider,omitempty" json:"provider,omitempty"`
 }
 
 // ScriptSigningPolicy defines the enforcement level for script signatures.
@@ -102,9 +102,9 @@ const (
 
 // TrustedKeyRef identifies a trusted signing key by name, thumbprint, or key reference.
 type TrustedKeyRef struct {
-	Name         string `yaml:"name"`
-	Thumbprint   string `yaml:"thumbprint,omitempty"`
-	PublicKeyRef string `yaml:"public_key_ref,omitempty"`
+	Name         string `yaml:"name" json:"name"`
+	Thumbprint   string `yaml:"thumbprint,omitempty" json:"thumbprint,omitempty"`
+	PublicKeyRef string `yaml:"public_key_ref,omitempty" json:"public_key_ref,omitempty"`
 }
 
 // ScriptSigningConfig defines the steward-level script signing policy.
@@ -112,14 +112,14 @@ type TrustedKeyRef struct {
 // Child tenants inherit parent config via MergeScriptSigningConfig and may only
 // tighten policy (none→optional→required), never loosen it.
 type ScriptSigningConfig struct {
-	Policy        ScriptSigningPolicy `yaml:"policy,omitempty"`
-	TrustMode     ScriptTrustMode     `yaml:"trust_mode,omitempty"`
-	TrustedKeys   []TrustedKeyRef     `yaml:"trusted_keys,omitempty"`
-	AllowPublicCA bool                `yaml:"allow_public_ca,omitempty"`
+	Policy        ScriptSigningPolicy `yaml:"policy,omitempty" json:"policy,omitempty"`
+	TrustMode     ScriptTrustMode     `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"`
+	TrustedKeys   []TrustedKeyRef     `yaml:"trusted_keys,omitempty" json:"trusted_keys,omitempty"`
+	AllowPublicCA bool                `yaml:"allow_public_ca,omitempty" json:"allow_public_ca,omitempty"`
 
 	// RequireSignedAdhoc requires a valid signature on all ad-hoc script commands.
 	// Incompatible with policy: none.
-	RequireSignedAdhoc bool `yaml:"require_signed_adhoc,omitempty"`
+	RequireSignedAdhoc bool `yaml:"require_signed_adhoc,omitempty" json:"require_signed_adhoc,omitempty"`
 }
 
 // ResourceConfig defines a single resource to be managed by the steward.
@@ -148,15 +148,15 @@ const (
 
 // LoggingConfig defines logging output settings.
 type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+	Level  string `yaml:"level" json:"level"`
+	Format string `yaml:"format" json:"format"`
 }
 
 // ErrorHandlingConfig defines how to handle various error conditions.
 type ErrorHandlingConfig struct {
-	ModuleLoadFailure  ErrorAction `yaml:"module_load_failure"`
-	ResourceFailure    ErrorAction `yaml:"resource_failure"`
-	ConfigurationError ErrorAction `yaml:"configuration_error"`
+	ModuleLoadFailure  ErrorAction `yaml:"module_load_failure" json:"module_load_failure"`
+	ResourceFailure    ErrorAction `yaml:"resource_failure" json:"resource_failure"`
+	ConfigurationError ErrorAction `yaml:"configuration_error" json:"configuration_error"`
 }
 
 // ErrorAction defines the available error handling strategies.
