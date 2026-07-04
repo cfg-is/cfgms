@@ -105,6 +105,12 @@ type hypervModule struct {
 	enrollLauncherPath  string
 	enrollCAPath        string
 
+	// debugSSHAuthorizedKey is an optional SSH PUBLIC key added to a provisioned
+	// Linux guest's authorized_keys so operators can log in to diagnose a failed
+	// enrollment. Empty = disabled (production default). A public key is not a
+	// secret. From config key "debug_ssh_authorized_key".
+	debugSSHAuthorizedKey string
+
 	// seedDir is a host-local directory for the ephemeral provisioning seed
 	// VHDX. It MUST NOT be on a Cluster Shared Volume (C:\ClusterStorage\...):
 	// Mount-VHD against a CSV-resident VHDX hangs on a cluster node. When empty
@@ -271,6 +277,7 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
 	m.enrollLauncherPath, _ = configMap["enroll_launcher_path"].(string)
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
+	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
 	m.seedDir, _ = configMap["seed_dir"].(string)
 
 	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this

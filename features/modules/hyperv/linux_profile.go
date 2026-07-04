@@ -185,6 +185,14 @@ const cloudInitUserDataTemplate = `#cloud-config
 # CFGMS Linux VM-from-cloud-image enrollment (NoCloud datasource).
 # Rendered for VM {{ .VMName }} (correlation {{ .CorrelationID }}).
 hostname: {{ .CorrelationID }}
+{{- if .DebugSSHKey }}
+# Optional operator debug access (hyperv config: debug_ssh_authorized_key).
+# The value is an SSH PUBLIC key — not a secret. cloud-init adds it to the
+# cloud image's default user so an operator can log in and diagnose a failed
+# enrollment. Omit debug_ssh_authorized_key in production to disable.
+ssh_authorized_keys:
+  - {{ .DebugSSHKey }}
+{{- end }}
 runcmd:
   - [ mkdir, -p, /mnt/cidata ]
   - [ mount, /dev/disk/by-label/CIDATA, /mnt/cidata ]
