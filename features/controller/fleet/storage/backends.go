@@ -675,22 +675,47 @@ func (b *DatabaseBackend) prepareStatements() error {
 	var err error
 
 	// Insert DNA record statement
+	// ON CONFLICT keeps the write idempotent when two DNA snapshots for the same
+	// device resolve to the same version (GetNextVersion runs outside this insert's
+	// transaction, so a duplicate/concurrent publish can collide on the
+	// UNIQUE(device_id, version) constraint). The latest snapshot wins.
 	b.stmts.insertRecord, err = b.db.Prepare(`
 		INSERT INTO dna_history
 		(device_id, timestamp, version, dna_json, content_hash,
 		 original_size, compressed_size, compression_ratio, shard_id,
 		 tenant_id, os, architecture, hostname, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			timestamp=EXCLUDED.timestamp,
+			dna_json=EXCLUDED.dna_json,
+			content_hash=EXCLUDED.content_hash,
+			original_size=EXCLUDED.original_size,
+			compressed_size=EXCLUDED.compressed_size,
+			compression_ratio=EXCLUDED.compression_ratio,
+			shard_id=EXCLUDED.shard_id,
+			tenant_id=EXCLUDED.tenant_id,
+			os=EXCLUDED.os,
+			architecture=EXCLUDED.architecture,
+			hostname=EXCLUDED.hostname,
+			status=EXCLUDED.status
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			content_hash=EXCLUDED.content_hash,
+			timestamp=EXCLUDED.timestamp,
+			shard_id=EXCLUDED.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert reference statement: %w", err)
