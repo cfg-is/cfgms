@@ -40,3 +40,20 @@ func TestLinuxCloudInit_DebugSSHKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(out2), "ssh_authorized_keys", "no debug SSH access unless explicitly configured")
 }
+
+// TestLinuxCloudInit_InstallUsesControllerCAFlag guards against the flag-name drift
+// that silently broke enrollment: the cloud-init install line must invoke
+// `cfgms-steward install ... --controller-ca ...` (the actual flag registered by
+// the steward install command), NOT the non-existent `--ca-cert`, which aborts the
+// install at flag parsing ("unknown flag: --ca-cert") so the steward never installs.
+func TestLinuxCloudInit_InstallUsesControllerCAFlag(t *testing.T) {
+	profile := defaultLinuxCloudInitProfile()
+	out, err := NewProfileRenderer().Render(context.Background(), profile, ProfileVars{
+		VMName: "stw-lin-01", OSFamily: "linux", CorrelationID: "corr-1",
+		EnrollToken: "tok", CAFingerprint: "abcd", BundleURL: profile.Enroll.BundleURL,
+	}, preseedTestStore())
+	require.NoError(t, err)
+	rendered := string(out)
+	assert.Contains(t, rendered, "--controller-ca", "install must use the real --controller-ca flag")
+	assert.NotContains(t, rendered, "--ca-cert", "the steward install command has no --ca-cert flag (aborts enrollment)")
+}
