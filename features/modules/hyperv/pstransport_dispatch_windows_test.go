@@ -510,7 +510,7 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psSetHddFirstBoot", psSetHddFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "VHDPath": "C:\\VMs\\web-01.vhdx"}},
 		// cloud-init CIDATA seed reuses psMountSeedVHD/psCopyToSeedVHD with extra optional args
 		{"psMountSeedVHD/cidata", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA"}},
-		{"psCopyToSeedVHD/cidata", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA", "FileName": "user-data", "Content": "#cloud-config", "FileName2": "meta-data", "Content2": "instance-id: x", "StewardSrc": "C:\\s\\cfgms-steward-linux", "StewardDest": "cfgms-steward", "CASrc": "C:\\s\\ca.crt"}},
+		{"psCopyToSeedVHD/cidata", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA", "FileName": "user-data", "Content": "#cloud-config", "FileName2": "meta-data", "Content2": "instance-id: x", "StewardSrc": "C:\\s\\cfgms-steward-linux", "StewardDest": "cfgms-steward", "LauncherSrc": "C:\\s\\cfgms-steward-launcher-linux", "LauncherDest": "cfgms-steward-launcher", "CASrc": "C:\\s\\ca.crt"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},

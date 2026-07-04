@@ -163,11 +163,14 @@ const linuxCloudInitProfileName = "debian-cloudinit-base"
 // image (source.image). cloud-init auto-detects the CIDATA-labelled seed on
 // first boot — no kernel cmdline, no boot-media repack — and runs runcmd as root.
 //
-// The seed volume (built host-side) carries the steward binary (cfgms-steward)
-// and controller CA (controller-ca.crt) next to this user-data. runcmd copies the
-// binary off the vfat seed (which has no Unix exec bit), makes it executable, and
-// runs `cfgms-steward install --regtoken … --ca-cert … --fingerprint …`, which on
-// a live (non-chroot) system stages the binary, writes the CA + systemd unit
+// The seed volume (built host-side) carries the steward binary (cfgms-steward),
+// the launcher binary (cfgms-steward-launcher), and controller CA
+// (controller-ca.crt) next to this user-data. runcmd copies the binaries off the
+// vfat seed (which has no Unix exec bit), makes them executable, and runs
+// `cfgms-steward install --regtoken … --ca-cert … --fingerprint …`. On Linux that
+// install is launcher-managed and REQUIRES cfgms-steward-launcher next to the
+// steward binary (so the resulting steward is push-upgradeable); on
+// a live (non-chroot) system it stages the binary, writes the CA + systemd unit
 // (token baked in), and `systemctl enable --now` starts enrollment. The
 // controller URL is baked into the binary at build time (ldflags).
 //
@@ -187,6 +190,8 @@ runcmd:
   - [ mount, /dev/disk/by-label/CIDATA, /mnt/cidata ]
   - [ cp, /mnt/cidata/cfgms-steward, /opt/cfgms-steward ]
   - [ chmod, "0755", /opt/cfgms-steward ]
+  - [ cp, /mnt/cidata/cfgms-steward-launcher, /opt/cfgms-steward-launcher ]
+  - [ chmod, "0755", /opt/cfgms-steward-launcher ]
   - [ /opt/cfgms-steward, install, --regtoken, "{{ .EnrollToken }}", --ca-cert, /mnt/cidata/controller-ca.crt, --fingerprint, "{{ .CAFingerprint }}" ]
   - [ umount, /mnt/cidata ]
 `
