@@ -1,0 +1,128 @@
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — warm near-black grounds, warm taupe
+ * text, muted slate-blue accent, desaturated earth-tone semantics, and a
+ * palette of muted card tints. State owns the colour budget; the accent is
+ * reserved for interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f7f4ef;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #f0ebe4;  /* raised / inset chrome */
+  --bg-sunk:      #f0ebe4;  /* wells, code blocks */
+  --border:       #d4cfc4;
+
+  /* --- Text & accent --- */
+  --text-primary:   #6b5a4a; /* warm taupe */
+  --text-secondary: #7a6a5a;
+  --text-faint:     #8f7d66; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #a05a35;  --state-warn-bg:  #f7e8db; /* drift / warning */
+  --state-crit:      #b56a5a;  --state-crit-bg:  #f2e5e3; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #7a6a5a;  --state-neutral-bg:#e8e0d8; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f2e5e3;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f7e8db;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e8e0d8;  /* metadata / reference */
+  --tint-cream:  #faf8f5;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(60, 45, 30, 0.40);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1e1e1e;
+    --bg-surface:  #252526;
+    --bg-elevated: #2d2d2d;
+    --bg-sunk:     #1a1a1a;
+    --border:      #3c3c3c;
+
+    --text-primary:   #c4b4a4;
+    --text-secondary: #a89888;
+    --text-faint:     #8a7a68;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #6d9472;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #d4864f;  --state-warn-bg:   #332518;
+    --state-crit:    #c97a6a;  --state-crit-bg:   #2d1f1c;
+    --state-mauve:   #a58198;
+    --state-neutral: #a89888;  --state-neutral-bg:#2a2520;
+
+    --tint-red:    #2d1f1c;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #332518;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #2a2520;
+    --tint-cream:  #252321;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f7f4ef; --bg-surface: #ffffff; --bg-elevated: #f0ebe4; --bg-sunk: #f0ebe4; --border: #d4cfc4;
+  --text-primary: #6b5a4a; --text-secondary: #7a6a5a; --text-faint: #8f7d66; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #a05a35; --state-warn-bg: #f7e8db;
+  --state-crit: #b56a5a; --state-crit-bg: #f2e5e3; --state-mauve: #7a5f6e; --state-neutral: #7a6a5a; --state-neutral-bg: #e8e0d8;
+  --tint-red: #f2e5e3; --tint-green: #e8f0e9; --tint-orange: #f7e8db; --tint-blue: #e6eef2; --tint-brown: #e8e0d8; --tint-cream: #faf8f5;
+  --shadow: 0 18px 50px -22px rgba(60, 45, 30, 0.40);
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1e1e1e; --bg-surface: #252526; --bg-elevated: #2d2d2d; --bg-sunk: #1a1a1a; --border: #3c3c3c;
+  --text-primary: #c4b4a4; --text-secondary: #a89888; --text-faint: #8a7a68; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #6d9472; --state-ok-bg: #1a2e1d; --state-warn: #d4864f; --state-warn-bg: #332518;
+  --state-crit: #c97a6a; --state-crit-bg: #2d1f1c; --state-mauve: #a58198; --state-neutral: #a89888; --state-neutral-bg: #2a2520;
+  --tint-red: #2d1f1c; --tint-green: #1a2e1d; --tint-orange: #332518; --tint-blue: #1e2528; --tint-brown: #2a2520; --tint-cream: #252321;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+}
