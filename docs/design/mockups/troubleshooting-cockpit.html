@@ -1,0 +1,470 @@
+<style>
+  :root {
+    --bg: #f0ebe4; --chrome: #f7f4ef; --chrome-2: #ffffff; --border: #d4cfc4;
+    --text: #6b5a4a; --text-dim: #7a6a5a; --accent: #4a6b7c; --accent-ink: #ffffff;
+    --shadow: 0 18px 50px -22px rgba(60,45,30,.4); --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #181817; --chrome: #1e1e1e; --chrome-2: #252526; --border: #3c3c3c;
+      --text: #c4b4a4; --text-dim: #a89888; --accent: #7b9fb0; --accent-ink: #16202a;
+      --shadow: 0 22px 60px -26px rgba(0,0,0,.8);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f0ebe4; --chrome: #f7f4ef; --chrome-2: #ffffff; --border: #d4cfc4;
+    --text: #6b5a4a; --text-dim: #7a6a5a; --accent: #4a6b7c; --accent-ink: #ffffff;
+    --shadow: 0 18px 50px -22px rgba(60,45,30,.4);
+  }
+  :root[data-theme="dark"] {
+    --bg: #181817; --chrome: #1e1e1e; --chrome-2: #252526; --border: #3c3c3c;
+    --text: #c4b4a4; --text-dim: #a89888; --accent: #7b9fb0; --accent-ink: #16202a;
+    --shadow: 0 22px 60px -26px rgba(0,0,0,.8);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; background: var(--bg); color: var(--text);
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased; display: flex; flex-direction: column;
+  }
+  .topbar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 11px 16px; background: var(--chrome); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .brand { display: flex; align-items: baseline; gap: 8px; margin-right: auto; }
+  .brand b { font-size: 14px; letter-spacing: .13em; text-transform: uppercase; font-weight: 700; }
+  .brand span { font-size: 11px; color: var(--text-dim); letter-spacing: .04em; }
+  .seg { display: inline-flex; position: relative; background: var(--chrome-2); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
+  .seg button {
+    position: relative; z-index: 1; appearance: none; border: 0; background: transparent;
+    color: var(--text-dim); font: inherit; font-size: 12.5px; font-weight: 600;
+    padding: 6px 13px; border-radius: 7px; cursor: pointer; transition: color .18s ease;
+  }
+  .seg button[aria-pressed="true"] { color: var(--accent-ink); }
+  .seg .thumb { position: absolute; top: 3px; left: 3px; height: calc(100% - 6px); background: var(--accent); border-radius: 7px; transition: transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index: 0; }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .dims { font-family: 'JetBrains Mono', ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .stage { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 22px 16px 30px; overflow: auto; }
+  .frame-wrap { position: relative; margin: 0 auto; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); border: 1px solid var(--border); background: var(--chrome); transition: width .22s ease, height .22s ease; }
+  .frame { display: block; border: 0; transform-origin: 0 0; background: transparent; }
+  .hint { text-align: center; color: var(--text-dim); font-size: 12.5px; line-height: 1.6; padding: 0 20px 30px; max-width: 580px; margin: 0 auto; }
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>troubleshooting cockpit</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS cockpit mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  Brand-aligned to <b>cfg.is/style-guide</b> · use the <b>Auto / Light / Dark</b> toggle to compare themes,
+  flip intake <b>Email / Live</b>, tab <b>Investigation / Chat</b>, and try <b>Caller-ID lookup</b>. Pinch to zoom.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1440,h:940}, tablet:{w:900,h:1180}, mobile:{w:390,h:1620} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg:#f7f4ef; --panel:#ffffff; --elev:#f0ebe4; --sunk:#f0ebe4; --border:#d4cfc4;
+      --text:#6b5a4a; --dim:#7a6a5a; --faint:#8f7d66;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --ok:#507055; --ok-bg:#e8f0e9; --warn:#a05a35; --warn-bg:#f7e8db;
+      --crit:#b56a5a; --crit-bg:#f2e5e3; --mauve:#7a5f6e; --neu:#7a6a5a; --neu-bg:#e8e0d8;
+      --tint-red:#f2e5e3; --tint-green:#e8f0e9; --tint-orange:#f7e8db; --tint-blue:#e6eef2;
+      --tint-brown:#e8e0d8; --tint-cream:#faf8f5;
+    }
+    :root[data-theme="dark"]{
+      --bg:#1e1e1e; --panel:#252526; --elev:#2d2d2d; --sunk:#1a1a1a; --border:#3c3c3c;
+      --text:#c4b4a4; --dim:#a89888; --faint:#8a7a68;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --ok:#6d9472; --ok-bg:#1a2e1d; --warn:#d4864f; --warn-bg:#332518;
+      --crit:#c97a6a; --crit-bg:#2d1f1c; --mauve:#a58198; --neu:#a89888; --neu-bg:#2a2520;
+      --tint-red:#2d1f1c; --tint-green:#1a2e1d; --tint-orange:#332518; --tint-blue:#1e2528;
+      --tint-brown:#2a2520; --tint-cream:#252321;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0;height:100%;}
+    body{background:var(--bg); color:var(--text); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums;}
+    .lbl{font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--faint); font-weight:600;}
+    .dot{width:7px; height:7px; border-radius:50%; background:currentColor; flex:none;}
+    .pill{display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:600; white-space:nowrap;}
+    .pill.ok{background:var(--ok-bg); color:var(--ok);} .pill.warn{background:var(--warn-bg); color:var(--warn);}
+    .pill.crit{background:var(--crit-bg); color:var(--crit);} .pill.neu{background:var(--neu-bg); color:var(--neu);}
+    .pill.acc{background:var(--accent); color:var(--accent-ink);}
+
+    .cockpit{display:flex; flex-direction:column; height:100%;}
+    .cbar{display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:10px 16px;
+      background:var(--panel); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:4;}
+    .cid{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+    .cid .num{font-size:12px; font-weight:700; letter-spacing:.05em; color:var(--accent);}
+    .cid .asset{font-size:14px; font-weight:700;}
+    .cid .path{font-size:11.5px; color:var(--dim);}
+    .intakeseg{display:inline-flex; position:relative; background:var(--elev); border:1px solid var(--border);
+      border-radius:9px; padding:3px; margin-left:auto;}
+    .intakeseg button{position:relative; z-index:1; border:0; background:transparent; color:var(--dim);
+      font:inherit; font-size:12px; font-weight:600; padding:6px 12px; border-radius:6px; cursor:pointer;}
+    .intakeseg button.on{color:var(--accent-ink);}
+    .intakeseg .ithumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); border-radius:6px; background:var(--accent); transition:transform .2s ease, width .2s ease; z-index:0;}
+
+    .work{flex:1; display:grid; grid-template-columns:1fr; min-height:0;}
+    .leftcol{display:flex; flex-direction:column; min-height:0;}
+
+    /* ===== rail (tabbed) ===== */
+    .rail{display:flex; flex-direction:column; min-height:0; background:var(--panel); border-bottom:1px solid var(--border);}
+    .tabs{display:flex; align-items:center; gap:2px; padding:0 12px; border-bottom:1px solid var(--border); position:relative;}
+    .tabs button{appearance:none; border:0; background:transparent; font:inherit; font-size:12.5px; font-weight:600;
+      color:var(--dim); padding:12px 12px; cursor:pointer; position:relative;}
+    .tabs button.on{color:var(--text);}
+    .tabs button.on::after{content:""; position:absolute; left:8px; right:8px; bottom:-1px; height:2px; background:var(--accent); border-radius:2px;}
+    .tabs .ctx{margin-left:auto; display:flex; align-items:center; gap:7px; font-size:11px;}
+    .live-ind{display:flex; align-items:center; gap:6px; color:var(--crit); font-weight:600;}
+    .live-ind .dot{animation:pulse 1.4s infinite;}
+    @keyframes pulse{0%,100%{opacity:1;} 50%{opacity:.25;}}
+    @media (prefers-reduced-motion:reduce){.live-ind .dot{animation:none;}}
+    .tabpane{display:none; flex:1; min-height:0; flex-direction:column;}
+    .tabpane.on{display:flex;}
+    .rbody{flex:1; overflow:auto; padding:14px 15px; display:flex; flex-direction:column; gap:12px;}
+
+    .intake{display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; font-size:11.5px; color:var(--dim);}
+    .subj{font-size:14px; font-weight:600; line-height:1.3;}
+    .finds{display:flex; flex-direction:column;}
+    .find{display:grid; grid-template-columns:16px 1fr; gap:10px; padding:8px 0; position:relative;}
+    .find:not(:last-child)::before{content:""; position:absolute; left:7px; top:21px; bottom:-8px; width:1.5px; background:var(--border);}
+    .find .mk{width:15px; height:15px; border-radius:50%; border:2px solid var(--ok); display:grid; place-items:center; margin-top:1px;}
+    .find .mk::after{content:""; width:5px; height:5px; border-radius:50%; background:var(--ok);}
+    .find.q .mk{border-color:var(--accent);} .find.q .mk::after{background:var(--accent);}
+    .find p{margin:0; font-size:12.5px;} .find p b{font-weight:600;}
+    .verdict{margin-top:2px; padding:10px 12px; background:var(--tint-cream); border:1px solid var(--border);
+      border-radius:10px; display:flex; align-items:center; gap:10px; font-size:12px;}
+
+    .msgs{display:flex; flex-direction:column; gap:11px;}
+    .msg{display:flex; gap:9px;}
+    .msg .av{width:26px; height:26px; border-radius:7px; flex:none; display:grid; place-items:center; font-size:10px; font-weight:700;
+      font-family:'JetBrains Mono',Menlo,monospace;}
+    .msg .av.you{background:var(--neu-bg); color:var(--text);}
+    .msg .av.sys{background:var(--accent); color:var(--accent-ink);}
+    .msg .av.bot{background:var(--warn-bg); color:var(--warn); border:1px solid var(--warn);}
+    .msg .bub .who{font-size:11px; color:var(--faint); font-weight:600; margin-bottom:2px;}
+    .msg .bub p{margin:0; font-size:12.5px; line-height:1.4;}
+    .mention{color:var(--accent); font-weight:600; font-family:'JetBrains Mono',Menlo,monospace;}
+    .composer{display:flex; align-items:center; gap:9px; padding:11px 15px; border-top:1px solid var(--border); background:var(--panel);}
+    .composer .box{flex:1; padding:9px 12px; background:var(--sunk); border:1px solid var(--border); border-radius:9px; color:var(--faint); font-size:12.5px;}
+    .composer .send{width:34px; height:34px; border-radius:9px; background:var(--accent); color:var(--accent-ink); border:0; display:grid; place-items:center; flex:none; cursor:pointer;}
+
+    /* ===== quick reference ===== */
+    .qref{background:var(--tint-brown); border-bottom:1px solid var(--border); display:flex; flex-direction:column; flex:none;}
+    .qref .qhead{display:flex; align-items:center; gap:9px; padding:9px 13px; border-bottom:1px solid var(--border);}
+    .qref .qhead b{font-size:12px; font-weight:700; letter-spacing:.03em;}
+    .qref .qhead .count{margin-left:auto; font-size:11px; font-weight:700;}
+    .qref.ready .qhead .state{background:var(--ok-bg); color:var(--ok);}
+    .qref .qhead .state{background:var(--warn-bg); color:var(--warn);}
+    .qtools{display:flex; gap:6px; flex-wrap:wrap; padding:8px 13px 2px;}
+    .qbtn{appearance:none; font:inherit; font-size:11px; font-weight:600; padding:5px 9px; border-radius:7px; cursor:pointer;
+      background:var(--panel); border:1px solid var(--border); color:var(--text);}
+    .qbtn.pri{background:var(--accent); border-color:var(--accent); color:var(--accent-ink);}
+    .qfields{padding:4px 13px 9px; display:flex; flex-direction:column;}
+    .qfield{display:flex; justify-content:space-between; gap:10px; align-items:baseline; padding:6px 0; border-bottom:1px solid var(--border);}
+    .qfield:last-child{border-bottom:0;}
+    .qfield .lbl{flex:none; padding-top:1px;}
+    .qf-v{font-size:12.5px; font-weight:600; text-align:right; line-height:1.3;}
+    .qf-v .src{font-size:9px; letter-spacing:.04em; text-transform:uppercase; color:var(--faint); font-weight:600; margin-left:5px;}
+    .qf-v .src.ok{color:var(--ok);}
+    .qfield.miss{background:var(--warn-bg); margin:0 -13px; padding:6px 13px; border-bottom:1px solid var(--border);}
+    .qfield.miss .lbl{color:var(--warn);}
+    .qfield.miss .qf-v{color:var(--warn);}
+    .qf-v .add{font-size:11px; font-weight:600; color:var(--accent); cursor:pointer; margin-left:4px;}
+
+    /* ===== canvas ===== */
+    .canvas{overflow:auto; padding:16px; display:grid; grid-template-columns:1fr; gap:14px; align-content:start;}
+    .card{background:var(--panel); border:1px solid var(--border); border-radius:13px; overflow:hidden;}
+    .card > h3{margin:0; padding:11px 15px; font-size:12.5px; font-weight:700; border-bottom:1px solid var(--border);
+      display:flex; align-items:center; justify-content:space-between; gap:10px;}
+    .card > h3 .rt{font-size:11px; font-weight:600; color:var(--accent); cursor:pointer;}
+    .card > h3 .sub{color:var(--faint); font-weight:500; font-size:11px;}
+
+    .diff{background:var(--tint-red);}
+    .diff .grid{display:grid; grid-template-columns:1fr; gap:1px; background:var(--border);}
+    .diff .col{background:var(--panel); padding:12px 15px;}
+    .diff .col .lbl{margin-bottom:8px;}
+    .diff .kv{display:flex; justify-content:space-between; gap:12px; padding:5px 0; font-size:12.5px; align-items:center;}
+    .diff .kv .k{color:var(--dim);}
+    .diff .kv .v{font-weight:600;}
+    .diff .kv.bad{background:var(--crit-bg); margin:0 -15px; padding:5px 15px;}
+    .diff .kv.bad .v{color:var(--crit);}
+    .diff .kv.good .v{color:var(--ok);}
+    .diff .note{padding:10px 15px; font-size:12px; color:var(--dim); display:flex; gap:8px; align-items:flex-start;}
+    .diff .raw{display:none; padding:12px 15px; border-top:1px solid var(--border); background:var(--sunk);}
+    .diff .raw.show{display:block;}
+    .diff .raw pre{margin:0; font-size:11px; color:var(--dim); white-space:pre-wrap; line-height:1.5;}
+    .diff .raw .cur{color:var(--ok);}
+
+    .graph{background:var(--tint-orange);} .graph .gwrap{padding:10px; display:grid; place-items:center; background:var(--panel);}
+    .graph svg{width:100%; height:auto; max-width:340px;}
+    .timeline{background:var(--tint-blue);}
+    .tl{padding:8px 15px 12px; background:var(--panel);}
+    .tl .ev{display:grid; grid-template-columns:52px 14px 1fr; gap:10px; padding:7px 0; position:relative; align-items:start;}
+    .tl .ev:not(:last-child)::before{content:""; position:absolute; left:58px; top:19px; bottom:-7px; width:1.5px; background:var(--border);}
+    .tl .ev .t{font-size:11px; color:var(--faint); text-align:right; padding-top:1px;}
+    .tl .ev .m{width:9px; height:9px; border-radius:50%; background:var(--neu); margin:4px auto 0;}
+    .tl .ev.crit .m{background:var(--crit);} .tl .ev.now .m{background:var(--accent); box-shadow:0 0 0 4px var(--accent-bg,rgba(122,159,176,.2));}
+    .tl .ev p{margin:0; font-size:12.5px;} .tl .ev p b{font-weight:600;} .tl .ev small{color:var(--faint); font-size:11px;}
+
+    .remedy{background:var(--tint-green); border-color:var(--ok);}
+    .remedy > h3{color:var(--ok); border-bottom-color:var(--border);}
+    .remedy .rbdy{padding:13px 15px; display:flex; flex-direction:column; gap:11px; background:var(--panel);}
+    .remedy .plan{font-size:13.5px; font-weight:600;}
+    .remedy .facts{display:flex; flex-wrap:wrap; gap:7px;}
+    .remedy .fact{font-size:11.5px; color:var(--dim); background:var(--elev); border:1px solid var(--border); border-radius:7px; padding:4px 9px;}
+    .remedy .acts{display:flex; gap:9px; flex-wrap:wrap;}
+    .btn{appearance:none; font:inherit; font-size:13px; font-weight:600; padding:9px 16px; border-radius:9px; cursor:pointer;}
+    .btn.pri{background:var(--ok); color:#fff; border:1px solid var(--ok);}
+    .btn.ghost{background:transparent; color:var(--text); border:1px solid var(--border);}
+
+    @media (min-width:720px){
+      .work{grid-template-columns:320px 1fr;}
+      .leftcol{height:100%; border-right:1px solid var(--border);}
+      .rail{flex:1; min-height:0; border-bottom:0;}
+    }
+    @media (min-width:1024px){
+      .work{grid-template-columns:340px 1fr;}
+      .canvas{grid-template-columns:1fr 1fr; padding:18px;}
+      .diff, .remedy{grid-column:1 / -1;}
+      .diff .grid{grid-template-columns:1fr 1fr;}
+    }
+  `;
+
+  const graphSVG = `
+    <svg viewBox="0 0 320 190" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dependency graph">
+      <line x1="160" y1="95" x2="60" y2="40" stroke="var(--crit)" stroke-width="2"/>
+      <line x1="160" y1="95" x2="60" y2="150" stroke="var(--crit)" stroke-width="2"/>
+      <line x1="160" y1="95" x2="270" y2="95" stroke="var(--border)" stroke-width="2"/>
+      <g font-family="'JetBrains Mono',Menlo,monospace" font-size="9">
+        <circle cx="160" cy="95" r="26" fill="var(--crit-bg)" stroke="var(--crit)" stroke-width="2"/>
+        <text x="160" y="98" text-anchor="middle" fill="var(--crit)" font-weight="700">sql-primary</text>
+        <circle cx="60" cy="40" r="20" fill="var(--warn-bg)" stroke="var(--warn)" stroke-width="1.5"/>
+        <text x="60" y="43" text-anchor="middle" fill="var(--warn)">api-02</text>
+        <circle cx="60" cy="150" r="20" fill="var(--warn-bg)" stroke="var(--warn)" stroke-width="1.5"/>
+        <text x="60" y="153" text-anchor="middle" fill="var(--warn)">reports-01</text>
+        <circle cx="270" cy="95" r="20" fill="var(--ok-bg)" stroke="var(--ok)" stroke-width="1.5"/>
+        <text x="270" y="98" text-anchor="middle" fill="var(--ok)">web-04</text>
+      </g>
+      <text x="103" y="58" fill="var(--crit)" font-family="'JetBrains Mono',Menlo,monospace" font-size="8.5">×4 lat</text>
+      <text x="103" y="132" fill="var(--crit)" font-family="'JetBrains Mono',Menlo,monospace" font-size="8.5">×4 lat</text>
+    </svg>`;
+
+  const MOCK_HTML = `
+  <div class="cockpit">
+    <div class="cbar">
+      <div class="cid">
+        <span class="num mono">CASE 4821</span>
+        <span class="asset mono">sql-primary</span>
+        <span class="path mono">root / msp-a / client-1</span>
+      </div>
+      <div class="intakeseg" role="group" aria-label="Intake">
+        <span class="ithumb" aria-hidden="true"></span>
+        <button data-intake="email" class="on">Email</button>
+        <button data-intake="live">Live call</button>
+      </div>
+      <span class="pill warn"><span class="dot"></span>SLA 46m</span>
+    </div>
+
+    <div class="work">
+      <div class="leftcol">
+      <!-- QUICK REFERENCE -->
+      <aside class="qref">
+        <div class="qhead">
+          <b>Ticket</b>
+          <span class="pill state" style="padding:2px 8px;"><span class="dot"></span><span id="qstate">2 needed</span></span>
+          <span class="count mono" id="qcount">3 / 5</span>
+        </div>
+        <div class="qtools">
+          <button class="qbtn pri" id="cidLookup">Caller-ID lookup</button>
+          <button class="qbtn">Match ticket</button>
+          <button class="qbtn">Edit</button>
+        </div>
+        <div class="qfields">
+          <div class="qfield" data-field="title"><span class="lbl">Title</span><span class="qf-v">SQL app slow since 9am <span class="src ok">email</span></span></div>
+          <div class="qfield" data-field="client"><span class="lbl">Client</span><span class="qf-v mono">client-1 <span class="src ok">caller-ID</span></span></div>
+          <div class="qfield" data-field="priority"><span class="lbl">Priority</span><span class="qf-v">High · P2 <span class="src ok">email</span></span></div>
+          <div class="qfield miss" data-field="contact"><span class="lbl">Contact</span><span class="qf-v">— <span class="add">add</span></span></div>
+          <div class="qfield miss" data-field="category"><span class="lbl">Category</span><span class="qf-v">— <span class="add">add</span></span></div>
+        </div>
+      </aside>
+
+      <!-- RAIL: tabbed Investigation / Chat -->
+      <aside class="rail">
+        <div class="tabs">
+          <button data-tab="inv" class="on">Investigation</button>
+          <button data-tab="chat">Chat</button>
+          <div class="ctx">
+            <span class="ctx-email pill neu" style="padding:2px 8px;"><span class="dot"></span>Email · #4821</span>
+            <span class="ctx-live live-ind" style="display:none;"><span class="dot"></span>LIVE · <span class="mono">02:14</span></span>
+          </div>
+        </div>
+
+        <div class="tabpane on" data-pane="inv">
+          <div class="rbody">
+            <div class="intake mono"><span>#4821</span><span>·</span><span id="intakeSrc">Email</span><span>·</span><span>08:52</span></div>
+            <div class="subj">"SQL app has been crawling since about 9am"</div>
+            <div class="lbl">Prepared by CFGMS</div>
+            <div class="finds">
+              <div class="find"><span class="mk"></span><p>Correlated onset with config push <b class="mono">r2291</b> at <b class="mono">08:41</b></p></div>
+              <div class="find"><span class="mk"></span><p><b class="mono">sql-primary</b> drifted — <b>max server memory</b> reverted to 2 GB default</p></div>
+              <div class="find"><span class="mk"></span><p>Blast radius: <b>2 of 3</b> dependent app servers at <b class="mono">×4</b> latency</p></div>
+              <div class="find q"><span class="mk"></span><p>Remediation staged &amp; validated — awaiting approval</p></div>
+            </div>
+            <div class="verdict"><span class="pill crit"><span class="dot"></span>Cause found</span><b>1 action · ~30s · reversible</b></div>
+          </div>
+        </div>
+
+        <div class="tabpane" data-pane="chat">
+          <div class="rbody">
+            <div class="msgs">
+              <div class="msg"><div class="av you">YOU</div><div class="bub"><div class="who">Dispatcher</div><p>Customer's on the line — app's been crawling for the whole floor since ~9am.</p></div></div>
+              <div class="msg"><div class="av sys">CF</div><div class="bub"><div class="who">CFGMS</div><p>On it — pulling <span class="mention">sql-primary</span> and its dependents…</p></div></div>
+              <div class="msg"><div class="av sys">CF</div><div class="bub"><div class="who">CFGMS</div><p>Found it: memory config reverted during the <span class="mention">r2291</span> push at 08:41. Canvas updated →</p></div></div>
+              <div class="msg"><div class="av you">YOU</div><div class="bub"><div class="who">Dispatcher</div><p><span class="mention">@sql-bot</span> confirm blast radius before I promise a fix time.</p></div></div>
+              <div class="msg"><div class="av bot">SQ</div><div class="bub"><div class="who mono">@sql-bot</div><p>3 dependents; <span class="mention">api-02</span> + <span class="mention">reports-01</span> at ×4 latency. web-04 nominal.</p></div></div>
+              <div class="msg"><div class="av sys">CF</div><div class="bub"><div class="who">CFGMS</div><p>Fix staged → approve on the canvas. Tell them ~2 minutes.</p></div></div>
+            </div>
+          </div>
+          <div class="composer">
+            <div class="box">Message, or <b class="mono">@bot</b> to summon…</div>
+            <button class="send" aria-label="Send"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M4 12l16-8-6 16-3-6-7-2z" fill="currentColor"/></svg></button>
+          </div>
+        </div>
+      </aside>
+      </div>
+
+      <!-- CANVAS -->
+      <main class="canvas">
+        <section class="card diff">
+          <h3><span>Desired vs actual · <span class="mono" style="font-weight:700">sql-primary</span></span><span class="rt" data-raw>⌄ raw</span></h3>
+          <div class="grid">
+            <div class="col">
+              <div class="lbl">Desired — intent r2291</div>
+              <div class="kv"><span class="k mono">max_server_memory</span><span class="v mono">12288 MB</span></div>
+              <div class="kv"><span class="k mono">max_worker_threads</span><span class="v mono">640</span></div>
+              <div class="kv"><span class="k mono">cost_threshold_par</span><span class="v mono">50</span></div>
+            </div>
+            <div class="col">
+              <div class="lbl">Actual — observed 08:44</div>
+              <div class="kv bad"><span class="k mono">max_server_memory</span><span class="v mono">2048 MB ⚠</span></div>
+              <div class="kv good"><span class="k mono">max_worker_threads</span><span class="v mono">640 ✓</span></div>
+              <div class="kv good"><span class="k mono">cost_threshold_par</span><span class="v mono">50 ✓</span></div>
+            </div>
+          </div>
+          <div class="note"><span class="pill crit"><span class="dot"></span>drift</span><span>Memory section of r2291 failed to apply — service reverted to install default, starving the buffer pool.</span></div>
+          <div class="raw"><pre class="mono">$ cfg steward inspect sql-primary --module mssql.config
+<span class="cur">➜</span> desired.max_server_memory = 12288
+  actual.max_server_memory  = 2048   (source: registry default)
+  last_apply = r2291 partial (section 'memory' err: lock timeout)
+  drift_detected = 2026-07-03T08:44:11Z</pre></div>
+        </section>
+
+        <section class="card graph">
+          <h3><span>Blast radius</span><span class="sub">3 dependents</span></h3>
+          <div class="gwrap">${graphSVG}</div>
+        </section>
+
+        <section class="card timeline">
+          <h3><span>Change timeline</span><span class="sub">today</span></h3>
+          <div class="tl">
+            <div class="ev"><span class="t mono">08:41</span><span class="m"></span><p><b>Config push r2291</b><br><small class="mono">by controller · ring: broad</small></p></div>
+            <div class="ev crit"><span class="t mono">08:44</span><span class="m"></span><p><b>Drift detected</b> on sql-primary<br><small class="mono">memory section not applied</small></p></div>
+            <div class="ev"><span class="t mono">08:52</span><span class="m"></span><p><b>Ticket #4821</b> opened<br><small class="mono">email · client-1</small></p></div>
+            <div class="ev now"><span class="t mono">now</span><span class="m"></span><p><b>Remediation staged</b><br><small class="mono">awaiting approval</small></p></div>
+          </div>
+        </section>
+
+        <section class="card remedy">
+          <h3><span>Remediation plan</span><span class="pill ok" style="background:transparent;border:1px solid currentColor;">validated</span></h3>
+          <div class="rbdy">
+            <div class="plan">Re-apply the <b class="mono">memory</b> section of r2291 to <b class="mono">sql-primary</b></div>
+            <div class="facts"><span class="fact">1 host</span><span class="fact">~30s</span><span class="fact">no restart</span><span class="fact">reversible</span><span class="fact mono">module: mssql.config</span></div>
+            <div class="acts"><button class="btn pri">Approve &amp; run</button><button class="btn ghost">Preview diff</button><button class="btn ghost">Hand to L2</button></div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>`;
+
+  const MOCK_JS = `
+    var ibtns=[].slice.call(document.querySelectorAll('.intakeseg button'));
+    var ithumb=document.querySelector('.intakeseg .ithumb');
+    var tabs=[].slice.call(document.querySelectorAll('.tabs button'));
+    function moveI(){var a=ibtns.filter(function(b){return b.classList.contains('on');})[0]||ibtns[0];
+      ithumb.style.width=a.offsetWidth+'px';ithumb.style.transform='translateX('+(a.offsetLeft-3)+'px)';}
+    function setTab(id){tabs.forEach(function(t){t.classList.toggle('on',t.dataset.tab===id);});
+      [].slice.call(document.querySelectorAll('.tabpane')).forEach(function(p){p.classList.toggle('on',p.dataset.pane===id);});}
+    tabs.forEach(function(t){t.addEventListener('click',function(){setTab(t.dataset.tab);});});
+    ibtns.forEach(function(b){b.addEventListener('click',function(){
+      document.body.dataset.intake=b.dataset.intake;
+      ibtns.forEach(function(x){x.classList.toggle('on',x===b);});moveI();
+      var live=b.dataset.intake==='live';
+      document.querySelector('.ctx-email').style.display=live?'none':'inline-flex';
+      document.querySelector('.ctx-live').style.display=live?'inline-flex':'none';
+      document.getElementById('intakeSrc').textContent=live?'Live call':'Email';
+      setTab(live?'chat':'inv');
+    });});
+    var lookup=document.getElementById('cidLookup');
+    function fill(f,val,src){var el=document.querySelector('.qfield[data-field="'+f+'"]');if(!el)return;
+      el.classList.remove('miss');
+      el.querySelector('.qf-v').innerHTML=val+' <span class="src ok">'+src+'</span>';}
+    if(lookup){lookup.addEventListener('click',function(){
+      fill('contact','M. Rivera · IT mgr','caller-ID');
+      fill('category','Database / Perf','auto');
+      document.getElementById('qcount').textContent='5 / 5';
+      document.getElementById('qstate').textContent='complete';
+      document.querySelector('.qref').classList.add('ready');});}
+    var rt=document.querySelector('[data-raw]');if(rt){rt.addEventListener('click',function(){
+      var r=document.querySelector('.diff .raw');r.classList.toggle('show');
+      rt.textContent=r.classList.contains('show')?'⌃ hide':'⌄ raw';});}
+    window.addEventListener('load',moveI);moveI();
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body>'+
+    MOCK_HTML+'<script>'+MOCK_JS+'<\/script></body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>
