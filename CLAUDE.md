@@ -195,7 +195,7 @@ A module commits to exactly one kind via `executors:` in `module.yaml`. Cross-ki
 
 **Packaging and trust (#1877, ADR-006):** modules are out-of-process gRPC binaries cached by the controller and pulled by hosts. Bundles are publisher-signed; the controller verifies, runs an approval workflow, and stages. End-to-end signing — the controller forwards module signatures intact, never strips and re-signs. `steward.cfg` `module_trust.mode`: `strict` (steward verifies independently), `controller` (default), `bypass` (dev only). CFGMS publisher identity is baked into the steward binary at build time and cannot be changed via cfg push.
 
-**Stdlib** (`file`, `service`, `package`, `script`, `firewall`, `patch`) ships in the steward installer using the same module contract. Stdlib is governance (installer payload), not implementation (never compiled-in).
+**Stdlib** ships in the steward installer using the same module contract; it is governance (installer payload), not implementation (never compiled-in). **What qualifies as stdlib:** a module is stdlib only if it's part of the declared baseline for *nearly every managed machine* — usage across the fleet, not capability; execution primitives (`script`) and platform-scoped baselines also qualify. Everything else is an `extended` module, pulled on demand. The closed set (`file`, `service`, `package`, `script`, `firewall`, `patch`, `user`, `cert_trust`, `time`, `hostname`) and the criterion are authoritative in ADR-016; see `docs/architecture/modules/README.md`.
 
 **Four execution paths on a steward** — every byte of code that runs on a steward arrives through exactly one of these:
 
