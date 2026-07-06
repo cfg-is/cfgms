@@ -1462,3 +1462,116 @@ func TestHandleRegister_DuplicateDeviceIDCrossTenant_200(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec2.Code,
 		"same DeviceID under a different tenant must be accepted (namespaces are independent)")
 }
+
+// TestProvisionedVMRegistration_IPTrustGate covers ADR-010 §3 (Issue #2082):
+// a steward provisioned by the HyperV module registers via the standard
+// POST /api/v1/register endpoint; the IP-trust evaluator (#1694) is the
+// admission gate — the same gate used for all steward registrations. No separate
+// provisioning-registration path exists that bypasses the evaluator.
+//
+// Both admission paths are exercised with real components (real IPTrustStore,
+// real IPTrustApprovalHook, real PendingRegistrationStore, real cert.Manager)
+// to verify end-to-end that the gate is not bypassed for provisioned VMs.
+func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+
+	// Wire real components from the OSS composite storage manager.
+	storageManager := pkgtesting.SetupTestStorage(t)
+	ipTrustStore := storageManager.GetIPTrustStore()
+	require.NotNil(t, ipTrustStore, "test storage must provide an IPTrustStore")
+	pendingStore := storageManager.GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore, "test storage must provide a PendingRegistrationStore")
+
+	// Wire the real IPTrustApprovalHook and durable pending store.
+	server.SetApprovalHook(NewIPTrustApprovalHook(ipTrustStore, logging.NewNoopLogger()))
+	server.SetPendingStore(pendingStore)
+
+	const tenantID = "hv-tenant"
+	const hvTrustedIP = "10.10.0.50"    // HV host's tenant-network IP, added to trust store below
+	const hvUntrustedIP = "198.51.100.1" // not in any trusted range
+
+	// Seed a registration token for the HV tenant (mirrors the join token the
+	// steward bakes into its answer file per ADR-010 §2).
+	tok := &registration.Token{
+		Token:         "cfgms_reg_hv_iptest",
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "hv-vms",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	// sendFrom posts a registration request with the given source IP and returns
+	// the raw response body bytes alongside the recorder so both decoded fields
+	// and raw content (e.g. cert PEM checks) can be verified.
+	sendFrom := func(t *testing.T, sourceIP string) (*httptest.ResponseRecorder, []byte) {
+		t.Helper()
+		body, err := json.Marshal(RegistrationRequest{
+			Token:          tok.Token,
+			DeviceID:       testValidDeviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = sourceIP + ":54321"
+		rec := httptest.NewRecorder()
+		server.handleRegister(rec, req)
+		return rec, rec.Body.Bytes()
+	}
+
+	t.Run("untrusted_network_requires_manual_approval", func(t *testing.T) {
+		// HV host IP is NOT in the trust store → evaluator returns DecisionQuarantine
+		// → handler returns HTTP 202 Accepted with a pending_id for operator review.
+		rec, rawBody := sendFrom(t, hvUntrustedIP)
+		require.Equal(t, http.StatusAccepted, rec.Code,
+			"provisioned VM registering from an untrusted network must be quarantined (202 Accepted)")
+
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.NewDecoder(bytes.NewReader(rawBody)).Decode(&resp))
+		assert.Equal(t, "pending", resp.Status,
+			"quarantined registration must have status 'pending'")
+		assert.NotEmpty(t, resp.PendingID,
+			"quarantined response must include a pending_id for operator approval")
+		assert.Equal(t, tenantID, resp.TenantID,
+			"quarantined response must reflect the registering tenant")
+
+		// No cert-bundle PEM must appear — issuance is gated on operator approval (Issue #1693).
+		assert.NotContains(t, string(rawBody), "-----BEGIN",
+			"cert PEM must not appear in quarantine response: issuance gated on manual approval")
+
+		// Pending entry must be persisted in durable store for operator action.
+		entry, err := pendingStore.GetPendingByID(context.Background(), resp.PendingID)
+		require.NoError(t, err, "pending entry must be durably persisted for operator review")
+		assert.Equal(t, tenantID, entry.TenantID)
+		assert.Equal(t, business.PendingRegistrationStatusPending, entry.Status,
+			"pending entry must be in 'pending' state awaiting operator approval")
+		assert.Equal(t, hvUntrustedIP, entry.SourceIP,
+			"source IP must be recorded in the pending entry for operator review")
+	})
+
+	// Operator action: seed the HV host's network as trusted
+	// (mirrors 'cfg registration ip-trust add' or the 30-min liveness promotion).
+	require.NoError(t,
+		ipTrustStore.AddTrustedRange(context.Background(), tenantID, hvTrustedIP+"/32", false),
+		"seeding trusted IP range for HV tenant must succeed")
+
+	t.Run("trusted_network_auto_admits", func(t *testing.T) {
+		// HV host IP IS in the trust store → evaluator returns DecisionApprove
+		// → handler returns HTTP 200 with a full mTLS cert bundle.
+		rec, rawBody := sendFrom(t, hvTrustedIP)
+		require.Equal(t, http.StatusOK, rec.Code,
+			"provisioned VM registering from the HV host's trusted network must be auto-admitted (200 OK)")
+
+		var resp RegistrationResponse
+		require.NoError(t, json.NewDecoder(bytes.NewReader(rawBody)).Decode(&resp))
+		assert.NotEmpty(t, resp.ClientCert, "auto-admitted registration must include a client cert")
+		assert.NotEmpty(t, resp.ClientKey, "auto-admitted registration must include a client key")
+		assert.NotEmpty(t, resp.CACert, "auto-admitted registration must include the CA cert")
+		assert.Equal(t, tenantID, resp.TenantID,
+			"auto-admission response must reflect the registering tenant")
+		assert.Equal(t, "hv-vms", resp.Group,
+			"auto-admission response must include the token's fleet group")
+	})
+}
