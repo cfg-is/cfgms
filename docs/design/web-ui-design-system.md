@@ -1,12 +1,11 @@
 # CFGMS Web UI — Design System
 
-> **Status: WORK IN PROGRESS (checkpoint).** This document captures the
-> founder-owned, in-session design direction for the CFGMS web UI. It is the
-> `docs/design/web-ui-design-system.md` deliverable named in Epic #2344, but it
-> is **not yet complete** — the login screen and a finalized fleet-overview
-> screen in this identity are still pending. Do not treat the epic's
-> "design system merged" success criterion as satisfied until those exist and
-> this banner is removed.
+This document is the founder-owned design direction for the CFGMS web UI and the
+`docs/design/web-ui-design-system.md` deliverable named in Epic #2344. It defines
+the visual identity, the working principle, the case model, and the reference
+screens (login, fleet overview, troubleshooting cockpit) that the shipped
+React + TypeScript + Vite app is built to match. It is a design reference, not
+production code; the mockups express intent, the tokens are the source of truth.
 
 Machine-readable tokens live in [`web-ui-design-tokens.css`](web-ui-design-tokens.css).
 Reference mockups live in [`mockups/`](mockups/).
@@ -134,7 +133,64 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
 
 ---
 
-## 5. Provenance — directions considered
+## 5. Screens (established in the mockups)
+
+Three reference screens fix the identity for the parts of the app that gate
+early development. Each mockup is responsive (Desktop / Tablet / Mobile) and
+ships both themes.
+
+### 5.1 Login — [`mockups/login.html`](mockups/login.html)
+
+A single, quiet authentication surface framed as a **terminal window** (the one
+place the Ubuntu-Mono terminal accent is spent). One credential path to start —
+the mTLS/session sign-in that mirrors `cfg` — with the full set of states the
+screen must handle already drawn:
+
+- `signin` (default), `loading`, `invalid` (bad credential), and `expired`
+  (session timed out — re-authenticate), so error and lifecycle copy are
+  designed, not left to implementation.
+- An **MFA seam**: a `mfa` state carrying a passkey/WebAuthn challenge. The
+  layout, copy, and control are designed **now** so the flow has a home; the
+  actual second-factor enforcement is built later (see [ADR-015](../architecture/decisions/015-web-session-semantics.md)
+  for the session model this feeds).
+
+### 5.2 App shell + fleet overview — [`mockups/fleet-overview.html`](mockups/fleet-overview.html)
+
+The **app shell** every authenticated screen lives in: left sidebar, a top
+**app bar** with a **tenant-scope switcher** (the `root / msp-a` path selector),
+global **search**, an **alert/notification center**, and a **user menu**. On
+phones the search drops to its own full-width row; the sidebar becomes an
+off-canvas drawer.
+
+The first screen inside the shell is the **read-only fleet overview** — stewards
+enrolled to the controller — carrying the patterns early development needs:
+
+- **Live-filter search**, not a command bar: typing narrows the visible rows in
+  place (name, company, last user, IP, OS, health, ring, agent) and updates the
+  match count and pager live. Clearing restores the full list.
+- **Selectable device-DNA columns.** A column picker chooses which DNA a
+  technician sees. Defaults are Name, Company, Last user, IP, Health, Last
+  check-in; additional DNA (OS, Agent, Ring, Model, Serial, MAC) is opt-in. Name
+  is pinned. A trailing spacer column absorbs slack so columns hug their content
+  and the name column never balloons as DNA is added.
+- **Sort, saved views, and scale-aware pagination** — the count and pager are
+  written for 48k+ stewards, not a demo-sized list.
+- **Row drill-in → asset-DNA drawer.** Selecting a steward opens a side drawer
+  showing the **full device DNA** for that host (the early-development need for
+  "view all asset DNA" before deeper asset screens exist), with a raw-values
+  disclosure and export.
+- **Ready / Loading (skeleton) / Error / Empty** states are all drawn; the
+  mockup's `preview state` strip is a harness affordance for reviewing them and
+  is not part of the product UI.
+
+### 5.3 Troubleshooting cockpit — [`mockups/troubleshooting-cockpit.html`](mockups/troubleshooting-cockpit.html)
+
+The differentiator described in §3–§4: the agentic case surface. This is the
+primary working screen the fleet overview and login lead into.
+
+---
+
+## 6. Provenance — directions considered
 
 Three interface directions were explored in-session before converging:
 
@@ -149,11 +205,8 @@ Three interface directions were explored in-session before converging:
 
 ---
 
-## 6. Open items (before this can drop its WIP status)
+## 7. Open items
 
-- [ ] **Login screen** in this identity (Epic #2344's other gating screen).
-- [ ] **Finalized read-only fleet-overview** screen in this identity
-      (the generic v0 mockup is a placeholder, not the reference).
 - [ ] **Converge the app identity with the public-site style guide.** The app
       currently *derives from* the published guide; at some point the two style
       guides should be reconciled into one source of truth. (Founder note,
@@ -167,10 +220,11 @@ Three interface directions were explored in-session before converging:
 
 ---
 
-## 7. How to view the mockups
+## 8. How to view the mockups
 
 The mockups are self-contained HTML — open any file in [`mockups/`](mockups/)
 directly in a browser. Each is wrapped in a small preview harness with a
-**Desktop / Tablet / Mobile** viewport toggle and (for the cockpit) an
-**Auto / Light / Dark** theme toggle, so both responsive breakpoints and both
-themes can be reviewed from a single file — including from a phone.
+**Desktop / Tablet / Mobile** viewport toggle; the cockpit, login, and
+fleet-overview add an **Auto / Light / Dark** theme toggle, so both responsive
+breakpoints and both themes can be reviewed from a single file — including from
+a phone.
