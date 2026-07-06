@@ -65,16 +65,37 @@ The `executors` field must contain exactly one element. `kind` is computed at pa
 
 ## Available Modules
 
-**Stdlib** (shipped in the steward installer, all `executors: [steward]`):
+### What belongs in stdlib
+
+The standard library is not an open-ended collection. A module is **stdlib** only if it meets this test:
+
+> A module is stdlib if it is part of the **declared baseline for nearly every managed machine** — configured on essentially all endpoints to bring them to, and hold them in, a managed/compliant state. The test is **usage across the fleet, not capability**: a powerful module used on only a subset of machines is `extended`, not stdlib.
+
+Two carve-outs:
+
+- **Execution primitives** (e.g. `script`) are stdlib regardless of the usage test — they are core paths through which cfg reaches a host.
+- **Platform-scoped** resources qualify where the resource exists (a Windows-only baseline module is still stdlib).
+
+Everything else — however useful — is an `extended` module, built as a standalone bundle and pulled on demand (see [distribution.md](distribution.md) and [ADR-006](../decisions/006-module-packaging-and-distribution.md)). Changing the stdlib set is an ADR-level decision. **[ADR-016](../decisions/016-steward-module-foundation.md) is authoritative** for the criterion, the current members, and the `stdlib/` ↔ `extended/` repository split.
+
+### Current stdlib members
+
+Shipped in the steward installer, all `executors: [steward]` (closed set — see ADR-016):
 
 - `file` - File content, directory creation, and permissions (`type: file` / `type: directory` / `type: symlink`)
-- `firewall` - Firewall rules and policies
-- `package` - Software package management
-- `patch` - OS patch management (Windows Update COM API on Windows; stub on other platforms)
-- `script` - Cross-platform script execution (file-based, no inline eval)
 - `service` - OS service state management
+- `package` - Software package management
+- `script` - Cross-platform script execution (file-based, no inline eval) — *execution primitive*
+- `firewall` - Firewall rules and policies
+- `patch` - OS patch management (Windows Update COM API on Windows; stub on other platforms)
+- `user` - Local users & groups, membership, password/lock state — *planned (net-new)*
+- `cert_trust` - System trust store: install/trust CA & certs; keeps the CFGMS mTLS chain healthy — *planned (net-new)*
+- `time` - Timezone + NTP/time-sync — *planned (net-new)*
+- `hostname` - System/computer name & workgroup — *planned (net-new)*
 
-**Non-stdlib steward modules:**
+### Extended steward modules (non-stdlib)
+
+CFGMS-authored but used on only a subset of the fleet; built as standalone bundles, pulled on demand:
 
 - `acme` - ACME/Let's Encrypt certificate management
 - `activedirectory` - Local Active Directory integration (steward)
