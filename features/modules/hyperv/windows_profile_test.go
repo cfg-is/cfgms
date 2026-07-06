@@ -94,8 +94,10 @@ func TestAutounattend_NoBannedPatterns(t *testing.T) {
 	// present (locate the seed volume, run cfgms-steward install).
 	assert.Contains(t, rendered, `cfgms-steward.exe" install --regtoken`,
 		"enrollment must self-install the steward via install --regtoken")
-	assert.Contains(t, rendered, "--ca-cert",
-		"enrollment must pass the staged controller CA via --ca-cert")
+	assert.Contains(t, rendered, "--controller-ca",
+		"enrollment must pass the staged controller CA via --controller-ca (the real steward install flag)")
+	assert.NotContains(t, rendered, "--ca-cert",
+		"the steward install command has no --ca-cert flag (aborts enrollment: 'unknown flag')")
 	assert.Contains(t, rendered, "--fingerprint",
 		"enrollment must pass the CA fingerprint via --fingerprint")
 }

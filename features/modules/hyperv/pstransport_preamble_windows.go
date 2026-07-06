@@ -244,6 +244,8 @@ function Cfgms-CopyToSeedVHD {
         [string]$Content2 = '',
         [string]$StewardSrc = '',
         [string]$StewardDest = 'cfgms-steward.exe',
+        [string]$LauncherSrc = '',
+        [string]$LauncherDest = 'cfgms-steward-launcher',
         [string]$CASrc = ''
     )
     $disk = Mount-VHD -Path $SeedPath -Passthru
@@ -253,6 +255,7 @@ function Cfgms-CopyToSeedVHD {
     Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
     if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
     if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
+    if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
     if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
     Cfgms-DismountAndVerify -Path $SeedPath
 }

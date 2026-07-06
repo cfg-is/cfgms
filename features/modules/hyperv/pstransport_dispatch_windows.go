@@ -87,6 +87,8 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 				optArg(psArgs, "FileName2", "FileName2")+
 				optArg(psArgs, "Content2", "Content2")+
 				optArg(psArgs, "StewardDest", "StewardDest")+
+				optArg(psArgs, "LauncherSrc", "LauncherSrc")+
+				optArg(psArgs, "LauncherDest", "LauncherDest")+
 				" -StewardSrc "+quoteArg(psArgs, "StewardSrc")+
 				" -CASrc "+quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:

@@ -60,7 +60,7 @@ const (
 	// travel via ArgumentList; empty optional params fall back to their defaults.
 	// WinRM-transport variant of the preamble's Cfgms-CopyToSeedVHD — same parameter
 	// contract; the preamble adds the verify-dismount hardening (see psMountSeedVHD).
-	psCopyToSeedVHD = `$disk = Mount-VHD -Path $SeedPath -Passthru; $label = $(if ($Label) { $Label } else { 'CFGMS_SEED' }); $letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq $label } | Select-Object -First 1).DriveLetter; Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline; if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }; if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $(if ($StewardDest) { $StewardDest } else { 'cfgms-steward.exe' })) -Force }; if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }; Dismount-VHD -Path $SeedPath`
+	psCopyToSeedVHD = `$disk = Mount-VHD -Path $SeedPath -Passthru; $label = $(if ($Label) { $Label } else { 'CFGMS_SEED' }); $letter = ($disk | Get-Disk | Get-Partition | Get-Volume | Where-Object { $_.FileSystemLabel -eq $label } | Select-Object -First 1).DriveLetter; Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline; if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }; if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $(if ($StewardDest) { $StewardDest } else { 'cfgms-steward.exe' })) -Force }; if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $(if ($LauncherDest) { $LauncherDest } else { 'cfgms-steward-launcher' })) -Force }; if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }; Dismount-VHD -Path $SeedPath`
 
 	// psDetachSeedVHD wraps Dismount-VHD (called at finalizing, not in the
 	// create path this story implements).
@@ -229,6 +229,8 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 		// (operator-unwritable) SecretStore for the token (#2077 fix).
 		EnrollToken:   m.enrollToken,
 		CAFingerprint: m.enrollCAFingerprint,
+		// Optional operator-provided debug SSH public key (diagnose failed enroll).
+		DebugSSHKey: m.debugSSHAuthorizedKey,
 	}
 	// A per-VM random password is generated for both families: Windows uses it
 	// for the one-shot AutoLogon that runs enrollment; Linux uses it for the
@@ -580,15 +582,17 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
-		"SeedPath":    seedPath,
-		"Label":       cidataVolumeLabel,
-		"FileName":    "user-data",
-		"Content":     userData,
-		"FileName2":   "meta-data",
-		"Content2":    metaData,
-		"StewardSrc":  m.enrollStewardPath,
-		"StewardDest": "cfgms-steward",
-		"CASrc":       m.enrollCAPath,
+		"SeedPath":     seedPath,
+		"Label":        cidataVolumeLabel,
+		"FileName":     "user-data",
+		"Content":      userData,
+		"FileName2":    "meta-data",
+		"Content2":     metaData,
+		"StewardSrc":   m.enrollStewardPath,
+		"StewardDest":  "cfgms-steward",
+		"LauncherSrc":  m.enrollLauncherPath,
+		"LauncherDest": "cfgms-steward-launcher",
+		"CASrc":        m.enrollCAPath,
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, psErr)
 		return m.failProvision(ctx, vmName, record, fmt.Errorf("hyperv: write cloud-init seed for VM %q: %w", vmName, psErr))

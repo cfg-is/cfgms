@@ -169,6 +169,12 @@ type ProfileVars struct {
 	// enrollment). It is never persisted or surfaced; the steward manages the
 	// host after enrollment. Empty for non-Windows profiles.
 	AdminPassword string
+	// DebugSSHKey is an optional SSH PUBLIC key added to the provisioned guest's
+	// authorized_keys (Linux cloud-init) so an operator can log in to diagnose a
+	// failed enrollment. A public key is not a secret; the matching private key
+	// never leaves the operator. Empty disables it (production default). Sourced
+	// from the hyperv module's debug_ssh_authorized_key config.
+	DebugSSHKey string
 }
 
 // ProfileRenderer renders an UnattendProfile's template into answer-file bytes,
@@ -235,6 +241,7 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 		BundleURL      string
 		CAFingerprint  string
 		AdminPassword  string
+		DebugSSHKey    string
 	}{
 		VMName:         vars.VMName,
 		OSFamily:       vars.OSFamily,
@@ -244,6 +251,7 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 		BundleURL:      vars.BundleURL,
 		CAFingerprint:  vars.CAFingerprint,
 		AdminPassword:  vars.AdminPassword,
+		DebugSSHKey:    vars.DebugSSHKey,
 	}
 
 	var buf bytes.Buffer

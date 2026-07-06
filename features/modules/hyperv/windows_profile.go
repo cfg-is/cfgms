@@ -69,7 +69,7 @@ func randomAdminPassword() (string, error) {
 // Enrollment runs first-boot via <FirstLogonCommands>: an AutoLogon of the local
 // Administrator triggers a single cmd.exe /c command that locates the FAT32
 // CFGMS_SEED volume (staged with cfgms-steward.exe + controller-ca.crt next to
-// autounattend.xml) and runs `cfgms-steward install --regtoken … --ca-cert …
+// autounattend.xml) and runs `cfgms-steward install --regtoken … --controller-ca …
 // --fingerprint …`, which self-copies the binary to the platform path and
 // registers as a service. The steward's controller URL is baked in at build
 // time (ldflags). A fixed argument list with declared paths — no iex /
@@ -188,7 +188,7 @@ const autounattendTemplate = `<?xml version="1.0" encoding="utf-8"?>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>1</Order>
           <Description>Install and enroll the CFGMS steward from the seed volume</Description>
-          <CommandLine>cmd.exe /c for %i in (D E F G H I J K) do @if exist "%i:\cfgms-steward.exe" "%i:\cfgms-steward.exe" install --regtoken "{{ .EnrollToken }}" --ca-cert "%i:\controller-ca.crt" --fingerprint "{{ .CAFingerprint }}"</CommandLine>
+          <CommandLine>cmd.exe /c for %i in (D E F G H I J K) do @if exist "%i:\cfgms-steward.exe" "%i:\cfgms-steward.exe" install --regtoken "{{ .EnrollToken }}" --controller-ca "%i:\controller-ca.crt" --fingerprint "{{ .CAFingerprint }}"</CommandLine>
         </SynchronousCommand>
       </FirstLogonCommands>
     </component>
