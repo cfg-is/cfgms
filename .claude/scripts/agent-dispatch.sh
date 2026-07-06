@@ -1095,25 +1095,37 @@ case "$cmd" in
     # Build the initial prompt without trailing space when args are empty.
     # Trailing space leaves Claude's input box mid-word and shows the slash-
     # command autocomplete dropdown instead of submitting on Enter.
-    if [[ -n "$args" ]]; then
-      po_prompt="/po ${args}"
-      po_name="PO: ${args}"
+    # Resume mode: `po-live --resume [<session-id>]` reattaches to an existing
+    # Claude session in the same /workspace clone instead of seeding a fresh
+    # /po. With an id it resumes that exact session; bare, it continues the
+    # most recent session for the workspace (the last PO conversation).
+    if [[ "${1:-}" == "--resume" ]]; then
+      if [[ -n "${2:-}" ]]; then
+        claude_args=( --resume "$2" )
+        session_desc="resume session ${2}"
+      else
+        claude_args=( --continue )
+        session_desc="resume last session"
+      fi
+    elif [[ -n "$args" ]]; then
+      claude_args=( --name "PO: ${args}" "/po ${args}" )
+      session_desc="/po ${args}"
     else
-      po_prompt="/po"
-      po_name="PO"
+      claude_args=( --name "PO" "/po" )
+      session_desc="/po"
     fi
 
     echo "================================================"
     echo " CFGMS PO Live Session"
-    echo " Initial prompt: ${po_prompt}"
+    echo " Session:        ${session_desc}"
     echo " Clone:          ${real_path}"
     echo "================================================"
 
     host_claude_dir="$HOME/.claude"
     host_claude_json="$HOME/.claude.json"
 
-    # Pass $1 (display name) and $2 (initial prompt) via bash -c positional
-    # args to avoid shell-quote escaping pain when args contain special chars.
+    # Pass the resolved claude args via bash -c positional args ("$@") to avoid
+    # shell-quote escaping pain when args contain special characters.
     exec docker run -it --rm \
       --name "$container_name" \
       --label "cfg-agent=true" \
@@ -1132,10 +1144,9 @@ case "$cmd" in
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c 'setup-env.sh && exec claude --dangerously-skip-permissions --name "$1" "$2"' \
-      cfg-agent-live-po \
-      "$po_name" \
-      "$po_prompt"
+      -c 'setup-env.sh && exec claude --dangerously-skip-permissions "$@"' \
+      _ \
+      "${claude_args[@]}"
     ;;
 
   launch-interactive)
