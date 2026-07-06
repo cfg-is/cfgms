@@ -1,4 +1,4 @@
-# ADR-015: Web-Session Semantics (Browser Credential Login)
+# ADR-018: Web-Session Semantics (Browser Credential Login)
 
 **Status:** Accepted
 
