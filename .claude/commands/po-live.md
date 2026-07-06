@@ -108,4 +108,17 @@ The container uses `--rm` and removes itself on exit. To exit:
 - Type `/exit` or `exit` in the live Claude session, then `exit` the bash shell
 - Or close the tmux pane (`Ctrl-b x`) — Docker will clean up
 
-The shared `worktrees/po-live` clone persists between sessions; remove manually with `rm -rf worktrees/po-live` if you want a fresh workspace.
+The shared `worktrees/po-live` clone persists between sessions.
+
+**Workspace freshness:**
+- A **fresh** `/po` session (bare `po-live`, `po-live intent …`, etc.) always
+  resets the clone to a **clean, up-to-date `develop`** first, so a stale branch
+  left by a prior session can't leak in. Uncommitted changes are **stashed, not
+  discarded** (`git -C worktrees/po-live stash list` to recover); committed work
+  is already safe on its own branch.
+- A **resume** session (`--continue` / `--resume`) does **not** touch the branch
+  or working tree — it deliberately reattaches to the workspace exactly as the
+  session left it.
+
+Remove the clone manually with `rm -rf worktrees/po-live` if you want it fully
+re-cloned from scratch.

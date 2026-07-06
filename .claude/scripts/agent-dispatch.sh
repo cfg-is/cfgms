@@ -1092,6 +1092,24 @@ case "$cmd" in
     # Remove stale container with the same name (only one PO live at a time)
     docker rm -f "$container_name" 2>/dev/null || true
 
+    # Fresh /po sessions (i.e. NOT --resume/--continue) always start on a clean,
+    # up-to-date develop so a stale branch left by a prior session can't leak in.
+    # Any uncommitted work is stashed, not discarded (committed work is already
+    # safe on its own branch). This runs only after the old container is gone,
+    # so we never mutate the shared clone underneath a live session.
+    if [[ "${1:-}" != "--resume" && "${1:-}" != "--continue" ]]; then
+      echo "Refreshing po-live workspace to a clean, up-to-date develop..."
+      git -C "$clone_dir" fetch --quiet origin develop || true
+      if [[ -n "$(git -C "$clone_dir" status --porcelain 2>/dev/null)" ]]; then
+        stash_label="po-live-autobackup-$(date -u +%Y%m%dT%H%M%SZ)"
+        if git -C "$clone_dir" stash push -u -m "$stash_label" >/dev/null 2>&1; then
+          echo "  ! Stashed uncommitted changes as '${stash_label}'"
+          echo "    (recover with: git -C '${clone_dir}' stash list)"
+        fi
+      fi
+      git -C "$clone_dir" checkout -q -B develop origin/develop
+    fi
+
     # Build the initial prompt without trailing space when args are empty.
     # Trailing space leaves Claude's input box mid-word and shows the slash-
     # command autocomplete dropdown instead of submitting on Enter.
