@@ -261,9 +261,9 @@ tool added to the host):
    controller CA) is attached as a data disk. cloud-init **auto-detects the
    `CIDATA` volume by label on first boot — no kernel command line, no boot-media
    repack.** Its `user-data` `runcmd` (list/exec form only — no shell-string
-   composition) runs `cfgms-steward install --regtoken … --ca-cert … --fingerprint
-   …`, which on a live system stages the binary, writes the systemd unit, and
-   starts enrollment.
+   composition) runs `cfgms-steward install --regtoken … --controller-ca … --fingerprint
+   …`, which on a live system stages the binary (launcher-managed), writes the
+   systemd unit, and starts enrollment.
 3. The seed is detached at `finalizing`; the OS disk is the first boot device.
 
 **Host prerequisite:** the cloud image (`source.image`) must already be on the
@@ -299,7 +299,17 @@ required on the host.
 The enrollment join token and CA fingerprint are supplied via the module's
 controller-synced config (`enroll_token`, `enroll_ca_fingerprint`), and the
 steward binary + CA are staged from `enroll_steward_path` / `enroll_ca_path` (the
-linux steward built for the guest). See [ADR-009](../../../docs/architecture/decisions/009-vm-from-iso-managed-endpoint.md).
+linux steward built for the guest). For a launcher-managed (push-upgradeable)
+guest steward, also set `enroll_launcher_path` to the host path of
+`cfgms-steward-launcher` — it is staged alongside the steward and the guest install
+requires it. See [ADR-009](../../../docs/architecture/decisions/009-vm-from-iso-managed-endpoint.md).
+
+Optional provisioning-debug config:
+
+| Key | Purpose |
+|-----|---------|
+| `enroll_launcher_path` | Host path to `cfgms-steward-launcher`, staged onto the seed so the guest performs a launcher-managed (push-upgradeable) install. |
+| `debug_ssh_authorized_key` | An SSH **public** key added to a provisioned Linux guest's `authorized_keys` so an operator can log in and diagnose a failed enrollment. Public key only (not a secret); omit to disable (production default). |
 
 ### Annotated Linux example (legacy netinst ISO + preseed)
 
