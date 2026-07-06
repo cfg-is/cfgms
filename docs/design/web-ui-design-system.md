@@ -151,7 +151,7 @@ screen must handle already drawn:
   designed, not left to implementation.
 - An **MFA seam**: a `mfa` state carrying a passkey/WebAuthn challenge. The
   layout, copy, and control are designed **now** so the flow has a home; the
-  actual second-factor enforcement is built later (see **ADR-015 — web-session
+  actual second-factor enforcement is built later (see **ADR-018 — web-session
   semantics**, PR #2350, for the session model this feeds).
 
 ### 5.2 App shell + fleet overview — [`mockups/fleet-overview.html`](mockups/fleet-overview.html)
