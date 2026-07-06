@@ -1095,11 +1095,16 @@ case "$cmd" in
     # Build the initial prompt without trailing space when args are empty.
     # Trailing space leaves Claude's input box mid-word and shows the slash-
     # command autocomplete dropdown instead of submitting on Enter.
-    # Resume mode: `po-live --resume [<session-id>]` reattaches to an existing
-    # Claude session in the same /workspace clone instead of seeding a fresh
-    # /po. With an id it resumes that exact session; bare, it continues the
-    # most recent session for the workspace (the last PO conversation).
-    if [[ "${1:-}" == "--resume" ]]; then
+    # Resume mode: reattach to an existing Claude session in the same /workspace
+    # clone instead of seeding a fresh /po. These forward Claude's own flags:
+    #   --continue          -> claude --continue  (most recent session)
+    #   --resume            -> claude --continue  (bare: convenience alias)
+    #   --resume <session-id> -> claude --resume <session-id>  (that exact one)
+    # The session transcript persists on the host-mounted ~/.claude.
+    if [[ "${1:-}" == "--continue" ]]; then
+      claude_args=( --continue )
+      session_desc="continue last session"
+    elif [[ "${1:-}" == "--resume" ]]; then
       if [[ -n "${2:-}" ]]; then
         claude_args=( --resume "$2" )
         session_desc="resume session ${2}"

@@ -3,7 +3,7 @@ name: po-live
 description: PO Live — launch a Product Owner session in a docker container in a new tmux pane, pre-seeded with /po <args>
 parameters:
   - name: subcommand
-    description: "Args to pass to /po inside the live container (e.g., 'intent certificate rotation', 'next', 'status'), or '--resume [session-id]' to reattach to a past session"
+    description: "Args to pass to /po inside the live container (e.g., 'intent certificate rotation', 'next', 'status'), or '--continue' / '--resume [session-id]' to reattach to a past session"
     required: false
 ---
 
@@ -75,21 +75,23 @@ Surface the script's stderr to the founder verbatim and stop. Don't auto-fall-ba
 - `/po-live next` — opens a new pane and asks PO for the single highest-leverage next action
 - `/po-live` (no args) — opens a new pane at the PO dashboard
 - `/po-live unblock #501` — opens a new pane to handle a targeted unblock conversation
-- `/po-live --resume` — opens a new pane and **reattaches to the most recent** PO session in the workspace (instead of seeding a fresh `/po`)
+- `/po-live --continue` — opens a new pane and **continues the most recent** PO session in the workspace (instead of seeding a fresh `/po`)
 - `/po-live --resume 79f06f1d-6d1c-4001-afeb-0618432d81a8` — reattaches to that **specific** session by id
+- `/po-live --resume` — bare alias for `--continue` (most recent session)
 
 ## Resuming a previous session
 
-`po-live --resume` reattaches to an existing Claude conversation in the shared
-`worktrees/po-live` clone instead of starting a fresh `/po`. This is how you pick
-up after closing the pane, a reboot, or a power loss — the container is
-ephemeral (`--rm`) but the session transcript lives on the host-mounted
-`~/.claude`, so it survives.
+`po-live --continue` / `po-live --resume` reattach to an existing Claude
+conversation in the shared `worktrees/po-live` clone instead of starting a fresh
+`/po`. This is how you pick up after closing the pane, a reboot, or a power loss
+— the container is ephemeral (`--rm`) but the session transcript lives on the
+host-mounted `~/.claude`, so it survives. These forward Claude's own flags:
 
-- **`--resume <session-id>`** → runs `claude --resume <session-id>` in the
-  container: resumes that exact conversation.
-- **`--resume`** (bare) → runs `claude --continue`: resumes the most recent
-  session for the workspace.
+- **`--continue`** → runs `claude --continue`: resumes the most recent session
+  for the workspace.
+- **`--resume <session-id>`** → runs `claude --resume <session-id>`: resumes
+  that exact conversation.
+- **`--resume`** (bare) → convenience alias for `--continue`.
 
 To find a session id, look under `~/.claude/projects/-workspace/` on the host
 (the container runs Claude at `/workspace`), or use bare `--resume` to grab the
