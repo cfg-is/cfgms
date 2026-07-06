@@ -93,6 +93,8 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 				" -CASrc "+quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
 		return t.runFresh(ctx, "Cfgms-DetachSeedVHD -Path "+quoteArg(psArgs, "Path"))
+	case psDeleteSeedMedia:
+		return t.run(ctx, "Cfgms-DeleteSeedMedia -Path "+quoteArg(psArgs, "Path"))
 	case psAttachSeedDisk:
 		// runFresh: Add-VMHardDiskDrive opens the seed VHD, which hits the same
 		// async-VHD deadlock as Mount-VHD in the persistent -Command - host.

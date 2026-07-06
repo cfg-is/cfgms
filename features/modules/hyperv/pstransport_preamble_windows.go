@@ -267,6 +267,15 @@ function Cfgms-DetachSeedVHD {
     Dismount-VHD -Path $Path -ErrorAction SilentlyContinue
 }
 
+# Cfgms-DeleteSeedMedia removes the seed VHDX or answer ISO file after
+# enrollment (ADR-010 §5). Idempotent — SilentlyContinue means an absent file
+# is not an error. The path travels via ArgumentList only; it is never
+# interpolated into the script text.
+function Cfgms-DeleteSeedMedia {
+    param([Parameter(Mandatory)][string]$Path)
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+}
+
 # Cfgms-AttachSeedDisk attaches the seed VHDX to the VM as a secondary hard
 # disk. $SeedPath travels via ArgumentList.
 function Cfgms-AttachSeedDisk {

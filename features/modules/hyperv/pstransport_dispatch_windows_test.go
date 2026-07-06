@@ -78,6 +78,8 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 			" -CASrc " + quoteArg(psArgs, "CASrc"))
 	case psDetachSeedVHD:
 		return emit("Cfgms-DetachSeedVHD -Path " + quoteArg(psArgs, "Path"))
+	case psDeleteSeedMedia:
+		return emit("Cfgms-DeleteSeedMedia -Path " + quoteArg(psArgs, "Path"))
 	case psPrepCloudBootDisk:
 		return emit("Cfgms-PrepCloudBootDisk -ImagePath " + quoteArg(psArgs, "ImagePath") +
 			" -VhdPath " + quoteArg(psArgs, "VhdPath") +
@@ -498,6 +500,7 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psMountSeedVHD", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psCopyToSeedVHD", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "FileName": "preseed.cfg", "Content": "# placeholder preseed"}},
 		{"psDetachSeedVHD", psDetachSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psDeleteSeedMedia", psDeleteSeedMedia, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
@@ -571,6 +574,25 @@ func TestPreamble_RemoveVMStopsRunningVMFirst(t *testing.T) {
 	require.NotEqual(t, -1, removeIdx)
 	assert.Less(t, stopIdx, removeIdx,
 		"Stop-VM must be ordered before Remove-VM, otherwise the running VM blocks its own deletion")
+}
+
+// TestPreamble_DeleteSeedMediaUsesLiteralPathAndSilentContinue guards the
+// security and idempotency properties of the Cfgms-DeleteSeedMedia preamble
+// function (ADR-010 §5 / Issue #2081). Dispatch tests assert routing only;
+// this test asserts the function body itself:
+//   - -LiteralPath prevents wildcard/glob expansion — a crafted path like
+//     "C:\seeds\*" or "C:\seeds\[vol]*.vhdx" must not expand.
+//   - -ErrorAction SilentlyContinue makes the delete idempotent — removing an
+//     already-absent file is not an error.
+func TestPreamble_DeleteSeedMediaUsesLiteralPathAndSilentContinue(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-DeleteSeedMedia")
+
+	assert.Contains(t, body, "-LiteralPath",
+		"Cfgms-DeleteSeedMedia must use -LiteralPath to prevent wildcard glob expansion on the seed path")
+	assert.Contains(t, body, "SilentlyContinue",
+		"Cfgms-DeleteSeedMedia must use -ErrorAction SilentlyContinue for idempotency (absent file is not an error)")
+	assert.Contains(t, body, "Remove-Item",
+		"Cfgms-DeleteSeedMedia must call Remove-Item")
 }
 
 // preambleFunctionBody extracts the body of a `function <name> { ... }` block
