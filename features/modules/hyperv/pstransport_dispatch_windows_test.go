@@ -146,6 +146,8 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-GetClusterOwnerNode -ClusterName " + quoteArg(psArgs, "ClusterName"))
 	case psGetClusterResourceOwner:
 		return emit("Cfgms-GetClusterResourceOwner -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGetClusterAccessSelf:
+		return emit("Cfgms-GetClusterAccessSelf -ClusterName " + quoteArg(psArgs, "ClusterName"))
 	case psAddClusterVMRole:
 		return emit("Cfgms-AddClusterVMRole -ClusterName " + quoteArg(psArgs, "ClusterName") +
 			" -VMName " + quoteArg(psArgs, "VMName"))
@@ -526,6 +528,7 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psGetCluster", psGetCluster, map[string]string{"ClusterName": "lab-hv"}},
 		{"psGetClusterOwnerNode", psGetClusterOwnerNode, map[string]string{"ClusterName": "lab-hv"}},
 		{"psGetClusterResourceOwner", psGetClusterResourceOwner, map[string]string{"ClusterName": "lab-hv"}},
+		{"psGetClusterAccessSelf", psGetClusterAccessSelf, map[string]string{"ClusterName": "lab-hv"}},
 		// Failover cluster write verbs (cluster.go, #2202 S2)
 		{"psAddClusterVMRole", psAddClusterVMRole, map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"}},
 		{"psRemoveClusterResource", psRemoveClusterResource, map[string]string{"Name": "web-01"}},

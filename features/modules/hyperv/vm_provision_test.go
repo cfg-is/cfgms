@@ -18,7 +18,8 @@ import (
 // real in-memory SecretStore is injected so the windows create path can resolve
 // the .ppkg host-path secret ({{ secret "ppkg-path-key" }}) when rendering the
 // autounattend answer file (#2047) — no mock framework is used.
-func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
+func provisionModuleWithTransport(t *testing.T, transport winrmTransport) *hypervModule {
+	t.Helper()
 	m := &hypervModule{
 		executor:       &stubHypervExecutor{},
 		transport:      transport,
@@ -37,10 +38,10 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 	// user password. The Windows autounattend (ADR-010) no longer reads secrets
 	// (token + CA fingerprint are controller-supplied ProfileVars), so it needs
 	// no store entries.
-	_ = m.SetSecretStore(newInlineStore(
+	require.NoError(t, m.SetSecretStore(newInlineStore(
 		"hyperv/enroll/regtoken", "reg-token-stub-value",
 		"hyperv/enroll/user-password-crypted", "$6$rounds=4096$stub$cryptedstub",
-	))
+	)))
 	return m
 }
 
@@ -85,7 +86,7 @@ func TestProvisionVM_Gen1SkipsFirmware(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(1, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -200,7 +201,7 @@ func TestProvisionVM_Gen2WindowsFirmwareTemplate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -226,7 +227,7 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -253,7 +254,7 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -303,7 +304,7 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 // seed VHDX.
 func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -330,7 +331,7 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -381,7 +382,7 @@ func cloudInitVMConfigMap(generation int) map[string]interface{} {
 // boot device; and there is NO install ISO, NO answer ISO, and NO boot keypress.
 func TestProvisionVM_CloudInitPath(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	// The linux steward + launcher binaries + CA host paths the seed stages (ADR-010).
 	// The launcher is required for a launcher-managed (push-upgradeable) install.
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
@@ -432,7 +433,7 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 // firmware boot device — same Gen1 contract as the install-media path).
 func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(1)}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -457,7 +458,7 @@ func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
 // runcmd and no banned patterns.
 func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -521,7 +522,7 @@ func TestProvision_InstallingToFinalizingDetachesSeed(t *testing.T) {
 		CorrelationID: "stw-01",
 		StartedAt:     time.Now().Add(-2 * time.Hour),
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -560,7 +561,7 @@ func TestProvision_InstallingNotSettledDoesNotDetach(t *testing.T) {
 		CorrelationID: "stw-01",
 		StartedAt:     time.Now(), // just started — well within the settle window
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -587,7 +588,7 @@ func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	require.NoError(t, m.SetSecretStore(preseedTestStore()))
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -630,7 +631,7 @@ func TestProvisionVM_AdvancesRecordAbsentToInstalling(t *testing.T) {
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
@@ -658,7 +659,7 @@ func TestProvisionVM_ResumeFromInstallingDoesNotRestart(t *testing.T) {
 		State:         ProvisionStateInstalling,
 		CorrelationID: "stw-01",
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
@@ -687,7 +688,7 @@ func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: map[string]interface{}{
@@ -739,7 +740,7 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 		CorrelationID: "stw-01",
 		StartedAt:     time.Now().Add(-2 * time.Hour),
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -834,7 +835,7 @@ func TestProvision_WindowsFinalizeDeletesAnswerISO(t *testing.T) {
 		CorrelationID: "stw-01",
 		StartedAt:     time.Now().Add(-2 * time.Hour),
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
@@ -886,7 +887,7 @@ func TestProvision_FinalizeDeleteSeedMediaErrorDoesNotBlockAdvance(t *testing.T)
 		StartedAt:     time.Now().Add(-2 * time.Hour),
 		UpdatedAt:     time.Now().Add(-2 * time.Hour),
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -960,7 +961,7 @@ func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
 	}))
 
 	// Wire a VHD path for stale-vm so the sweep can derive the media path.
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 	m.seedDir = `C:\cfgms-seeds`
 	m.vmsMu.Lock()

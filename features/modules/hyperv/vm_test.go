@@ -1457,3 +1457,89 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 			"an already-registered role must not be added again (S2 idempotency)")
 	})
 }
+
+// TestParseHARoleMap exercises the executor-supplied map decode path directly:
+// a standalone VM (no ha_role, or a malformed/empty block) yields a nil HARole,
+// while a well-formed ha_role map is decoded into an HARoleConfig. This is the
+// map-shaped runtime input the generic executor delivers (not the *VMConfig
+// short-circuit), so it must be covered independently of the typed create path.
+func TestParseHARoleMap(t *testing.T) {
+	// Standalone / absent-or-malformed inputs → nil (no clustered registration).
+	assert.Nil(t, parseHARoleMap(nil), "absent ha_role → standalone VM")
+	assert.Nil(t, parseHARoleMap("not-a-map"), "non-map ha_role → standalone VM")
+	assert.Nil(t, parseHARoleMap(map[string]interface{}{}), "empty ha_role map → standalone VM")
+	assert.Nil(t, parseHARoleMap(map[string]interface{}{"resource_group_name": "rg-only"}),
+		"ha_role without cluster_name → standalone VM (cluster_name is the anchor)")
+	assert.Nil(t, parseHARoleMap(map[string]interface{}{"cluster_name": "   "}),
+		"whitespace-only cluster_name → standalone VM")
+
+	// cluster_name only → HARole with an empty resource_group_name.
+	role := parseHARoleMap(map[string]interface{}{"cluster_name": "lab-hv"})
+	require.NotNil(t, role, "a cluster_name must decode into an HARoleConfig")
+	assert.Equal(t, "lab-hv", role.ClusterName)
+	assert.Equal(t, "", role.ResourceGroupName)
+
+	// Full block → both fields decoded.
+	role = parseHARoleMap(map[string]interface{}{
+		"cluster_name":        "lab-hv",
+		"resource_group_name": "rg-ha",
+	})
+	require.NotNil(t, role)
+	assert.Equal(t, "lab-hv", role.ClusterName)
+	assert.Equal(t, "rg-ha", role.ResourceGroupName)
+}
+
+// TestSetVM_HARole_MapShapeRegistersClusteredRole drives the create path with an
+// executor-shaped config MAP carrying a nested ha_role block (the generic runtime
+// input), rather than a typed *VMConfig. This proves parseHARoleMap wires the
+// decoded HARole into setVM and that registerClusteredRole then delegates to
+// setCluster — the map-shaped path the *VMConfig short-circuit (vm.go) bypasses.
+func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
+	const vmName = "ha-map-vm"
+	const cluster = "lab-hv"
+
+	mapCfg := rawConfigState{m: map[string]interface{}{
+		"name":        vmName,
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"vhd_path":    `C:\VMs\ha-map-vm.vhdx`, // non-CSV: seed-dir rule not triggered
+		"switch_name": "Default Switch",
+		"generation":  2,
+		"state":       "stopped",
+		"ha_role": map[string]interface{}{
+			"cluster_name":        cluster,
+			"resource_group_name": "rg-ha",
+		},
+	}}
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`,   // getVM: VM absent
+		``,                  // New-VM: create succeeds
+		`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
+		`{"owners":{}}`,     // ownership helper: resource owners (role absent)
+		`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read
+		``,                  // Add-ClusterVirtualMachineRole: success
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, mapCfg))
+
+	// The decoded HARole must drive exactly one clustered-role registration.
+	assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
+		"a map-shaped ha_role must register the clustered role exactly once")
+
+	addArgs := psArgsForCmd(transport, psAddClusterVMRole)
+	require.NotNil(t, addArgs, "the Add call's psArgs must be recorded")
+	assert.Equal(t, cluster, addArgs["ClusterName"])
+	assert.Equal(t, vmName, addArgs["VMName"])
+
+	// Names travel via psArgs only, never composed into the scriptBlock (S3).
+	for _, sb := range scriptBlocks(transport) {
+		assert.NotContains(t, sb, vmName,
+			"VM/role name must travel via ArgumentList, never the scriptBlock")
+		assert.NotContains(t, sb, cluster,
+			"cluster name must travel via ArgumentList, never the scriptBlock")
+	}
+}

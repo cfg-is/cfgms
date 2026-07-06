@@ -192,7 +192,7 @@ func TestRandomAdminPassword_ComplexAndUnique(t *testing.T) {
 // renders a real autounattend (not the placeholder), with the CorrelationID
 // baked in and a generated AdminPassword present.
 func TestRenderSeedAnswerFile_WindowsRendersAutounattend(t *testing.T) {
-	m := provisionModuleWithTransport(&testWinRMTransport{})
+	m := provisionModuleWithTransport(t, &testWinRMTransport{})
 	src := &SourceConfig{ISO: `C:\iso\ws2025.iso`, OSFamily: "windows"}
 
 	content, err := m.renderSeedAnswerFile(context.Background(), "stw-win-09", src, "stw-win-09")
