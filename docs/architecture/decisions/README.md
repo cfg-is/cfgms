@@ -60,6 +60,7 @@ What becomes easier or harder by making this decision?
 | [013](013-steward-controller-trust-and-distribution.md) | Steward Controller-Trust Anchoring and Binary Distribution | 2026-06-24 | Accepted |
 | [014](014-cfg-sessions-and-credential-unlock.md) | cfg Admin Sessions and Credential Storage (Zero Standing Privilege) | 2026-06-28 | Accepted |
 | [015](015-story-materialization-at-decomposition.md) | Story Materialization at Decomposition | 2026-07-03 | Accepted |
+| [018](018-web-session-semantics.md) | Web-Session Semantics (Browser Credential Login) | 2026-07-04 | Accepted |
 
 ### Superseded/Deprecated
 
