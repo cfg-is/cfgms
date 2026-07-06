@@ -1099,12 +1099,17 @@ case "$cmd" in
     # so we never mutate the shared clone underneath a live session.
     if [[ "${1:-}" != "--resume" && "${1:-}" != "--continue" ]]; then
       echo "Refreshing po-live workspace to a clean, up-to-date develop..."
-      git -C "$clone_dir" fetch --quiet origin develop || true
+      git -C "$clone_dir" fetch --quiet origin develop \
+        || echo "  ! warning: fetch of origin/develop failed; refreshing against last-known origin/develop" >&2
       if [[ -n "$(git -C "$clone_dir" status --porcelain 2>/dev/null)" ]]; then
         stash_label="po-live-autobackup-$(date -u +%Y%m%dT%H%M%SZ)"
         if git -C "$clone_dir" stash push -u -m "$stash_label" >/dev/null 2>&1; then
           echo "  ! Stashed uncommitted changes as '${stash_label}'"
           echo "    (recover with: git -C '${clone_dir}' stash list)"
+        else
+          echo "ERROR: could not stash uncommitted changes in ${clone_dir}; refusing to refresh to develop." >&2
+          echo "       Resolve manually (commit/stash/clean the clone), then relaunch." >&2
+          exit 1
         fi
       fi
       git -C "$clone_dir" checkout -q -B develop origin/develop

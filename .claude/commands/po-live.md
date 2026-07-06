@@ -32,7 +32,7 @@ Inspect the exit code:
 
 Confirm to the founder:
 - Container name `cfg-agent-live-po`
-- Initial prompt: `/po $ARGUMENTS` (or just `/po` if no args)
+- Session: a fresh session seeds `/po $ARGUMENTS` (or `/po` with no args); `--continue` / `--resume [<id>]` instead reattach to an existing session (no `/po` prompt is sent)
 - Workspace: `worktrees/po-live` (shared across PO live sessions)
 - Resume later: relaunch with `/po-live --resume` (most recent) or `/po-live --resume <session-id>`; the session transcript persists on the host-mounted `~/.claude`. See [Resuming a previous session](#resuming-a-previous-session).
 
