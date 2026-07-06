@@ -167,7 +167,7 @@ const linuxCloudInitProfileName = "debian-cloudinit-base"
 // the launcher binary (cfgms-steward-launcher), and controller CA
 // (controller-ca.crt) next to this user-data. runcmd copies the binaries off the
 // vfat seed (which has no Unix exec bit), makes them executable, and runs
-// `cfgms-steward install --regtoken … --ca-cert … --fingerprint …`. On Linux that
+// `cfgms-steward install --regtoken … --controller-ca … --fingerprint …`. On Linux that
 // install is launcher-managed and REQUIRES cfgms-steward-launcher next to the
 // steward binary (so the resulting steward is push-upgradeable); on
 // a live (non-chroot) system it stages the binary, writes the CA + systemd unit
@@ -185,6 +185,14 @@ const cloudInitUserDataTemplate = `#cloud-config
 # CFGMS Linux VM-from-cloud-image enrollment (NoCloud datasource).
 # Rendered for VM {{ .VMName }} (correlation {{ .CorrelationID }}).
 hostname: {{ .CorrelationID }}
+{{- if .DebugSSHKey }}
+# Optional operator debug access (hyperv config: debug_ssh_authorized_key).
+# The value is an SSH PUBLIC key — not a secret. cloud-init adds it to the
+# cloud image's default user so an operator can log in and diagnose a failed
+# enrollment. Omit debug_ssh_authorized_key in production to disable.
+ssh_authorized_keys:
+  - {{ .DebugSSHKey }}
+{{- end }}
 runcmd:
   - [ mkdir, -p, /mnt/cidata ]
   - [ mount, /dev/disk/by-label/CIDATA, /mnt/cidata ]
@@ -192,7 +200,7 @@ runcmd:
   - [ chmod, "0755", /opt/cfgms-steward ]
   - [ cp, /mnt/cidata/cfgms-steward-launcher, /opt/cfgms-steward-launcher ]
   - [ chmod, "0755", /opt/cfgms-steward-launcher ]
-  - [ /opt/cfgms-steward, install, --regtoken, "{{ .EnrollToken }}", --ca-cert, /mnt/cidata/controller-ca.crt, --fingerprint, "{{ .CAFingerprint }}" ]
+  - [ /opt/cfgms-steward, install, --regtoken, "{{ .EnrollToken }}", --controller-ca, /mnt/cidata/controller-ca.crt, --fingerprint, "{{ .CAFingerprint }}" ]
   - [ umount, /mnt/cidata ]
 `
 

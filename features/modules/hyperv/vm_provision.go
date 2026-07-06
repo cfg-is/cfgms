@@ -229,6 +229,8 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 		// (operator-unwritable) SecretStore for the token (#2077 fix).
 		EnrollToken:   m.enrollToken,
 		CAFingerprint: m.enrollCAFingerprint,
+		// Optional operator-provided debug SSH public key (diagnose failed enroll).
+		DebugSSHKey: m.debugSSHAuthorizedKey,
 	}
 	// A per-VM random password is generated for both families: Windows uses it
 	// for the one-shot AutoLogon that runs enrollment; Linux uses it for the
