@@ -409,6 +409,107 @@ func TestRollout_OperatorHalt(t *testing.T) {
 	assert.Equal(t, string(business.RolloutStatusHalted), string(stored.Status))
 }
 
+// TestRollout_Halt_CrossTenantForbidden verifies that a scoped caller cannot halt a rollout
+// owned by another tenant. Supplying a victim tenant's rollout ID to POST /halt must return
+// 403 FORBIDDEN and must not modify the victim's record. This mirrors the GET cross-tenant
+// guard (TestRollout_GetStatus_CrossTenant) for the halt path.
+func TestRollout_Halt_CrossTenantForbidden(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	// Seed an in-progress rollout owned by tenant-b.
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "other-rollout",
+		TenantID:      "tenant-b",
+		TargetVersion: "v0.5.21",
+		CurrentRing:   "pre-release",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	// Caller is tenant-a — must be forbidden.
+	rec := doHaltRollout(server, "tenant-a", "other-rollout")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant halt must be forbidden: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "FORBIDDEN")
+
+	// The victim's rollout must not have been halted.
+	stored, err := rolloutStore.GetRollout(context.Background(), "other-rollout")
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusInProgress), string(stored.Status),
+		"cross-tenant halt must not modify the victim's rollout status")
+	assert.Nil(t, stored.HaltedAt, "cross-tenant halt must not stamp halted_at on the victim's record")
+}
+
+// TestRollout_Halt_NotFound verifies that POST /api/v1/rollout/{rollout_id}/halt returns
+// 404 ROLLOUT_NOT_FOUND for an unknown rollout ID. This mirrors TestRollout_GetStatus_NotFound
+// for the halt path.
+func TestRollout_Halt_NotFound(t *testing.T) {
+	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	rec := doHaltRollout(server, "tenant-a", "nonexistent-rollout-id")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLLOUT_NOT_FOUND")
+}
+
+// TestRollout_Halt_IdempotentOnTerminal verifies that halting a rollout that is already in a
+// terminal state (halted or completed) returns 200 with the current status and does not modify
+// the record. This covers the already-terminal short-circuit in handleHaltRollout.
+func TestRollout_Halt_IdempotentOnTerminal(t *testing.T) {
+	const tenantID = "tenant-a"
+
+	cases := []struct {
+		name   string
+		status business.RolloutStatus
+	}{
+		{"already halted", business.RolloutStatusHalted},
+		{"already completed", business.RolloutStatusCompleted},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+			// Seed a rollout already in a terminal state with distinguishing fields that must
+			// survive an idempotent halt untouched.
+			haltedAt := time.Now().UTC().Add(-time.Hour)
+			require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+				ID:             "terminal-rollout",
+				TenantID:       tenantID,
+				TargetVersion:  "v0.5.21",
+				CurrentRing:    "stable",
+				RingsCompleted: 2,
+				RingsTotal:     2,
+				Status:         tc.status,
+				StartedAt:      time.Now().UTC().Add(-2 * time.Hour),
+				HaltedAt:       &haltedAt,
+				Error:          "original terminal reason",
+			}))
+
+			rec := doHaltRollout(server, tenantID, "terminal-rollout")
+			require.Equal(t, http.StatusOK, rec.Code, "idempotent halt must return 200: %s", rec.Body.String())
+
+			// The response must echo the existing terminal status, not force it to halted.
+			var wrapper struct {
+				Data startRolloutResponse `json:"data"`
+			}
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper))
+			assert.Equal(t, string(tc.status), wrapper.Data.Status,
+				"idempotent halt must report the existing terminal status")
+
+			// The stored record must be unmodified: status, halted_at, and error preserved.
+			stored, err := rolloutStore.GetRollout(context.Background(), "terminal-rollout")
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.status), string(stored.Status),
+				"idempotent halt must not change a terminal rollout's status")
+			require.NotNil(t, stored.HaltedAt)
+			assert.Equal(t, haltedAt, *stored.HaltedAt, "idempotent halt must not overwrite halted_at")
+			assert.Equal(t, "original terminal reason", stored.Error,
+				"idempotent halt must not overwrite the original terminal reason")
+			assert.Equal(t, 2, stored.RingsCompleted, "idempotent halt must not change rings_completed")
+		})
+	}
+}
+
 // TestRollout_RequiresRolloutStore verifies that POST /api/v1/rollout returns 503 when
 // the rollout store is not configured.
 func TestRollout_RequiresRolloutStore(t *testing.T) {
@@ -537,6 +638,93 @@ func TestRollout_CompletesWhenAllRingsStewardsOnVersion(t *testing.T) {
 	assert.Equal(t, string(business.RolloutStatusCompleted), string(finalRecord.Status),
 		"rollout must complete when all ring stewards are already on the target version")
 	assert.Equal(t, 2, finalRecord.RingsCompleted)
+}
+
+// TestRollout_GetStatus_FleetQueryFailure verifies that when the fleet health query fails
+// for an in-progress rollout, handleGetRollout does NOT report deceptively healthy all-zero
+// metrics. Instead it flags the health metrics as unavailable so operators cannot mistake a
+// query failure for a healthy ring with no failures. The record itself is still returned 200.
+func TestRollout_GetStatus_FleetQueryFailure(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Seed an in-progress rollout sitting on a current ring so the live-metrics branch runs.
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "in-progress-rollout",
+		TenantID:      tenantID,
+		TargetVersion: targetVersion,
+		CurrentRing:   "pre-release",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	// Swap in a fleet query that always fails (real interface impl, not a mock).
+	server.fleetQuery = &failingFleetQuery{}
+
+	rec := doGetRollout(server, tenantID, "in-progress-rollout")
+	require.Equal(t, http.StatusOK, rec.Code, "status must still return 200 with the record: %s", rec.Body.String())
+
+	var wrapper struct {
+		Data rolloutStatusResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper))
+	resp := wrapper.Data
+
+	assert.False(t, resp.HealthMetricsAvailable,
+		"health_metrics_available must be false when the fleet query fails")
+	assert.NotEmpty(t, resp.HealthMetricsError,
+		"health_metrics_error must explain that metrics are unavailable")
+	// The zeroed metrics must not be presented as authoritative healthy values.
+	assert.Zero(t, resp.OnVersionPct, "on_version_pct must not be fabricated on query failure")
+	assert.Zero(t, resp.FailedCount, "failed_count must not be fabricated on query failure")
+	assert.Zero(t, resp.PendingCount, "pending_count must not be fabricated on query failure")
+}
+
+// TestRollout_GetStatus_FleetQuerySuccessFlagsAvailable verifies the positive path: when the
+// fleet query succeeds for an in-progress rollout, health_metrics_available is true.
+func TestRollout_GetStatus_FleetQuerySuccessFlagsAvailable(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	stewards := []fleet.StewardData{
+		{
+			ID:       "steward-ok",
+			TenantID: tenantID,
+			Status:   "online",
+			DNAAttributes: map[string]string{
+				"deployment_ring": "pre-release",
+				"steward.version": targetVersion,
+			},
+		},
+	}
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, stewards)
+
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "in-progress-ok",
+		TenantID:      tenantID,
+		TargetVersion: targetVersion,
+		CurrentRing:   "pre-release",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	rec := doGetRollout(server, tenantID, "in-progress-ok")
+	require.Equal(t, http.StatusOK, rec.Code, "status must return 200: %s", rec.Body.String())
+
+	var wrapper struct {
+		Data rolloutStatusResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper))
+	resp := wrapper.Data
+
+	assert.True(t, resp.HealthMetricsAvailable,
+		"health_metrics_available must be true when the fleet query succeeds")
+	assert.Empty(t, resp.HealthMetricsError, "no error message on a successful query")
+	assert.Equal(t, float64(100), resp.OnVersionPct, "the single on-version steward yields 100%%")
 }
 
 // TestRollout_InvalidVersionRejected verifies that a malformed target_version returns 400.

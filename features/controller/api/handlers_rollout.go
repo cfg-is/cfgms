@@ -37,19 +37,27 @@ type startRolloutResponse struct {
 }
 
 // rolloutStatusResponse is returned by GET /api/v1/rollout/{rollout_id}.
+//
+// HealthMetricsAvailable reports whether the live health metrics (OnVersionPct,
+// FailedCount, PendingCount) reflect a successful fleet query. When the fleet query
+// fails for an in-progress rollout the metrics are unknown — not zero — so this flag
+// is false and HealthMetricsError explains why. Operators must not read the zeroed
+// metrics as "healthy ring, no failures" when HealthMetricsAvailable is false.
 type rolloutStatusResponse struct {
-	RolloutID      string     `json:"rollout_id"`
-	TargetVersion  string     `json:"target_version"`
-	CurrentRing    string     `json:"current_ring"`
-	Status         string     `json:"status"`
-	OnVersionPct   float64    `json:"on_version_pct"`
-	FailedCount    int        `json:"failed_count"`
-	PendingCount   int        `json:"pending_count"`
-	RingsCompleted int        `json:"rings_completed"`
-	RingsTotal     int        `json:"rings_total"`
-	StartedAt      time.Time  `json:"started_at"`
-	HaltedAt       *time.Time `json:"halted_at,omitempty"`
-	Error          string     `json:"error,omitempty"`
+	RolloutID              string     `json:"rollout_id"`
+	TargetVersion          string     `json:"target_version"`
+	CurrentRing            string     `json:"current_ring"`
+	Status                 string     `json:"status"`
+	OnVersionPct           float64    `json:"on_version_pct"`
+	FailedCount            int        `json:"failed_count"`
+	PendingCount           int        `json:"pending_count"`
+	HealthMetricsAvailable bool       `json:"health_metrics_available"`
+	HealthMetricsError     string     `json:"health_metrics_error,omitempty"`
+	RingsCompleted         int        `json:"rings_completed"`
+	RingsTotal             int        `json:"rings_total"`
+	StartedAt              time.Time  `json:"started_at"`
+	HaltedAt               *time.Time `json:"halted_at,omitempty"`
+	Error                  string     `json:"error,omitempty"`
 }
 
 // rolloutHaltChans tracks per-rollout halt-signal channels. The goroutine selects on the
@@ -212,15 +220,28 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 		Error:          record.Error,
 	}
 
-	// Compute live health metrics for the current ring when in-progress.
+	// Compute live health metrics for the current ring when in-progress. A failed fleet
+	// query yields unknown counts, not zeros: surfacing them as 0% on_version / 0 failed /
+	// 0 pending would give operators silently false data to base rollout decisions on. On
+	// failure we log at warn level, leave the metrics at their zero value, and flag them as
+	// unavailable so the response is unambiguous rather than deceptively healthy-looking.
 	if record.Status == business.RolloutStatusInProgress && record.CurrentRing != "" && s.fleetQuery != nil {
-		onVersion, failed, pending, _ := s.queryRingHealthCounts(r.Context(), record.CurrentRing, record.TargetVersion, record.TenantID)
-		total := onVersion + failed + pending
-		if total > 0 {
-			resp.OnVersionPct = 100.0 * float64(onVersion) / float64(total)
+		onVersion, failed, pending, qErr := s.queryRingHealthCounts(r.Context(), record.CurrentRing, record.TargetVersion, record.TenantID)
+		if qErr != nil {
+			s.logger.Warn("Ring health query failed for rollout status; reporting metrics as unavailable",
+				"rollout_id", logging.SanitizeLogValue(rolloutID),
+				"ring", logging.SanitizeLogValue(record.CurrentRing),
+				"error", qErr)
+			resp.HealthMetricsError = "ring health metrics are unavailable: the fleet query failed"
+		} else {
+			total := onVersion + failed + pending
+			if total > 0 {
+				resp.OnVersionPct = 100.0 * float64(onVersion) / float64(total)
+			}
+			resp.FailedCount = failed
+			resp.PendingCount = pending
+			resp.HealthMetricsAvailable = true
 		}
-		resp.FailedCount = failed
-		resp.PendingCount = pending
 	}
 
 	s.writeSuccessResponse(w, resp)
