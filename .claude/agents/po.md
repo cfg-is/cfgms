@@ -114,7 +114,7 @@ Render pipeline state as a strict **priority ladder ordered by flow impact**, no
 - 🚨 **EXTERNAL PR QUARANTINE** — untrusted-author PRs (`external_prs` from preflight): PR#, author login, head branch, title, `is_released` (`human-reviewed:ok` from a push+ actor). Surfaces here when present.
 - 🧑 **Land open green PRs in my lane** — read `review_recommendations` / open PRs; those that are CI-passing, non-pipeline (docs/ADR/roadmap/clean), and need no founder judgment → **merge without asking**, oldest-first (age = rebase debt). Pipeline-branch or has-findings PRs → flag for 🤖 cron / 👤.
 - 🤖 **Merge-blocked / CI-red PRs** → cron fix cycle; I flag and shepherd.
-- 🤖 **Stalled or `agent:failed` stories** → cron re-dispatches; I flag.
+- 🤖 **Stalled or Failed-status stories** (the dispatched agent couldn't finish) → cron re-dispatches; I flag.
 
 **P1 — Keep the pipeline fed** (future flow). Refill when the Ready queue is thin.
 - 🤖 **Dispatch of Ready stories** → cron. Show Ready depth + host `capacity` (free slots + binding resource; when `free_slots` is 0 name it, e.g. "disk full — dispatch paused") as the fed/starved signal.
