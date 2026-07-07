@@ -106,7 +106,54 @@ External fork PRs fall back to GitHub-hosted runners. Additionally set **repo �
 
 ---
 
-## 6. What the founder does vs what the agent builds
+## 6. Lab Provisioning Results (Issue #2335, measured 2026-07-07 on cfg-lab)
+
+First Linux CI runner provisioned end-to-end on the lab cluster: VM `cfgms-ci-lin-01`
+(4 vCPU / 8 GB / 60 GB, Debian 13 cloud image) on host CFG-70-02 via the hyperv
+module cloud-init path (ADR-009 §6a), steward enrolled to tenant `gh-ci-runners`,
+registered to `cfg-is/cfgms` as runner **`cfgms-ci-lin-01`** with labels
+**`self-hosted, Linux, X64, cfgms`** (runner id 21, status `online`).
+
+Measured timings:
+
+| Phase | Measured |
+|-------|----------|
+| VM provision, cloud-init path (`cfg config upload` → VM booted) | 2 m 42 s |
+| Steward enrollment (seeded boot → steward `active` on controller) | ~100 s |
+| Registration token mint | 0.44 s |
+| Runner registration (agent download 197 MB + deps + `config.sh` + service start) | 63 s |
+| Registration sequence → runner `online` in GitHub API | 77.6 s |
+| Hyper-V checkpoint create (`Checkpoint-VM`, running VM) | 4.55 s |
+| Hyper-V checkpoint revert (`Restore-VMCheckpoint`) | 10.02 s |
+
+`ProvisionTimings.String()` for the registration sequence (checkpoint durations per
+the struct semantics — enrollment-confirmed → checkpoint-created spans operator
+steps between the two operations):
+
+```
+cirunner provisioning: token-mint=437ms sync-trigger=27ms enrollment=1m17.126s total=1m17.59s checkpoint-create=45.126s checkpoint-revert=10.017s
+```
+
+The runner was `online` in the GitHub API when first polled 36 s after the
+checkpoint revert — the checkpoint-revert pool pattern (Phase 2 ephemeral runners)
+is viable.
+
+**Deviations from the target workflow path (pre-existing gaps, filed for follow-up):**
+the `cirunner-provision.yaml` workflow could not run this sequence yet. The deployed
+lab controller predates the workflow-submission endpoint (`cfg workflow run` → 404),
+and two source-level gaps block it on any current build: the workflow engine
+registers the `github` APIProvider with a nil secrets store
+(`features/workflow/providers.go` — never re-injected with the controller's secret
+store), and the `github_runner` module is not registered in the steward module
+factory (`features/steward/factory/factory.go`), so the runner cfg cannot converge
+on a steward. The registration token for this run was minted directly against the
+GitHub API (same endpoint the App-based provider calls) and delivered over an
+operator SSH session — never composed into a CFGMS command string. Sequence and
+timings otherwise mirror the workflow's steps 1–4.
+
+---
+
+## 7. What the founder does vs what the agent builds
 
 - **Founder (one-time prereq):** run §1 (≈1 click) and §3 (drop 3 secrets). That's it, forever.
 - **Automated build-out:** the manifest-flow helper (optional), the controller token-minting integration (§4), the VM provisioning + registration wiring, steward management of the runners, and the gated CI-workflow routing (§5).
