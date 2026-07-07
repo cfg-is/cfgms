@@ -34,8 +34,14 @@ env:
 
 jobs:
   # Fast unit tests - runs on every push/PR
+  #
+  # runs-on routing (#2337, epic #565): internal events (push, merge_group,
+  # non-fork pull_request) run on the CFGMS-managed self-hosted Linux runner;
+  # fork PRs and workflow_dispatch (no fork property) stay on GitHub-hosted.
+  # The full label set targets the Linux runner specifically — a bare
+  # 'self-hosted' would also match the Windows runner.
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -73,8 +79,9 @@ jobs:
         retention-days: 5
 
   # Integration tests - runs on PRs to develop/main, workflow_dispatch, or push to main
+  # runs-on routing (#2337): same fork-gated self-hosted routing as unit-tests.
   integration-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
