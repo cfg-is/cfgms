@@ -471,6 +471,10 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
 	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
 
+	// Connection monitoring endpoints (Issue #2367)
+	stewards.Handle("/connections/all", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleListAllConnections))).Methods("GET")
+	stewards.Handle("/{id}/connection", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetStewardConnection))).Methods("GET")
+
 	// QUIC connection management endpoints
 	// Script management endpoints
 	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")

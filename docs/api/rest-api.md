@@ -245,6 +245,71 @@ Refresh the mTLS credentials for a steward. Called when the steward's certificat
 
 - `id` (path): Steward ID
 
+#### GET /api/v1/stewards/{id}/connection
+
+Get transport-level connection detail for a specific steward: whether it is currently streaming, when it connected, its remote network address, and the last-activity timestamp. Sourced from the live connection registry.
+
+Returns `connected: false` (HTTP 200) for a known steward that is not currently streaming. Returns 404 for an unknown steward ID.
+
+**Authentication:** Required  
+**Required permission:** `steward:read`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+**Response (connected):**
+
+```json
+{
+  "data": {
+    "steward_id": "steward-001",
+    "connected": true,
+    "connected_at": "2026-01-12T10:29:00Z",
+    "remote_addr": "198.51.100.42:54321",
+    "last_activity": "2026-01-12T10:30:00Z"
+  },
+  "timestamp": "2026-01-12T10:30:05Z"
+}
+```
+
+**Response (known but not connected):**
+
+```json
+{
+  "data": {
+    "steward_id": "steward-001",
+    "connected": false
+  },
+  "timestamp": "2026-01-12T10:30:05Z"
+}
+```
+
+#### GET /api/v1/stewards/connections/all
+
+List all currently-connected stewards from the live connection registry, filtered to the authenticated caller's tenant. Returns transport-level connection detail for each connected steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:read`
+
+**Response:**
+
+```json
+{
+  "data": {
+    "connections": [
+      {
+        "steward_id": "steward-001",
+        "connected_at": "2026-01-12T10:29:00Z",
+        "remote_addr": "198.51.100.42:54321",
+        "last_activity": "2026-01-12T10:30:00Z"
+      }
+    ]
+  },
+  "timestamp": "2026-01-12T10:30:05Z"
+}
+```
+
 ### Configuration Management
 
 #### GET /api/v1/stewards/{id}/config
