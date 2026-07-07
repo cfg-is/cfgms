@@ -271,7 +271,7 @@ func TestExistenceGating_ExistingVMNotRecreatedByDefault(t *testing.T) {
 	transport := &testWinRMTransport{
 		output: existingSourceVMJSON("stw-01", "Running"),
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // on_existing: never
 
@@ -299,7 +299,7 @@ func TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault(t *testing.T) {
 	transport := &testWinRMTransport{
 		output: existingSourceVMJSON("stw-01", "Off"),
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // desired running, on_existing: never
 
@@ -324,7 +324,7 @@ func TestExistenceGating_BrokenVMSurfacesAsDegraded(t *testing.T) {
 	transport := &testWinRMTransport{
 		output: existingSourceVMJSON("stw-01", "Critical"),
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // on_existing: never
 
@@ -354,7 +354,7 @@ func TestExistenceGating_RecreateOnlyWhenExplicit(t *testing.T) {
 	transport := &testWinRMTransport{
 		output: existingSourceVMJSON("stw-01", "Running"),
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	configMap := sourceVMConfigMap(2, "linux")
 	src := configMap["source"].(map[string]interface{})
@@ -393,7 +393,7 @@ func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
 	transport := &testWinRMTransport{
 		output: `{"found":false}`, // host reports the VM absent
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
 		VMName:        "stw-01",
 		State:         ProvisionStateInstalling,

@@ -4,6 +4,7 @@ package hyperv
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,8 @@ import (
 // real in-memory SecretStore is injected so the windows create path can resolve
 // the .ppkg host-path secret ({{ secret "ppkg-path-key" }}) when rendering the
 // autounattend answer file (#2047) — no mock framework is used.
-func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
+func provisionModuleWithTransport(t *testing.T, transport winrmTransport) *hypervModule {
+	t.Helper()
 	m := &hypervModule{
 		executor:       &stubHypervExecutor{},
 		transport:      transport,
@@ -36,10 +38,10 @@ func provisionModuleWithTransport(transport winrmTransport) *hypervModule {
 	// user password. The Windows autounattend (ADR-010) no longer reads secrets
 	// (token + CA fingerprint are controller-supplied ProfileVars), so it needs
 	// no store entries.
-	_ = m.SetSecretStore(newInlineStore(
+	require.NoError(t, m.SetSecretStore(newInlineStore(
 		"hyperv/enroll/regtoken", "reg-token-stub-value",
 		"hyperv/enroll/user-password-crypted", "$6$rounds=4096$stub$cryptedstub",
-	))
+	)))
 	return m
 }
 
@@ -84,7 +86,7 @@ func TestProvisionVM_Gen1SkipsFirmware(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(1, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -199,7 +201,7 @@ func TestProvisionVM_Gen2WindowsFirmwareTemplate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -225,7 +227,7 @@ func TestProvisionVM_Gen2LinuxFirmwareTemplate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -252,7 +254,7 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -302,7 +304,7 @@ func TestProvisionVM_SeedVHDBuildAndAttachSequence(t *testing.T) {
 // seed VHDX.
 func TestProvisionVM_WindowsBuildsAnswerISO(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -329,7 +331,7 @@ func TestProvisionVM_AttachesInstallISOFromHostPath(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -380,7 +382,7 @@ func cloudInitVMConfigMap(generation int) map[string]interface{} {
 // boot device; and there is NO install ISO, NO answer ISO, and NO boot keypress.
 func TestProvisionVM_CloudInitPath(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	// The linux steward + launcher binaries + CA host paths the seed stages (ADR-010).
 	// The launcher is required for a launcher-managed (push-upgradeable) install.
 	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
@@ -431,7 +433,7 @@ func TestProvisionVM_CloudInitPath(t *testing.T) {
 // firmware boot device — same Gen1 contract as the install-media path).
 func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(1)}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -456,7 +458,7 @@ func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
 // runcmd and no banned patterns.
 func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 
 	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
@@ -520,7 +522,7 @@ func TestProvision_InstallingToFinalizingDetachesSeed(t *testing.T) {
 		CorrelationID: "stw-01",
 		StartedAt:     time.Now().Add(-2 * time.Hour),
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -559,7 +561,7 @@ func TestProvision_InstallingNotSettledDoesNotDetach(t *testing.T) {
 		CorrelationID: "stw-01",
 		StartedAt:     time.Now(), // just started — well within the settle window
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -586,7 +588,7 @@ func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`}, // getVM → absent
 	}
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	require.NoError(t, m.SetSecretStore(preseedTestStore()))
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
@@ -629,7 +631,7 @@ func TestProvisionVM_AdvancesRecordAbsentToInstalling(t *testing.T) {
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
@@ -657,7 +659,7 @@ func TestProvisionVM_ResumeFromInstallingDoesNotRestart(t *testing.T) {
 		State:         ProvisionStateInstalling,
 		CorrelationID: "stw-01",
 	}))
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
@@ -686,7 +688,7 @@ func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
 		perCallOutputs: []string{`{"found":false}`},
 	}
 	store := NewMemProvisionStore()
-	m := provisionModuleWithTransport(transport)
+	m := provisionModuleWithTransport(t, transport)
 	m.provisionStore = store
 
 	cfg := rawConfigState{m: map[string]interface{}{
@@ -710,4 +712,289 @@ func TestProvisionVM_NoSourceSkipsProvisioning(t *testing.T) {
 
 	_, err := store.GetProvision(context.Background(), "plain-vm")
 	assert.ErrorIs(t, err, ErrProvisionNotFound, "no source: no provisioning record")
+}
+
+// ── REQUIRED TEST: seed VHDX + answer media deleted post-finalizing ──────────
+
+// TestProvision_FinalizeDeletesSeedMediaPostDetach is the REQUIRED TEST
+// (ADR-010 §5 / Issue #2081). It proves that when a VM's installing record
+// passes the settle window and the VM is running, finalizeProvision:
+//  1. Issues Dismount-VHD (detach) before Remove-Item (delete).
+//  2. Issues Remove-Item for BOTH the seed VHDX path and the answer ISO path
+//     — idempotent, so a non-existent file is not an error.
+//  3. Advances the record to finalizing (not ready — that is controller-side).
+//
+// The delete is issued post-finalizing in the sense that it is part of the
+// same convergence cycle that advances the record to finalizing, bounding the
+// on-disk join-token window to that single cycle. A second convergence cycle
+// on the same (now-finalizing) record issues no further Remove-Item calls,
+// proving system-level idempotency.
+func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: runningSourceVMJSON(),
+	}
+	store := NewMemProvisionStore()
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now().Add(-2 * time.Hour),
+	}))
+	m := provisionModuleWithTransport(t, transport)
+	m.provisionStore = store
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// Detach must precede delete — both path values travel via args, never the
+	// script text (ADR-009 §5 — no user-controlled value in script).
+	detach := callsContaining(calls, "Dismount-VHD")
+	require.Len(t, detach, 1, "finalizing must issue exactly one Dismount-VHD")
+	assert.True(t, argsContain(detach[0], `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`),
+		"seed path must travel via args")
+	assert.NotContains(t, detach[0].scriptBlock, "cfgms-seed-stw-01",
+		"seed path must not be interpolated into the script text")
+
+	// Remove-Item is issued for both the seed VHDX and the answer ISO — both
+	// paths travel via args only. SilentlyContinue makes it idempotent.
+	deletes := callsContaining(calls, "Remove-Item")
+	require.GreaterOrEqual(t, len(deletes), 2, "finalizing must issue Remove-Item for both seed VHDX and answer ISO")
+	seedPaths := make([]string, 0, len(deletes))
+	for _, d := range deletes {
+		for _, a := range d.args {
+			if s, ok := a.(string); ok && strings.Contains(s, "cfgms-") {
+				seedPaths = append(seedPaths, s)
+			}
+		}
+	}
+	assert.Contains(t, seedPaths, `C:\ClusterStorage\CSV01\cfgms-seed-stw-01.vhdx`,
+		"seed VHDX must be deleted via args")
+	for _, d := range deletes {
+		assert.Contains(t, d.scriptBlock, "SilentlyContinue",
+			"seed media delete must be idempotent (SilentlyContinue)")
+		assert.NotContains(t, d.scriptBlock, "cfgms-seed-stw-01",
+			"path must not be interpolated into the delete script text")
+	}
+
+	// Detach must precede the first Remove-Item in the recorded call sequence.
+	detachIdx := -1
+	firstDeleteIdx := -1
+	for i, c := range calls {
+		if strings.Contains(c.scriptBlock, "Dismount-VHD") && detachIdx < 0 {
+			detachIdx = i
+		}
+		if strings.Contains(c.scriptBlock, "Remove-Item") && firstDeleteIdx < 0 {
+			firstDeleteIdx = i
+		}
+	}
+	require.Greater(t, detachIdx, -1, "Dismount-VHD must be recorded")
+	require.Greater(t, firstDeleteIdx, -1, "Remove-Item must be recorded")
+	assert.Less(t, detachIdx, firstDeleteIdx, "Dismount-VHD must precede Remove-Item")
+
+	// Record must be at finalizing after the cycle.
+	rec, err := store.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFinalizing, rec.State,
+		"record must advance to finalizing after detach+delete")
+
+	// ── Idempotency: a second convergence cycle on the now-finalizing record
+	// must NOT issue another Dismount-VHD or Remove-Item.
+	transport.mu.Lock()
+	transport.calls = nil
+	transport.mu.Unlock()
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls2 := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls2, "Dismount-VHD"),
+		"second cycle on finalizing record must not re-detach the seed")
+	assert.Empty(t, callsContaining(calls2, "Remove-Item"),
+		"second cycle on finalizing record must not re-delete seed media")
+}
+
+// TestProvision_WindowsFinalizeDeletesAnswerISO asserts the Windows path
+// (answer ISO, not seed VHDX) issues Remove-Item for the answer ISO path on
+// finalization. The seed VHDX path is also attempted (idempotent no-op since
+// it never existed for Windows VMs).
+func TestProvision_WindowsFinalizeDeletesAnswerISO(t *testing.T) {
+	vmJSON := `{"found":true,"Name":"stw-01","MemoryStartupBytes":4294967296,` +
+		`"ProcessorCount":2,"Generation":2,"Path":"C:\\ClusterStorage\\CSV01\\stw-01.vhdx",` +
+		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"Running"}`
+	transport := &testWinRMTransport{output: vmJSON}
+	store := NewMemProvisionStore()
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now().Add(-2 * time.Hour),
+	}))
+	m := provisionModuleWithTransport(t, transport)
+	m.provisionStore = store
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "windows")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	deletes := callsContaining(calls, "Remove-Item")
+	require.GreaterOrEqual(t, len(deletes), 1, "windows finalization must issue Remove-Item for answer ISO")
+
+	isoPaths := make([]string, 0)
+	for _, d := range deletes {
+		for _, a := range d.args {
+			if s, ok := a.(string); ok && strings.Contains(s, "cfgms-answer") {
+				isoPaths = append(isoPaths, s)
+			}
+		}
+	}
+	assert.Contains(t, isoPaths, `C:\ClusterStorage\CSV01\cfgms-answer-stw-01.iso`,
+		"answer ISO path must be deleted for the windows path")
+}
+
+// TestProvision_FinalizeDeleteSeedMediaErrorDoesNotBlockAdvance asserts that a
+// transient ExecutePS failure on psDeleteSeedMedia does NOT fail the provision
+// or block the record from advancing to finalizing. The detach (psDetachSeedVHD)
+// already removed the answer file from the guest's visible media; the delete is
+// a best-effort on-disk cleanup, and the TTL sweep is the safety net for any
+// failed deletes. A failed delete must log a warning and continue.
+func TestProvision_FinalizeDeleteSeedMediaErrorDoesNotBlockAdvance(t *testing.T) {
+	// Call sequence when an installing record is past the settle window and the VM
+	// is running:
+	//   0: getVM (existence check in setVM)        → Running
+	//   1: getVM (vmIsRunning in finalizeProvision) → Running
+	//   2: psDetachSeedVHD                          → success
+	//   3: psDeleteSeedMedia (seed VHDX path)       → ERROR (simulated transient failure)
+	//   4: psDeleteSeedMedia (answer ISO path)      → success (continue after error)
+	deleteErr := fmt.Errorf("PS host: Remove-Item failed (access denied)")
+	transport := &testWinRMTransport{
+		output:        runningSourceVMJSON(),
+		perCallErrors: []error{nil, nil, nil, deleteErr},
+	}
+	store := NewMemProvisionStore()
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now().Add(-2 * time.Hour),
+		UpdatedAt:     time.Now().Add(-2 * time.Hour),
+	}))
+	m := provisionModuleWithTransport(t, transport)
+	m.provisionStore = store
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	// Must succeed — a failed seed-media delete is non-fatal.
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg),
+		"failed seed-media delete must not propagate as a provision failure")
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// Detach must still run.
+	require.Len(t, callsContaining(calls, "Dismount-VHD"), 1)
+	// Both Remove-Item calls must be issued (error on first does not skip second).
+	require.Len(t, callsContaining(calls, "Remove-Item"), 2,
+		"both seed VHDX and answer ISO Remove-Item calls must be attempted even after error on first")
+
+	// Record must advance to finalizing despite the failed delete.
+	rec, err := store.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFinalizing, rec.State,
+		"record must still advance to finalizing when seed-media delete fails")
+}
+
+// TestProvision_SweepNilGuardsAreNoop asserts that sweepStaleSeedMedia returns
+// silently when the provision store or transport are nil, without panicking.
+func TestProvision_SweepNilGuardsAreNoop(t *testing.T) {
+	// nil provisionStore
+	m1 := &hypervModule{
+		transport:      &testWinRMTransport{},
+		provisionStore: nil,
+		vms:            make(map[string]VMConfig),
+	}
+	require.NotPanics(t, func() { m1.sweepStaleSeedMedia(context.Background()) },
+		"nil provisionStore must not panic")
+
+	// nil transport
+	m2 := &hypervModule{
+		transport:      nil,
+		provisionStore: NewMemProvisionStore(),
+		vms:            make(map[string]VMConfig),
+	}
+	require.NotPanics(t, func() { m2.sweepStaleSeedMedia(context.Background()) },
+		"nil transport must not panic")
+}
+
+// TestProvision_SweepDeletesStaleSeedMedia asserts that sweepStaleSeedMedia
+// issues Remove-Item for a stale provision record's seed paths when the record
+// is older than seedMediaTTL, without affecting a fresh record.
+func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
+	transport := &testWinRMTransport{output: runningSourceVMJSON()}
+	store := NewMemProvisionStore()
+
+	// Stale record: updated 48h ago — well past seedMediaTTL.
+	stalePast := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stale-vm",
+		State:         ProvisionStateFinalizing,
+		CorrelationID: "stale-vm",
+		StartedAt:     stalePast,
+		UpdatedAt:     stalePast,
+	}))
+
+	// Fresh record: updated just now — within the TTL window, must not be swept.
+	require.NoError(t, store.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "fresh-vm",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "fresh-vm",
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}))
+
+	// Wire a VHD path for stale-vm so the sweep can derive the media path.
+	m := provisionModuleWithTransport(t, transport)
+	m.provisionStore = store
+	m.seedDir = `C:\cfgms-seeds`
+	m.vmsMu.Lock()
+	m.vms["stale-vm"] = VMConfig{VHDPath: `C:\VMs\stale-vm.vhdx`}
+	m.vmsMu.Unlock()
+
+	m.sweepStaleSeedMedia(context.Background())
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	deletes := callsContaining(calls, "Remove-Item")
+	require.GreaterOrEqual(t, len(deletes), 1, "sweep must issue Remove-Item for the stale record")
+
+	// The stale-vm seed paths must appear in the delete args.
+	var deletedPaths []string
+	for _, d := range deletes {
+		for _, a := range d.args {
+			if s, ok := a.(string); ok && strings.Contains(s, "stale-vm") {
+				deletedPaths = append(deletedPaths, s)
+			}
+		}
+	}
+	assert.NotEmpty(t, deletedPaths, "stale-vm seed media paths must be deleted by the sweep")
+
+	// The fresh-vm paths must NOT appear in the delete args.
+	for _, d := range deletes {
+		for _, a := range d.args {
+			if s, ok := a.(string); ok {
+				assert.NotContains(t, s, "fresh-vm",
+					"fresh record must not be swept before TTL expires")
+			}
+		}
+	}
 }

@@ -66,6 +66,12 @@ const (
 	// create path this story implements).
 	psDetachSeedVHD = `Dismount-VHD -Path $Path -ErrorAction SilentlyContinue`
 
+	// psDeleteSeedMedia removes a staged seed file (seed VHDX or answer ISO)
+	// after enrollment. Idempotent — SilentlyContinue means an already-absent
+	// file is not an error. The path travels via ArgumentList only; it is never
+	// interpolated into the script text.
+	psDeleteSeedMedia = `Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue`
+
 	// psAttachSeedDisk wraps Add-VMHardDiskDrive: attach the seed VHDX as the
 	// VM's secondary disk.
 	psAttachSeedDisk = `Add-VMHardDiskDrive -VMName $Name -Path $SeedPath`
@@ -117,6 +123,14 @@ const (
 // gibibyte is 1024^3, used to convert source.resize_gb into a byte count for the
 // cloud boot-disk resize (0 means "leave at native size").
 const gibibyte = int64(1) << 30
+
+// seedMediaTTL is the maximum time staged seed media (seed VHDX, answer ISO)
+// may remain on disk after the provision record's last update. The TTL sweep
+// (sweepStaleSeedMedia) catches orphaned media from failed or aborted
+// provisions — bounding the on-disk join-token window even when the per-VM
+// finalizeProvision delete was never reached (e.g. the VM was deleted
+// mid-install).
+const seedMediaTTL = 24 * time.Hour
 
 // secureBootTemplate returns the Gen2 secure-boot firmware template for the
 // given os_family. Windows guests use the Microsoft Windows template; Linux
@@ -708,6 +722,27 @@ func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName s
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Dismount-VHD", "vm:"+vmName, nil, nil, nil)
 
+	// Delete the seed VHDX and the answer ISO (ADR-010 §5). Both calls are
+	// idempotent — psDeleteSeedMedia uses SilentlyContinue so an absent file
+	// is not an error. For linux/cloud-init VMs the seed VHDX exists; the ISO
+	// path is a no-op. For windows VMs the seed VHDX never existed; the ISO
+	// path deletes the answer ISO built by psBuildAnswerIso.
+	isoPath := answerISOPath(vmName, cfg.VHDPath, m.seedDir)
+	for _, mediaPath := range []string{seedPath, isoPath} {
+		if _, psErr := m.transport.ExecutePS(ctx, psDeleteSeedMedia, map[string]string{
+			"Path": mediaPath,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-Item", "vm:"+vmName, nil, nil, psErr)
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: seed media delete failed; TTL sweep will retry",
+					"vm_name", logging.SanitizeLogValue(vmName),
+					"path", logging.SanitizeLogValue(mediaPath))
+			}
+			continue
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-Item", "vm:"+vmName, nil, nil, nil)
+	}
+
 	// Advance installing → finalizing. ready is controller-side (#2050).
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateFinalizing)
 }
@@ -737,4 +772,58 @@ func (m *hypervModule) vmIsRunning(ctx context.Context, vmName string) (bool, er
 		return false, err
 	}
 	return strings.EqualFold(current.State, "running"), nil
+}
+
+// sweepStaleSeedMedia deletes staged seed media (seed VHDX + answer ISO) for
+// any provision record whose UpdatedAt is older than seedMediaTTL. This is a
+// safety net that bounds the on-disk join-token window for orphaned media left
+// by failed or aborted provisions — e.g. a VM deleted mid-install, or a
+// finalizeProvision delete that failed transiently. All Remove-Item calls use
+// psDeleteSeedMedia (SilentlyContinue), so absent files are not errors. Paths
+// are derived from seedVHDPath / answerISOPath; if neither seedDir is set nor
+// the VM's VHD path is known from the module cache, the path fails validation
+// and that file is silently skipped.
+func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
+	if m.provisionStore == nil || m.transport == nil {
+		return
+	}
+	records, err := m.provisionStore.ListProvisions(ctx)
+	if err != nil {
+		return
+	}
+	for _, rec := range records {
+		if rec.State == ProvisionStateAbsent {
+			continue
+		}
+		if time.Since(rec.UpdatedAt) < seedMediaTTL {
+			continue
+		}
+		// Derive the VHD path from the module's VM cache. Unknown VMs (deleted
+		// mid-provision) get an empty vhdPath, which is fine when seedDir is set.
+		m.vmsMu.RLock()
+		cachedCfg, ok := m.vms[rec.VMName]
+		m.vmsMu.RUnlock()
+		vhdPath := ""
+		if ok {
+			vhdPath = cachedCfg.VHDPath
+		}
+		for _, mediaPath := range []string{
+			seedVHDPath(rec.VMName, vhdPath, m.seedDir),
+			answerISOPath(rec.VMName, vhdPath, m.seedDir),
+		} {
+			if validateSeedPath(mediaPath) != nil {
+				// Path not derivable (seedDir unset and VM absent from cache); skip.
+				continue
+			}
+			if _, psErr := m.transport.ExecutePS(ctx, psDeleteSeedMedia, map[string]string{
+				"Path": mediaPath,
+			}); psErr != nil {
+				if logger, ok := m.GetLogger(); ok {
+					logger.Warn("hyperv: TTL sweep seed media delete failed",
+						"vm_name", logging.SanitizeLogValue(rec.VMName),
+						"path", logging.SanitizeLogValue(mediaPath))
+				}
+			}
+		}
+	}
 }
