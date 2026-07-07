@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // NewPackageManager creates a new package manager based on the current platform
@@ -84,15 +86,59 @@ func resolveWingetFullPath(ctx context.Context) (string, bool) {
 // the given Program Files root, newest package version first. The glob is
 // pinned to the DesktopAppInstaller x64 package family
 // (Microsoft.DesktopAppInstaller_<version>_x64__8wekyb3d8bbwe) so no other
-// publisher's directory can match.
+// publisher's directory can match. Ordering compares the dotted package
+// version numerically — a lexical sort would order 1.9.x above 1.10.x.
 func wingetCandidates(programFiles string) []string {
 	pattern := filepath.Join(programFiles, "WindowsApps", "Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe", "winget.exe")
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
 		return nil
 	}
-	// Glob output is lexically sorted ascending; newest package last. Reverse
-	// so the newest version is probed first.
-	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+	sort.SliceStable(matches, func(i, j int) bool {
+		return compareVersionSlices(wingetPackageVersion(matches[i]), wingetPackageVersion(matches[j])) > 0
+	})
 	return matches
+}
+
+// wingetPackageVersion extracts the dotted package version from a candidate
+// path's package directory name (Microsoft.DesktopAppInstaller_<ver>_x64__…)
+// as numeric segments. Unparseable segments end the version (best effort — the
+// --version probe in resolveWingetFullPath remains the correctness gate).
+func wingetPackageVersion(candidate string) []int {
+	dir := filepath.Base(filepath.Dir(candidate))
+	parts := strings.Split(dir, "_")
+	if len(parts) < 2 {
+		return nil
+	}
+	segs := strings.Split(parts[1], ".")
+	version := make([]int, 0, len(segs))
+	for _, s := range segs {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			break
+		}
+		version = append(version, n)
+	}
+	return version
+}
+
+// compareVersionSlices numerically compares two version-segment slices;
+// missing segments compare as zero (1.29 == 1.29.0).
+func compareVersionSlices(a, b []int) int {
+	for i := 0; i < len(a) || i < len(b); i++ {
+		av, bv := 0, 0
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		if av != bv {
+			if av > bv {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }

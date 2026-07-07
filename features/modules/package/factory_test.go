@@ -29,6 +29,9 @@ func TestWingetCandidates(t *testing.T) {
 
 	mk("Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe", true)
 	mk("Microsoft.DesktopAppInstaller_1.29.280.0_x64__8wekyb3d8bbwe", true)
+	// Digit-width boundary: 1.9.x must sort BELOW 1.10.x and 1.29.x — a lexical
+	// path sort would wrongly rank it first.
+	mk("Microsoft.DesktopAppInstaller_1.9.25200.0_x64__8wekyb3d8bbwe", true)
 	// Wrong publisher hash and wrong architecture must never match.
 	mk("Evil.DesktopAppInstaller_9.9.9.9_x64__attacker00000", true)
 	mk("Microsoft.DesktopAppInstaller_1.30.0.0_arm64__8wekyb3d8bbwe", true)
@@ -36,13 +39,23 @@ func TestWingetCandidates(t *testing.T) {
 	mk("Microsoft.DesktopAppInstaller_1.31.0.0_x64__8wekyb3d8bbwe", false)
 
 	got := wingetCandidates(programFiles)
-	require.Len(t, got, 2, "only x64 DesktopAppInstaller dirs containing winget.exe match")
-	assert.Contains(t, got[0], "1.29.280.0", "newest package version probed first")
+	require.Len(t, got, 3, "only x64 DesktopAppInstaller dirs containing winget.exe match")
+	assert.Contains(t, got[0], "1.29.280.0", "newest package version probed first (numeric compare)")
 	assert.Contains(t, got[1], "1.26.510.0")
+	assert.Contains(t, got[2], "1.9.25200.0", "1.9.x sorts below 1.26.x/1.29.x despite lexical order")
 	for _, c := range got {
 		assert.NotContains(t, c, "attacker", "foreign publisher directories must never match")
 		assert.NotContains(t, c, "arm64")
 	}
+}
+
+// TestCompareVersionSlices pins the numeric comparison, including the
+// digit-width boundary and missing-segment-as-zero semantics.
+func TestCompareVersionSlices(t *testing.T) {
+	assert.Equal(t, 1, compareVersionSlices([]int{1, 10}, []int{1, 9}), "1.10 > 1.9")
+	assert.Equal(t, -1, compareVersionSlices([]int{1, 9, 25200}, []int{1, 26, 510}), "1.9.x < 1.26.x")
+	assert.Equal(t, 0, compareVersionSlices([]int{1, 29}, []int{1, 29, 0}), "1.29 == 1.29.0")
+	assert.Equal(t, 1, compareVersionSlices([]int{2}, nil), "anything beats an unparseable version")
 }
 
 // TestWingetCandidates_Empty verifies absent WindowsApps and empty

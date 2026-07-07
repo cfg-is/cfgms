@@ -69,6 +69,11 @@ jobs:
   # windows-latest. Linux and macOS stay hosted unconditionally. The whole
   # include list is selected via fromJSON because individual matrix entries
   # cannot carry conditions.
+  #
+  # SECURITY: the fork expression is convenience routing, NOT the security
+  # boundary — fork PRs run the fork's workflow copy. The enforcing control is
+  # the repository Actions setting "Require approval for ALL external
+  # contributors"; do not weaken it while self-hosted runners are attached.
   native-builds:
     name: Native Build (${{ matrix.platform }})
     permissions:
@@ -84,7 +89,7 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Mark workspace safe for git (self-hosted service-account ownership)
+    - name: Mark workspace safe for git (needed on self-hosted after service-account changes; idempotent on hosted)
       shell: bash
       run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
