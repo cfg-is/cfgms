@@ -162,12 +162,14 @@ func TestBuildHTTPConfig(t *testing.T) {
 	logger := logging.NewLogger("debug")
 
 	t.Run("empty CFGMS_HTTP_CA_CERT_PATH produces empty CACertPath", func(t *testing.T) {
+		dir := t.TempDir()
 		t.Setenv("CFGMS_HTTP_CA_CERT_PATH", "")
-		cfg := buildHTTPConfig("https://controller.example.com", 30*time.Second, logger)
+		// Inject a non-existent platform path so the test is not sensitive to
+		// whether /etc/cfgms/controller-ca.crt exists on the host (self-hosted CI runners
+		// are managed CFGMS nodes and carry the real cert).
+		cfg := buildHTTPConfigWithPlatformPath("https://controller.example.com", 30*time.Second, filepath.Join(dir, "controller-ca.crt"), logger)
 		require.NotNil(t, cfg)
 		assert.Equal(t, "https://controller.example.com", cfg.ControllerURL)
-		// CACertPath is "" when no env var is set and platform-standard cert does not exist.
-		// In test environments the platform cert is absent, so this holds.
 		assert.Equal(t, "", cfg.CACertPath)
 	})
 

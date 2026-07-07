@@ -62,26 +62,36 @@ jobs:
         echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
 
   # Native build tests on each platform
+  #
+  # Windows routing (#2337, epic #565): internal events (merge_group, non-fork
+  # pull_request) build natively on the CFGMS-managed self-hosted Windows
+  # runner; fork PRs and workflow_dispatch (no fork property) use GitHub-hosted
+  # windows-latest. Linux and macOS stay hosted unconditionally. The whole
+  # include list is selected via fromJSON because individual matrix entries
+  # cannot carry conditions.
+  #
+  # SECURITY: the fork expression is convenience routing, NOT the security
+  # boundary — fork PRs run the fork's workflow copy. The enforcing control is
+  # the repository Actions setting "Require approval for ALL external
+  # contributors"; do not weaken it while self-hosted runners are attached.
   native-builds:
-    name: Native Build (${{ matrix.os }})
+    name: Native Build (${{ matrix.platform }})
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            platform: Linux
-          - os: macos-latest
-            platform: macOS
-          - os: windows-latest
-            platform: Windows
+        include: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":"windows-latest","platform":"Windows"}]' || '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":["self-hosted","Windows","cfgms"],"platform":"Windows"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
+
+    - name: Mark workspace safe for git (needed on self-hosted after service-account changes; idempotent on hosted)
+      shell: bash
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
     - name: Set up Go
       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0

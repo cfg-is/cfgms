@@ -115,7 +115,7 @@ Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 **`make test-complete` coverage:**
 - All pre-commit validation, fast comprehensive tests, production-critical tests
 - Cross-platform compilation, Docker integration tests, E2E tests
-- **Gap:** Native Windows/macOS builds (CI-only, requires runners)
+- **Gap:** Native Windows builds: run on self-hosted Windows runner for non-fork PRs; macOS builds: CI-only, requires runners (gap)
 
 ## Essential Commands
 

@@ -34,12 +34,42 @@ env:
 
 jobs:
   # Fast unit tests - runs on every push/PR
+  #
+  # runs-on routing (#2337, epic #565): internal events (push, merge_group,
+  # non-fork pull_request) run on the CFGMS-managed self-hosted Linux runner;
+  # fork PRs and workflow_dispatch (no fork property) stay on GitHub-hosted.
+  # The full label set targets the Linux runner specifically — a bare
+  # 'self-hosted' would also match the Windows runner.
+  #
+  # SECURITY: this expression is convenience routing, NOT the security
+  # boundary — a fork PR executes the FORK's copy of this file and could
+  # rewrite it. The enforcing control is the repository Actions setting
+  # "Require approval for ALL external contributors" (fork-PR workflow runs
+  # need maintainer approval before any runner is assigned). Do not weaken
+  # that setting while self-hosted runners are attached to this public repo.
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
+    # The self-hosted runner VM is itself a CFGMS-managed steward endpoint, so
+    # host-state-sensitive tests (platform CA path, launcher state) would read
+    # the live steward's files — the container keeps the job hermetic there.
+    # The whole container object is conditional: 'null' on the hosted/fork path
+    # (no container at all — hosted runners are already hermetic), the golang
+    # image on the self-hosted path. Options: --user 1000 matches the runner
+    # user (workspace writable; chmod-based failure-injection tests work);
+    # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
+    # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
+    # golang image lacks but hosted runners ship (jq for the script tests).
+    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.4-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-    
+
+    - name: Mark workspace safe for git (container UID differs from host mount)
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    - name: Add host-staged CI tools to PATH (no-op unless /opt/ci-tools is mounted)
+      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
+
     - name: Set up Go
       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
@@ -73,14 +103,31 @@ jobs:
         retention-days: 5
 
   # Integration tests - runs on PRs to develop/main, workflow_dispatch, or push to main
+  # runs-on routing (#2337): same fork-gated self-hosted routing as unit-tests.
   integration-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
+    # Hermetic container for the same reason as unit-tests (steward-enrolled
+    # runner VM host state must not leak into tests); self-hosted path only.
+    # The whole container object is conditional: 'null' on the hosted/fork path
+    # (no container at all — hosted runners are already hermetic), the golang
+    # image on the self-hosted path. Options: --user 1000 matches the runner
+    # user (workspace writable; chmod-based failure-injection tests work);
+    # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
+    # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
+    # golang image lacks but hosted runners ship (jq for the script tests).
+    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.4-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-    
+
+    - name: Mark workspace safe for git (container UID differs from host mount)
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    - name: Add host-staged CI tools to PATH (no-op unless /opt/ci-tools is mounted)
+      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
+
     - name: Set up Go
       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
