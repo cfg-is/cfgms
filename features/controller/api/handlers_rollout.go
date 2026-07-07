@@ -569,11 +569,23 @@ func (s *Server) setRingDesiredVersion(ringName, version string) {
 }
 
 // effectiveRings returns the effective ring configuration, protected by the server mutex.
+//
+// When deployment_rings is entirely unconfigured (nil), the default four-ring set applies
+// so an out-of-the-box controller can still orchestrate rollouts. An explicitly-configured
+// ring set is returned as-is, including an explicitly empty one: unlike Config.EffectiveRings
+// — which substitutes the four-ring default for an empty set so tenant/ring resolution always
+// has rings — a rollout must not silently run against defaults the operator deliberately
+// removed. An operator-declared empty ring set is a distinct operational state that the
+// handleStartRollout NO_RINGS guard surfaces as an error rather than masks.
 func (s *Server) effectiveRings() controllerconfig.DeploymentRingConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.cfg == nil {
+	if s.cfg == nil || s.cfg.DeploymentRings == nil {
 		return controllerconfig.DefaultDeploymentRingConfig()
 	}
-	return s.cfg.EffectiveRings()
+	rc := *s.cfg.DeploymentRings
+	if rc.FallbackRing == "" {
+		rc.FallbackRing = controllerconfig.DefaultFallbackRing
+	}
+	return rc
 }

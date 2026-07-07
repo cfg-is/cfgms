@@ -19,6 +19,7 @@ import (
 
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -113,11 +114,44 @@ var _ business.RolloutStore = (*testRolloutStore)(nil)
 
 // --- Test helpers ---
 
+// newMinimalServerForRollout creates a Server with only the fields needed for rollout
+// handler tests. Rollout tests inject a Principal via withScopedPrincipal / withAdminPrincipal,
+// so authRunAccess reads from the request context and the heavyweight auth/storage
+// infrastructure created by setupTestServer (git-backed RBAC, auth defense caches, secret
+// store) is not required. Omitting that infrastructure prevents cache cleanup goroutines from
+// accumulating across the 16 rollout tests, which on Windows CI pushes the package test suite
+// past its 5-minute limit.
+func newMinimalServerForRollout(t *testing.T) *Server {
+	t.Helper()
+	// Pre-close cleanupDone: no startAPIKeyCleanup goroutine was started, so server.Close()
+	// must not block waiting for it.
+	cleanupDone := make(chan struct{})
+	close(cleanupDone)
+
+	cfg := controllerconfig.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	s := &Server{
+		logger:      logging.NewNoopLogger(),
+		cfg:         cfg,
+		stopCleanup: make(chan struct{}),
+		cleanupDone: cleanupDone,
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.Close(closeCtx); err != nil {
+			t.Logf("newMinimalServerForRollout cleanup: Close: %v", err)
+		}
+	})
+	return s
+}
+
 // setupRolloutServer creates a server wired with a rollout store, upgrade store,
 // and a fleet query backed by the given stewards.
 func setupRolloutServer(t *testing.T, tenantID string, stewards []fleet.StewardData) (*Server, *testRolloutStore, *testUpgradeStore) {
 	t.Helper()
-	server := setupTestServer(t)
+	server := newMinimalServerForRollout(t)
 
 	// Configure two-ring deployment_rings so tests run against a predictable ring set.
 	server.cfg.DeploymentRings = &controllerconfig.DeploymentRingConfig{
@@ -513,7 +547,7 @@ func TestRollout_Halt_IdempotentOnTerminal(t *testing.T) {
 // TestRollout_RequiresRolloutStore verifies that POST /api/v1/rollout returns 503 when
 // the rollout store is not configured.
 func TestRollout_RequiresRolloutStore(t *testing.T) {
-	server := setupTestServer(t)
+	server := newMinimalServerForRollout(t)
 	// rolloutStore is nil — not configured.
 
 	rec := doStartRollout(server, "tenant-a", "v0.5.21")
@@ -734,4 +768,79 @@ func TestRollout_InvalidVersionRejected(t *testing.T) {
 	rec := doStartRollout(server, "tenant-a", "not-a-semver")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "INVALID_VERSION")
+}
+
+// TestRollout_Start_InvalidBodyRejected verifies that POST /api/v1/rollout returns
+// 400 INVALID_BODY when the request body is not decodable JSON. This exercises the
+// json.NewDecoder decode-error branch in handleStartRollout, and asserts that no
+// rollout record is created for a request that never got past body parsing.
+func TestRollout_Start_InvalidBodyRejected(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Malformed JSON: unterminated object, missing quotes — Decode must fail.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout",
+		bytes.NewReader([]byte("{not valid json")))
+	req = withScopedPrincipal(req, tenantID)
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"malformed body must return 400: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "INVALID_BODY")
+
+	// A request rejected at body parsing must not have created any rollout record.
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created for an undecodable body")
+}
+
+// TestRollout_Start_MissingTargetVersionRejected verifies that POST /api/v1/rollout
+// returns 400 MISSING_FIELDS when the body decodes but target_version is empty. This
+// exercises the required-field guard that sits between body decoding and version-format
+// validation, and confirms an empty target_version is rejected as missing (not as an
+// invalid version).
+func TestRollout_Start_MissingTargetVersionRejected(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Well-formed JSON that omits target_version entirely.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout",
+		bytes.NewReader([]byte(`{"tenant_id":"tenant-a"}`)))
+	req = withScopedPrincipal(req, tenantID)
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"missing target_version must return 400: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "MISSING_FIELDS")
+
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created when target_version is missing")
+}
+
+// TestRollout_Start_NoRingsConfigured verifies that POST /api/v1/rollout returns
+// 500 NO_RINGS when the controller has an explicitly empty deployment ring set. A
+// rollout is impossible without rings, and effectiveRings surfaces an operator-declared
+// empty set rather than silently masking it with the four-ring default — so this branch
+// covers a real operational misconfiguration, not dead code.
+func TestRollout_Start_NoRingsConfigured(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Explicitly configure an empty ring set (non-nil, zero rings).
+	server.cfg.DeploymentRings = &controllerconfig.DeploymentRingConfig{
+		Rings: []controllerconfig.RingSpec{},
+	}
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a rollout with no rings configured must return 500: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "NO_RINGS")
+
+	// No rollout record may be created when there are no rings to advance through.
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created when no rings are configured")
 }
