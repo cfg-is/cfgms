@@ -11,18 +11,32 @@ description: >
   The controller's POST /api/v1/rollout endpoint runs the equivalent logic in Go; this
   template shows how the same flow can be driven through the declarative workflow engine.
 
+  Ring desired_version advancement is an internal controller operation: the Go handler's
+  runRollout goroutine calls setRingDesiredVersion for each ring in sequence. This
+  template does not dispatch upgrade commands or set desired_version directly — it runs
+  as a companion gating workflow that soaks, evaluates health, and halts when a ring's
+  failure rate exceeds its halt_threshold.
+
   Operator setup:
     1. Set target_version to the steward binary version to promote.
     2. Set tenant_id to the tenant whose fleet should be promoted.
     3. Set controller_url to the controller's external REST API base URL.
-    4. Dispatch upgrades to each ring's stewards via POST /api/v1/stewards/upgrade
+    4. Set rollout_id to the rollout ID returned by POST /api/v1/rollout.
+    5. Dispatch upgrades to each ring's stewards via POST /api/v1/stewards/upgrade
        before or in parallel with this workflow — this template gates progression,
        it does not dispatch upgrade commands itself.
-    5. Configure soak durations and halt_thresholds to match your fleet risk tolerance.
+    6. Configure soak durations and halt_thresholds to match your fleet risk tolerance.
+
+  Halt semantics: when a ring's on_version_pct falls at or below the pass threshold
+  (default 95.0 — equivalent to a 5% halt_threshold), the check-*-threshold conditional
+  detects the breach and the halt-on-*-threshold step calls POST .../halt to persist
+  status=halted. Subsequent ring steps in this workflow become no-ops because the
+  controller's runRollout goroutine stops on the closed halt channel. The workflow-level
+  on_failure: stop covers network or auth failures on the halt call itself.
 
   Durability note (v1): this workflow runs on the in-memory engine. A controller
   restart during execution loses progress; the operator re-runs the workflow. Ring
-  desired_version mutations applied via the set-ring-desired-version steps survive
+  desired_version mutations applied via the controller's runRollout handler survive
   restarts (they are git-backed configuration). See ADR-008 for the durable workflow
   execution roadmap.
 version: "1.0"
@@ -38,18 +52,6 @@ variables:
 
 steps:
   # ---- pre-release ring ----
-
-  - name: set-pre-release-desired-version
-    type: http
-    timeout: 30s
-    http:
-      method: POST
-      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
-      headers:
-        Content-Type: application/json
-      expected_status:
-        - 200
-        - 202
 
   - name: soak-pre-release
     type: delay
@@ -68,29 +70,35 @@ steps:
     type: conditional
     condition:
       type: expression
-      # Halt when failure rate = failed / (on_version + failed) exceeds 5%.
-      # on_version_pct is returned by query_ring_health as a percentage (0–100).
+      # Advance when on_version_pct > 95.0 (failure rate < 5% halt_threshold).
       expression: '{{ gt .health_pre_release_on_version_pct 95.0 }}'
     steps:
       - name: pre-release-passed
         type: delay
         delay:
           duration: 0s
-          message: "pre-release ring passed health gate, advancing"
+          message: "pre-release ring passed health gate, advancing to early ring"
+
+  - name: halt-on-pre-release-threshold
+    type: conditional
+    condition:
+      type: expression
+      # Halt when on_version_pct is at or below 95.0 (failure rate >= 5% halt_threshold).
+      expression: '{{ le .health_pre_release_on_version_pct 95.0 }}'
+    steps:
+      - name: halt-rollout-pre-release
+        type: http
+        timeout: 30s
+        http:
+          method: POST
+          url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}/halt"
+          headers:
+            Content-Type: application/json
+          expected_status:
+            - 200
+            - 202
 
   # ---- early ring ----
-
-  - name: set-early-desired-version
-    type: http
-    timeout: 30s
-    http:
-      method: POST
-      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
-      headers:
-        Content-Type: application/json
-      expected_status:
-        - 200
-        - 202
 
   - name: soak-early
     type: delay
@@ -105,19 +113,37 @@ steps:
       desired_version: "{{ .target_version }}"
       tenant_id: "{{ .tenant_id }}"
 
-  # ---- default ring ----
+  - name: check-early-threshold
+    type: conditional
+    condition:
+      type: expression
+      expression: '{{ gt .health_early_on_version_pct 95.0 }}'
+    steps:
+      - name: early-passed
+        type: delay
+        delay:
+          duration: 0s
+          message: "early ring passed health gate, advancing to default ring"
 
-  - name: set-default-desired-version
-    type: http
-    timeout: 30s
-    http:
-      method: POST
-      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
-      headers:
-        Content-Type: application/json
-      expected_status:
-        - 200
-        - 202
+  - name: halt-on-early-threshold
+    type: conditional
+    condition:
+      type: expression
+      expression: '{{ le .health_early_on_version_pct 95.0 }}'
+    steps:
+      - name: halt-rollout-early
+        type: http
+        timeout: 30s
+        http:
+          method: POST
+          url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}/halt"
+          headers:
+            Content-Type: application/json
+          expected_status:
+            - 200
+            - 202
+
+  # ---- default ring ----
 
   - name: soak-default
     type: delay
@@ -132,19 +158,37 @@ steps:
       desired_version: "{{ .target_version }}"
       tenant_id: "{{ .tenant_id }}"
 
-  # ---- stable ring ----
+  - name: check-default-threshold
+    type: conditional
+    condition:
+      type: expression
+      expression: '{{ gt .health_default_on_version_pct 95.0 }}'
+    steps:
+      - name: default-passed
+        type: delay
+        delay:
+          duration: 0s
+          message: "default ring passed health gate, advancing to stable ring"
 
-  - name: set-stable-desired-version
-    type: http
-    timeout: 30s
-    http:
-      method: POST
-      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
-      headers:
-        Content-Type: application/json
-      expected_status:
-        - 200
-        - 202
+  - name: halt-on-default-threshold
+    type: conditional
+    condition:
+      type: expression
+      expression: '{{ le .health_default_on_version_pct 95.0 }}'
+    steps:
+      - name: halt-rollout-default
+        type: http
+        timeout: 30s
+        http:
+          method: POST
+          url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}/halt"
+          headers:
+            Content-Type: application/json
+          expected_status:
+            - 200
+            - 202
+
+  # ---- stable ring ----
 
   - name: soak-stable
     type: delay
@@ -158,3 +202,33 @@ steps:
       ring: stable
       desired_version: "{{ .target_version }}"
       tenant_id: "{{ .tenant_id }}"
+
+  - name: check-stable-threshold
+    type: conditional
+    condition:
+      type: expression
+      expression: '{{ gt .health_stable_on_version_pct 95.0 }}'
+    steps:
+      - name: stable-passed
+        type: delay
+        delay:
+          duration: 0s
+          message: "stable ring passed health gate; rollout complete"
+
+  - name: halt-on-stable-threshold
+    type: conditional
+    condition:
+      type: expression
+      expression: '{{ le .health_stable_on_version_pct 95.0 }}'
+    steps:
+      - name: halt-rollout-stable
+        type: http
+        timeout: 30s
+        http:
+          method: POST
+          url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}/halt"
+          headers:
+            Content-Type: application/json
+          expected_status:
+            - 200
+            - 202

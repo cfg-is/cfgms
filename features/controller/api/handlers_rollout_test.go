@@ -211,7 +211,7 @@ func waitForRolloutStatus(t *testing.T, store *testRolloutStore, rolloutID strin
 }
 
 // seedFailedUpgradeRecords pre-populates the upgrade store with terminal-failure records
-// for each steward ID, targeting desiredVersion. This simulates stewards that attempted
+// for each steward ID, targeting desiredVersion. This seeds stewards that attempted
 // but failed the upgrade before the ring health check runs.
 func seedFailedUpgradeRecords(t *testing.T, store *testUpgradeStore, tenantID, desiredVersion string, stewardIDs ...string) {
 	t.Helper()
