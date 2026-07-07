@@ -151,6 +151,61 @@ GitHub API (same endpoint the App-based provider calls) and delivered over an
 operator SSH session — never composed into a CFGMS command string. Sequence and
 timings otherwise mirror the workflow's steps 1–4.
 
+### Windows runner (Issue #2336, measured 2026-07-07 on cfg-lab)
+
+Windows CI runner provisioned on the same cluster: VM `cfgms-ci-win-01`
+(4 vCPU / 8 GB, Windows Server 2025 SERVERSTANDARD from the eval ISO) on host
+CFG-70-02 via the hyperv module autounattend path (ADR-009 §6), steward v0.9.10
+enrolled to tenant `gh-ci-runners`, registered to `cfg-is/cfgms` as runner
+**`CFGMS-CI-WIN-01`** with labels **`self-hosted, Windows, X64, cfgms`** (runner
+id 23, status `online`; GitHub canonicalizes the OS/arch label case, as with the
+Linux runner).
+
+Measured timings:
+
+| Phase | Measured |
+|-------|----------|
+| VM provision, autounattend path (`cfg config upload` → VM created + answer ISO staged) | 43 s |
+| Full provision (`cfg config upload` → unattended install → steward `active` on controller) | 7 m 16 s |
+| Registration token mint | 0.50 s |
+| Runner agent download (100 MB zip, in-guest) | 7.2 s |
+| Runner agent extract | 14.2 s |
+| Registration script (`config.cmd` remove + re-register + service install/start) | 4.8 s |
+| Runner `online` in GitHub API after service start | first poll (< 60 s) |
+| Hyper-V checkpoint create (`Checkpoint-VM`, running VM) | 7.05 s |
+| Hyper-V checkpoint revert (`Restore-VMCheckpoint`) | 5.82 s |
+| Revert → `Start-VM` → runner `online` in GitHub API | 137 s |
+
+A production checkpoint (the Server 2025 default) restores the VM to `Off`, so the
+revert-pool cycle on Windows is revert (5.8 s) + boot to runner-online (137 s,
+including the runner service's delayed auto-start) — viable for Phase 2 ephemeral
+runners, with a materially longer recovery than the Linux VM's 36 s.
+
+**Script fix confirmed live:** the shipped `register-github-runner-windows.yaml`
+(v1.0.0) ran verbatim and registered the runner (`√ Runner successfully added`,
+`√ Settings Saved.`, token never echoed — a recursive literal-token search over
+the runner work dir, including the agent's `_diag` logs, found zero hits), but the
+runner stayed `offline`: `config.cmd --unattended --replace` only writes settings.
+v1.1.0 adds `--runasservice`, which installs and starts the runner's Windows
+service (`actions.runner.cfg-is-cfgms.CFGMS-CI-WIN-01`, NETWORK SERVICE, delayed
+auto-start) — runner `online` at the first API poll after the script exits.
+
+**Deviations for this run:** same workflow-path gaps as the Linux run above (token
+minted directly against the GitHub API; agent staged operator-side because the
+`github_runner` module is still not in the steward factory). Two additional lab
+findings recorded for follow-up: (1) the deployed v0.9.9 hyperv module rendered the
+pre-#2355 `--ca-cert` install flag, which no current steward accepts — resolved by
+push-upgrading the HV-host steward to v0.9.10 and staging a matching guest
+`cfgms-steward.exe` (both sides must agree on the rendered flag); (2) a steward
+`exec` job that runs a Windows batch file (`config.cmd`) completes its work but the
+job harness never observes process exit (descendant console handles hold the output
+stream open), the completion event never fires, and the controller's per-device
+dispatch lock (`features/controller/dispatcher/dispatcher.go`) is then held
+indefinitely — `run-cancel` does not release it, and a steward reboot makes the
+completion event permanently impossible (controller restart required). Runner
+registration on Windows therefore ran over PowerShell Direct rather than the
+steward exec channel.
+
 ---
 
 ## 7. What the founder does vs what the agent builds
