@@ -853,10 +853,17 @@ func logLevelFromEnv() string {
 
 // buildHTTPConfig constructs an HTTPConfig from environment variables and the provided arguments.
 func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging.Logger) *registration.HTTPConfig {
+	return buildHTTPConfigWithPlatformPath(controllerURL, timeout, defaultPlatformCACertPath(), logger)
+}
+
+// buildHTTPConfigWithPlatformPath is the testable core of buildHTTPConfig.
+// platformPath is injected so tests can exercise all CA-resolution cases without
+// depending on whether /etc/cfgms/controller-ca.crt exists on the host (e.g. self-hosted CI runners).
+func buildHTTPConfigWithPlatformPath(controllerURL string, timeout time.Duration, platformPath string, logger logging.Logger) *registration.HTTPConfig {
 	return &registration.HTTPConfig{
 		ControllerURL: controllerURL,
 		Timeout:       timeout,
-		CACertPath:    resolveRegistrationCACertPath(logger),
+		CACertPath:    doResolveRegistrationCACertPath(logger, platformPath),
 		Logger:        logger,
 	}
 }
