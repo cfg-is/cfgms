@@ -954,6 +954,10 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "new_tenant_id is required", "MISSING_TENANT_ID")
 		return
 	}
+	if !identifierRegex.MatchString(newTenantID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid tenant ID format", "INVALID_TENANT_ID")
+		return
+	}
 	newTenantIDForLog := logging.SanitizeLogValue(newTenantID)
 
 	// Steward must exist in durable storage.

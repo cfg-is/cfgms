@@ -1685,6 +1685,24 @@ func TestHandleMoveSteward_MissingNewTenantID(t *testing.T) {
 	assert.Equal(t, "MISSING_TENANT_ID", errResp.Error.Code)
 }
 
+// TestHandleMoveSteward_InvalidTenantIDFormat verifies 400 for a malformed new_tenant_id.
+func TestHandleMoveSteward_InvalidTenantIDFormat(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := strings.NewReader(`{"new_tenant_id":"bad.tenant:id"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/some-steward/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "some-steward"})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_TENANT_ID", errResp.Error.Code)
+}
+
 // TestHandleMoveSteward_APIKeyRejected verifies that an API-key caller (non-mTLS) is
 // rejected with 403 at the Tier-3 gate when hitting the route via the router.
 func TestHandleMoveSteward_APIKeyRejected(t *testing.T) {
