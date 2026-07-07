@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1542,4 +1543,57 @@ func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
 		assert.NotContains(t, sb, cluster,
 			"cluster name must travel via ArgumentList, never the scriptBlock")
 	}
+}
+
+// TestSetVM_AbsentDeletesProvisionRecord is the REQUIRED TEST from AC: applying
+// state:absent on a VM that has an incomplete provisioning record (e.g. left at
+// "installing" by a failed enrollment) must delete both the VM and the record.
+// After deletion, a subsequent source: declaration must provision cleanly (no
+// surface-and-wait wedge from a stale in-progress record).
+func TestSetVM_AbsentDeletesProvisionRecord(t *testing.T) {
+	ctx := context.Background()
+
+	// Pre-seed an incomplete (installing) record — exactly the stuck state
+	// observed on CFG-70-02: enrollment failed, record remained at installing.
+	store := NewMemProvisionStore()
+	now := time.Now().UTC()
+	require.NoError(t, store.SetProvision(ctx, &ProvisionRecord{
+		VMName:        "vm-wedge",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "vm-wedge",
+		StartedAt:     now,
+		UpdatedAt:     now,
+	}))
+
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+	m.provisionStore = store
+
+	// Apply state: absent — must delete the VM and clear the provision record.
+	require.NoError(t, m.Set(ctx, "vm:vm-wedge", mapConfigState{
+		"name":  "vm-wedge",
+		"state": "absent",
+	}))
+
+	// The provision record must be gone so that a subsequent source: declaration
+	// provisions cleanly instead of hitting surface-and-wait indefinitely.
+	_, err := store.GetProvision(ctx, "vm-wedge")
+	assert.ErrorIs(t, err, ErrProvisionNotFound,
+		"state:absent must delete the provision record so future source: declarations do not wedge")
+}
+
+// TestSetVM_AbsentNoProvisionRecord verifies that state:absent on a VM with no
+// provision record (the plain-lifecycle case — VM was never source-provisioned)
+// succeeds and does not error on missing record.
+func TestSetVM_AbsentNoProvisionRecord(t *testing.T) {
+	ctx := context.Background()
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+	m.provisionStore = NewMemProvisionStore() // empty store
+
+	// Should succeed even though there is no provision record to delete.
+	require.NoError(t, m.Set(ctx, "vm:plain-vm", mapConfigState{
+		"name":  "plain-vm",
+		"state": "absent",
+	}))
 }

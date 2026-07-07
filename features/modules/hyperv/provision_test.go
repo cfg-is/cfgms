@@ -12,6 +12,98 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestProvisionStore_SurvivesReopen is the REQUIRED TEST from AC: a record
+// written to the durable store is readable after the store is re-opened at the
+// same root (simulating a steward restart). This proves the in-memory-only
+// default is replaced by a real durable implementation in the default wiring
+// path (NewFlatFileProvisionStore → ConfigBackedProvisionStore).
+func TestProvisionStore_SurvivesReopen(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store1, err := NewFlatFileProvisionStore(root)
+	require.NoError(t, err, "NewFlatFileProvisionStore must succeed on a writable root")
+
+	now := time.Now().Truncate(time.Second).UTC()
+	record := &ProvisionRecord{
+		VMName:        "vm-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "corr-restart-test",
+		StartedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, store1.SetProvision(ctx, record))
+
+	// Simulate a steward restart: open a second store instance at the same root.
+	store2, err := NewFlatFileProvisionStore(root)
+	require.NoError(t, err)
+
+	got, err := store2.GetProvision(ctx, "vm-01")
+	require.NoError(t, err, "record written before re-open must be readable after (durable store)")
+	assert.Equal(t, "vm-01", got.VMName)
+	assert.Equal(t, ProvisionStateInstalling, got.State)
+	assert.Equal(t, "corr-restart-test", got.CorrelationID)
+	assert.Equal(t, now, got.StartedAt)
+}
+
+// TestProvisionStore_ConfigBacked_CRUD exercises full Get/Set/Delete/List
+// round-trips on ConfigBackedProvisionStore via NewFlatFileProvisionStore.
+func TestProvisionStore_ConfigBacked_CRUD(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	store, err := NewFlatFileProvisionStore(root)
+	require.NoError(t, err)
+
+	// Get on empty store returns ErrProvisionNotFound.
+	_, err = store.GetProvision(ctx, "vm-a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+
+	// Delete on empty store returns ErrProvisionNotFound.
+	err = store.DeleteProvision(ctx, "vm-a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+
+	// List on empty store returns empty non-nil slice.
+	list, err := store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, list)
+	assert.Empty(t, list)
+
+	now := time.Now().Truncate(time.Second).UTC()
+	recA := &ProvisionRecord{VMName: "vm-a", State: ProvisionStateCreating, CorrelationID: "c-a", StartedAt: now, UpdatedAt: now}
+	recB := &ProvisionRecord{VMName: "vm-b", State: ProvisionStateReady, CorrelationID: "c-b", StartedAt: now, UpdatedAt: now, LastError: "prior-err"}
+	require.NoError(t, store.SetProvision(ctx, recA))
+	require.NoError(t, store.SetProvision(ctx, recB))
+
+	// Get returns the stored record.
+	gotA, err := store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateCreating, gotA.State)
+	assert.Equal(t, "c-a", gotA.CorrelationID)
+
+	// List returns all records.
+	list, err = store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+
+	// Set overwrites existing record.
+	recA.State = ProvisionStateFailed
+	require.NoError(t, store.SetProvision(ctx, recA))
+	got, err := store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFailed, got.State)
+
+	// Delete removes the record; Get afterwards returns ErrProvisionNotFound.
+	require.NoError(t, store.DeleteProvision(ctx, "vm-b"))
+	_, err = store.GetProvision(ctx, "vm-b")
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+
+	// vm-a still present.
+	_, err = store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+}
+
 // ─── ProvisionStore CRUD tests ────────────────────────────────────────────────
 
 // TestProvisionStore_CRUD exercises Get/Set/Delete/ErrProvisionNotFound

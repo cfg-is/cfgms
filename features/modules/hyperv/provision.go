@@ -4,11 +4,15 @@ package hyperv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 // ProvisionState is the lifecycle position of a VM that is being provisioned
@@ -244,3 +248,128 @@ func (s *memProvisionStore) ListProvisions(_ context.Context) ([]*ProvisionRecor
 	}
 	return out, nil
 }
+
+// ── Durable ProvisionStore (flatfile-backed) ──────────────────────────────────
+
+// provisionNamespace is the stored-config namespace for hyperv provision records.
+// A dash separator (not slash) is required for keysafe path-safety compliance.
+const provisionNamespace = "hyperv-provisions"
+
+// provisionTenantID is the fixed local tenant scope used for steward-local
+// provision records. Stewards are single-tenant on the host side; using a
+// fixed non-empty value satisfies the flatfile store's ErrTenantRequired guard.
+const provisionTenantID = "local"
+
+// ConfigBackedProvisionStore implements ProvisionStore by persisting
+// ProvisionRecord values as JSON-encoded ConfigEntry data through a
+// cfgconfig.ConfigStore backend (typically a FlatFileConfigStore). It follows
+// the shape of ConfigBackedProfileStore: namespace = provisionNamespace, key
+// name = VM name, data = JSON-encoded ProvisionRecord. Write-through: every
+// SetProvision and DeleteProvision goes immediately to the backing store.
+type ConfigBackedProvisionStore struct {
+	store    cfgconfig.ConfigStore
+	tenantID string
+}
+
+// NewConfigBackedProvisionStore constructs a ConfigBackedProvisionStore over
+// the given config store. tenantID must be non-empty; callers that do not
+// have a tenant scope should pass provisionTenantID ("local").
+func NewConfigBackedProvisionStore(store cfgconfig.ConfigStore, tenantID string) *ConfigBackedProvisionStore {
+	if tenantID == "" {
+		tenantID = provisionTenantID
+	}
+	return &ConfigBackedProvisionStore{store: store, tenantID: tenantID}
+}
+
+// NewFlatFileProvisionStore constructs a durable ProvisionStore backed by a
+// FlatFileConfigStore rooted at root. root is created (with MkdirAll) if it
+// does not already exist. This is the production constructor called by the
+// steward factory; tests inject the store directly via WithProvisionStore.
+func NewFlatFileProvisionStore(root string) (ProvisionStore, error) {
+	ffStore, err := flatfile.NewFlatFileConfigStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: open provision store at %q: %w", root, err)
+	}
+	return NewConfigBackedProvisionStore(ffStore, provisionTenantID), nil
+}
+
+func (s *ConfigBackedProvisionStore) provisionKey(vmName string) *cfgconfig.ConfigKey {
+	return &cfgconfig.ConfigKey{
+		TenantID:  s.tenantID,
+		Namespace: provisionNamespace,
+		Name:      vmName,
+	}
+}
+
+// GetProvision reads the provision record for vmName from the backing store.
+// Returns ErrProvisionNotFound when no record exists.
+func (s *ConfigBackedProvisionStore) GetProvision(ctx context.Context, vmName string) (*ProvisionRecord, error) {
+	entry, err := s.store.GetConfig(ctx, s.provisionKey(vmName))
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, ErrProvisionNotFound
+		}
+		return nil, fmt.Errorf("hyperv: get provision record %q: %w", vmName, err)
+	}
+	var record ProvisionRecord
+	if err := json.Unmarshal(entry.Data, &record); err != nil {
+		return nil, fmt.Errorf("hyperv: decode provision record %q: %w", vmName, err)
+	}
+	return &record, nil
+}
+
+// SetProvision persists record to the backing store, overwriting any existing
+// entry for the same VM name.
+func (s *ConfigBackedProvisionStore) SetProvision(ctx context.Context, record *ProvisionRecord) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("hyperv: encode provision record %q: %w", record.VMName, err)
+	}
+	return s.store.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:    s.provisionKey(record.VMName),
+		Data:   data,
+		Format: cfgconfig.ConfigFormatJSON,
+	})
+}
+
+// DeleteProvision removes the provision record for vmName from the backing
+// store. Returns ErrProvisionNotFound when no record exists.
+func (s *ConfigBackedProvisionStore) DeleteProvision(ctx context.Context, vmName string) error {
+	err := s.store.DeleteConfig(ctx, s.provisionKey(vmName))
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return ErrProvisionNotFound
+		}
+		return fmt.Errorf("hyperv: delete provision record %q: %w", vmName, err)
+	}
+	return nil
+}
+
+// ListProvisions returns a snapshot of all provision records stored under the
+// provision namespace. Each ConfigEntry's Data is decoded directly (no second
+// GetConfig round-trip per name, per the ListConfigs contract). Returns an
+// empty non-nil slice when no records exist.
+func (s *ConfigBackedProvisionStore) ListProvisions(ctx context.Context) ([]*ProvisionRecord, error) {
+	entries, err := s.store.ListConfigs(ctx, &cfgconfig.ConfigFilter{
+		TenantID:  s.tenantID,
+		Namespace: provisionNamespace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: list provision records: %w", err)
+	}
+	out := make([]*ProvisionRecord, 0, len(entries))
+	for _, e := range entries {
+		if e == nil || len(e.Data) == 0 {
+			continue
+		}
+		var r ProvisionRecord
+		if err := json.Unmarshal(e.Data, &r); err != nil {
+			continue // skip malformed entries
+		}
+		out = append(out, &r)
+	}
+	return out, nil
+}
+
+// Verify ConfigBackedProvisionStore satisfies the ProvisionStore contract.
+var _ ProvisionStore = (*ConfigBackedProvisionStore)(nil)
