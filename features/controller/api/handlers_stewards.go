@@ -21,13 +21,19 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Regex pattern for validating identifiers (prevents log injection)
 var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// tenantPathRegex validates a tenant path: flat IDs (e.g. "corp") and slash-separated
+// hierarchical paths (e.g. "msp-a/client-1"). Each component matches identifierRegex.
+var tenantPathRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$`)
 
 // handleListStewards handles GET /api/v1/stewards
 // Supports optional query parameters for filtered search: os, platform, arch, status, hostname,
@@ -954,7 +960,7 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "new_tenant_id is required", "MISSING_TENANT_ID")
 		return
 	}
-	if !identifierRegex.MatchString(newTenantID) {
+	if !tenantPathRegex.MatchString(newTenantID) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid tenant ID format", "INVALID_TENANT_ID")
 		return
 	}
@@ -976,6 +982,40 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 
 	oldTenantID := record.TenantID
 	oldTenantIDForLog := logging.SanitizeLogValue(oldTenantID)
+
+	// Extract the caller's principal and scope from context once so they are available
+	// throughout authorization, audit, and the success path.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	// Dual-admin authorization (Issue #2342).
+	// An unscoped (root) admin (callerTenantID == "") is always permitted; the move is
+	// recorded as a privileged cross-tenant action. A scoped admin must have scope that is
+	// an ancestor of (or equal to) BOTH source AND destination via the anchored-prefix form.
+	// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
+	if callerTenantID != "" {
+		sourceInScope := oldTenantID == callerTenantID || strings.HasPrefix(oldTenantID, callerTenantID+"/")
+		destInScope := newTenantID == callerTenantID || strings.HasPrefix(newTenantID, callerTenantID+"/")
+		if !sourceInScope || !destInScope {
+			s.logger.Warn("steward move denied: scoped admin has insufficient scope",
+				"steward_id", stewardIDForLog,
+				"source_tenant", oldTenantIDForLog,
+				"dest_tenant", newTenantIDForLog,
+				"caller_scope", logging.SanitizeLogValue(callerTenantID),
+			)
+			s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
+				business.AuditEventSecurityEvent, "steward_move",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{
+					"decision":        "denied",
+					"reason":          "insufficient_scope",
+					"source_in_scope": sourceInScope,
+					"dest_in_scope":   destInScope,
+				})
+			s.writeErrorResponse(w, http.StatusForbidden, "Insufficient scope to move steward between these tenants", "INSUFFICIENT_SCOPE")
+			return
+		}
+	}
 
 	// Self-move: destination equals current tenant — short-circuit with no state change.
 	if oldTenantID == newTenantID {
@@ -1070,12 +1110,77 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		"new_tenant_id", newTenantIDForLog,
 	)
 
+	s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
+		business.AuditEventDataModification, "steward_move",
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"decision":                "approved",
+			"privileged_cross_tenant": callerTenantID == "",
+		})
+
 	s.writeSuccessResponse(w, map[string]any{
 		"steward_id":      stewardID,
 		"tenant_id":       newTenantID,
 		"previous_tenant": oldTenantID,
 		"status":          "moved",
 	})
+}
+
+// emitMoveAudit records a steward-move audit event. It is a no-op when auditManager is nil.
+// Must be called before WriteHeader on every code path.
+func (s *Server) emitMoveAudit(
+	r *http.Request,
+	stewardID, sourceTenantID, destTenantID string,
+	principal *Principal,
+	eventType business.AuditEventType,
+	action string,
+	result business.AuditResult,
+	severity business.AuditSeverity,
+	extras map[string]interface{},
+) {
+	if s.auditManager == nil {
+		return
+	}
+	callerID := ""
+	certSerial := ""
+	certFingerprint := ""
+	if principal != nil {
+		callerID = principal.ID
+		certSerial = principal.CertSerial
+		certFingerprint = principal.CertFingerprint
+	}
+
+	b := audit.NewEventBuilder().
+		Tenant(sourceTenantID).
+		Type(eventType).
+		Action(action).
+		User(callerID, business.AuditUserTypeHuman).
+		Resource("steward", stewardID, "").
+		Result(result).
+		Severity(severity).
+		Request(s.getRequestID(r), r.Method, r.URL.Path, extractSourceIP(r, s.trustedProxies), r.Header.Get("User-Agent")).
+		Changes(
+			map[string]interface{}{"tenant_id": logging.SanitizeLogValue(sourceTenantID)},
+			map[string]interface{}{"tenant_id": logging.SanitizeLogValue(destTenantID)},
+			[]string{"tenant_id"},
+		).
+		Detail("steward_id", logging.SanitizeLogValue(stewardID)).
+		Detail("source_tenant", logging.SanitizeLogValue(sourceTenantID)).
+		Detail("dest_tenant", logging.SanitizeLogValue(destTenantID)).
+		Detail("admin_cn", logging.SanitizeLogValue(callerID)).
+		Detail("cert_serial", logging.SanitizeLogValue(certSerial)).
+		Detail("cert_fingerprint", logging.SanitizeLogValue(certFingerprint))
+
+	for k, v := range extras {
+		b = b.Detail(k, v)
+	}
+
+	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+		s.logger.Warn("Failed to emit move audit event",
+			"error", err,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+		)
+	}
 }
 
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective

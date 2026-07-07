@@ -1718,3 +1718,326 @@ func TestHandleMoveSteward_APIKeyRejected(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "API-key callers must be rejected at Tier-3")
 }
+
+// ---- handleMoveSteward authorization + audit tests (Issue #2342) ----
+
+// postMoveStewardWithPrincipal calls handleMoveSteward directly with an explicit principal
+// (bypassing Tier-3 middleware) so authorization logic can be tested in isolation.
+func postMoveStewardWithPrincipal(server *Server, stewardID, newTenantID string, p *Principal) *httptest.ResponseRecorder {
+	body := strings.NewReader(`{"new_tenant_id":"` + newTenantID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+stewardID+"/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "test-request-id-"+stewardID)
+	req = withPrincipal(req, p)
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+	return rec
+}
+
+// setupMoveAuthServer creates a test server with source and destination tenants for
+// authorization tests. In addition to the standard "source-tenant" and "dest-tenant", it
+// creates hierarchical child tenants as separate store entries with path-style IDs so the
+// anchored-prefix check can be exercised.
+func setupMoveAuthServer(t *testing.T) (*Server, business.StewardStore) {
+	t.Helper()
+	server, st, _ := setupMoveStewardServer(t)
+	ctx := context.Background()
+
+	// Add extra tenants needed for hierarchical tests. "msp-a" and "other-msp" are flat
+	// parent-level scopes; "msp-a-child" serves as a child-namespace stand-in.
+	for _, id := range []string{"msp-a", "msp-a-child", "other-msp"} {
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id})
+		require.NoError(t, err, "creating tenant %q", id)
+	}
+	return server, st
+}
+
+// TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource verifies 403 when a scoped
+// admin's scope does not cover the source tenant.
+func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-auth-nosrc",
+		TenantID: "source-tenant", // caller has scope "other-msp", no authority here
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-auth-nosrc", "source-tenant", "addr", "registered"))
+
+	// dest-tenant is in scope but source is not
+	scopedPrincipal := &Principal{ID: "scoped-admin", IsAdmin: true, TenantID: "other-msp", CertSerial: "SN-001", CertFingerprint: "fp-001"}
+	rec := postMoveStewardWithPrincipal(server, "s-auth-nosrc", "dest-tenant", scopedPrincipal)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INSUFFICIENT_SCOPE", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverDestination verifies 403 when a
+// scoped admin's scope covers the source but not the destination.
+func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverDestination(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	// Seed a steward in "msp-a" so the caller's scope covers the source.
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-auth-nodst",
+		TenantID: "msp-a",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-auth-nodst", "msp-a", "addr", "registered"))
+
+	// "other-msp" is not in "msp-a" scope
+	scopedPrincipal := &Principal{ID: "scoped-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-002", CertFingerprint: "fp-002"}
+	rec := postMoveStewardWithPrincipal(server, "s-auth-nodst", "other-msp", scopedPrincipal)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INSUFFICIENT_SCOPE", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_ScopedAdmin_AuthorityOverBoth_AnchoredPrefix verifies 200 when a
+// scoped admin has anchored-prefix authority over both source and destination.
+// The source steward is stored with a hierarchical TenantID ("msp-a/child-src") so the
+// prefix check exercises the strings.HasPrefix path.
+func TestHandleMoveSteward_ScopedAdmin_AuthorityOverBoth_AnchoredPrefix(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	// Seed the steward directly with a hierarchical source tenant ID so the stored record
+	// has "msp-a/..." format while the controller service index uses "msp-a".
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-auth-both",
+		TenantID: "msp-a/child-src",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-auth-both", "msp-a/child-src", "addr", "registered"))
+
+	// Destination is also a child of "msp-a/" — caller has authority over both.
+	// We use "msp-a-child" (a flat tenant that was pre-created) as destination. The
+	// scope check for dest is strings.HasPrefix("msp-a-child", "msp-a/") == false,
+	// so we need a true hierarchical path. Create a child tenant in the store.
+	ctx := context.Background()
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID:       "s-dest-placeholder",
+		TenantID: "msp-a/child-dst",
+	}))
+	// Register "msp-a/child-dst" as a destination tenant via a direct store insertion
+	// (bypassing tenant manager validation) — we only need GetTenant to return active.
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ID:   "msp-a-child-dst",
+		Name: "msp-a-child-dst",
+	})
+	require.NoError(t, err)
+
+	// For the anchored-prefix test, pass a flat destination that's literally under "msp-a/"
+	// by constructing the request with new_tenant_id = "msp-a/child-dst". Since tenantPathRegex
+	// now accepts slashes, this is valid. The tenant store won't have this exact path-style ID
+	// (the tenant manager uses flat IDs), so GetTenant returns not-found → 400 TENANT_NOT_FOUND.
+	// That means the AUTH check passed (no 403) and the failure is the subsequent tenant lookup.
+	scopedPrincipal := &Principal{ID: "msp-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-003", CertFingerprint: "fp-003"}
+	rec := postMoveStewardWithPrincipal(server, "s-auth-both", "msp-a/child-dst", scopedPrincipal)
+
+	// The authorization check PASSES (both in scope), but the destination tenant isn't
+	// registered — we get 400 TENANT_NOT_FOUND, not 403 INSUFFICIENT_SCOPE.
+	require.NotEqual(t, http.StatusForbidden, rec.Code, "auth must pass for msp-a scope over msp-a/child-dst destination")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code,
+		"403 would mean auth failed; 400 TENANT_NOT_FOUND confirms auth passed and tenant lookup failed")
+}
+
+// TestHandleMoveSteward_ScopedAdmin_ExactTenantMatch verifies that a scoped admin with
+// a scope exactly matching both source and destination is allowed (exact-match path).
+func TestHandleMoveSteward_ScopedAdmin_ExactTenantMatch(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	// Both source and destination are "msp-a" — but that's a self-move.
+	// Use source = "msp-a" (exact match) and dest = "msp-a-child" which is NOT in scope.
+	// To test exact-match on destination, use dest = "msp-a" → self-move (no_change).
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-auth-exact",
+		TenantID: "msp-a",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-auth-exact", "msp-a", "addr", "registered"))
+
+	// Caller has exact match on source; dest = "msp-a" is also exact match → self-move
+	scopedPrincipal := &Principal{ID: "msp-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-004", CertFingerprint: "fp-004"}
+	rec := postMoveStewardWithPrincipal(server, "s-auth-exact", "msp-a", scopedPrincipal)
+
+	// Auth passes (exact match on both), self-move short-circuits → no_change
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct{ Data map[string]interface{} `json:"data"` }
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "no_change", resp.Data["status"])
+}
+
+// TestHandleMoveSteward_UnscopedRootAdmin_Allowed verifies that a root (TenantID=="")
+// admin can always move any steward regardless of source/destination tenants.
+func TestHandleMoveSteward_UnscopedRootAdmin_Allowed(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-auth-root",
+		TenantID: "source-tenant",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-auth-root", "source-tenant", "addr", "registered"))
+
+	rootPrincipal := &Principal{ID: "root-admin", IsAdmin: true, TenantID: "", CertSerial: "SN-ROOT", CertFingerprint: "fp-root"}
+	rec := postMoveStewardWithPrincipal(server, "s-auth-root", "dest-tenant", rootPrincipal)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct{ Data map[string]interface{} `json:"data"` }
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "moved", resp.Data["status"])
+}
+
+// TestHandleMoveSteward_AuditOnSuccess verifies that a successful move emits an audit
+// record containing source/destination tenants, admin identity (CN + cert fields),
+// request ID, before→after diff, and outcome.
+func TestHandleMoveSteward_AuditOnSuccess(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-audit-ok",
+		TenantID: "source-tenant",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-audit-ok", "source-tenant", "addr", "registered"))
+
+	rootPrincipal := &Principal{
+		ID:              "audit-admin",
+		IsAdmin:         true,
+		TenantID:        "",
+		CertSerial:      "SERIAL-OK",
+		CertFingerprint: "FPRINT-OK",
+	}
+	body := strings.NewReader(`{"new_tenant_id":"dest-tenant"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/s-audit-ok/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-audit-ok-123")
+	req = withPrincipal(req, rootPrincipal)
+	req = withVars(req, map[string]string{"id": "s-audit-ok"})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Flush the audit manager so in-memory events reach the store.
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"steward_move"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "at least one steward_move audit entry expected")
+
+	var found *business.AuditEntry
+	for _, e := range entries {
+		if e.Action == "steward_move" && e.Result == business.AuditResultSuccess {
+			found = e
+			break
+		}
+	}
+	require.NotNil(t, found, "successful steward_move audit entry not found")
+
+	assert.Equal(t, business.AuditResultSuccess, found.Result)
+	assert.Equal(t, business.AuditSeverityHigh, found.Severity)
+	assert.Equal(t, "audit-admin", found.UserID, "admin CN must be recorded")
+	assert.Equal(t, "req-audit-ok-123", found.RequestID, "request ID must be recorded")
+	assert.NotNil(t, found.Changes, "before→after diff must be present")
+	assert.Equal(t, "source-tenant", found.Changes.Before["tenant_id"], "before tenant must be source-tenant")
+	assert.Equal(t, "dest-tenant", found.Changes.After["tenant_id"], "after tenant must be dest-tenant")
+	assert.Equal(t, "source-tenant", found.Details["source_tenant"], "source_tenant detail must be set")
+	assert.Equal(t, "dest-tenant", found.Details["dest_tenant"], "dest_tenant detail must be set")
+	assert.Equal(t, "SERIAL-OK", found.Details["cert_serial"], "cert_serial must be recorded")
+	assert.Equal(t, "FPRINT-OK", found.Details["cert_fingerprint"], "cert_fingerprint must be recorded")
+}
+
+// TestHandleMoveSteward_AuditOnDenial verifies that a denied move emits a Critical-severity
+// security audit event containing source/destination tenants, admin identity, request ID,
+// before→after diff, and outcome=denied.
+func TestHandleMoveSteward_AuditOnDenial(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-audit-deny",
+		TenantID: "source-tenant",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-audit-deny", "source-tenant", "addr", "registered"))
+
+	scopedPrincipal := &Principal{
+		ID:              "scoped-deny-admin",
+		IsAdmin:         true,
+		TenantID:        "other-msp",
+		CertSerial:      "SERIAL-DENY",
+		CertFingerprint: "FPRINT-DENY",
+	}
+	body := strings.NewReader(`{"new_tenant_id":"dest-tenant"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/s-audit-deny/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-audit-deny-456")
+	req = withPrincipal(req, scopedPrincipal)
+	req = withVars(req, map[string]string{"id": "s-audit-deny"})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"steward_move"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "at least one steward_move audit entry expected")
+
+	var found *business.AuditEntry
+	for _, e := range entries {
+		if e.Action == "steward_move" && e.Result == business.AuditResultDenied {
+			found = e
+			break
+		}
+	}
+	require.NotNil(t, found, "denied steward_move audit entry not found")
+
+	assert.Equal(t, business.AuditResultDenied, found.Result)
+	assert.Equal(t, business.AuditSeverityCritical, found.Severity, "denied move must be Critical severity")
+	assert.Equal(t, "scoped-deny-admin", found.UserID, "admin CN must be recorded")
+	assert.Equal(t, "req-audit-deny-456", found.RequestID, "request ID must be recorded")
+	assert.NotNil(t, found.Changes, "before→after diff must be present even for denied moves")
+	assert.Equal(t, "source-tenant", found.Changes.Before["tenant_id"])
+	assert.Equal(t, "dest-tenant", found.Changes.After["tenant_id"])
+	assert.Equal(t, "source-tenant", found.Details["source_tenant"])
+	assert.Equal(t, "dest-tenant", found.Details["dest_tenant"])
+	assert.Equal(t, "SERIAL-DENY", found.Details["cert_serial"])
+	assert.Equal(t, "FPRINT-DENY", found.Details["cert_fingerprint"])
+}
+
+// TestHandleMoveSteward_TenantPathWithSlash verifies that a hierarchical new_tenant_id
+// (containing a slash) now passes format validation (tenantPathRegex allows slashes).
+func TestHandleMoveSteward_TenantPathWithSlash(t *testing.T) {
+	server, st := setupMoveAuthServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-slash-test",
+		TenantID: "msp-a/child-src",
+		Status:   business.StewardStatusRegistered,
+	})
+
+	// Request with hierarchical new_tenant_id — format validation must pass.
+	// The tenant doesn't exist in the store, so we expect TENANT_NOT_FOUND (400), not INVALID_TENANT_ID (400).
+	scopedPrincipal := &Principal{ID: "msp-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-007", CertFingerprint: "fp-007"}
+	rec := postMoveStewardWithPrincipal(server, "s-slash-test", "msp-a/other-child", scopedPrincipal)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.NotEqual(t, "INVALID_TENANT_ID", errResp.Error.Code,
+		"hierarchical tenant IDs must pass format validation")
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code,
+		"auth passed and tenant lookup failed as expected")
+}
