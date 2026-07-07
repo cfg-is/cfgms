@@ -96,36 +96,38 @@ Also read:
 - `./scripts/pipeline-helper.sh lease-list` — active distributed leases (multi-host; §4.-1). Each row is `<key>  <holder>  <exp>  <expired>`. Shows what other hosts are currently working.
 - Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for **this host's** trigger, named `po-cron-<CFGMS_HOST_ID>` (multiple hosts each run their own; a bare legacy `po-cron` counts as this host's if `CFGMS_HOST_ID` is unset). Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
 
-### 1.2 Dashboard Output
+### 1.2 Dashboard Output — flow-priority ladder
 
-Display sections in this order. **Omit any section with zero items.**
+Render pipeline state as a strict **priority ladder ordered by flow impact**, not a flat list of sections. The goal is a single glance that answers "what should I focus on?" Lead with one **DO NEXT** line drawn from the highest non-empty tier that is *in my lane* (🧑). **Omit any tier with zero items.**
 
-**Section 0.5: EXTERNAL PR QUARANTINE** — PRs quarantined because the author is not a trusted (`push`/`maintain`/`admin`) collaborator. Read `external_prs` from preflight output. For each entry show: PR number, author login, head branch, title, and whether `is_released` (has `human-reviewed:ok` from a push+ actor). Omit if empty.
+**Two axes — never collapse them:**
+- **Tier** = flow impact (below). This sets the order.
+- **Ownership tag** = who acts, overlaid on every item: 🤖 cron · 🧑 me (this session) · 👤 founder. The tag **never changes an item's tier.**
 
-**Section 1: NEEDS ATTENTION** — project items with `Blocked` status. Flag items older than 7 days as stale.
+**Ownership split (load-bearing).** The hardware host's po **cron loop owns all dispatch** — story, fix, and acceptance-review containers — and merges pipeline-branch PRs via the acceptance reviewer. **This session does NOT dispatch.** My lane (🧑) is exactly three things: (1) **land the PRs that fall through the cracks** — CI-green, in my lane (docs / ADR / roadmap / clean non-pipeline), no founder judgment needed → `gh pr merge --squash` **without asking**; anything with findings or on a pipeline branch → flag for cron/founder; (2) **decompose the next epic** via the Planning Team (§4.1 Step 7, inline main session); (3) **surface 👤 decisions.**
 
-**Section 2: MERGE DECISIONS** — Open PRs where `has_acceptance_review_comment: false` and CI is not failing (read from `review_recommendations` in the preflight output). Show QA verdict summary and CI status.
+**Founder-only inherits urgency.** An item only the founder can resolve is tiered by *what it blocks*, not by who owns it. A 👤 decision gating P0/P1 work appears **in that tier**, flagged 👤 — never demoted. P2 holds only *non-blocking* strategic 👤 calls.
 
-**Section 3: ACTIVE MILESTONE** — current roadmap milestone, open item count, blockers.
+---
 
-**Section 3.5: WINDOWS QUEUE** — Ready stories whose required execution
-environment this host cannot serve. In a cron context read `windows_queue` from
-the preflight output; for the interactive dashboard (no preflight run) use
-`gh issue list --repo cfg-is/cfgms --label needs-windows --state open`. These are
-held, not dispatched, on the Linux orchestrator; they are worked on the Windows
-host via Self-Dispatch Mode (§7). Omit if empty.
+**P0 — In-flight work decaying** (spent capacity, actively rotting; delay causes rework + rebase debt). Highest priority.
+- 🚨 **EXTERNAL PR QUARANTINE** — untrusted-author PRs (`external_prs` from preflight): PR#, author login, head branch, title, `is_released` (`human-reviewed:ok` from a push+ actor). Surfaces here when present.
+- 🧑 **Land open green PRs in my lane** — read `review_recommendations` / open PRs; those that are CI-passing, non-pipeline (docs/ADR/roadmap/clean), and need no founder judgment → **merge without asking**, oldest-first (age = rebase debt). Pipeline-branch or has-findings PRs → flag for 🤖 cron / 👤.
+- 🤖 **Merge-blocked / CI-red PRs** → cron fix cycle; I flag and shepherd.
+- 🤖 **Stalled or `agent:failed` stories** → cron re-dispatches; I flag.
 
-**Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories. Include host capacity from the preflight `capacity` field (free slots + binding resource); when `free_slots` is 0, note the binding resource (e.g. "disk full — dispatch paused").
+**P1 — Keep the pipeline fed** (future flow). Refill when the Ready queue is thin.
+- 🤖 **Dispatch of Ready stories** → cron. Show Ready depth + host `capacity` (free slots + binding resource; when `free_slots` is 0 name it, e.g. "disk full — dispatch paused") as the fed/starved signal.
+- 🧑 **Decompose the next epic** (Planning Team, inline) when Ready is thin — rubric, in order: **critical-path** (unblocks the milestone / other epics) → **continue-over-start** (top up an in-progress epic before opening a new one, unless it can't yield parallel work) → **fan-out** (prefer epics whose stories are mutually independent over a long dependency chain — this is how we guarantee parallel work exists) → **roadmap order** (tie-break). This is my main P1 action.
+- ⏸️ **WINDOWS QUEUE** — Ready stories this host can't serve (`windows_queue`, or `gh issue list --repo cfg-is/cfgms --label needs-windows --state open`), held for the Windows host's Self-Dispatch Mode (§7). Surfaces here as fed-but-parked work.
 
-**Section 5: PIPELINE DEPTH** — counts by stage (epics, drafts, ready, fix, review).
+**P2 — Strategic, non-blocking founder calls.** Only 👤 `Blocked` items **not** gating P0/P1 work (e.g. "is #1792 still a deliberate hold?"). Flag items >7 days as stale.
 
-**Section 6: CRON PO** — scheduled agent status for this host's trigger
-(`po-cron-<CFGMS_HOST_ID>`): enabled/disabled/not configured, last run, next run.
-If not configured, suggest setting it up. If disabled (idle), explain why. If
-`lease-list` shows leases held by *other* holders, note that other hosts are
-active — that is expected and healthy under multi-host cron (§4.-1).
+**P3 — Hygiene.** Board status drift, epic closeouts (`/pipeline-sweep`), genuinely-stale non-blocking items. Batchable, bottom of the page.
 
-**Section 7: FORWARD EDGE** — next milestone definition quality. Prompt founder if thin.
+---
+
+**Context footer (grounding, not a tier)** — one line each below the ladder: **Active milestone** (roadmap milestone, open count, blockers) · **Cron PO** (this host's `po-cron-<CFGMS_HOST_ID>` trigger: enabled/disabled/not-configured, last/next run; note leases held by *other* holders as expected healthy multi-host activity, §4.-1) · **Forward edge** (next-milestone definition quality — prompt founder if thin).
 
 ### 1.3 Error Handling
 
@@ -215,13 +217,13 @@ Inform the founder: "Cron PO was paused (idle). Re-enabled — next cycle at <ne
 
 Analyze pipeline state and recommend the single most valuable action.
 
-### Priority Order (first match wins)
+### Priority Order (first match wins) — follows the P0→P3 flow ladder (§1.2)
 
-1. **Stale blocked items** (>7 days): "Unblock #NNN — stale for X days, blocking Y stories"
-2. **Merge decisions pending**: "Review and merge PR #NNN — QA passed, CI green"
-3. **Failed agents**: "Check draft PR #NNN from failed agent — fix, re-dispatch, or close"
-4. **Empty pipeline**: "Run `/po intent <topic>` to add work"
-5. **Forward edge thin**: "Next milestone needs definition"
+1. **P0 · Decaying in-flight work**: green PR in my lane sitting unlanded → "Land PR #NNN (docs/ADR/clean) — CI green, aging X days"; else flag a merge-blocked/stalled item for cron. Founder-only items that *block* in-flight work belong here too, tagged 👤.
+2. **P1 · Pipeline starving**: Ready queue thin → "Decompose epic #NNN — <rubric reason: critical-path / fan-out for parallel work>"
+3. **P2 · Non-blocking founder call**: "Decide #NNN — <stale-blocked or strategic hold>, not gating flow"
+4. **P3 · Hygiene**: "Run `/pipeline-sweep` — N closeable epics / stale board items"
+5. **Empty pipeline**: "Run `/po intent <topic>` to add work"
 6. **Everything healthy**: "Pipeline is running. Nothing needs your attention."
 
 -----
