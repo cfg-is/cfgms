@@ -13,7 +13,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/workflow"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
 )
 
 // makeRingTestSteward creates a StewardData record for ring health tests.
@@ -81,7 +80,7 @@ func TestRingHealthNode_OnVersionFailedPending(t *testing.T) {
 
 	fleetQuery := fleet.NewMemoryQuery(&testStewardProvider{stewards: stewards})
 
-	upgradeStore := memory.NewUpgradeStore()
+	upgradeStore := newTestUpgradeStore()
 
 	// Populate dispatched (pending) upgrade records.
 	for _, id := range []string{"s-pend-1", "s-pend-2", "s-pend-3"} {
@@ -270,7 +269,7 @@ func TestRingHealthNode_RolledBackCounted_AsFailed(t *testing.T) {
 	}
 
 	fleetQuery := fleet.NewMemoryQuery(&testStewardProvider{stewards: stewards})
-	upgradeStore := memory.NewUpgradeStore()
+	upgradeStore := newTestUpgradeStore()
 
 	rec := newTestUpgradeRecordForRing("upg-rollback", "s-rollback", desiredVersion)
 	require.NoError(t, upgradeStore.CreateUpgrade(ctx, rec))
