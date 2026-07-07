@@ -154,6 +154,19 @@ failover.
 > `ErrInvalidHARoleSeedDir`. Set `seed_dir` to a per-node path such as
 > `C:\ProgramData\cfgms\seed`.
 
+> **VM configuration files must also be on cluster storage.** `New-VM` places
+> the VM's configuration files at the host default (the local system drive)
+> unless told otherwise, and `Add-ClusterVirtualMachineRole` refuses a VM whose
+> configuration lives on non-clustered storage — the promote then fails each
+> converge with *"The clustered role was not successfully created"* (the module
+> retries convergently; the error is in the steward log with the cluster report
+> path). The module does not yet expose a VM configuration-path setting, so for
+> a VM that will carry `ha_role`, either provision it with everything on the
+> CSV or move it once with
+> `Move-VMStorage <vm> -DestinationStoragePath C:\ClusterStorage\<csv>\<vm>` —
+> the next converge completes the registration (verified live on cfg-lab,
+> #2372).
+
 ### Create an external virtual switch
 
 ```yaml
