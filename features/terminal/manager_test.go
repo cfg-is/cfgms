@@ -432,8 +432,12 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 // and blocks until GetSession has confirmed concurrent access, proving the lock is
 // not held during the termination loop.
 func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
+	// 200ms gives enough margin on slow Windows runners: the goroutine starts
+	// within a few ms, well under the timeout window, so activeSession stays
+	// fresh after UpdateActivity(). 1ms was too short — goroutine scheduling
+	// latency on Windows exceeded it and caused activeSession to appear timed out.
 	config := &Config{
-		SessionTimeout: 1 * time.Millisecond,
+		SessionTimeout: 200 * time.Millisecond,
 		MaxSessions:    100,
 		RecordSessions: false,
 	}

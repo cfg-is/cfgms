@@ -498,9 +498,10 @@ func (s *Server) setupRouter() {
 	fleetRouter := api.PathPrefix("/fleet").Subrouter()
 	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
 
-	// Configuration push endpoint (Issue #1318)
+	// Configuration push endpoint (Issue #1318) and push-status read (Issue #2366)
 	cfgPush := api.PathPrefix("/config").Subrouter()
 	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
+	cfgPush.Handle("/push/{id}", s.requirePermission("config", "push")(http.HandlerFunc(s.handleGetConfigPush))).Methods("GET")
 
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()

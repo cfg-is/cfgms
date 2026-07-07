@@ -359,7 +359,9 @@ Validate configuration for a steward without applying it.
 
 #### POST /api/v1/config/push
 
-Trigger an immediate fan-out of a configuration version to all currently active stewards. Returns `202 Accepted` immediately; delivery is fire-and-forget in a background goroutine. The leader node returns `503 Service Unavailable` for follower nodes in an HA cluster.
+Trigger an immediate fan-out of a configuration version to the stewards matched by `selector` within the configuration's tenant. Returns `202 Accepted` immediately; delivery is fire-and-forget in a background goroutine. The leader node returns `503 Service Unavailable` for follower nodes in an HA cluster.
+
+A `selector` field is **required** — there is no implicit "all" default. Use the literal string `"all"` to target every steward in `tenant_id`'s fleet. The fan-out is always scoped to `cfg.tenant_id`: an admin pushing a tenant-A-labelled config with `"all"` reaches only tenant-A stewards, never other tenants'.
 
 **Authentication:** Required  
 **Required permission:** `config:push`
@@ -368,26 +370,75 @@ Trigger an immediate fan-out of a configuration version to all currently active 
 
 ```json
 {
+  "selector": "all",
   "config_id": "cfg-001",
   "version": "1.2.3",
   "tenant_id": "default"
 }
 ```
 
+`selector` supports the full fleet selector grammar (same as `POST /api/v1/fleet/resolve` and `POST /api/v1/jobs`): `id:`, `name:`, `os:`, `platform:`, `arch:`, `tag:`, `dna.<key>:`. Empty selector → 400. Unknown selector key → 400.
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Missing or empty `selector`, invalid selector expression, missing required config fields |
+| `401` | No valid authentication |
+| `403` | Tenant-scoped caller submitted a `tenant_id` different from their own |
+| `503` | Node is not the HA leader |
+
 **Response (202 Accepted):**
 
 ```json
 {
-  "data": {
-    "push_id": "push-1705051800000000000",
-    "status": "accepted",
-    "queued_at": "2025-01-12T10:30:00Z"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
+  "push_id": "push-1705051800000000000",
+  "status": "accepted",
+  "queued_at": "2025-01-12T10:30:00Z"
 }
 ```
 
+Use `GET /api/v1/config/push/{push_id}` to poll delivery status after receiving the 202.
+
 > **[GAP: save=deploy auto-distribution not yet wired to ConfigStore]** The push endpoint fans out `CommandSyncConfig` to active stewards but does not write through the ConfigStore. Once Epic #1501 lands, save=deploy will automatically trigger distribution on config write, making explicit pushes unnecessary for most workflows.
+
+#### GET /api/v1/config/push/{id}
+
+Retrieve the status of a single push operation by its `push_id` (returned in the `202` response from `POST /api/v1/config/push`).
+
+**Authentication:** Required  
+**Required permission:** `config:push`
+
+**Parameters:**
+
+- `id` (path): The `push_id` from the `POST /api/v1/config/push` response.
+
+**Tenant isolation:** Callers may only read push records owned by their own tenant. A push ID that exists but belongs to a different tenant returns `404` (not `403`) to avoid disclosing cross-tenant push existence. Admin (mTLS) callers may read any push record.
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| `401` | No valid authentication |
+| `404` | Push ID not found, or owned by a different tenant |
+| `503` | Push store not configured |
+
+**Response (200 OK):**
+
+```json
+{
+  "push_id": "push-1705051800000000000",
+  "config_id": "cfg-001",
+  "tenant_id": "default",
+  "version": "1.2.3",
+  "status": "completed",
+  "initiated_by": "",
+  "created_at": "2025-01-12T10:30:00Z",
+  "updated_at": "2025-01-12T10:30:05Z"
+}
+```
+
+`status` values: `pending`, `in_progress`, `completed`, `failed`.
 
 ### Script Management
 
