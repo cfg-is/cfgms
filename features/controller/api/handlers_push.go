@@ -94,7 +94,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	filter, err := selector.Parse(req.Selector)
 	if err != nil {
-		s.logger.Info("Invalid selector expression", "selector", safeSelector, "error", err)
+		s.logger.Info("Invalid selector expression", "selector", safeSelector, "error", logging.SanitizeLogValue(err.Error()))
 		s.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}

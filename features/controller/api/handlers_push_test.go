@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -513,9 +514,55 @@ func (c *failingControlPlane) SendCommand(_ context.Context, _ *controlplaneType
 	return c.sendErr
 }
 
+// syncedPushStore wraps a real PushStore and signals statusUpdated after each
+// UpdatePushStatus call has committed to the underlying store. The fan-out
+// goroutine calls UpdatePushStatus as its final action (after SendCommand →
+// wg.Done fires), so tests that assert on the terminal record status must block
+// on this signal — not on the control plane's WaitGroup, which unblocks too early.
+// This replaces the prohibited time.Sleep polling loop with a deterministic
+// completion primitive tied to the exact write the test is asserting on.
+type syncedPushStore struct {
+	business.PushStore
+	statusUpdated chan struct{}
+}
+
+func newSyncedPushStore(inner business.PushStore) *syncedPushStore {
+	return &syncedPushStore{
+		PushStore:     inner,
+		statusUpdated: make(chan struct{}, 1),
+	}
+}
+
+// UpdatePushStatus delegates to the wrapped store, then signals statusUpdated
+// after the write returns so a waiting test observes the committed final state.
+// The buffered channel plus non-blocking send means callers that never drain it
+// (tests that don't assert on status) are unaffected.
+func (s *syncedPushStore) UpdatePushStatus(ctx context.Context, id string, status business.PushStatus) error {
+	err := s.PushStore.UpdatePushStatus(ctx, id, status)
+	select {
+	case s.statusUpdated <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+// waitForStatusUpdate blocks until the fan-out goroutine's UpdatePushStatus call
+// completes, failing the test on timeout. Deterministic: the signal fires only
+// after the underlying store write returns.
+func (s *syncedPushStore) waitForStatusUpdate(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.statusUpdated:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fan-out goroutine to update push status")
+	}
+}
+
 // makePushServerWithStore creates a test server wired with both a command publisher
 // and a real push store so that the fan-out goroutine's UpdatePushStatus paths can be exercised.
-func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, business.PushStore) {
+// The returned store is a syncedPushStore wrapping the real store; tests that assert on
+// the terminal push status use waitForStatusUpdate to synchronize with the goroutine.
+func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, *syncedPushStore) {
 	t.Helper()
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
 
@@ -548,8 +595,9 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
-	pushStore := storageManager.GetPushStore()
-	require.NotNil(t, pushStore)
+	rawPushStore := storageManager.GetPushStore()
+	require.NotNil(t, rawPushStore)
+	pushStore := newSyncedPushStore(rawPushStore)
 
 	pub, err := commands.New(&commands.Config{ControlPlane: cp, Signer: nil, Logger: logger})
 	require.NoError(t, err)
@@ -560,7 +608,7 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 		nil, nil, nil, "", nil,
 		auditMgr,
 		pub,       // real command publisher
-		pushStore, // real push store
+		pushStore, // synced push store (wraps the real store, signals on status update)
 		nil,       // No blob store needed
 	)
 	require.NoError(t, err)
@@ -597,18 +645,13 @@ func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.PushID)
 
-	// UpdatePushStatus runs after wg.Done() inside the goroutine, so poll until
-	// the record reflects completed status before asserting on pending records.
+	// UpdatePushStatus runs after wg.Done() inside the goroutine. Block on the
+	// push store's completion signal so the terminal status write has committed
+	// before we assert — no sleep-based polling.
+	pushStore.waitForStatusUpdate(t)
+
 	ctx := context.Background()
-	var updated *business.PushRecord
-	var err error
-	for i := 0; i < 20; i++ {
-		updated, err = pushStore.GetPush(ctx, resp.PushID)
-		if err == nil && updated.Status == business.PushStatusCompleted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	updated, err := pushStore.GetPush(ctx, resp.PushID)
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusCompleted, updated.Status,
 		"push record must be marked completed after successful fan-out delivery")
@@ -647,17 +690,12 @@ func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.PushID)
 
-	// Poll briefly for the status update to land.
+	// Block on the push store's completion signal so the terminal status write
+	// has committed before we assert — no sleep-based polling.
+	pushStore.waitForStatusUpdate(t)
+
 	ctx := context.Background()
-	var updated *business.PushRecord
-	var err error
-	for i := 0; i < 20; i++ {
-		updated, err = pushStore.GetPush(ctx, resp.PushID)
-		if err == nil && updated.Status == business.PushStatusFailed {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	updated, err := pushStore.GetPush(ctx, resp.PushID)
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusFailed, updated.Status,
 		"push record must be marked failed when all targeted stewards fail delivery")
@@ -853,6 +891,47 @@ func TestHandleGetConfigPush_NilStoreSends503(t *testing.T) {
 	assert.Contains(t, resp["error"], "push store not available")
 }
 
+// failingGetPushStore wraps a real PushStore and overrides only GetPush to return
+// a generic (non-ErrPushNotFound) error, exercising the 500 branch of
+// handleGetConfigPush. It is not a mock: every method other than GetPush delegates
+// to the wrapped real store, so any unanticipated call still hits a real
+// implementation rather than a nil embedded interface.
+type failingGetPushStore struct {
+	business.PushStore
+}
+
+// newFailingGetPushStore wraps a real PushStore so all methods except GetPush
+// delegate to a real implementation.
+func newFailingGetPushStore(inner business.PushStore) *failingGetPushStore {
+	return &failingGetPushStore{PushStore: inner}
+}
+
+func (f *failingGetPushStore) GetPush(_ context.Context, _ string) (*business.PushRecord, error) {
+	return nil, errors.New("forced push store retrieval failure")
+}
+
+// TestHandleGetConfigPush_StorageError_Returns500 verifies that when GetPush
+// returns a generic (non-ErrPushNotFound) error, handleGetConfigPush returns 500
+// with "failed to retrieve push record" rather than 404 or a panic.
+func TestHandleGetConfigPush_StorageError_Returns500(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, rawPushStore := makePushServerWithStore(t, cp)
+	// Swap in a store whose GetPush always fails with a generic error, wrapping the
+	// real store so every other method delegates to a real implementation. The
+	// nil-store guard passed (store is non-nil); this exercises the 500 branch.
+	server.pushStore = newFailingGetPushStore(rawPushStore)
+
+	req := withAdminPrincipal(newGetPushRequest(t, "push-storage-error"))
+	rec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "failed to retrieve push record", resp["error"])
+}
+
 // TestHandleGetConfigPush_UnknownID404 verifies that an unknown push ID returns 404.
 func TestHandleGetConfigPush_UnknownID404(t *testing.T) {
 	cp := &syncedControlPlane{}
@@ -990,4 +1069,33 @@ func TestHandleConfigPush_SelectorParseError(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Contains(t, resp["error"], "badkey")
+}
+
+// TestHandleConfigPush_FleetQueryError_Returns500 verifies that when the fleet
+// query fails during selector resolution, the handler returns 500 with
+// "fleet query failed" and produces no push record or fan-out. Uses the shared
+// failingFleetQuery double (handlers_stewards_test.go) — a real FleetQuery
+// implementation with deterministic error behavior, not a mock.
+func TestHandleConfigPush_FleetQueryError_Returns500(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+	server.fleetQuery = &failingFleetQuery{}
+
+	payload := validPushPayload()
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "fleet query failed", resp["error"])
+
+	// A failed fleet query must short-circuit before persistence and fan-out.
+	pending, err := pushStore.GetPendingPushes(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending, "500 fleet-query failure must not create a push record")
+	assert.Empty(t, cp.ReceivedIDs(), "500 fleet-query failure must not trigger fan-out")
 }
