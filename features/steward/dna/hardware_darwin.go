@@ -8,7 +8,6 @@ package dna
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -76,10 +75,7 @@ func (d *DarwinHardwareCollector) CollectMemory(ctx context.Context, attributes 
 	}
 
 	// Additional memory info from vm_stat if available
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	defer cancel()
-
-	if vmstat, err := exec.CommandContext(cmdCtx, "vm_stat").Output(); err == nil {
+	if vmstat, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "vm_stat"); err == nil {
 		d.parseVMStat(string(vmstat), attributes)
 	}
 
@@ -89,19 +85,14 @@ func (d *DarwinHardwareCollector) CollectMemory(ctx context.Context, attributes 
 // CollectDisk gathers disk and storage information on macOS
 func (d *DarwinHardwareCollector) CollectDisk(ctx context.Context, attributes map[string]string) error {
 	// Get disk information using diskutil
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	if _, err := exec.CommandContext(cmdCtx, "diskutil", "list", "-plist").Output(); err == nil {
+	if _, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "diskutil", "list", "-plist"); err == nil {
 		// diskutil plist output is available; set presence flag (detailed parsing is deferred).
 		attributes["disk_info_available"] = "true"
 		attributes["disk_collection_method"] = "diskutil"
 	}
-	cancel()
 
 	// Get filesystem information using df
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	defer cancel2()
-
-	if output, err := exec.CommandContext(cmdCtx2, "df", "-h").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "df", "-h"); err == nil {
 		d.parseDiskUsage(string(output), attributes)
 	}
 
@@ -116,23 +107,17 @@ func (d *DarwinHardwareCollector) CollectMotherboard(ctx context.Context, attrib
 	}
 
 	// System version
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	if version, err := exec.CommandContext(cmdCtx, "sw_vers", "-productVersion").Output(); err == nil {
+	if version, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "sw_vers", "-productVersion"); err == nil {
 		attributes["os_version"] = strings.TrimSpace(string(version))
 	}
-	cancel()
 
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	if build, err := exec.CommandContext(cmdCtx2, "sw_vers", "-buildVersion").Output(); err == nil {
+	if build, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "sw_vers", "-buildVersion"); err == nil {
 		attributes["os_build"] = strings.TrimSpace(string(build))
 	}
-	cancel2()
 
-	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	if name, err := exec.CommandContext(cmdCtx3, "sw_vers", "-productName").Output(); err == nil {
+	if name, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "sw_vers", "-productName"); err == nil {
 		attributes["os_name"] = strings.TrimSpace(string(name))
 	}
-	cancel3()
 
 	// Hardware UUID (if available)
 	if uuid, err := d.getSysctl(ctx, "kern.uuid"); err == nil {
@@ -149,10 +134,7 @@ func (d *DarwinHardwareCollector) CollectMotherboard(ctx context.Context, attrib
 
 // getSysctl executes sysctl to get system information
 func (d *DarwinHardwareCollector) getSysctl(ctx context.Context, key string) (string, error) {
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinHwCmdTimeout)
-	defer cancel()
-
-	output, err := exec.CommandContext(cmdCtx, "sysctl", "-n", key).Output()
+	output, err := darwinRunCmd(ctx, darwinHwCmdTimeout, "sysctl", "-n", key)
 	if err != nil {
 		return "", err
 	}

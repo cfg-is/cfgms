@@ -9,18 +9,11 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os/exec"
 	"strings"
 	"time"
 )
 
 const darwinNetCmdTimeout = 30 * time.Second
-
-// darwinNetCmdWaitDelay is the maximum time WaitDelay allows for a killed command's
-// I/O to drain before Output() is forced to return. On macOS CI runners, netstat can
-// get stuck in a kernel call that survives SIGKILL at the process level but leaves
-// the stdout pipe open; WaitDelay guarantees Output() returns regardless.
-const darwinNetCmdWaitDelay = 5 * time.Second
 
 // CollectInterfaces gathers detailed network interface information on macOS
 func (d *DarwinNetworkCollector) CollectInterfaces(ctx context.Context, attributes map[string]string) error {
@@ -48,12 +41,9 @@ func (d *DarwinNetworkCollector) CollectInterfaces(ctx context.Context, attribut
 // darwinRunNetCmd runs a command with a timeout context and WaitDelay so that
 // processes stuck in kernel calls (e.g. netstat on CI macOS) do not block
 // Output() indefinitely after SIGKILL. Returns nil output on timeout or error.
+// It is a nil-on-error convenience wrapper over the shared darwinRunCmd helper.
 func darwinRunNetCmd(ctx context.Context, timeout time.Duration, name string, args ...string) []byte {
-	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, name, args...)
-	cmd.WaitDelay = darwinNetCmdWaitDelay
-	output, err := cmd.Output()
+	output, err := darwinRunCmd(ctx, timeout, name, args...)
 	if err != nil {
 		return nil
 	}
