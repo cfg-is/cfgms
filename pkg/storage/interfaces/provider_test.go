@@ -436,9 +436,10 @@ func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*b
 func (m *MockStewardStore) GetStewardByDeviceID(_ context.Context, _ string) (*business.StewardRecord, error) {
 	return nil, business.ErrStewardNotFound
 }
-func (m *MockStewardStore) HealthCheck(_ context.Context) error { return nil }
-func (m *MockStewardStore) Initialize(_ context.Context) error  { return nil }
-func (m *MockStewardStore) Close() error                        { return nil }
+func (m *MockStewardStore) UpdateStewardTenant(_ context.Context, _, _ string) error { return nil }
+func (m *MockStewardStore) HealthCheck(_ context.Context) error                      { return nil }
+func (m *MockStewardStore) Initialize(_ context.Context) error                       { return nil }
+func (m *MockStewardStore) Close() error                                             { return nil }
 
 // MockSessionStore implements business.SessionStore for testing
 type MockSessionStore struct{}

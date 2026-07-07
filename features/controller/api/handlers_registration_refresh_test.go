@@ -96,6 +96,16 @@ func (s *testStewardStore) UpdateStewardStatus(_ context.Context, id string, sta
 	}
 	return nil
 }
+func (s *testStewardStore) UpdateStewardTenant(_ context.Context, id, newTenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[id]
+	if !ok {
+		return business.ErrStewardNotFound
+	}
+	r.TenantID = newTenantID
+	return nil
+}
 func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error { return nil }
 func (s *testStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil

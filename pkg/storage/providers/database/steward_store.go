@@ -224,6 +224,21 @@ func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID 
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
 }
 
+// UpdateStewardTenant moves a steward to a different tenant by updating its tenant_id column.
+func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, newTenantID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE steward_records SET tenant_id = $2 WHERE id = $1`,
+		stewardID, newTenantID)
+	if err != nil {
+		return fmt.Errorf("database: failed to update tenant for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
 // GetStewardsSeen returns all stewards whose last_seen is after the given time.
 func (s *DatabaseStewardStore) GetStewardsSeen(ctx context.Context, since time.Time) ([]*business.StewardRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `

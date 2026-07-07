@@ -911,6 +911,173 @@ func logEntryToStewardEvent(e loggingInterfaces.LogEntry) *stewardLogEvent {
 	}
 }
 
+// moveStewardRequest is the JSON body for POST /api/v1/stewards/{id}/move.
+type moveStewardRequest struct {
+	NewTenantID string `json:"new_tenant_id"`
+}
+
+// allowedMoveSources is the set of statuses from which a steward may be moved.
+// Revoked stewards are excluded: accepting a move would silently back-door re-entry
+// into a new tenant without going through the registration-refresh approval flow.
+var allowedMoveSources = map[string]bool{
+	"registered":   true,
+	"active":       true,
+	"lost":         true,
+	"archived":     true,
+	"dormant":      true,
+	"deregistered": true,
+}
+
+// handleMoveSteward handles POST /api/v1/stewards/{id}/move.
+// Moves a steward to a different tenant: updates durable storage AND the live
+// in-memory registry, and invalidates the per-tenant config cache for both the
+// source and destination tenants. Registered in the Tier-3 (mTLS-only) endpoint
+// class (Issue #2341).
+func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	var req moveStewardRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+
+	newTenantID := req.NewTenantID
+	if newTenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "new_tenant_id is required", "MISSING_TENANT_ID")
+		return
+	}
+	if !identifierRegex.MatchString(newTenantID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid tenant ID format", "INVALID_TENANT_ID")
+		return
+	}
+	newTenantIDForLog := logging.SanitizeLogValue(newTenantID)
+
+	// Steward must exist in durable storage.
+	if s.stewardStore == nil {
+		s.logger.Error("steward move failed: steward store not configured", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Steward store not configured", "INTERNAL_ERROR")
+		return
+	}
+
+	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
+	if err != nil {
+		s.logger.Info("steward not found for move", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	oldTenantID := record.TenantID
+	oldTenantIDForLog := logging.SanitizeLogValue(oldTenantID)
+
+	// Self-move: destination equals current tenant — short-circuit with no state change.
+	if oldTenantID == newTenantID {
+		s.logger.Info("steward move skipped (self-move)",
+			"steward_id", stewardIDForLog,
+			"tenant_id", newTenantIDForLog,
+		)
+		s.writeSuccessResponse(w, map[string]any{
+			"steward_id":      stewardID,
+			"tenant_id":       newTenantID,
+			"previous_tenant": oldTenantID,
+			"status":          "no_change",
+		})
+		return
+	}
+
+	// Revoked stewards may not be moved (would back-door un-revoke).
+	if string(record.Status) == "revoked" {
+		s.logger.Warn("steward move rejected: source status is revoked",
+			"steward_id", stewardIDForLog,
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Revoked stewards cannot be moved", "STEWARD_REVOKED")
+		return
+	}
+
+	// Validate source status against the allowed set.
+	if !allowedMoveSources[string(record.Status)] {
+		s.logger.Warn("steward move rejected: source status not allowed",
+			"steward_id", stewardIDForLog,
+			"status", logging.SanitizeLogValue(string(record.Status)),
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Steward status does not permit a move", "STEWARD_STATUS_INVALID")
+		return
+	}
+
+	// Destination tenant must exist and be active.
+	if s.tenantManager == nil {
+		s.logger.Error("steward move failed: tenant manager not configured", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Tenant manager not configured", "INTERNAL_ERROR")
+		return
+	}
+
+	destTenant, err := s.tenantManager.GetTenant(r.Context(), newTenantID)
+	if err != nil {
+		s.logger.Info("destination tenant not found for steward move",
+			"steward_id", stewardIDForLog,
+			"new_tenant_id", newTenantIDForLog,
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Destination tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+	if destTenant.Status != "active" {
+		s.logger.Warn("destination tenant is not active",
+			"steward_id", stewardIDForLog,
+			"new_tenant_id", newTenantIDForLog,
+			"tenant_status", logging.SanitizeLogValue(string(destTenant.Status)),
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Destination tenant is not active", "TENANT_NOT_ACTIVE")
+		return
+	}
+
+	// Update durable storage.
+	if err := s.stewardStore.UpdateStewardTenant(r.Context(), stewardID, newTenantID); err != nil {
+		s.logger.Error("steward move: failed to update durable store",
+			"steward_id", stewardIDForLog,
+			"new_tenant_id", newTenantIDForLog,
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward tenant", "INTERNAL_ERROR")
+		return
+	}
+
+	// Update the live in-memory registry. The steward may not be connected yet
+	// (e.g. the controller just restarted); a miss here is not an error — the
+	// durable store update is authoritative and the registry will be warm on
+	// next reconnect.
+	if regErr := s.controllerService.UpdateStewardTenant(stewardID, newTenantID); regErr != nil {
+		s.logger.Info("steward move: registry entry not present (steward not yet connected)",
+			"steward_id", stewardIDForLog,
+		)
+	}
+
+	// Invalidate per-tenant config cache for both source and destination so the
+	// next config resolution uses the correct tenant path.
+	s.tenantManager.InvalidateConfigCache(oldTenantID)
+	s.tenantManager.InvalidateConfigCache(newTenantID)
+
+	s.logger.Info("steward moved to new tenant",
+		"steward_id", stewardIDForLog,
+		"old_tenant_id", oldTenantIDForLog,
+		"new_tenant_id", newTenantIDForLog,
+	)
+
+	s.writeSuccessResponse(w, map[string]any{
+		"steward_id":      stewardID,
+		"tenant_id":       newTenantID,
+		"previous_tenant": oldTenantID,
+		"status":          "moved",
+	})
+}
+
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective
 func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)

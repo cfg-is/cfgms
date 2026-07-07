@@ -20,7 +20,7 @@ type tier3RouteEntry struct {
 	permission string
 }
 
-// tier3RouteTable is the authoritative list of all 19 Tier-3 routes wired in server.go.
+// tier3RouteTable is the authoritative list of all Tier-3 routes wired in server.go.
 // Each entry maps to exactly one permission in tier3Permissions. The parity test
 // (TestTier3Enforcement_RouteSetMatchesCanonicalSet) asserts this set equals tier3Permissions.
 var tier3RouteTable = []tier3RouteEntry{
@@ -43,6 +43,7 @@ var tier3RouteTable = []tier3RouteEntry{
 	{"POST", "/api/v1/tenants", "tenant:create"},
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},
 	{"PUT", "/api/v1/tenants/test-tenant/refresh-policy", "refresh:set-policy"},
+	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"}, // Issue #2341
 }
 
 // TestTier3Enforcement_APIKeyWithAdminPermissions_Gets403 verifies that an API-key

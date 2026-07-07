@@ -186,7 +186,8 @@ func (s *testStewardStore) ListStewardsByStatus(_ context.Context, _ business.St
 func (s *testStewardStore) UpdateStewardStatus(_ context.Context, _ string, _ business.StewardStatus) error {
 	return nil
 }
-func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error { return nil }
+func (s *testStewardStore) UpdateStewardTenant(_ context.Context, _, _ string) error { return nil }
+func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error      { return nil }
 func (s *testStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil
 }

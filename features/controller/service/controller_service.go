@@ -737,6 +737,22 @@ func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error 
 	return nil
 }
 
+// UpdateStewardTenant reassigns a steward to a different tenant in the live registry.
+// The steward need not be currently connected — the update is applied to the in-memory
+// entry so the next config resolution uses the new tenant path. Returns an error if
+// the steward is not in the registry (it may have been loaded from durable storage but
+// not yet reconnected; callers must ensure the durable store is also updated).
+func (s *ControllerService) UpdateStewardTenant(stewardID, newTenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+	steward.TenantID = newTenantID
+	return nil
+}
+
 // GetAllStewards returns a list of all registered stewards. Each entry is a
 // copy-on-read: DNA is deep-cloned and Metrics is shallow-copied under the
 // read lock, so callers can safely read the results concurrently with SyncDNA
