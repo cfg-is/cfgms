@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,12 +85,17 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No filter: existing behavior — return all stewards including registered-but-not-connected.
+	// No filter: return all stewards including registered-but-not-connected.
+	// Deregistered stewards are excluded by default; pass ?include_deregistered=true to restore them.
+	includeDeregistered := r.URL.Query().Get("include_deregistered") == "true"
 	stewards := s.controllerService.GetAllStewards()
 
 	stewardList := make([]StewardInfo, 0, len(stewards))
 
 	for _, steward := range stewards {
+		if !includeDeregistered && steward.Status == string(business.StewardStatusDeregistered) {
+			continue
+		}
 		info := StewardInfo{
 			ID:          steward.ID,
 			Version:     steward.Version,
@@ -623,6 +629,115 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	s.logger.Info("Configuration deleted", "steward_id", stewardIDForLog)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDecommissionSteward handles DELETE /api/v1/stewards/{id}.
+// Tombstones the steward's durable record (status: deregistered), updates the in-memory
+// registry, and drops any active QUIC/gRPC session. The record is retained for audit.
+// Requires an admin mTLS certificate (TierMTLSOnly gate). Issue #2408.
+func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	if s.stewardStore == nil {
+		s.logger.Error("decommission failed: steward store not configured",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
+	if err != nil {
+		if errors.Is(err, business.ErrStewardNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+		s.logger.Error("decommission failed: store lookup error",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up steward", "INTERNAL_ERROR")
+		return
+	}
+
+	// Cross-tenant scope check using the durable record's TenantID as the authoritative source.
+	// Admin mTLS (empty callerTenant) has global scope; API-key callers are rejected at the
+	// TierMTLSOnly gate before reaching here, so callerTenant is always from an mTLS principal.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		sameTenant := record.TenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	// Tombstone in durable storage — authoritative; must succeed before in-memory updates.
+	if err := s.stewardStore.DeregisterSteward(r.Context(), stewardID); err != nil {
+		s.logger.Error("decommission failed: store write error",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decommission steward", "INTERNAL_ERROR")
+		return
+	}
+
+	// Update in-memory status — best-effort; durable storage already succeeded.
+	if err := s.controllerService.UpdateStewardStatus(stewardID, string(business.StewardStatusDeregistered)); err != nil {
+		s.logger.Warn("decommission: in-memory status update failed (non-fatal)",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Drop any active QUIC/gRPC connection.
+	s.mu.RLock()
+	reg := s.registry
+	s.mu.RUnlock()
+	if reg != nil {
+		reg.Unregister(stewardID)
+	}
+
+	// Emit audit event.
+	auditTenantID := callerTenant
+	if auditTenantID == "" {
+		auditTenantID = audit.SystemTenantID
+	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principalID := ""
+	if principal != nil {
+		principalID = principal.ID
+	}
+	s.emitDecommissionAudit(r.Context(), auditTenantID, principalID, stewardID)
+
+	s.logger.Info("Steward decommissioned",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"principal_id", logging.SanitizeLogValue(principalID))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":     stewardID,
+		"status": string(business.StewardStatusDeregistered),
+	})
+}
+
+// emitDecommissionAudit records a steward-decommission audit event. No-op when auditManager is nil.
+func (s *Server) emitDecommissionAudit(ctx context.Context, tenantID, principalID, stewardID string) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventSystemAccess).
+		Action("steward.decommissioned").
+		User(principalID, business.AuditUserTypeHuman).
+		Resource("steward", stewardID, "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh)
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit decommission audit event",
+			"error", err, "steward_id", logging.SanitizeLogValue(stewardID))
+	}
 }
 
 // handleGetStewardModules handles GET /api/v1/stewards/{id}/modules.

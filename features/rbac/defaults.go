@@ -44,6 +44,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "steward",
 		Actions:      []string{"create", "read", "update", "delete"},
 	},
+	{
+		Id:           "steward.decommission",
+		Name:         "Decommission Steward",
+		Description:  "Permanently decommission a steward from the fleet (tombstones the record; requires mTLS)",
+		ResourceType: "steward",
+		Actions:      []string{"delete"},
+	},
 
 	// Configuration Management Permissions
 	{

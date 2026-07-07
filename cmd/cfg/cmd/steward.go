@@ -225,6 +225,49 @@ Examples:
 	RunE: runStewardMove,
 }
 
+// stewardDecommissionCmd permanently decommissions a steward from the fleet.
+var stewardDecommissionCmd = &cobra.Command{
+	Use:   "decommission <id>",
+	Short: "Decommission a steward from the fleet",
+	Long: `Mark a steward record as deregistered after its host or VM has been torn down.
+
+Requires an admin mTLS certificate. The record is retained in durable storage
+for audit but no longer appears in cfg steward list. Any active connection is dropped.
+
+Examples:
+  cfg steward decommission steward-abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardDecommission,
+}
+
+func runStewardDecommission(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+	resp, err := client.doRequest(context.Background(), http.MethodDelete,
+		"/api/v1/stewards/"+stewardID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decommission steward: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		fmt.Printf("Steward %s decommissioned.\n", stewardID)
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("steward %s not found", stewardID)
+	case http.StatusForbidden:
+		return fmt.Errorf("decommission requires an admin mTLS certificate")
+	case http.StatusServiceUnavailable:
+		return fmt.Errorf("fleet store unavailable; retry later")
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+}
+
 // stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
 var stewardLogsCmd = &cobra.Command{
 	Use:   "logs <id>",
@@ -479,11 +522,18 @@ func init() {
 		panic(err)
 	}
 
+	// decommission flags (Issue #2408)
+	stewardDecommissionCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardDecommissionCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardDecommissionCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardDecommissionCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
 	stewardCmd.AddCommand(stewardDNACmd)
 	stewardCmd.AddCommand(stewardModulesCmd)
 	stewardCmd.AddCommand(stewardMoveCmd)
+	stewardCmd.AddCommand(stewardDecommissionCmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
 	stewardCmd.AddCommand(stewardExecCmd)
