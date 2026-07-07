@@ -308,7 +308,7 @@ func TestErrorHandlingIntegration(t *testing.T) {
 			result: StepResult{Status: StatusFailed},
 			err:    stepErr,
 		}
-		engine := NewEngine(factory, logger, exec, nil)
+		engine := NewEngine(factory, logger, nil, exec, nil)
 		engine.errorHandler = &testErrorHandler{
 			decision: ErrorHandlingDecision{Action: ErrorActionStop},
 		}

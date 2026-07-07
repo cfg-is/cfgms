@@ -209,7 +209,7 @@ func TestGitHubAppProvider_GetMethods(t *testing.T) {
 // can be validated from a YAML workflow configuration.
 func TestGitHubAppProvider_RegisteredInBuiltins(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	provider, err := registry.GetProvider("github")
 	require.NoError(t, err, "github provider must be registered in registerBuiltinProviders")
@@ -234,7 +234,7 @@ func TestGitHubAppProvider_RegisteredInBuiltins(t *testing.T) {
 // rather than panicking or producing a nil-pointer dereference.
 func TestGitHubAppProvider_RegistryExecuteWithoutSecrets(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	config := &APIConfig{
 		Provider:  "github",
@@ -249,6 +249,66 @@ func TestGitHubAppProvider_RegistryExecuteWithoutSecrets(t *testing.T) {
 	_, err := registry.ExecuteOperation(context.Background(), config)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "secrets store not configured")
+}
+
+// TestGitHubAppProvider_RegistryWithSecretsStore verifies that the github provider
+// resolved from a production-wired registry (with a real secrets store) reaches
+// the store and fails on a MISSING secret rather than "secrets store not configured".
+// This is the [REQUIRED TEST] from the story-2374 acceptance criteria.
+func TestGitHubAppProvider_RegistryWithSecretsStore(t *testing.T) {
+	logger := pkgtesting.NewMockLogger(true)
+	store := newEmptyTestSecretStore() // real store, no secrets pre-populated
+	registry := NewProviderRegistry(logger, store)
+
+	provider, err := registry.GetProvider("github")
+	require.NoError(t, err)
+
+	config := &APIConfig{
+		Provider:  "github",
+		Service:   "runners",
+		Operation: "registration-token",
+		Parameters: map[string]interface{}{
+			"owner": "test-org",
+			"repo":  "test-repo",
+		},
+	}
+
+	_, err = provider.ExecuteOperation(context.Background(), config)
+	require.Error(t, err)
+	assert.False(t, strings.Contains(err.Error(), "secrets store not configured"),
+		"expected failure on missing secret, not 'secrets store not configured'; got: %v", err)
+	assert.True(t, errors.Is(err, secretsif.ErrSecretNotFound),
+		"expected ErrSecretNotFound in error chain, got: %v", err)
+}
+
+// TestNewEngine_SecretsStoreThreadedToProvider verifies that a secrets store passed
+// to NewEngine is threaded through NewProviderRegistry to the github APIProvider.
+// The provider must fail on ErrSecretNotFound (secrets store reachable) rather than
+// "secrets store not configured" (secrets store nil).
+func TestNewEngine_SecretsStoreThreadedToProvider(t *testing.T) {
+	logger := pkgtesting.NewMockLogger(true)
+	store := newEmptyTestSecretStore()
+	engine := NewEngine(nil, logger, store, nil, nil)
+
+	provider, err := engine.providerRegistry.GetProvider("github")
+	require.NoError(t, err, "github provider must be registered in the engine's built-in registry")
+
+	config := &APIConfig{
+		Provider:  "github",
+		Service:   "runners",
+		Operation: "registration-token",
+		Parameters: map[string]interface{}{
+			"owner": "test-org",
+			"repo":  "test-repo",
+		},
+	}
+
+	_, err = provider.ExecuteOperation(context.Background(), config)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, secretsif.ErrSecretNotFound),
+		"secrets store reached (wired through NewEngine): expected ErrSecretNotFound, got: %v", err)
+	assert.False(t, strings.Contains(err.Error(), "secrets store not configured"),
+		"secrets store must be wired, not nil: got: %v", err)
 }
 
 // TestGitHubAppProvider_ExecuteOperation_E2E exercises the full ExecuteOperation path

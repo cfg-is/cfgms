@@ -897,6 +897,13 @@ func (s *Server) GetRouter() http.Handler {
 	return s.router
 }
 
+// GetSecretStore returns the central secrets provider so callers outside the api
+// package (e.g. server.initializeWorkflowHandler) can thread it into subsystems
+// that require secret access (Issue #2374).
+func (s *Server) GetSecretStore() secretsif.SecretStore {
+	return s.secretStore
+}
+
 // SetApprovalHook replaces the registration approval hook (Issue #422).
 // Called during server startup when a workflow engine is available.
 func (s *Server) SetApprovalHook(hook RegistrationApprovalHook) {

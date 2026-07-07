@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // executionIDCounter ensures unique IDs even when time.Now().UnixNano() returns
@@ -54,10 +55,12 @@ type Engine struct {
 }
 
 // NewEngine creates a new workflow engine instance.
+// secrets is the controller's central secret store; pass nil when no store is available
+// (e.g. steward-side) — providers that require secrets will surface a clear error.
 // transformExecutor handles StepTypeTransform steps; pass nil if transform steps are not used.
 // ringHealthExecutor handles StepTypeQueryRingHealth steps; pass nil if ring-health steps are not used.
 // executeStep returns a clear error for any step type whose executor is nil.
-func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor) *Engine {
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -74,7 +77,7 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecu
 
 	// Design decision: ProviderRegistry is retained for backwards compatibility with workflows
 	// registered before the pluggable provider system; new workflows use the provider interface directly.
-	providerRegistry := NewProviderRegistry(logger)
+	providerRegistry := NewProviderRegistry(logger, secrets)
 
 	engine := &Engine{
 		moduleFactory:      moduleFactory,
