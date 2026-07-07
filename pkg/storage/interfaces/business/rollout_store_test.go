@@ -118,14 +118,14 @@ func (e errRolloutTestStr) Error() string { return string(e) }
 
 func newTestRolloutRecord(id, tenantID string) *business.RolloutRecord {
 	return &business.RolloutRecord{
-		ID:             id,
-		TenantID:       tenantID,
-		TargetVersion:  "v2.0.0",
-		CurrentRing:    "canary",
-		RingsCompleted: 0,
-		RingsTotal:     4,
-		Status:         business.RolloutStatusInProgress,
-		StartedAt:      time.Now().UTC(),
+		ID:               id,
+		TenantID:         tenantID,
+		TargetVersion:    "v2.0.0",
+		CurrentRing:      "canary",
+		RingsCompleted:   0,
+		RingsTotal:       4,
+		Status:           business.RolloutStatusInProgress,
+		StartedAt:        time.Now().UTC(),
 		DeferredStewards: []string{},
 	}
 }

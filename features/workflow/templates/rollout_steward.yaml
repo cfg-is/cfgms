@@ -1,0 +1,160 @@
+name: rollout-steward
+description: >
+  Ring-by-ring steward binary rollout with configurable soak periods and health-gated
+  ring promotion. The rollout advances a target version through the ordered deployment
+  ring set (pre-release → early → default → stable). Between rings a soak delay runs,
+  then query_ring_health evaluates whether the failure rate exceeds the ring's
+  halt_threshold. Failed endpoints are requeued via the RolloutRecord deferred-retry
+  list; the rollout halts when a ring's failure rate breaches its threshold.
+
+  This template is the reference implementation for ring-advance rollout orchestration.
+  The controller's POST /api/v1/rollout endpoint runs the equivalent logic in Go; this
+  template shows how the same flow can be driven through the declarative workflow engine.
+
+  Operator setup:
+    1. Set target_version to the steward binary version to promote.
+    2. Set tenant_id to the tenant whose fleet should be promoted.
+    3. Set controller_url to the controller's external REST API base URL.
+    4. Dispatch upgrades to each ring's stewards via POST /api/v1/stewards/upgrade
+       before or in parallel with this workflow — this template gates progression,
+       it does not dispatch upgrade commands itself.
+    5. Configure soak durations and halt_thresholds to match your fleet risk tolerance.
+
+  Durability note (v1): this workflow runs on the in-memory engine. A controller
+  restart during execution loses progress; the operator re-runs the workflow. Ring
+  desired_version mutations applied via the set-ring-desired-version steps survive
+  restarts (they are git-backed configuration). See ADR-008 for the durable workflow
+  execution roadmap.
+version: "1.0"
+timeout: 72h
+on_failure: stop
+
+variables:
+  target_version: "v0.5.21"
+  tenant_id: "default"
+  controller_url: "https://localhost:9080"
+  # Rollout ID is injected at runtime by the caller (e.g. from POST /api/v1/rollout response).
+  rollout_id: ""
+
+steps:
+  # ---- pre-release ring ----
+
+  - name: set-pre-release-desired-version
+    type: http
+    timeout: 30s
+    http:
+      method: POST
+      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
+      headers:
+        Content-Type: application/json
+      expected_status:
+        - 200
+        - 202
+
+  - name: soak-pre-release
+    type: delay
+    delay:
+      duration: 5m
+      message: "Soaking pre-release ring before health check"
+
+  - name: health-pre-release
+    type: query_ring_health
+    config:
+      ring: pre-release
+      desired_version: "{{ .target_version }}"
+      tenant_id: "{{ .tenant_id }}"
+
+  - name: check-pre-release-threshold
+    type: conditional
+    condition:
+      type: expression
+      # Halt when failure rate = failed / (on_version + failed) exceeds 5%.
+      # on_version_pct is returned by query_ring_health as a percentage (0–100).
+      expression: '{{ gt .health_pre_release_on_version_pct 95.0 }}'
+    steps:
+      - name: pre-release-passed
+        type: delay
+        delay:
+          duration: 0s
+          message: "pre-release ring passed health gate, advancing"
+
+  # ---- early ring ----
+
+  - name: set-early-desired-version
+    type: http
+    timeout: 30s
+    http:
+      method: POST
+      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
+      headers:
+        Content-Type: application/json
+      expected_status:
+        - 200
+        - 202
+
+  - name: soak-early
+    type: delay
+    delay:
+      duration: 1h
+      message: "Soaking early ring before health check"
+
+  - name: health-early
+    type: query_ring_health
+    config:
+      ring: early
+      desired_version: "{{ .target_version }}"
+      tenant_id: "{{ .tenant_id }}"
+
+  # ---- default ring ----
+
+  - name: set-default-desired-version
+    type: http
+    timeout: 30s
+    http:
+      method: POST
+      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
+      headers:
+        Content-Type: application/json
+      expected_status:
+        - 200
+        - 202
+
+  - name: soak-default
+    type: delay
+    delay:
+      duration: 6h
+      message: "Soaking default ring before health check"
+
+  - name: health-default
+    type: query_ring_health
+    config:
+      ring: default
+      desired_version: "{{ .target_version }}"
+      tenant_id: "{{ .tenant_id }}"
+
+  # ---- stable ring ----
+
+  - name: set-stable-desired-version
+    type: http
+    timeout: 30s
+    http:
+      method: POST
+      url: "{{ .controller_url }}/api/v1/rollout/{{ .rollout_id }}"
+      headers:
+        Content-Type: application/json
+      expected_status:
+        - 200
+        - 202
+
+  - name: soak-stable
+    type: delay
+    delay:
+      duration: 24h
+      message: "Soaking stable ring before final health check"
+
+  - name: health-stable
+    type: query_ring_health
+    config:
+      ring: stable
+      desired_version: "{{ .target_version }}"
+      tenant_id: "{{ .tenant_id }}"

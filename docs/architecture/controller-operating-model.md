@@ -242,7 +242,61 @@ Ring-set mutation happens only via controller config file reload or restart. No 
 
 ### Ordered Promotion Model
 
-The ring order in `deployment_rings.rings` defines the promotion sequence: the operator advances a version from earlier rings (pre-release → early → default → stable) by setting `desired_version` on each ring. The rollout workflow that automates this advancement based on soak time and health gates is implemented in Story S3.
+The ring order in `deployment_rings.rings` defines the promotion sequence: the operator advances a version from earlier rings (pre-release → early → default → stable) by setting `desired_version` on each ring. The rollout workflow that automates this advancement is described in the [Rollout Workflow](#rollout-workflow) section below.
+
+### Rollout Workflow
+
+`POST /api/v1/rollout` starts a ring-advance rollout that moves a target steward binary version through the ordered ring set. Each ring transition is governed by a configurable soak period and a health gate; if the health gate fails the rollout halts and the operator must resolve the issue before restarting.
+
+#### Ring-Advance Loop
+
+The rollout goroutine processes rings in declaration order:
+
+1. **Set desired_version** — the ring's `desired_version` is updated in-memory to the target version, making it visible to ring health queries for this controller process.
+2. **Soak** — if `ring.soak` is non-zero, the goroutine waits the soak duration before sampling health. Zero soak skips the wait.
+3. **Query ring health** — the fleet is queried for all stewards with `deployment_ring = <ring>`. Each steward is classified as:
+   - **on-version**: `RunningVersion == desired_version`
+   - **failed**: has a terminal-failure upgrade record (`status: failed` or `rolled_back`) for this version
+   - **pending**: all others (no record yet, or an in-progress upgrade)
+4. **Halt or advance**: if `failed / (on_version + failed) > halt_threshold` the rollout transitions to `halted`. Otherwise the ring is marked completed and the loop advances to the next ring.
+
+#### Failure Policy
+
+**Per-endpoint requeue**: a steward that does not reach the target version is not dropped. Its ID is appended to `RolloutRecord.DeferredStewards` after the health gate runs. The steward's `deployment_ring` attribute is never mutated by the rollout; it remains in its ring and will be retried on the next rollout pass.
+
+**Per-ring halt**: if `failed_count / (on_version_count + failed_count) > halt_threshold` (per-ring `RingSpec` field, default 0.05) the rollout halts: no further ring promotions occur, no new dispatches are issued, and a structured error is logged. The operator resolves the failures and re-issues the rollout.
+
+Pending stewards are excluded from the halt-threshold denominator — they are still in-flight and are counted separately.
+
+#### Operator Halt
+
+`POST /api/v1/rollout/{rollout_id}/halt` signals the rollout goroutine to stop advancing. The goroutine checks the halt signal at soak time and at each ring boundary. The rollout record transitions to `halted` status immediately on the API call; the goroutine exits at the next checkpoint.
+
+#### Rollout Status
+
+`GET /api/v1/rollout/{rollout_id}` returns:
+
+| Field | Description |
+|-------|-------------|
+| `current_ring` | Ring currently being processed; empty when completed |
+| `status` | `in-progress`, `halted`, or `completed` |
+| `on_version_pct` | Percentage of current-ring stewards on the target version |
+| `failed_count` | Stewards with terminal upgrade failures in the current ring |
+| `pending_count` | Stewards still in progress in the current ring |
+| `rings_completed` | Number of rings that passed the health gate |
+| `rings_total` | Total rings in the rollout plan |
+
+Health metrics are computed live against the current ring for in-progress rollouts; terminal states report the final observed values.
+
+#### v1 In-Memory Durability Risk
+
+The rollout goroutine runs in memory on the in-memory workflow engine. **A controller restart during a rollout loses the orchestration state (current ring, progress counter).** The operator must re-issue the rollout after restart.
+
+Ring `desired_version` mutations applied by the goroutine are in-memory only in v1; they survive for the lifetime of the controller process but are not persisted to the git-backed config. The `RolloutRecord` stored in `RolloutStore` is durable (git-backed or database-backed depending on the configured provider) and tracks which rings were completed before the restart.
+
+**Mitigation**: the operator re-issues `POST /api/v1/rollout` after restart. Rings already at the target version will pass their health gate quickly (soak re-runs from scratch); rings not yet reached are processed as if starting fresh. No data is lost; at most a soak period is duplicated.
+
+This risk is tracked in [ADR-008](decisions/008-durable-workflow-execution.md) and will be addressed when durable workflow execution (DBOS or equivalent) is adopted. Do not engineer around this limitation in v1 stories.
 
 ### Config Signing
 

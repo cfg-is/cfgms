@@ -124,6 +124,9 @@ type Server struct {
 	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
 	batchJobStore                  business.BatchJobStore                // Issue #2296: durable batch-job persistence
 	batchJobExecutor               *batchjob.RollingBatchExecutor        // Issue #2296: rolling-batch executor for fleet-wide updates
+	rolloutStore                   business.RolloutStore                 // Issue #2340: durable rollout-orchestration-state persistence
+	onRolloutSoak                  func(rolloutID string)                // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
+	onRolloutTerminal              func(rolloutID string)                // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
@@ -665,6 +668,16 @@ func (s *Server) setupRouter() {
 	jobs.Handle("", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleCreateJob))).Methods("POST")
 	jobs.Handle("/{id}", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleGetJob))).Methods("GET")
 
+	// Rollout endpoints (Issue #2340). Always registered — handlers return 503 when
+	// rolloutStore is nil (nil-safe by design).
+	rollout := api.PathPrefix("/rollout").Subrouter()
+	rollout.Handle("",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleStartRollout))).Methods("POST")
+	rollout.Handle("/{rollout_id}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetRollout))).Methods("GET")
+	rollout.Handle("/{rollout_id}/halt",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleHaltRollout))).Methods("POST")
+
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
 	// handler is explicitly wired in after server creation.
@@ -1000,6 +1013,14 @@ func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.upgradeStore = store
+}
+
+// SetRolloutStore wires the durable RolloutStore used by the ring-advance rollout
+// endpoints (Issue #2340). When nil, POST /api/v1/rollout returns 503.
+func (s *Server) SetRolloutStore(store business.RolloutStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rolloutStore = store
 }
 
 // SetStewardStore wires the durable StewardStore used by the registration-refresh
