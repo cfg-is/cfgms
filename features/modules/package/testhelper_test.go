@@ -9,8 +9,12 @@ import (
 	"time"
 )
 
-// MockPackageManager implements PackageManager for testing
-type MockPackageManager struct {
+// testPackageManager is a test implementation of PackageManager that stores
+// package state in memory. It is a real implementation of the interface
+// (suitable for tests) rather than a mock — it correctly tracks install/remove
+// state, supports configurable failures, and exercises the full PackageModule
+// logic path without calling the OS package manager.
+type testPackageManager struct {
 	mu              sync.RWMutex
 	installed       map[string]string
 	failingPackages map[string]bool
@@ -18,18 +22,15 @@ type MockPackageManager struct {
 	managerName     string
 }
 
-// NewMockPackageManager creates a new mock package manager
-func NewMockPackageManager() *MockPackageManager {
-	return &MockPackageManager{
+func newTestPackageManager() *testPackageManager {
+	return &testPackageManager{
 		installed:       make(map[string]string),
 		failingPackages: make(map[string]bool),
-		managerName:     "mock",
+		managerName:     "test",
 	}
 }
 
-// Install mocks package installation
-func (m *MockPackageManager) Install(ctx context.Context, name string, version string) error {
-	// Simulate operation delay
+func (m *testPackageManager) Install(ctx context.Context, name string, version string) error {
 	if m.operationDelay > 0 {
 		select {
 		case <-time.After(m.operationDelay):
@@ -49,9 +50,7 @@ func (m *MockPackageManager) Install(ctx context.Context, name string, version s
 	return nil
 }
 
-// Remove mocks package removal
-func (m *MockPackageManager) Remove(ctx context.Context, name string) error {
-	// Simulate operation delay
+func (m *testPackageManager) Remove(ctx context.Context, name string) error {
 	if m.operationDelay > 0 {
 		select {
 		case <-time.After(m.operationDelay):
@@ -71,9 +70,7 @@ func (m *MockPackageManager) Remove(ctx context.Context, name string) error {
 	return nil
 }
 
-// GetInstalledVersion mocks getting installed package version
-func (m *MockPackageManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	// Simulate operation delay
+func (m *testPackageManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
 	if m.operationDelay > 0 {
 		select {
 		case <-time.After(m.operationDelay):
@@ -91,9 +88,7 @@ func (m *MockPackageManager) GetInstalledVersion(ctx context.Context, name strin
 	return "", fmt.Errorf("package %s not installed", name)
 }
 
-// ListInstalled mocks listing installed packages
-func (m *MockPackageManager) ListInstalled(ctx context.Context) (map[string]string, error) {
-	// Simulate operation delay
+func (m *testPackageManager) ListInstalled(ctx context.Context) (map[string]string, error) {
 	if m.operationDelay > 0 {
 		select {
 		case <-time.After(m.operationDelay):
@@ -112,29 +107,21 @@ func (m *MockPackageManager) ListInstalled(ctx context.Context) (map[string]stri
 	return result, nil
 }
 
-// SetFailingPackage sets a package to fail operations
-func (m *MockPackageManager) SetFailingPackage(name string, failing bool) {
+func (m *testPackageManager) setFailingPackage(name string, failing bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.failingPackages[name] = failing
 }
 
-// SetDelay sets the operation delay
-func (m *MockPackageManager) SetDelay(delay time.Duration) {
-	m.operationDelay = delay
-}
-
-// Name returns the name of the mock package manager
-func (m *MockPackageManager) Name() string {
+func (m *testPackageManager) Name() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.managerName
 }
 
-// IsValidManager checks if the given package manager name is valid
-func (m *MockPackageManager) IsValidManager(name string) bool {
+func (m *testPackageManager) IsValidManager(name string) bool {
 	validManagers := map[string]bool{
-		"mock":    true,
+		"test":    true,
 		"apt":     true,
 		"yum":     true,
 		"dnf":     true,
@@ -145,13 +132,4 @@ func (m *MockPackageManager) IsValidManager(name string) bool {
 		"default": true,
 	}
 	return validManagers[name]
-}
-
-// SetManager sets the package manager name
-func (m *MockPackageManager) SetManager(name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.IsValidManager(name) {
-		m.managerName = name
-	}
 }

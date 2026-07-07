@@ -133,7 +133,7 @@ version: latest
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewPackageModule(NewMockPackageManager())
+			m, err := NewPackageModule(newTestPackageManager())
 			require.NoError(t, err)
 
 			if tt.setupFunc != nil {
@@ -195,7 +195,7 @@ dependencies:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewPackageModule(NewMockPackageManager())
+			m, err := NewPackageModule(newTestPackageManager())
 			require.NoError(t, err)
 
 			err = m.Set(context.Background(), tt.resourceID, tt.config)
@@ -415,7 +415,7 @@ version: "1 2 3"
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewPackageModule(NewMockPackageManager())
+			m, err := NewPackageModule(newTestPackageManager())
 			require.NoError(t, err)
 
 			err = m.Set(context.Background(), tt.resourceID, tt.config)
@@ -449,6 +449,12 @@ func TestErrPackageModule(t *testing.T) {
 	cfg := &Config{Name: "nginx", State: "present", Version: "latest"}
 	err = m.Set(ctx, "nginx", cfg)
 	assert.ErrorIs(t, err, initErr)
+
+	// errPackageModule must implement LoggingInjectable so the factory can
+	// inject loggers even when no package manager is available (e.g. Windows
+	// CI runners without winget/choco).
+	_, ok := modules.Module(m).(modules.LoggingInjectable)
+	require.True(t, ok, "errPackageModule must implement modules.LoggingInjectable")
 }
 
 // TestNewPackageModule_NilManager verifies that passing nil returns an error.
@@ -456,4 +462,72 @@ func TestNewPackageModule_NilManager(t *testing.T) {
 	_, err := NewPackageModule(nil)
 	assert.Error(t, err)
 	assert.Equal(t, ErrInvalidConfig, err)
+}
+
+// TestPackageModule_ErrorPaths tests sentinel error paths in Set().
+func TestPackageModule_ErrorPaths(t *testing.T) {
+	t.Run("NilConfig", func(t *testing.T) {
+		m, err := NewPackageModule(newTestPackageManager())
+		require.NoError(t, err)
+		// Pass nil modules.ConfigState (not a typed nil *Config) to trigger the
+		// config == nil guard at module.go:94.
+		err = m.Set(context.Background(), "nginx", nil)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("ResourceIDMismatch", func(t *testing.T) {
+		m, err := NewPackageModule(newTestPackageManager())
+		require.NoError(t, err)
+		cfg := createConfigFromYAML(`
+name: other-package
+state: present
+version: latest
+`)
+		err = m.Set(context.Background(), "nginx", cfg)
+		assert.ErrorIs(t, err, ErrResourceIDMismatch)
+	})
+
+	t.Run("InvalidPackageManager", func(t *testing.T) {
+		m, err := NewPackageModule(newTestPackageManager())
+		require.NoError(t, err)
+		cfg := createConfigFromYAML(`
+name: nginx
+state: present
+version: latest
+package_manager: unknown-manager
+`)
+		err = m.Set(context.Background(), "nginx", cfg)
+		assert.ErrorIs(t, err, ErrInvalidPackageManager)
+	})
+
+	t.Run("CircularDependency", func(t *testing.T) {
+		m, err := NewPackageModule(newTestPackageManager())
+		require.NoError(t, err)
+		cfg := createConfigFromYAML(`
+name: nginx
+state: present
+version: latest
+dependencies:
+  - nginx
+`)
+		err = m.Set(context.Background(), "nginx", cfg)
+		assert.ErrorIs(t, err, ErrCircularDependency)
+	})
+
+	t.Run("DependencyInstallFailure", func(t *testing.T) {
+		mgr := newTestPackageManager()
+		mgr.setFailingPackage("npm", true)
+		m, err := NewPackageModule(mgr)
+		require.NoError(t, err)
+		cfg := createConfigFromYAML(`
+name: nodejs
+state: present
+version: latest
+dependencies:
+  - npm
+`)
+		err = m.Set(context.Background(), "nodejs", cfg)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "npm")
+	})
 }
