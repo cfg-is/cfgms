@@ -858,6 +858,80 @@ Delete an API key. The key is immediately invalidated.
 
 - `id` (path): API key ID
 
+### Session Management
+
+Admin auth sessions are zero-standing-privilege bearer-token sessions issued to `cfg` CLI users holding an admin mTLS bundle (ADR-014). The raw token is returned once at creation and never re-stored; the controller holds only a SHA-256 hash. Sessions have an idle TTL (15 min) and an absolute cap (8 h). These endpoints require an admin principal (`IsAdmin == true`).
+
+#### POST /api/v1/sessions
+
+Create a new admin session. The caller must present an admin mTLS certificate. Returns a one-time bearer token — store it securely in the OS keychain.
+
+**Authentication:** admin mTLS certificate
+
+**Request body:**
+
+```json
+{
+  "connection_name": "my-ctrl"
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "session_id": "abc123",
+  "token": "<43-char base64url bearer token>",
+  "issued_at": "2026-07-07T00:00:00Z",
+  "idle_ttl": 900,
+  "absolute_expiry": "2026-07-07T08:00:00Z"
+}
+```
+
+#### GET /api/v1/sessions
+
+List currently active admin sessions. A session is active if it is not revoked and has not exceeded its idle TTL or absolute cap. Tenant-scoped admins see only sessions belonging to their tenant; global admins (no tenant) see all tenants' sessions.
+
+**Authentication:** admin mTLS certificate or bearer token (`Authorization: Bearer <token>`)
+
+**Response (200 OK):**
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "abc123",
+      "principal_id": "alice",
+      "connection_name": "my-ctrl",
+      "issued_at": "2026-07-07T00:00:00Z",
+      "last_activity": "2026-07-07T00:10:00Z",
+      "absolute_expiry": "2026-07-07T08:00:00Z"
+    }
+  ]
+}
+```
+
+Fields returned: `session_id`, `principal_id`, `connection_name`, `issued_at`, `last_activity`, `absolute_expiry`. The bearer token is never included.
+
+#### DELETE /api/v1/sessions/{id}
+
+Revoke a session by ID. Accepts either a valid bearer token or an admin mTLS certificate as credentials, so an admin can revoke sessions even if a token is unavailable.
+
+**Authentication:** admin mTLS certificate or bearer token
+
+**Parameters:**
+
+- `id` (path): session ID
+
+**Response (200 OK):**
+
+```json
+{
+  "id": "abc123",
+  "revoked": true
+}
+```
+
 ### Registration Token Management
 
 Registration tokens authorise steward self-registration. The token encodes the target tenant and is consumed by `POST /api/v1/register`.

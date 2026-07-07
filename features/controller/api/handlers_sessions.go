@@ -76,6 +76,70 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// sessionListItem is the allow-listed per-session payload for GET /api/v1/sessions.
+// Fields are named explicitly so a future field added to session.Session cannot
+// silently leak through this endpoint via a raw json.Marshal passthrough.
+type sessionListItem struct {
+	SessionID      string    `json:"session_id"`
+	PrincipalID    string    `json:"principal_id"`
+	ConnectionName string    `json:"connection_name"`
+	IssuedAt       time.Time `json:"issued_at"`
+	LastActivity   time.Time `json:"last_activity"`
+	AbsoluteExpiry time.Time `json:"absolute_expiry"`
+}
+
+// sessionListResponse wraps the active-session listing for GET /api/v1/sessions.
+type sessionListResponse struct {
+	Sessions []sessionListItem `json:"sessions"`
+}
+
+// handleSessionList handles GET /api/v1/sessions.
+// Requires an admin principal (principal.IsAdmin == true).
+// Tenant-scoped admins see only sessions whose TenantID matches their own;
+// global admins (TenantID == "") see every tenant's sessions.
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil || !principal.IsAdmin {
+		s.writeErrorResponse(w, http.StatusForbidden, "Admin mTLS certificate required", "NOT_ADMIN")
+		return
+	}
+	if s.sessionManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Session management not available", "SESSION_UNAVAILABLE")
+		return
+	}
+
+	all, err := s.sessionManager.List(r.Context())
+	if err != nil {
+		s.logger.Error("Failed to list sessions",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list sessions", "SESSION_LIST_ERROR")
+		return
+	}
+
+	items := make([]sessionListItem, 0, len(all))
+	for _, sess := range all {
+		if principal.TenantID != "" && sess.TenantID != principal.TenantID {
+			continue
+		}
+		items = append(items, sessionListItem{
+			SessionID:      sess.ID,
+			PrincipalID:    sess.PrincipalID,
+			ConnectionName: sess.ConnectionName,
+			IssuedAt:       sess.IssuedAt,
+			LastActivity:   sess.LastActivity,
+			AbsoluteExpiry: sess.AbsoluteExpiresAt,
+		})
+	}
+
+	s.logger.Info("Sessions listed",
+		"principal_id", logging.SanitizeLogValue(principal.ID),
+		"count", len(items))
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sessionListResponse{Sessions: items})
+}
+
 // handleSessionRevoke handles DELETE /api/v1/sessions/{id}.
 // Accepts either a valid session token or an admin mTLS cert as credentials.
 // Returns HTTP 200 on success or HTTP 404 if the session does not exist.

@@ -443,3 +443,234 @@ func TestHandleSessionCreate_NoSessionManager(t *testing.T) {
 		t.Errorf("status = %d, want 503 when sessionManager is nil", rec.Code)
 	}
 }
+
+// injectAdminPrincipalWithTenant returns a request with an admin Principal scoped to a specific tenant.
+func injectAdminPrincipalWithTenant(r *http.Request, principalID, tenantID string) *http.Request {
+	p := &Principal{
+		ID:       principalID,
+		Name:     "mtls-admin:" + principalID,
+		IsAdmin:  true,
+		TenantID: tenantID,
+	}
+	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+}
+
+// TestHandleSessionList_NonAdminReturns403 verifies that a non-admin caller receives 403.
+func TestHandleSessionList_NonAdminReturns403(t *testing.T) {
+	srv, _, _ := setupTestServerWithSession(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req = injectNonAdminPrincipal(req)
+	rec := httptest.NewRecorder()
+
+	srv.handleSessionList(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+// TestHandleSessionList_TenantIsolation verifies that a tenant-scoped admin sees only
+// sessions belonging to their tenant, while a global admin sees all tenants' sessions.
+func TestHandleSessionList_TenantIsolation(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	// Issue sessions in two different tenants and one without a tenant.
+	_, _, err := mgr.Issue(ctx, "alice", "ctrl-a", "tenant-x")
+	if err != nil {
+		t.Fatalf("Issue tenant-x: %v", err)
+	}
+	_, _, err = mgr.Issue(ctx, "bob", "ctrl-b", "tenant-y")
+	if err != nil {
+		t.Fatalf("Issue tenant-y: %v", err)
+	}
+	_, _, err = mgr.Issue(ctx, "carol", "ctrl-c", "tenant-x")
+	if err != nil {
+		t.Fatalf("Issue tenant-x second: %v", err)
+	}
+
+	// Tenant-scoped admin for tenant-x: must see only tenant-x sessions (alice + carol).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req = injectAdminPrincipalWithTenant(req, "alice", "tenant-x")
+	rec := httptest.NewRecorder()
+	srv.handleSessionList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant-x admin: status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var tenantResp struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&tenantResp); err != nil {
+		t.Fatalf("decode tenant-x response: %v", err)
+	}
+	if len(tenantResp.Sessions) != 2 {
+		t.Errorf("tenant-x admin: got %d sessions, want 2 (alice + carol)", len(tenantResp.Sessions))
+	}
+
+	// Global admin (TenantID == ""): must see all three sessions.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req2 = injectAdminPrincipal(req2, "global-admin") // no TenantID → global
+	rec2 := httptest.NewRecorder()
+	srv.handleSessionList(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("global admin: status = %d, want 200; body: %s", rec2.Code, rec2.Body.String())
+	}
+	var globalResp struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec2.Body).Decode(&globalResp); err != nil {
+		t.Fatalf("decode global response: %v", err)
+	}
+	if len(globalResp.Sessions) != 3 {
+		t.Errorf("global admin: got %d sessions, want 3 (all tenants)", len(globalResp.Sessions))
+	}
+}
+
+// TestHandleSessionList_NoTokenDisclosure verifies that the raw bearer token, its SHA-256
+// hash, and any other secret-equivalent value are absent from the GET /api/v1/sessions
+// response body. The assertion is against raw response bytes, not the response struct.
+func TestHandleSessionList_NoTokenDisclosure(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, token, err := mgr.Issue(ctx, "dave", "ctrl-d", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	tokenHash := session.HashToken(token)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req = injectAdminPrincipal(req, "dave")
+	rec := httptest.NewRecorder()
+	srv.handleSessionList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, token) {
+		t.Errorf("response body contains raw bearer token — must not be disclosed\nbody:\n%s", body)
+	}
+	if strings.Contains(body, tokenHash) {
+		t.Errorf("response body contains token hash — must not be disclosed\nbody:\n%s", body)
+	}
+}
+
+// TestHandleSessionList_IdleExpiredExcluded verifies that a session that has gone
+// idle-expired (per Validate's IdleTimeout rule) is excluded from the listing, even
+// if the store record has not yet been physically reaped.
+func TestHandleSessionList_IdleExpiredExcluded(t *testing.T) {
+	srv := setupTestServer(t)
+	cfg := session.Config{
+		IdleTimeout:     100 * time.Millisecond,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     10 * time.Millisecond,
+	}
+	clock := &testClock{t: time.Now()}
+	store := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, clock.Now)
+	srv.SetSessionManager(mgr)
+
+	ctx := context.Background()
+	// Issue a session; it will become idle-expired when the clock advances past IdleTimeout.
+	_, _, err := mgr.Issue(ctx, "eve", "ctrl-e", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Advance past idle TTL; the MemStore sweep has not yet reaped the record.
+	clock.advance(200 * time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req = injectAdminPrincipal(req, "eve")
+	rec := httptest.NewRecorder()
+	srv.handleSessionList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Sessions []interface{} `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Sessions) != 0 {
+		t.Errorf("idle-expired session still in listing: got %d sessions, want 0", len(resp.Sessions))
+	}
+}
+
+// TestHandleSessionList_ResponseFields verifies the response contains exactly the
+// allow-listed fields and no extras.
+func TestHandleSessionList_ResponseFields(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, _, err := mgr.Issue(ctx, "frank", "ctrl-f", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req = injectAdminPrincipal(req, "frank")
+	rec := httptest.NewRecorder()
+	srv.handleSessionList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Decode as a generic map to inspect raw field names.
+	var raw struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Sessions) != 1 {
+		t.Fatalf("want 1 session, got %d", len(raw.Sessions))
+	}
+	item := raw.Sessions[0]
+	allowed := map[string]bool{
+		"session_id":      true,
+		"principal_id":    true,
+		"connection_name": true,
+		"issued_at":       true,
+		"last_activity":   true,
+		"absolute_expiry": true,
+	}
+	for k := range item {
+		if !allowed[k] {
+			t.Errorf("unexpected field %q in session list item", k)
+		}
+	}
+	for k := range allowed {
+		if _, ok := item[k]; !ok {
+			t.Errorf("required field %q missing from session list item", k)
+		}
+	}
+}
+
+// TestHandleSessionList_NoSessionManager returns 503 when no manager is wired.
+func TestHandleSessionList_NoSessionManager(t *testing.T) {
+	srv := setupTestServer(t) // no SetSessionManager call
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req = injectAdminPrincipal(req, "alice")
+	rec := httptest.NewRecorder()
+
+	srv.handleSessionList(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 when sessionManager is nil", rec.Code)
+	}
+}
