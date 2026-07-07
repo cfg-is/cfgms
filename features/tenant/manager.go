@@ -66,6 +66,16 @@ func (m *Manager) WithAuditManager(a *audit.Manager) *Manager {
 	return m
 }
 
+// InvalidateConfigCache evicts the cached source resolution for tenantID.
+// Called by the steward-move handler to invalidate both source and destination tenants
+// after a move, so the next config resolution picks up the correct tenant path.
+// No-op when no config router is wired (single-node dev/test setups).
+func (m *Manager) InvalidateConfigCache(tenantID string) {
+	if m.router != nil {
+		m.router.InvalidateTenantCache(tenantID)
+	}
+}
+
 // CreateTenant creates a new tenant with validation and RBAC setup
 func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*business.TenantData, error) {
 	// When an explicit ID is provided without a name, use the ID as the display name.

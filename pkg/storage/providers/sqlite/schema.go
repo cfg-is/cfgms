@@ -83,10 +83,11 @@ func backfillAuditEntries(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// backfillStewardColumns adds the four registration-refresh identity columns to a
-// pre-existing stewards table that was created without them (Issue #2093, ADR-010).
-// Fresh databases (table absent) are skipped. Column-existence is checked via
-// PRAGMA before each ALTER TABLE so the pass is fully idempotent.
+// backfillStewardColumns adds the four registration-refresh identity columns and
+// the tenant_id column to a pre-existing stewards table created without them
+// (Issue #2093 ADR-010; Issue #2341 tenant-move). Fresh databases (table absent)
+// are skipped. Column-existence is checked via PRAGMA before each ALTER TABLE
+// so the pass is fully idempotent.
 func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 	exists, err := tableExists(ctx, db, "stewards")
 	if err != nil {
@@ -104,6 +105,7 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 		{"identity_key_pub", `ALTER TABLE stewards ADD COLUMN identity_key_pub BLOB NOT NULL DEFAULT ''`},
 		{"key_protection_level", `ALTER TABLE stewards ADD COLUMN key_protection_level TEXT NOT NULL DEFAULT ''`},
 		{"last_provenance_json", `ALTER TABLE stewards ADD COLUMN last_provenance_json TEXT NOT NULL DEFAULT ''`},
+		{"tenant_id", `ALTER TABLE stewards ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		present, err := columnExists(ctx, db, "stewards", c.name)
 		if err != nil {
@@ -307,8 +309,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		// Stewards — durable fleet registry (ADR-003 §2, Issue #663)
 		// Records are never deleted; deregistered stewards are retained for audit.
 		// Columns device_id, identity_key_pub, key_protection_level, last_provenance_json
-		// were added in Issue #2093 (ADR-010 registration-refresh). Pre-existing rows
-		// receive empty defaults via backfillStewardColumns() before this transaction.
+		// were added in Issue #2093 (ADR-010 registration-refresh). tenant_id was added
+		// in Issue #2341 (admin move-steward). Pre-existing rows receive empty defaults
+		// via backfillStewardColumns() before this transaction.
 		`CREATE TABLE IF NOT EXISTS stewards (
 			id                   TEXT PRIMARY KEY,
 			hostname             TEXT NOT NULL DEFAULT '',
@@ -323,7 +326,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			device_id            TEXT NOT NULL DEFAULT '',
 			identity_key_pub     BLOB NOT NULL DEFAULT '',
 			key_protection_level TEXT NOT NULL DEFAULT '',
-			last_provenance_json TEXT NOT NULL DEFAULT ''
+			last_provenance_json TEXT NOT NULL DEFAULT '',
+			tenant_id            TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,

@@ -166,6 +166,10 @@ type StewardStore interface {
 	// Returns ErrStewardNotFound if no record exists.
 	UpdateStewardStatus(ctx context.Context, stewardID string, status StewardStatus) error
 
+	// UpdateStewardTenant moves a steward to a different tenant.
+	// Returns ErrStewardNotFound if no record exists for stewardID.
+	UpdateStewardTenant(ctx context.Context, stewardID, newTenantID string) error
+
 	// DeregisterSteward marks the steward as deregistered. Records are retained
 	// for audit history; use ListStewardsByStatus to exclude them from active views.
 	// Returns ErrStewardNotFound if no record exists.

@@ -37,6 +37,7 @@ var tier3Permissions = map[string]struct{}{
 	"tenant:create":                {}, // POST /tenants
 	"refresh:approve":              {}, // POST /stewards/refresh/{pending_id}/approve
 	"refresh:set-policy":           {}, // PUT /tenants/{tenant_path}/refresh-policy
+	"steward:move":                 {}, // POST /stewards/{id}/move
 }
 
 // requireTier returns middleware that enforces the given authentication tier.

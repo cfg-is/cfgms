@@ -8,6 +8,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,10 +20,12 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -1378,4 +1382,317 @@ func TestGetStewardLogs_PendingOutcome(t *testing.T) {
 	assert.NotNil(t, record["detection"], "detection must be present")
 	assert.Nil(t, record["outcome"], "outcome must be absent")
 	assert.Equal(t, true, record["pending_outcome"], "pending_outcome must be true for a detection with no outcome")
+}
+
+// ---- handleMoveSteward tests (Issue #2341) ----
+
+// setupMoveStewardServer creates a test server wired with a real flat-file steward
+// store (rooted at a t.TempDir(), no external infrastructure required) and a tenant
+// backing store pre-seeded with both "source-tenant" and "dest-tenant" in Active state.
+// The returned root is the store's backing directory, used by tests that need to induce
+// a genuine durable-store failure.
+func setupMoveStewardServer(t *testing.T) (*Server, business.StewardStore, string) {
+	t.Helper()
+	server := setupTestServer(t)
+
+	st, root := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	// Create source and destination tenants in the backing store. setupTestServer
+	// builds a fresh tenant manager per test, so neither tenant can pre-exist —
+	// a CreateTenant failure here is a real setup error and must fail the test.
+	ctx := context.Background()
+	for _, id := range []string{"source-tenant", "dest-tenant"} {
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id})
+		require.NoError(t, err, "creating tenant %q", id)
+	}
+	return server, st, root
+}
+
+// seedSteward persists a steward record into the real flat-file store, failing the
+// test on error. Records are written verbatim; RegisterSteward defaults an empty
+// status to "registered" but preserves any status the caller sets.
+func seedSteward(t *testing.T, st business.StewardStore, rec *business.StewardRecord) {
+	t.Helper()
+	require.NoError(t, st.RegisterSteward(context.Background(), rec), "seeding steward %q", rec.ID)
+}
+
+// postMoveSteward calls handleMoveSteward directly (bypassing Tier-3 middleware) with a
+// root-admin mTLS principal so we can exercise the handler logic in isolation.
+func postMoveSteward(server *Server, stewardID, newTenantID string) *httptest.ResponseRecorder {
+	body := strings.NewReader(`{"new_tenant_id":"` + newTenantID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+stewardID+"/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+	return rec
+}
+
+// TestHandleMoveSteward_HappyPath verifies the move succeeds and returns status "moved"
+// with the correct old and new tenant IDs.
+func TestHandleMoveSteward_HappyPath(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+
+	// Wire a registered steward in the controller service and the store.
+	require.NoError(t, server.controllerService.RegisterSteward("s-happy", "source-tenant", "addr", "registered"))
+	seedSteward(t, st, &business.StewardRecord{ID: "s-happy", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+
+	// dest-tenant is already created by setupMoveStewardServer.
+	rec := postMoveSteward(server, "s-happy", "dest-tenant")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "moved", resp.Data["status"])
+	assert.Equal(t, "dest-tenant", resp.Data["tenant_id"])
+	assert.Equal(t, "source-tenant", resp.Data["previous_tenant"])
+}
+
+// TestHandleMoveSteward_InMemoryRegistryUpdated verifies that after a move, the live
+// in-memory registry reflects the new tenant ID so config resolves from the new path.
+// This is the "already-connected steward re-scopes" AC (Issue #2341).
+func TestHandleMoveSteward_InMemoryRegistryUpdated(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+
+	require.NoError(t, server.controllerService.RegisterSteward("s-connected", "source-tenant", "addr", "active"))
+	seedSteward(t, st, &business.StewardRecord{ID: "s-connected", TenantID: "source-tenant", Status: business.StewardStatusActive})
+
+	// dest-tenant is already created by setupMoveStewardServer.
+	rec := postMoveSteward(server, "s-connected", "dest-tenant")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The controller service registry must reflect the new tenant — config resolution
+	// reads this on the next convergence.
+	info, ok := server.controllerService.GetStewardInfo("s-connected")
+	require.True(t, ok, "steward must still be in the registry after move")
+	assert.Equal(t, "dest-tenant", info.TenantID,
+		"in-memory TenantID must be updated so config resolves from the new tenant path")
+}
+
+// TestHandleMoveSteward_NoCertReissue verifies that the move does not alter the steward
+// identity fields (DeviceID, IdentityKeyPub) — proving no cert re-issue occurs.
+func TestHandleMoveSteward_NoCertReissue(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+
+	pub := []byte{0x01, 0x02, 0x03}
+	seedSteward(t, st, &business.StewardRecord{
+		ID:             "s-nocert",
+		TenantID:       "source-tenant",
+		Status:         business.StewardStatusRegistered,
+		DeviceID:       "aabbcc",
+		IdentityKeyPub: pub,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-nocert", "source-tenant", "addr", "registered"))
+
+	// dest-tenant is already created by setupMoveStewardServer.
+	ctx := context.Background()
+	rec := postMoveSteward(server, "s-nocert", "dest-tenant")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	got, err := server.stewardStore.GetSteward(ctx, "s-nocert")
+	require.NoError(t, err)
+	// Identity fields must be unchanged.
+	assert.Equal(t, "aabbcc", got.DeviceID, "DeviceID must not change on move")
+	assert.Equal(t, pub, got.IdentityKeyPub, "IdentityKeyPub must not change on move")
+	assert.Equal(t, "dest-tenant", got.TenantID, "TenantID must be updated")
+}
+
+// TestHandleMoveSteward_SelfMove verifies that a move to the same tenant short-circuits
+// with no state change (status "no_change") and does not touch the store or registry.
+func TestHandleMoveSteward_SelfMove(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{ID: "s-self", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+	require.NoError(t, server.controllerService.RegisterSteward("s-self", "source-tenant", "addr", "registered"))
+
+	rec := postMoveSteward(server, "s-self", "source-tenant")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "no_change", resp.Data["status"], "self-move must return no_change")
+}
+
+// TestHandleMoveSteward_RevokedSourceRejected verifies that a move from a revoked
+// steward returns 400 STEWARD_REVOKED — moving would back-door re-entry.
+func TestHandleMoveSteward_RevokedSourceRejected(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+
+	seedSteward(t, st, &business.StewardRecord{ID: "s-revoked", TenantID: "source-tenant", Status: business.StewardStatusRevoked})
+
+	// dest-tenant is already created by setupMoveStewardServer.
+	rec := postMoveSteward(server, "s-revoked", "dest-tenant")
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_REVOKED", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_AllowedSourceStatuses verifies that each allowed source status
+// succeeds and the status is not promoted (no implicit status change on move).
+func TestHandleMoveSteward_AllowedSourceStatuses(t *testing.T) {
+	allowedStatuses := []business.StewardStatus{
+		business.StewardStatusRegistered,
+		business.StewardStatusActive,
+		business.StewardStatusLost,
+		business.StewardStatusArchived,
+		business.StewardStatusDormant,
+		business.StewardStatusDeregistered,
+	}
+
+	for _, status := range allowedStatuses {
+		status := status
+		t.Run(string(status), func(t *testing.T) {
+			server, st, _ := setupMoveStewardServer(t)
+
+			id := "s-" + string(status)
+			seedSteward(t, st, &business.StewardRecord{ID: id, TenantID: "source-tenant", Status: status})
+			require.NoError(t, server.controllerService.RegisterSteward(id, "source-tenant", "addr", string(status)))
+
+			// dest-tenant is already created by setupMoveStewardServer.
+			ctx := context.Background()
+			rec := postMoveSteward(server, id, "dest-tenant")
+			require.Equal(t, http.StatusOK, rec.Code, "status %q must be allowed to move", status)
+
+			// Status must not be promoted.
+			got, err := server.stewardStore.GetSteward(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, status, got.Status, "status must not change on move for %q", status)
+		})
+	}
+}
+
+// TestHandleMoveSteward_DestinationNotFound verifies that moving to a nonexistent
+// tenant returns 400 TENANT_NOT_FOUND.
+func TestHandleMoveSteward_DestinationNotFound(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+	seedSteward(t, st, &business.StewardRecord{ID: "s-dest404", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+
+	rec := postMoveSteward(server, "s-dest404", "nonexistent-tenant")
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_DestinationNotActive verifies that moving to a tenant that
+// exists but is not in "active" status returns 400 TENANT_NOT_ACTIVE. The durable
+// store must not be updated when the destination is inactive.
+func TestHandleMoveSteward_DestinationNotActive(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+	seedSteward(t, st, &business.StewardRecord{ID: "s-inactive-dest", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+
+	// dest-tenant was created active by setupMoveStewardServer; suspend it so the
+	// handler sees a non-active destination.
+	ctx := context.Background()
+	require.NoError(t, server.tenantManager.SuspendTenant(ctx, "dest-tenant"))
+
+	rec := postMoveSteward(server, "s-inactive-dest", "dest-tenant")
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_ACTIVE", errResp.Error.Code)
+
+	// The move must not have been persisted.
+	got, err := server.stewardStore.GetSteward(ctx, "s-inactive-dest")
+	require.NoError(t, err)
+	assert.Equal(t, "source-tenant", got.TenantID, "steward must remain in source tenant when destination is not active")
+}
+
+// TestHandleMoveSteward_DurableStoreWriteFails verifies that when the durable store
+// write fails after all validation passes, the handler returns 500 INTERNAL_ERROR.
+func TestHandleMoveSteward_DurableStoreWriteFails(t *testing.T) {
+	server, st, root := setupMoveStewardServer(t)
+	seedSteward(t, st, &business.StewardRecord{ID: "s-writefail", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+	require.NoError(t, server.controllerService.RegisterSteward("s-writefail", "source-tenant", "addr", "registered"))
+
+	// Induce a genuine durable-store write failure: make the flat-file store's backing
+	// directory read-only. The record was already written, so GetSteward (a pure read)
+	// still succeeds and the handler reaches UpdateStewardTenant, whose atomic write
+	// (temp-file creation in the directory) then fails with a permission error — the
+	// handler must surface a 500. Restore the mode on cleanup so t.TempDir() removal
+	// (registered earlier, so it runs after this) can delete the tree.
+	stewardDir := filepath.Join(root, "stewards")
+	require.NoError(t, os.Chmod(stewardDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(stewardDir, 0o750) })
+
+	rec := postMoveSteward(server, "s-writefail", "dest-tenant")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_StewardNotFound verifies 404 when the steward ID is unknown.
+func TestHandleMoveSteward_StewardNotFound(t *testing.T) {
+	server, _, _ := setupMoveStewardServer(t)
+
+	rec := postMoveSteward(server, "nonexistent-steward", "dest-tenant")
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_InvalidStewardID verifies 400 for a malformed steward ID.
+func TestHandleMoveSteward_InvalidStewardID(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := strings.NewReader(`{"new_tenant_id":"dest"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/bad.id:here/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "bad.id:here"})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_STEWARD_ID", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_MissingNewTenantID verifies 400 when new_tenant_id is absent.
+func TestHandleMoveSteward_MissingNewTenantID(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := strings.NewReader(`{}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/some-steward/move", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "some-steward"})
+	rec := httptest.NewRecorder()
+	server.handleMoveSteward(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MISSING_TENANT_ID", errResp.Error.Code)
+}
+
+// TestHandleMoveSteward_APIKeyRejected verifies that an API-key caller (non-mTLS) is
+// rejected with 403 at the Tier-3 gate when hitting the route via the router.
+func TestHandleMoveSteward_APIKeyRejected(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:move"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/some-steward/move",
+		strings.NewReader(`{"new_tenant_id":"dest"}`))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "API-key callers must be rejected at Tier-3")
 }

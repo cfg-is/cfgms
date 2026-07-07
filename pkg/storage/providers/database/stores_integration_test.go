@@ -380,6 +380,28 @@ func TestDatabaseStewardStore_Deregister(t *testing.T) {
 	assert.Equal(t, business.StewardStatusDeregistered, got.Status)
 }
 
+func TestDatabaseStewardStore_UpdateStewardTenant(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	rec := makeSampleSteward("sw-move", "tenant-src")
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	require.NoError(t, store.UpdateStewardTenant(ctx, "sw-move", "tenant-dst"))
+
+	got, err := store.GetSteward(ctx, "sw-move")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst", got.TenantID)
+	// Status must not be promoted on move.
+	assert.Equal(t, business.StewardStatusRegistered, got.Status)
+}
+
+func TestDatabaseStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
+	store := newTestStewardStore(t)
+	err := store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-dst")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
 func TestDatabaseStewardStore_GetStewardsSeen(t *testing.T) {
 	store := newTestStewardStore(t)
 	ctx := context.Background()

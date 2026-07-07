@@ -289,3 +289,84 @@ func TestSQLiteStewardStore_MigrationIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "s-mig", got.ID, "row must survive second initializeSchema")
 }
+
+func TestSQLiteStewardStore_UpdateStewardTenant(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	rec := testStewardRec("s-move")
+	rec.TenantID = "tenant-src"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move", "tenant-dst"))
+
+	got, err := store.GetSteward(ctx, "s-move")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst", got.TenantID)
+	// Status must not be promoted.
+	assert.Equal(t, business.StewardStatusRegistered, got.Status)
+}
+
+func TestSQLiteStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
+	store := newTestStewardStore(t)
+	err := store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-dst")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+func TestSQLiteStewardStore_TenantID_PersistedByRegisterAndRetrieved(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	rec := testStewardRec("s-tenid")
+	rec.TenantID = "my-tenant"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	got, err := store.GetSteward(ctx, "s-tenid")
+	require.NoError(t, err)
+	assert.Equal(t, "my-tenant", got.TenantID)
+}
+
+// TestSQLiteStewardStore_BackfillTenantID verifies that backfillStewardColumns adds the
+// tenant_id column to a pre-existing stewards table that was created without it (Issue #2341).
+func TestSQLiteStewardStore_BackfillTenantID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "backfill.db")
+	ctx := context.Background()
+
+	// Create a database with the old schema (no tenant_id).
+	db, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS stewards (
+		id TEXT PRIMARY KEY, hostname TEXT NOT NULL DEFAULT '',
+		platform TEXT NOT NULL DEFAULT '', arch TEXT NOT NULL DEFAULT '',
+		version TEXT NOT NULL DEFAULT '', ip_address TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'registered',
+		registered_at TEXT NOT NULL, last_seen TEXT NOT NULL,
+		last_heartbeat_at TEXT NOT NULL DEFAULT '',
+		device_id TEXT NOT NULL DEFAULT '',
+		identity_key_pub BLOB NOT NULL DEFAULT '',
+		key_protection_level TEXT NOT NULL DEFAULT '',
+		last_provenance_json TEXT NOT NULL DEFAULT ''
+	)`)
+	require.NoError(t, err)
+	// Insert a row without tenant_id.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO stewards (id, registered_at, last_seen) VALUES ('s-old','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Re-open with migration: backfillStewardColumns must add tenant_id.
+	db2, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	defer func() { _ = db2.Close() }()
+
+	store := &SQLiteStewardStore{db: db2}
+	got, err := store.GetSteward(ctx, "s-old")
+	require.NoError(t, err)
+	assert.Equal(t, "", got.TenantID, "backfilled row must have empty tenant_id default")
+
+	// Update the tenant and verify round-trip.
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-old", "post-migration-tenant"))
+	got2, err := store.GetSteward(ctx, "s-old")
+	require.NoError(t, err)
+	assert.Equal(t, "post-migration-tenant", got2.TenantID)
+}

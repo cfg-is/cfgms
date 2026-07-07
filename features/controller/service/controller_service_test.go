@@ -1057,3 +1057,36 @@ func TestSetRingConfig_NoopOnEqualConfig(t *testing.T) {
 	got := svc.GetRingConfig()
 	assert.Len(t, got.Rings, 4)
 }
+
+// ---- UpdateStewardTenant tests ----
+
+func TestUpdateStewardTenant_Success(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, svc.RegisterSteward("s-move", "tenant-src", "addr", "registered"))
+
+	require.NoError(t, svc.UpdateStewardTenant("s-move", "tenant-dst"))
+
+	info, ok := svc.GetStewardInfo("s-move")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-dst", info.TenantID, "TenantID must reflect the new tenant after move")
+}
+
+func TestUpdateStewardTenant_NotFound(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	err := svc.UpdateStewardTenant("nonexistent", "tenant-dst")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestUpdateStewardTenant_PreservesOtherFields(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, svc.RegisterSteward("s-preserve", "tenant-old", "addr-1", "active"))
+
+	require.NoError(t, svc.UpdateStewardTenant("s-preserve", "tenant-new"))
+
+	info, ok := svc.GetStewardInfo("s-preserve")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-new", info.TenantID)
+	assert.Equal(t, "active", info.Status, "Status must not change on tenant update")
+	assert.Equal(t, "s-preserve", info.ID, "ID must not change on tenant update")
+}
