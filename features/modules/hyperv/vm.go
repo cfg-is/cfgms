@@ -701,6 +701,31 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 		}
 	}
 
+	// Cluster-role membership probe (#2372): report whether this VM is a
+	// clustered HA role so drift detection covers promote AND demote. The probe
+	// requires the module-level cluster_name scope cap (S5) — on demote the
+	// desired config no longer carries ha_role, so the scope cap is the only
+	// cluster the module may ask. It reuses the same scope-capped
+	// readResourceOwners read as setCluster's owner path; a read needs no CNO
+	// ownership gate. Without a configured scope no HA-role drift is observable
+	// — skip entirely, never error. A failing probe degrades to HARole=nil
+	// rather than failing every VM read on a transient cluster-service error;
+	// the degradation defers BOTH directions one cycle (a missed membership
+	// re-promotes idempotently; a pending demote reads current as nil→nil and
+	// simply waits) — each converges on the next cycle once the probe recovers.
+	if m.clusterName != "" {
+		if owners, roErr := m.readResourceOwners(ctx, m.clusterName); roErr == nil {
+			if _, isMember := owners[vmName]; isMember {
+				cfg.HARole = &HARoleConfig{ClusterName: m.clusterName}
+			}
+		} else if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: cluster-role membership probe failed; reporting no HA role this cycle",
+				"vm_name", logging.SanitizeLogValue(vmName),
+				"cluster", logging.SanitizeLogValue(m.clusterName),
+				"error", roErr.Error())
+		}
+	}
+
 	// Write-through: update cache on successful read
 	m.vmsMu.Lock()
 	m.vms[vmName] = *cfg
@@ -931,20 +956,29 @@ func parseHARoleMap(v interface{}) *HARoleConfig {
 	return &HARoleConfig{ClusterName: cluster, ResourceGroupName: rg}
 }
 
-// registerClusteredRole registers a just-created VM as a clustered HA role by
-// delegating to the cluster module's setCluster write path. The clustered role
-// name is the VM name (the default cluster group name Add-ClusterVirtualMachineRole
-// assigns); resource_group_name is reserved for an explicit group name and
-// currently defaults to the VM name. setCluster applies the S5 scope cap, the
-// CNO ownership gate, and existence-based idempotency — so the role is added
-// exactly once cluster-wide and re-converges are no-ops.
+// registerClusteredRole registers a VM as a clustered HA role — the promote
+// half of the single-surface ha_role setting (#2372), called from every path a
+// VM can converge through (plain create, applyVMState on an existing VM, and
+// finalizeProvision for a source-provisioned VM). It delegates to
+// reconcileRoleMembership, which applies the S5 scope cap, the CNO ownership
+// gate, and existence-based idempotency — so the role is added exactly once
+// cluster-wide and re-converges are no-ops. The clustered role name is the VM
+// name (the default cluster group name Add-ClusterVirtualMachineRole assigns);
+// resource_group_name is reserved for an explicit group name and currently
+// defaults to the VM name.
 func (m *hypervModule) registerClusteredRole(ctx context.Context, cfg *VMConfig) error {
-	cc := &ClusterConfig{
-		Name:      cfg.HARole.ClusterName,
-		RoleNames: []string{cfg.Name},
-		State:     "present",
-	}
-	return m.setCluster(ctx, "cluster:"+cfg.HARole.ClusterName, cc)
+	return m.reconcileRoleMembership(ctx, cfg.HARole.ClusterName, cfg.Name, "present", false)
+}
+
+// demoteClusteredRole removes a VM's clustered-role membership — the demote
+// half of the single-surface ha_role setting (#2372): an ha_role removed from a
+// previously-HA vm resource converges by removing the ROLE, never the VM.
+// allowDestructive is passed true unconditionally: this path only ever issues
+// Remove-ClusterGroup against the role, so the S6 destructive gate (which
+// protects hyperv.cluster's standalone destructive surface) has nothing to
+// protect here, and demote must not require a second operator opt-in (AC1).
+func (m *hypervModule) demoteClusteredRole(ctx context.Context, cfg *VMConfig, clusterName string) error {
+	return m.reconcileRoleMembership(ctx, clusterName, cfg.Name, "absent", true)
 }
 
 // applySourceGated enforces the ADR-009 §2 existence-gating safety invariant for
@@ -1152,6 +1186,32 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 	// the cache write at the end of this function reflects the converged set.
 	if err := m.reconcileNetwork(ctx, cfgResourceID, vmName, hostName, desired, current); err != nil {
 		return err
+	}
+
+	// Cluster-role membership reconcile (#2372): ha_role is convergent on the
+	// existing-VM path, not create-only. current.HARole comes from getVM's
+	// membership probe; both mutations run before any power-state transition,
+	// mirroring the create path's register-before-start ordering.
+	//
+	//   nil → non-nil  promote (register the clustered role)
+	//   non-nil → nil  demote (remove the role — the VM is never touched)
+	//   both non-nil   no-op: already a member; moving a registered VM to a
+	//                  different cluster in one step has no defined semantics
+	//                  (out of scope, #2372) and the same-cluster case is
+	//                  already converged.
+	switch {
+	case desired.HARole != nil && current.HARole == nil:
+		promoteCfg := *desired
+		promoteCfg.Name = vmName
+		if err := m.registerClusteredRole(ctx, &promoteCfg); err != nil {
+			return err
+		}
+	case desired.HARole == nil && current.HARole != nil:
+		demoteCfg := *desired
+		demoteCfg.Name = vmName
+		if err := m.demoteClusteredRole(ctx, &demoteCfg, current.HARole.ClusterName); err != nil {
+			return err
+		}
 	}
 
 	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount

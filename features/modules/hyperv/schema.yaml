@@ -101,13 +101,19 @@ resources:
       ha_role:
         type: object
         description: >
-          When present, registers the VM as a clustered HA role on the named
-          failover cluster after creation (reuses the cluster CNO ownership gate
-          and existence-based idempotency). Absent: the VM is a standalone
-          (non-HA) resource. When the primary vhd_path is on a Cluster Shared
-          Volume (C:\ClusterStorage\...), the module-level seed_dir must be set
-          and host-local (not under CSV) or the resource is rejected at validate
-          time.
+          Convergent cluster-role membership — the single surface for VM HA
+          state (#2372). Present: the VM is registered as a clustered HA role
+          on the named failover cluster, on every path (plain create, an
+          already-existing VM on the next converge, a source-provisioned VM at
+          provisioning finalize). REMOVING this block from a previously-HA vm
+          resource DEMOTES the VM on the next converge: the clustered role is
+          removed (the VM itself is never touched) with no separate opt-in
+          flag. Both directions reuse the cluster CNO ownership gate and
+          existence-based idempotency. Promote/demote drift detection requires
+          the module-level cluster_name scope cap. When the primary vhd_path is
+          on a Cluster Shared Volume (C:\ClusterStorage\...), the module-level
+          seed_dir must be set and host-local (not under CSV) or the resource
+          is rejected at validate time.
         required:
           - cluster_name
         properties:
@@ -156,11 +162,12 @@ resources:
 
   cluster:
     description: >
-      Hyper-V failover-cluster HA VM role management. Declares which VMs are
-      clustered as highly-available roles on the named cluster and their
-      placement/scheduling properties. Mutation is CNO-owner-gated and
-      idempotent; role teardown requires allow_destructive. Cluster formation is
-      out of scope.
+      Hyper-V failover-cluster role property management (cluster-scoped only).
+      Reconciles placement/scheduling properties of existing clustered VM
+      roles. VM cluster-role membership (promote/demote) is a hyperv.vm
+      setting (ha_role) — the single surface for VM-scoped settings; this
+      resource never creates or removes roles. Mutation is CNO-owner-gated and
+      idempotent. Cluster formation is out of scope.
     required:
       - name
     properties:
@@ -169,16 +176,24 @@ resources:
         description: Failover cluster (CNO) name; must equal the module's declared cluster_name.
       role_names:
         type: array
-        description: Bounded set of clustered VM role names this resource manages. Empty means all roles in scope.
+        description: >
+          Bounded set of existing clustered VM role names whose properties this
+          resource reconciles. Roles are never created or removed here — VM
+          cluster-role membership is the hyperv.vm ha_role setting.
         items:
           type: string
       allow_destructive:
         type: boolean
-        description: Opt in to destructive cluster operations (role teardown). Default false.
+        description: >
+          Retained for the internal destructive gate; the operator-facing role
+          teardown surface is removed — state absent is refused regardless
+          (demote via removing ha_role on the hyperv.vm resource).
         default: false
       state:
         type: string
-        description: Desired lifecycle. Cluster formation/teardown is out of scope.
+        description: >
+          Desired lifecycle. absent is refused (role membership is managed via
+          hyperv.vm ha_role); cluster formation/teardown is out of scope.
         enum:
           - present
           - absent

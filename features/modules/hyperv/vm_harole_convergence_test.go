@@ -1,0 +1,447 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+package hyperv
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ─── Issue #2372: single-surface ha_role convergence ───────────────────────────
+//
+// A VM's cluster-role membership is a fully convergent hyperv.vm setting:
+// declaring ha_role promotes on any path (existing VM, plain create,
+// source-provisioned), removing it demotes (role removed, VM intact), and
+// hyperv.cluster no longer offers a second membership surface.
+
+// ─── getVM cluster-role membership probe ───────────────────────────────────────
+
+// TestGetVM_ClusterRoleProbe_MemberReported verifies getVM populates HARole on
+// the returned VMConfig when the module-level cluster_name scope is configured
+// and the VM appears in the cluster's VirtualMachine group owner map.
+func TestGetVM_ClusterRoleProbe_MemberReported(t *testing.T) {
+	const vmName = "ha-probe-vm"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "running", 2, 4096), // psGetVM
+		`{"owners":{"ha-probe-vm":"NODE1"}}`,   // membership probe
+	}}
+	m := vmModuleWithTransport(transport, "t-probe")
+	m.clusterName = "lab-hv"
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.HARole, "a clustered VM must report HARole from the probe")
+	assert.Equal(t, "lab-hv", cfg.HARole.ClusterName)
+}
+
+// TestGetVM_ClusterRoleProbe_NonMemberNil verifies a VM absent from the owner
+// map reports a nil HARole.
+func TestGetVM_ClusterRoleProbe_NonMemberNil(t *testing.T) {
+	const vmName = "plain-vm"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "running", 2, 4096),
+		`{"owners":{}}`,
+	}}
+	m := vmModuleWithTransport(transport, "t-probe")
+	m.clusterName = "lab-hv"
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.HARole)
+}
+
+// TestGetVM_ClusterRoleProbe_SkippedWithoutScope verifies the probe is skipped
+// entirely (no extra transport call) when no module-level cluster_name is set —
+// no HA-role drift is observable without a cluster scope, and non-cluster hosts
+// must not issue cluster queries.
+func TestGetVM_ClusterRoleProbe_SkippedWithoutScope(t *testing.T) {
+	const vmName = "standalone-vm"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "running", 2, 4096),
+	}}
+	m := vmModuleWithTransport(transport, "t-probe")
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.HARole)
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Len(t, transport.calls, 1, "no cluster probe without a cluster_name scope")
+}
+
+// TestGetVM_ClusterRoleProbe_ErrorDegrades verifies a failing membership probe
+// degrades to HARole=nil without failing the VM read: promote is idempotent, so
+// a missed membership converges on a later cycle rather than breaking Get.
+func TestGetVM_ClusterRoleProbe_ErrorDegrades(t *testing.T) {
+	const vmName = "degraded-vm"
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON(vmName, "running", 2, 4096), ``},
+		perCallErrors:  []error{nil, errors.New("cluster service down")},
+	}
+	m := vmModuleWithTransport(transport, "t-probe")
+	m.clusterName = "lab-hv"
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err, "a probe failure must not fail the VM read")
+	assert.Nil(t, cfg.HARole)
+}
+
+// ─── AC1 (REQUIRED TEST): promote / demote an existing VM, idempotent ─────────
+
+// TestSetVM_HARole_PromoteExistingVM: adding ha_role to an already-created VM
+// registers the clustered role on the next converge.
+func TestSetVM_HARole_PromoteExistingVM(t *testing.T) {
+	const vmName = "ha-promote-vm"
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
+		`{"owners":{}}`,                        // getVM probe: not a member
+		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
+		`{"owners":{}}`,                        // ownership helper: role owners
+		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
+		``,                                     // Add-ClusterVirtualMachineRole
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, mapConfigState{
+		"name":      vmName,
+		"memory_mb": 4096,
+		"cpu_count": 2,
+		"vhd_path":  `C:\VMs\ha-promote-vm.vhdx`,
+		"state":     "stopped",
+		"ha_role":   map[string]interface{}{"cluster_name": cluster},
+	}))
+
+	assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
+		"ha_role on an existing VM must register the clustered role")
+	assert.Equal(t, 0, countCmd(transport, psRemoveVM), "promote must not touch the VM")
+}
+
+// TestSetVM_HARole_DemoteRemovesRoleOnly: removing ha_role from a previously-HA
+// vm resource demotes — the clustered role is removed, the VM is untouched, and
+// no operator opt-in flag is required (the demote path never deletes the VM).
+func TestSetVM_HARole_DemoteRemovesRoleOnly(t *testing.T) {
+	const vmName = "ha-demote-vm"
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
+		`{"owners":{"ha-demote-vm":"NODE1"}}`,  // getVM probe: member
+		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
+		`{"owners":{"ha-demote-vm":"NODE1"}}`,  // ownership helper: role owners
+		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
+		``,                                     // Remove-ClusterGroup
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, mapConfigState{
+		"name":      vmName,
+		"memory_mb": 4096,
+		"cpu_count": 2,
+		"vhd_path":  `C:\VMs\ha-demote-vm.vhdx`,
+		"state":     "stopped",
+		// no ha_role key — desired state is standalone
+	}))
+
+	assert.Equal(t, 1, countCmd(transport, psRemoveClusterResource),
+		"removing ha_role must remove the clustered role")
+	assert.Equal(t, 0, countCmd(transport, psRemoveVM),
+		"demote is role-only — the VM must never be deleted")
+}
+
+// TestSetVM_HARole_PromoteIdempotent: an already-registered member with ha_role
+// still declared performs no membership mutation (and no ownership reads).
+func TestSetVM_HARole_PromoteIdempotent(t *testing.T) {
+	const vmName = "ha-steady-vm"
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
+		`{"owners":{"ha-steady-vm":"NODE1"}}`,  // getVM probe: already a member
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, mapConfigState{
+		"name":      vmName,
+		"memory_mb": 4096,
+		"cpu_count": 2,
+		"vhd_path":  `C:\VMs\ha-steady-vm.vhdx`,
+		"state":     "stopped",
+		"ha_role":   map[string]interface{}{"cluster_name": cluster},
+	}))
+
+	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
+		"an already-registered member must not re-register")
+	assert.Equal(t, 0, countCmd(transport, psRemoveClusterResource))
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Len(t, transport.calls, 2,
+		"steady state must be exactly getVM + probe — no membership machinery")
+}
+
+// TestSetVM_HARole_DemoteIdempotent: a VM that is already standalone with no
+// ha_role declared performs no membership mutation.
+func TestSetVM_HARole_DemoteIdempotent(t *testing.T) {
+	const vmName = "plain-steady-vm"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "stopped", 2, 4096),
+		`{"owners":{}}`,
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = "lab-hv"
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, mapConfigState{
+		"name":      vmName,
+		"memory_mb": 4096,
+		"cpu_count": 2,
+		"vhd_path":  `C:\VMs\plain-steady-vm.vhdx`,
+		"state":     "stopped",
+	}))
+
+	assert.Equal(t, 0, countCmd(transport, psRemoveClusterResource))
+	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole))
+}
+
+// ─── AC3 (REQUIRED TEST): non-CNO-owner nodes no-op ────────────────────────────
+
+// TestSetVM_HARole_NonOwnerNoop: promote on a non-CNO-owner node performs no
+// membership mutation and returns nil — coordination, not authorization.
+func TestSetVM_HARole_NonOwnerNoop(t *testing.T) {
+	const vmName = "ha-nonowner-vm"
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
+		`{"owners":{}}`,                        // getVM probe: not a member
+		`{"owner":"NODE2"}`,                    // ownership helper: another node owns CNO
+		`{"owners":{}}`,                        // ownership helper: role owners
+		`{"owner":"NODE2"}`,                    // audit cnoOwner re-read
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, mapConfigState{
+		"name":      vmName,
+		"memory_mb": 4096,
+		"cpu_count": 2,
+		"vhd_path":  `C:\VMs\ha-nonowner-vm.vhdx`,
+		"state":     "stopped",
+		"ha_role":   map[string]interface{}{"cluster_name": cluster},
+	}))
+
+	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
+		"a non-owner node must not mutate cluster membership")
+}
+
+// ─── AC2 (REQUIRED TEST): source-provisioned VM registered by finalizing ──────
+
+// TestFinalizeProvision_HARole_RegistersBeforeFinalizing: a source-provisioned
+// VM with ha_role declared is registered as a clustered role during finalize —
+// no later than the record's installing → finalizing transition (ready is
+// controller-side, #2050, and never observed here).
+func TestFinalizeProvision_HARole_RegistersBeforeFinalizing(t *testing.T) {
+	ctx := context.Background()
+	const vmName = "ha-src-vm"
+	const cluster = "lab-hv"
+
+	store := NewMemProvisionStore()
+	started := time.Now().UTC().Add(-10 * time.Minute)
+	require.NoError(t, store.SetProvision(ctx, &ProvisionRecord{
+		VMName:        vmName,
+		State:         ProvisionStateInstalling,
+		CorrelationID: vmName,
+		StartedAt:     started,
+		UpdatedAt:     started,
+	}))
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSON(vmName, "running", 2, 4096), // vmIsRunning → getVM
+		`{"owners":{}}`,                        // getVM probe (cluster scope set)
+		``,                                     // Dismount-VHD (detach seed)
+		``,                                     // Remove-Item (seed VHDX)
+		``,                                     // Remove-Item (answer ISO)
+		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
+		`{"owners":{}}`,                        // ownership helper: role owners
+		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
+		``,                                     // Add-ClusterVirtualMachineRole
+	}}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+	m.provisionStore = store
+
+	cfg := &VMConfig{
+		Name:    vmName,
+		VHDPath: `C:\VMs\ha-src-vm.vhdx`,
+		HARole:  &HARoleConfig{ClusterName: cluster},
+		Source: &SourceConfig{
+			Image:      `C:\images\debian.raw`,
+			OSFamily:   "linux",
+			Completion: CompletionConfig{Mode: "steward-registration", Timeout: "10m"},
+		},
+	}
+
+	require.NoError(t, m.finalizeProvision(ctx, vmName, vmName, cfg))
+
+	assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
+		"finalize must register the declared ha_role")
+
+	rec, err := store.GetProvision(ctx, vmName)
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFinalizing, rec.State,
+		"registration happens no later than the finalizing transition")
+}
+
+// TestFinalizeProvision_HARole_RegistrationFailureRetries: a failed registration
+// keeps the record at installing so the next converge cycle retries finalize —
+// the record must not advance past a VM that should be HA but is not.
+func TestFinalizeProvision_HARole_RegistrationFailureRetries(t *testing.T) {
+	ctx := context.Background()
+	const vmName = "ha-src-fail-vm"
+	const cluster = "lab-hv"
+
+	store := NewMemProvisionStore()
+	started := time.Now().UTC().Add(-10 * time.Minute)
+	require.NoError(t, store.SetProvision(ctx, &ProvisionRecord{
+		VMName:        vmName,
+		State:         ProvisionStateInstalling,
+		CorrelationID: vmName,
+		StartedAt:     started,
+		UpdatedAt:     started,
+	}))
+
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			hostVMJSON(vmName, "running", 2, 4096), // vmIsRunning → getVM
+			`{"owners":{}}`,                        // getVM probe
+			``,                                     // Dismount-VHD
+			``,                                     // Remove-Item (seed)
+			``,                                     // Remove-Item (iso)
+			`{"owner":"NODE1"}`,                    // CNO owner
+			`{"owners":{}}`,                        // role owners
+			`{"owner":"NODE1"}`,                    // audit re-read
+			``,                                     // Add — errors below
+		},
+		perCallErrors: []error{nil, nil, nil, nil, nil, nil, nil, nil, errors.New("cluster add failed")},
+	}
+	m := vmModuleWithTransport(transport, "t-ha")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+	m.provisionStore = store
+
+	cfg := &VMConfig{
+		Name:    vmName,
+		VHDPath: `C:\VMs\ha-src-fail-vm.vhdx`,
+		HARole:  &HARoleConfig{ClusterName: cluster},
+		Source: &SourceConfig{
+			Image:      `C:\images\debian.raw`,
+			OSFamily:   "linux",
+			Completion: CompletionConfig{Mode: "steward-registration", Timeout: "10m"},
+		},
+	}
+
+	require.Error(t, m.finalizeProvision(ctx, vmName, vmName, cfg))
+
+	rec, err := store.GetProvision(ctx, vmName)
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateInstalling, rec.State,
+		"a failed HA registration must keep the record at installing for retry")
+}
+
+// ─── AC4: hyperv.cluster no longer offers a second membership surface ─────────
+
+// TestSetCluster_RoleNamesNoLongerAddRoles: a hyperv.cluster resource naming a
+// role that does not exist performs NO membership mutation — role creation
+// lives exclusively on hyperv.vm ha_role.
+func TestSetCluster_RoleNamesNoLongerAddRoles(t *testing.T) {
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"owner":"NODE1"}`, // ownership helper: CNO owner
+		`{"owners":{}}`,     // ownership helper: role owners (role absent)
+		`{"owner":"NODE1"}`, // audit cnoOwner re-read
+	}}
+	m := vmModuleWithTransport(transport, "t-cluster")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "cluster:"+cluster, mapConfigState{
+		"name":       cluster,
+		"role_names": []interface{}{"some-vm"},
+	}))
+
+	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
+		"hyperv.cluster must no longer create VM roles — ha_role on hyperv.vm is the single surface")
+}
+
+// TestSetCluster_AbsentMembershipSurfaceRemoved: the destructive role-removal
+// surface on hyperv.cluster is gone — state:absent on role_names errors with
+// the single-surface sentinel and issues no PS mutation.
+func TestSetCluster_AbsentMembershipSurfaceRemoved(t *testing.T) {
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"owner":"NODE1"}`,
+		`{"owners":{"some-vm":"NODE1"}}`,
+		`{"owner":"NODE1"}`,
+	}}
+	m := vmModuleWithTransport(transport, "t-cluster")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	err := m.Set(context.Background(), "cluster:"+cluster, mapConfigState{
+		"name":              cluster,
+		"role_names":        []interface{}{"some-vm"},
+		"state":             "absent",
+		"allow_destructive": true,
+	})
+	require.ErrorIs(t, err, ErrRoleMembershipNotClusterManaged)
+	assert.Equal(t, 0, countCmd(transport, psRemoveClusterResource),
+		"the removed surface must not issue Remove-ClusterGroup")
+}
+
+// TestSetCluster_PropertiesStillReconciledForExistingRole: narrowing the surface
+// keeps hyperv.cluster's cluster-scoped concern — placement/scheduling property
+// reconcile (#2306) — for roles that already exist.
+func TestSetCluster_PropertiesStillReconciledForExistingRole(t *testing.T) {
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"owner":"NODE1"}`,              // ownership helper: CNO owner
+		`{"owners":{"some-vm":"NODE1"}}`, // ownership helper: role exists
+		`{"owner":"NODE1"}`,              // audit cnoOwner re-read
+		``,                               // Set-ClusterOwnerNode (preferred owners)
+	}}
+	m := vmModuleWithTransport(transport, "t-cluster")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "cluster:"+cluster, mapConfigState{
+		"name":       cluster,
+		"role_names": []interface{}{"some-vm"},
+		"roles": map[string]interface{}{
+			"some-vm": map[string]interface{}{
+				"preferred_owners": []interface{}{"NODE1", "NODE2"},
+			},
+		},
+	}))
+
+	assert.Equal(t, 1, countCmd(transport, psSetClusterRolePreferredOwners),
+		"property reconcile for existing roles stays on hyperv.cluster")
+}
