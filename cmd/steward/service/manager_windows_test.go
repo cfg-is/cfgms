@@ -7,10 +7,13 @@ package service
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 func TestWindowsManagerInstallPath(t *testing.T) {
@@ -97,5 +100,42 @@ func TestWindowsManagerNew(t *testing.T) {
 	assert.True(t, ok, "New() should return a *windowsManager on Windows")
 }
 
+// TestSetServiceEnvironmentRoundTrip is the REQUIRED TEST for #2378: the
+// registry-write helper round-trips the CFGMS_LOG_DIR Environment value. It
+// targets a scratch HKCU key — writing the real HKLM service key requires
+// Administrator, which unit tests do not have (the helper's root/keyPath
+// parameters exist exactly for this).
+func TestSetServiceEnvironmentRoundTrip(t *testing.T) {
+	const scratch = `Software\CFGMS-test-svcenv`
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, scratch, registry.ALL_ACCESS)
+	require.NoError(t, err)
+	require.NoError(t, key.Close())
+	t.Cleanup(func() { _ = registry.DeleteKey(registry.CURRENT_USER, scratch) })
 
+	logDir := `C:\ProgramData\CFGMS\logs`
+	require.NoError(t, setServiceEnvironment(registry.CURRENT_USER, scratch, logDir))
 
+	rk, err := registry.OpenKey(registry.CURRENT_USER, scratch, registry.QUERY_VALUE)
+	require.NoError(t, err)
+	defer rk.Close()
+	vals, valType, err := rk.GetStringsValue("Environment")
+	require.NoError(t, err)
+	assert.Equal(t, uint32(registry.MULTI_SZ), valType, "Environment must be REG_MULTI_SZ — the only type the SCM accepts")
+	assert.Equal(t, []string{"CFGMS_LOG_DIR=" + logDir}, vals)
+}
+
+// TestPlatformLogDir verifies the ProgramData-with-fallback resolution mirrors
+// platformCACertPath, including CFGMS_INSTALL_PREFIX test isolation.
+func TestPlatformLogDir(t *testing.T) {
+	t.Setenv("ProgramData", `C:\ProgramData`)
+	t.Setenv("CFGMS_INSTALL_PREFIX", "")
+	assert.Equal(t, filepath.Join(`C:\ProgramData`, "CFGMS", "logs"), platformLogDir())
+
+	t.Setenv("ProgramData", "")
+	assert.Equal(t, filepath.Join(`C:\ProgramData`, "CFGMS", "logs"), platformLogDir(),
+		`unset ProgramData falls back to C:\ProgramData`)
+
+	t.Setenv("CFGMS_INSTALL_PREFIX", `D:\scratch`)
+	assert.Equal(t, filepath.Join(`D:\scratch`, `ProgramData`, "CFGMS", "logs"), platformLogDir(),
+		"CFGMS_INSTALL_PREFIX nests the path under the prefix")
+}

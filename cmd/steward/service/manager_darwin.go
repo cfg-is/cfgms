@@ -187,6 +187,11 @@ func generateLaunchdPlist(token, controllerURL string) string {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CFGMS_LOG_DIR</key>
+    <string>/usr/local/var/log/cfgms</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>/var/log/cfgms-steward.log</string>
   <key>StandardErrorPath</key>
@@ -195,4 +200,3 @@ func generateLaunchdPlist(token, controllerURL string) string {
 </plist>
 `, darwinServiceName, darwinInstallPath, token, urlArgs)
 }
-

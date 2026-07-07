@@ -169,3 +169,11 @@ func TestSystemdUnitFilePermissions(t *testing.T) {
 	// 0600: owner rw (root only); systemd reads as root, group read exposes the token
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
+
+// TestGenerateSystemdUnitSetsLogDir: the installer-managed steward must log to
+// the platform-conventional path (#2378) — never the /tmp/cfgms fallback.
+func TestGenerateSystemdUnitSetsLogDir(t *testing.T) {
+	unit := generateSystemdUnit("tok_test", "")
+	assert.Contains(t, unit, "Environment=CFGMS_LOG_DIR=/var/log/cfgms",
+		"systemd unit must set the platform-conventional log directory")
+}

@@ -412,7 +412,7 @@ The steward writes structured logs using the file logging provider. This is the 
 
 Log level is controlled by the `CFGMS_LOG_LEVEL` environment variable (default `INFO`). Accepted values are `debug`, `info`, `warn`, and `error` (case-insensitive). Invalid or empty values fall back to `INFO`.
 
-Log directory is controlled by `CFGMS_LOG_DIR` (default `/tmp/cfgms` with a warning; set this for production deployments).
+Log directory is controlled by `CFGMS_LOG_DIR`. The three native installers set it automatically to the platform-conventional paths listed under *Log locations* above (Linux `/var/log/cfgms/` via the systemd unit's `Environment=` line, Windows `C:\ProgramData\CFGMS\logs\` via the service's registry `Environment` value, macOS `/usr/local/var/log/cfgms/` via the launchd plist's `EnvironmentVariables` dict) — an installed steward never falls back silently. A steward run bare (no installer — dev/manual/e2e) keeps the `/tmp/cfgms`-with-a-warning fallback.
 
 ## Controller-Connected Capabilities
 
