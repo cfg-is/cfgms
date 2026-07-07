@@ -687,3 +687,159 @@ func TestStewardDNA_JSONOutput(t *testing.T) {
 
 	assert.Equal(t, rawBody, output)
 }
+
+// ---- cfg steward move tests (Issue #2342) ----
+
+func TestStewardMove_Success(t *testing.T) {
+	var requestPath string
+	var requestMethod string
+	var requestBody map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		requestMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&requestBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id":      "steward-abc",
+				"tenant_id":       "dest-tenant",
+				"previous_tenant": "source-tenant",
+				"status":          "moved",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origToTenant := stewardMoveToTenant
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardMoveToTenant = origToTenant
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardMoveToTenant = "dest-tenant"
+
+	output := captureStdout(t, func() {
+		err := runStewardMove(stewardMoveCmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/stewards/steward-abc/move", requestPath)
+	assert.Equal(t, http.MethodPost, requestMethod)
+	assert.Equal(t, "dest-tenant", requestBody["new_tenant_id"])
+	assert.Contains(t, output, "moved")
+	assert.Contains(t, output, "dest-tenant")
+}
+
+func TestStewardMove_NoChange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"steward_id":      "steward-abc",
+				"tenant_id":       "same-tenant",
+				"previous_tenant": "same-tenant",
+				"status":          "no_change",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origToTenant := stewardMoveToTenant
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardMoveToTenant = origToTenant
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardMoveToTenant = "same-tenant"
+
+	output := captureStdout(t, func() {
+		err := runStewardMove(stewardMoveCmd, []string{"steward-abc"})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "no change")
+}
+
+func TestStewardMove_Forbidden_ReturnsClearError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "INSUFFICIENT_SCOPE",
+				"message": "Insufficient scope to move steward between these tenants",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origToTenant := stewardMoveToTenant
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardMoveToTenant = origToTenant
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardMoveToTenant = "other-tenant"
+
+	err := runStewardMove(stewardMoveCmd, []string{"steward-abc"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "move denied")
+	assert.Contains(t, err.Error(), "steward-abc")
+}
+
+func TestStewardMove_StewardNotFound_Returns404Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "STEWARD_NOT_FOUND",
+				"message": "Steward not found",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	origToTenant := stewardMoveToTenant
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+		stewardMoveToTenant = origToTenant
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+	stewardMoveToTenant = "dest-tenant"
+
+	err := runStewardMove(stewardMoveCmd, []string{"unknown-steward"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestStewardMove_FlagsRegistered(t *testing.T) {
+	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("url"), "--url flag must be registered")
+	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
+	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
+	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
+	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("to-tenant"), "--to-tenant flag must be registered")
+}
