@@ -1869,13 +1869,16 @@ func TestHandleMoveSteward_ScopedAdmin_ExactTenantMatch(t *testing.T) {
 
 	// Auth passes (exact match on both), self-move short-circuits → no_change
 	require.Equal(t, http.StatusOK, rec.Code)
-	var resp struct{ Data map[string]interface{} `json:"data"` }
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "no_change", resp.Data["status"])
 }
 
 // TestHandleMoveSteward_UnscopedRootAdmin_Allowed verifies that a root (TenantID=="")
-// admin can always move any steward regardless of source/destination tenants.
+// admin can always move any steward regardless of source/destination tenants, and that
+// the resulting audit record marks it as a privileged cross-tenant action.
 func TestHandleMoveSteward_UnscopedRootAdmin_Allowed(t *testing.T) {
 	server, st := setupMoveAuthServer(t)
 
@@ -1890,9 +1893,27 @@ func TestHandleMoveSteward_UnscopedRootAdmin_Allowed(t *testing.T) {
 	rec := postMoveStewardWithPrincipal(server, "s-auth-root", "dest-tenant", rootPrincipal)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	var resp struct{ Data map[string]interface{} `json:"data"` }
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "moved", resp.Data["status"])
+
+	// AC #1: unscoped root admin move must emit a privileged-action audit record.
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"steward_move"},
+	})
+	require.NoError(t, err)
+	var found *business.AuditEntry
+	for _, e := range entries {
+		if e.Result == business.AuditResultSuccess && e.UserID == "root-admin" {
+			found = e
+			break
+		}
+	}
+	require.NotNil(t, found, "privileged-action audit record must be emitted for root admin move")
+	assert.Equal(t, true, found.Details["privileged_cross_tenant"], "root admin move must be flagged as privileged_cross_tenant")
 }
 
 // TestHandleMoveSteward_AuditOnSuccess verifies that a successful move emits an audit
@@ -1948,6 +1969,7 @@ func TestHandleMoveSteward_AuditOnSuccess(t *testing.T) {
 	assert.Equal(t, business.AuditSeverityHigh, found.Severity)
 	assert.Equal(t, "audit-admin", found.UserID, "admin CN must be recorded")
 	assert.Equal(t, "req-audit-ok-123", found.RequestID, "request ID must be recorded")
+	assert.NotEmpty(t, found.IPAddress, "source IP must be recorded")
 	assert.NotNil(t, found.Changes, "before→after diff must be present")
 	assert.Equal(t, "source-tenant", found.Changes.Before["tenant_id"], "before tenant must be source-tenant")
 	assert.Equal(t, "dest-tenant", found.Changes.After["tenant_id"], "after tenant must be dest-tenant")
@@ -2009,6 +2031,7 @@ func TestHandleMoveSteward_AuditOnDenial(t *testing.T) {
 	assert.Equal(t, business.AuditSeverityCritical, found.Severity, "denied move must be Critical severity")
 	assert.Equal(t, "scoped-deny-admin", found.UserID, "admin CN must be recorded")
 	assert.Equal(t, "req-audit-deny-456", found.RequestID, "request ID must be recorded")
+	assert.NotEmpty(t, found.IPAddress, "source IP must be recorded")
 	assert.NotNil(t, found.Changes, "before→after diff must be present even for denied moves")
 	assert.Equal(t, "source-tenant", found.Changes.Before["tenant_id"])
 	assert.Equal(t, "dest-tenant", found.Changes.After["tenant_id"])
