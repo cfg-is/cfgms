@@ -204,6 +204,54 @@ else
 fi
 rm -rf "$T7" "$T7_PREFIX"
 
+# ── Test 8 & 9: Version-stamping ldflags round-trip ──────────────────────────
+#
+# Builds cfgms-steward twice using the same ldflags pattern as STEWARD_BUILD_FLAGS:
+# once with VERSION injected, once with the pre-story default (0.5.0-dev).
+# Requires: go toolchain available on PATH.
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+VERSION_BIN_DIR="$(mktemp -d)"
+
+TEST_VERSION="v1.9.9-test-stamp"
+PLACEHOLDER_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+# Test 8: build with injected VERSION and assert --version reports it.
+STAMPED_LDFLAGS="-s -w -X main.ControllerURL=https://localhost:9080 -X github.com/cfgis/cfgms/pkg/version.Version=${TEST_VERSION} -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=${PLACEHOLDER_KEY}"
+if go build \
+    -trimpath \
+    -ldflags "$STAMPED_LDFLAGS" \
+    -o "$VERSION_BIN_DIR/cfgms-steward-stamped" \
+    "$REPO_ROOT/cmd/steward" 2>/dev/null; then
+    VERSION_OUT="$("$VERSION_BIN_DIR/cfgms-steward-stamped" --version 2>/dev/null || true)"
+    if echo "$VERSION_OUT" | grep -q "$TEST_VERSION"; then
+        pass "test8: injected VERSION stamps into --version output"
+    else
+        fail "test8: --version should contain '$TEST_VERSION' (got: '$VERSION_OUT')"
+    fi
+else
+    fail "test8: go build failed for stamped binary"
+fi
+
+# Test 9: build with default VERSION (0.5.0-dev) and assert --version is unchanged.
+DEFAULT_LDFLAGS="-s -w -X main.ControllerURL=https://localhost:9080 -X github.com/cfgis/cfgms/pkg/version.Version=0.5.0-dev -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=${PLACEHOLDER_KEY}"
+if go build \
+    -trimpath \
+    -ldflags "$DEFAULT_LDFLAGS" \
+    -o "$VERSION_BIN_DIR/cfgms-steward-default" \
+    "$REPO_ROOT/cmd/steward" 2>/dev/null; then
+    DEFAULT_OUT="$("$VERSION_BIN_DIR/cfgms-steward-default" --version 2>/dev/null || true)"
+    if echo "$DEFAULT_OUT" | grep -q "0.5.0-dev"; then
+        pass "test9: default build version matches pre-story baseline (0.5.0-dev)"
+    else
+        fail "test9: --version should contain '0.5.0-dev' for default build (got: '$DEFAULT_OUT')"
+    fi
+else
+    fail "test9: go build failed for default binary"
+fi
+
+rm -rf "$VERSION_BIN_DIR"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

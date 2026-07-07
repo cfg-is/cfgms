@@ -19,10 +19,22 @@ fix-git-bare:
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
-# Steward controller URL baked in at build time (security: no runtime override).
-# Override for MSP builds: make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com
+# Steward build flags: controller URL, version, and publisher-key baked in at build time
+# (security: no runtime override for controller URL or publisher key).
+#
+# Scope boundary: STEWARD_PUBLISHER_KEY wires the ldflags injection mechanism; a build
+# using the placeholder key (all-zero) cannot verify genuine signed upgrades. The all-zero
+# key is a small-order Ed25519 point, so ed25519.Verify does NOT fail against it (it accepts
+# attacker-forged signatures). Fail-closed behavior is enforced in code, not by the crypto:
+# pkg/modules/trust rejects the all-zero/small-order placeholder (ErrUntrustedPublisherKey),
+# so a placeholder-key build refuses ALL bundles. The real production key is deferred to the
+# code-signing pipeline (ADR-013 §5).
+#
+# Override for MSP builds:
+#   make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com VERSION=v1.0.0
+#   make build-steward STEWARD_PUBLISHER_KEY=<base64-ed25519-pub>
 STEWARD_CONTROLLER_URL ?= https://localhost:9080
-STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL)"
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
@@ -216,7 +228,7 @@ build-steward-cross:
 # This target cross-compiles the binary and packages it into an MSI.
 # For production builds, provide a code-signing certificate:
 #   make build-msi-windows STEWARD_CONTROLLER_URL=https://ctrl.example.com \
-#        VERSION=v1.0.0 SIGNING_CERT_THUMBPRINT=<thumbprint>
+#        VERSION=v1.0.0 SIGNING_CERT_THUMBPRINT=<thumbprint> PUBLISHER_KEY=<base64-ed25519-pub>
 build-msi-windows:
 	@echo "🪟 Building Windows MSI installer"
 	@echo "==================================="
@@ -235,10 +247,15 @@ build-msi-windows:
 	if [ -n "$(SIGNING_CERT_THUMBPRINT)" ]; then \
 		SIGN_ARG="-SigningCertThumbprint '$(SIGNING_CERT_THUMBPRINT)'"; \
 	fi; \
+	KEY_ARG=""; \
+	if [ -n "$(PUBLISHER_KEY)" ]; then \
+		KEY_ARG="-PublisherKey '$(PUBLISHER_KEY)'"; \
+	fi; \
 	pwsh -NonInteractive -File build/windows/build-msi.ps1 \
 		$$URL_ARG \
 		-Version "$(or $(VERSION),0.0.0)" \
-		$$SIGN_ARG
+		$$SIGN_ARG \
+		$$KEY_ARG
 	@echo "✅ MSI built: bin/cfgms-steward-windows-amd64.msi"
 
 # Build macOS .pkg installer for cfgms-steward (amd64 and arm64).
@@ -252,7 +269,7 @@ build-msi-windows:
 # Examples:
 #   make build-pkg-darwin VERSION=v1.0.0
 #   APPLE_SIGNING_IDENTITY="Developer ID Installer: Acme (XXXXXXXXXX)" \
-#     make build-pkg-darwin VERSION=v1.0.0
+#     make build-pkg-darwin VERSION=v1.0.0 PUBLISHER_KEY=<base64-ed25519-pub>
 build-pkg-darwin:
 	@echo "🍎 Building macOS .pkg installer"
 	@echo "================================="
@@ -260,8 +277,12 @@ build-pkg-darwin:
 		echo "❌ build-pkg-darwin must be run on macOS (pkgbuild requires macOS)."; \
 		exit 1; \
 	fi
-	@bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)"
-	@bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)"
+	@KEY_ARG=""; \
+	if [ -n "$(PUBLISHER_KEY)" ]; then \
+		KEY_ARG="--publisher-key $(PUBLISHER_KEY)"; \
+	fi; \
+	bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)" $$KEY_ARG; \
+	bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)" $$KEY_ARG
 	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
 
 # Run Linux install.sh tests (Story #1708)

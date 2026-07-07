@@ -44,6 +44,7 @@ ARCH="amd64"
 VERSION="0.0.0"
 BINARY_PATH=""
 CONTROLLER_URL=""
+PUBLISHER_KEY=""
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --version)       VERSION="$2";        shift 2 ;;
         --binary-path)   BINARY_PATH="$2";    shift 2 ;;
         --controller-url) CONTROLLER_URL="$2"; shift 2 ;;
+        --publisher-key) PUBLISHER_KEY="$2";  shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -67,6 +69,7 @@ echo "=== CFGMS Steward macOS .pkg Build ==="
 echo "Version:        $VERSION"
 echo "Pkg version:    $PKG_VERSION"
 echo "ControllerURL:  ${CONTROLLER_URL:-(not set — generic build)}"
+echo "PublisherKey:   ${PUBLISHER_KEY:+(set)}${PUBLISHER_KEY:-(not set — placeholder key)}"
 echo "Arch:           $ARCH"
 
 # ── Step 1: Build the binary (when not pre-supplied) ─────────────────────────
@@ -84,6 +87,9 @@ if [[ -z "$BINARY_PATH" ]]; then
         LD_FLAGS="-s -w -X main.ControllerURL=$CONTROLLER_URL $VERSION_FLAG"
     else
         LD_FLAGS="-s -w $VERSION_FLAG"
+    fi
+    if [[ -n "$PUBLISHER_KEY" ]]; then
+        LD_FLAGS="$LD_FLAGS -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PUBLISHER_KEY"
     fi
 
     GOOS=darwin GOARCH="$ARCH" CGO_ENABLED=0 go build \

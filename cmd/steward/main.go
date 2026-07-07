@@ -251,8 +251,9 @@ func buildRootCommand() *cobra.Command {
 	)
 
 	root := &cobra.Command{
-		Use:   "cfgms-steward",
-		Short: "CFGMS Steward — endpoint configuration management agent",
+		Use:     "cfgms-steward",
+		Version: version.Short(),
+		Short:   "CFGMS Steward — endpoint configuration management agent",
 		Long: fmt.Sprintf(`CFGMS Steward %s
 
 Manages the local endpoint configuration on behalf of a CFGMS controller.
