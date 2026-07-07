@@ -170,7 +170,7 @@ Measured timings:
 | Registration token mint | 0.50 s |
 | Runner agent download (100 MB zip, in-guest) | 7.2 s |
 | Runner agent extract | 14.2 s |
-| Registration script (`config.cmd` remove + re-register + service install/start) | 4.8 s |
+| Registration script v1.1.0 (`config.cmd` register + service install/start; operator ran `config.cmd remove` first to clear the v1.0.0 registration) | 4.8 s |
 | Runner `online` in GitHub API after service start | first poll (< 60 s) |
 | Hyper-V checkpoint create (`Checkpoint-VM`, running VM) | 7.05 s |
 | Hyper-V checkpoint revert (`Restore-VMCheckpoint`) | 5.82 s |
