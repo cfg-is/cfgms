@@ -634,7 +634,7 @@ func TestBreakpointCondition_RespectedOnHit(t *testing.T) {
 func createTestEngineWithDebug(t *testing.T) (*Engine, logging.Logger) {
 	t.Helper()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(createTestFactory(), logger, nil, nil)
+	engine := NewEngine(createTestFactory(), logger, nil, nil, nil)
 	return engine, logger
 }
 

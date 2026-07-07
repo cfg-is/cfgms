@@ -66,6 +66,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -1116,7 +1117,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
-	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger)
+	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore())
 	if workflowHandler != nil {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
@@ -1364,11 +1365,15 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logg
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
 // Returns nil, nil on failure so the controller starts without workflow support rather than failing.
+// secrets is the controller's central secret store (Issue #2374); it is threaded through
+// NewEngine → NewProviderRegistry → GitHubAppProvider so the github provider can mint
+// App-JWTs on a live controller without failing with "secrets store not configured".
 func initializeWorkflowHandler(
 	storageManager *interfaces.StorageManager,
 	moduleCache *modulecache.ModuleCache,
 	workflowRT *workflowruntime.ModuleRuntime,
 	logger logging.Logger,
+	secrets secretsif.SecretStore,
 ) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
 	// Workflow module factory: looks up controller-kind module bundles by
 	// name in the controller's module cache (#1883) and fork/execs them as
@@ -1380,7 +1385,7 @@ func initializeWorkflowHandler(
 	// REST-only deployments that never resolve modules through the engine are unaffected.
 	moduleFactory := workflow.NewWorkflowModuleFactory(moduleCache, workflowRT)
 
-	workflowEngine := workflow.NewEngine(moduleFactory, logger, nil, nil)
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil)
 
 	configStore := storageManager.GetConfigStore()
 

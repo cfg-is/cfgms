@@ -16,7 +16,7 @@ import (
 
 func TestProviderRegistry_RegisterProvider(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	// Test registering a new provider
 	mockProvider := &MockProvider{name: "test"}
@@ -31,7 +31,7 @@ func TestProviderRegistry_RegisterProvider(t *testing.T) {
 
 func TestProviderRegistry_GetProvider(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	// Test getting non-existent provider
 	_, err := registry.GetProvider("nonexistent")
@@ -50,7 +50,7 @@ func TestProviderRegistry_GetProvider(t *testing.T) {
 
 func TestProviderRegistry_ListProviders(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	// Should have built-in providers
 	providers := registry.ListProviders()
@@ -71,7 +71,7 @@ func TestProviderRegistry_ListProviders(t *testing.T) {
 
 func TestProviderRegistry_ExecuteOperation(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	// Use a mock provider so the test is build-tag-neutral; the builtin provider
 	// gate is verified by TestDefaultBuildProvidersReturnErrNotImplemented.
@@ -97,7 +97,7 @@ func TestProviderRegistry_ExecuteOperation(t *testing.T) {
 
 func TestProviderRegistry_ExecuteOperation_InvalidProvider(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	config := &APIConfig{
 		Provider:  "nonexistent",
@@ -113,7 +113,7 @@ func TestProviderRegistry_ExecuteOperation_InvalidProvider(t *testing.T) {
 
 func TestProviderRegistry_ExecuteOperation_InvalidConfig(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	config := &APIConfig{
 		Provider:  "microsoft",
@@ -225,7 +225,7 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 	// this test exercises the engine's variable-storage path, not the provider stubs.
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
 
 	const providerName = "test-api-provider"
 	err := engine.providerRegistry.RegisterProvider(providerName, &MockProvider{name: providerName})
@@ -270,7 +270,7 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 // values never appear in log output at any level in either build.
 func TestProviderNoPayloadLogging(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	registry := NewProviderRegistry(logger, nil)
 
 	// Register a succeeding mock so the completion-log path is exercised.
 	const providerName = "test-log-provider"
