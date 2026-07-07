@@ -762,7 +762,7 @@ func TestProvision_FinalizeDeletesSeedMediaPostDetach(t *testing.T) {
 	// Remove-Item is issued for both the seed VHDX and the answer ISO — both
 	// paths travel via args only. SilentlyContinue makes it idempotent.
 	deletes := callsContaining(calls, "Remove-Item")
-	require.GreaterOrEqual(t, len(deletes), 1, "finalizing must issue at least one Remove-Item for seed media")
+	require.GreaterOrEqual(t, len(deletes), 2, "finalizing must issue Remove-Item for both seed VHDX and answer ISO")
 	seedPaths := make([]string, 0, len(deletes))
 	for _, d := range deletes {
 		for _, a := range d.args {
