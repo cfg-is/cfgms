@@ -250,6 +250,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=CFGMS_LOG_DIR=/var/log/cfgms
 ExecStart=%s
 Restart=always
 RestartSec=10

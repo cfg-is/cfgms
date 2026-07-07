@@ -142,3 +142,13 @@ func TestDarwinManagerNew(t *testing.T) {
 	_, ok := m.(*darwinManager)
 	assert.True(t, ok, "New() should return a *darwinManager on macOS")
 }
+
+// TestGenerateLaunchdPlistSetsLogDir: the installer-managed steward must log to
+// the platform-conventional path (#2378) — never the /tmp/cfgms fallback.
+func TestGenerateLaunchdPlistSetsLogDir(t *testing.T) {
+	plist := generateLaunchdPlist("tok_test", "")
+	assert.Contains(t, plist, "<key>EnvironmentVariables</key>")
+	assert.Contains(t, plist, "<key>CFGMS_LOG_DIR</key>")
+	assert.Contains(t, plist, "<string>/usr/local/var/log/cfgms</string>",
+		"launchd plist must set the platform-conventional log directory")
+}

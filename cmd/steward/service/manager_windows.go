@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -37,6 +38,44 @@ func platformCACertPath() string {
 		return filepath.Join(prefix, dest[len(vol):])
 	}
 	return dest
+}
+
+// platformLogDir returns the platform-conventional steward log directory
+// (docs/architecture/steward-operating-model.md), mirroring
+// platformCACertPath's ProgramData-with-fallback resolution including the
+// CFGMS_INSTALL_PREFIX test isolation.
+func platformLogDir() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	dest := filepath.Join(programData, "CFGMS", "logs")
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		vol := filepath.VolumeName(dest)
+		return filepath.Join(prefix, dest[len(vol):])
+	}
+	return dest
+}
+
+// setServiceEnvironment writes a service's REG_MULTI_SZ Environment value —
+// the native SCM mechanism for per-service environment variables (Windows has
+// no systemd-style inline Environment= line; the SCM reads this value at
+// service start). In-process registry access, never a reg.exe/sc.exe
+// shell-out. root and keyPath are parameters so the round-trip unit test can
+// target a scratch HKCU key (writing the real HKLM service key requires
+// Administrator, which unit tests do not have). The access mask must include
+// SET_VALUE — the read-only QUERY_VALUE mask used by read paths yields
+// access-denied on SetStringsValue.
+func setServiceEnvironment(root registry.Key, keyPath, logDir string) error {
+	key, err := registry.OpenKey(root, keyPath, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("open service key %s: %w", keyPath, err)
+	}
+	defer key.Close()
+	if err := key.SetStringsValue("Environment", []string{"CFGMS_LOG_DIR=" + logDir}); err != nil {
+		return fmt.Errorf("set Environment value on %s: %w", keyPath, err)
+	}
+	return nil
 }
 
 func newManager(binaryPath string) Manager {
@@ -149,6 +188,15 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 		return fmt.Errorf("failed to create Windows service: %w", err)
 	}
 	defer newSvc.Close()
+
+	// Point CFGMS_LOG_DIR at the platform-conventional log directory so an
+	// installed steward never falls back to the undiscoverable /tmp/cfgms
+	// (#2378). Written after CreateService (the service key must exist) and
+	// before Start so the very first start picks it up.
+	if err := setServiceEnvironment(registry.LOCAL_MACHINE,
+		`SYSTEM\CurrentControlSet\Services\`+windowsServiceName, platformLogDir()); err != nil {
+		return fmt.Errorf("failed to set service environment: %w", err)
+	}
 
 	// Configure automatic restart on failure (3 escalating delays, 1-day reset).
 	recoveryActions := []mgr.RecoveryAction{
@@ -266,4 +314,3 @@ func waitForStop(s *mgr.Service, timeout time.Duration) error {
 	}
 	return fmt.Errorf("service did not stop within %s", timeout)
 }
-
