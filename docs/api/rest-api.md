@@ -1125,49 +1125,449 @@ Configuration drift summary report.
 
 ### Workflow Engine
 
-Workflow endpoints are registered only when a `WorkflowHandler` is wired in (`SetWorkflowHandler()`).
+Workflow endpoints are registered only when a `WorkflowHandler` is wired in via `SetWorkflowHandler()`. All routes inherit the API subrouter's authentication middleware (API key or mTLS). No additional per-route permission scope is enforced beyond valid credentials.
 
 #### GET /api/v1/workflows
 
-List workflows.
+List workflow definitions for the calling tenant.
 
-**Authentication:** Required (inherits api subrouter auth middleware)
+**Authentication:** Required
+
+**Response:**
+
+```json
+{
+  "workflows": [
+    {
+      "name": "patch-linux-fleet",
+      "description": "Apply OS patches to Linux stewards",
+      "version": "1.0.0",
+      "steps": [
+        { "name": "run-patch", "type": "task", "module": "patch" }
+      ],
+      "semantic_version": { "major": 1, "minor": 0, "patch": 0 }
+    }
+  ],
+  "count": 1
+}
+```
 
 #### POST /api/v1/workflows
 
-Create a workflow.
+Create a new workflow definition.
 
 **Authentication:** Required
+
+**Request Body:**
+
+```json
+{
+  "name": "patch-linux-fleet",
+  "description": "Apply OS patches to Linux stewards",
+  "version": "1.0.0",
+  "steps": [
+    { "name": "run-patch", "type": "task", "module": "patch" }
+  ],
+  "variables": { "target_group": "linux-servers" }
+}
+```
+
+**Response:** `201 Created` — returns the created `VersionedWorkflow` object (same shape as the list entry above).
 
 #### GET /api/v1/workflows/{id}
 
-Get a workflow by ID.
+Get the latest version of a workflow by name.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Response:** `200 OK`
+
+```json
+{
+  "name": "patch-linux-fleet",
+  "version": "1.0.0",
+  "steps": [ { "name": "run-patch", "type": "task", "module": "patch" } ],
+  "semantic_version": { "major": 1, "minor": 0, "patch": 0 }
+}
+```
 
 #### PUT /api/v1/workflows/{id}
 
-Update a workflow.
+Replace a workflow definition. Creates a new stored version; the `name` field in the body is ignored — the path `{id}` sets the workflow name.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Request Body:** Same shape as `POST /api/v1/workflows`.
+
+**Response:** `200 OK` — returns the updated `VersionedWorkflow` object.
 
 #### DELETE /api/v1/workflows/{id}
 
-Delete a workflow.
+Delete all stored versions of a workflow.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Response:**
+
+```json
+{
+  "deleted": "patch-linux-fleet",
+  "versions": 2
+}
+```
 
 #### POST /api/v1/workflows/{id}/execute
 
-Execute a workflow immediately.
+Trigger immediate execution of a workflow.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Request Body (optional):**
+
+```json
+{
+  "variables": { "target_group": "staging" }
+}
+```
+
+**Response:** `202 Accepted`
+
+```json
+{
+  "execution_id": "exec-abc123",
+  "workflow_name": "patch-linux-fleet",
+  "status": "running",
+  "start_time": "2026-07-07T12:00:00Z"
+}
+```
 
 #### GET /api/v1/workflows/{id}/executions
 
-List execution history for a workflow.
+List all execution records for a workflow.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Response:**
+
+```json
+{
+  "executions": [
+    {
+      "id": "exec-abc123",
+      "workflow_name": "patch-linux-fleet",
+      "status": "completed",
+      "start_time": "2026-07-07T12:00:00Z",
+      "end_time": "2026-07-07T12:05:00Z",
+      "step_results": {},
+      "variables": {}
+    }
+  ],
+  "count": 1
+}
+```
+
+#### GET /api/v1/workflows/{id}/executions/{exec_id}
+
+Get the status and details of a specific workflow execution.
+
+**Authentication:** Required  
+The requesting tenant must own the workflow — cross-tenant lookups return `403 Forbidden`.
+
+**Parameters:**
+
+- `id` (path): Workflow name
+- `exec_id` (path): Execution ID
+
+**Response:** `200 OK`
+
+```json
+{
+  "id": "exec-abc123",
+  "workflow_name": "patch-linux-fleet",
+  "status": "running",
+  "start_time": "2026-07-07T12:00:00Z",
+  "current_step": "run-patch",
+  "step_results": {},
+  "variables": {}
+}
+```
+
+**Error responses:**
+
+- `404 Not Found` — execution ID does not exist or does not belong to the named workflow
+- `403 Forbidden` — workflow is not visible in the calling tenant's namespace
+
+#### POST /api/v1/workflows/{id}/executions/{exec_id}/cancel
+
+Cancel a running or pending workflow execution.
+
+**Authentication:** Required  
+Cross-tenant cancellations return `403 Forbidden`. Already-terminal executions return `409 Conflict`.
+
+**Parameters:**
+
+- `id` (path): Workflow name
+- `exec_id` (path): Execution ID
+
+**Response:** `200 OK`
+
+```json
+{
+  "cancelled": "exec-abc123"
+}
+```
+
+**Error responses:**
+
+- `404 Not Found` — execution ID does not exist or does not belong to the named workflow
+- `403 Forbidden` — workflow is not visible in the calling tenant's namespace
+- `409 Conflict` — execution is already in a terminal state (`completed`, `failed`, or `cancelled`)
+
+### Workflow Triggers
+
+Trigger endpoints manage scheduled and event-driven workflow execution. The `/triggers` subrouter is registered alongside `/workflows` when a `WorkflowHandler` is wired in (`server.go:717`). All routes inherit the API subrouter's authentication middleware. Trigger types: `schedule`, `webhook`, `siem`, `manual`.
+
+#### GET /api/v1/triggers/health
+
+Health status of the trigger subsystem.
+
+**Authentication:** Required
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-07-07T12:00:00Z",
+  "service": "workflow-trigger-api"
+}
+```
+
+#### POST /api/v1/triggers
+
+Create a new trigger.
+
+**Authentication:** Required
+
+**Request Body:**
+
+```json
+{
+  "name": "nightly-patch",
+  "description": "Run patch workflow every night at 02:00 UTC",
+  "type": "schedule",
+  "workflow_name": "patch-linux-fleet",
+  "status": "active",
+  "tenant_id": "root/msp-a/client-1",
+  "schedule": {
+    "cron": "0 2 * * *",
+    "timezone": "UTC"
+  }
+}
+```
+
+**Response:** `201 Created` — returns the created `Trigger` object.
+
+```json
+{
+  "id": "trigger-xyz789",
+  "name": "nightly-patch",
+  "type": "schedule",
+  "status": "active",
+  "workflow_name": "patch-linux-fleet",
+  "tenant_id": "root/msp-a/client-1",
+  "created_at": "2026-07-07T12:00:00Z",
+  "updated_at": "2026-07-07T12:00:00Z"
+}
+```
+
+#### GET /api/v1/triggers
+
+List triggers with optional filtering.
+
+**Authentication:** Required
+
+**Query parameters (all optional):**
+
+- `type` — `schedule` | `webhook` | `siem` | `manual`
+- `status` — `active` | `inactive` | `paused` | `error` | `deleted`
+- `tenant_id` — tenant path prefix filter
+- `tags` — comma-separated list
+- `created_after` / `created_before` — RFC 3339 timestamps
+- `limit` / `offset` — pagination (default limit: server-defined)
+
+**Response:**
+
+```json
+{
+  "triggers": [ { "id": "trigger-xyz789", "name": "nightly-patch" } ],
+  "count": 1,
+  "filter": { "type": "schedule", "status": "active" }
+}
+```
+
+#### GET /api/v1/triggers/{id}
+
+Get a trigger by ID.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:** `200 OK` — returns the `Trigger` object (same shape as the `POST /api/v1/triggers` response).
+
+#### PUT /api/v1/triggers/{id}
+
+Update a trigger. The `{id}` path value overrides any `id` field in the body.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Request Body:** Same shape as `POST /api/v1/triggers`.
+
+**Response:** `200 OK` — returns the updated `Trigger` object.
+
+#### DELETE /api/v1/triggers/{id}
+
+Delete a trigger.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:** `204 No Content`
+
+```json
+{
+  "message": "Trigger deleted successfully",
+  "trigger_id": "trigger-xyz789"
+}
+```
+
+#### POST /api/v1/triggers/{id}/enable
+
+Enable a previously disabled trigger.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:**
+
+```json
+{
+  "message": "Trigger enabled successfully",
+  "trigger_id": "trigger-xyz789",
+  "status": "active"
+}
+```
+
+#### POST /api/v1/triggers/{id}/disable
+
+Disable an active trigger without deleting it.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:**
+
+```json
+{
+  "message": "Trigger disabled successfully",
+  "trigger_id": "trigger-xyz789",
+  "status": "inactive"
+}
+```
+
+#### POST /api/v1/triggers/{id}/execute
+
+Manually fire a trigger immediately, bypassing its schedule or conditions.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Request Body (optional):** Key-value map of execution data passed to the triggered workflow.
+
+```json
+{
+  "override_target": "staging"
+}
+```
+
+**Response:** `200 OK` — returns the `TriggerExecution` object.
+
+```json
+{
+  "id": "texec-def456",
+  "trigger_id": "trigger-xyz789",
+  "status": "running",
+  "start_time": "2026-07-07T12:00:00Z"
+}
+```
+
+#### GET /api/v1/triggers/{id}/executions
+
+Get execution history for a trigger.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+- `limit` (query, optional): Maximum records to return (default: 50; must be > 0)
+
+**Response:**
+
+```json
+{
+  "trigger_id": "trigger-xyz789",
+  "executions": [
+    {
+      "id": "texec-def456",
+      "trigger_id": "trigger-xyz789",
+      "status": "success",
+      "start_time": "2026-07-07T02:00:00Z"
+    }
+  ],
+  "count": 1,
+  "limit": 50
+}
+```
 
 ### Internal Endpoints (not for external use)
 
