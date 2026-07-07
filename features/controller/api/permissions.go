@@ -21,6 +21,7 @@ var knownPermissions = map[string]bool{
 	"steward:read-modules":    true,
 	"steward:delete-config":   true,
 	"steward:move":            true,
+	"steward:decommission":    true,
 	// Config management
 	"config:list":             true,
 	"config:list-deployments": true,

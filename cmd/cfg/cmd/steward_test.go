@@ -843,3 +843,165 @@ func TestStewardMove_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("to-tenant"), "--to-tenant flag must be registered")
 }
+
+// TestStewardDecommission_CallsDeleteEndpoint verifies that decommission issues an
+// HTTP DELETE to /api/v1/stewards/{id} and reports success on 200.
+func TestStewardDecommission_CallsDeleteEndpoint(t *testing.T) {
+	var requestPath string
+	var requestMethod string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		requestMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"id":     "steward-abc123",
+				"status": "deregistered",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runStewardDecommission(stewardDecommissionCmd, []string{"steward-abc123"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, http.MethodDelete, requestMethod)
+	assert.Equal(t, "/api/v1/stewards/steward-abc123", requestPath)
+	assert.Contains(t, output, "steward-abc123")
+	assert.Contains(t, output, "decommissioned")
+}
+
+// TestStewardDecommission_NotFound_ReturnsError verifies a 404 surfaces a clear error.
+func TestStewardDecommission_NotFound_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "STEWARD_NOT_FOUND",
+				"message": "Steward not found",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardDecommission(stewardDecommissionCmd, []string{"unknown-steward"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+	assert.Contains(t, err.Error(), "unknown-steward")
+}
+
+// TestStewardDecommission_Forbidden_ReturnsMTLSError verifies that a 403 (API-key caller
+// rejected at the Tier-3 gate) surfaces an mTLS-specific error.
+func TestStewardDecommission_Forbidden_ReturnsMTLSError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "MTLS_REQUIRED",
+				"message": "mTLS admin certificate required for this endpoint",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardDecommission(stewardDecommissionCmd, []string{"steward-abc123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mTLS")
+}
+
+// TestStewardDecommission_ServiceUnavailable_ReturnsRetryError verifies that a 503
+// (fleet store unavailable) surfaces a retry-later error.
+func TestStewardDecommission_ServiceUnavailable_ReturnsRetryError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "SERVICE_UNAVAILABLE",
+				"message": "Fleet store unavailable",
+			},
+		})
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardDecommission(stewardDecommissionCmd, []string{"steward-abc123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "retry")
+}
+
+// TestStewardDecommission_OtherHTTPError_ReturnsStatusAndBody verifies that an unexpected
+// status returns the status and response body.
+func TestStewardDecommission_OtherHTTPError_ReturnsStatusAndBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}))
+	defer server.Close()
+
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	err := runStewardDecommission(stewardDecommissionCmd, []string{"steward-abc123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "internal server error")
+}
+
+func TestStewardDecommission_FlagsRegistered(t *testing.T) {
+	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("url"), "--url flag must be registered")
+	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
+	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
+	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
+}

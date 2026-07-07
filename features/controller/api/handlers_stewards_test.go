@@ -30,6 +30,302 @@ import (
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
+// ---- handleDecommissionSteward tests (Issue #2408) ----
+
+// setupDecommissionServer creates a test server wired with a real flat-file steward
+// store, suitable for decommission handler tests that need durable storage.
+func setupDecommissionServer(t *testing.T) (*Server, business.StewardStore) {
+	t.Helper()
+	server := setupTestServer(t)
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+	return server, st
+}
+
+// deleteDecommissionSteward calls handleDecommissionSteward directly (bypassing the Tier-3
+// middleware) with a root-admin mTLS principal so we can exercise the handler in isolation.
+func deleteDecommissionSteward(server *Server, stewardID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/"+stewardID, nil)
+	req = withPrincipal(req, &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleDecommissionSteward(rec, req)
+	return rec
+}
+
+// TestHandleDecommissionSteward_HappyPath verifies that a known steward is tombstoned
+// with status "deregistered" and the response contains {"id":"...","status":"deregistered"}.
+func TestHandleDecommissionSteward_HappyPath(t *testing.T) {
+	server, st := setupDecommissionServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-decomm-ok",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+	require.NoError(t, server.controllerService.RegisterSteward("s-decomm-ok", "test-tenant", "addr", "active"))
+
+	rec := deleteDecommissionSteward(server, "s-decomm-ok")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "s-decomm-ok", resp.Data["id"])
+	assert.Equal(t, "deregistered", resp.Data["status"])
+
+	// Verify durable store reflects the tombstone.
+	got, err := st.GetSteward(context.Background(), "s-decomm-ok")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusDeregistered, got.Status)
+}
+
+// TestHandleDecommissionSteward_APIKeyRejected verifies that an API-key caller
+// is rejected with 403 at the Tier-3 gate (via the full router).
+func TestHandleDecommissionSteward_APIKeyRejected(t *testing.T) {
+	server, _ := setupDecommissionServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:decommission"})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/any-steward", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "API-key callers must be rejected at Tier-3")
+}
+
+// TestHandleDecommissionSteward_InvalidID verifies 400 for a malformed steward ID.
+func TestHandleDecommissionSteward_InvalidID(t *testing.T) {
+	server, _ := setupDecommissionServer(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/bad.id:here", nil)
+	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "bad.id:here"})
+	rec := httptest.NewRecorder()
+	server.handleDecommissionSteward(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_STEWARD_ID", errResp.Error.Code)
+}
+
+// TestHandleDecommissionSteward_NilStore verifies 503 when stewardStore is nil.
+func TestHandleDecommissionSteward_NilStore(t *testing.T) {
+	server := setupTestServer(t)
+	// stewardStore is nil in the default setup.
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/some-steward", nil)
+	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "some-steward"})
+	rec := httptest.NewRecorder()
+	server.handleDecommissionSteward(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleDecommissionSteward_NotFound verifies 404 for an unknown steward ID.
+func TestHandleDecommissionSteward_NotFound(t *testing.T) {
+	server, _ := setupDecommissionServer(t)
+
+	rec := deleteDecommissionSteward(server, "nonexistent-steward")
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleDecommissionSteward_CrossTenant verifies that a scoped admin receives 404
+// when trying to decommission a steward in a different tenant (avoids existence disclosure).
+func TestHandleDecommissionSteward_CrossTenant(t *testing.T) {
+	server, st := setupDecommissionServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-cross-tenant",
+		TenantID: "tenant-b",
+		Status:   business.StewardStatusActive,
+	}))
+
+	// Caller is scoped to "tenant-a"; steward belongs to "tenant-b".
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/s-cross-tenant", nil)
+	req = withPrincipal(req, &Principal{ID: "tenant-a-admin", IsAdmin: true, TenantID: "tenant-a"})
+	req = withVars(req, map[string]string{"id": "s-cross-tenant"})
+	rec := httptest.NewRecorder()
+	server.handleDecommissionSteward(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant decommission must return 404, not 403")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleDecommissionSteward_AuditEmitted verifies that a successful decommission writes
+// an audit entry with action "steward.decommissioned", AuditSeverityHigh, and resource_type "steward".
+func TestHandleDecommissionSteward_AuditEmitted(t *testing.T) {
+	server, st := setupDecommissionServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-audit-decomm",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/s-audit-decomm", nil)
+	req = withPrincipal(req, &Principal{ID: "audit-admin", IsAdmin: true, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "s-audit-decomm"})
+	rec := httptest.NewRecorder()
+	server.handleDecommissionSteward(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"steward.decommissioned"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "decommission audit entry must be written")
+
+	e := entries[0]
+	assert.Equal(t, "steward.decommissioned", e.Action)
+	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+	assert.Equal(t, "steward", e.ResourceType)
+	assert.Equal(t, "s-audit-decomm", e.ResourceID)
+	assert.Equal(t, business.AuditResultSuccess, e.Result)
+}
+
+// TestHandleDecommissionSteward_RegistryConnectionDropped verifies that after decommission
+// the registry no longer contains the steward's entry (active connection is dropped).
+func TestHandleDecommissionSteward_RegistryConnectionDropped(t *testing.T) {
+	server, st := setupDecommissionServer(t)
+
+	stewardID := "s-conn-drop"
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       stewardID,
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	reg := registry.NewRegistry()
+	require.NoError(t, reg.Register(&registry.StewardConnection{
+		StewardID:   stewardID,
+		Sender:      &noopSender{},
+		ConnectedAt: time.Now(),
+	}))
+	server.SetRegistry(reg)
+
+	countBefore := reg.Count()
+	require.Equal(t, 1, countBefore, "registry must have one entry before decommission")
+
+	rec := deleteDecommissionSteward(server, stewardID)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	assert.Equal(t, 0, reg.Count(), "registry must be empty after decommission")
+	_, found := reg.Get(stewardID)
+	assert.False(t, found, "registry.Get must return false for decommissioned steward")
+}
+
+// TestHandleDecommissionSteward_ExcludedFromList verifies that after decommission the steward
+// no longer appears in the unfiltered list, but reappears with ?include_deregistered=true.
+// The handler is called directly (bypassing auth middleware) with an empty TenantID so that
+// isEmptyFilter returns true and the test exercises the unfiltered GetAllStewards path, where
+// the include_deregistered filtering lives (per Issue #2408 implementation notes).
+func TestHandleDecommissionSteward_ExcludedFromList(t *testing.T) {
+	server, st := setupDecommissionServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-list-filter",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+	require.NoError(t, server.controllerService.RegisterSteward("s-list-filter", "test-tenant", "addr", "active"))
+
+	// Decommission via the handler.
+	rec := deleteDecommissionSteward(server, "s-list-filter")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Default list (no TenantID → isEmptyFilter is true → unfiltered GetAllStewards path).
+	// The deregistered steward must be excluded.
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req = withTenant(req, "") // empty tenant → admin global scope → isEmptyFilter true
+	rec = httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	for _, s := range resp.Data {
+		assert.NotEqual(t, "s-list-filter", s.ID, "deregistered steward must not appear in default list")
+	}
+
+	// With ?include_deregistered=true it must reappear.
+	req2 := httptest.NewRequest("GET", "/api/v1/stewards?include_deregistered=true", nil)
+	req2 = withTenant(req2, "")
+	rec2 := httptest.NewRecorder()
+	server.handleListStewards(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp2 struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+	found := false
+	for _, s := range resp2.Data {
+		if s.ID == "s-list-filter" {
+			found = true
+			assert.Equal(t, "deregistered", s.Status)
+		}
+	}
+	assert.True(t, found, "deregistered steward must appear with ?include_deregistered=true")
+}
+
+// TestHandleDecommissionSteward_DurableStoreWriteFails verifies that when the durable
+// store write (DeregisterSteward) fails after lookup and scope checks pass, the handler
+// returns 500 INTERNAL_ERROR and does NOT tombstone the record. Per CFGMS standards, the
+// error branch at handlers_stewards.go:681 must be covered, not just the happy path.
+func TestHandleDecommissionSteward_DurableStoreWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
+	server := setupTestServer(t)
+	st, root := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-decomm-writefail",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	// Induce a genuine durable-store write failure: make the flat-file store's backing
+	// directory read-only. The record was already written, so GetSteward (a pure read)
+	// still succeeds and the handler reaches DeregisterSteward, whose atomic write
+	// (temp-file creation in the directory) then fails with a permission error — the
+	// handler must surface a 500. Restore the mode on cleanup so t.TempDir() removal
+	// can delete the tree.
+	stewardDir := filepath.Join(root, "stewards")
+	require.NoError(t, os.Chmod(stewardDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(stewardDir, 0o750) })
+
+	rec := deleteDecommissionSteward(server, "s-decomm-writefail")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+
+	// The tombstone must not have been persisted: restore write access and confirm the
+	// record is still Active (the failed write left durable state unchanged).
+	require.NoError(t, os.Chmod(stewardDir, 0o750))
+	got, err := st.GetSteward(context.Background(), "s-decomm-writefail")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusActive, got.Status,
+		"record must remain Active when the durable tombstone write fails")
+}
+
 // ---- buildFleetFilter unit tests (no server required) ----
 
 func TestBuildFleetFilter_Empty(t *testing.T) {

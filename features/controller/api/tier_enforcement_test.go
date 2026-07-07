@@ -43,7 +43,8 @@ var tier3RouteTable = []tier3RouteEntry{
 	{"POST", "/api/v1/tenants", "tenant:create"},
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},
 	{"PUT", "/api/v1/tenants/test-tenant/refresh-policy", "refresh:set-policy"},
-	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"}, // Issue #2341
+	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},      // Issue #2341
+	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"}, // Issue #2408
 }
 
 // TestTier3Enforcement_APIKeyWithAdminPermissions_Gets403 verifies that an API-key

@@ -462,7 +462,8 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
 	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
-	stewards.Handle("/{id}/move", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward)))).Methods("POST") // Issue #2341: Tier-3 admin move-steward
+	stewards.Handle("/{id}/move", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward)))).Methods("POST")              // Issue #2341: Tier-3 admin move-steward
+	stewards.Handle("/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward)))).Methods("DELETE") // Issue #2408: Tier-3 steward decommission
 
 	// Configuration management endpoints
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
