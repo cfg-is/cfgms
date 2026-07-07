@@ -44,9 +44,14 @@ jobs:
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
     # The self-hosted runner VM is itself a CFGMS-managed steward endpoint, so
     # host-state-sensitive tests (platform CA path, launcher state) would read
-    # the live steward's files. The container keeps the job hermetic; it also
-    # runs unchanged on GitHub-hosted runners for the fork/dispatch path.
-    container: golang:1.26.4-bookworm
+    # the live steward's files. The container keeps the job hermetic on the
+    # self-hosted path only (empty image ⇒ no container on hosted runners,
+    # which are already hermetic). --user 1000 matches the self-hosted runner
+    # user so the workspace mount is writable AND permission-denial tests work
+    # (root would bypass chmod-based failure injection).
+    container:
+      image: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'golang:1.26.4-bookworm' || '' }}
+      options: --user 1000
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -91,8 +96,10 @@ jobs:
   integration-tests:
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
     # Hermetic container for the same reason as unit-tests (steward-enrolled
-    # runner VM host state must not leak into tests).
-    container: golang:1.26.4-bookworm
+    # runner VM host state must not leak into tests); self-hosted path only.
+    container:
+      image: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'golang:1.26.4-bookworm' || '' }}
+      options: --user 1000
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
