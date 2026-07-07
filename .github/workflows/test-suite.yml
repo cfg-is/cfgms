@@ -53,13 +53,18 @@ jobs:
       image: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'golang:1.26.4-bookworm' || '' }}
       # /etc/passwd + /etc/group mounted read-only so UID 1000 resolves to a
       # named user (os/user lookups; file-ownership and script-UID tests).
-      options: --user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
+      # /opt/ci-tools carries static host-staged binaries the golang image
+      # lacks but hosted runners ship (jq for the script-test suite).
+      options: --user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
     - name: Mark workspace safe for git (container UID differs from host mount)
       run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    - name: Add host-staged CI tools to PATH (container only)
+      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
 
     - name: Set up Go
       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -103,7 +108,9 @@ jobs:
       image: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'golang:1.26.4-bookworm' || '' }}
       # /etc/passwd + /etc/group mounted read-only so UID 1000 resolves to a
       # named user (os/user lookups; file-ownership and script-UID tests).
-      options: --user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
+      # /opt/ci-tools carries static host-staged binaries the golang image
+      # lacks but hosted runners ship (jq for the script-test suite).
+      options: --user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
@@ -112,6 +119,9 @@ jobs:
 
     - name: Mark workspace safe for git (container UID differs from host mount)
       run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    - name: Add host-staged CI tools to PATH (container only)
+      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
 
     - name: Set up Go
       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
