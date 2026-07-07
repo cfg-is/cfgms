@@ -680,7 +680,7 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 	// Tombstone in durable storage — authoritative; must succeed before in-memory updates.
 	if err := s.stewardStore.DeregisterSteward(r.Context(), stewardID); err != nil {
 		s.logger.Error("decommission failed: store write error",
-			"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decommission steward", "INTERNAL_ERROR")
 		return
 	}
@@ -688,7 +688,7 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 	// Update in-memory status — best-effort; durable storage already succeeded.
 	if err := s.controllerService.UpdateStewardStatus(stewardID, string(business.StewardStatusDeregistered)); err != nil {
 		s.logger.Warn("decommission: in-memory status update failed (non-fatal)",
-			"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Drop any active QUIC/gRPC connection.
