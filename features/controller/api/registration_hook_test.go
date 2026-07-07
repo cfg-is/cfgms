@@ -92,7 +92,7 @@ func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigS
 	configStore := storageManager.GetConfigStore()
 
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil, nil)
 
 	hook := NewWorkflowApprovalHook(engine, configStore, logger)
 	return hook, configStore

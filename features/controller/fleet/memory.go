@@ -127,13 +127,14 @@ func toStewardResult(s StewardData) StewardResult {
 		attrs = map[string]string{}
 	}
 	return StewardResult{
-		ID:            s.ID,
-		TenantID:      s.TenantID,
-		Hostname:      attrs["hostname"],
-		OS:            attrs["os"],
-		Architecture:  attrs["arch"],
-		Status:        s.Status,
-		LastHeartbeat: s.LastHeartbeat,
-		DNAAttributes: attrs,
+		ID:             s.ID,
+		TenantID:       s.TenantID,
+		Hostname:       attrs["hostname"],
+		OS:             attrs["os"],
+		Architecture:   attrs["arch"],
+		Status:         s.Status,
+		LastHeartbeat:  s.LastHeartbeat,
+		DNAAttributes:  attrs,
+		RunningVersion: attrs["steward.version"],
 	}
 }
