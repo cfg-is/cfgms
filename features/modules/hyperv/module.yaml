@@ -59,8 +59,12 @@ behavioral_envelope:
     exactly-once; the VM is resolved to its Id via a local Get-VM and clustered
     by -VMId, avoiding a cross-node WMI name-enumeration that is denied when the
     module runs as the LocalSystem steward) and Remove-ClusterGroup
-    -RemoveResources (remove a clustered VM role group by name — gated behind
-    allow_destructive: true, default off). The cluster-role PROPERTY write
+    -RemoveResources (remove a clustered VM role group by name — reached only
+    by the hyperv.vm ha_role demote path since #2372: removing ha_role from a
+    previously-HA vm resource converges by removing the ROLE, never the VM;
+    both cmdlets are CNO-owner-gated and scope-capped, and the pre-#2372
+    operator-facing hyperv.cluster role teardown surface is hard-refused). The
+    cluster-role PROPERTY write
     cmdlets (#2306) are: Set-ClusterOwnerNode (preferred owners on the role group,
     possible owners on the VM resource) and Set-ClusterGroup group-property
     assignment (Priority, AutoStart, AntiAffinityClassNames) — reconciled only on

@@ -597,8 +597,11 @@ func (m *hypervModule) readResourceOwners(ctx context.Context, clusterName strin
 	return parsed.Owners, nil
 }
 
-// setCluster reconciles the declared clustered-VM-role set on a failover
-// cluster (S2). It is the Set("cluster:<name>", config) write path.
+// setCluster reconciles the placement/scheduling PROPERTIES of existing
+// clustered VM roles (#2306). It is the Set("cluster:<name>", config) write
+// path — cluster-scoped only since #2372: it never creates or removes VM-role
+// membership (that is the hyperv.vm ha_role setting, via
+// reconcileRoleMembership below).
 //
 // Decision order (each step short-circuits BEFORE any transport call where it
 // can):
@@ -609,16 +612,15 @@ func (m *hypervModule) readResourceOwners(ctx context.Context, clusterName strin
 //  3. CNO gate (S1): clusterOwnershipHelper decides which node acts. A NON-owner
 //     records an ownership-gated-skip audit event and returns nil — ownership is
 //     coordination, not authorization, so a non-owner never errors or blocks.
-//  4. On the owner, for each role NAMED in the declared RoleNames set
-//     (drift-not-adopted, S1 — roles absent from cfg are never mutated):
-//     - state: absent + allow_destructive=false → ErrDestructiveOpBlocked,
-//     with NO PS write cmdlet (S6 destructive gate, default off).
-//     - state: absent + allow_destructive=true  → Remove-ClusterResource.
-//     - present (default): existence check via the helper's resource-owner
-//     map (reuses S1's readResourceOwners output — no 4th PS function). If
-//     the role already exists → idempotent no-op. Otherwise
-//     Add-ClusterVirtualMachineRole; an "already"/"exists" error is
-//     normalised to nil (post-failover existence-check↔Add race).
+//  4. On the owner:
+//     - state: absent → ErrRoleMembershipNotClusterManaged with NO PS write —
+//     the pre-#2372 destructive role-removal surface is hard-removed
+//     (demote by removing ha_role on the vm resource).
+//     - present (default): for each role NAMED in RoleNames
+//     (drift-not-adopted, S1 — roles absent from cfg are never touched):
+//     a role missing from the cluster is skipped with a warn + audit (it is
+//     NOT created); an existing role gets its declared placement properties
+//     reconciled via reconcileRoleProperties.
 //
 // Every path (create / gated-skip / idempotent no-op / destructive / drift)
 // records a pkg/audit event via recordHypervOp with the node identity

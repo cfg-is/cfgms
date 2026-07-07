@@ -709,8 +709,10 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	// readResourceOwners read as setCluster's owner path; a read needs no CNO
 	// ownership gate. Without a configured scope no HA-role drift is observable
 	// — skip entirely, never error. A failing probe degrades to HARole=nil
-	// (promote is idempotent, so a missed membership converges next cycle)
-	// rather than failing every VM read on a transient cluster-service error.
+	// rather than failing every VM read on a transient cluster-service error;
+	// the degradation defers BOTH directions one cycle (a missed membership
+	// re-promotes idempotently; a pending demote reads current as nil→nil and
+	// simply waits) — each converges on the next cycle once the probe recovers.
 	if m.clusterName != "" {
 		if owners, roErr := m.readResourceOwners(ctx, m.clusterName); roErr == nil {
 			if _, isMember := owners[vmName]; isMember {
@@ -954,13 +956,16 @@ func parseHARoleMap(v interface{}) *HARoleConfig {
 	return &HARoleConfig{ClusterName: cluster, ResourceGroupName: rg}
 }
 
-// registerClusteredRole registers a just-created VM as a clustered HA role by
-// delegating to the cluster module's setCluster write path. The clustered role
-// name is the VM name (the default cluster group name Add-ClusterVirtualMachineRole
-// assigns); resource_group_name is reserved for an explicit group name and
-// currently defaults to the VM name. setCluster applies the S5 scope cap, the
-// CNO ownership gate, and existence-based idempotency — so the role is added
-// exactly once cluster-wide and re-converges are no-ops.
+// registerClusteredRole registers a VM as a clustered HA role — the promote
+// half of the single-surface ha_role setting (#2372), called from every path a
+// VM can converge through (plain create, applyVMState on an existing VM, and
+// finalizeProvision for a source-provisioned VM). It delegates to
+// reconcileRoleMembership, which applies the S5 scope cap, the CNO ownership
+// gate, and existence-based idempotency — so the role is added exactly once
+// cluster-wide and re-converges are no-ops. The clustered role name is the VM
+// name (the default cluster group name Add-ClusterVirtualMachineRole assigns);
+// resource_group_name is reserved for an explicit group name and currently
+// defaults to the VM name.
 func (m *hypervModule) registerClusteredRole(ctx context.Context, cfg *VMConfig) error {
 	return m.reconcileRoleMembership(ctx, cfg.HARole.ClusterName, cfg.Name, "present", false)
 }

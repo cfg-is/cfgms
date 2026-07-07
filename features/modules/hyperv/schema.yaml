@@ -101,13 +101,19 @@ resources:
       ha_role:
         type: object
         description: >
-          When present, registers the VM as a clustered HA role on the named
-          failover cluster after creation (reuses the cluster CNO ownership gate
-          and existence-based idempotency). Absent: the VM is a standalone
-          (non-HA) resource. When the primary vhd_path is on a Cluster Shared
-          Volume (C:\ClusterStorage\...), the module-level seed_dir must be set
-          and host-local (not under CSV) or the resource is rejected at validate
-          time.
+          Convergent cluster-role membership — the single surface for VM HA
+          state (#2372). Present: the VM is registered as a clustered HA role
+          on the named failover cluster, on every path (plain create, an
+          already-existing VM on the next converge, a source-provisioned VM at
+          provisioning finalize). REMOVING this block from a previously-HA vm
+          resource DEMOTES the VM on the next converge: the clustered role is
+          removed (the VM itself is never touched) with no separate opt-in
+          flag. Both directions reuse the cluster CNO ownership gate and
+          existence-based idempotency. Promote/demote drift detection requires
+          the module-level cluster_name scope cap. When the primary vhd_path is
+          on a Cluster Shared Volume (C:\ClusterStorage\...), the module-level
+          seed_dir must be set and host-local (not under CSV) or the resource
+          is rejected at validate time.
         required:
           - cluster_name
         properties:
