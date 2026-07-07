@@ -1039,7 +1039,7 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("steward move: failed to update durable store",
 			"steward_id", stewardIDForLog,
 			"new_tenant_id", newTenantIDForLog,
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward tenant", "INTERNAL_ERROR")
 		return

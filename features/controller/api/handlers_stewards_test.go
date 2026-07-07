@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1611,6 +1612,9 @@ func TestHandleMoveSteward_DestinationNotActive(t *testing.T) {
 // TestHandleMoveSteward_DurableStoreWriteFails verifies that when the durable store
 // write fails after all validation passes, the handler returns 500 INTERNAL_ERROR.
 func TestHandleMoveSteward_DurableStoreWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
 	server, st, root := setupMoveStewardServer(t)
 	seedSteward(t, st, &business.StewardRecord{ID: "s-writefail", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
 	require.NoError(t, server.controllerService.RegisterSteward("s-writefail", "source-tenant", "addr", "registered"))
