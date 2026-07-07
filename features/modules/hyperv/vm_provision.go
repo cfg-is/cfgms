@@ -743,6 +743,21 @@ func (m *hypervModule) finalizeProvision(ctx context.Context, vmName, hostName s
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-Item", "vm:"+vmName, nil, nil, nil)
 	}
 
+	// Cluster-role registration for a source-provisioned VM (#2372): ha_role is
+	// convergent on every path, so a VM born via source: is registered here —
+	// no later than the installing → finalizing transition (ready is
+	// controller-side, #2050, never observed by this steward-side code). A
+	// registration failure returns BEFORE the record advances, keeping it at
+	// installing so the next converge cycle retries the finalize (transient CNO
+	// failover must not strand a should-be-HA VM as standalone).
+	if cfg.HARole != nil {
+		roleCfg := *cfg
+		roleCfg.Name = vmName
+		if err := m.registerClusteredRole(ctx, &roleCfg); err != nil {
+			return fmt.Errorf("hyperv: register clustered role for provisioned VM %q: %w", vmName, err)
+		}
+	}
+
 	// Advance installing → finalizing. ready is controller-side (#2050).
 	return m.advanceProvision(ctx, vmName, record, ProvisionStateFinalizing)
 }

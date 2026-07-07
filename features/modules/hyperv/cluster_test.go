@@ -698,26 +698,25 @@ func TestSetCluster_NonOwnerSkipsProperties(t *testing.T) {
 	assert.True(t, skip, "a non-owner must record cluster-set-skip")
 }
 
-// TestClusterSet_CNOOwner_Create verifies the AC: the CNO-owner node calls
-// Cfgms-AddClusterVMRole (psAddClusterVMRole) exactly once when the named role
-// is absent, and records a create audit event with the owner node identity and
-// a Go receipt-time Timestamp (S8).
-func TestClusterSet_CNOOwner_Create(t *testing.T) {
+// TestRoleMembership_CNOOwner_Create verifies the AC on the membership engine
+// (reconcileRoleMembership — the internal path behind hyperv.vm ha_role, #2372):
+// the CNO-owner node calls Cfgms-AddClusterVMRole (psAddClusterVMRole) exactly
+// once when the named role is absent, and records a create audit event with the
+// owner node identity and a Go receipt-time Timestamp (S8).
+func TestRoleMembership_CNOOwner_Create(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`, // helper: CNO owner read → this node (NODE1) owns it
 			`{"owners":{}}`,     // helper: resource owners → role absent
-			`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read
+			`{"owner":"NODE1"}`, // engine: cnoOwner re-read
 			``,                  // Add-ClusterVirtualMachineRole → success (empty output)
 		},
 	}
 	m, store := clusterTestModule(t, transport) // m.nodeHostname == "NODE1", clusterName == "lab-hv"
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-	cfg := &ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"}
-
 	start := time.Now()
-	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "present", false)
 	require.NoError(t, err)
 
 	// Exactly one Add cmdlet, and the user-supplied role name never appears in the
@@ -794,12 +793,12 @@ func TestClusterSet_NonOwner_Skip(t *testing.T) {
 	assert.Equal(t, false, skipEvt.Changes.After["owns_cno"])
 }
 
-// TestClusterSet_Idempotent verifies the idempotency Technical Decision two ways:
-// (a) when the role already exists, the existence check short-circuits the Add
-// (no PS mutation), and (b) when the existence read missed it but Add returns an
-// "already registered" error, that error is normalised to nil. Both converges
-// succeed and leave no error.
-func TestClusterSet_Idempotent(t *testing.T) {
+// TestRoleMembership_Idempotent verifies the idempotency Technical Decision on
+// the membership engine two ways: (a) when the role already exists, the
+// existence check short-circuits the Add (no PS mutation), and (b) when the
+// existence read missed it but Add returns an "already registered" error, that
+// error is normalised to nil. Both converges succeed and leave no error.
+func TestRoleMembership_Idempotent(t *testing.T) {
 	// (a) Existence-check short-circuit: role already present in the owners map.
 	t.Run("existence-check short-circuit", func(t *testing.T) {
 		transport := &testWinRMTransport{
@@ -812,8 +811,7 @@ func TestClusterSet_Idempotent(t *testing.T) {
 		m, _ := clusterTestModule(t, transport)
 		defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-		err := m.setCluster(context.Background(), "cluster:lab-hv",
-			&ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"})
+		err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "present", false)
 		require.NoError(t, err)
 		assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
 			"an already-existing role must short-circuit BEFORE the Add (no PS mutation)")
@@ -836,8 +834,7 @@ func TestClusterSet_Idempotent(t *testing.T) {
 		m, _ := clusterTestModule(t, transport)
 		defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-		err := m.setCluster(context.Background(), "cluster:lab-hv",
-			&ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"})
+		err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "present", false)
 		require.NoError(t, err,
 			"an 'already configured' error from Add must be normalised to nil (idempotent)")
 		assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
@@ -861,17 +858,18 @@ func TestClusterSet_Idempotent(t *testing.T) {
 		m, _ := clusterTestModule(t, transport)
 		defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-		err := m.setCluster(context.Background(), "cluster:lab-hv",
-			&ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"})
+		err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "present", false)
 		require.Error(t, err, "a non-idempotent PS error must surface, not be swallowed")
 		assert.Contains(t, err.Error(), "Access is denied")
 	})
 }
 
-// TestClusterSet_DestructiveGate verifies S6: state: absent with
-// allow_destructive: false returns ErrDestructiveOpBlocked WITHOUT invoking any
-// PS write cmdlet (zero Add/Remove calls).
-func TestClusterSet_DestructiveGate(t *testing.T) {
+// TestRoleMembership_DestructiveGate verifies S6 on the membership engine:
+// state "absent" with allowDestructive false returns ErrDestructiveOpBlocked
+// WITHOUT invoking any PS write cmdlet (zero Add/Remove calls). The vm-side
+// demote passes true (role-only removal); the gate still protects any future
+// internal caller that does not.
+func TestRoleMembership_DestructiveGate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // helper CNO owner (this node owns it)
@@ -882,13 +880,7 @@ func TestClusterSet_DestructiveGate(t *testing.T) {
 	m, _ := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-	cfg := &ClusterConfig{
-		Name:             "lab-hv",
-		RoleNames:        []string{"web-01"},
-		State:            "absent",
-		AllowDestructive: false,
-	}
-	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "absent", false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrDestructiveOpBlocked,
 		"state: absent without allow_destructive must return ErrDestructiveOpBlocked")
@@ -899,12 +891,12 @@ func TestClusterSet_DestructiveGate(t *testing.T) {
 		"the destructive gate must issue no Add either")
 }
 
-// TestClusterSet_DriftNotAdopted verifies S1: Set on a cfg naming only role A,
-// with an undeclared role B also present on the cluster, issues no Add or Remove
-// targeting B — only declared roles are mutated. Here role A ("web-01") is
-// absent (gets created) while role B ("db-99") is present but undeclared and
-// must be left untouched, even though state is the default "present".
-func TestClusterSet_DriftNotAdopted(t *testing.T) {
+// TestRoleMembership_DriftNotAdopted verifies S1 on the membership engine: a
+// reconcile naming only role A, with an undeclared role B also present on the
+// cluster, issues no Add or Remove targeting B — only the named role is
+// mutated. Here role A ("web-01") is absent (gets created) while role B
+// ("db-99") is present but unnamed and must be left untouched.
+func TestRoleMembership_DriftNotAdopted(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,            // helper CNO owner (this node)
@@ -916,8 +908,7 @@ func TestClusterSet_DriftNotAdopted(t *testing.T) {
 	m, _ := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-	cfg := &ClusterConfig{Name: "lab-hv", RoleNames: []string{"web-01"}, State: "present"}
-	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "present", false)
 	require.NoError(t, err)
 
 	// Exactly one Add (for the declared web-01); zero Removes (db-99 is never adopted).
@@ -939,13 +930,13 @@ func TestClusterSet_DriftNotAdopted(t *testing.T) {
 	}
 }
 
-// ─── B2: setCluster destructive REMOVE success path (state: absent + allow_destructive) ─
+// ─── B2: membership-engine REMOVE path (the hyperv.vm ha_role demote engine) ───
 
-// TestClusterSet_Remove_Success verifies B2(a): on the CNO-owner node, a
-// declared role that EXISTS, with state: absent + allow_destructive: true,
-// triggers Remove-ClusterResource exactly once and records a
-// cluster-set-remove audit event with removed: true.
-func TestClusterSet_Remove_Success(t *testing.T) {
+// TestRoleMembership_Remove_Success verifies B2(a): on the CNO-owner node, a
+// named role that EXISTS, with state "absent" + allowDestructive true (exactly
+// what demoteClusteredRole passes), triggers Remove-ClusterResource exactly
+// once and records a cluster-set-remove audit event with removed: true.
+func TestRoleMembership_Remove_Success(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // helper CNO owner → this node (NODE1) owns it
@@ -957,15 +948,8 @@ func TestClusterSet_Remove_Success(t *testing.T) {
 	m, store := clusterTestModule(t, transport) // m.nodeHostname == "NODE1"
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-	cfg := &ClusterConfig{
-		Name:             "lab-hv",
-		RoleNames:        []string{"web-01"},
-		State:            "absent",
-		AllowDestructive: true,
-	}
-
 	start := time.Now()
-	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "absent", true)
 	require.NoError(t, err, "removing an existing role with allow_destructive must succeed")
 
 	// (a) Exactly one Remove cmdlet; zero Adds.
@@ -1002,11 +986,11 @@ func TestClusterSet_Remove_Success(t *testing.T) {
 		"the remove audit must record removed: true")
 }
 
-// TestClusterSet_Remove_TransportError verifies B2(b): when the
-// Remove-ClusterResource transport call FAILS, setCluster wraps and returns the
+// TestRoleMembership_Remove_TransportError verifies B2(b): when the
+// Remove-ClusterResource transport call FAILS, the engine wraps and returns the
 // error (it does NOT swallow it) — isAlreadyRegistered must NOT be applied to
 // the remove path, so even an "already"-bearing error surfaces.
-func TestClusterSet_Remove_TransportError(t *testing.T) {
+func TestRoleMembership_Remove_TransportError(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`,             // helper CNO owner (this node owns it)
@@ -1024,13 +1008,7 @@ func TestClusterSet_Remove_TransportError(t *testing.T) {
 	m, store := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-	cfg := &ClusterConfig{
-		Name:             "lab-hv",
-		RoleNames:        []string{"web-01"},
-		State:            "absent",
-		AllowDestructive: true,
-	}
-	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "absent", true)
 	require.Error(t, err, "a failed Remove must surface, never be swallowed")
 	assert.Contains(t, err.Error(), "could not be deleted",
 		"the underlying Remove error must be wrapped, not normalised away")
@@ -1052,11 +1030,11 @@ func TestClusterSet_Remove_TransportError(t *testing.T) {
 		"a failed remove must record removed: false")
 }
 
-// TestClusterSet_Remove_AlreadyGone verifies B2(c): a declared role that is NOT
-// present in the resource-owner map, with state: absent + allow_destructive:
+// TestRoleMembership_Remove_AlreadyGone verifies B2(c): a named role that is
+// NOT present in the resource-owner map, with state "absent" + allowDestructive
 // true, is an idempotent no-op — zero Remove-ClusterResource calls, a
 // cluster-set-remove-noop audit event, and no error.
-func TestClusterSet_Remove_AlreadyGone(t *testing.T) {
+func TestRoleMembership_Remove_AlreadyGone(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
 			`{"owner":"NODE1"}`, // helper CNO owner (this node owns it)
@@ -1067,13 +1045,7 @@ func TestClusterSet_Remove_AlreadyGone(t *testing.T) {
 	m, store := clusterTestModule(t, transport)
 	defer func() { _ = m.auditMgr.Stop(context.Background()) }()
 
-	cfg := &ClusterConfig{
-		Name:             "lab-hv",
-		RoleNames:        []string{"web-01"},
-		State:            "absent",
-		AllowDestructive: true,
-	}
-	err := m.setCluster(context.Background(), "cluster:lab-hv", cfg)
+	err := m.reconcileRoleMembership(context.Background(), "lab-hv", "web-01", "absent", true)
 	require.NoError(t, err, "removing an already-absent role is an idempotent no-op")
 
 	assert.Equal(t, 0, countCmd(transport, psRemoveClusterResource),

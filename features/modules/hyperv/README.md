@@ -115,12 +115,19 @@ The resource type is selected via the `module` field as `hyperv.<type>`
 ### Highly-available (clustered) VM
 
 Add an optional `ha_role` block to register the VM as a clustered HA role on a
-failover cluster after it is created. The primary VHDX lives on a Cluster Shared
-Volume (`C:\ClusterStorage\...`) so it is reachable from every node; after
-`New-VM`, the module registers the VM as a clustered role via the cluster write
-path, reusing the **CNO ownership gate** and **existence idempotency** — the role
-is added exactly once cluster-wide and a non-owner node is a no-op. Standalone
-(non-HA) VMs omit `ha_role` and behave exactly as before.
+failover cluster. `ha_role` is **fully convergent on every path** (#2372): it
+promotes a freshly-created VM, an already-existing VM (on the next converge),
+and a source-provisioned VM (during provisioning finalize) — and **removing**
+the block demotes the VM (the clustered role is removed; the VM is never
+touched, so no destructive opt-in is needed). Registration and demotion reuse
+the **CNO ownership gate** and **existence idempotency** — mutations run exactly
+once cluster-wide and a non-owner node is a no-op. Standalone (non-HA) VMs omit
+`ha_role` and behave exactly as before. This is the **single surface** for VM
+cluster-role membership — see *Single surface* under the cluster section below;
+promote/demote drift detection requires the module-level `cluster_name` scope
+cap. The primary VHDX lives on a Cluster Shared Volume
+(`C:\ClusterStorage\...`) so it is reachable from every node — required for real
+failover.
 
 ```yaml
 - name: ci-runner-01
@@ -541,32 +548,64 @@ two write cmdlets `Add-ClusterVirtualMachineRole` and `Remove-ClusterResource`
 (S2) are declared in `module.yaml`'s `behavioral_envelope`. No cluster-formation
 cmdlet (`New-Cluster`/`Add-ClusterNode`/`Remove-ClusterNode`/quorum) is declared.
 
-### Managing clustered VM roles (`Set`)
+### Single surface: VM cluster-role membership lives on `hyperv.vm` (#2372)
 
-`Set("cluster:<name>", config)` reconciles the **declared** clustered-VM-role set
-(`role_names`). Its decision order is:
+**All VM-scoped settings — including promoting a VM to a clustered HA role and
+demoting it back — are `hyperv.vm` settings.** `hyperv.cluster` never creates or
+removes VM roles; there is exactly one config surface:
+
+- **Promote:** declare `ha_role:` on the vm resource. Convergent on **every**
+  path — a plain-lifecycle create, an already-existing VM (registered on the
+  next converge), and a source-provisioned VM (registered during finalize, no
+  later than the record's `finalizing` transition).
+- **Demote:** remove `ha_role:` from the vm resource. The clustered role is
+  removed; **the VM itself is never touched**. Because demotion is role-only,
+  it needs no separate destructive opt-in — it converges by default.
+- **Idempotent both ways:** an already-registered member is not re-added; an
+  already-standalone VM is not re-removed. An *already configured / already
+  exists* error from `Add-ClusterVirtualMachineRole` (a post-failover
+  existence-check↔Add race) is normalised to `nil`; every other PS error
+  surfaces.
+- **CNO gate (S1) unchanged:** only the CNO-owner node mutates; a non-owner
+  records an *ownership-gated-skip* audit event and returns `nil` —
+  coordination, not authorization.
+- **Moving a registered VM to a different cluster in one step is undefined** —
+  demote first (remove `ha_role`), converge, then promote with the new cluster.
+
+**Drift detection requires the module-level `cluster_name` scope cap.** `Get`
+reports a VM's current cluster-role membership by probing the scope-capped
+cluster's role-owner map — on demote the desired config no longer carries
+`ha_role`, so the module-level `cluster_name` is the only cluster it may ask.
+Set `cluster_name` at the hyperv module level (matching each VM's
+`ha_role.cluster_name`) or promote/demote drift is not observable and `ha_role`
+convergence on existing VMs does not run.
+
+### Reconciling role properties (`Set` on `hyperv.cluster`)
+
+`Set("cluster:<name>", config)` is **cluster-scoped only**: it reconciles the
+placement/scheduling **properties** of roles named in `role_names` that already
+exist (#2306). Its decision order is:
 
 | Step | Behaviour |
 |------|-----------|
 | **Scope cap (S5)** | An out-of-scope `<name>` returns `ErrClusterNotDeclared` **before** any cmdlet runs. |
 | **CNO gate (S1)** | Only the **CNO-owner** node mutates. A non-owner records an *ownership-gated-skip* audit event and returns `nil` (coordination, not authorization — never an error, never a PS write). |
-| **Existence check (idempotency)** | Before clustering a role, the owner checks the live per-role owner map (the same `Get-ClusterGroup` read the ownership gate already performs — no extra PS function). An already-clustered role is a no-op. |
-| **Create** | An absent declared role is clustered with `Add-ClusterVirtualMachineRole`. If the cmdlet still reports *already configured / already exists* (a post-failover existence-check↔Add race), that error is normalised to `nil`. **Only** that error class is treated as idempotent — every other PS error surfaces. |
-| **Destructive gate (S6)** | `state: absent` removes the role with `Remove-ClusterResource`, but **only** when `allow_destructive: true`. With the default `allow_destructive: false` it returns `ErrDestructiveOpBlocked` **without** invoking any write cmdlet. |
-| **Drift-not-adopted (S1)** | Only roles named in `role_names` are ever passed to Add/Remove. A role present on the cluster but absent from the config is **never** created, removed, or adopted — even with `allow_destructive: true`. |
+| **Membership is not managed here (#2372)** | A role named in `role_names` that does not exist on the cluster is skipped with a warning and an audit event — it is **not** created; declare `ha_role` on the `hyperv.vm` resource instead. `state: absent` returns `ErrRoleMembershipNotClusterManaged` without any PS write — demotion is `ha_role` removal on the vm resource. |
+| **Property reconcile (#2306)** | Roles that exist get their declared placement/scheduling properties converged. |
+| **Drift-not-adopted (S1)** | Only roles named in `role_names` are ever property-reconciled. A role present on the cluster but absent from the config is never touched. |
 
-Every `Set` path (create / gated-skip / idempotent no-op / destructive / drift)
-records a `pkg/audit` event via the same audit path as `Get`, carrying the node
-identity, the CNO-owner decision, the role, and before/after state maps, with a
-Go receipt-time `Timestamp` (S8).
+Every `Set` path records a `pkg/audit` event via the same audit path as `Get`,
+carrying the node identity, the CNO-owner decision, the role, and before/after
+state maps, with a Go receipt-time `Timestamp` (S8).
 
 ```yaml
 - name: lab-hv
   module: hyperv.cluster
   config:
-    role_names: [web-01, db-01]   # cluster these existing VMs as HA roles
-    # state: absent                # opt into teardown of the named roles, AND:
-    # allow_destructive: true      # ...required for any role removal (default false)
+    role_names: [web-01, db-01]   # property-reconcile targets (must already exist)
+    roles:
+      web-01:
+        preferred_owners: [NODE1, NODE2]
 ```
 
 ### Ownership gate (coordination, not authorization)
