@@ -1046,6 +1046,11 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	if err := m.finalizeProvision(ctx, vmName, hostName, cfg); err != nil {
 		return err
 	}
+	// TTL sweep: clean up orphaned seed media for any stale provision records
+	// (ADR-010 §5). Called after finalizeProvision so the just-advanced record
+	// (UpdatedAt = now) is naturally excluded by the TTL check. Best-effort —
+	// a sweep failure does not block convergence.
+	m.sweepStaleSeedMedia(ctx)
 	return m.applyVMState(ctx, vmName, hostName, cfg, currentVM, state)
 }
 
