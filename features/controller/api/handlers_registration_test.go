@@ -1489,7 +1489,7 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 	server.SetPendingStore(pendingStore)
 
 	const tenantID = "hv-tenant"
-	const hvTrustedIP = "10.10.0.50"    // HV host's tenant-network IP, added to trust store below
+	const hvTrustedIP = "10.10.0.50"     // HV host's tenant-network IP, added to trust store below
 	const hvUntrustedIP = "198.51.100.1" // not in any trusted range
 
 	// Seed a registration token for the HV tenant (mirrors the join token the

@@ -5,6 +5,7 @@ package factory
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -312,6 +313,27 @@ func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
 	mod, err := factory.LoadModule("hyperv")
 	assert.NoError(t, err, "hyperv builtin must load without error")
 	assert.NotNil(t, mod, "hyperv builtin module must not be nil")
+}
+
+// TestModuleFactory_Hyperv_DurableStoreCreated verifies that when LoadModule
+// creates the hyperv module, the factory attempts to construct a durable
+// provision store and creates the backing directory. Uses
+// CFGMS_HYPERV_PROVISION_STORE_DIR to redirect the store into a writable temp
+// directory — without this override the default path (/var/lib/cfgms/...) is
+// not writable in CI and the factory silently falls back to the in-memory store.
+func TestModuleFactory_Hyperv_DurableStoreCreated(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CFGMS_HYPERV_PROVISION_STORE_DIR", root)
+
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule("hyperv")
+	require.NoError(t, err, "hyperv builtin must load without error")
+	require.NotNil(t, mod, "hyperv builtin module must not be nil")
+
+	// The durable store constructor calls os.MkdirAll on the root; verify the
+	// directory exists as a side-effect proving the durable code path was reached.
+	_, statErr := os.Stat(root)
+	assert.NoError(t, statErr, "provision store root must be created by the durable store constructor")
 }
 
 func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {

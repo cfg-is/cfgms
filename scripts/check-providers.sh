@@ -36,6 +36,10 @@ is_allowed() {
     [[ "$file" == pkg/migrate/blob/* ]] && return 0
     [[ "$file" == features/controller/initialization/initialization.go ]] && return 0
     [[ "$file" == features/controller/server/server.go ]] && return 0
+    # hyperv provision store: NewFlatFileProvisionStore is the durable-store
+    # constructor for the hyperv module's provision store (Issue #2371). It
+    # wraps flatfile directly — analogous to controller initialization files.
+    [[ "$file" == features/modules/hyperv/provision.go ]] && return 0
     [[ "$file" == */providers_test.go ]] && return 0
     return 1
 }
@@ -78,6 +82,7 @@ else
     echo "  pkg/migrate/blob/                                           (migration engine registry bootstrap)"
     echo "  features/controller/initialization/initialization.go        (registry bootstrap)"
     echo "  features/controller/server/server.go                        (registry bootstrap)"
+    echo "  features/modules/hyperv/provision.go                        (hyperv durable store constructor, Issue #2371)"
     echo "  */providers_test.go                                         (per-package test provider registration)"
     exit 1
 fi

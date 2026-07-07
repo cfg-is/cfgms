@@ -746,7 +746,18 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 				"state":     cur.State,
 			}
 		}
-		return m.removeVM(ctx, vmName, deleteBefore)
+		if err := m.removeVM(ctx, vmName, deleteBefore); err != nil {
+			return err
+		}
+		// Delete the provisioning record so a subsequent source: declaration
+		// provisions cleanly without hitting the surface-and-wait wedge.
+		// Mirrors the on_existing: recreate path in applySourceGated.
+		if m.provisionStore != nil {
+			if err := m.provisionStore.DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
+				return err
+			}
+		}
+		return nil
 	}
 
 	cfg := &VMConfig{Name: vmName}

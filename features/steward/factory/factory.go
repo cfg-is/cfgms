@@ -34,6 +34,9 @@ package factory
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -180,12 +183,58 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 }
 
 // loadBuiltinModule creates a new instance of a built-in module.
+// The hyperv module is handled specially so a durable provision store can be
+// wired via the factory logger (required for the fallback warn path).
 func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, error) {
+	if moduleName == "hyperv" {
+		return f.newHypervModule(), nil
+	}
 	ctor, ok := builtinModuleConstructors[moduleName]
 	if !ok {
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
 	}
 	return ctor(), nil
+}
+
+// newHypervModule constructs the hyperv module with a durable provision store.
+// If the store cannot be created (e.g. the path is not writable on this boot),
+// it logs a Warn and falls back to the in-memory store — steward startup never
+// crashes over a non-critical store init failure.
+func (f *ModuleFactory) newHypervModule() modules.Module {
+	root := defaultHypervProvisionStoreDir()
+	store, err := hyperv.NewFlatFileProvisionStore(root)
+	if err != nil {
+		f.logger.Warn("hyperv: durable provision store unavailable; using in-memory fallback for this boot",
+			"root", root, "error", err)
+		return hyperv.New(hyperv.NewDefaultDetector())
+	}
+	return hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(store))
+}
+
+// defaultHypervProvisionStoreDir returns the platform-specific directory for
+// the hyperv module's durable provision store. Mirrors defaultCertStoreDir in
+// cmd/steward/main.go (same switch shape, same ProgramData/Library fallbacks).
+// CFGMS_HYPERV_PROVISION_STORE_DIR overrides the default for test isolation.
+func defaultHypervProvisionStoreDir() string {
+	if override := os.Getenv("CFGMS_HYPERV_PROVISION_STORE_DIR"); override != "" {
+		return override
+	}
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "steward", "hyperv", "provisions")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "steward", "hyperv", "provisions")
+	default:
+		return "/var/lib/cfgms/steward/hyperv/provisions"
+	}
 }
 
 // ValidateModuleInterface ensures the module implements the required Module interface.
