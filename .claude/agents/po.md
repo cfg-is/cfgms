@@ -292,10 +292,12 @@ no hand-tuned magic number).
   resource); read it to decide how many reviews/dispatches to *attempt* this cycle.
   Query directly with `./.claude/scripts/agent-dispatch.sh capacity` (→
   `CAPACITY_OK:slots=<n>` / `CAPACITY_FULL:<binding>:slots=0`).
-- **Knobs** (env, all optional): per-agent `CFGMS_AGENT_MEM_MB` (4096),
-  `CFGMS_AGENT_CPUS` (4), `CFGMS_AGENT_DISK_GB` (8); ceilings `CFGMS_AGENT_MEM_CEIL`
-  (0.90), `CFGMS_AGENT_DISK_CEIL` (0.90), `CFGMS_AGENT_CPU_CEIL` (0.75); bypass
-  `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
+- **Knobs** (env, all optional): per-agent RAM/disk reservations
+  `CFGMS_AGENT_MEM_MB` (4096), `CFGMS_AGENT_DISK_GB` (8); CPU is **load-based** —
+  `CFGMS_AGENT_CPU_LOAD` (1.5) is the expected sustained cores per agent measured
+  against the live 1-min load average, not a per-core reservation. Ceilings
+  `CFGMS_AGENT_MEM_CEIL` (0.90), `CFGMS_AGENT_DISK_CEIL` (0.90), `CFGMS_AGENT_CPU_CEIL`
+  (0.75); bypass `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
 
 **Expired-lease GC** runs inside `agent-dispatch.sh cleanup-stale` (Step 1.5) — no
 separate call needed.
