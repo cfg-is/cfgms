@@ -51,7 +51,9 @@ jobs:
     # (root would bypass chmod-based failure injection).
     container:
       image: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'golang:1.26.4-bookworm' || '' }}
-      options: --user 1000
+      # /etc/passwd + /etc/group mounted read-only so UID 1000 resolves to a
+      # named user (os/user lookups; file-ownership and script-UID tests).
+      options: --user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -99,7 +101,9 @@ jobs:
     # runner VM host state must not leak into tests); self-hosted path only.
     container:
       image: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'golang:1.26.4-bookworm' || '' }}
-      options: --user 1000
+      # /etc/passwd + /etc/group mounted read-only so UID 1000 resolves to a
+      # named user (os/user lookups; file-ownership and script-UID tests).
+      options: --user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
