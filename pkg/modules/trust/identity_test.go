@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,7 +27,11 @@ func TestCFGMSPublisherKey_LdflagsRoundTrip(t *testing.T) {
 	testKeyB64 := base64.StdEncoding.EncodeToString(testKey)
 
 	tmpDir := t.TempDir()
-	probePath := filepath.Join(tmpDir, "probe")
+	probeName := "probe"
+	if runtime.GOOS == "windows" {
+		probeName = "probe.exe"
+	}
+	probePath := filepath.Join(tmpDir, probeName)
 
 	ldflags := "-X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=" + testKeyB64
 
