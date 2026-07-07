@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-05-25
+**Last Updated**: 2026-07-04
 
 ## Versioning Strategy
 
@@ -451,6 +451,22 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 - [ ] Implement Cluster-Aware Patching
 - [ ] Explore further specialized integrations and features
 
+## Captured Backlog (unscheduled)
+
+Founder-captured todos awaiting placement in a versioned milestone. Each carries enough context to decompose later; suggested homes are notes, not commitments.
+
+> **Design status:** the module and DNA items below are now designed in **[ADR-016](../architecture/decisions/016-steward-module-foundation.md)** (steward module foundation) and **[ADR-017](../architecture/decisions/017-dna-composition-and-sync.md)** (DNA composition & sync), both *Proposed*. Those ADRs are authoritative for the specifics; the entries here are the roadmap placeholders. Sequencing settled during design: **module foundation → OSquery → baseline DNA → asset page**, with OSquery deliberately *before* baseline DNA so DNA is built on osquery rather than reinventing it.
+
+- [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* these live views are **telemetry, not DNA** (ADR-017 excludes ephemeral state from the hashed DNA); live service read/control also overlaps the `service` module's desired-state enforcement — clarify the boundary. *Suggested home:* Web UI backend APIs (Epic #2343) + Web UI Foundation (Epic #2344), plus a steward monitoring/streaming capability epic. *Latest of the group — depends on Web UI Foundation.*
+
+- [ ] **Full OSquery support** — Integrate osquery as the **unmanaged-host-fact** data source for DNA plus ad-hoc fleet queries. Per ADR-017, osquery feeds DNA only through a **curated stable-fact allowlist** (`host:*` fragments, observe-only) — never its dynamic tables — and the specific query list is gated on the stdlib set being confirmed (ADR-016). Decisions remaining: bundled vs. host-detected binary, scheduling, security envelope. *Suggested home:* its own OSquery-integration epic, sequenced **before** baseline DNA.
+
+- [ ] **Define & build the standard-library steward modules** — **Decided in ADR-016:** a closed **10-module** stdlib set — `file`, `service`, `package`, `script`, `firewall`, `patch`, **`user`, `cert_trust`, `time`, `hostname`**. Six exist (patch needs a `module.yaml` + stub resolution); **four are net-new cross-platform builds** (`user`, `cert_trust`, `time`, `hostname`). Also adds the `Get`→canonical-DNA-fragment contract, atomic object-level ownership declaration, and a stdlib completeness gate. *This is a build epic, not an audit* — likely splits into (a) reorg + contract + gate + `patch`, and (b) the four new modules. *Suggested home:* near-term module foundation.
+
+- [ ] **Split non-stdlib modules into an on-demand directory** — **Decided in ADR-016:** `features/modules/stdlib/` (installer payload) ↔ `features/modules/extended/` (CFGMS-authored, non-stdlib, pulled on demand per ADR-006), with a build-enforced installer-payload boundary. Registry/scheduled_task/network/mount/sysctl/env are the excluded-from-stdlib candidates that live under `extended/` when built. *Suggested home:* same module-foundation epic as the stdlib work above.
+
+- [ ] **Controller baseline DNA per steward** — **Designed in ADR-017:** DNA becomes a fragment set (managed fragments from module `Get`, observe-only host facts from osquery), with object-canonical ids, a module-preempts-osquery authority resolver, a two-level per-fragment + aggregate-root hash, and delta-based partial-sync validation. *Suggested home:* DNA-composition epic, **downstream of both** the module foundation and OSquery.
+
 ## Architectural Concepts
 
 The following concepts represent the foundation for future architectural decisions and provide a framework for evaluating new features and capabilities as the system evolves.
@@ -500,7 +516,7 @@ Multi-layered validation approach:
 ## Version Information
 
 - **Document Version**: 4.0
-- **Last Updated**: 2026-05-25
+- **Last Updated**: 2026-07-04
 
 ### Related Documentation
 
