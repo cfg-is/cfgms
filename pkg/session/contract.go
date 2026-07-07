@@ -77,11 +77,16 @@ func DefaultConfig() Config {
 //
 // Revoke invalidates a session by ID. Accepts a valid session token or an admin mTLS cert
 // so a client holding an expired token can still clean up server-side.
+//
+// List returns copies of all currently-live sessions across all tenants. A session is live
+// if it is not revoked, not absolute-expired, and not idle-expired — the same three checks
+// Validate applies. Tenant scoping is the caller's responsibility.
 type Manager interface {
 	Issue(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error)
 	Validate(ctx context.Context, token string) (*Session, error)
 	Renew(ctx context.Context, token string) (*Session, string, error)
 	Revoke(ctx context.Context, id string) error
+	List(ctx context.Context) ([]*Session, error)
 }
 
 // Store is the in-memory backing store for the session Manager (ADR-014 §2, v1).

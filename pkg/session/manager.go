@@ -184,6 +184,42 @@ func (m *manager) Renew(ctx context.Context, token string) (*Session, string, er
 	return &out, newToken, nil
 }
 
+// List returns copies of all currently-live sessions. A session is live if it is not
+// revoked, not absolute-expired, and not idle-expired — the same three checks Validate
+// applies. Tenant scoping is the caller's responsibility. Results are copies so callers
+// cannot mutate manager-internal state through the returned pointers.
+func (m *manager) List(_ context.Context) ([]*Session, error) {
+	now := m.clockFn()
+	// Snapshot the managedSession pointers under m.mu, then release m.mu BEFORE
+	// acquiring any per-session ms.mu. Holding m.mu while taking ms.mu would invert
+	// the lock order used by Renew (ms.mu then m.mu), producing an ABBA deadlock
+	// under concurrent List/Renew on the same session.
+	m.mu.RLock()
+	snapshot := make([]*managedSession, 0, len(m.sessions))
+	for _, ms := range m.sessions {
+		snapshot = append(snapshot, ms)
+	}
+	m.mu.RUnlock()
+
+	out := make([]*Session, 0, len(snapshot))
+	for _, ms := range snapshot {
+		ms.mu.Lock()
+		live := !ms.revoked &&
+			now.Before(ms.session.AbsoluteExpiresAt) &&
+			now.Before(ms.session.LastActivity.Add(m.cfg.IdleTimeout))
+		var copy *Session
+		if live {
+			c := *ms.session
+			copy = &c
+		}
+		ms.mu.Unlock()
+		if copy != nil {
+			out = append(out, copy)
+		}
+	}
+	return out, nil
+}
+
 // Revoke immediately invalidates the session identified by id. Subsequent Validate
 // or Renew calls for any token belonging to this session return ErrSessionRevoked.
 func (m *manager) Revoke(ctx context.Context, id string) error {

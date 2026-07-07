@@ -534,11 +534,12 @@ func (s *Server) setupRouter() {
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
 	apiKeys.Handle("/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey)))).Methods("DELETE")
 
-	// Admin session endpoints (Issue #2232). POST requires an admin principal (IsAdmin==true);
-	// DELETE accepts either a valid session token or an admin mTLS cert.
-	// Both handlers check principal.IsAdmin internally — no tier-3 wrapper needed because
+	// Admin session endpoints (Issue #2232, #2368). POST requires an admin principal (IsAdmin==true);
+	// DELETE accepts either a valid session token or an admin mTLS cert; GET lists active sessions.
+	// All handlers check principal.IsAdmin internally — no tier-3 wrapper needed because
 	// session-token principals also have IsAdmin==true.
 	api.Handle("/sessions", http.HandlerFunc(s.handleSessionCreate)).Methods("POST")
+	api.Handle("/sessions", http.HandlerFunc(s.handleSessionList)).Methods("GET")
 	api.Handle("/sessions/{id}", http.HandlerFunc(s.handleSessionRevoke)).Methods("DELETE")
 
 	// Registration token management endpoints (Story #264)
