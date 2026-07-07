@@ -46,7 +46,7 @@ func createTestFactory() *factory.ModuleFactory {
 func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil)
 
 	workflow := Workflow{
 		Name: "simple-workflow",
@@ -100,7 +100,7 @@ func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil)
 
 	workflow := Workflow{
 		Name: "parallel-workflow",
@@ -154,7 +154,7 @@ func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
 func TestEngine_CancelExecution(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil)
 
 	workflow := Workflow{
 		Name: "long-running-workflow",
@@ -192,7 +192,7 @@ func TestEngine_CancelExecution(t *testing.T) {
 func TestEngine_ListExecutions(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil)
 
 	workflow := Workflow{
 		Name: "list-test-workflow",
@@ -302,7 +302,7 @@ func TestEvaluateCondition(t *testing.T) {
 
 	logger := pkgtesting.NewMockLogger(true)
 	factory := createTestFactory()
-	engine := NewEngine(factory, logger, nil)
+	engine := NewEngine(factory, logger, nil, nil)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -380,7 +380,7 @@ func TestEngineTransformExecutorWired(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
 	exec := &testTransformExecutor{}
 
-	engine := NewEngine(factory, logger, exec)
+	engine := NewEngine(factory, logger, exec, nil)
 
 	require.NotNil(t, engine.transformExecutor)
 	assert.Equal(t, exec, engine.transformExecutor)
@@ -395,7 +395,7 @@ func TestExecuteStepTransformDispatches(t *testing.T) {
 		varName:  "transform_output",
 		varValue: "hello",
 	}
-	engine := NewEngine(factory, logger, exec)
+	engine := NewEngine(factory, logger, exec, nil)
 
 	wf := Workflow{
 		Name: "transform-dispatch-test",
@@ -424,7 +424,7 @@ func TestContinueWithStepExecution(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
 
 	exec := &testTransformExecutor{err: fmt.Errorf("transform failed")}
-	engine := NewEngine(factory, logger, exec)
+	engine := NewEngine(factory, logger, exec, nil)
 	engine.errorHandler = &testErrorHandler{
 		decision: ErrorHandlingDecision{
 			Action:       ErrorActionContinueWith,
@@ -461,7 +461,7 @@ func TestContinueWithStepNotFound(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
 
 	exec := &testTransformExecutor{err: fmt.Errorf("transform failed")}
-	engine := NewEngine(factory, logger, exec)
+	engine := NewEngine(factory, logger, exec, nil)
 	engine.errorHandler = &testErrorHandler{
 		decision: ErrorHandlingDecision{
 			Action:       ErrorActionContinueWith,
@@ -493,7 +493,7 @@ func TestFallbackStepExecution(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
 
 	exec := &testTransformExecutor{err: fmt.Errorf("transform failed")}
-	engine := NewEngine(factory, logger, exec)
+	engine := NewEngine(factory, logger, exec, nil)
 	engine.errorHandler = &testErrorHandler{
 		decision: ErrorHandlingDecision{Action: ErrorActionFallback},
 	}
@@ -561,7 +561,7 @@ func TestRetryMaxAttempts(t *testing.T) {
 
 	factory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(factory, logger, nil)
+	engine := NewEngine(factory, logger, nil, nil)
 	// Use zero delays so the test runs instantly.
 	engine.errorHandler = &DefaultErrorHandler{
 		MaxRetries:        maxAttempts,
@@ -618,7 +618,7 @@ func TestRetryNilConfig(t *testing.T) {
 		result: StepResult{Status: StatusFailed},
 		err:    fmt.Errorf("step error"),
 	}
-	engine := NewEngine(factory, logger, exec)
+	engine := NewEngine(factory, logger, exec, nil)
 	// ShouldRetry returns true (up to 5 attempts) — without the nil guard this handler
 	// would cause the loop to run, resulting in RetryCount > 0.
 	engine.errorHandler = &testRetryDecisionHandler{
@@ -676,7 +676,7 @@ func TestGenericConfigStateYAMLRoundTrip(t *testing.T) {
 // --- loadWorkflowByName tests ---
 
 func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
-	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil, nil)
 
 	want := Workflow{
 		Name: "my-workflow",
@@ -694,7 +694,7 @@ func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
 }
 
 func TestEngine_LoadWorkflowByName_Miss(t *testing.T) {
-	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil, nil)
 
 	_, err := engine.loadWorkflowByName("nonexistent-workflow")
 	require.Error(t, err)
@@ -719,7 +719,7 @@ steps:
 	wfPath := filepath.Join(dir, "disk-workflow.yaml")
 	require.NoError(t, os.WriteFile(wfPath, []byte(yamlContent), 0600))
 
-	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil, nil)
 	got, err := engine.loadWorkflowFromPath(wfPath)
 	require.NoError(t, err)
 	assert.Equal(t, "disk-workflow", got.Name)
@@ -729,8 +729,77 @@ steps:
 }
 
 func TestEngine_LoadWorkflowFromPath_Missing(t *testing.T) {
-	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil)
+	engine := NewEngine(createTestFactory(), pkgtesting.NewMockLogger(true), nil, nil)
 	_, err := engine.loadWorkflowFromPath("/nonexistent/path/workflow.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "/nonexistent/path/workflow.yaml")
+}
+
+func TestRingHealthExecutor_NilReturnsError(t *testing.T) {
+	factory := createTestFactory()
+	logger := pkgtesting.NewMockLogger(true)
+	// ringHealthExecutor is nil — engine must return a clear error.
+	engine := NewEngine(factory, logger, nil, nil)
+
+	wf := Workflow{
+		Name: "ring-health-nil-test",
+		Steps: []Step{
+			{Name: "check-ring", Type: StepTypeQueryRingHealth},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when ring health executor is nil")
+	assert.Contains(t, final.GetError(), "ring health executor not configured")
+}
+
+func TestRingHealthExecutor_Injected_IsCalled(t *testing.T) {
+	factory := createTestFactory()
+	logger := pkgtesting.NewMockLogger(true)
+
+	exec := &testRingHealthExecutor{
+		result: StepResult{Status: StatusCompleted, Output: map[string]interface{}{
+			"on_version_pct": 75.0,
+			"failed_pct":     5.0,
+			"pending_count":  3,
+		}},
+	}
+	engine := NewEngine(factory, logger, nil, exec)
+
+	wf := Workflow{
+		Name: "ring-health-dispatch-test",
+		Steps: []Step{
+			{Name: "check-ring", Type: StepTypeQueryRingHealth},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus())
+	assert.True(t, exec.called, "ring health executor must have been invoked")
+}
+
+// testRingHealthExecutor is a minimal test-local RingHealthStepExecutor.
+type testRingHealthExecutor struct {
+	result StepResult
+	err    error
+	called bool
+}
+
+func (e *testRingHealthExecutor) ExecuteRingHealthStep(_ context.Context, _ Step, _ *WorkflowExecution) (StepResult, error) {
+	e.called = true
+	return e.result, e.err
 }

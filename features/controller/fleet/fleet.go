@@ -91,14 +91,15 @@ func ParseTargetSelector(s string) (Filter, error) {
 // StewardResult is a device record returned by a fleet query.
 // Contains enough information for targeting decisions without a full DNA dump.
 type StewardResult struct {
-	ID            string
-	TenantID      string
-	Hostname      string
-	OS            string
-	Architecture  string
-	Status        string
-	LastHeartbeat time.Time
-	DNAAttributes map[string]string
+	ID             string
+	TenantID       string
+	Hostname       string
+	OS             string
+	Architecture   string
+	Status         string
+	LastHeartbeat  time.Time
+	DNAAttributes  map[string]string
+	RunningVersion string // populated from the steward.version DNA attribute (Issue #2260)
 }
 
 // FleetQuery is the single query path for all device filtering.

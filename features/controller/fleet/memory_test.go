@@ -286,10 +286,11 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 				Status:        "online",
 				LastHeartbeat: now,
 				DNAAttributes: map[string]string{
-					"hostname": "my-host",
-					"os":       "linux",
-					"arch":     "arm64",
-					"custom":   "value",
+					"hostname":       "my-host",
+					"os":             "linux",
+					"arch":           "arm64",
+					"custom":         "value",
+					"steward.version": "v1.5.3",
 				},
 			},
 		},
@@ -309,6 +310,27 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 	assert.Equal(t, "online", r.Status)
 	assert.WithinDuration(t, now, r.LastHeartbeat, time.Second)
 	assert.Equal(t, "value", r.DNAAttributes["custom"])
+	assert.Equal(t, "v1.5.3", r.RunningVersion, "RunningVersion must be populated from steward.version DNA attribute")
+}
+
+func TestMemoryQuery_StewardResult_RunningVersionEmpty_WhenDNAAbsent(t *testing.T) {
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:       "no-version",
+				TenantID: "tenant-x",
+				Status:   "online",
+				// No steward.version in DNAAttributes
+				DNAAttributes: map[string]string{"hostname": "host-a"},
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "", results[0].RunningVersion, "RunningVersion must be empty when steward.version DNA attribute is absent")
 }
 
 func TestMemoryQuery_TenantScoping_IsolatesData(t *testing.T) {

@@ -29,25 +29,35 @@ type TransformStepExecutor interface {
 	ExecuteTransformStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
+// RingHealthStepExecutor executes a workflow step of type query_ring_health.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers pass *nodes.RingHealthNodeExecutor.
+type RingHealthStepExecutor interface {
+	ExecuteRingHealthStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory     ModuleLoader
-	logger            *logging.ModuleLogger
-	executions        map[string]*WorkflowExecution
-	workflows         map[string]Workflow
-	mutex             sync.RWMutex
-	httpClient        *HTTPClient
-	providerRegistry  *ProviderRegistry
-	errorHandler      ErrorHandler
-	syncManager       *SyncManager
-	debugEngine       *DebugEngineImpl
-	transformExecutor TransformStepExecutor
+	moduleFactory      ModuleLoader
+	logger             *logging.ModuleLogger
+	executions         map[string]*WorkflowExecution
+	workflows          map[string]Workflow
+	mutex              sync.RWMutex
+	httpClient         *HTTPClient
+	providerRegistry   *ProviderRegistry
+	errorHandler       ErrorHandler
+	syncManager        *SyncManager
+	debugEngine        *DebugEngineImpl
+	transformExecutor  TransformStepExecutor
+	ringHealthExecutor RingHealthStepExecutor
 }
 
 // NewEngine creates a new workflow engine instance.
-// transformExecutor handles StepTypeTransform steps; pass nil if transform steps
-// are not used (executeStep will return an error for any transform step encountered).
-func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecutor TransformStepExecutor) *Engine {
+// transformExecutor handles StepTypeTransform steps; pass nil if transform steps are not used.
+// ringHealthExecutor handles StepTypeQueryRingHealth steps; pass nil if ring-health steps are not used.
+// executeStep returns a clear error for any step type whose executor is nil.
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -67,15 +77,16 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecu
 	providerRegistry := NewProviderRegistry(logger)
 
 	engine := &Engine{
-		moduleFactory:     moduleFactory,
-		logger:            workflowLogger,
-		executions:        make(map[string]*WorkflowExecution),
-		workflows:         make(map[string]Workflow),
-		httpClient:        httpClient,
-		providerRegistry:  providerRegistry,
-		errorHandler:      NewDefaultErrorHandler(),
-		syncManager:       NewSyncManager(),
-		transformExecutor: transformExecutor,
+		moduleFactory:      moduleFactory,
+		logger:             workflowLogger,
+		executions:         make(map[string]*WorkflowExecution),
+		workflows:          make(map[string]Workflow),
+		httpClient:         httpClient,
+		providerRegistry:   providerRegistry,
+		errorHandler:       NewDefaultErrorHandler(),
+		syncManager:        NewSyncManager(),
+		transformExecutor:  transformExecutor,
+		ringHealthExecutor: ringHealthExecutor,
 	}
 
 	// Initialize debug engine
@@ -461,6 +472,14 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 			var transformResult StepResult
 			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
 			execution.SetStepResult(step.Name, transformResult)
+		}
+	case StepTypeQueryRingHealth:
+		if e.ringHealthExecutor == nil {
+			err = fmt.Errorf("ring health executor not configured")
+		} else {
+			var rhResult StepResult
+			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
+			execution.SetStepResult(step.Name, rhResult)
 		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
