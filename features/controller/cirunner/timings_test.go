@@ -74,6 +74,18 @@ func TestProvisionTimings_CheckpointDurations(t *testing.T) {
 	}
 	assert.True(t, ptNoCheckpoint.Valid(), "checkpoint fields are optional")
 	assert.NotContains(t, ptNoCheckpoint.String(), "checkpoint")
+
+	// Partial checkpoint state (created but never reverted): String must still
+	// omit checkpoint info — the append requires BOTH milestones.
+	ptCreateOnly := ptNoCheckpoint
+	ptCreateOnly.CheckpointCreatedAt = base.Add(25 * time.Second)
+	assert.True(t, ptCreateOnly.Valid(), "partial checkpoint state stays valid")
+	assert.NotContains(t, ptCreateOnly.String(), "checkpoint")
+
+	ptRevertOnly := ptNoCheckpoint
+	ptRevertOnly.CheckpointRevertedAt = base.Add(25 * time.Second)
+	assert.True(t, ptRevertOnly.Valid(), "partial checkpoint state stays valid")
+	assert.NotContains(t, ptRevertOnly.String(), "checkpoint")
 }
 
 // TestProvisionTimings_Invalid covers non-monotonic and incomplete milestone
