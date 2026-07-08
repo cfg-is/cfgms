@@ -73,7 +73,16 @@ behavioral_envelope:
     Remove-ClusterAccess (grant/revoke a node computer account's cluster-management
     access) — a PRIVILEGED, controller-orchestrated action tied to node lifecycle,
     NOT reachable from routine cluster cfg convergence (a lateral-movement
-    primitive). All arguments travel via
+    primitive). The VM STORAGE-LOCATION cmdlets (#2411) are: Move-VMStorage
+    (live, non-destructive storage migration homing a VM's configuration files
+    and disks at the directory of its declared vhd_path — a synchronous
+    config-only move at create, and a converge-time full migration dispatched
+    as a DETACHED powershell.exe -File process because the migration outlives
+    the executor's per-module-call deadline; directory-level, file names never
+    change; tracked on a durable move record, never a stop/delete/recreate)
+    and Get-Volume (read-only free-space preflight on the destination volume
+    before any migration is dispatched).
+    All arguments travel via
     ArgumentList (never string-composed). Cluster FORMATION cmdlets
     (New-Cluster, Add-ClusterNode, Remove-ClusterNode, quorum) are NOT declared
     and out of scope. This envelope change requires ADR-006 module re-signing

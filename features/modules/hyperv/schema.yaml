@@ -18,7 +18,16 @@ resources:
         minimum: 1
       vhd_path:
         type: string
-        description: Absolute Windows path to the VHD/VHDX file (e.g. C:\\VMs\\disk.vhdx)
+        description: >
+          Absolute Windows path to the VHD/VHDX file (e.g.
+          C:\\VMs\\disk.vhdx). The containing directory is the VM's storage
+          HOME (#2411): configuration files, checkpoints, smart-paging files,
+          and all attached disks belong there. Creation places everything at
+          the home; changing the directory on an existing VM converges via a
+          live, non-destructive Move-VMStorage migration (async, tracked on a
+          durable move record; the VM is never stopped or recreated).
+          Directory-level only — changing just the file name does not converge
+          (Move-VMStorage ignores renames).
       switch_name:
         description: >
           The VM's FULL desired network, declared on the VM. Accepts either a

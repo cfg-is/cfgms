@@ -80,6 +80,12 @@ type hypervModule struct {
 	// WithProvisionStore.
 	provisionStore ProvisionStore
 
+	// fallbackMoveStore backs the storage-location move records (#2411) when
+	// provisionStore does not implement MoveStore (both in-repo stores do; this
+	// exists so a custom ProvisionStore cannot panic the move path). Lazily
+	// created by moveStore().
+	fallbackMoveStore *memProvisionStore
+
 	// profileStore loads unattended-install profiles referenced as
 	// profile://<name> in a VM source (ADR-009 §7). It is wired from the
 	// controller's stored-config backend in Configure() when a "config_store"

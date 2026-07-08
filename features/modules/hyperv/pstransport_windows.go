@@ -261,6 +261,56 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 	return string(out), nil
 }
 
+// runDetached launches a single Cfgms-* expression in a DETACHED fresh
+// powershell.exe -File process and returns as soon as the process has
+// started — it never waits for completion. This is REQUIRED for the live
+// storage migration (Cfgms-MoveVMStorage): the move can run for minutes to
+// hours, far past the executor's per-module-call deadline (ADR-012 §7), so
+// the module call must not hold it open. The MoveRecord written by the Go
+// caller is the source of truth for "started"; the detached function writes
+// a per-VM error marker on failure, and completion is judged by the converge
+// loop re-observing the VM's location.
+//
+// The temp script is preamble + expression, exactly like runFresh, with a
+// trailing self-delete (Go cannot remove the file while the child holds it
+// open; PowerShell parses the whole script before executing, so the script
+// deleting itself on its last line is safe). A background goroutine reaps
+// the process handle and removes the script if the self-delete never ran
+// (e.g. a parse-stage failure). No ctx: cancelling the dispatching call must
+// not kill an already-started migration — Windows children outlive their
+// parent, which is also what lets the move survive a steward restart.
+func (t *psHostTransport) runDetached(expression string) (string, error) {
+	f, err := os.CreateTemp("", "cfgms-moveop-*.ps1")
+	if err != nil {
+		return "", fmt.Errorf("hyperv-ps-host: create temp move script: %w", err)
+	}
+	tmpPath := f.Name()
+	body := psHostPreamble + "\n" + expression + "\n" +
+		"Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+	if _, werr := io.WriteString(f, body); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hyperv-ps-host: write temp move script: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hyperv-ps-host: close temp move script: %w", cerr)
+	}
+
+	cmd := exec.Command("powershell.exe",
+		"-NoProfile", "-NonInteractive", "-File", tmpPath,
+	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
+	if serr := cmd.Start(); serr != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hyperv-ps-host: start detached move process: %w", serr)
+	}
+	go func() {
+		_ = cmd.Wait()
+		_ = os.Remove(tmpPath) // no-op when the script already self-deleted
+	}()
+	return "", nil
+}
+
 func (t *psHostTransport) run(_ context.Context, expression string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
