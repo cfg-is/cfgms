@@ -102,6 +102,9 @@ type Executor struct {
 	// and verifyChanges. Derived from ModuleCallTimeoutSec at construction; defaults
 	// to 120 s when the config field is zero or negative (ADR-012 §7).
 	moduleCallTimeout time.Duration
+
+	// Monitor engine fields (Issue #2435). Protected by monitorMu except where noted.
+	monitorFields
 }
 
 // NewExecutor creates an Executor. When cfg.Factory is nil, an empty registry and

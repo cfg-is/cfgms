@@ -28,13 +28,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
@@ -51,27 +49,6 @@ import (
 // (derived from MAC + hostname) changes between convergence cycles, indicating a
 // VM/container migration or hardware change that requires manual reconciliation.
 var ErrDNAIDMismatch = errors.New("DNA-ID mismatch: manual reconciliation required")
-
-// monitorQueueCapacity is the maximum number of ChangeEvents the fan-in channel
-// can buffer. When full, events are shed to the next scheduled convergence pass.
-const monitorQueueCapacity = 64
-
-// monitorEntry pairs a module's Monitor with its resource configuration.
-// Used to fan-in ChangeEvents and dispatch targeted reconciles.
-type monitorEntry struct {
-	resourceID string
-	resource   config.ResourceConfig
-	monitor    modules.Monitor
-}
-
-// bundleNameFromModuleRef extracts the module bundle name from a module reference.
-// "hyperv.vm" → "hyperv"; "file" → "file".
-func bundleNameFromModuleRef(moduleRef string) string {
-	if idx := strings.IndexByte(moduleRef, '.'); idx >= 0 {
-		return moduleRef[:idx]
-	}
-	return moduleRef
-}
 
 // Steward manages configuration for a single endpoint in standalone mode.
 //
@@ -107,43 +84,14 @@ type Steward struct {
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
 
-	// monitors holds active monitor entries started on cfg load.
-	// Each entry has had Monitor(ctx, resourceID, desired) called on it.
-	monitors []monitorEntry
-
-	// debounceWindow is the per-resource debounce interval for monitor events.
-	// Events for the same resourceID within this window are coalesced into one
-	// targeted reconcile. Defaults to 1500ms; override via export_test.go in tests.
-	debounceWindow time.Duration
-
-	// monitorFanInCap overrides the fan-in channel capacity when non-zero.
-	// Tests set a small value (e.g. 2) to guarantee queue overflow without
-	// relying on scheduler timing. Production code always uses monitorQueueCapacity.
-	monitorFanInCap int
-
-	// monitorState caches the latest ChangeEvent.Details.AsMap() per
-	// resourceID for every actively-monitored resource (#2423). It feeds
-	// CollectModuleDNAAttributes — the module half of the DNA attribute set —
-	// and holds only the latest snapshot per resource (last-write-wins, no
-	// history). Entries are evicted when the resource's monitor forwarding
-	// goroutine exits (module Close / steward shutdown), so a resource that
-	// leaves monitoring disappears from the next CollectAttributes map and
-	// PublishDNAUpdate's delta compression signals the removal.
-	monitorStateMu sync.Mutex
-	monitorState   map[string]map[string]interface{}
-
 	// monitorDNARefreshes counts DNA snapshot refreshes triggered by a
-	// monitor-driven targeted reconcile that applied changes. In controller mode
-	// the same post-reconcile path updates the heartbeat currentDNAHash; this
-	// counter makes the early (pre-scheduled-tick) refresh observable in
-	// standalone tests. Read via export_test.go.
+	// monitor-driven targeted reconcile that applied changes (standalone only).
+	// Read via export_test.go.
 	monitorDNARefreshes atomic.Int64
 
 	// wg tracks the convergence loop goroutine and the health monitor goroutine
 	// for clean shutdown.
 	wg sync.WaitGroup
-	// monitorWg tracks fan-in and event-loop goroutines started by startMonitors.
-	monitorWg sync.WaitGroup
 
 	// Shutdown coordination
 	shutdown chan struct{}
@@ -270,7 +218,6 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		executor:         executor,
 		dnaCollector:     dnaCollector,
 		driftDetector:    driftDetector,
-		debounceWindow:   1500 * time.Millisecond,
 		shutdown:         make(chan struct{}),
 	}, nil
 }
@@ -511,326 +458,29 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// startMonitors iterates the cfg resources, loads each module from the factory,
-// type-asserts modules.Monitor, and calls Monitor(ctx, resourceID, desired) for
-// each module that implements the interface. A fan-in goroutine forwards all
-// ChangeEvents to a single dispatch loop that calls runTargetedReconcile.
-//
-// Modules that do not implement Monitor are silently skipped — they fall back
-// to the scheduled convergence interval. This is always the case today; the
-// first Monitor implementation (Hyper-V) lands in S2.
+// startMonitors delegates to the executor's monitor engine, registering a
+// standalone-mode reconcile observer that refreshes DNA snapshots and increments
+// monitorDNARefreshes when a targeted reconcile applies changes.
 func (s *Steward) startMonitors(ctx context.Context) {
-	var entries []monitorEntry
-
-	for _, resource := range s.standaloneConfig.Resources {
-		bundle := bundleNameFromModuleRef(resource.Module)
-
-		mod, err := s.moduleFactory.LoadModule(bundle)
-		if err != nil || mod == nil {
-			continue
-		}
-
-		mon, ok := mod.(modules.Monitor)
-		if !ok {
-			continue
-		}
-
-		resourceID := s.executor.GetResourceID(resource)
-		desired := execution.NewConfigState(resource.Config)
-
-		if err := mon.Monitor(ctx, resourceID, desired); err != nil {
-			s.logger.Warn("Failed to start module monitor",
-				"resource", resource.Name,
+	// Register the standalone-specific post-reconcile observer before starting
+	// the engine so the first reconcile already has it wired.
+	s.executor.SetMonitorReconcileObserver(func(rCtx context.Context, resourceID string) {
+		s.monitorDNARefreshes.Add(1)
+		if _, err := s.detectUnmanagedDNADrift(rCtx); err != nil {
+			s.logger.Warn("DNA refresh after targeted reconcile returned error",
 				"resource_id", logging.SanitizeLogValue(resourceID),
 				"error", err)
-			continue
 		}
-
-		entries = append(entries, monitorEntry{
-			resourceID: resourceID,
-			resource:   resource,
-			monitor:    mon,
-		})
-	}
-
-	if len(entries) == 0 {
-		return
-	}
-
-	s.monitors = entries
-
-	// Fan-in: one forwarding goroutine per monitor channel; all send to fanIn.
-	// fanIn is bounded at monitorQueueCapacity; excess events are shed to the
-	// next scheduled convergence pass (non-blocking drop with Warn log).
-	fanInCap := monitorQueueCapacity
-	if s.monitorFanInCap > 0 {
-		fanInCap = s.monitorFanInCap
-	}
-	fanIn := make(chan modules.ChangeEvent, fanInCap)
-	for _, entry := range entries {
-		ch := entry.monitor.Changes()
-		s.monitorWg.Add(1)
-		go func(ch <-chan modules.ChangeEvent) {
-			defer s.monitorWg.Done()
-			// seen tracks every resourceID this goroutine cached module-DNA
-			// state for (#2423), so all of them are evicted when monitoring
-			// stops — the channel closing (module Close), ctx cancel, or
-			// steward shutdown. Eviction keys on what was actually cached,
-			// not the entry's own resourceID, because a module may emit
-			// events for more than one resourceID on a single channel.
-			seen := make(map[string]struct{})
-			defer func() { s.evictMonitorState(seen) }()
-			for {
-				select {
-				case evt, ok := <-ch:
-					if !ok {
-						return
-					}
-					// Cache the latest observed state BEFORE the non-blocking
-					// send, so even a shed event still refreshes the module
-					// DNA snapshot (#2423).
-					if s.cacheMonitorState(evt) {
-						seen[evt.ResourceID] = struct{}{}
-					}
-					// Non-blocking send: if the queue is full, shed this event to
-					// the next scheduled convergence pass and log at Warn.
-					select {
-					case fanIn <- evt:
-					default:
-						s.logger.Warn("Monitor event queue full, event shed to scheduled poll",
-							"resource_id", logging.SanitizeLogValue(evt.ResourceID))
-					}
-				case <-ctx.Done():
-					return
-				case <-s.shutdown:
-					return
-				}
-			}
-		}(ch)
-	}
-
-	s.monitorWg.Add(1)
-	go func() {
-		defer s.monitorWg.Done()
-		s.monitorEventLoop(ctx, fanIn)
-	}()
-}
-
-// monitorEventLoop reads ChangeEvents from the fan-in channel and dispatches
-// debounced targeted reconciles. Multiple events for the same resourceID within
-// the debounce window are coalesced into a single runTargetedReconcile call.
-// Exits when the context is cancelled or the shutdown channel is closed.
-func (s *Steward) monitorEventLoop(ctx context.Context, events <-chan modules.ChangeEvent) {
-	// fireCh receives debounced resourceIDs after their timer window elapses.
-	// Buffered to avoid blocking the timer goroutines under load.
-	fireCh := make(chan string, 16)
-	// debounce maps resourceID → pending AfterFunc timer.
-	debounce := make(map[string]*time.Timer)
-	// afterFuncWg tracks in-flight AfterFunc goroutines so monitorEventLoop
-	// does not return (and monitorWg.Done() is not called) until every timer
-	// callback has exited. Without this, a timer that fires concurrently with
-	// Stop() outlives monitorWg.Wait() and is caught by goleak as a leak.
-	var afterFuncWg sync.WaitGroup
-
-	defer func() {
-		// Stop pending timers. t.Stop() returns true only if the timer has not
-		// yet fired — in that case the goroutine will never run, so we call
-		// Done() ourselves to balance the Add(1) from below. If t.Stop()
-		// returns false the goroutine is already running; it will call Done().
-		for _, t := range debounce {
-			if t.Stop() {
-				afterFuncWg.Done()
-			}
-		}
-		// Wait for any in-flight AfterFunc goroutines to exit. They observe
-		// s.shutdown (already closed) via their select and return promptly.
-		afterFuncWg.Wait()
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.shutdown:
-			return
-		case evt, ok := <-events:
-			if !ok {
-				return
-			}
-			s.logger.Info("Monitor change event received",
-				"resource_id", logging.SanitizeLogValue(evt.ResourceID),
-				"change_type", evt.ChangeType)
-			resourceID := evt.ResourceID
-			if _, exists := debounce[resourceID]; !exists {
-				// First event for this resourceID in the window — start the timer.
-				afterFuncWg.Add(1)
-				debounce[resourceID] = time.AfterFunc(s.debounceWindow, func() {
-					defer afterFuncWg.Done()
-					select {
-					case fireCh <- resourceID:
-					case <-ctx.Done():
-					case <-s.shutdown:
-					}
-				})
-			}
-			// Duplicate events within the window are coalesced — the existing
-			// timer will fire once after the debounce window elapses.
-		case resourceID := <-fireCh:
-			delete(debounce, resourceID)
-			s.runTargetedReconcile(ctx, resourceID)
-		}
+	})
+	if err := s.executor.StartMonitors(ctx, s.standaloneConfig.Resources); err != nil {
+		s.logger.Warn("Failed to start module monitors", "error", err)
 	}
 }
 
-// cacheMonitorState stores the latest ChangeEvent Details snapshot for a
-// resourceID (#2423). Returns true when a snapshot was cached (the caller
-// tracks the ID for eviction). Nil Details or an empty ResourceID cache
-// nothing. The snapshot is shallow-copied so a module mutating the map it
-// returned from AsMap cannot race the flattener.
-func (s *Steward) cacheMonitorState(evt modules.ChangeEvent) bool {
-	if evt.ResourceID == "" || evt.Details == nil {
-		return false
-	}
-	snap := evt.Details.AsMap()
-	if snap == nil {
-		return false
-	}
-	copied := make(map[string]interface{}, len(snap))
-	for k, v := range snap {
-		copied[k] = v
-	}
-	s.monitorStateMu.Lock()
-	if s.monitorState == nil {
-		s.monitorState = make(map[string]map[string]interface{})
-	}
-	s.monitorState[evt.ResourceID] = copied
-	s.monitorStateMu.Unlock()
-	return true
-}
-
-// evictMonitorState removes the given resourceIDs from the module-DNA cache
-// (#2423). Called when a monitor forwarding goroutine exits, so a resource
-// that leaves monitoring actually disappears from the map returned by
-// CollectModuleDNAAttributes — PublishDNAUpdate's delta compression turns the
-// missing key into the "this is gone" signal on the next publish.
-func (s *Steward) evictMonitorState(resourceIDs map[string]struct{}) {
-	if len(resourceIDs) == 0 {
-		return
-	}
-	s.monitorStateMu.Lock()
-	for id := range resourceIDs {
-		delete(s.monitorState, id)
-	}
-	s.monitorStateMu.Unlock()
-}
-
-// CollectModuleDNAAttributes returns a flattened, namespaced snapshot of every
-// actively-monitored module resource's latest observed state (#2423), built
-// purely from the generic ConfigState.AsMap() — no module-specific types.
-//
-// Key convention (documented in docs/architecture/steward-operating-model.md):
-//   - every key is "<resourceID>.<field>" with the resourceID VERBATIM — e.g.
-//     "cluster:cfg-lab.member_nodes"; the colon stays, and no module-name
-//     prefix is added (the resourceID is the module's own ChangeEvent scheme)
-//   - nested map keys join with "."  → "cluster:cfg-lab.resource_owner.web-01"
-//   - slice values join with ","     → "CFG-70-02,CFG-AB-02"
-//   - any other value stringifies via fmt.Sprintf("%v", v)
-//
-// The result rides the existing DNA refresh/publish pipeline exactly as
-// hardware facts do (merged by the composite collector in cmd/steward);
-// last-write-wins per resource, eventually consistent by design.
-func (s *Steward) CollectModuleDNAAttributes(_ context.Context) map[string]string {
-	out := make(map[string]string)
-	s.monitorStateMu.Lock()
-	defer s.monitorStateMu.Unlock()
-	for resourceID, snap := range s.monitorState {
-		for field, v := range snap {
-			flattenDNAValue(resourceID+"."+field, v, out)
-		}
-	}
-	return out
-}
-
-// flattenDNAValue flattens one value into out under key, per the convention
-// documented on CollectModuleDNAAttributes. It handles the ConfigState.AsMap
-// shapes that occur in practice (string, bool, ints, []string, []interface{},
-// map[string]string, nested map[string]interface{}) and falls back to
-// fmt.Sprintf("%v") for anything else — never panics on an unexpected type.
-func flattenDNAValue(key string, v interface{}, out map[string]string) {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		for k, sub := range val {
-			flattenDNAValue(key+"."+k, sub, out)
-		}
-	case map[string]string:
-		for k, sub := range val {
-			out[key+"."+k] = sub
-		}
-	case []string:
-		out[key] = strings.Join(val, ",")
-	case []interface{}:
-		parts := make([]string, 0, len(val))
-		for _, e := range val {
-			parts = append(parts, fmt.Sprintf("%v", e))
-		}
-		out[key] = strings.Join(parts, ",")
-	case string:
-		out[key] = val
-	default:
-		out[key] = fmt.Sprintf("%v", val)
-	}
-}
-
-// runTargetedReconcile finds the ResourceConfig whose module-internal ID matches
-// resourceID and calls ExecuteResource for it. The ChangeEvent that triggered
-// this call is treated as a hint only — current state is read via module.Get()
-// and desired state comes from the cfg ResourceConfig, never from the event.
-//
-// If resourceID is not present in cfg (unmanaged resource), the call is a no-op.
-// Both ctx.Done() and s.shutdown are checked before the reconcile so a shutdown
-// mid-dispatch exits cleanly without calling Set after Close().
-//
-// When the reconcile changes state (ChangesApplied), a fresh DNA snapshot is
-// collected so the next heartbeat reflects the corrected state before the
-// scheduled convergence tick fires.
-func (s *Steward) runTargetedReconcile(ctx context.Context, resourceID string) {
-	select {
-	case <-ctx.Done():
-		return
-	case <-s.shutdown:
-		return
-	default:
-	}
-
-	for _, resource := range s.standaloneConfig.Resources {
-		if s.executor.GetResourceID(resource) == resourceID {
-			s.logger.Info("Running targeted reconcile for monitored resource",
-				"resource", resource.Name,
-				"resource_id", logging.SanitizeLogValue(resourceID))
-			result := s.executor.ExecuteResource(ctx, resource)
-			if result.ChangesApplied {
-				s.logger.Info("Targeted reconcile changed state, refreshing DNA snapshot",
-					"resource", resource.Name,
-					"resource_id", logging.SanitizeLogValue(resourceID))
-				// Record the early DNA refresh BEFORE collecting it. In controller
-				// mode the same post-reconcile path updates the heartbeat
-				// currentDNAHash before the next scheduled convergence tick; this
-				// counter makes that observable in tests. It is incremented ahead of
-				// the (potentially slow) collection so the "a monitor-driven refresh
-				// was triggered" signal is observable even while collection runs.
-				s.monitorDNARefreshes.Add(1)
-				if _, err := s.detectUnmanagedDNADrift(ctx); err != nil {
-					s.logger.Warn("DNA refresh after targeted reconcile returned error",
-						"resource", resource.Name,
-						"error", err)
-				}
-			}
-			return
-		}
-	}
-
-	s.logger.Info("Monitor event for unmanaged resource (not in cfg, skipping)",
-		"resource_id", logging.SanitizeLogValue(resourceID))
+// CollectModuleDNAAttributes delegates to the executor's monitor engine.
+// See execution.Executor.CollectModuleDNAAttributes for the key convention.
+func (s *Steward) CollectModuleDNAAttributes(ctx context.Context) map[string]string {
+	return s.executor.CollectModuleDNAAttributes(ctx)
 }
 
 // Stop gracefully shuts down the steward and cleans up resources.
@@ -866,10 +516,10 @@ func (s *Steward) Stop(ctx context.Context) error {
 	// Wait for the convergence loop goroutine to exit.
 	s.wg.Wait()
 
-	// Wait for all monitor goroutines (fan-in + event loop) to exit.
-	// This guarantees no further ExecuteResource calls after Close() is called
-	// on the monitors below.
-	s.monitorWg.Wait()
+	// Stop the monitor engine: waits for all fan-in + event-loop goroutines to
+	// exit, then closes all monitor instances. Must happen before UnloadAllModules
+	// so no further ChangeEvents are produced after module Close().
+	s.executor.StopMonitors()
 
 	// Close drift detector
 	if s.driftDetector != nil {
@@ -882,17 +532,6 @@ func (s *Steward) Stop(ctx context.Context) error {
 	if s.secretStore != nil {
 		if err := s.secretStore.Close(); err != nil {
 			s.logger.Warn("Failed to close secret store", "error", err)
-		}
-	}
-
-	// Close all active monitors before unloading modules.
-	// Closing the monitor releases any OS-level watchers and signals to the
-	// module that no further ChangeEvents will be produced.
-	for _, entry := range s.monitors {
-		if err := entry.monitor.Close(); err != nil {
-			s.logger.Warn("Failed to close monitor",
-				"resource_id", logging.SanitizeLogValue(entry.resourceID),
-				"error", err)
 		}
 	}
 
