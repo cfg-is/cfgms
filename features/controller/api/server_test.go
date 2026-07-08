@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -1681,6 +1683,101 @@ func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
 	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
 	assert.Contains(t, overlapping, "api-key:create",
 		"overlapping_permissions must name the Tier-3 permission held by the key")
+}
+
+// --- Issue #2373: lazy route registration tests --------------------------------
+
+// TestServer_WorkflowRoutesLiveAfterSetWorkflowHandler verifies that
+// POST /api/v1/workflows is reachable when SetWorkflowHandler is called after
+// New() — the production ordering in server.go. Before the fix, setupRouter()
+// baked the nil-check at construction time, so routes were permanently absent.
+func TestServer_WorkflowRoutesLiveAfterSetWorkflowHandler(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Wire handler AFTER construction — mirrors production ordering in server.go.
+	handler, _ := newTestWorkflowHandler(t)
+	server.SetWorkflowHandler(handler)
+
+	// Without auth: must return 401 (route registered, auth enforced), not 404 (absent).
+	req := httptest.NewRequest("POST", "/api/v1/workflows", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusNotFound, rec.Code,
+		"POST /api/v1/workflows must be registered after SetWorkflowHandler is called post-construction")
+}
+
+// TestServer_ReportsRoutesLiveAfterSetReportsHandler verifies that
+// GET /api/v1/reports/templates is reachable when SetReportsHandler is called
+// after New() — the production ordering in server.go (Issue #2373).
+func TestServer_ReportsRoutesLiveAfterSetReportsHandler(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Wire handler AFTER construction — mirrors production ordering in server.go.
+	handler := reportapi.New(nil, nil, logging.NewNoopLogger())
+	server.SetReportsHandler(handler)
+
+	// Without auth: must return 401 (route registered), not 404 (absent).
+	req := httptest.NewRequest("GET", "/api/v1/reports/templates", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusNotFound, rec.Code,
+		"GET /api/v1/reports/templates must be registered after SetReportsHandler is called post-construction")
+}
+
+// TestServer_RollbackRoutesLiveAfterSetRollbackManager verifies that rollback
+// routes are registered when SetRollbackManager is called after New() (the
+// production ordering), and that the config/rollback permission gate is enforced
+// (Issue #2373).
+func TestServer_RollbackRoutesLiveAfterSetRollbackManager(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Wire manager AFTER construction — always unconditional in server.go line 1094.
+	server.SetRollbackManager(&testRollbackManager{})
+
+	t.Run("route_exists", func(t *testing.T) {
+		// Without auth: must return 401, not 404.
+		req := httptest.NewRequest("GET", "/api/v1/rollback/points", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.NotEqual(t, http.StatusNotFound, rec.Code,
+			"GET /api/v1/rollback/points must be registered after SetRollbackManager is called post-construction")
+	})
+
+	t.Run("permission_gate_enforced", func(t *testing.T) {
+		// With auth but without config:rollback permission: must return 403, not 200.
+		keyWithoutRollback := NewTestKey(t, server, []string{"steward:read"})
+		req := httptest.NewRequest("GET", "/api/v1/rollback/points", nil)
+		req.Header.Set("X-API-Key", keyWithoutRollback)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"rollback route must enforce config/rollback permission gate even when registered lazily")
+	})
+}
+
+// TestServer_LazyRoutesInheritAPIV1MiddlewareChain verifies that lazily-registered
+// workflow routes inherit the full /api/v1 middleware chain. An unauthenticated
+// request must be rejected with 401 — never pass through (200) or be absent (404)
+// (Issue #2373).
+func TestServer_LazyRoutesInheritAPIV1MiddlewareChain(t *testing.T) {
+	server := setupTestServer(t)
+	handler, _ := newTestWorkflowHandler(t)
+	server.SetWorkflowHandler(handler)
+
+	req := httptest.NewRequest("POST", "/api/v1/workflows", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusNotFound, rec.Code,
+		"workflow route must be registered (404 means the route was not added to the /api/v1 subrouter)")
+	assert.NotEqual(t, http.StatusOK, rec.Code,
+		"unauthenticated request must not reach the workflow handler")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"unauthenticated request to /api/v1/workflows must be rejected by auth middleware with 401")
 }
 
 // TestStartupScan_NoWarnForUnprivilegedKey verifies that scanAPIKeysForPrivilegedAccess

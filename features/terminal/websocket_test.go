@@ -732,11 +732,17 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 	// how fast the WebSocket consumer drains the buffer.
 	ctx := context.Background()
 	done := make(chan struct{})
+	var floodErr error
 	go func() {
 		defer close(done)
 		for i := 0; i < 1000; i++ {
 			if err := session.HandleOutput(ctx, []byte("x")); err != nil {
-				t.Errorf("HandleOutput returned unexpected error: %v", err)
+				// Report via a channel-guarded variable rather than calling t.Errorf
+				// here: if HandleOutput ever blocks past the deadline below, this
+				// goroutine outlives the test and a direct t.Errorf would panic with
+				// "Fail in goroutine after test has completed". The main goroutine
+				// inspects floodErr only after observing done, so the read is safe.
+				floodErr = err
 				return
 			}
 		}
@@ -745,6 +751,7 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 	select {
 	case <-done:
 		// All 1000 calls completed — non-blocking behaviour confirmed.
+		require.NoError(t, floodErr, "HandleOutput returned unexpected error")
 	case <-time.After(10 * time.Second):
 		t.Fatal("HandleOutput blocked: 1000 iterations did not complete within 10 s; likely blocking on full output channel")
 	}

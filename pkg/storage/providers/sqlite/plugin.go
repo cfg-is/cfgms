@@ -145,16 +145,19 @@ func openDB(path string) (*sql.DB, error) {
 	const pragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
 
 	var dsn string
+	inMemory := false
 	switch {
 	case path == ":memory:":
 		// Shared cache so multiple connections in tests see the same data.
 		dsn = "file::memory:?cache=shared&" + pragmas
+		inMemory = true
 	case strings.HasPrefix(path, "file:"):
 		sep := "?"
 		if strings.Contains(path, "?") {
 			sep = "&"
 		}
 		dsn = path + sep + pragmas
+		inMemory = strings.Contains(path, "mode=memory") || strings.Contains(path, ":memory:")
 	default:
 		dsn = "file:" + path + "?" + pragmas
 	}
@@ -163,6 +166,35 @@ func openDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to open %s: %w", path, err)
 	}
+
+	if inMemory {
+		// Shared-cache in-memory databases must be pinned to a single connection.
+		//
+		// Two failure modes are eliminated by capping the pool at one connection:
+		//
+		//  1. Schema-init deadlock. With an unbounded pool, database/sql may open a
+		//     second connection to the same shared-cache in-memory DB while the
+		//     schema-init transaction on the first connection still holds a write
+		//     lock. Shared-cache table locks are not released until that
+		//     transaction commits, and modernc.org/sqlite's busy handler retries
+		//     the blocked sibling, so it spins inside _sqlite3VdbeExec instead of
+		//     returning — surfacing as an indefinite hang under full-suite
+		//     parallelism (the TestHandleRegister_* suite timeout). busy_timeout
+		//     does not bound shared-cache lock waits the way it bounds file locks.
+		//
+		//  2. Vanishing database. A named shared-cache in-memory DB exists only
+		//     while at least one connection to it is open. If the pool recycles the
+		//     last connection, the schema disappears mid-test.
+		//
+		// A single, never-recycled connection serializes access (correct for these
+		// low-throughput control stores) and keeps the named DB alive for the life
+		// of the *sql.DB. File-backed databases keep the concurrent WAL pool.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(0)
+		db.SetConnMaxIdleTime(0)
+	}
+
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: failed to ping %s: %w", path, err)
