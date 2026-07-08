@@ -141,12 +141,13 @@ is viable.
 **Deviations from the target workflow path (pre-existing gaps, filed for follow-up):**
 the `cirunner-provision.yaml` workflow could not run this sequence yet. The deployed
 lab controller predates the workflow-submission endpoint (`cfg workflow run` → 404),
-and two source-level gaps block it on any current build: the workflow engine
+and one source-level gap blocks it on any current build: the workflow engine
 registers the `github` APIProvider with a nil secrets store
 (`features/workflow/providers.go` — never re-injected with the controller's secret
-store), and the `github_runner` module is not registered in the steward module
-factory (`features/steward/factory/factory.go`), so the runner cfg cannot converge
-on a steward. The registration token for this run was minted directly against the
+store). The `github_runner` module is now registered in the steward factory
+(`features/steward/factory/factory.go` — Issue #2427); the operator-assisted
+registration used in this lab run was a point-in-time deviation, not a standing
+limitation. The registration token for this run was minted directly against the
 GitHub API (same endpoint the App-based provider calls) and delivered over an
 operator SSH session — never composed into a CFGMS command string. Sequence and
 timings otherwise mirror the workflow's steps 1–4.
@@ -192,7 +193,8 @@ auto-start) — runner `online` at the first API poll after the script exits.
 
 **Deviations for this run:** same workflow-path gaps as the Linux run above (token
 minted directly against the GitHub API; agent staged operator-side because the
-`github_runner` module is still not in the steward factory). Two additional lab
+`github_runner` module was not yet in the steward factory at the time of this lab
+run — that gap was closed by Issue #2427). Two additional lab
 findings recorded for follow-up: (1) the deployed v0.9.9 hyperv module rendered the
 pre-#2355 `--ca-cert` install flag, which no current steward accepts — resolved by
 push-upgrading the HV-host steward to v0.9.10 and staging a matching guest
