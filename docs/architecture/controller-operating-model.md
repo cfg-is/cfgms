@@ -327,8 +327,8 @@ For each steward, the controller tracks:
 | Last heartbeat | gRPC heartbeat calls | Configurable interval |
 | Health status | Heartbeat payload | With each heartbeat |
 | Compliance status | Convergence result reports | After each convergence run |
-| DNA hash | Heartbeat payload | With each heartbeat |
-| DNA snapshot | Full sync (data plane) or deltas (control plane) | On hash mismatch, initial registration, or as changes occur |
+| DNA aggregate root | Heartbeat payload | With each heartbeat |
+| DNA fragments | Full sync (initial) or partial-sync deltas (data plane); stored **versioned/append-only** | On root mismatch, initial registration, or as changes occur |
 | Steward version | Heartbeat `Version` field + `steward.version` DNA attribute | With each heartbeat and DNA delta |
 | Performance metrics | Steward metric uploads | Periodic + on-demand |
 

@@ -282,28 +282,28 @@ The steward continuously knows about itself. This information is collected indep
 
 ### DNA (Digital Native Attributes)
 
-A snapshot of the device's identity and state. For the authoritative per-attribute audit table — including platform coverage (Linux / Windows / macOS), sensitivity classification, collection path (fast vs. background), and gap tracking — see [DNA Collection Audit](dna-collection.md).
+The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](dna-collection.md).
 
-| Category | Examples | Collection Path |
-|----------|----------|-----------------|
-| **Hardware** | CPU, memory, disk, motherboard, serial numbers | Fast (cached after first call) |
-| **Software** | OS, installed packages, running services, startup programs | Background (async goroutine) |
-| **Network** | Interfaces, IPs, MACs, routing, DNS, firewall | Fast |
-| **Security** | Encryption state, admin accounts, AV products, certificates | Background (async goroutine) |
+Fragments are sourced by class:
 
-DNA is collected on startup and periodically thereafter. It serves two purposes:
-1. **Device identity** — the controller uses DNA to identify and classify devices
-2. **Drift baseline** — DNA changes between collections indicate environmental drift
+| Class | Examples | Authority | Drift |
+|-------|----------|-----------|-------|
+| **Managed** | services, files, users, packages, firewall (from module `Get`) | managing module | enforced (`auto_correct` / `report_only`) |
+| **Observe-only** | CPU model, total memory, BIOS, OS build (osquery stable-fact allowlist) | osquery | report-only |
+
+Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
+1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
+2. **Drift baseline** — managed fragments whose state diverges from desired trigger drift correction
 
 ### DNA Sync Model
 
-DNA is a deterministic, hashable dataset. The steward computes a hash of its current DNA and includes it in every heartbeat. This keeps the controller aware of DNA currency with near-zero bandwidth overhead.
+DNA is a deterministic, hashable dataset with a **two-level (Merkle-style) hash**: a per-fragment hash over each fragment's canonical bytes, and an **aggregate root** over the sorted `(fragment_id, fragment_hash)` manifest. The steward includes the aggregate root in every heartbeat, keeping the controller aware of DNA currency with near-zero bandwidth.
 
-- **Heartbeats** carry the DNA hash (control plane, every heartbeat interval)
-- **Deltas** are published as changes are detected (control plane, as they occur)
-- **Full sync** is only required on initial registration or when the controller detects a hash mismatch (data plane, on demand)
+- **Heartbeats** carry the aggregate root (control plane, every heartbeat interval)
+- **Partial sync**: on a root mismatch the controller diffs manifests and requests only the changed/added/removed fragments' bytes (data plane), then recomputes the root to prove its copy is fully in sync — no whole-DNA re-transfer
+- **Full sync** is required only on initial registration
 
-As long as both sides compute the same hash, the full DNA never needs to be retransmitted after the initial sync. If a delta is missed or hashes diverge, the controller requests a full sync over the data plane.
+The controller stores DNA **versioned and append-only** (ADR-017 Amendment A1.3), not last-write-wins: each accepted delta produces a new fragment version, so per-entity state stays queryable over time. Because unchanged fragments dedupe by hash, history cost tracks change volume, not fleet-size × time.
 
 ### Health
 
@@ -331,7 +331,7 @@ The steward collects and retains time-series performance metrics for the host sy
   - **On-demand**: controller requests current metrics or a historical range from the steward
   - **Real-time streaming**: controller initiates a live metrics stream for a single endpoint (e.g., admin troubleshooting a specific device)
 
-This data provides the foundation for future Digital Experience (DEX) capabilities — user experience scoring, hardware lifecycle analysis, and productivity impact assessment. Building collection and local retention now means DEX becomes an analytics layer on top, not a rebuild.
+This data is the collection foundation for **Digital Employee Experience (DEX)** — a layered track (collection → attribution → baselines → root-cause → prediction → experience-driven remediation), not a single future capability. Building collection and local retention now means DEX's later layers become an analytics + workflow-engine remediation loop on top, not a rebuild. DEX signals attach to the same typed entity ids as DNA (ADR-017 Amendment A1.4), so baselines and root-cause join against DNA and the topology graph rather than forming a separate data island.
 
 ## Reporting
 

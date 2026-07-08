@@ -2,7 +2,9 @@
 
 **Epic:** [#1932](https://github.com/cfgis/cfgms/issues/1932) — DNA collection audit: documented attributes vs implemented attributes
 
-This document cross-references every documented DNA category from `steward-operating-model.md` against the attribute keys that the collectors actually emit. It is the authoritative source for platform coverage, sensitivity classification, and gap tracking.
+> **Status — legacy collector.** This document audits the **flat-map `Collector`** ([`features/steward/dna/dna.go`](../../features/steward/dna/dna.go)) that [ADR-016](decisions/016-steward-module-foundation.md) and [ADR-017](decisions/017-dna-composition-and-sync.md) **retire**. The target model is a **fragment set** — managed fragments from module `Get` plus observe-only `host:*` facts from an osquery allowlist — each with a typed entity id, a provenance envelope (`source`, `observed_at`, `confidence`, outside the hash), and controller-side versioned history (ADR-017 Amendment A1.3). Ephemeral values (process snapshots, live utilisation) are **telemetry, not DNA** (ADR-017 clause 4). Read this as the coverage/gap baseline the fragment migration inherits, **not** as the go-forward design.
+
+This document cross-references every documented DNA category from `steward-operating-model.md` against the attribute keys that the collectors actually emit. It is the authoritative source for platform coverage, sensitivity classification, and gap tracking **of the legacy collector**.
 
 ## Legend
 
