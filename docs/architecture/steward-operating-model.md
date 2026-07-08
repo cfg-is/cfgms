@@ -585,6 +585,7 @@ The steward binary is the same in every deployment. The table below shows which 
 | Convergence loop (apply/monitor) | Yes | Yes |
 | Scheduled re-check (`converge_interval`) | Yes | Yes (default 30m until cfg received) |
 | Event hooks | Yes | Yes |
+| Module Monitor engine (fan-in, debounce, targeted reconcile) | Yes | Yes — started by `syncConfigNow` after each cfg fetch; stopped by `Disconnect` |
 | DNA collection | Yes | Yes |
 | Health monitoring | Yes | Yes |
 | Performance monitoring | Yes | Yes |
