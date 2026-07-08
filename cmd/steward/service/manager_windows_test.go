@@ -8,6 +8,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,9 @@ func TestWindowsManagerInstallPath(t *testing.T) {
 	m := New("cfgms-steward.exe")
 	status, err := m.Status()
 	require.NoError(t, err)
-	assert.Equal(t, windowsInstallPath, status.InstallPath)
+	// Launcher-managed install: the service's exec target is the launcher,
+	// so that is the install path Status reports (mirrors linuxLauncherPath).
+	assert.Equal(t, windowsLauncherPath, status.InstallPath)
 }
 
 func TestWindowsManagerStatusNotInstalled(t *testing.T) {
@@ -30,11 +33,15 @@ func TestWindowsManagerStatusNotInstalled(t *testing.T) {
 	status, err := m.Status()
 	require.NoError(t, err)
 	assert.Equal(t, windowsServiceName, status.ServiceName)
-	assert.Equal(t, windowsInstallPath, status.InstallPath)
+	assert.Equal(t, windowsLauncherPath, status.InstallPath)
 }
 
 func TestWindowsManagerInstallRequiresElevation(t *testing.T) {
-	m := New("cfgms-steward.exe")
+	// Stage a launcher stub next to the steward path so the pre-elevation
+	// bundle check passes and Install reaches the elevation gate.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, windowsLauncherBinaryName), []byte("stub"), 0o600))
+	m := New(filepath.Join(dir, "cfgms-steward.exe"))
 	if m.IsElevated() {
 		t.Skip("skipping elevation check — running as Administrator")
 	}
@@ -122,6 +129,74 @@ func TestSetServiceEnvironmentRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(registry.MULTI_SZ), valType, "Environment must be REG_MULTI_SZ — the only type the SCM accepts")
 	assert.Equal(t, []string{"CFGMS_LOG_DIR=" + logDir}, vals)
+}
+
+// TestWindowsLauncherPathParity is the REQUIRED path-parity TEST for #2379:
+// windowsLauncherPath must equal the literal path returned by
+// features/steward/client's launcherPath() on windows
+// (client_transport_upgrade.go) — the compile-time contract push-upgrade
+// execs. Drift between install-time and the upgrade runtime path silently
+// breaks push-upgrade, so the literal is pinned here.
+func TestWindowsLauncherPathParity(t *testing.T) {
+	assert.Equal(t, `C:\Program Files\CFGMS\cfgms-steward-launcher.exe`, windowsLauncherPath,
+		"windowsLauncherPath must match client_transport_upgrade.go launcherPath() exactly")
+	assert.Equal(t, "cfgms-steward-launcher.exe", windowsLauncherBinaryName)
+}
+
+// TestWindowsInstallLauncherMissing is the REQUIRED fail-closed TEST for
+// #2379: Install must return a clear, actionable error — before any service
+// registration — when the launcher binary is not bundled next to the steward
+// binary. The check runs before the elevation gate (like fingerprint
+// verification), so this asserts an early return without touching privileged
+// state.
+func TestWindowsInstallLauncherMissing(t *testing.T) {
+	dir := t.TempDir() // empty: no launcher next to the (hypothetical) steward binary
+	m := New(filepath.Join(dir, "cfgms-steward.exe"))
+	err := m.Install("tok_test123", "", "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), windowsLauncherBinaryName,
+		"error must name the missing launcher binary")
+	assert.Contains(t, err.Error(), "not found next to the steward binary",
+		"error must explain the bundle expectation")
+	assert.NotContains(t, err.Error(), "Administrator",
+		"launcher presence is checked before the elevation gate")
+}
+
+// TestBuildLauncherServiceArgs is the REQUIRED launcher-target TEST for
+// #2379: the Windows service must be registered to invoke the launcher
+// (`run --root ... --child-args "..."`), never the bare steward binary —
+// mirrors TestGenerateSystemdUnit's assertions for Linux.
+func TestBuildLauncherServiceArgs(t *testing.T) {
+	token := "tok_svc_args_abc123"
+
+	args := buildLauncherServiceArgs(windowsInstallDir, token, "")
+	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args", "--regtoken " + token}, args)
+
+	withURL := buildLauncherServiceArgs(windowsInstallDir, token, "https://ctrl.example.com:8443")
+	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args",
+		"--regtoken " + token + " --controller-url https://ctrl.example.com:8443"}, withURL)
+
+	// The service args must never point execution at the bare steward binary.
+	joined := strings.Join(withURL, " ")
+	assert.NotContains(t, joined, windowsInstallPath+" --regtoken",
+		"service must exec the launcher, not the bare steward binary")
+
+	// Token appears exactly once (no duplication across args).
+	assert.Equal(t, 1, strings.Count(joined, token), "token should appear exactly once")
+}
+
+// TestWindowsLauncherUnderProgramFilesACL is the REQUIRED LPE-hardening TEST
+// for #2379: the launcher — a binary a SYSTEM service execs — must be
+// installed under the install dir whose default Program Files ACL restricts
+// writes to Administrators/SYSTEM. No install-dir ACL is loosened by this
+// package (copyBinary sets no Windows ACLs; the directory inherits Program
+// Files protection), so the load-bearing guarantee is that the path never
+// moves out from under it.
+func TestWindowsLauncherUnderProgramFilesACL(t *testing.T) {
+	assert.True(t, strings.HasPrefix(windowsLauncherPath, windowsInstallDir+`\`),
+		"launcher must live inside the install dir")
+	assert.True(t, strings.HasPrefix(windowsInstallDir, `C:\Program Files\`),
+		"install dir must be under Program Files (Administrator-only-writable default ACL)")
 }
 
 // TestPlatformLogDir verifies the ProgramData-with-fallback resolution mirrors
