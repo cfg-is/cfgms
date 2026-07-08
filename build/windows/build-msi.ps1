@@ -187,6 +187,43 @@ try {
     Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
 }
 
+# ── Step 1c: Build the steward launcher binary ──────────────────────────────
+# The launcher is bundled in the MSI payload next to cfgms-steward.exe;
+# windowsManager.Install() registers it as the service binary and requires it
+# in the bundle (launcher-managed install — what makes the steward
+# push-upgradeable). Never fetched post-install.
+
+Write-Host ""
+Write-Host "Building cfgms-steward-launcher binary for windows/$Arch..." -ForegroundColor Yellow
+
+$LauncherPath = Join-Path $RepoRoot "bin" "cfgms-steward-launcher-windows-$Arch.exe"
+
+$env:GOOS        = "windows"
+$env:GOARCH      = $Arch
+$env:CGO_ENABLED = "0"
+
+Push-Location $RepoRoot
+try {
+    $LauncherArgs = @(
+        "build",
+        "-trimpath",
+        "-ldflags", "-s -w -X github.com/cfgis/cfgms/pkg/version.Version=$Version",
+        "-o", $LauncherPath,
+        "./cmd/cfgms-steward-launcher"
+    )
+    & go @LauncherArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "go build failed for cfgms-steward-launcher (exit $LASTEXITCODE)"
+    }
+} finally {
+    Pop-Location
+    Remove-Item Env:GOOS        -ErrorAction SilentlyContinue
+    Remove-Item Env:GOARCH      -ErrorAction SilentlyContinue
+    Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+}
+
+Write-Host "  Launcher: $LauncherPath" -ForegroundColor Green
+
 # ── Step 2: Ensure WiX 4 toolset is installed ────────────────────────────────
 
 Write-Host ""
@@ -232,6 +269,7 @@ $WixArgs = @(
     $WxsFile,
     "-d", "ProductVersion=$MsiVersion",
     "-d", "BinaryPath=$BinaryPath",
+    "-d", "LauncherPath=$LauncherPath",
     "-d", "ModulesDir=$ModulesDir",
     "-out", $OutputMsi
 )

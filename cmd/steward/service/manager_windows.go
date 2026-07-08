@@ -8,20 +8,39 @@ package service
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 const (
-	windowsInstallDir  = `C:\Program Files\CFGMS`
+	// windowsInstallDir is the install root. It equals the launcher's own
+	// defaultRoot() on Windows (cmd/cfgms-steward-launcher/main.go), so the
+	// launcher's versioned layout (versions/, state.json) nests under it.
+	windowsInstallDir = `C:\Program Files\CFGMS`
+	// windowsInstallPath is the legacy bare-steward binary path. The MSI
+	// payload still places cfgms-steward.exe here (it hosts the install/
+	// uninstall custom actions); the service itself execs the launcher.
 	windowsInstallPath = `C:\Program Files\CFGMS\cfgms-steward.exe`
-	windowsServiceName = "CFGMSSteward"
-	windowsDisplayName = "CFGMS Steward"
-	windowsDescription = "CFGMS endpoint configuration management agent"
+	// windowsLauncherPath is where the launcher binary is installed. The
+	// steward's push-upgrade handler execs "cfgms-steward-launcher.exe swap"
+	// at this exact compile-time path (features/steward/client
+	// launcherPath()), so a launcher-managed install is what makes a Windows
+	// steward upgradeable via the control plane. It must not change.
+	windowsLauncherPath = `C:\Program Files\CFGMS\cfgms-steward-launcher.exe`
+	// windowsLauncherBinaryName is the launcher binary as shipped in the
+	// install bundle (MSI payload), expected alongside the cfgms-steward
+	// binary being installed.
+	windowsLauncherBinaryName = "cfgms-steward-launcher.exe"
+	windowsServiceName        = "CFGMSSteward"
+	windowsDisplayName        = "CFGMS Steward"
+	windowsDescription        = "CFGMS endpoint configuration management agent"
 )
 
 // platformCACertPath returns the path where the CA cert is written, respecting
@@ -98,16 +117,19 @@ func (m *windowsManager) IsElevated() bool {
 	return true
 }
 
-// Install copies the binary to C:\Program Files\CFGMS\, creates a Windows
-// service configured to start automatically with failure-restart recovery,
-// and starts it. If the service already exists it is stopped, the binary
-// replaced, and the service restarted.
+// Install installs the launcher to C:\Program Files\CFGMS\, stages the
+// steward binary under the launcher's versioned layout, and creates a Windows
+// service that runs the launcher (which supervises the steward) — mirroring
+// the Linux launcher-managed model. This is what makes a Windows steward
+// upgradeable via the control plane: the push-upgrade handler execs
+// "cfgms-steward-launcher.exe swap" at windowsLauncherPath. If the service
+// already exists it is stopped and re-registered.
 //
 // Uses the native Windows Service API via golang.org/x/sys/windows/svc/mgr.
 // Does NOT shell out to sc.exe.
 //
-// When controllerURL is non-empty, --controller-url is passed to CreateService
-// args so the steward connects to the specified controller on start.
+// When controllerURL is non-empty, --controller-url is forwarded to the
+// supervised steward via the launcher's --child-args.
 // If caCertPEM is non-empty, the CA cert is written to the platform-standard
 // path before the service is started. When expectedFingerprint is also non-empty,
 // fingerprint verification runs first — a mismatch returns an error without any
@@ -123,6 +145,23 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 			return err
 		}
 	}
+
+	// A launcher-managed install (steward supervised by
+	// cfgms-steward-launcher.exe, staged under versions\) is what makes the
+	// steward upgradeable via the control plane: the push-upgrade handler
+	// execs "cfgms-steward-launcher.exe swap" and requires the launcher at
+	// windowsLauncherPath. A bare direct-service steward cannot be
+	// push-upgraded. The launcher binary ships alongside the steward binary
+	// in the install bundle (MSI payload). Checked before the elevation gate
+	// (read-only stat) so the caller gets the actionable bundle error even
+	// without Administrator rights.
+	launcherSrc := filepath.Join(filepath.Dir(m.binaryPath), windowsLauncherBinaryName)
+	if _, err := os.Stat(launcherSrc); err != nil {
+		return fmt.Errorf("launcher binary %q not found next to the steward binary: %w\n"+
+			"  a launcher-managed install requires %s in the install bundle",
+			launcherSrc, err, windowsLauncherBinaryName)
+	}
+
 	if !m.IsElevated() {
 		return fmt.Errorf("install requires Administrator privileges: right-click the binary and select 'Run as administrator'")
 	}
@@ -153,9 +192,25 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 		return fmt.Errorf("failed to create install directory %s: %w", windowsInstallDir, err)
 	}
 
-	fmt.Printf("Installing to %s...\n", windowsInstallPath)
-	if err := copyBinary(m.binaryPath, windowsInstallPath); err != nil {
-		return fmt.Errorf("failed to copy binary: %w", err)
+	ver := version.Short()
+
+	// The MSI payload already places the launcher at windowsLauncherPath;
+	// copyBinary is a same-path-safe atomic copy (temp file + rename), so this
+	// also covers manual installs from an extracted bundle elsewhere on disk.
+	fmt.Printf("Installing launcher to %s...\n", windowsLauncherPath)
+	if err := copyBinary(launcherSrc, windowsLauncherPath); err != nil {
+		return fmt.Errorf("failed to install launcher: %w", err)
+	}
+
+	// Bootstrap the launcher layout: stage the steward binary as the current
+	// version under versions\<ver>\ and record it in state.json. This reuses
+	// the launcher's own "swap" surface (fixed binary path + discrete argv,
+	// never a composed shell string), so the on-disk layout is identical to
+	// what a subsequent push-upgrade produces. windowsInstallDir equals the
+	// launcher's defaultRoot() on Windows.
+	fmt.Printf("Staging steward %s under %s...\n", ver, windowsInstallDir)
+	if out, err := exec.Command(windowsLauncherPath, "swap", "--root", windowsInstallDir, ver, m.binaryPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to stage steward binary via launcher: %w\n%s", err, out)
 	}
 
 	// Write CA cert before registering the service so the service finds it on first start.
@@ -166,23 +221,19 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 		}
 	}
 
-	// Build service start arguments; --controller-url is optional (ADR-013 §3).
-	svcArgs := []string{"--regtoken", token}
-	if controllerURL != "" {
-		svcArgs = append(svcArgs, "--controller-url", controllerURL)
-	}
-
 	fmt.Println("Registering Windows service...")
 	newSvc, err := scm.CreateService(
 		windowsServiceName,
-		windowsInstallPath,
+		windowsLauncherPath,
 		mgr.Config{
 			StartType:   mgr.StartAutomatic,
 			DisplayName: windowsDisplayName,
 			Description: windowsDescription,
 		},
-		// Arguments appended to the binary path; received as os.Args on service start.
-		svcArgs...,
+		// Arguments appended to the binary path; received as os.Args on
+		// service start. The launcher supervises the steward and forwards
+		// --child-args to it.
+		buildLauncherServiceArgs(windowsInstallDir, token, controllerURL)...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create Windows service: %w", err)
@@ -221,8 +272,23 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 	return nil
 }
 
+// buildLauncherServiceArgs returns the service start arguments that make the
+// SCM run the launcher's supervision loop: `run --root <root> --child-args
+// "<steward args>"`. Args inside child-args are space-separated (the launcher
+// splits on whitespace via strings.Fields); the registration token is
+// validated to be free of spaces/quotes, so no per-arg quoting is needed.
+// Mirrors generateSystemdUnit's childArgs on Linux.
+func buildLauncherServiceArgs(root, token, controllerURL string) []string {
+	childArgs := fmt.Sprintf(`--regtoken %s`, token)
+	if controllerURL != "" {
+		childArgs += fmt.Sprintf(` --controller-url %s`, controllerURL)
+	}
+	return []string{"run", "--root", root, "--child-args", childArgs}
+}
+
 // Uninstall stops and removes the Windows service. If purge is true the
-// installed binary at windowsInstallPath is also deleted.
+// installed launcher binary, its versioned staging layout, and the legacy
+// bare-steward binary at windowsInstallPath are also deleted.
 func (m *windowsManager) Uninstall(purge bool) error {
 	if !m.IsElevated() {
 		return fmt.Errorf("uninstall requires Administrator privileges: right-click the binary and select 'Run as administrator'")
@@ -253,6 +319,33 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	}
 
 	if purge {
+		// Launcher binary + versioned layout (versions\, state.json and the
+		// legacy pointer files) for launcher-managed installs. Remove the
+		// specific known paths only — windowsInstallDir also holds MSI-owned
+		// files (cfgms-steward.exe, modules\), so never RemoveAll the root.
+		if _, err := os.Stat(windowsLauncherPath); err == nil {
+			fmt.Printf("Removing %s...\n", windowsLauncherPath)
+			if err := os.Remove(windowsLauncherPath); err != nil {
+				return fmt.Errorf("failed to remove launcher: %w", err)
+			}
+		}
+		versionsDir := filepath.Join(windowsInstallDir, "versions")
+		if _, err := os.Stat(versionsDir); err == nil {
+			fmt.Printf("Removing %s...\n", versionsDir)
+			if err := os.RemoveAll(versionsDir); err != nil {
+				return fmt.Errorf("failed to remove launcher versions dir: %w", err)
+			}
+		}
+		for _, stateFile := range []string{"state.json", "current.txt", "previous.txt"} {
+			p := filepath.Join(windowsInstallDir, stateFile)
+			if _, err := os.Stat(p); err == nil {
+				fmt.Printf("Removing %s...\n", p)
+				if err := os.Remove(p); err != nil {
+					return fmt.Errorf("failed to remove launcher state file: %w", err)
+				}
+			}
+		}
+		// Legacy bare-steward binary (pre-launcher direct-service installs).
 		if _, err := os.Stat(windowsInstallPath); err == nil {
 			fmt.Printf("Removing %s...\n", windowsInstallPath)
 			if err := os.Remove(windowsInstallPath); err != nil {
@@ -269,7 +362,9 @@ func (m *windowsManager) Uninstall(purge bool) error {
 func (m *windowsManager) Status() (*ServiceStatus, error) {
 	status := &ServiceStatus{
 		ServiceName: windowsServiceName,
-		InstallPath: windowsInstallPath,
+		// Launcher-managed: the service's exec target is the launcher
+		// (mirrors linuxManager.Status reporting linuxLauncherPath).
+		InstallPath: windowsLauncherPath,
 	}
 
 	scm, err := mgr.Connect()
