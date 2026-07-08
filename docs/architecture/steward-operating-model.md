@@ -295,6 +295,32 @@ Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
 2. **Drift baseline** — managed fragments whose state diverges from desired trigger drift correction
 
+#### Monitored module resource state as DNA attributes
+
+DNA attributes also include a namespaced snapshot of every actively-monitored
+module resource's latest observed state: the steward's monitor fan-in caches
+the newest `ChangeEvent` details per resource (last-write-wins, no history),
+and the DNA collector merges the flattened result with the hardware-fact
+attributes on the same refresh tick — the same delta-compressed publish path,
+no separate channel, no coupling to heartbeat timing.
+
+Flattening and namespacing convention:
+
+- every key is `<resourceID>.<field>` with the resource ID **verbatim** —
+  including its colon, with no module-name prefix (the resource ID is the
+  module's own `ChangeEvent` scheme): `cluster:cfg-lab.cno_owner_node`
+- nested map keys join with `.` — `cluster:cfg-lab.resource_owner.web-01`
+- slice values join with `,` — `cluster:cfg-lab.member_nodes` =
+  `CFG-70-02,CFG-AB-02,CFG-C3-02`
+- any other value stringifies (`true`, `3`)
+
+A resource that leaves monitoring (module close, steward shutdown) is evicted
+from the cache, so its keys disappear from the next collected map — the delta
+publish signals the removal. The snapshot is **eventually consistent** by
+design: it rides the DNA refresh interval, and any safety-critical decision
+(e.g. cluster ownership gating) always uses live module queries, never this
+snapshot.
+
 ### DNA Sync Model
 
 DNA is a deterministic, hashable dataset with a **two-level (Merkle-style) hash**: a per-fragment hash over each fragment's canonical bytes, and an **aggregate root** over the sorted `(fragment_id, fragment_hash)` manifest. The steward includes the aggregate root in every heartbeat, keeping the controller aware of DNA currency with near-zero bandwidth.

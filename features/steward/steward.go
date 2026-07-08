@@ -121,6 +121,17 @@ type Steward struct {
 	// relying on scheduler timing. Production code always uses monitorQueueCapacity.
 	monitorFanInCap int
 
+	// monitorState caches the latest ChangeEvent.Details.AsMap() per
+	// resourceID for every actively-monitored resource (#2423). It feeds
+	// CollectModuleDNAAttributes — the module half of the DNA attribute set —
+	// and holds only the latest snapshot per resource (last-write-wins, no
+	// history). Entries are evicted when the resource's monitor forwarding
+	// goroutine exits (module Close / steward shutdown), so a resource that
+	// leaves monitoring disappears from the next CollectAttributes map and
+	// PublishDNAUpdate's delta compression signals the removal.
+	monitorStateMu sync.Mutex
+	monitorState   map[string]map[string]interface{}
+
 	// monitorDNARefreshes counts DNA snapshot refreshes triggered by a
 	// monitor-driven targeted reconcile that applied changes. In controller mode
 	// the same post-reconcile path updates the heartbeat currentDNAHash; this
@@ -561,11 +572,25 @@ func (s *Steward) startMonitors(ctx context.Context) {
 		s.monitorWg.Add(1)
 		go func(ch <-chan modules.ChangeEvent) {
 			defer s.monitorWg.Done()
+			// seen tracks every resourceID this goroutine cached module-DNA
+			// state for (#2423), so all of them are evicted when monitoring
+			// stops — the channel closing (module Close), ctx cancel, or
+			// steward shutdown. Eviction keys on what was actually cached,
+			// not the entry's own resourceID, because a module may emit
+			// events for more than one resourceID on a single channel.
+			seen := make(map[string]struct{})
+			defer func() { s.evictMonitorState(seen) }()
 			for {
 				select {
 				case evt, ok := <-ch:
 					if !ok {
 						return
+					}
+					// Cache the latest observed state BEFORE the non-blocking
+					// send, so even a shed event still refreshes the module
+					// DNA snapshot (#2423).
+					if s.cacheMonitorState(evt) {
+						seen[evt.ResourceID] = struct{}{}
 					}
 					// Non-blocking send: if the queue is full, shed this event to
 					// the next scheduled convergence pass and log at Warn.
@@ -654,6 +679,105 @@ func (s *Steward) monitorEventLoop(ctx context.Context, events <-chan modules.Ch
 			delete(debounce, resourceID)
 			s.runTargetedReconcile(ctx, resourceID)
 		}
+	}
+}
+
+// cacheMonitorState stores the latest ChangeEvent Details snapshot for a
+// resourceID (#2423). Returns true when a snapshot was cached (the caller
+// tracks the ID for eviction). Nil Details or an empty ResourceID cache
+// nothing. The snapshot is shallow-copied so a module mutating the map it
+// returned from AsMap cannot race the flattener.
+func (s *Steward) cacheMonitorState(evt modules.ChangeEvent) bool {
+	if evt.ResourceID == "" || evt.Details == nil {
+		return false
+	}
+	snap := evt.Details.AsMap()
+	if snap == nil {
+		return false
+	}
+	copied := make(map[string]interface{}, len(snap))
+	for k, v := range snap {
+		copied[k] = v
+	}
+	s.monitorStateMu.Lock()
+	if s.monitorState == nil {
+		s.monitorState = make(map[string]map[string]interface{})
+	}
+	s.monitorState[evt.ResourceID] = copied
+	s.monitorStateMu.Unlock()
+	return true
+}
+
+// evictMonitorState removes the given resourceIDs from the module-DNA cache
+// (#2423). Called when a monitor forwarding goroutine exits, so a resource
+// that leaves monitoring actually disappears from the map returned by
+// CollectModuleDNAAttributes — PublishDNAUpdate's delta compression turns the
+// missing key into the "this is gone" signal on the next publish.
+func (s *Steward) evictMonitorState(resourceIDs map[string]struct{}) {
+	if len(resourceIDs) == 0 {
+		return
+	}
+	s.monitorStateMu.Lock()
+	for id := range resourceIDs {
+		delete(s.monitorState, id)
+	}
+	s.monitorStateMu.Unlock()
+}
+
+// CollectModuleDNAAttributes returns a flattened, namespaced snapshot of every
+// actively-monitored module resource's latest observed state (#2423), built
+// purely from the generic ConfigState.AsMap() — no module-specific types.
+//
+// Key convention (documented in docs/architecture/steward-operating-model.md):
+//   - every key is "<resourceID>.<field>" with the resourceID VERBATIM — e.g.
+//     "cluster:cfg-lab.member_nodes"; the colon stays, and no module-name
+//     prefix is added (the resourceID is the module's own ChangeEvent scheme)
+//   - nested map keys join with "."  → "cluster:cfg-lab.resource_owner.web-01"
+//   - slice values join with ","     → "CFG-70-02,CFG-AB-02"
+//   - any other value stringifies via fmt.Sprintf("%v", v)
+//
+// The result rides the existing DNA refresh/publish pipeline exactly as
+// hardware facts do (merged by the composite collector in cmd/steward);
+// last-write-wins per resource, eventually consistent by design.
+func (s *Steward) CollectModuleDNAAttributes(_ context.Context) map[string]string {
+	out := make(map[string]string)
+	s.monitorStateMu.Lock()
+	defer s.monitorStateMu.Unlock()
+	for resourceID, snap := range s.monitorState {
+		for field, v := range snap {
+			flattenDNAValue(resourceID+"."+field, v, out)
+		}
+	}
+	return out
+}
+
+// flattenDNAValue flattens one value into out under key, per the convention
+// documented on CollectModuleDNAAttributes. It handles the ConfigState.AsMap
+// shapes that occur in practice (string, bool, ints, []string, []interface{},
+// map[string]string, nested map[string]interface{}) and falls back to
+// fmt.Sprintf("%v") for anything else — never panics on an unexpected type.
+func flattenDNAValue(key string, v interface{}, out map[string]string) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for k, sub := range val {
+			flattenDNAValue(key+"."+k, sub, out)
+		}
+	case map[string]string:
+		for k, sub := range val {
+			out[key+"."+k] = sub
+		}
+	case []string:
+		out[key] = strings.Join(val, ",")
+	case []interface{}:
+		parts := make([]string, 0, len(val))
+		for _, e := range val {
+			parts = append(parts, fmt.Sprintf("%v", e))
+		}
+		out[key] = strings.Join(parts, ",")
+	case string:
+		out[key] = val
+	default:
+		out[key] = fmt.Sprintf("%v", val)
 	}
 }
 

@@ -998,3 +998,63 @@ func TestSubsystemState_StatusTransitions(t *testing.T) {
 	s.markHealthy("controller")
 	assert.Equal(t, string(steward.StatusHealthy), s.status())
 }
+
+// fakeModuleDNASource is a stub moduleDNASource for the composite-collector
+// merge test (#2423).
+type fakeModuleDNASource struct {
+	attrs map[string]string
+}
+
+func (f *fakeModuleDNASource) CollectModuleDNAAttributes(_ context.Context) map[string]string {
+	return f.attrs
+}
+
+// TestDNACollectorAdapter_MergesHardwareAndModuleAttributes is the REQUIRED
+// TEST for #2423 AC4: the composite adapter's CollectAttributes returns the
+// UNION of hardware-fact attributes (unchanged) and module attributes in one
+// map, with no key collision — module keys are resourceID-namespaced
+// ("<type>:<name>.<field>") while hardware keys are bare identifiers.
+func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
+	moduleAttrs := map[string]string{
+		"cluster:cfg-lab.cno_owner_node":        "CFG-70-02",
+		"cluster:cfg-lab.member_nodes":          "CFG-70-02,CFG-AB-02,CFG-C3-02",
+		"cluster:cfg-lab.resource_owner.web-01": "CFG-70-02",
+	}
+	adapter := newDNACollectorAdapter(logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
+
+	attrs, err := adapter.CollectAttributes(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, attrs)
+
+	// Hardware facts present and unchanged (hostname is always collected).
+	assert.Contains(t, attrs, "hostname", "hardware-fact attributes must survive the merge")
+
+	// Module attributes present, resourceID verbatim.
+	for k, v := range moduleAttrs {
+		assert.Equal(t, v, attrs[k], "module attribute %q must be in the union", k)
+	}
+
+	// No key collision between the two sources: every module key carries the
+	// resourceID namespace, which no hardware fact uses.
+	hardwareOnly, err := newDNACollectorAdapter(logging.NewLogger("error"), nil).CollectAttributes(context.Background())
+	require.NoError(t, err)
+	for k := range hardwareOnly {
+		_, clash := moduleAttrs[k]
+		assert.False(t, clash, "hardware key %q must not collide with module keys", k)
+	}
+	assert.Len(t, attrs, len(hardwareOnly)+len(moduleAttrs),
+		"union size must be the exact sum — no silent overwrites")
+}
+
+// TestDNACollectorAdapter_NilModuleSourceUnchanged: with a nil moduleDNASource
+// (the controller-mode call sites today) the adapter behaves exactly as the
+// pre-#2423 hardware-fact adapter.
+func TestDNACollectorAdapter_NilModuleSourceUnchanged(t *testing.T) {
+	adapter := newDNACollectorAdapter(logging.NewLogger("error"), nil)
+	attrs, err := adapter.CollectAttributes(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, attrs, "hostname")
+	for k := range attrs {
+		assert.NotContains(t, k, ":", "no namespaced module keys may appear without a source")
+	}
+}
