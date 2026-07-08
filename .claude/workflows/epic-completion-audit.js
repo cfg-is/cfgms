@@ -82,6 +82,12 @@ const doRemediate = cfg.remediate === true
 const founderNotes = cfg.founderNotes || {}
 const N_VERIFIERS = Math.max(1, Math.min(3, cfg.verifiers || 3))
 const FOUNDER_OWNED = new Set((cfg.founderOwned || [565]).map(String))
+// SAFETY: remediation MUTATES the board (files issues, flips status). It runs ONLY for
+// a single explicitly-targeted epic — never in sweep mode — so a mis-passed or dropped
+// arg can never mass-file remediation stories across every open epic. NOTE: pass args
+// via `Workflow({ name: 'epic-completion-audit', args: {...} })`; scriptPath invocations
+// may not thread args in every harness, which this guard also fails safe against.
+const remediateActive = doRemediate && targetEpic != null
 
 // ── schemas ────────────────────────────────────────────────────────────────
 const EPIC_LIST_SCHEMA = {
@@ -333,7 +339,8 @@ if (!epics.length) {
   log(targetEpic ? `Epic #${targetEpic} is not an open epic — nothing to audit.` : 'No open epics to audit.')
   return { audited: 0, closed: 0, results: [] }
 }
-log(`Auditing ${epics.length} epic(s)${doClose ? ' (close=ON)' : ' (dry-run — report only)'}.`)
+log(`Auditing ${epics.length} epic(s)${doClose ? ' (close=ON)' : ''}${remediateActive ? ' (remediate=ON)' : ''}${!doClose && !remediateActive ? ' (dry-run — report only)' : ''}.`)
+if (doRemediate && !targetEpic) log('remediate requested but IGNORED: it only runs for a single targeted epic (args.epic) — safety against mass board mutation in sweep mode.')
 
 const results = await pipeline(
   epics,
@@ -361,7 +368,7 @@ const results = await pipeline(
 
     // Remediate INCOMPLETE epics: BA authors/annotates stories -> Tech Lead validates -> Ready.
     let created = [], annotated = [], readied = [], remediationBlocked = ''
-    if (doRemediate && verdict.verdict === 'INCOMPLETE') {
+    if (remediateActive && verdict.verdict === 'INCOMPLETE') {
       const ba = await agent(
         baRemediatePrompt(epic, bundle, verdict, founderNotes[String(epic.number)]),
         { label: `ba:remediate:#${epic.number}`, phase: 'Remediate', schema: BA_SCHEMA, agentType: 'ba' },
@@ -411,7 +418,7 @@ const createdCount = clean.reduce((a, r) => a + ((r.created && r.created.length)
 const readiedCount = clean.reduce((a, r) => a + ((r.readied && r.readied.length) || 0), 0)
 const annotatedCount = clean.reduce((a, r) => a + ((r.annotated && r.annotated.length) || 0), 0)
 const remediationBlocked = clean.filter(r => r.remediationBlocked).map(r => `#${r.epic}: ${r.remediationBlocked}`)
-if (doRemediate) {
+if (remediateActive) {
   log(`Remediation: ${createdCount} stories created · ${readiedCount} promoted to Ready · ${annotatedCount} existing stories annotated.`)
   if (remediationBlocked.length) log(`Remediation BLOCKED (needs founder decision): ${remediationBlocked.join(' ; ')}`)
 }
@@ -420,6 +427,6 @@ return {
   audited: clean.length,
   complete: complete.length,
   closed: closedCount,
-  remediation: doRemediate ? { created: createdCount, readied: readiedCount, annotated: annotatedCount, blocked: remediationBlocked } : null,
+  remediation: remediateActive ? { created: createdCount, readied: readiedCount, annotated: annotatedCount, blocked: remediationBlocked } : null,
   results: clean,
 }
