@@ -171,10 +171,11 @@ State all 5 fields back. Ask for explicit confirmation. Loop until confirmed.
 
 On confirmation, create the issue. Include the epic's **`cap:*` capability tags** — the product capabilities this epic serves (`cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`; multi-valued, descriptive, orthogonal to queue state). Stories inherit these at decomposition (Step 7a). If the epic is sourced from a `docs/product/roadmap.md` item, map its inline `**Tags:**` to the `cap:*` set:
 ```bash
+# one --label per capability this epic serves (add/remove as needed)
 gh issue create --repo cfg-is/cfgms \
   --title "<concise title, <70 chars>" \
   --label "epic" \
-  --label "cap:twin" --label "cap:dex" \  # one --label per capability this epic serves
+  --label "cap:twin" --label "cap:dex" \
   --body "<structured body>"
 ```
 
