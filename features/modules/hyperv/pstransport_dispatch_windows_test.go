@@ -59,7 +59,8 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 			" -CPU " + intArg(psArgs, "CPU") +
 			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
 			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
-			" -Generation " + intArg(psArgs, "Generation"))
+			" -Generation " + intArg(psArgs, "Generation") +
+			optArg(psArgs, "Path", "Path"))
 	case psNewSeedVHD:
 		return emit("Cfgms-NewSeedVHD -Path " + quoteArg(psArgs, "Path") +
 			" -SizeBytes " + intArg(psArgs, "SizeBytes"))
@@ -90,7 +91,21 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 			" -CPU " + intArg(psArgs, "CPU") +
 			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
 			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
-			" -Generation " + intArg(psArgs, "Generation"))
+			" -Generation " + intArg(psArgs, "Generation") +
+			optArg(psArgs, "Path", "Path"))
+	case psSetVMHome:
+		return emit("Cfgms-SetVMHome -Name " + quoteArg(psArgs, "Name") +
+			" -VMHome " + quoteArg(psArgs, "Home"))
+	case psVMStorageMovePreflight:
+		return emit("Cfgms-VMStorageMovePreflight -Name " + quoteArg(psArgs, "Name") +
+			" -DestDir " + quoteArg(psArgs, "DestDir"))
+	case psMoveVMStorage:
+		return emit("Cfgms-MoveVMStorage -Name " + quoteArg(psArgs, "Name") +
+			" -VMHome " + quoteArg(psArgs, "Home"))
+	case psGetVMMoveError:
+		return emit("Cfgms-GetVMMoveError -Name " + quoteArg(psArgs, "Name"))
+	case psClearVMMoveError:
+		return emit("Cfgms-ClearVMMoveError -Name " + quoteArg(psArgs, "Name"))
 	case psSetHddFirstBoot:
 		return emit("Cfgms-SetHddFirstBoot -Name " + quoteArg(psArgs, "Name") +
 			" -VHDPath " + quoteArg(psArgs, "VHDPath"))
@@ -295,6 +310,55 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 			psCommand: psSetVMMemory,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "8192"},
 			want:      "Cfgms-SetVMMemory -Name 'cfgms-t__web-01' -MemoryMB 8192",
+		},
+		{
+			// #2411: -Path (the VM home, dir(vhd_path)) rides New-VM as an
+			// optional arg so config files start co-located with the disk.
+			name:      "New-VM with home Path",
+			psCommand: psCreateVM,
+			psArgs: map[string]string{
+				"Name":       "cfgms-t__web-01",
+				"MemoryMB":   "4096",
+				"CPU":        "4",
+				"VHDPath":    "C:\\VMs\\web-01\\web-01.vhdx",
+				"SwitchName": "External",
+				"Generation": "2",
+				"Path":       "C:\\VMs\\web-01",
+			},
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01\\web-01.vhdx' -SwitchName 'External' -Generation 2 -Path 'C:\\VMs\\web-01'",
+		},
+		{
+			// #2411: the create-time config-only home move. NOTE the parameter is
+			// -VMHome (the Go psArgs key is "Home"): $Home is a read-only PowerShell
+			// automatic variable and cannot be a function parameter name.
+			name:      "SetVMHome",
+			psCommand: psSetVMHome,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\VMs\\web-01"},
+			want:      "Cfgms-SetVMHome -Name 'cfgms-t__web-01' -VMHome 'C:\\VMs\\web-01'",
+		},
+		{
+			name:      "VMStorageMovePreflight",
+			psCommand: psVMStorageMovePreflight,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "DestDir": "C:\\ClusterStorage\\CSV01\\web-01"},
+			want:      "Cfgms-VMStorageMovePreflight -Name 'cfgms-t__web-01' -DestDir 'C:\\ClusterStorage\\CSV01\\web-01'",
+		},
+		{
+			name:      "MoveVMStorage",
+			psCommand: psMoveVMStorage,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\ClusterStorage\\CSV01\\web-01"},
+			want:      "Cfgms-MoveVMStorage -Name 'cfgms-t__web-01' -VMHome 'C:\\ClusterStorage\\CSV01\\web-01'",
+		},
+		{
+			name:      "GetVMMoveError",
+			psCommand: psGetVMMoveError,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-GetVMMoveError -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "ClearVMMoveError",
+			psCommand: psClearVMMoveError,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-ClearVMMoveError -Name 'cfgms-t__web-01'",
 		},
 		{
 			name:      "Connect-VMNic",
@@ -532,6 +596,14 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		// Failover cluster write verbs (cluster.go, #2202 S2)
 		{"psAddClusterVMRole", psAddClusterVMRole, map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"}},
 		{"psRemoveClusterResource", psRemoveClusterResource, map[string]string{"Name": "web-01"}},
+		// VM storage location verbs (vm_storage.go, #2411)
+		{"psCreateVM/homePath", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\VMs\\w\\test.vhdx", "SwitchName": "sw", "Generation": "2", "Path": "C:\\VMs\\w"}},
+		{"psCreateVMFromDisk/homePath", psCreateVMFromDisk, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048", "CPU": "2", "VHDPath": "C:\\VMs\\w\\web-01.vhdx", "SwitchName": "External", "Generation": "2", "Path": "C:\\VMs\\w"}},
+		{"psSetVMHome", psSetVMHome, map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\VMs\\w"}},
+		{"psVMStorageMovePreflight", psVMStorageMovePreflight, map[string]string{"Name": "cfgms-t__web-01", "DestDir": "C:\\ClusterStorage\\CSV01\\w"}},
+		{"psMoveVMStorage", psMoveVMStorage, map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\ClusterStorage\\CSV01\\w"}},
+		{"psGetVMMoveError", psGetVMMoveError, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psClearVMMoveError", psClearVMMoveError, map[string]string{"Name": "cfgms-t__web-01"}},
 	}
 
 	for _, tc := range commands {
