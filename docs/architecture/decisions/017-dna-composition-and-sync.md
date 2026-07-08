@@ -184,6 +184,15 @@ Read everything — even managed objects — from osquery.
 - `features/steward/dna/drift` — drift subsystem gated by the managed/observe-only class
 - `docs/product/roadmap.md` — Captured Backlog (OSquery, controller baseline DNA) + [Digital Twin & DEX — Tiered Rollout](../../product/roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout) (the Tier-1 commitments this amendment lands)
 
+**Flat-DNA-surface consumers to re-home on the fragment model.** Two shipped
+consumers read/write today's flat attribute map directly and must be migrated
+onto fragments when the DNA-composition epic is decomposed (epic #2418, ADR
+Alignment item 1): the steward-side ChangeEvent→DNA attribute bridge
+(#2423/#2435 — module Monitor engine events surfaced as DNA attributes) and the
+controller-side cluster-registry parser (#2424 — cluster membership parsed from
+steward DNA attributes). Both are attribute-key contracts on the flat surface;
+re-homing them is in scope for that epic, not this ADR.
+
 ---
 
 ## Amendment 1 (2026-07-07) — Twin/DEX data-model commitments
