@@ -837,6 +837,16 @@ func (s *Server) Close(ctx context.Context) error {
 			s.nonceCache.Close()
 		}
 
+		// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
+		if s.runExecutionQueue != nil {
+			s.runExecutionQueue.Stop()
+		}
+
+		// Stop the config service's router cache goroutine (configrouting source cache).
+		if s.configService != nil {
+			s.configService.Close()
+		}
+
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
