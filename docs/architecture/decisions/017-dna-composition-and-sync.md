@@ -1,6 +1,6 @@
 # ADR-017: DNA Composition & Sync — fragment model, authority resolution, and partial-sync validation
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
 **Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX)
 **Issue:** (to be assigned at decomposition)
@@ -188,7 +188,7 @@ Read everything — even managed objects — from osquery.
 
 ## Amendment 1 (2026-07-07) — Twin/DEX data-model commitments
 
-**Status:** Proposed (rider on this ADR)
+**Status:** Accepted (2026-07-08, rider on this ADR)
 
 **Context.** A product-planning session (roadmap.md v4.1, *Digital Twin & DEX — Tiered Rollout*) established that the Digital Twin and Digital Employee Experience (DEX) capabilities ship as layers threaded across the timeline, built on the **same DNA foundation this ADR defines**. Four data-model commitments are cheap to honor in this epic and expensive to retrofit later; the baseline-DNA / DNA-composition epic **must** land them. Each is deliberately designed to preserve the base ADR's invariants — hash determinism (clause 5) and telemetry exclusion (clause 4) — by adding *around* the fragment, never *inside* the hash.
 
