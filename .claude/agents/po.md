@@ -169,11 +169,12 @@ State all 5 fields back. Ask for explicit confirmation. Loop until confirmed.
 
 ### 2.4 Epic Creation
 
-On confirmation, create the issue:
+On confirmation, create the issue. Include the epic's **`cap:*` capability tags** — the product capabilities this epic serves (`cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`; multi-valued, descriptive, orthogonal to queue state). Stories inherit these at decomposition (Step 7a). If the epic is sourced from a `docs/product/roadmap.md` item, map its inline `**Tags:**` to the `cap:*` set:
 ```bash
 gh issue create --repo cfg-is/cfgms \
   --title "<concise title, <70 chars>" \
   --label "epic" \
+  --label "cap:twin" --label "cap:dex" \  # one --label per capability this epic serves
   --body "<structured body>"
 ```
 
@@ -708,6 +709,8 @@ gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
 ```
 Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
 
+**Capture the epic's `cap:*` capability tags** from `labels` (the product capabilities that consume this work — `cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`). If the epic has none but was sourced from a roadmap item, map that item's inline `**Tags:**` (in `docs/product/roadmap.md`) to the corresponding `cap:*` set. **Each story inherits its epic's `cap:*` tags** (a story may narrow to a subset if it only serves some of them, but never invents a capability the epic lacks). A multi-tag story is the signal it is foundational — its interface/schema must satisfy every listed consumer.
+
 **7b. Acquire the decompose lease:**
 
 Decomposition is a multi-minute operation; sub-issue links only appear once the
@@ -777,8 +780,8 @@ cat > /tmp/story-body.md <<'STORY_EOF'
 <full parser-compliant story body (## Dependencies, ## Files In Scope, etc.)>
 STORY_EOF
 
-./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
-# Returns: CREATED_ISSUE:<item_id>:#NNN  — locked `internal` issue, sub-issue-linked under the epic
+./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md --cap "<inherited cap tags, e.g. cms,twin>"
+# Returns: CREATED_ISSUE:<item_id>:#NNN  — locked `internal` issue, sub-issue-linked under the epic, tagged cap:*
 rm /tmp/story-body.md
 
 bash ./scripts/project-queue.sh update-field <item_id> status "Ready"
@@ -788,11 +791,11 @@ bash ./scripts/project-queue.sh update-field <item_id> status "Ready"
 
 **Public-body hygiene (MANDATORY).** Story bodies are world-readable the moment they're created. No secrets, no credentials, no customer/business specifics, and no exploit-grade detail about unfixed vulnerabilities in any materialized body.
 
-**`--defer` — the exception path.** A story whose body cannot be public while queued (a security fix describing a live vulnerability, business-adjacent content) is created with `create-story <EPIC_NUM> "<title>" <body_file> --defer`. It stays a private project draft (returns `CREATED_DRAFT:<item_id>`) and is materialized by `po-act.sh dispatch` when work starts. Use it deliberately, not by default. If an epic decomposes ENTIRELY into `--defer` drafts, post a decomposition-complete marker comment on the epic — deferred drafts aren't sub-issues, so the preflight can't see them.
+**`--defer` — the exception path.** A story whose body cannot be public while queued (a security fix describing a live vulnerability, business-adjacent content) is created with `create-story <EPIC_NUM> "<title>" <body_file> --defer`. `--defer` and `--cap` compose in any order; on a deferred story the cap intent rides a body marker until materialize applies the labels at dispatch. It stays a private project draft (returns `CREATED_DRAFT:<item_id>`) and is materialized by `po-act.sh dispatch` when work starts. Use it deliberately, not by default. If an epic decomposes ENTIRELY into `--defer` drafts, post a decomposition-complete marker comment on the epic — deferred drafts aren't sub-issues, so the preflight can't see them.
 
 **Work-product test — what may EVER become an issue.** If the deliverable is a **repo artifact** (code, docs, config that lives in the repo), it becomes an issue via create-story. If the deliverable does **not** live in the repo (business setup, legal/licensing review as a decision, ops, finance), it stays a project item forever and is **never** an issue. License-*file* edits are repo artifacts (OK); "have a lawyer review licensing" is not.
 
-**Never apply `pipeline:*` / `agent:*` labels** — those are decommissioned; the board **Status** field is the only queue signal. Dev issues carry only `story` (+ `epic` for epics) and `internal` (applied by the materialize step).
+**Never apply `pipeline:*` / `agent:*` labels** — those are decommissioned; the board **Status** field is the only queue signal. Dev issues carry `story` (+ `epic` for epics), `internal` (applied by the materialize step), and any inherited **`cap:*` capability tags** (applied via `create-story --cap`). `cap:*` is **descriptive only** — it names the consuming product capability, never queue state, and must never gate dispatch or drive Status.
 
 **7g. Post summary on epic:**
 ```bash
@@ -1127,3 +1130,6 @@ GitHub issue labels still in use:
 | `high-priority` | Escalation tracking issue requiring founder attention |
 | `needs-windows` | Story requires the Windows host — native Windows code OR full e2e deployment testing / troubleshooting (the Windows host runs the Linux-controller + Linux/Windows-minion matrix). Held by the Linux orchestrator, worked via Self-Dispatch Mode (§7). Equivalent to a `## Environment: windows` body section. |
 | `needs-macos` | Story requires a macOS execution environment (reserved; same routing as `needs-windows`). |
+| `internal` | Automated pipeline item (epic/story/PR), locked to external comment |
+| `community` | Public, unlocked, human-filed external issue |
+| `cap:cms` `cap:twin` `cap:dex` `cap:workflow` `cap:directory` `cap:web` `cap:msp` | **Descriptive** capability tags — the product capability that *consumes* the work (multi-valued, inherited epic→story). Orthogonal to Projects-V2 queue state; never gate dispatch. Vocabulary: `docs/product/roadmap.md` → Capability Tags. |

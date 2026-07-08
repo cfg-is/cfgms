@@ -216,6 +216,10 @@ Review the PR diff for:
 
    Pre-existing markers in unchanged lines are out of scope for this scan — they're handled by the sweep story (#1430) and by Phase 3's file-state check for AC-named files.
 
+### Capability-tag consistency (informational — NEVER a blocking finding)
+
+If the parent story carries `cap:*` capability tags (the product capability that consumes it — see `docs/product/roadmap.md`), sanity-check that the delivered surface plausibly advances each tagged consumer, not just that it compiles (guards the "built ≠ live" failure — code that exists but doesn't reach its consumer). `cap:*` is **descriptive**, so a mismatch is an **informational observation in the review comment only** — it does **not** set Fix/Blocked status, does not lower the verdict, and never blocks merge. Surface it as a note so a human can retag or re-scope; do not manufacture a finding from it.
+
 Classify each finding by severity:
 - **High**: Security vulnerability, data loss risk, architecture violation
 - **Medium**: Missing test coverage, error handling gap, correctness concern

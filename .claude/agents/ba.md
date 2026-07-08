@@ -248,13 +248,17 @@ cat > /tmp/story-body.md <<'STORY_EOF'
 STORY_EOF
 
 # Create the story — materialized at creation as a locked internal issue,
-# sub-issue-linked under the epic (ADR-015)
-./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
+# sub-issue-linked under the epic (ADR-015). --cap applies the descriptive
+# capability tags this story INHERITS FROM ITS EPIC (the product capability that
+# consumes it; multi-valued). A story may narrow to a subset of the epic's tags
+# but never invents one the epic lacks. Vocabulary: docs/product/roadmap.md.
+./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md --cap "<inherited, e.g. cms,twin>"
 # Output: CREATED_ISSUE:<item_id>:#NNN
 # Use #NNN in later siblings' ## Dependencies sections.
 
-# Sensitive body (live-vuln detail, business specifics)? Keep it private until dispatch:
-#   ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<title>" /tmp/story-body.md --defer
+# Sensitive body (live-vuln detail, business specifics)? Keep it private until dispatch
+# (--defer and --cap compose in any order; cap rides a body marker until materialize):
+#   ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<title>" /tmp/story-body.md --defer --cap "<...>"
 #   Output: CREATED_DRAFT:<item_id>
 
 rm /tmp/story-body.md
