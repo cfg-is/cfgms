@@ -101,6 +101,31 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Start Windows resource sampler (self-hosted Windows only, best-effort)
+      if: matrix.platform == 'Windows' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      shell: pwsh
+      run: |
+        $sampleFile = "$env:TEMP\resource-samples-win.txt"
+        $scriptFile = "$env:TEMP\resource-sampler.ps1"
+        @'
+param([string]$OutputFile)
+while ($true) {
+    try {
+        $cpuVal = (Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples[0].CookedValue
+        $memAvailMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue
+        $memTotalMB = [Math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1MB)
+        $cpuPct = [Math]::Round($cpuVal)
+        $memUsedMB = $memTotalMB - [Math]::Round($memAvailMB)
+        $ts = Get-Date -Format 'HH:mm:ss'
+        Add-Content $OutputFile "$ts cpu_pct=$cpuPct mem_used_mb=$memUsedMB/$memTotalMB"
+    } catch {}
+    Start-Sleep -Seconds 5
+}
+'@ | Set-Content $scriptFile -Encoding UTF8
+        $proc = Start-Process pwsh -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $scriptFile, '-OutputFile', $sampleFile) -PassThru -WindowStyle Hidden
+        $proc.Id | Set-Content "$env:TEMP\sampler-pid.txt" -Encoding UTF8
+
     - name: Build All Binaries
       shell: bash
       run: make build
@@ -117,6 +142,41 @@ jobs:
         name: binaries-${{ matrix.platform }}
         path: bin/
         retention-days: 5
+
+    - name: Report Windows resource profile (self-hosted Windows only, best-effort)
+      if: always() && matrix.platform == 'Windows' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      shell: pwsh
+      run: |
+        $pidFile = "$env:TEMP\sampler-pid.txt"
+        $sampleFile = "$env:TEMP\resource-samples-win.txt"
+        if (Test-Path $pidFile) {
+            $samplerPid = [int](Get-Content $pidFile -Raw).Trim()
+            Stop-Process -Id $samplerPid -ErrorAction SilentlyContinue
+        }
+        $cpuPeak = 0; $memPeak = 0; $memTotal = 0
+        if (Test-Path $sampleFile) {
+            foreach ($line in (Get-Content $sampleFile)) {
+                if ($line -match 'cpu_pct=(\d+)') { $v = [int]$Matches[1]; if ($v -gt $cpuPeak) { $cpuPeak = $v } }
+                if ($line -match 'mem_used_mb=(\d+)/(\d+)') {
+                    $v = [int]$Matches[1]; if ($v -gt $memPeak) { $memPeak = $v }
+                    $memTotal = [int]$Matches[2]
+                }
+            }
+            Copy-Item $sampleFile "resource-samples-native-windows.txt"
+        } else {
+            Set-Content "resource-samples-native-windows.txt" ""
+        }
+        Write-Host "RESOURCE_PROFILE: os=windows cpu_peak_pct=$cpuPeak mem_peak_mb=$memPeak/$memTotal vm=4vCPU/8GB"
+
+    - name: Upload resource samples (self-hosted Windows only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && matrix.platform == 'Windows' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      with:
+        name: resource-samples-native-windows
+        path: resource-samples-native-windows.txt
+        retention-days: 30
 
   # Integration tests with Docker infrastructure (Linux only)
   integration-tests:

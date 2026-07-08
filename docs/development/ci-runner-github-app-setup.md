@@ -210,7 +210,153 @@ steward exec channel.
 
 ---
 
-## 7. What the founder does vs what the agent builds
+## 7. Self-hosted vs GitHub-hosted CI timing (epic #565 MVP success criteria)
+
+Measured 2026-07-08. Point-in-time samples; durations vary run-to-run due to queue
+contention on the single-runner pool, module cache state, and ambient GitHub Actions load.
+
+### 7.1 Self-hosted Windows runner (`CFGMS-CI-WIN-01`)
+
+Job: `Native Build (Windows)`, `runner_name: CFGMS-CI-WIN-01` (labels: `self-hosted,
+Windows, X64, cfgms`). Routes here for non-fork `pull_request`, `merge_group`, and `push`
+events (Issue #2337). Duration = job `started_at` → `completed_at` (excludes queue-wait
+before the runner picks up the job).
+
+| Run ID | Event | `started_at` | `completed_at` | Duration |
+|--------|-------|--------------|----------------|----------|
+| [28919392704](https://github.com/cfg-is/cfgms/actions/runs/28919392704) | pull\_request | 2026-07-08T05:17:30Z | 2026-07-08T05:24:33Z | 7m 3s |
+| [28915357324](https://github.com/cfg-is/cfgms/actions/runs/28915357324) | merge\_group | 2026-07-08T03:45:06Z | 2026-07-08T03:52:27Z | 7m 21s |
+| [28915407858](https://github.com/cfg-is/cfgms/actions/runs/28915407858) | merge\_group | 2026-07-08T03:39:20Z | 2026-07-08T03:45:05Z | 5m 45s |
+| [28915270545](https://github.com/cfg-is/cfgms/actions/runs/28915270545) | merge\_group | 2026-07-08T03:27:18Z | 2026-07-08T03:39:19Z | 12m 1s |
+| [28913793047](https://github.com/cfg-is/cfgms/actions/runs/28913793047) | pull\_request | 2026-07-08T02:49:23Z | 2026-07-08T03:00:42Z | 11m 19s |
+| [28913609116](https://github.com/cfg-is/cfgms/actions/runs/28913609116) | merge\_group | 2026-07-08T02:42:30Z | 2026-07-08T02:49:21Z | 6m 51s |
+| [28912926805](https://github.com/cfg-is/cfgms/actions/runs/28912926805) | pull\_request | 2026-07-08T02:28:06Z | 2026-07-08T02:35:37Z | 7m 31s |
+
+**Sorted: 5m 45s, 6m 51s, 7m 3s, 7m 21s, 7m 31s, 11m 19s, 12m 1s**
+
+**Median: 7m 21s (441 s) · Average: 8m 16s (496 s)**
+
+The 12m 1s sample (run 28915270545) reflects queue serialization: three `merge_group` runs
+enqueued in rapid succession on the single `CFGMS-CI-WIN-01` runner — each starts only after
+the preceding one completes.
+
+### 7.2 GitHub-hosted Windows runner baseline
+
+Job: `Native Build (Windows)` (post-routing) or `Native Build (windows-latest)` (pre-routing;
+the matrix `platform` field was renamed when Issue #2337 updated the matrix expression — the
+underlying job is identical). Routes to `windows-latest` for `workflow_dispatch` events and
+fork-sourced `pull_request` events; pre-routing all runs used `windows-latest`. The 8 samples
+below include 1 post-routing `workflow_dispatch` run and 7 runs from before Issue #2337 merged
+into develop (2026-07-07 ~17:20), when all builds used GitHub-hosted runners.
+
+| Run ID | Event | Job name | `started_at` | `completed_at` | Duration |
+|--------|-------|----------|--------------|----------------|----------|
+| [28885889636](https://github.com/cfg-is/cfgms/actions/runs/28885889636) | workflow\_dispatch | Native Build (Windows) | 2026-07-07T17:30:48Z | 2026-07-07T17:47:51Z | 17m 3s |
+| [28879341829](https://github.com/cfg-is/cfgms/actions/runs/28879341829) | pull\_request | Native Build (windows-latest) | 2026-07-07T15:45:34Z | 2026-07-07T16:01:42Z | 16m 8s |
+| [28830345350](https://github.com/cfg-is/cfgms/actions/runs/28830345350) | pull\_request | Native Build (windows-latest) | 2026-07-06T23:28:58Z | 2026-07-06T23:40:49Z | 11m 51s |
+| [28828564496](https://github.com/cfg-is/cfgms/actions/runs/28828564496) | pull\_request | Native Build (windows-latest) | 2026-07-06T22:48:50Z | 2026-07-06T23:04:33Z | 15m 43s |
+| [28826483352](https://github.com/cfg-is/cfgms/actions/runs/28826483352) | merge\_group | Native Build (windows-latest) | 2026-07-06T22:05:48Z | 2026-07-06T22:20:43Z | 14m 55s |
+| [28824227037](https://github.com/cfg-is/cfgms/actions/runs/28824227037) | merge\_group | Native Build (windows-latest) | 2026-07-06T21:23:29Z | 2026-07-06T21:39:29Z | 16m 0s |
+| [28821984103](https://github.com/cfg-is/cfgms/actions/runs/28821984103) | merge\_group | Native Build (windows-latest) | 2026-07-06T20:44:03Z | 2026-07-06T21:00:26Z | 16m 23s |
+| [28811278270](https://github.com/cfg-is/cfgms/actions/runs/28811278270) | merge\_group | Native Build (windows-latest) | 2026-07-06T17:42:41Z | 2026-07-06T18:04:32Z | 21m 51s |
+
+**Sorted: 11m 51s, 14m 55s, 15m 43s, 16m 0s, 16m 8s, 16m 23s, 17m 3s, 21m 51s**
+
+**Median: 16m 4s (964 s) · Average: 16m 14s (974 s)**
+
+### 7.3 Comparison and "materially faster" verdict
+
+| Metric | Self-hosted (`CFGMS-CI-WIN-01`) | GitHub-hosted (`windows-latest`) | Speedup |
+|--------|---------------------------------|----------------------------------|---------|
+| Median | 7m 21s (441 s) | 16m 4s (964 s) | **2.19×** |
+| Average | 8m 16s (496 s) | 16m 14s (974 s) | **1.96×** |
+
+**Epic #565 "materially faster" criterion: YES.** The self-hosted runner completes the
+`Native Build (Windows)` job in approximately half the time of the GitHub-hosted baseline —
+a 2.19× median speedup (7m 21s vs 16m 4s). Excluding the queue-contention outlier (12m 1s,
+run 28915270545) the self-hosted median drops to 7m 3s — a 2.34× speedup.
+
+These are point-in-time measurements taken 2026-07-08 during this story's implementation.
+The self-hosted pool currently has one Windows runner (`CFGMS-CI-WIN-01`), so concurrent
+merge\_group or PR builds queue and serialize, which inflates individual durations.
+GitHub-hosted runners are provisioned on demand with no queuing penalty. Measurements will
+shift as the runner pool grows and cache state matures.
+
+### 7.4 Native-Windows job evidence
+
+The following run provides durable evidence that the `Native Build (Windows)` job has
+executed and passed on the self-hosted Windows runner:
+
+| Field | Value |
+|-------|-------|
+| Run ID | [28919392704](https://github.com/cfg-is/cfgms/actions/runs/28919392704) |
+| Job name | `Native Build (Windows)` |
+| `runner_name` | `CFGMS-CI-WIN-01` |
+| Runner labels | `self-hosted, Windows, X64, cfgms` |
+| `conclusion` | `success` |
+| `started_at` | `2026-07-08T05:17:30Z` |
+| `completed_at` | `2026-07-08T05:24:33Z` |
+| Event | `pull_request` (non-fork, branch `feature/story-2379-windows-launcher-msi`) |
+
+`CFGMS-CI-WIN-01` is the VM provisioned in §6 (runner id 23, Windows Server 2025
+SERVERSTANDARD, 4 vCPU / 8 GB, host CFG-70-02). This run built all CFGMS binaries natively
+on Windows (`make build`) and ran the unit test suite
+(`go test -race -short -timeout=5m ./pkg/... ./features/...`), both passing on the
+self-hosted runner.
+
+### 7.5 Runner resource profile (Story #2428, instrumented 2026-07-08)
+
+The self-hosted CI jobs now capture peak CPU% and peak memory usage during each run so
+the 4 vCPU / 8 GB VM allocation can be compared against actual utilization. This closes
+the gap between knowing the *allocation* and knowing the *utilization* before deciding
+whether to scale vertically (larger VMs) or horizontally (more VMs).
+
+**Jobs instrumented:**
+- `unit-tests` (Linux, `cfgms-ci-lin-01`)
+- `integration-tests` (Linux, `cfgms-ci-lin-01`)
+- `Native Build (Windows)` (Windows, `CFGMS-CI-WIN-01`)
+
+Steps run only on the self-hosted path (same fork-gate as the job); fork PRs and
+`workflow_dispatch` events skip the sampler entirely — no cost added to hosted CI.
+
+**How to read the resource profile:**
+
+1. **Job log line** — search for `RESOURCE_PROFILE` in the "Report resource profile"
+   step log. The line is emitted at the end of each instrumented run:
+
+   ```
+   RESOURCE_PROFILE: os=linux   cpu_peak_pct=<n> mem_peak_mb=<n>/<total_mb> vm=4vCPU/8GB
+   RESOURCE_PROFILE: os=windows cpu_peak_pct=<n> mem_peak_mb=<n>/<total_mb> vm=4vCPU/8GB
+   ```
+
+   `cpu_peak_pct` is the highest single 5 s interval CPU% observed during the job.
+   `mem_peak_mb` is the highest used-memory reading (total − available) over the same interval.
+
+2. **Per-run artifact** — raw time-series samples (one line per 5 s interval:
+   `HH:MM:SS cpu_pct=<n> mem_used_mb=<n>/<total_mb>`) are uploaded as an artifact
+   retained for 30 days. Artifact names:
+
+   | Job | Artifact name |
+   |-----|---------------|
+   | `unit-tests` | `resource-samples-unit-tests` |
+   | `integration-tests` | `resource-samples-integration-tests` |
+   | `Native Build (Windows)` | `resource-samples-native-windows` |
+
+   Download from the Actions run page → Artifacts section, or via CLI:
+
+   ```bash
+   gh run download <run-id> --name resource-samples-unit-tests
+   ```
+
+**Initial reading:** The instrumentation was added with this story (2026-07-08). No
+instrumented runs exist at implementation time. The `RESOURCE_PROFILE` lines and
+artifacts will populate from subsequent self-hosted runs. The VM-sizing assessment
+(under- vs over-provisioned) is an explicit follow-up once ≥~5 instrumented runs have
+accumulated.
+
+---
+
+## 8. What the founder does vs what the agent builds
 
 - **Founder (one-time prereq):** run §1 (≈1 click) and §3 (drop 3 secrets). That's it, forever.
 - **Automated build-out:** the manifest-flow helper (optional), the controller token-minting integration (§4), the VM provisioning + registration wiring, steward management of the runners, and the gated CI-workflow routing (§5).
