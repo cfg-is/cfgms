@@ -1759,6 +1759,90 @@ Get execution history for a trigger.
 }
 ```
 
+### Cluster Management
+
+Read-only view of the Hyper-V cluster topology derived on demand from steward DNA
+attributes. **This API is eventually consistent**: it reflects whatever `cluster:<name>.*`
+DNA attributes were last published by each steward's `DNARefreshLoop` ticker (default
+30 minutes, configurable via `DNARefreshInterval`). A cluster topology change — a new
+member node, a role ownership transfer — can take up to one refresh interval to appear
+in these endpoints. This is acceptable because no safety-critical behavior (no-duplicate-VM
+enforcement, owner-gated lifecycle actions) depends on this registry; those operations gate
+off live PowerShell queries on every convergence tick, not off this read API.
+
+#### GET /api/v1/clusters
+
+List all clusters visible to the authenticated caller. Clusters are derived by parsing
+`cluster:<name>.*` keys from each steward's `DNA.Attributes`. Only clusters whose member
+stewards belong to the caller's tenant (or a descendant tenant) are returned.
+
+**Required permission:** `cluster:list`
+
+**Tenant scoping:** Caller's tenant from the authenticated context limits which stewards'
+DNA is scanned. An admin mTLS principal (empty tenant) has no scope restriction and sees
+all clusters.
+
+**Response:**
+
+```json
+{
+  "data": [
+    {
+      "name": "cfg-lab",
+      "members": ["steward-a", "steward-b"],
+      "role_owners": {
+        "csv": "CFG-70-02",
+        "cno": "CFG-AB-02"
+      }
+    }
+  ],
+  "timestamp": "2026-07-08T12:00:00Z"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Cluster name from the `cluster:<name>.*` DNA key prefix |
+| `members` | []string | Sorted steward IDs whose DNA carries `cluster:<name>.*` keys |
+| `role_owners` | object | Map of role name → owner node, parsed from `cluster:<name>.resource_owner.<role>` keys |
+
+#### GET /api/v1/clusters/{name}
+
+Get the registry entry for a single named cluster.
+
+Returns 404 when the cluster does not exist or all its member stewards are outside
+the caller's tenant scope. 404 (not 403) is used to avoid disclosing cluster existence
+across tenant boundaries.
+
+**Required permission:** `cluster:read`
+
+**Parameters:**
+
+- `name` (path): Cluster name (e.g., `cfg-lab`)
+
+**Response (200):**
+
+```json
+{
+  "data": {
+    "name": "cfg-lab",
+    "members": ["steward-a", "steward-b"],
+    "role_owners": {
+      "csv": "CFG-70-02",
+      "cno": "CFG-AB-02"
+    }
+  },
+  "timestamp": "2026-07-08T12:00:00Z"
+}
+```
+
+**Error responses:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `MISSING_CLUSTER_NAME` | `name` path variable is empty |
+| 404 | `CLUSTER_NOT_FOUND` | Cluster does not exist or is outside the caller's tenant |
+
 ### Internal Endpoints (not for external use)
 
 #### POST /raft/message

@@ -455,6 +455,13 @@ func (s *Server) setupRouter() {
 	// Default for all routes on the api subrouter. Tier-3 (TierMTLSOnly) endpoints are
 	// additionally wrapped with requireTier(TierMTLSOnly); see Issue #1419 story S3.
 
+	// Cluster registry endpoints (Issue #2424): read-only view of cluster topology
+	// derived on demand from steward DNA attributes. Eventually consistent (up to one
+	// DNARefreshInterval, default 30 min) — see docs/api/rest-api.md for details.
+	clusters := api.PathPrefix("/clusters").Subrouter()
+	clusters.Handle("", s.requirePermission("cluster", "list")(http.HandlerFunc(s.handleListClusters))).Methods("GET")
+	clusters.Handle("/{name}", s.requirePermission("cluster", "read")(http.HandlerFunc(s.handleGetCluster))).Methods("GET")
+
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
