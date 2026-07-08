@@ -24,20 +24,35 @@
 //   Verdict   -> COMPLETE (evidence + majority-not-refuted, no blocking gap) or
 //                INCOMPLETE (gap list + remediation-story specs) + a closeout
 //                comment; optionally close COMPLETE epics when args.close is set.
+//   Remediate -> (args.remediate) for INCOMPLETE epics, a BA authors remediation
+//                stories via create-story for UNCOVERED gaps / annotates already-
+//                open covering stories (never duplicating); undecomposed epics get
+//                a full decomposition. The BA — not the audit — decides the HOW.
+//   Validate  -> a Tech Lead validates each newly-created story for dev-agent
+//                executability and promotes passing ones to Ready.
 //
 // REPRODUCIBLE: deterministic orchestration, always verifies origin/develop
-// (never a local checkout), same epic -> same process. Report-only by default.
+// (never a local checkout), same epic -> same process. Report-only by default;
+// close and remediate are separate opt-in flags.
 //
 // args:
 //   epic:        number   — audit ONE epic; omit to sweep every open epic
 //   close:       boolean  — default false (dry-run). true => post the closeout
 //                           comment and `gh issue close` epics judged COMPLETE.
+//   remediate:   boolean  — default false. true => BA files/annotates remediation
+//                           stories for INCOMPLETE epics + Tech Lead marks them Ready.
+//   founderNotes:object   — { "<epic#>": "architectural decision the BA authors TO" }.
+//                           The audit finds the gap; the founder/BA decide the fix —
+//                           the audit agent never prescribes an implementation.
 //   verifiers:   integer  — adversarial skeptics per epic (default 3, max 3 lenses)
 //   founderOwned:number[] — epics never auto-closed in SWEEP mode even if COMPLETE
 //                           (default [565]; targeting one explicitly via `epic`
 //                           overrides this so a human can still close it on purpose)
 //
-// Invoke: Workflow({ name: 'epic-completion-audit', args: { epic: 565 } })
+// Invoke (audit only):  Workflow({ name: 'epic-completion-audit', args: { epic: 565 } })
+// Invoke (remediate):   Workflow({ name: 'epic-completion-audit', args: {
+//                          epic: 565, remediate: true,
+//                          founderNotes: { "565": "interim: register github_runner in the builtin factory like hyperv; do NOT gate on the ADR-006 pull path" } } })
 
 export const meta = {
   name: 'epic-completion-audit',
@@ -48,12 +63,23 @@ export const meta = {
     { title: 'Evidence' },
     { title: 'Adversarial' },
     { title: 'Verdict' },
+    { title: 'Remediate' },
+    { title: 'Validate' },
   ],
 }
 
 const cfg = args || {}
 const targetEpic = cfg.epic != null ? String(cfg.epic) : null
 const doClose = cfg.close === true
+// remediate: for INCOMPLETE epics, hand gaps+evidence to a BA to author remediation
+// stories (via create-story) / annotate already-open covering stories, then a Tech
+// Lead validates each new story and promotes it to Ready. Report-only when false.
+const doRemediate = cfg.remediate === true
+// founderNotes: { "<epic#>": "architectural decision the BA must author TO" } — e.g.
+// { "565": "interim fix = register github_runner in the builtin factory like hyperv;
+//   do NOT gate on the ADR-006 pull path" }. The audit finds the gap; the founder/BA
+// (not the audit agent) decide the HOW.
+const founderNotes = cfg.founderNotes || {}
 const N_VERIFIERS = Math.max(1, Math.min(3, cfg.verifiers || 3))
 const FOUNDER_OWNED = new Set((cfg.founderOwned || [565]).map(String))
 
@@ -144,6 +170,39 @@ const VERDICT_SCHEMA = {
       },
       description: 'if INCOMPLETE: one story per gap, titled per the story convention',
     },
+  },
+}
+
+const BA_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['created', 'annotated'],
+  properties: {
+    created: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['number', 'title'],
+        properties: { number: { type: 'integer' }, title: { type: 'string' }, gap: { type: 'string' } },
+      },
+      description: 'new remediation stories filed via create-story under this epic',
+    },
+    annotated: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['number'],
+        properties: { number: { type: 'integer' }, note: { type: 'string' } },
+      },
+      description: 'existing OPEN sub-issues updated with the audit gap (NOT duplicated)',
+    },
+    decomposed: { type: 'boolean', description: 'true if this was a full decomposition of a previously-undecomposed epic' },
+    blocked: { type: 'string', description: 'if a gap needs a founder decision you do not have: the specific question (else empty)' },
+  },
+}
+
+const TL_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['story', 'ready'],
+  properties: {
+    story: { type: 'integer' },
+    ready: { type: 'boolean', description: 'true iff promoted to Ready (passes all executability checks)' },
+    revisionNeeded: { type: 'string', description: 'if not ready: exactly what the BA must fix' },
   },
 }
 
@@ -238,6 +297,28 @@ ${verdict.closeoutComment || 'Epic completion audit: COMPLETE. All acceptance cr
 2. \`gh issue close ${epic.number} --repo cfg-is/cfgms --reason completed\`
 Report CLOSED:${epic.number} on success.`
 
+const baRemediatePrompt = (epic, bundle, verdict, note) => {
+  const { scope } = bundle
+  const openCovering = (scope.subIssues || []).filter(s => s.state && String(s.state).toUpperCase() === 'OPEN')
+  return `Remediate INCOMPLETE epic #${epic.number} ("${epic.title}"). You are the BA. Author real work via \`./scripts/pipeline-helper.sh\` ONLY (create-story / comment) — never \`gh issue create\`. Ground EVERY code reference with serena before you write it (a wrong symbol becomes a dev-agent gap).
+
+Epic intent: ${scope.intent}
+Confirmed gaps (evidence-backed completion audit vs origin/develop):
+${(verdict.gaps || []).map((g, i) => `${i + 1}. ${g}`).join('\n') || '(see the epic verdict rationale)'}
+Existing OPEN sub-issues (do NOT duplicate — annotate one if a gap is already its scope): ${openCovering.map(s => '#' + s.number).join(', ') || 'none'}
+Unlinked drafts to fold in or file: ${(scope.unlinkedDrafts || []).join(' | ') || 'none'}
+${note ? `\n>>> FOUNDER ARCHITECTURAL DECISION for this epic — author TO THIS, not your own reading of the code:\n${note}\n` : ''}
+Rules:
+1. If a gap is already covered by an OPEN sub-issue above, DO NOT create a new story. Instead post the precise audit finding (file:line evidence + what's still missing) to that issue: \`./scripts/pipeline-helper.sh comment <issue> <body-file>\`, and record it in "annotated" — so the dev agent that picks it up knows exactly what remains.
+2. For each UNCOVERED gap, create a right-sized remediation story: \`./scripts/pipeline-helper.sh create-story ${epic.number} "<scope>: <title> (under epic #${epic.number})" <body-file>\`. Full spec: ## Goal, ## Story Dependencies, ## Files In Scope, ## Out of Scope, ## Docs In Scope, ## Acceptance Criteria (mark [REQUIRED TEST] where the audit named a missing test). Record each in "created".
+3. If this epic has ZERO sub-issues (undecomposed), do a normal full decomposition driven by the audit gaps instead; set decomposed=true. Never exceed 10 stories.
+4. If a gap needs a founder decision you do not have (and no founder note above covers it), DO NOT guess — set "blocked" with the specific question and skip that gap.
+
+Return the created / annotated stories.`
+}
+
+const tlPrompt = (storyNum, epic) => `Validate story #${storyNum} (just authored to remediate epic #${epic.number}) for dev-agent executability, per your full Tech Lead rubric. Read its body and verify every code reference against origin/develop with serena. If it passes, promote it to Ready (project Status change via \`./scripts/pipeline-helper.sh\` / \`project-queue.sh\`). If it fails, leave it Draft and report exactly what the BA must fix. Return {story:${storyNum}, ready:<bool>, revisionNeeded:<text if not ready>}.`
+
 // ── orchestration ────────────────────────────────────────────────────────────
 phase('Discover')
 const discovered = await agent(
@@ -277,6 +358,25 @@ const results = await pipeline(
       const res = await agent(closePrompt(epic, verdict), { label: `close:#${epic.number}`, phase: 'Verdict', agentType: 'general-purpose' })
       closed = typeof res === 'string' && res.includes(`CLOSED:${epic.number}`)
     }
+
+    // Remediate INCOMPLETE epics: BA authors/annotates stories -> Tech Lead validates -> Ready.
+    let created = [], annotated = [], readied = [], remediationBlocked = ''
+    if (doRemediate && verdict.verdict === 'INCOMPLETE') {
+      const ba = await agent(
+        baRemediatePrompt(epic, bundle, verdict, founderNotes[String(epic.number)]),
+        { label: `ba:remediate:#${epic.number}`, phase: 'Remediate', schema: BA_SCHEMA, agentType: 'ba' },
+      )
+      created = (ba && ba.created) || []
+      annotated = (ba && ba.annotated) || []
+      remediationBlocked = (ba && ba.blocked) || ''
+      if (created.length) {
+        const tlVotes = await parallel(created.map(s => () =>
+          agent(tlPrompt(s.number, epic), { label: `tl:validate:#${s.number}`, phase: 'Validate', schema: TL_SCHEMA, agentType: 'tech-lead' }),
+        ))
+        readied = tlVotes.filter(Boolean).filter(v => v.ready).map(v => v.story)
+      }
+    }
+
     return {
       epic: epic.number,
       title: epic.title,
@@ -292,6 +392,10 @@ const results = await pipeline(
       closeoutComment: verdict.closeoutComment || '',
       founderHeld,
       closed,
+      created,
+      annotated,
+      readied,
+      remediationBlocked,
     }
   },
 )
@@ -303,4 +407,19 @@ log(`Done: ${clean.length} audited · ${complete.length} COMPLETE · ${clean.len
 const heldComplete = complete.filter(r => r.founderHeld).map(r => r.epic)
 if (heldComplete.length) log(`COMPLETE but founder-owned (not auto-closed): ${heldComplete.map(n => '#' + n).join(', ')} — target explicitly to close.`)
 
-return { audited: clean.length, complete: complete.length, closed: closedCount, results: clean }
+const createdCount = clean.reduce((a, r) => a + ((r.created && r.created.length) || 0), 0)
+const readiedCount = clean.reduce((a, r) => a + ((r.readied && r.readied.length) || 0), 0)
+const annotatedCount = clean.reduce((a, r) => a + ((r.annotated && r.annotated.length) || 0), 0)
+const remediationBlocked = clean.filter(r => r.remediationBlocked).map(r => `#${r.epic}: ${r.remediationBlocked}`)
+if (doRemediate) {
+  log(`Remediation: ${createdCount} stories created · ${readiedCount} promoted to Ready · ${annotatedCount} existing stories annotated.`)
+  if (remediationBlocked.length) log(`Remediation BLOCKED (needs founder decision): ${remediationBlocked.join(' ; ')}`)
+}
+
+return {
+  audited: clean.length,
+  complete: complete.length,
+  closed: closedCount,
+  remediation: doRemediate ? { created: createdCount, readied: readiedCount, annotated: annotatedCount, blocked: remediationBlocked } : null,
+  results: clean,
+}
