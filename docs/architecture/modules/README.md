@@ -99,7 +99,8 @@ CFGMS-authored but used on only a subset of the fleet; built as standalone bundl
 
 - `acme` - ACME/Let's Encrypt certificate management
 - `activedirectory` - Local Active Directory integration (steward)
-- `hyperv` - In-host Hyper-V management via a persistent PowerShell host subprocess (steward kind; runs on the Hyper-V host itself)
+- `github_runner` - GitHub Actions self-hosted runner agent lifecycle (install + service management; the module is token-free, never mints/consumes registration tokens). Like `hyperv`, it is currently statically registered in the steward factory as an interim measure pending the future stdlib/extended split-loading story, rather than pulled on-demand per ADR-006.
+- `hyperv` - In-host Hyper-V management via a persistent PowerShell host subprocess (steward kind; runs on the Hyper-V host itself). Statically registered in the steward factory as an interim measure (same as `github_runner` above).
 
 **Outpost modules:**
 

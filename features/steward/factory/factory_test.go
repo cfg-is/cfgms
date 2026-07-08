@@ -226,10 +226,26 @@ func TestGetModuleInfo(t *testing.T) {
 
 func TestAllBuiltinModulesLoad(t *testing.T) {
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
-	for _, name := range []string{"acme", "directory", "file", "firewall", "hyperv", "package", "patch", "script"} {
+	for _, name := range []string{"acme", "directory", "file", "firewall", "github_runner", "hyperv", "package", "patch", "script"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
+	}
+}
+
+// TestGithubRunner_IsInBuiltinModuleConstructors asserts that "github_runner" is
+// present in builtinModuleConstructors (contrast with hyperv, which is absent
+// from the map and handled separately by newHypervModule). The loaded instance
+// must satisfy modules.Module.
+func TestGithubRunner_IsInBuiltinModuleConstructors(t *testing.T) {
+	ctor, ok := builtinModuleConstructors["github_runner"]
+	assert.True(t, ok, `"github_runner" must be in builtinModuleConstructors`)
+
+	if ok {
+		instance := ctor()
+		assert.NotNil(t, instance, "github_runner constructor must return a non-nil instance")
+		_, isModule := interface{}(instance).(modules.Module)
+		assert.True(t, isModule, "github_runner instance must satisfy modules.Module")
 	}
 }
 

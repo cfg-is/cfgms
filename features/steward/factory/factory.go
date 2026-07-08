@@ -43,6 +43,7 @@ import (
 	acme_module "github.com/cfgis/cfgms/features/modules/acme"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
+	github_runner_module "github.com/cfgis/cfgms/features/modules/github_runner"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	package_module "github.com/cfgis/cfgms/features/modules/package"
 	"github.com/cfgis/cfgms/features/modules/patch"
@@ -174,13 +175,14 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 // Note: "hyperv" is intentionally absent — it is handled separately by newHypervModule
 // (which wires the durable provision store) and early-returned in loadBuiltinModule.
 var builtinModuleConstructors = map[string]func() modules.Module{
-	"acme":      func() modules.Module { return acme_module.New() },
-	"directory": func() modules.Module { return file.New() }, // merged into file module (type: directory)
-	"file":      func() modules.Module { return file.New() },
-	"firewall":  func() modules.Module { return firewall.New() },
-	"package":   func() modules.Module { return package_module.New() },
-	"patch":     func() modules.Module { return patch.New() },
-	"script":    func() modules.Module { return script.New() },
+	"acme":          func() modules.Module { return acme_module.New() },
+	"directory":     func() modules.Module { return file.New() }, // merged into file module (type: directory)
+	"file":          func() modules.Module { return file.New() },
+	"firewall":      func() modules.Module { return firewall.New() },
+	"github_runner": func() modules.Module { return github_runner_module.New() },
+	"package":       func() modules.Module { return package_module.New() },
+	"patch":         func() modules.Module { return patch.New() },
+	"script":        func() modules.Module { return script.New() },
 }
 
 // loadBuiltinModule creates a new instance of a built-in module.
