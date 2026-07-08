@@ -109,20 +109,20 @@ jobs:
         $sampleFile = "$env:TEMP\resource-samples-win.txt"
         $scriptFile = "$env:TEMP\resource-sampler.ps1"
         @'
-param([string]$OutputFile)
-while ($true) {
-    try {
-        $cpuVal = (Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples[0].CookedValue
-        $memAvailMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue
-        $memTotalMB = [Math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1MB)
-        $cpuPct = [Math]::Round($cpuVal)
-        $memUsedMB = $memTotalMB - [Math]::Round($memAvailMB)
-        $ts = Get-Date -Format 'HH:mm:ss'
-        Add-Content $OutputFile "$ts cpu_pct=$cpuPct mem_used_mb=$memUsedMB/$memTotalMB"
-    } catch {}
-    Start-Sleep -Seconds 5
-}
-'@ | Set-Content $scriptFile -Encoding UTF8
+        param([string]$OutputFile)
+        while ($true) {
+            try {
+                $cpuVal = (Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples[0].CookedValue
+                $memAvailMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue
+                $memTotalMB = [Math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1MB)
+                $cpuPct = [Math]::Round($cpuVal)
+                $memUsedMB = $memTotalMB - [Math]::Round($memAvailMB)
+                $ts = Get-Date -Format 'HH:mm:ss'
+                Add-Content $OutputFile "$ts cpu_pct=$cpuPct mem_used_mb=$memUsedMB/$memTotalMB"
+            } catch {}
+            Start-Sleep -Seconds 5
+        }
+        '@ | Set-Content $scriptFile -Encoding UTF8
         $proc = Start-Process pwsh -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $scriptFile, '-OutputFile', $sampleFile) -PassThru -WindowStyle Hidden
         $proc.Id | Set-Content "$env:TEMP\sampler-pid.txt" -Encoding UTF8
 
