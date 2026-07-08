@@ -123,7 +123,7 @@ func applyTerm(f *fleet.Filter, t term) error {
 	case t.key == "id":
 		f.IDs = append(f.IDs, strings.Split(t.value, ",")...)
 	case t.key == "name":
-		f.Hostname = t.value
+		f.Name = t.value
 	case t.key == "os":
 		f.OS = t.value
 	case t.key == "platform":

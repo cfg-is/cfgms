@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -147,7 +148,7 @@ type fleetQueryAdapter struct {
 }
 
 func (a *fleetQueryAdapter) Search(ctx context.Context, selector, tenantID string) ([]batchjob.StewardMeta, error) {
-	filter, err := fleet.ParseTargetSelector(selector)
+	filter, err := fleetSelector.Parse(selector)
 	if err != nil {
 		return nil, err
 	}
