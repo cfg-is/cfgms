@@ -818,6 +818,90 @@ func TestGetConfiguration_AbsentRingFallsBack(t *testing.T) {
 		"steward with no deployment_ring must receive fallback ring's desired_version")
 }
 
+// --- Cluster cascade wiring tests (Issue #2425) ---
+
+// TestNewConfigurationServiceV2_WiresClusterRegistry verifies that when NewConfigurationServiceV2
+// is constructed with a non-nil ControllerService, the cluster-policies cascade is active:
+// a steward with cluster membership DNA attributes receives resources from the matching
+// cluster-policies config document in its effective configuration.
+func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	stewardID := "cluster-member-1"
+
+	// Register the steward in the ControllerService with cluster DNA attributes.
+	// cluster:cfg-lab.member is a valid cluster:<name>.<field> key that causes
+	// BuildRegistry to record stewardID as a member of "cfg-lab".
+	dna := makeTestDNA(stewardID, map[string]string{
+		"cluster:cfg-lab.member": "true",
+	})
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	// Store a cluster-policies/cfg-lab config document.
+	cs := svc.storageManager.GetConfigStore()
+	clusterResource := stewardtypes.ResourceConfig{Name: "cfg-lab-vm", Module: "hyperv.vm"}
+	clusterCfg := stewardtypes.StewardConfig{
+		Resources: []stewardtypes.ResourceConfig{clusterResource},
+	}
+	clusterCfgYAML, err := yaml.Marshal(clusterCfg)
+	require.NoError(t, err)
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "default", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: clusterCfgYAML,
+	}))
+
+	// Also store a device-level config so Sources is non-empty (GetEffectiveConfiguration
+	// returns the raw resolver result without the Sources>0 gate).
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, createTestStewardConfig(stewardID)))
+
+	effective, err := svc.GetEffectiveConfiguration(ctx, "default", stewardID)
+	require.NoError(t, err)
+
+	resourcesByName := make(map[string]stewardtypes.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+
+	_, hasCfgLabVM := resourcesByName["cfg-lab-vm"]
+	assert.True(t, hasCfgLabVM,
+		"steward with cluster:cfg-lab.member DNA must receive cfg-lab-vm from cluster-policies/cfg-lab")
+
+	src, hasSrc := effective.Sources["resource.cfg-lab-vm"]
+	require.True(t, hasSrc, "cluster resource source must be tracked in effective config")
+	assert.Contains(t, src.Source, "cluster-policies",
+		"source description must identify the cluster-policies namespace")
+}
+
+// TestNewConfigurationServiceV2_NoControllerSvc_NoCascade verifies that when
+// NewConfigurationServiceV2 is constructed with a nil ControllerService (test/standalone mode),
+// no cluster cascade occurs and ResolveConfiguration behaves identically to before this story.
+func TestNewConfigurationServiceV2_NoControllerSvc_NoCascade(t *testing.T) {
+	ctx := context.Background()
+	svc := createTestServiceV2(t) // nil controllerSvc
+
+	stewardID := "no-cluster-steward"
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, createTestStewardConfig(stewardID)))
+
+	effective, err := svc.GetEffectiveConfiguration(ctx, "default", stewardID)
+	require.NoError(t, err)
+	require.NotNil(t, effective, "effective config must be returned even without a cluster registry")
+
+	// No cluster-policies resources should appear (there's no registry to look up membership).
+	for _, r := range effective.Config.Resources {
+		assert.NotContains(t, r.Name, "cluster",
+			"no cluster resources expected when ControllerService is nil")
+	}
+}
+
 // TestGetConfiguration_EmptyRingVersionNoOverride proves: when the resolved ring has
 // no desired_version, the ring does not override the tenant-path desired_version.
 func TestGetConfiguration_EmptyRingVersionNoOverride(t *testing.T) {

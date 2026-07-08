@@ -10,8 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -551,6 +554,271 @@ func TestResolveRingVersion_DefaultFallbackWhenFallbackRingEmpty(t *testing.T) {
 	assert.Equal(t, "v0.5.20", version, "empty fallback_ring must default to 'default' ring")
 	assert.Equal(t, "default", ring)
 	assert.True(t, didFallback)
+}
+
+// --- Cluster cascade tests (Issue #2425) ---
+
+// buildClusterRegistry constructs a real *clusterregistry.Registry from the given
+// steward DNA, exercising the production BuildRegistry parse path (no stubs). It
+// marks stewardID as a member of each named cluster via the cluster:<name>.member
+// DNA convention that clusterregistry.BuildRegistry parses.
+func buildClusterRegistry(stewardID string, clusters ...string) *clusterregistry.Registry {
+	attrs := make(map[string]string, len(clusters))
+	for _, c := range clusters {
+		attrs["cluster:"+c+".member"] = "true"
+	}
+	return clusterregistry.BuildRegistry([]fleet.StewardData{
+		{ID: stewardID, DNAAttributes: attrs},
+	})
+}
+
+// TestResolveConfiguration_ClusterCascade_MemberReceivesResources verifies the required
+// AC: a steward reported as a member of cluster "cfg-lab" by the registry receives the
+// merged resources from cluster-policies/cfg-lab, positioned after Group-level and before
+// Device-level (a device-level resource of the same name still wins).
+func TestResolveConfiguration_ClusterCascade_MemberReceivesResources(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Group-level sets a resource "base-resource"
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "group"}},
+			},
+		}),
+	}))
+
+	// Cluster-level sets "cluster-resource" and overrides "base-resource"
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "cluster-resource", Module: "file", Config: map[string]interface{}{"value": "cluster"}},
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "cluster-override"}},
+			},
+		}),
+	}))
+
+	// Device-level overrides "base-resource" — device must win over cluster
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "stewards", Name: "steward-1"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "device-wins"}},
+			},
+		}),
+	}))
+
+	registry := buildClusterRegistry("steward-1", "cfg-lab")
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	// cluster-resource must be present (from cluster-policies/cfg-lab)
+	resourcesByName := make(map[string]stewardconfig.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+	clusterRes, ok := resourcesByName["cluster-resource"]
+	require.True(t, ok, "cluster-resource must be present in effective config")
+	assert.Equal(t, "cluster", clusterRes.Config["value"], "cluster-resource must come from cluster-policies")
+
+	// device-level must win over cluster-level for the same resource name
+	baseRes, ok := resourcesByName["base-resource"]
+	require.True(t, ok, "base-resource must be present")
+	assert.Equal(t, "device-wins", baseRes.Config["value"], "device-level must override cluster-level for same resource")
+
+	// inheritance source for cluster-resource must show the cluster origin
+	src, ok := effective.Sources["resource.cluster-resource"]
+	require.True(t, ok, "cluster-resource source must be tracked")
+	assert.Contains(t, src.Source, "cluster-policies", "source must identify cluster-policies namespace")
+}
+
+// TestResolveConfiguration_NoMembership_Unchanged verifies that a steward with no cluster
+// membership (registry returns nil) produces byte-identical EffectiveConfiguration output
+// to an InheritanceResolver with no registry wired at all. This is the nil-registry /
+// empty-membership no-op guarantee.
+func TestResolveConfiguration_NoMembership_Unchanged(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Seed a cluster-policies doc that must NOT appear for a non-member steward.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "cluster-only-resource", Module: "file"},
+			},
+		}),
+	}))
+
+	// Group-level config for baseline
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file"},
+			},
+		}),
+	}))
+
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+
+	// Resolve with no registry wired
+	irNoRegistry := NewInheritanceResolver(router, sm.GetClientTenantStore(), sm.GetTenantStore())
+	effectiveNoRegistry, err := irNoRegistry.ResolveConfiguration(ctx, "client", "steward-2")
+	require.NoError(t, err)
+
+	// Resolve with registry wired but steward has no membership
+	emptyRegistry := buildClusterRegistry("other-steward", "cfg-lab")
+	irWithRegistry := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), emptyRegistry)
+	effectiveWithRegistry, err := irWithRegistry.ResolveConfiguration(ctx, "client", "steward-2")
+	require.NoError(t, err)
+
+	// Resources must be identical — no cluster-only-resource leaked in
+	assert.Equal(t, len(effectiveNoRegistry.Config.Resources), len(effectiveWithRegistry.Config.Resources),
+		"non-member steward must have identical resource count regardless of registry wiring")
+	for _, r := range effectiveWithRegistry.Config.Resources {
+		assert.NotEqual(t, "cluster-only-resource", r.Name,
+			"cluster-only-resource must not appear for a non-member steward")
+	}
+
+	// Sources must have the same keys
+	assert.Equal(t, len(effectiveNoRegistry.Sources), len(effectiveWithRegistry.Sources),
+		"non-member steward must have identical source count regardless of registry wiring")
+}
+
+// TestResolveConfiguration_ClusterLeave_DropsResources verifies that when a steward's
+// registry membership is removed (cluster leave), the cluster.cfg resources are absent
+// from the next ResolveConfiguration call — no stale merge.
+func TestResolveConfiguration_ClusterLeave_DropsResources(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "cluster-vm", Module: "hyperv.vm"},
+			},
+		}),
+	}))
+
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+
+	// First call: steward IS a member — cluster-vm must appear
+	memberRegistry := buildClusterRegistry("steward-1", "cfg-lab")
+	irMember := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), memberRegistry)
+	effectiveMember, err := irMember.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	memberResourceNames := make(map[string]bool)
+	for _, r := range effectiveMember.Config.Resources {
+		memberResourceNames[r.Name] = true
+	}
+	assert.True(t, memberResourceNames["cluster-vm"],
+		"cluster-vm must appear when steward is a member of cfg-lab")
+
+	// Second call: steward has LEFT the cluster (registry returns nil) — cluster-vm must be gone
+	leftRegistry := buildClusterRegistry("other-steward", "cfg-lab")
+	irLeft := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), leftRegistry)
+	effectiveLeft, err := irLeft.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	leftResourceNames := make(map[string]bool)
+	for _, r := range effectiveLeft.Config.Resources {
+		leftResourceNames[r.Name] = true
+	}
+	assert.False(t, leftResourceNames["cluster-vm"],
+		"cluster-vm must be absent after steward leaves cfg-lab (no stale merge)")
+}
+
+// TestResolveConfiguration_CorruptClusterConfig_DoesNotFailResolution verifies that a
+// corrupt (non-YAML) cluster-policies document causes a warning log but does NOT fail
+// ResolveConfiguration. The steward must still receive its non-cluster config, and the
+// corrupt cluster doc must contribute no resources (the error is non-fatal by design).
+func TestResolveConfiguration_CorruptClusterConfig_DoesNotFailResolution(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Store a valid group-level config
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "group-resource", Module: "file"},
+			},
+		}),
+	}))
+
+	// Store a corrupt (non-YAML) cluster-policies document to trigger the parse-error path.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "bad-cluster"},
+		Data: []byte("{{{{this is not valid YAML: [[["),
+	}))
+
+	registry := buildClusterRegistry("steward-1", "bad-cluster")
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+
+	// Resolution must succeed despite the corrupt cluster config document.
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err, "corrupt cluster-policies document must not fail ResolveConfiguration")
+
+	// The group-level resource must still appear (cluster corruption is isolated).
+	resourceNames := make(map[string]bool)
+	for _, r := range effective.Config.Resources {
+		resourceNames[r.Name] = true
+	}
+	assert.True(t, resourceNames["group-resource"],
+		"group-level resource must appear even when cluster config is corrupt")
+}
+
+// TestWithLogger_InstallsRealLogger verifies WithLogger installs the provided
+// logger as the resolver's diagnostic sink: after the call, both the unexported
+// logger field and the log() accessor return the exact logger that was passed in.
+func TestWithLogger_InstallsRealLogger(t *testing.T) {
+	ir := &InheritanceResolver{}
+
+	realLogger := logging.NewLogger("info")
+	require.NotNil(t, realLogger, "test precondition: NewLogger must return a real logger")
+
+	returned := ir.WithLogger(realLogger)
+
+	assert.Same(t, ir, returned, "WithLogger must return the same resolver for chaining")
+	assert.Same(t, realLogger, ir.logger, "WithLogger must install the provided logger")
+	assert.Same(t, realLogger, ir.log(), "log() must return the installed real logger")
+}
+
+// TestWithLogger_NilDefaultsToNonNilLogger verifies the nil-guard branch: passing
+// nil to WithLogger installs a real default logger (never leaves the field nil and
+// never routes through the Noop fallback in log()). This exercises lines 83-85.
+func TestWithLogger_NilDefaultsToNonNilLogger(t *testing.T) {
+	// Start from a resolver that already has a logger to prove nil resets to a
+	// fresh default rather than being ignored.
+	ir := (&InheritanceResolver{}).WithLogger(logging.NewLogger("info"))
+
+	returned := ir.WithLogger(nil)
+
+	assert.Same(t, ir, returned, "WithLogger(nil) must return the same resolver for chaining")
+	require.NotNil(t, ir.logger, "WithLogger(nil) must install a non-nil default logger")
+	require.NotNil(t, ir.log(), "log() must return a non-nil logger after WithLogger(nil)")
 }
 
 // TestResolveRingVersion_NilDNAAttrs verifies nil attrs does not panic.
