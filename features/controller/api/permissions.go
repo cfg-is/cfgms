@@ -92,6 +92,9 @@ var knownPermissions = map[string]bool{
 	"registration:manage-refresh-policy": true,
 	// Batch job management (Issue #2296)
 	"jobs:write": true,
+	// Cluster registry (Issue #2424)
+	"cluster:list": true,
+	"cluster:read": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
