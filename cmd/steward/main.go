@@ -1284,7 +1284,7 @@ func connectWithApprovedRegistration(
 		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:          dnaRefreshInterval,
-		DNACollector:                newDNACollectorAdapter(logger),
+		DNACollector:                newDNACollectorAdapter(logger, nil), // no monitor engine in this mode (#2423)
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1421,7 +1421,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:          dnaRefreshIntervalReconnect,
-		DNACollector:                newDNACollectorAdapter(logger),
+		DNACollector:                newDNACollectorAdapter(logger, nil), // no monitor engine in this mode (#2423)
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1792,14 +1792,33 @@ func publishUpgradeLifecycleEvent(ctx context.Context, tc upgradeEventPublisher,
 	return nil
 }
 
-// dnaCollectorAdapter adapts dna.Collector to the client.DNACollector interface
-// by extracting the Attributes map from the proto DNA result. (Issue #1915)
-type dnaCollectorAdapter struct {
-	collector *dna.Collector
+// moduleDNASource is the narrow surface the composite DNA collector needs to
+// fold monitored-module state into the DNA attribute set (#2423). Satisfied by
+// (*steward.Steward).CollectModuleDNAAttributes; nil when the running mode has
+// no monitor-running steward engine (see newDNACollectorAdapter call sites).
+type moduleDNASource interface {
+	CollectModuleDNAAttributes(ctx context.Context) map[string]string
 }
 
-func newDNACollectorAdapter(logger logging.Logger) *dnaCollectorAdapter {
-	return &dnaCollectorAdapter{collector: dna.NewCollector(logger)}
+// dnaCollectorAdapter adapts dna.Collector to the client.DNACollector interface
+// by extracting the Attributes map from the proto DNA result (Issue #1915),
+// merged with a flattened, namespaced snapshot of monitored module resource
+// state when a moduleDNASource is wired (#2423). Both attribute sets ride the
+// same PublishDNAUpdate delta-compression path — a change in only a module
+// attribute still triggers a publish.
+type dnaCollectorAdapter struct {
+	collector *dna.Collector
+	modules   moduleDNASource
+}
+
+// newDNACollectorAdapter builds the composite DNA collector. modules may be
+// nil: the monitor fan-in (and therefore CollectModuleDNAAttributes) lives on
+// the standalone steward engine (features/steward.Steward.startMonitors),
+// which the controller-mode transport paths do not construct today — they pass
+// nil and publish hardware facts only, exactly as before #2423. Wire the
+// steward engine (or a narrow method-value) here when a mode has one.
+func newDNACollectorAdapter(logger logging.Logger, modules moduleDNASource) *dnaCollectorAdapter {
+	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), modules: modules}
 }
 
 func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string]string, error) {
@@ -1807,8 +1826,22 @@ func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
+	if result == nil && a.modules == nil {
 		return nil, nil
 	}
-	return result.Attributes, nil
+	// Union of hardware facts and module attributes. The two key spaces cannot
+	// collide: hardware-fact keys are bare identifiers (hostname, os, arch)
+	// while module keys are namespaced by resourceID ("<type>:<name>.<field>").
+	attrs := make(map[string]string)
+	if result != nil {
+		for k, v := range result.Attributes {
+			attrs[k] = v
+		}
+	}
+	if a.modules != nil {
+		for k, v := range a.modules.CollectModuleDNAAttributes(ctx) {
+			attrs[k] = v
+		}
+	}
+	return attrs, nil
 }
