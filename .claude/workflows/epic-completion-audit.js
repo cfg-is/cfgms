@@ -51,7 +51,10 @@ export const meta = {
   ],
 }
 
-const cfg = args || {}
+// args may arrive as an object or a JSON string depending on the caller — accept both.
+const cfg = (typeof args === 'string'
+  ? (() => { try { return JSON.parse(args) } catch (_) { return {} } })()
+  : args) || {}
 const targetEpic = cfg.epic != null ? String(cfg.epic) : null
 const doClose = cfg.close === true
 const N_VERIFIERS = Math.max(1, Math.min(3, cfg.verifiers || 3))
