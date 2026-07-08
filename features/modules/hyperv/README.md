@@ -621,6 +621,30 @@ removes VM roles; there is exactly one config surface:
 - **Moving a registered VM to a different cluster in one step is undefined** —
   demote first (remove `ha_role`), converge, then promote with the new cluster.
 
+#### Cluster-wide existence gate (#2420)
+
+The identical `hyperv.vm` resource with `ha_role` cascades to **every** member
+steward of the cluster, so a steward will routinely converge a VM that is
+locally absent (`Get-VM` miss) simply because a *different* node hosts it. The
+existence gate closes the duplicate-VM window this creates:
+
+- When the VM is locally absent **and** the clustered role it names is already
+  registered cluster-wide (owned by **any** node — the `Get` membership probe
+  reports this even for locally-absent VMs), `Set` takes **no create action at
+  all**: no `New-VM`, no source provisioning. It records a
+  `vm-set-skip-hosted-elsewhere` audit event and converges as a no-op.
+- The gate keys on the role's **existence**, not its owner — a non-hosting
+  steward never needs to know who hosts the VM, only that someone does.
+  (Owner-side creation of a cluster-wide-missing role is a separate concern,
+  #2421.)
+- A transient membership-probe failure degrades to "no role observed" for that
+  cycle (unchanged from #2372): the gate simply cannot fire, and the pre-#2420
+  create logic — whose clustered-role registration is still CNO-gated and
+  existence-idempotent — applies for that cycle. The probe retries on the next
+  converge; no new error-path behavior is introduced.
+- Non-HA VMs (`ha_role` absent) are untouched: a locally-absent standalone VM
+  is created exactly as before.
+
 **Drift detection requires the module-level `cluster_name` scope cap.** `Get`
 reports a VM's current cluster-role membership by probing the scope-capped
 cluster's role-owner map — on demote the desired config no longer carries

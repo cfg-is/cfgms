@@ -673,7 +673,15 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	if !found {
 		// Absent is a valid current state — the executor compares this against
 		// the desired state and calls Set to create the resource when needed.
-		return &VMConfig{Name: vmName, State: "absent"}, nil
+		// The cluster-role membership probe still runs (#2420): a locally-absent
+		// VM whose name is already a registered clustered role signals "hosted
+		// elsewhere" to setVM's existence gate, closing the duplicate-VM window
+		// when the identical ha_role resource cascades to every member steward.
+		return &VMConfig{
+			Name:   vmName,
+			State:  "absent",
+			HARole: m.probeClusterRoleMembership(ctx, vmName),
+		}, nil
 	}
 
 	// The host returns the VM by its exact name — no prefix to strip.
@@ -722,30 +730,9 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 		}
 	}
 
-	// Cluster-role membership probe (#2372): report whether this VM is a
-	// clustered HA role so drift detection covers promote AND demote. The probe
-	// requires the module-level cluster_name scope cap (S5) — on demote the
-	// desired config no longer carries ha_role, so the scope cap is the only
-	// cluster the module may ask. It reuses the same scope-capped
-	// readResourceOwners read as setCluster's owner path; a read needs no CNO
-	// ownership gate. Without a configured scope no HA-role drift is observable
-	// — skip entirely, never error. A failing probe degrades to HARole=nil
-	// rather than failing every VM read on a transient cluster-service error;
-	// the degradation defers BOTH directions one cycle (a missed membership
-	// re-promotes idempotently; a pending demote reads current as nil→nil and
-	// simply waits) — each converges on the next cycle once the probe recovers.
-	if m.clusterName != "" {
-		if owners, roErr := m.readResourceOwners(ctx, m.clusterName); roErr == nil {
-			if _, isMember := owners[vmName]; isMember {
-				cfg.HARole = &HARoleConfig{ClusterName: m.clusterName}
-			}
-		} else if logger, ok := m.GetLogger(); ok {
-			logger.Warn("hyperv: cluster-role membership probe failed; reporting no HA role this cycle",
-				"vm_name", logging.SanitizeLogValue(vmName),
-				"cluster", logging.SanitizeLogValue(m.clusterName),
-				"error", roErr.Error())
-		}
-	}
+	// Cluster-role membership probe (#2372/#2420) — see
+	// probeClusterRoleMembership for the scope-cap and degrade semantics.
+	cfg.HARole = m.probeClusterRoleMembership(ctx, vmName)
 
 	// Write-through: update cache on successful read
 	m.vmsMu.Lock()
@@ -753,6 +740,39 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	m.vmsMu.Unlock()
 
 	return cfg, nil
+}
+
+// probeClusterRoleMembership reports whether vmName is a registered clustered
+// HA role in the module's scope-capped cluster (#2372), on BOTH the found and
+// locally-absent getVM paths (#2420). The probe requires the module-level
+// cluster_name scope cap (S5) — on demote the desired config no longer carries
+// ha_role, so the scope cap is the only cluster the module may ask. It reuses
+// the same scope-capped readResourceOwners read as setCluster's owner path; a
+// read needs no CNO ownership gate. Without a configured scope no HA-role
+// state is observable — skip entirely, never error. A failing probe degrades
+// to nil rather than failing every VM read on a transient cluster-service
+// error; the degradation defers convergence one cycle in every direction (a
+// missed membership re-promotes idempotently; a pending demote reads nil→nil
+// and waits; a locally-absent HA VM falls back to the pre-#2421 create logic
+// unchanged) — each converges on the next cycle once the probe recovers.
+func (m *hypervModule) probeClusterRoleMembership(ctx context.Context, vmName string) *HARoleConfig {
+	if m.clusterName == "" {
+		return nil
+	}
+	owners, roErr := m.readResourceOwners(ctx, m.clusterName)
+	if roErr != nil {
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: cluster-role membership probe failed; reporting no HA role this cycle",
+				"vm_name", logging.SanitizeLogValue(vmName),
+				"cluster", logging.SanitizeLogValue(m.clusterName),
+				"error", roErr.Error())
+		}
+		return nil
+	}
+	if _, isMember := owners[vmName]; isMember {
+		return &HARoleConfig{ClusterName: m.clusterName}
+	}
+	return nil
 }
 
 // setVM applies the desired VM configuration.
@@ -911,6 +931,27 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	cfg.seedDir = m.seedDir
 	if err := cfg.Validate(); err != nil {
 		return err
+	}
+
+	// Cluster-wide existence gate (#2420): the identical ha_role resource
+	// cascades to every member steward, so a steward where the VM is locally
+	// absent but the clustered role it names is already registered cluster-wide
+	// (owned by ANY node — getVM's membership probe reports this on the absent
+	// path) must take no create action at all. This closes the duplicate-VM
+	// window: the same declaration on ≥2 members can never produce two New-VM
+	// calls. It sits BEFORE the source/plain dispatch so it gates both
+	// applySourceGated provisioning and plain-lifecycle createVM. Who owns the
+	// role is deliberately not consulted here (#2421 handles owner-side create);
+	// existence alone is the skip condition. Coordination, not an error.
+	if !vmExists && cfg.HARole != nil && current.HARole != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"vm-set-skip-hosted-elsewhere", "vm:"+vmName, nil,
+			map[string]interface{}{
+				"skipped":      true,
+				"cluster_name": current.HARole.ClusterName,
+				"locally":      "absent",
+			}, nil)
+		return nil
 	}
 
 	// Existence-gating safety invariant (ADR-009 §2): source provisioning is

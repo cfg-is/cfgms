@@ -39,6 +39,7 @@ type ConfigurationServiceV2 struct {
 	storageManager      *interfaces.StorageManager
 	fanoutCallback      FanoutCallback
 	callbackMu          sync.RWMutex
+	routerCloser        func() // stops the router's background cache goroutine
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
@@ -50,13 +51,24 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 		storageManager.GetConfigStore(),
 		storageManager.GetTenantStore(),
 	)
-	return &ConfigurationServiceV2{
+	svc := &ConfigurationServiceV2{
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
 		inheritanceResolver: config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore()),
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore(), storageManager.GetTenantStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
+	}
+	if c, ok := router.(interface{ Close() }); ok {
+		svc.routerCloser = c.Close
+	}
+	return svc
+}
+
+// Close stops the router's background cache cleanup goroutine. Safe to call multiple times.
+func (s *ConfigurationServiceV2) Close() {
+	if s.routerCloser != nil {
+		s.routerCloser()
 	}
 }
 

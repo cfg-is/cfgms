@@ -92,6 +92,166 @@ func TestGetVM_ClusterRoleProbe_ErrorDegrades(t *testing.T) {
 	assert.Nil(t, cfg.HARole)
 }
 
+// ─── Issue #2420: cluster-wide existence gate for ha_role VMs ──────────────────
+//
+// The identical hyperv.vm resource with ha_role cascades to every member
+// steward. A steward where the VM is locally absent but the clustered role is
+// already registered cluster-wide (owned by ANY node) must never create a
+// duplicate VM — it converges as a no-op with an audit skip.
+
+// TestGetVM_AbsentButClusteredRole_ReportsHARole (REQUIRED, #2420): a VM absent
+// via the local Get-VM fake but present in the readResourceOwners fake result
+// returns HARole non-nil on the absent VMConfig — the probe now runs on the
+// absent path too, so setVM can see "this role exists somewhere".
+func TestGetVM_AbsentButClusteredRole_ReportsHARole(t *testing.T) {
+	const vmName = "ghost-ha-vm"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`,                    // psGetVM: locally absent
+		`{"owners":{"ghost-ha-vm":"NODE2"}}`, // membership probe: registered cluster-wide
+	}}
+	m := vmModuleWithTransport(transport, "t-2420")
+	m.clusterName = "lab-hv"
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+	assert.Equal(t, "absent", cfg.State)
+	require.NotNil(t, cfg.HARole,
+		"a locally-absent VM whose name is a registered clustered role must report HARole")
+	assert.Equal(t, "lab-hv", cfg.HARole.ClusterName)
+}
+
+// TestGetVM_AbsentWithoutScope_NoProbe: the absent path issues no cluster probe
+// when no module-level cluster_name is configured — non-cluster hosts keep the
+// exact pre-#2420 single-call behavior.
+func TestGetVM_AbsentWithoutScope_NoProbe(t *testing.T) {
+	const vmName = "ghost-plain-vm"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`,
+	}}
+	m := vmModuleWithTransport(transport, "t-2420")
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+	assert.Equal(t, "absent", cfg.State)
+	assert.Nil(t, cfg.HARole)
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Len(t, transport.calls, 1, "no cluster probe without a cluster_name scope")
+}
+
+// TestSetVM_HARoleAlreadyClusterWide_SkipsCreate (REQUIRED, #2420): setVM with
+// ha_role declared, VM locally absent, and the clustered role already
+// registered cluster-wide (owned by a DIFFERENT node) performs no create action
+// and returns nil — for BOTH the plain-lifecycle path and the source
+// (provisioning) path. The skip is audited as vm-set-skip-hosted-elsewhere.
+func TestSetVM_HARoleAlreadyClusterWide_SkipsCreate(t *testing.T) {
+	const vmName = "ha-elsewhere-vm"
+	const cluster = "lab-hv"
+
+	// Two transport calls total: getVM + membership probe. Anything beyond that
+	// (New-VM, provisioning, ownership reads) violates the gate.
+	newTransport := func() *testWinRMTransport {
+		return &testWinRMTransport{perCallOutputs: []string{
+			`{"found":false}`,                        // getVM: locally absent
+			`{"owners":{"ha-elsewhere-vm":"NODE2"}}`, // probe: role hosted elsewhere
+		}}
+	}
+
+	t.Run("plain_lifecycle_path", func(t *testing.T) {
+		transport := newTransport()
+		m := vmModuleWithTransport(transport, "t-2420")
+		m.clusterName = cluster
+		m.nodeHostname = "NODE1"
+		mgr, store := newFakeAuditManager(t)
+		m.auditMgr = mgr
+		m.stewardID = "steward-2420"
+
+		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+			Name:       vmName,
+			MemoryMB:   4096,
+			CPUCount:   2,
+			VHDPath:    `C:\VMs\ha-elsewhere-vm.vhdx`,
+			SwitchName: "Default Switch",
+			Generation: 2,
+			State:      "running",
+			HARole:     &HARoleConfig{ClusterName: cluster},
+		}))
+
+		assert.Equal(t, 0, countCmd(transport, psCreateVM),
+			"the existence gate must prevent any New-VM on a non-hosting node")
+		transport.mu.Lock()
+		callCount := len(transport.calls)
+		transport.mu.Unlock()
+		assert.Equal(t, 2, callCount,
+			"gate must fire right after getVM+probe — no further transport calls")
+
+		require.NoError(t, m.auditMgr.Flush(context.Background()))
+		skips := auditEntriesByActionCT(store.captured(), "vm-set-skip-hosted-elsewhere")
+		require.Len(t, skips, 1, "the skip must be audited")
+	})
+
+	t.Run("source_path", func(t *testing.T) {
+		transport := newTransport()
+		m := vmModuleWithTransport(transport, "t-2420")
+		m.clusterName = cluster
+		m.nodeHostname = "NODE1"
+
+		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+			Name:       vmName,
+			MemoryMB:   4096,
+			CPUCount:   2,
+			VHDPath:    `C:\VMs\ha-elsewhere-vm.vhdx`,
+			SwitchName: "Default Switch",
+			Generation: 2,
+			State:      "running",
+			HARole:     &HARoleConfig{ClusterName: cluster},
+			Source: &SourceConfig{
+				Image:      `C:\images\debian.raw`,
+				OSFamily:   "linux",
+				Completion: CompletionConfig{Mode: "steward-registration", Timeout: "10m"},
+			},
+		}))
+
+		assert.Equal(t, 0, countCmd(transport, psCreateVM),
+			"the gate must fire before applySourceGated ever provisions")
+		transport.mu.Lock()
+		callCount := len(transport.calls)
+		transport.mu.Unlock()
+		assert.Equal(t, 2, callCount,
+			"gate must fire right after getVM+probe — no provisioning calls")
+	})
+}
+
+// TestSetVM_StandaloneVM_UnaffectedByGate (REQUIRED, #2420): a VM with
+// HARole == nil still creates normally when locally absent — the new gate never
+// fires for non-HA VMs, even on a cluster-scoped module.
+func TestSetVM_StandaloneVM_UnaffectedByGate(t *testing.T) {
+	const vmName = "plain-create-vm"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`, // getVM: locally absent
+		`{"owners":{}}`,   // probe: not a clustered role anywhere
+		``,                // New-VM: create succeeds
+		``,                // Cfgms-SetVMHome: config-home move (#2411)
+	}}
+	m := vmModuleWithTransport(transport, "t-2420")
+	m.clusterName = "lab-hv"
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+		Name:       vmName,
+		MemoryMB:   2048,
+		CPUCount:   2,
+		VHDPath:    `C:\VMs\plain-create-vm.vhdx`,
+		SwitchName: "Default Switch",
+		Generation: 2,
+		State:      "stopped",
+	}))
+
+	assert.Equal(t, 1, countCmd(transport, psCreateVM),
+		"a standalone (non-HA) VM must still be created when locally absent")
+}
+
 // ─── AC1 (REQUIRED TEST): promote / demote an existing VM, idempotent ─────────
 
 // TestSetVM_HARole_PromoteExistingVM: adding ha_role to an already-created VM

@@ -1418,6 +1418,7 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 	t.Run("first_converge_registers_once", func(t *testing.T) {
 		transport := &testWinRMTransport{perCallOutputs: []string{
 			`{"found":false}`,   // getVM: VM absent
+			`{"owners":{}}`,     // getVM probe (#2420): role absent cluster-wide
 			``,                  // New-VM: create succeeds
 			``,                  // Cfgms-SetVMHome: config-home move (#2411)
 			`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
@@ -1447,15 +1448,14 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 		assert.Equal(t, vmName, addArgs["VMName"])
 	})
 
-	// Re-converge with the role already present cluster-wide → idempotent no-op.
+	// Re-converge with the role already present cluster-wide → the #2420
+	// existence gate now skips the whole create path (previously New-VM ran and
+	// only the role registration was idempotently skipped — the exact
+	// duplicate-VM window the gate closes).
 	t.Run("role_present_is_noop", func(t *testing.T) {
 		transport := &testWinRMTransport{perCallOutputs: []string{
 			`{"found":false}`,              // getVM: VM absent on this node
-			``,                             // New-VM
-			``,                             // Cfgms-SetVMHome: config-home move (#2411)
-			`{"owner":"NODE1"}`,            // CNO owner read
-			`{"owners":{"ha-vm":"NODE1"}}`, // resource owners: role ALREADY present
-			`{"owner":"NODE1"}`,            // cnoOwner re-read
+			`{"owners":{"ha-vm":"NODE1"}}`, // getVM probe (#2420): role ALREADY present
 		}}
 		m := vmModuleWithTransport(transport, "t-ha")
 		m.clusterName = cluster
@@ -1463,6 +1463,8 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 
 		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, haCfg()))
 
+		assert.Equal(t, 0, countCmd(transport, psCreateVM),
+			"a role already registered cluster-wide must not create a duplicate VM (#2420)")
 		assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
 			"an already-registered role must not be added again (S2 idempotency)")
 	})
@@ -1524,6 +1526,7 @@ func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
 
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: VM absent
+		`{"owners":{}}`,     // getVM probe (#2420): role absent cluster-wide
 		``,                  // New-VM: create succeeds
 		``,                  // Cfgms-SetVMHome: config-home move (#2411)
 		`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
