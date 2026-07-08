@@ -21,7 +21,7 @@ describes the new substrate, the migration state, and operational procedures.
 | `pipeline:epic` label | `epic` label (kept as GitHub label) |
 | `pipeline:story` label | `story` label (kept as GitHub label) |
 
-Labels still in use: `epic`, `story`, `internal`, `community`, `high-priority`, `dependencies`.
+Labels still in use: `epic`, `story`, `internal`, `community`, `high-priority`, `dependencies`, `needs-windows`, `needs-macos`, and the descriptive **`cap:*`** capability namespace (`cap:cms`/`twin`/`dex`/`workflow`/`directory`/`web`/`msp` — the consuming product capability; multi-valued, orthogonal to queue state, never a queue signal; see `docs/product/roadmap.md` → Capability Tags).
 
 ## Issue Classes & Materialization (2026-06-24)
 
@@ -31,9 +31,9 @@ Work-items originate on the **private project board** and become public issues o
 
 | Class | Created by | Public? | Locked? | Labels |
 |-------|-----------|---------|---------|--------|
-| Pipeline story | `pipeline-helper.sh create-story` **at decomposition** (convert draft→issue; ADR-015) | yes | **locked** | `story` + `internal` |
-| Pipeline story (`--defer`) | `project-queue.sh materialize` **at dispatch** (sensitive bodies held private while queued) | yes | **locked** | `story` + `internal` |
-| Epic | `pipeline-helper.sh create-epic` (PO, interactive) | yes | **locked** | `epic` + `internal` |
+| Pipeline story | `pipeline-helper.sh create-story` **at decomposition** (convert draft→issue; ADR-015) | yes | **locked** | `story` + `internal` (+ inherited `cap:*`) |
+| Pipeline story (`--defer`) | `project-queue.sh materialize` **at dispatch** (sensitive bodies held private while queued) | yes | **locked** | `story` + `internal` (+ `cap:*` from body marker) |
+| Epic | `pipeline-helper.sh create-epic` (PO, interactive) | yes | **locked** | `epic` + `internal` (+ `cap:*`) |
 | Community | `pipeline-helper.sh create-community-issue` (human, interactive) | yes | **unlocked** | `community` |
 
 - **Decomposition** (`pipeline-helper.sh create-story`) creates a draft and immediately converts it in place (`convertProjectV2DraftIssueItemToIssue`), locks it, tags `internal` + `story`, and sub-issue-links it under its epic. Early materialization gives every story a real `#NNN` at authoring time (dependencies, dep-gating, sub-issue decomposition tracking) — see [ADR-015](../architecture/decisions/015-story-materialization-at-decomposition.md). Story bodies are **world-readable at creation**: no secrets, no customer/business specifics, no exploit-grade vulnerability detail. Bodies that can't be public while queued use `create-story ... --defer`, which keeps the old behavior: a private draft, materialized by `po-act.sh dispatch` when work starts.

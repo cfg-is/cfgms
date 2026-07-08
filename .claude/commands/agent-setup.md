@@ -72,7 +72,18 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    gh label create "community" --color "0E8A16" --description "Community-reported issue (public, open for comment). Bugs & feature requests welcome." --force
    gh label create "high-priority" --color "D73A4A" --description "Escalation requiring founder attention" --force
    ```
-   Note: `pipeline:*` and `agent:*` labels were decommissioned (Story #1482). Work queue state is now in GitHub Projects V2 — see `scripts/project-queue.sh`.
+   **Capability tags** (`cap:*`) — descriptive product-capability namespace (multi-valued, non-state; orthogonal to Projects-V2 work-queue state). Vocabulary is authoritative in `docs/product/roadmap.md` → Capability Tags. Shared color so they read as one namespace:
+   ```bash
+   # GitHub caps label descriptions at 100 chars — keep these terse.
+   gh label create "cap:cms"       --color "1D76DB" --description "Consumer: core config management (convergence, drift, modules)" --force
+   gh label create "cap:twin"     --color "1D76DB" --description "Consumer: digital twin (entity model, topology, temporal state)" --force
+   gh label create "cap:dex"       --color "1D76DB" --description "Consumer: digital employee experience (endpoint signals, baselines)" --force
+   gh label create "cap:workflow"  --color "1D76DB" --description "Consumer: automation / workflow engine" --force
+   gh label create "cap:directory" --color "1D76DB" --description "Consumer: identity & directory services (M365, AD/Entra)" --force
+   gh label create "cap:web"       --color "1D76DB" --description "Consumer: web UI and visualization surfaces" --force
+   gh label create "cap:msp"       --color "1D76DB" --description "Consumer: MSP integrations (PSA / RMM / docs)" --force
+   ```
+   Note: `pipeline:*` and `agent:*` labels were decommissioned (Story #1482). Work queue state is now in GitHub Projects V2 — see `scripts/project-queue.sh`. `cap:*` is the sanctioned **descriptive** namespace; it never encodes queue state.
 
 9. **Verify setup** (after image build completes):
    ```bash
