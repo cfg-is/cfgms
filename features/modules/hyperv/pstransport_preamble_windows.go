@@ -68,6 +68,10 @@ function Cfgms-GetVM {
         ProcessorCount     = [int]$vm.ProcessorCount
         Generation         = [int]$vm.Generation
         Path               = if ($disk) { $disk.Path } else { '' }
+        # The VM's configuration-file directory (#2411). Observed state for the
+        # declarative storage-location convergence: the desired location is
+        # always dir(vhd_path), so config files anywhere else are drift.
+        ConfigurationLocation = [string]$vm.ConfigurationLocation
         SwitchName         = if ($switchNames.Count -gt 0) { $switchNames[0] } else { '' }
         SwitchNames        = $switchNames
         State              = $vm.State.ToString()
@@ -89,6 +93,11 @@ function Cfgms-CreateVM {
         # so it is mandatory here; a missing value is a dispatcher bug, not a
         # silent default.
         [Parameter(Mandatory)][int]$Generation,
+        # Optional VM home directory (#2411) — dir(vhd_path). When set, New-VM
+        # receives it as -Path so the configuration files start co-located with
+        # the disk (New-VM appends a VM-name subfolder; the Go create path
+        # follows with Cfgms-SetVMHome to land at exactly the home).
+        [string]$Path = '',
         # Optional — defaults to a 64 GB dynamic VHD. The schema currently
         # doesn't expose vhd_size_gb so the Go dispatcher never passes one;
         # 64 GB matches the Hyper-V Manager default and is fine for any test
@@ -99,7 +108,9 @@ function Cfgms-CreateVM {
     # New-VM does NOT accept -ProcessorCount (real PS pitfall — surfaced by
     # PR #1912 live B1 bucket). Create with default 1 vCPU, then resize via
     # Set-VMProcessor only when the operator asked for something different.
-    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes ($VHDSizeGB * 1GB) -SwitchName $SwitchName -Generation $Generation | Out-Null
+    $vmArgs = @{}
+    if ($Path) { $vmArgs['Path'] = $Path }
+    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes ($VHDSizeGB * 1GB) -SwitchName $SwitchName -Generation $Generation @vmArgs | Out-Null
     if ($CPU -ne 1) {
         Set-VMProcessor -VMName $Name -Count $CPU
     }
@@ -116,9 +127,13 @@ function Cfgms-CreateVMFromDisk {
         [Parameter(Mandatory)][int]$CPU,
         [Parameter(Mandatory)][string]$VHDPath,
         [Parameter(Mandatory)][string]$SwitchName,
-        [Parameter(Mandatory)][int]$Generation
+        [Parameter(Mandatory)][int]$Generation,
+        # Optional VM home directory (#2411) — see Cfgms-CreateVM.
+        [string]$Path = ''
     )
-    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -VHDPath $VHDPath -SwitchName $SwitchName -Generation $Generation | Out-Null
+    $vmArgs = @{}
+    if ($Path) { $vmArgs['Path'] = $Path }
+    New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -VHDPath $VHDPath -SwitchName $SwitchName -Generation $Generation @vmArgs | Out-Null
     if ($CPU -ne 1) {
         Set-VMProcessor -VMName $Name -Count $CPU
     }
@@ -481,6 +496,126 @@ function Cfgms-BootKeypress {
         if ($kb) { $kb.TypeKey(0x20) | Out-Null }
         Start-Sleep -Milliseconds 400
     }
+}
+
+# ── VM storage location (#2411) ────────────────────────────────────────
+# Declarative VM home: the directory of the declared vhd_path holds the VM's
+# configuration files AND its disks. Cfgms-SetVMHome is the synchronous
+# config-only move used at create; Cfgms-MoveVMStorage is the full live
+# migration, run INSIDE a detached process (dispatched via the Go transport's
+# runDetached — the executor's per-module-call deadline forbids holding a
+# module call open for a multi-minute migration). Failure is surfaced through
+# a per-VM error marker under ProgramData that the converge loop probes;
+# completion is judged by re-observing the location, never by job objects.
+
+# Cfgms-VMMoveErrFile composes the per-VM move error-marker path. $Name is
+# validated upstream against ^[a-zA-Z0-9_\-]{1,64}$ so it is filename-safe.
+function Cfgms-VMMoveErrFile {
+    param([Parameter(Mandatory)][string]$Name)
+    return (Join-Path $env:ProgramData ('cfgms\hyperv\move-' + $Name + '.err'))
+}
+
+# Cfgms-SetVMHome homes the VM's configuration files (config + checkpoints +
+# smart paging; disks are NOT touched) at exactly $VMHome. New-VM -Path appends
+# a VM-name subfolder (verified live on cfg-lab 2026-07-07), so the create path
+# always follows New-VM with this move; on a fresh VM it is a KB-scale rename
+# that completes well within the module-call deadline. Dispatched via runFresh
+# (storage-migration service; the persistent -Command - host deadlocks on
+# async storage operations).
+function Cfgms-SetVMHome {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$VMHome)
+    Move-VMStorage -VMName $Name -VirtualMachinePath $VMHome -SnapshotFilePath $VMHome -SmartPagingFilePath $VMHome
+}
+
+# Cfgms-VMStorageMovePreflight reports the bytes required to move the VM's
+# disks into $DestDir vs the destination volume's free bytes, as JSON. Only
+# disks whose directory differs from $DestDir are counted — disks already at
+# the destination do not move (the #2372 shape: disks manually moved to CSV,
+# config still local, must not demand disk-sized free space for a KB-scale
+# config move). free_bytes is -1 when the volume cannot be resolved; the Go
+# caller proceeds and lets the move itself surface a real failure. Get-Volume
+# -FilePath resolves CSV mounts (C:\ClusterStorage\...) directly (verified
+# live); the walk-up finds the deepest existing ancestor since the destination
+# directory may not exist yet.
+function Cfgms-VMStorageMovePreflight {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$DestDir)
+    $required = [long]0
+    foreach ($d in @(Get-VMHardDiskDrive -VMName $Name)) {
+        if ((Split-Path -Path $d.Path -Parent).TrimEnd('\') -ine $DestDir.TrimEnd('\')) {
+            $required += (Get-Item -LiteralPath $d.Path).Length
+        }
+    }
+    $probe = $DestDir
+    while ($probe -and -not (Test-Path -LiteralPath $probe)) { $probe = Split-Path -Path $probe -Parent }
+    $free = [long]-1
+    if ($probe) {
+        $vol = Get-Volume -FilePath $probe -ErrorAction SilentlyContinue
+        if ($vol) { $free = [long]$vol.SizeRemaining }
+    }
+    ConvertTo-Json @{ required_bytes = $required; free_bytes = $free } -Compress
+}
+
+# Cfgms-MoveVMStorage performs the full live storage migration: configuration,
+# checkpoints, smart paging, and every attached disk whose directory is not
+# already $VMHome — each disk lands at $VMHome\<its current leaf> (DIRECTORY-
+# level convergence: Hyper-V refuses a -Vhds destination whose file name
+# differs from the source — "the source and destination file names must
+# match", surfaced live by a checkpointed VM whose current disk is an .avhdx —
+# so file names are never changed here). -DestinationStoragePath is
+# deliberately NOT used: it drops disks into a "Virtual Hard Disks" subfolder,
+# which would never converge the declared vhd_path (verified live on cfg-lab
+# 2026-07-07). This function runs INSIDE the detached process (runDetached);
+# on failure it writes the error marker the converge loop probes via
+# Cfgms-GetVMMoveError.
+function Cfgms-MoveVMStorage {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$VMHome
+    )
+    $errFile = Cfgms-VMMoveErrFile -Name $Name
+    New-Item -ItemType Directory -Force -Path (Split-Path -Path $errFile -Parent) | Out-Null
+    try {
+        $vhds = @()
+        foreach ($d in @(Get-VMHardDiskDrive -VMName $Name)) {
+            # The [string] casts are REQUIRED: PSObject-wrapped property values
+            # inside the -Vhds hashtables fail Move-VMStorage's validation with
+            # a misleading "Hash tables in the Vhds parameter must contain
+            # 'DestinationFilePath' key" error even though the key is present
+            # (root-caused live on cfg-lab 2026-07-07).
+            $src = [string]$d.Path
+            $dest = [string](Join-Path $VMHome ([string](Split-Path -Path $src -Leaf)))
+            if ($src -ine $dest) {
+                $vhds += @{ SourceFilePath = $src; DestinationFilePath = $dest }
+            }
+        }
+        if ($vhds.Count -gt 0) {
+            Move-VMStorage -VMName $Name -VirtualMachinePath $VMHome -SnapshotFilePath $VMHome -SmartPagingFilePath $VMHome -Vhds $vhds
+        } else {
+            Move-VMStorage -VMName $Name -VirtualMachinePath $VMHome -SnapshotFilePath $VMHome -SmartPagingFilePath $VMHome
+        }
+    } catch {
+        Set-Content -LiteralPath $errFile -Value $_.Exception.Message
+        throw
+    }
+}
+
+# Cfgms-GetVMMoveError reads the per-VM move error marker as JSON ({"error":""}
+# when no failure is recorded).
+function Cfgms-GetVMMoveError {
+    param([Parameter(Mandatory)][string]$Name)
+    $errFile = Cfgms-VMMoveErrFile -Name $Name
+    $text = ''
+    if (Test-Path -LiteralPath $errFile) {
+        $text = [string](Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+    }
+    ConvertTo-Json @{ error = $text.Trim() } -Compress
+}
+
+# Cfgms-ClearVMMoveError removes a stale error marker before a (re)dispatch so
+# a prior failure is never misattributed to the new attempt. Idempotent.
+function Cfgms-ClearVMMoveError {
+    param([Parameter(Mandatory)][string]$Name)
+    Remove-Item -LiteralPath (Cfgms-VMMoveErrFile -Name $Name) -Force -ErrorAction SilentlyContinue
 }
 
 # ── VSwitch read + lifecycle ──────────────────────────────────────────

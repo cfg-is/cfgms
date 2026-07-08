@@ -155,6 +155,14 @@ type VMConfig struct {
 	// (non-HA) resource with unchanged behavior.
 	HARole *HARoleConfig `yaml:"ha_role,omitempty"`
 
+	// ConfigLocation is the OBSERVED configuration-file location (Hyper-V
+	// ConfigurationLocation), populated by getVM and exposed on the Get/DNA
+	// surface. It is never declared in config — the desired location is always
+	// derived as dir(vhd_path) (the VM's home, #2411) — so it is deliberately
+	// absent from GetManagedFields to keep the executor's comparison free of
+	// false drift.
+	ConfigLocation string `yaml:"configuration_location,omitempty"`
+
 	// seedDir is the module-level provisioning seed directory (m.seedDir),
 	// injected by setVM before Validate so the HA-role CSV seed-dir rule can be
 	// checked. It is NOT a per-VM YAML field (seed_dir is module-level config) —
@@ -473,6 +481,9 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		"generation":   c.Generation,
 		"state":        c.State,
 		"source":       nil,
+		// Observed-only (#2411): reported for the Get/DNA surface, absent from
+		// GetManagedFields so it never participates in drift comparison.
+		"configuration_location": c.ConfigLocation,
 	}
 	if c.Source != nil {
 		m["source"] = map[string]interface{}{
@@ -551,7 +562,7 @@ func (c *VMConfig) GetManagedFields() []string {
 // VMConfig.VHDPath stores the disk path; conflating it with the config
 // directory caused #1887 B1 verification to flag 2-changed drift on
 // every successful create.
-const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress -Depth 4`
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; ConfigurationLocation=[string]$vm.ConfigurationLocation; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress -Depth 4`
 
 // psCreateVM is the script block passed to ExecutePS for VM creation.
 // All user-supplied values are transmitted via ArgumentList — none are
@@ -573,7 +584,12 @@ const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-no
 //     ADR-009 §5 supports Gen1 and Gen2 VMs (the seed VHDX boots on both,
 //     no floppy needed). setVM passes cfg.Generation (defaulting to 2 when
 //     0). The value travels via ArgumentList as a bare integer literal.
-const psCreateVM = `New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation $Generation | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
+//   - -Path is passed via a splat guard: when $Path is non-empty the VM's
+//     configuration files start under dir(vhd_path) rather than the host
+//     default on the system drive (#2411). New-VM appends a VM-name
+//     subfolder to -Path, so createVM follows with a config-only
+//     Move-VMStorage (psSetVMHome) to land at exactly the declared home.
+const psCreateVM = `$vmArgs = @{}; if ($Path) { $vmArgs['Path'] = $Path }; New-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB) -NewVHDPath $VHDPath -NewVHDSizeBytes 64GB -SwitchName $SwitchName -Generation $Generation @vmArgs | Out-Null; if ($CPU -ne 1) { Set-VMProcessor -VMName $Name -Count $CPU }`
 
 // psRemoveVM deletes a VM. Hyper-V refuses to remove a VM that is not Off
 // ("the operation cannot be performed while the object is in its current
@@ -674,6 +690,11 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	}
 	if v, ok := parsed["Path"].(string); ok {
 		cfg.VHDPath = v
+	}
+	// ConfigurationLocation is the VM's configuration-file directory (#2411).
+	// Observed-only: the desired location is derived as dir(vhd_path).
+	if v, ok := parsed["ConfigurationLocation"].(string); ok {
+		cfg.ConfigLocation = v
 	}
 	// Adapter-reported switch names are the exact names admins specified; the
 	// drift comparison is name vs name with no translation.
@@ -781,6 +802,11 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 			if err := m.provisionStore.DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
 				return err
 			}
+		}
+		// Delete any storage-move record (#2411) so a later same-named VM
+		// starts clean rather than inheriting an in-flight/failed move.
+		if err := m.moveStore().DeleteMove(ctx, vmName); err != nil && !errors.Is(err, ErrMoveNotFound) {
+			return err
 		}
 		return nil
 	}
@@ -1110,6 +1136,13 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 		generation = 2
 	}
 
+	// home is the VM's storage home — the directory of the declared vhd_path
+	// (#2411). New-VM receives it as -Path so the configuration files start
+	// co-located with the disk; because New-VM appends a VM-name subfolder to
+	// -Path, a config-only Move-VMStorage follows the create to land the
+	// configuration at exactly the home (zero location drift on a fresh VM).
+	home := vmHomeDir(cfg.VHDPath)
+
 	psArgs := map[string]string{
 		"Name":       hostName,
 		"MemoryMB":   fmt.Sprintf("%d", cfg.MemoryMB),
@@ -1117,6 +1150,7 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 		"VHDPath":    cfg.VHDPath,
 		"SwitchName": cfg.SwitchName,
 		"Generation": fmt.Sprintf("%d", generation),
+		"Path":       home,
 	}
 
 	cfgResourceID := "vm:" + vmName
@@ -1148,6 +1182,11 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 		if psErr != nil {
 			return fmt.Errorf("hyperv: create VM %q from cloud image: %w", vmName, psErr)
 		}
+		if home != "" {
+			if err := m.execSetVMHome(ctx, cfgResourceID, hostName, home); err != nil {
+				return err
+			}
+		}
 		return m.connectAdditionalNics(ctx, cfgResourceID, vmName, hostName, cfg)
 	}
 
@@ -1155,6 +1194,12 @@ func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cf
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VM", cfgResourceID, nil, after, psErr)
 	if psErr != nil {
 		return fmt.Errorf("hyperv: create VM %q: %w", vmName, psErr)
+	}
+
+	if home != "" {
+		if err := m.execSetVMHome(ctx, cfgResourceID, hostName, home); err != nil {
+			return err
+		}
 	}
 
 	return m.connectAdditionalNics(ctx, cfgResourceID, vmName, hostName, cfg)
@@ -1178,6 +1223,20 @@ func (m *hypervModule) connectAdditionalNics(ctx context.Context, cfgResourceID,
 // CPU/memory resize when the desired values differ from current.
 func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
 	cfgResourceID := "vm:" + vmName
+
+	// Storage-location convergence (#2411) runs FIRST: an ha_role registration
+	// on a mislocated VM fails (Add-ClusterVirtualMachineRole refuses a VM whose
+	// configuration files are off cluster storage), and power/resize actions are
+	// deferred while a live move is in flight. proceed=false means a move was
+	// started or is in flight — the rest of this cycle is a cheap no-op and the
+	// lifecycle resumes once the location converges.
+	proceed, err := m.convergeStorageLocation(ctx, vmName, hostName, desired, current)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		return nil
+	}
 
 	// Reconcile the VM's network adapters to the desired switch set before any
 	// power-state change. Add-VMNetworkAdapter / Remove-VMNetworkAdapter both

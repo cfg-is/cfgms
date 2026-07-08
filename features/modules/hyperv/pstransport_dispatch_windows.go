@@ -39,13 +39,16 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 	case psGetVM:
 		return t.run(ctx, "Cfgms-GetVM -Name "+quoteArg(psArgs, "Name"))
 	case psCreateVM:
+		// -Path is optional (#2411): the VM home (dir(vhd_path)); omitted when
+		// no vhd_path directory is derivable so New-VM keeps the host default.
 		return t.run(ctx,
 			"Cfgms-CreateVM -Name "+quoteArg(psArgs, "Name")+
 				" -MemoryMB "+intArg(psArgs, "MemoryMB")+
 				" -CPU "+intArg(psArgs, "CPU")+
 				" -VHDPath "+quoteArg(psArgs, "VHDPath")+
 				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
-				" -Generation "+intArg(psArgs, "Generation"))
+				" -Generation "+intArg(psArgs, "Generation")+
+				optArg(psArgs, "Path", "Path"))
 	case psRemoveVM:
 		return t.run(ctx, "Cfgms-RemoveVM -Name "+quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -143,13 +146,41 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 				" -CPU "+intArg(psArgs, "CPU")+
 				" -VHDPath "+quoteArg(psArgs, "VHDPath")+
 				" -SwitchName "+quoteArg(psArgs, "SwitchName")+
-				" -Generation "+intArg(psArgs, "Generation"))
+				" -Generation "+intArg(psArgs, "Generation")+
+				optArg(psArgs, "Path", "Path"))
 	case psSetHddFirstBoot:
 		// runFresh: Set-VMFirmware -FirstBootDevice referencing a disk deadlocks
 		// in the persistent host (same as Cfgms-SetDVDFirstBoot).
 		return t.runFresh(ctx,
 			"Cfgms-SetHddFirstBoot -Name "+quoteArg(psArgs, "Name")+
 				" -VHDPath "+quoteArg(psArgs, "VHDPath"))
+
+	// ── VM storage location (#2411) ──────────────────────────────────
+	case psSetVMHome:
+		// runFresh: Move-VMStorage engages the storage-migration service —
+		// async storage ops deadlock in the persistent -Command - host.
+		return t.runFresh(ctx,
+			"Cfgms-SetVMHome -Name "+quoteArg(psArgs, "Name")+
+				" -VMHome "+quoteArg(psArgs, "Home"))
+	case psVMStorageMovePreflight:
+		// runFresh: Get-Volume is a Storage-module cmdlet (same family as the
+		// seed-disk ops that deadlock in the persistent host).
+		return t.runFresh(ctx,
+			"Cfgms-VMStorageMovePreflight -Name "+quoteArg(psArgs, "Name")+
+				" -DestDir "+quoteArg(psArgs, "DestDir"))
+	case psMoveVMStorage:
+		// runDetached: the live migration can run for minutes-to-hours; the
+		// module call must return as soon as the migration process starts
+		// (executor per-call deadline, ADR-012 §7). The MoveRecord is the
+		// source of truth for "started"; failure surfaces via the error
+		// marker probed by Cfgms-GetVMMoveError.
+		return t.runDetached(
+			"Cfgms-MoveVMStorage -Name " + quoteArg(psArgs, "Name") +
+				" -VMHome " + quoteArg(psArgs, "Home"))
+	case psGetVMMoveError:
+		return t.run(ctx, "Cfgms-GetVMMoveError -Name "+quoteArg(psArgs, "Name"))
+	case psClearVMMoveError:
+		return t.run(ctx, "Cfgms-ClearVMMoveError -Name "+quoteArg(psArgs, "Name"))
 
 	// ── VM network reconcile (declarative multi-NIC, #2021) ──────────
 	case psConnectVMNic:

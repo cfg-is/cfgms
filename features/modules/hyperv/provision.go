@@ -64,16 +64,21 @@ type ProvisionStore interface {
 	ListProvisions(ctx context.Context) ([]*ProvisionRecord, error)
 }
 
-// memProvisionStore is a thread-safe in-memory ProvisionStore for tests.
+// memProvisionStore is a thread-safe in-memory ProvisionStore (and MoveStore —
+// see vm_storage.go) for tests.
 type memProvisionStore struct {
 	mu      sync.RWMutex
 	records map[string]*ProvisionRecord
+	moves   map[string]*MoveRecord
 }
 
 // NewMemProvisionStore returns a new in-memory ProvisionStore suitable for
 // tests and as a no-op placeholder when the hyperv feature is not configured.
 func NewMemProvisionStore() *memProvisionStore {
-	return &memProvisionStore{records: make(map[string]*ProvisionRecord)}
+	return &memProvisionStore{
+		records: make(map[string]*ProvisionRecord),
+		moves:   make(map[string]*MoveRecord),
+	}
 }
 
 func (s *memProvisionStore) GetProvision(_ context.Context, vmName string) (*ProvisionRecord, error) {

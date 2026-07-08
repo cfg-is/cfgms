@@ -509,17 +509,20 @@ func TestSetVM_MultiSwitchCreate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	// getVM (not-found) + New-VM + one Add-VMNetworkAdapter for the 2nd switch.
-	require.Len(t, calls, 3)
+	// getVM (not-found) + New-VM + config-home move (#2411) + one
+	// Add-VMNetworkAdapter for the 2nd switch.
+	require.Len(t, calls, 4)
 	assert.Contains(t, calls[1].scriptBlock, "New-VM", "second call must be New-VM")
-	assert.Contains(t, calls[2].scriptBlock, "Add-VMNetworkAdapter",
-		"third call must connect the additional adapter")
+	assert.Equal(t, psSetVMHome, calls[2].scriptBlock,
+		"third call homes the configuration files at dir(vhd_path)")
+	assert.Contains(t, calls[3].scriptBlock, "Add-VMNetworkAdapter",
+		"fourth call must connect the additional adapter")
 	// The additional switch name travels as an argument, never in the script.
-	require.NotEmpty(t, calls[2].args)
+	require.NotEmpty(t, calls[3].args)
 	// The switch name is the EXACT name (no namespacing) and travels via args,
 	// never interpolated into the script body.
-	assert.Contains(t, calls[2].args, "Mgmt", "additional switch must travel via args, exact name")
-	assert.NotContains(t, calls[2].scriptBlock, "Mgmt",
+	assert.Contains(t, calls[3].args, "Mgmt", "additional switch must travel via args, exact name")
+	assert.NotContains(t, calls[3].scriptBlock, "Mgmt",
 		"switch name must not be interpolated into the script body")
 }
 
@@ -946,8 +949,8 @@ func TestGet_VM_ReturnsConfig(t *testing.T) {
 // TestSet_VMCreate verifies that Set creates a VM and passes all fields via ArgumentList.
 // setVM calls getVM first to check existence: the mock returns `{"found":false}`
 // for call[0] so getVM reports state:"absent" (per the F14 contract), then Set
-// falls through to New-VM as call[1]. Two transport calls expected total:
-// getVM (call[0]) + New-VM (call[1]).
+// falls through to New-VM as call[1] and the config-home move (#2411) as
+// call[2].
 func TestSet_VMCreate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{`{"found":false}`},
@@ -970,8 +973,12 @@ func TestSet_VMCreate(t *testing.T) {
 	calls := transport.calls
 	transport.mu.Unlock()
 
-	// Two calls: getVM existence check (returns not-found) + New-VM creation
-	require.Len(t, calls, 2)
+	// Three calls: getVM existence check (returns not-found) + New-VM creation
+	// + the config-home move that lands the VM's configuration files at
+	// dir(vhd_path) (#2411).
+	require.Len(t, calls, 3)
+	assert.Equal(t, psSetVMHome, calls[2].scriptBlock,
+		"create must home the configuration files at dir(vhd_path)")
 	call := calls[1] // New-VM is the second call
 
 	// Script must reference $Name parameter, not the literal name
@@ -1412,6 +1419,7 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 		transport := &testWinRMTransport{perCallOutputs: []string{
 			`{"found":false}`,   // getVM: VM absent
 			``,                  // New-VM: create succeeds
+			``,                  // Cfgms-SetVMHome: config-home move (#2411)
 			`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
 			`{"owners":{}}`,     // ownership helper: resource owners (role absent)
 			`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read
@@ -1444,6 +1452,7 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 		transport := &testWinRMTransport{perCallOutputs: []string{
 			`{"found":false}`,              // getVM: VM absent on this node
 			``,                             // New-VM
+			``,                             // Cfgms-SetVMHome: config-home move (#2411)
 			`{"owner":"NODE1"}`,            // CNO owner read
 			`{"owners":{"ha-vm":"NODE1"}}`, // resource owners: role ALREADY present
 			`{"owner":"NODE1"}`,            // cnoOwner re-read
@@ -1516,6 +1525,7 @@ func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: VM absent
 		``,                  // New-VM: create succeeds
+		``,                  // Cfgms-SetVMHome: config-home move (#2411)
 		`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
 		`{"owners":{}}`,     // ownership helper: resource owners (role absent)
 		`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read

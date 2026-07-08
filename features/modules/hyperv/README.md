@@ -154,18 +154,54 @@ failover.
 > `ErrInvalidHARoleSeedDir`. Set `seed_dir` to a per-node path such as
 > `C:\ProgramData\cfgms\seed`.
 
-> **VM configuration files must also be on cluster storage.** `New-VM` places
-> the VM's configuration files at the host default (the local system drive)
-> unless told otherwise, and `Add-ClusterVirtualMachineRole` refuses a VM whose
-> configuration lives on non-clustered storage — the promote then fails each
-> converge with *"The clustered role was not successfully created"* (the module
-> retries convergently; the error is in the steward log with the cluster report
-> path). The module does not yet expose a VM configuration-path setting, so for
-> a VM that will carry `ha_role`, either provision it with everything on the
-> CSV or move it once with
-> `Move-VMStorage <vm> -DestinationStoragePath C:\ClusterStorage\<csv>\<vm>` —
-> the next converge completes the registration (verified live on cfg-lab,
-> #2372).
+> **VM configuration files must also be on cluster storage** —
+> `Add-ClusterVirtualMachineRole` refuses a VM whose configuration lives on
+> non-clustered storage. Since #2411 this is satisfied **by config alone**: the
+> directory of the declared `vhd_path` is the VM's storage home (see
+> *Declarative storage location* below), so a VM declared with a CSV `vhd_path`
+> plus `ha_role` is created with its configuration files on the CSV and reaches
+> clustered-role membership with **zero operator steps**. A pre-existing VM
+> whose configuration sits elsewhere converges the same way: the module detects
+> the location drift and performs a live storage migration, then completes the
+> registration on a subsequent converge.
+
+### Declarative storage location (#2411)
+
+The directory containing the declared `vhd_path` is the VM's **home** — its
+configuration files, checkpoints, smart-paging files, and virtual disks all
+belong there. There is no separate config key:
+
+- **Create:** `New-VM` receives `-Path <dir(vhd_path)>` and the create path
+  homes the configuration files at exactly `dir(vhd_path)` — a fresh VM starts
+  with zero location drift.
+- **Converge:** changing `vhd_path`'s directory on an existing VM (or a VM
+  whose configuration files sit outside the home) starts a **live,
+  non-destructive `Move-VMStorage`** migration: configuration + checkpoints +
+  smart paging + all attached disks, each landing at `home\<its current file
+  name>` — for the primary disk that is exactly the declared `vhd_path` in the
+  normal case where the file name matches. The move works on running and
+  stopped VMs; the VM is **never stopped, deleted, or recreated** by this path.
+- **Async:** the migration can run for minutes-to-hours, so it is dispatched as
+  a detached process and tracked through a durable move record (the #2371
+  record machinery). Converge cycles observing an in-flight move are cheap
+  no-ops (never a duplicate dispatch); completion is judged by re-observing the
+  VM's location; a move in flight survives a steward restart.
+- **Safety:** a free-space preflight on the destination volume (CSV mounts
+  resolved) fails the move loudly *before* dispatch when the disks won't fit.
+  A failed or interrupted migration leaves the VM running at its original
+  location (Hyper-V semantics), surfaces the error on the record, and the next
+  converge retries — bounded to one attempt per converge cycle.
+- **Observed state:** `Get`/DNA report the VM's configuration-file location as
+  `configuration_location` (observed-only; the desired location is always
+  derived from `vhd_path`).
+
+Limitations: location convergence is **directory-level** — `Move-VMStorage`
+refuses a destination whose file name differs from the source, so renaming a
+VHD file via `vhd_path` does not converge (recreate or rename out-of-band
+instead; a checkpointed VM's current `.avhdx` likewise keeps its name and
+moves directory-wise). Cross-host migration (`Move-VM` between cluster nodes)
+and per-disk differential placement (multiple VHDs on different volumes) are
+out of scope; secondary disks follow the primary into the home directory.
 
 ### Create an external virtual switch
 
