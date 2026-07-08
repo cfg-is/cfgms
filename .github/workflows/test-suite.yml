@@ -87,11 +87,39 @@ jobs:
     - name: Install dependencies
       run: go mod download
     
+    - name: Start Linux resource sampler (self-hosted only, best-effort)
+      if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        (
+          PREV=""
+          while true; do
+            CURR=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8; exit}' /proc/stat 2>/dev/null || true)
+            if [ -n "$PREV" ] && [ -n "$CURR" ]; then
+              CPU_PCT=$(awk -v p="$PREV" -v c="$CURR" 'BEGIN{
+                split(p,pa); split(c,ca)
+                tot=0; for(i=1;i<=7;i++) tot+=ca[i]-pa[i]
+                idle=(ca[4]-pa[4])+(ca[5]-pa[5])
+                print (tot>0)?int(100*(tot-idle)/tot):0
+              }')
+              MEM_TOTAL=$(awk '/^MemTotal:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_AVAIL=$(awk '/^MemAvailable:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_USED=$(( ${MEM_TOTAL:-0} - ${MEM_AVAIL:-0} ))
+              printf '%s cpu_pct=%d mem_used_mb=%d/%d\n' \
+                "$(date -u +%H:%M:%S 2>/dev/null || echo time)" \
+                "${CPU_PCT:-0}" "$MEM_USED" "${MEM_TOTAL:-0}" \
+                >> /tmp/resource-samples.txt
+            fi
+            PREV="$CURR"
+            sleep 5
+          done
+        ) & echo $! > /tmp/resource-sampler.pid || true
+
     - name: Run Fast Unit Tests
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test
-    
+
     - name: Upload test results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
@@ -101,6 +129,33 @@ jobs:
           coverage.out
           test-results.xml
         retention-days: 5
+
+    - name: Report resource profile (self-hosted only, best-effort)
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        set +e
+        kill "$(cat /tmp/resource-sampler.pid 2>/dev/null)" 2>/dev/null
+        if [ -f /tmp/resource-samples.txt ]; then
+          CPU_PEAK=$(awk -F'cpu_pct=' 'NF>1{n=split($2,a," ");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_PEAK=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_TOTAL=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");t=a[2]+0}END{print t}' /tmp/resource-samples.txt)
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=${CPU_PEAK:-0} mem_peak_mb=${MEM_PEAK:-0}/${MEM_TOTAL:-0} vm=4vCPU/8GB"
+          cp /tmp/resource-samples.txt resource-samples-unit-tests.txt
+        else
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=0 mem_peak_mb=0/0 vm=4vCPU/8GB (no samples collected)"
+          touch resource-samples-unit-tests.txt
+        fi
+        true
+
+    - name: Upload resource samples (self-hosted only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      with:
+        name: resource-samples-unit-tests
+        path: resource-samples-unit-tests.txt
+        retention-days: 30
 
   # Integration tests - runs on PRs to develop/main, workflow_dispatch, or push to main
   # runs-on routing (#2337): same fork-gated self-hosted routing as unit-tests.
@@ -145,12 +200,40 @@ jobs:
     - name: Install dependencies
       run: go mod download
     
+    - name: Start Linux resource sampler (self-hosted only, best-effort)
+      if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        (
+          PREV=""
+          while true; do
+            CURR=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8; exit}' /proc/stat 2>/dev/null || true)
+            if [ -n "$PREV" ] && [ -n "$CURR" ]; then
+              CPU_PCT=$(awk -v p="$PREV" -v c="$CURR" 'BEGIN{
+                split(p,pa); split(c,ca)
+                tot=0; for(i=1;i<=7;i++) tot+=ca[i]-pa[i]
+                idle=(ca[4]-pa[4])+(ca[5]-pa[5])
+                print (tot>0)?int(100*(tot-idle)/tot):0
+              }')
+              MEM_TOTAL=$(awk '/^MemTotal:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_AVAIL=$(awk '/^MemAvailable:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_USED=$(( ${MEM_TOTAL:-0} - ${MEM_AVAIL:-0} ))
+              printf '%s cpu_pct=%d mem_used_mb=%d/%d\n' \
+                "$(date -u +%H:%M:%S 2>/dev/null || echo time)" \
+                "${CPU_PCT:-0}" "$MEM_USED" "${MEM_TOTAL:-0}" \
+                >> /tmp/resource-samples.txt
+            fi
+            PREV="$CURR"
+            sleep 5
+          done
+        ) & echo $! > /tmp/resource-sampler.pid || true
+
     - name: Run Fast Comprehensive Tests
       run: make test-fast
-    
+
     - name: Run Production Critical Tests
       run: make test-production-critical
-    
+
     - name: Upload integration test results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
@@ -160,6 +243,33 @@ jobs:
           integration-coverage.out
           integration-results.xml
         retention-days: 5
+
+    - name: Report resource profile (self-hosted only, best-effort)
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        set +e
+        kill "$(cat /tmp/resource-sampler.pid 2>/dev/null)" 2>/dev/null
+        if [ -f /tmp/resource-samples.txt ]; then
+          CPU_PEAK=$(awk -F'cpu_pct=' 'NF>1{n=split($2,a," ");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_PEAK=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_TOTAL=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");t=a[2]+0}END{print t}' /tmp/resource-samples.txt)
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=${CPU_PEAK:-0} mem_peak_mb=${MEM_PEAK:-0}/${MEM_TOTAL:-0} vm=4vCPU/8GB"
+          cp /tmp/resource-samples.txt resource-samples-integration-tests.txt
+        else
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=0 mem_peak_mb=0/0 vm=4vCPU/8GB (no samples collected)"
+          touch resource-samples-integration-tests.txt
+        fi
+        true
+
+    - name: Upload resource samples (self-hosted only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      with:
+        name: resource-samples-integration-tests
+        path: resource-samples-integration-tests.txt
+        retention-days: 30
 
   # Cross-feature integration tests - chunked for efficiency
   cross-feature-tests:

@@ -302,6 +302,56 @@ on Windows (`make build`) and ran the unit test suite
 (`go test -race -short -timeout=5m ./pkg/... ./features/...`), both passing on the
 self-hosted runner.
 
+### 7.5 Runner resource profile (Story #2428, instrumented 2026-07-08)
+
+The self-hosted CI jobs now capture peak CPU% and peak memory usage during each run so
+the 4 vCPU / 8 GB VM allocation can be compared against actual utilization. This closes
+the gap between knowing the *allocation* and knowing the *utilization* before deciding
+whether to scale vertically (larger VMs) or horizontally (more VMs).
+
+**Jobs instrumented:**
+- `unit-tests` (Linux, `cfgms-ci-lin-01`)
+- `integration-tests` (Linux, `cfgms-ci-lin-01`)
+- `Native Build (Windows)` (Windows, `CFGMS-CI-WIN-01`)
+
+Steps run only on the self-hosted path (same fork-gate as the job); fork PRs and
+`workflow_dispatch` events skip the sampler entirely — no cost added to hosted CI.
+
+**How to read the resource profile:**
+
+1. **Job log line** — search for `RESOURCE_PROFILE` in the "Report resource profile"
+   step log. The line is emitted at the end of each instrumented run:
+
+   ```
+   RESOURCE_PROFILE: os=linux   cpu_peak_pct=<n> mem_peak_mb=<n>/<total_mb> vm=4vCPU/8GB
+   RESOURCE_PROFILE: os=windows cpu_peak_pct=<n> mem_peak_mb=<n>/<total_mb> vm=4vCPU/8GB
+   ```
+
+   `cpu_peak_pct` is the highest single 5 s interval CPU% observed during the job.
+   `mem_peak_mb` is the highest used-memory reading (total − available) over the same interval.
+
+2. **Per-run artifact** — raw time-series samples (one line per 5 s interval:
+   `HH:MM:SS cpu_pct=<n> mem_used_mb=<n>/<total_mb>`) are uploaded as an artifact
+   retained for 30 days. Artifact names:
+
+   | Job | Artifact name |
+   |-----|---------------|
+   | `unit-tests` | `resource-samples-unit-tests` |
+   | `integration-tests` | `resource-samples-integration-tests` |
+   | `Native Build (Windows)` | `resource-samples-native-windows` |
+
+   Download from the Actions run page → Artifacts section, or via CLI:
+
+   ```bash
+   gh run download <run-id> --name resource-samples-unit-tests
+   ```
+
+**Initial reading:** The instrumentation was added with this story (2026-07-08). No
+instrumented runs exist at implementation time. The `RESOURCE_PROFILE` lines and
+artifacts will populate from subsequent self-hosted runs. The VM-sizing assessment
+(under- vs over-provisioned) is an explicit follow-up once ≥~5 instrumented runs have
+accumulated.
+
 ---
 
 ## 8. What the founder does vs what the agent builds
