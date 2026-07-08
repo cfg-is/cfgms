@@ -2,6 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-07-04
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX)
 **Issue:** (to be assigned at decomposition)
 **Epic:** (controller-baseline-DNA / DNA-composition epic — to be filed)
 
@@ -181,4 +182,61 @@ Read everything — even managed objects — from osquery.
 - [ADR-006](006-module-packaging-and-distribution.md) — Module Packaging and Distribution
 - `features/steward/dna/dna.go` — current `Collector`, `ComputeHash` (redefined by this ADR)
 - `features/steward/dna/drift` — drift subsystem gated by the managed/observe-only class
-- `docs/product/roadmap.md` — Captured Backlog (OSquery, controller baseline DNA)
+- `docs/product/roadmap.md` — Captured Backlog (OSquery, controller baseline DNA) + [Digital Twin & DEX — Tiered Rollout](../../product/roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout) (the Tier-1 commitments this amendment lands)
+
+---
+
+## Amendment 1 (2026-07-07) — Twin/DEX data-model commitments
+
+**Status:** Proposed (rider on this ADR)
+
+**Context.** A product-planning session (roadmap.md v4.1, *Digital Twin & DEX — Tiered Rollout*) established that the Digital Twin and Digital Employee Experience (DEX) capabilities ship as layers threaded across the timeline, built on the **same DNA foundation this ADR defines**. Four data-model commitments are cheap to honor in this epic and expensive to retrofit later; the baseline-DNA / DNA-composition epic **must** land them. Each is deliberately designed to preserve the base ADR's invariants — hash determinism (clause 5) and telemetry exclusion (clause 4) — by adding *around* the fragment, never *inside* the hash.
+
+### A1.1 — Fragment provenance & freshness travel in an envelope, never in the hash
+
+Every fragment gains a **provenance envelope** carried alongside `canonical_bytes` but **excluded from `canonical_bytes`, `fragment_hash`, the manifest, and the aggregate root**:
+
+```
+fragment_envelope = (source, observed_at, confidence)
+```
+
+- **`source`** — the concrete producer instance (which module version, or that osquery ran the read). Distinct from `authority` (clause 2), which is the *role* that won resolution; `source` is the *provenance* of this specific read.
+- **`observed_at`** — when the steward last confirmed this fragment's state.
+- **`confidence`** — producer-declared reliability of the read. A module that partially fails to read an object marks the fragment low-confidence rather than emitting a wrong-but-confident value.
+
+**Invariant preserved.** Clause 5 forbids run-local noise (timestamps) inside `canonical_bytes` precisely so identical state hashes identically. The envelope honors this: it is metadata *about* the fragment, not fragment content. Two stewards with identical `sshd` state still produce identical `service:sshd` fragment hashes even though their `observed_at` differ — so partial-sync validation (clause 7) is unaffected, while "how fresh / how sure is this?" becomes answerable.
+
+### A1.2 — `fragment_id` is a first-class **typed entity id**; the type taxonomy is stable
+
+Clause 1 already defines `fragment_id` as `type:name` (`service:sshd`, `file:/etc/hosts`, `host:cpu`). This amendment elevates the **`type` prefix to a first-class, enumerated entity type** — a stable, versioned taxonomy owned by this epic (seeded by the stdlib object kinds plus the `host:*` fact kinds), not an incidental naming convention.
+
+This id is the **single shared identity** across three consumers, so they join for free:
+
+- **DNA** — the fragment (this ADR).
+- **Topology graph** (twin Tier 2) — graph **nodes are typed entities**; edges (`runs-on`, `depends-on`, `serves`, …) connect `fragment_id`s. No separate node-identity scheme.
+- **DEX telemetry** (Tier 2/3) — experience signals are addressed **to** a `fragment_id` (A1.4).
+
+A per-consumer id scheme would be the expensive retrofit this clause prevents. The taxonomy must therefore also cover entity kinds that DEX/topology need but no stdlib module *manages* (e.g. `application:*`, `device:*`) — such entities may exist as osquery-observed or telemetry-only nodes with **no managed fragment**.
+
+### A1.3 — The controller **retains versioned fragment history** (restores DNA "memory")
+
+The base ADR describes the controller holding *a* copy and updating it in place via partial sync (clause 7). This amendment requires the controller-side DNA store to be **append-only / versioned**, not last-write-wins:
+
+- Each accepted partial-sync delta produces a new **version** of the affected fragments, stamped with the aggregate-root version and ingest time; superseded fragment states are **retained, not overwritten**.
+- Per-entity state becomes **queryable over time**: "what was `service:sshd` on 2026-06-01", "diff `host:os` over the last 30 days", "when did this fragment last change".
+- History is **cheap by construction**: `fragment_hash` dedups unchanged fragments (an object unchanged across N syncs stores one state row plus version pointers), so storage tracks *change volume*, not fleet-size × time. Retention depth is a configurable policy.
+
+**Why here, not later.** Current-state-only is a lossy write. Once the controller overwrites, the history is gone — no Tier-2 temporal query, no Tier-3 DEX baseline/trend, no config-change→effect correlation can be reconstructed after the fact. This closes the "DNA lost its memory" gap. It changes **controller storage only** — not the wire protocol, the hash, or the steward.
+
+### A1.4 — DEX signals & graph edges address typed entities; telemetry stays non-DNA
+
+Clause 4's exclusion stands: DEX experience signals (app-hang, I/O wait, boot/login duration, per-process resource use) are **telemetry, not DNA**. They flow on the separate unhashed monitor-stream pipe and never enter fragments, the manifest, or the hash.
+
+The single commitment this rider adds: that telemetry is **addressed to the same typed `fragment_id`s** (A1.2). A DEX signal for QuickBooks references its `application:*` entity; a per-process metric references its owning entity. This keeps clause 4 intact while making DEX baselines and root-cause a **join** against DNA + the topology graph rather than a parallel, unjoinable data island.
+
+### Consequences of the amendment
+
+- **Invariants held.** Hash determinism (A1.1 keeps metadata out of the hash), single-authority atomicity (unchanged), telemetry exclusion (A1.4 keeps signals out of DNA). The rider adds around the fragment, not inside it — partial-sync validation is untouched.
+- **Wire additions are additive.** The provenance envelope (A1.1) is additive metadata on the `commonpb.DNA` type; manifest and aggregate root are unchanged.
+- **Controller storage is the real new work** (A1.3): fragment-addressable storage becomes version-addressable. This is the load-bearing change and must be scoped explicitly in the DNA-composition epic.
+- **A companion storage-shape ADR is likely needed** for the Tier-2 topology graph (property-graph store) and the temporal query surface — flagged in roadmap.md, to be drafted separately. This rider guarantees only the **identity + history substrate** those build on.

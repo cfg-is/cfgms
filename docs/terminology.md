@@ -238,27 +238,18 @@ CFGMS is designed to be both simple to get started with and capable of scaling t
 
 ### DNA (System-Specific Metadata)
 
-DNA refers to system-specific metadata used for targeting and identification, creating a comprehensive digital twin of the physical environment. This includes:
+DNA is CFGMS's deterministic, hashable representation of a host's **stable, desired-comparable state** — the foundation the Digital Twin and DEX build on, not the twin itself. (The Digital Twin is **Model + Sync + Reason**, delivered as a tiered rollout; DNA is the state half of its Model + Sync foundation. See the roadmap's Digital Twin & DEX rollout and ADR-017.)
 
-- Hardware information (CPU, memory, storage, network interfaces)
-- Operating system details (version, patches, installed software)
-- Network configuration (IP addresses, DNS, routing)
-- Physical location and environment (datacenter, rack, room)
-- System relationships and dependencies
-- Performance metrics and health status
-- Custom attributes and business context
-- Historical state and change tracking
-- Security posture and compliance status
-- Resource utilization and capacity planning data
+DNA is a **set of addressable fragments** rather than a flat attribute map (ADR-016 / ADR-017). Each fragment carries an object-canonical **typed entity id** (`service:sshd`, `file:/etc/hosts`, `host:cpu`), a single resolved **authority** (a managing module, or osquery for observe-only host facts), canonical bytes, and a per-fragment hash. Each also carries a **provenance envelope** (`source`, `observed_at`, `confidence`) that travels alongside the fragment but is excluded from its hash. DNA fragments include:
 
-The DNA system continuously updates this digital twin through:
+- Managed object state from module `Get` (services, files, users, packages, firewall, …) — enforceable, drift-corrected
+- Observe-only host facts from osquery via a curated stable-fact allowlist (CPU model, total memory, BIOS, OS build) — report-only
+- The **typed entity identity** shared with the topology graph and DEX telemetry (the common join key)
+- Security posture and compliance state where expressed as managed/observed objects
 
-- Real-time monitoring and state detection
-- Automated discovery of system changes
-- Integration with external data sources
-- Historical tracking of configuration changes
-- Relationship mapping between systems
-- Performance and health metrics collection
+DNA is **not** telemetry. Ephemeral runtime values — live CPU/memory utilisation, uptime, PIDs, per-process resource use, health metrics — are **excluded from DNA** (ADR-017 clause 4); they flow on the separate, unhashed monitor-stream / DEX pipe. That exclusion is what keeps the DNA hash stable instead of flapping every second.
+
+The controller retains DNA as **versioned, append-only** per-entity history (ADR-017 Amendment A1.3): state is queryable over time ("what was `service:sshd` on a given date", "when did this fragment last change"), and partial sync validates the controller's copy against the steward's via a two-level (per-fragment + aggregate-root) hash, transferring only changed fragments.
 
 ### Module
 

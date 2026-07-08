@@ -48,7 +48,9 @@ What becomes easier or harder by making this decision?
 | ADR | Title | Date | Status |
 |-----|-------|------|--------|
 | [001](001-central-provider-compliance-enforcement.md) | Central Provider Compliance Enforcement | 2025-10-20 | Accepted |
+| [002](002-steward-bootstrap-for-controllers.md) | Steward Bootstrap for Controller Nodes | 2026-03-30 | Accepted |
 | [003](003-storage-data-taxonomy.md) | Storage Data Taxonomy | 2026-04-13 | Proposed |
+| [004](004-audit-chain-integrity.md) | Audit Chain Integrity via HMAC-Keyed Hash Chain | 2026-04-21 | Accepted |
 | [005](005-logging-interface-for-transport-providers.md) | Logging Interface for Transport Providers | 2026-05-04 | Accepted |
 | [006](006-module-packaging-and-distribution.md) | Module Packaging and Distribution | 2026-06-05 | Accepted |
 | [007](007-controller-upgrade-and-state-externalization.md) | Controller Upgrade and State Externalization Strategy | 2026-06-15 | Accepted |
@@ -60,7 +62,10 @@ What becomes easier or harder by making this decision?
 | [013](013-steward-controller-trust-and-distribution.md) | Steward Controller-Trust Anchoring and Binary Distribution | 2026-06-24 | Accepted |
 | [014](014-cfg-sessions-and-credential-unlock.md) | cfg Admin Sessions and Credential Storage (Zero Standing Privilege) | 2026-06-28 | Accepted |
 | [015](015-story-materialization-at-decomposition.md) | Story Materialization at Decomposition | 2026-07-03 | Accepted |
+| [016](016-steward-module-foundation.md) | Steward Module Foundation — stdlib set, repository layout, DNA-fragment contract | 2026-07-04 | Proposed |
+| [017](017-dna-composition-and-sync.md) | DNA Composition & Sync — fragment model, authority resolution, partial-sync validation (incl. Amendment 1: twin/DEX data-model commitments) | 2026-07-04 | Proposed |
 | [018](018-web-session-semantics.md) | Web-Session Semantics (Browser Credential Login) | 2026-07-04 | Accepted |
+| [019](019-third-party-module-inclusion-and-trust.md) | Third-Party Module Inclusion and Delegated Publisher Trust | 2026-07-04 | Proposed |
 
 ### Superseded/Deprecated
 
