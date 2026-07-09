@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,6 +83,77 @@ func TestResolveOrFailFast_ServerError_PropagatesError(t *testing.T) {
 	require.Error(t, err)
 	// The error must not be silently swallowed.
 	assert.NotEmpty(t, err.Error())
+}
+
+// ---- runStewardList selector path -------------------------------------------
+
+// setStewardListFlags points the steward CLI globals at the given fixture URL
+// for the duration of the test and restores them afterward.
+func setStewardListFlags(t *testing.T, url string) {
+	t.Helper()
+	origURL := stewardURL
+	origInsecure := stewardTLSInsecure
+	t.Cleanup(func() {
+		stewardURL = origURL
+		stewardTLSInsecure = origInsecure
+	})
+	stewardURL = url
+	stewardTLSInsecure = true
+}
+
+func TestRunStewardList_SelectorPath_RendersResolvedMatches(t *testing.T) {
+	// Exercises the len(args) > 0 selector branch end-to-end: resolveOrFailFast
+	// against the fleet/resolve endpoint, hostname extraction from DNA, lastSeen
+	// formatting, and tabwriter column layout + flush.
+	lastSeen := time.Date(2026, 7, 9, 13, 30, 15, 0, time.UTC)
+	fixtures := []StewardInfo{
+		{
+			ID:       "s1",
+			Status:   "online",
+			Version:  "1.2.3",
+			LastSeen: lastSeen,
+			DNA:      &StewardInfoDNA{Hostname: "web-01"},
+		},
+		{
+			// No DNA and zero LastSeen: hostname and last-seen columns stay blank.
+			ID:      "s2",
+			Status:  "offline",
+			Version: "1.2.0",
+		},
+	}
+	srv := newResolveSelectorServer(t, fixtures)
+	t.Cleanup(srv.Close)
+	setStewardListFlags(t, srv.URL)
+
+	output := captureStdout(t, func() {
+		err := runStewardList(stewardListCmd, []string{"all"})
+		require.NoError(t, err)
+	})
+
+	// Header and both resolved stewards are present.
+	assert.Contains(t, output, "ID")
+	assert.Contains(t, output, "HOSTNAME")
+	assert.Contains(t, output, "s1")
+	assert.Contains(t, output, "online")
+	assert.Contains(t, output, "1.2.3")
+	assert.Contains(t, output, "web-01")
+	// LastSeen is formatted, not rendered as the raw zero-value time.
+	assert.Contains(t, output, "2026-07-09 13:30:15")
+	assert.Contains(t, output, "s2")
+	assert.Contains(t, output, "offline")
+}
+
+func TestRunStewardList_SelectorPath_ZeroMatch_ReturnsError(t *testing.T) {
+	// The error path: resolveOrFailFast returns a clear error when the selector
+	// matches no stewards, and runStewardList propagates it.
+	srv := newResolveSelectorServer(t, []StewardInfo{})
+	t.Cleanup(srv.Close)
+	setStewardListFlags(t, srv.URL)
+
+	err := runStewardList(stewardListCmd, []string{"name:ghost"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matched no stewards")
+	assert.Contains(t, err.Error(), `"name:ghost"`)
 }
 
 // ---- confirmMultiHost --------------------------------------------------------
@@ -207,9 +278,12 @@ func TestKeyedOutput_PartialFailure_AllRepresented(t *testing.T) {
 
 func TestFanOutConcurrent_ConcurrencyBound(t *testing.T) {
 	// Verify that no more than fanOutConcurrencyBound goroutines execute the
-	// action simultaneously. Uses a blocking channel receive to force
-	// goroutines to remain in-flight while others try to start, giving
-	// the Go scheduler a meaningful window to measure peak concurrency.
+	// action simultaneously. Synchronisation is deterministic: every goroutine
+	// that enters the action body (i.e. has acquired a semaphore slot) sends one
+	// signal on `started`, then blocks on `unblock`. The test reads exactly
+	// fanOutConcurrencyBound signals — a barrier that provably means that many
+	// goroutines are simultaneously in-flight and any further ones are still
+	// parked at the semaphore — before releasing them. No sleeps, no busy-waits.
 	const total = 50
 	matches := make([]StewardInfo, total)
 	for i := range matches {
@@ -218,13 +292,18 @@ func TestFanOutConcurrent_ConcurrencyBound(t *testing.T) {
 
 	var inflight atomic.Int64
 	var maxInflight atomic.Int64
+	// started is buffered to total so no action goroutine ever blocks on send,
+	// even the ones that pile up behind the semaphore once released.
+	started := make(chan struct{}, total)
 	// unblock is closed once peak measurement is done so goroutines can finish.
 	unblock := make(chan struct{})
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		fanOutConcurrent(context.Background(), matches, //nolint:errcheck
+		// Return values intentionally discarded: this test measures peak
+		// concurrency via atomic counters, not the fan-out results or error.
+		_, _ = fanOutConcurrent(context.Background(), matches,
 			func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
 				current := inflight.Add(1)
 				for {
@@ -233,8 +312,10 @@ func TestFanOutConcurrent_ConcurrencyBound(t *testing.T) {
 						break
 					}
 				}
-				// Block until the test signals unblock, holding the slot
-				// and allowing other goroutines to pile up at the semaphore.
+				// Signal that this goroutine holds a semaphore slot, then block
+				// until the test releases it — allowing other goroutines to pile
+				// up at the semaphore while peak concurrency is measured.
+				started <- struct{}{}
 				select {
 				case <-unblock:
 				case <-ctx.Done():
@@ -244,12 +325,11 @@ func TestFanOutConcurrent_ConcurrencyBound(t *testing.T) {
 			})
 	}()
 
-	// Yield to let goroutines ramp up and saturate the semaphore.
-	runtime.Gosched()
-	// Give fan-out goroutines time to start; use a short busy-wait instead of
-	// a fixed sleep so the test is fast on slow machines too.
-	for i := 0; i < 1000 && maxInflight.Load() < int64(fanOutConcurrencyBound); i++ {
-		runtime.Gosched()
+	// Deterministic barrier: the semaphore admits exactly fanOutConcurrencyBound
+	// goroutines at once, so this many started signals arrive before any slot is
+	// freed. Once received, peak in-flight is measured at its true maximum.
+	for i := 0; i < fanOutConcurrencyBound; i++ {
+		<-started
 	}
 
 	// Unblock all goroutines so the test completes.
