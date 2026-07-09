@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,6 +213,33 @@ func TestCollectorStubOrPlatform(t *testing.T) {
 	// The stub returns ErrPlatformNotSupported on non-Windows; invoke Run to
 	// verify the contract rather than leaving it untested.
 	assertStubOrSkip(t, col)
+}
+
+// TestSinkConcurrentWritesRace verifies that Sink is safe for concurrent use.
+// The ETW callback goroutine and the WMI poller goroutine both call WriteEvent
+// concurrently; without a Sink-level mutex, concurrent json.Encoder.Encode calls
+// race on the underlying bytes.Buffer. This test detects that under -race and
+// confirms correct output after the fix.
+func TestSinkConcurrentWritesRace(t *testing.T) {
+	var buf bytes.Buffer
+	sink := NewSink(&buf)
+	const workers = 20
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			require.NoError(t, sink.WriteEvent(SignalDiskIO, map[string]any{"n": n}))
+		}(i)
+	}
+	wg.Wait()
+	// All 20 writes should produce valid JSON lines with no interleaving.
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	assert.Len(t, lines, workers)
+	for i, line := range lines {
+		var rec SpikeRecord
+		assert.NoError(t, json.Unmarshal([]byte(line), &rec), "line %d not valid JSON: %s", i, line)
+	}
 }
 
 // TestSignalClassConstants verifies that all SignalClass values are non-empty

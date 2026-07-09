@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -88,8 +89,9 @@ type SpikeRecord struct {
 	Event map[string]any `json:"event,omitempty"`
 }
 
-// Sink writes spike records as JSON lines to an io.Writer.
+// Sink writes spike records as JSON lines to an io.Writer; safe for concurrent use.
 type Sink struct {
+	mu  sync.Mutex
 	w   io.Writer
 	enc *json.Encoder
 }
@@ -103,6 +105,8 @@ func NewSink(w io.Writer) *Sink {
 
 // WriteReachability emits a reachability result.
 func (s *Sink) WriteReachability(r ReachabilityResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.enc.Encode(SpikeRecord{
 		Timestamp:    time.Now().UTC(),
 		Kind:         "reachability",
@@ -112,6 +116,8 @@ func (s *Sink) WriteReachability(r ReachabilityResult) error {
 
 // WriteOverhead emits a CPU overhead sample.
 func (s *Sink) WriteOverhead(o OverheadSample) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.enc.Encode(SpikeRecord{
 		Timestamp: time.Now().UTC(),
 		Kind:      "overhead",
@@ -121,6 +127,8 @@ func (s *Sink) WriteOverhead(o OverheadSample) error {
 
 // WriteEvent emits a raw signal observation.
 func (s *Sink) WriteEvent(class SignalClass, fields map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.enc.Encode(SpikeRecord{
 		Timestamp: time.Now().UTC(),
 		Kind:      "event",
@@ -165,8 +173,10 @@ type SpikeReport struct {
 	Reachability []ReachabilityResult `json:"reachability"`
 	// Overhead is the CPU measurement taken while actively collecting.
 	Overhead OverheadSample `json:"overhead"`
-	// TotalEvents is the number of raw signal events emitted to the sink.
+	// TotalEvents is the number of raw signal events successfully written to the sink.
 	TotalEvents int `json:"total_events"`
+	// SinkErrors is the number of sink write failures during collection.
+	SinkErrors int `json:"sink_errors,omitempty"`
 }
 
 // String returns a human-readable summary of the spike report suitable for
@@ -201,5 +211,8 @@ func (r SpikeReport) String() string {
 	out += fmt.Sprintf("Verdict: %s\n", verdict)
 
 	out += fmt.Sprintf("\nTotal signal events captured: %d\n", r.TotalEvents)
+	if r.SinkErrors > 0 {
+		out += fmt.Sprintf("Sink write errors (dropped): %d\n", r.SinkErrors)
+	}
 	return out
 }

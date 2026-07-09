@@ -139,7 +139,7 @@ func TestCollectorRunShort(t *testing.T) {
 		t.Skipf("ETW session requires admin privilege (StartTrace: %v) — skipping", probeErr)
 	}
 	// Clean up probe session before proceeding.
-	_ = stopNamedTrace(probeHandle, "cfgms-dex-priv-probe")
+	require.NoError(t, stopNamedTrace(probeHandle, "cfgms-dex-priv-probe"), "cleanup probe ETW session")
 
 	cfg := DefaultConfig()
 	cfg.OverheadWindowSec = 2

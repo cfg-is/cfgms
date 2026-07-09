@@ -247,10 +247,11 @@ var wmiProviders = []wmiProvider{
 
 // Collector is the top-level acquisition spike entry point.
 type Collector struct {
-	cfg     SpikeConfig
-	sink    *Sink
-	total   atomic.Int64 // running count of signal events emitted
-	stopETW func()       // called to shut down the ETW session
+	cfg        SpikeConfig
+	sink       *Sink
+	total      atomic.Int64 // signal events successfully written to sink
+	sinkErrors atomic.Int64 // sink write failures during collection
+	stopETW    func()       // called to shut down the ETW session
 }
 
 // NewCollector returns a Collector configured with cfg.
@@ -302,7 +303,9 @@ func (c *Collector) Run(ctx context.Context) (SpikeReport, error) {
 	wg.Wait()
 
 	if sessionHandle != 0 {
-		_ = c.stopETWSession(sessionHandle)
+		if stopErr := c.stopETWSession(sessionHandle); stopErr != nil {
+			return SpikeReport{}, fmt.Errorf("dex: stop ETW session: %w", stopErr)
+		}
 	}
 
 	cpuAfter, err := processTimesNs()
@@ -334,6 +337,7 @@ func (c *Collector) Run(ctx context.Context) (SpikeReport, error) {
 		Reachability: reach,
 		Overhead:     overhead,
 		TotalEvents:  int(c.total.Load()),
+		SinkErrors:   int(c.sinkErrors.Load()),
 	}, nil
 }
 
@@ -592,8 +596,11 @@ func (c *Collector) runETWConsumer(ctx context.Context, sessionHandle uintptr) {
 			"thread_id":  record.EventHeader.ThreadId,
 			"timestamp":  record.EventHeader.TimeStamp,
 		}
-		_ = c.sink.WriteEvent(class, fields)
-		c.total.Add(1)
+		if c.sink.WriteEvent(class, fields) == nil {
+			c.total.Add(1)
+		} else {
+			c.sinkErrors.Add(1)
+		}
 		return 0
 	}
 
@@ -616,6 +623,9 @@ func (c *Collector) runETWConsumer(ctx context.Context, sessionHandle uintptr) {
 	// ProcessTrace blocks until the session is stopped or context is done.
 	done := make(chan struct{})
 	go func() {
+		// ProcessTrace fires callbacks on this thread — pin the M so the scheduler can't hand it off while blocked.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 		defer close(done)
 		// ProcessTrace returns ERROR_SUCCESS or a cancellation code (e.g.
 		// ERROR_CANCELLED when CloseTrace is called from the select below);
@@ -715,8 +725,11 @@ func (c *Collector) pollWMIProviderWithTimeout(ctx context.Context, p wmiProvide
 	}
 
 	for _, fields := range rows {
-		_ = c.sink.WriteEvent(p.class, fields)
-		c.total.Add(1)
+		if c.sink.WriteEvent(p.class, fields) == nil {
+			c.total.Add(1)
+		} else {
+			c.sinkErrors.Add(1)
+		}
 	}
 }
 
