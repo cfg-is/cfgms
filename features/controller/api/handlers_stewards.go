@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -36,10 +37,82 @@ var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // hierarchical paths (e.g. "msp-a/client-1"). Each component matches identifierRegex.
 var tenantPathRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$`)
 
+// stewardPageMaxLimit caps the limit query parameter on GET /api/v1/stewards (Issue #2489).
+const stewardPageMaxLimit = 500
+
+// StewardListPage is the paginated envelope returned by handleListStewards when
+// the limit/offset query parameters are present. Total is the post-filter,
+// pre-slice steward count so clients can compute page counts.
+type StewardListPage struct {
+	Stewards []StewardInfo `json:"stewards"`
+	Total    int           `json:"total"`
+	Limit    int           `json:"limit"`
+	Offset   int           `json:"offset"`
+}
+
+// parseStewardPagination parses the optional limit/offset query parameters for
+// GET /api/v1/stewards. Rules (pinned by Issue #2489):
+//   - limit must be an integer in 1..stewardPageMaxLimit
+//   - offset must be an integer >= 0
+//   - limit present without offset implies offset=0
+//   - offset present without limit is rejected (ambiguous page size)
+//   - neither present => paginated=false (existing full-list behavior)
+//
+// Error messages reference the offending parameter NAME only — never the raw
+// client-supplied value (no information disclosure in error responses).
+func parseStewardPagination(q url.Values) (limit, offset int, paginated bool, err error) {
+	limitStr := q.Get("limit")
+	offsetStr := q.Get("offset")
+
+	if limitStr == "" && offsetStr == "" {
+		return 0, 0, false, nil
+	}
+	if limitStr == "" {
+		return 0, 0, false, fmt.Errorf("offset requires limit to be set")
+	}
+
+	limit, convErr := strconv.Atoi(limitStr)
+	if convErr != nil || limit < 1 || limit > stewardPageMaxLimit {
+		return 0, 0, false, fmt.Errorf("limit must be an integer between 1 and %d", stewardPageMaxLimit)
+	}
+
+	if offsetStr != "" {
+		offset, convErr = strconv.Atoi(offsetStr)
+		if convErr != nil || offset < 0 {
+			return 0, 0, false, fmt.Errorf("offset must be a non-negative integer")
+		}
+	}
+
+	return limit, offset, true, nil
+}
+
+// paginateStewards sorts stewards by ID and slices the requested page window.
+// The ID sort exists solely to make pagination deterministic — pages must be
+// stable across requests even though the underlying sources iterate maps in
+// random order. User-facing sort is explicitly out of scope (Issue #2489).
+func paginateStewards(stewards []StewardInfo, limit, offset int) StewardListPage {
+	sort.Slice(stewards, func(i, j int) bool { return stewards[i].ID < stewards[j].ID })
+	total := len(stewards)
+	start := min(offset, total)
+	end := min(start+limit, total)
+	return StewardListPage{
+		Stewards: stewards[start:end],
+		Total:    total,
+		Limit:    limit,
+		Offset:   offset,
+	}
+}
+
 // handleListStewards handles GET /api/v1/stewards
 // Supports optional query parameters for filtered search: os, platform, arch, status, hostname,
 // tag (repeatable). TenantID is always taken from the authenticated context, never from query params.
-// When no query params are provided, the existing all-stewards behavior is preserved.
+//
+// Optional pagination (Issue #2489): limit (1..500) and offset (>=0) select a page
+// over a deterministic steward-ID-sorted order and switch the response payload to
+// a StewardListPage envelope with total = post-filter, pre-slice count. Pagination
+// applies on both the filtered and unfiltered code paths. When both params are
+// absent, the existing full-list payload is returned unchanged (backward
+// compatibility for cfg and existing clients).
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
 	tenantID := ""
@@ -51,6 +124,18 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	filter, err := buildFleetFilter(r, tenantID)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
+		return
+	}
+
+	// Parse optional pagination params. Rejected values are logged sanitized;
+	// the error body names the offending param, never the raw client value.
+	limit, offset, paginated, err := parseStewardPagination(r.URL.Query())
+	if err != nil {
+		s.logger.Warn("Rejected steward list pagination params",
+			"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
+			"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
+			"error", err)
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PAGINATION")
 		return
 	}
 
@@ -79,6 +164,12 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			stewardList = append(stewardList, info)
+		}
+		if paginated {
+			page := paginateStewards(stewardList, limit, offset)
+			s.logger.Info("Listed stewards (filtered, paginated)", "count", len(page.Stewards), "total", page.Total)
+			s.writeSuccessResponse(w, page)
+			return
 		}
 		s.logger.Info("Listed stewards (filtered)", "count", len(stewardList))
 		s.writeSuccessResponse(w, stewardList)
@@ -115,6 +206,13 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		stewardList = append(stewardList, info)
+	}
+
+	if paginated {
+		page := paginateStewards(stewardList, limit, offset)
+		s.logger.Info("Listed stewards (paginated)", "count", len(page.Stewards), "total", page.Total)
+		s.writeSuccessResponse(w, page)
+		return
 	}
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))

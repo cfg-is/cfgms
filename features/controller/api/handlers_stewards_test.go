@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1466,6 +1469,385 @@ func TestHandleGetStewardLogs_InvalidModuleParameter(t *testing.T) {
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "INVALID_PARAMETER", errResp.Error.Code)
+}
+
+// ---- GET /api/v1/stewards pagination tests (Issue #2489) ----
+
+// listStewardsPage mirrors the paginated envelope returned when limit/offset
+// query parameters are present on GET /api/v1/stewards.
+type listStewardsPage struct {
+	Stewards []StewardInfo `json:"stewards"`
+	Total    int           `json:"total"`
+	Limit    int           `json:"limit"`
+	Offset   int           `json:"offset"`
+}
+
+// getStewardsRaw performs GET /api/v1/stewards<query> through the router and
+// returns the HTTP status code and raw response body.
+func getStewardsRaw(t *testing.T, server *Server, apiKey, query string) (int, []byte) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/stewards"+query, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// getStewardsPage performs GET /api/v1/stewards<query> and decodes the
+// paginated envelope. Fails the test unless the response is HTTP 200.
+func getStewardsPage(t *testing.T, server *Server, apiKey, query string) listStewardsPage {
+	t.Helper()
+	code, body := getStewardsRaw(t, server, apiKey, query)
+	require.Equal(t, http.StatusOK, code, "body: %s", body)
+	var resp struct {
+		Data listStewardsPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp))
+	return resp.Data
+}
+
+// pageIDs extracts the steward IDs from a page in response order.
+func pageIDs(page listStewardsPage) []string {
+	ids := make([]string, 0, len(page.Stewards))
+	for _, s := range page.Stewards {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// registerNStewards registers n stewards with the given os attribute and
+// returns their IDs sorted ascending (the deterministic pagination order).
+func registerNStewards(t *testing.T, server *Server, n int, osName string) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		id := registerTestSteward(t, server.controllerService, map[string]string{
+			"hostname": fmt.Sprintf("page-host-%s-%d", osName, i), "os": osName,
+		})
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// ---- parseStewardPagination unit tests (no server required) ----
+
+func TestParseStewardPagination(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		wantErr    bool
+		wantPaged  bool
+		wantLimit  int
+		wantOffset int
+	}{
+		{name: "no params", query: "", wantPaged: false},
+		{name: "limit and offset", query: "limit=10&offset=5", wantPaged: true, wantLimit: 10, wantOffset: 5},
+		{name: "limit without offset implies offset 0", query: "limit=10", wantPaged: true, wantLimit: 10, wantOffset: 0},
+		{name: "offset without limit rejected", query: "offset=5", wantErr: true},
+		{name: "limit lower boundary", query: "limit=1", wantPaged: true, wantLimit: 1, wantOffset: 0},
+		{name: "limit upper boundary", query: "limit=500", wantPaged: true, wantLimit: 500, wantOffset: 0},
+		{name: "limit zero rejected", query: "limit=0", wantErr: true},
+		{name: "limit above cap rejected", query: "limit=501", wantErr: true},
+		{name: "limit non-integer rejected", query: "limit=abc", wantErr: true},
+		{name: "offset negative rejected", query: "limit=10&offset=-1", wantErr: true},
+		{name: "offset non-integer rejected", query: "limit=10&offset=xyz", wantErr: true},
+		{name: "offset zero accepted", query: "limit=10&offset=0", wantPaged: true, wantLimit: 10, wantOffset: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := url.ParseQuery(tc.query)
+			require.NoError(t, err)
+			limit, offset, paginated, perr := parseStewardPagination(q)
+			if tc.wantErr {
+				require.Error(t, perr)
+				return
+			}
+			require.NoError(t, perr)
+			assert.Equal(t, tc.wantPaged, paginated)
+			assert.Equal(t, tc.wantLimit, limit)
+			assert.Equal(t, tc.wantOffset, offset)
+		})
+	}
+}
+
+// TestParseStewardPagination_ErrorNamesParamNotValue verifies that validation
+// error messages reference the parameter name only and never echo the raw
+// client-supplied value (no information disclosure).
+func TestParseStewardPagination_ErrorNamesParamNotValue(t *testing.T) {
+	cases := map[string]string{
+		"limit=EVILVALUE1":           "limit",
+		"limit=10&offset=EVILVALUE2": "offset",
+		"offset=EVILVALUE3":          "offset",
+	}
+	for query, param := range cases {
+		q, err := url.ParseQuery(query)
+		require.NoError(t, err)
+		_, _, _, perr := parseStewardPagination(q)
+		require.Error(t, perr, "query %q must fail validation", query)
+		assert.Contains(t, perr.Error(), param, "error must name the offending param for query %q", query)
+		assert.NotContains(t, perr.Error(), "EVILVALUE", "error must not echo the raw client value for query %q", query)
+	}
+}
+
+// ---- HTTP-level pagination tests (filtered path: API-key tenant scope) ----
+
+// TestHandleListStewards_Pagination_PageBoundaries covers first page, mid page,
+// last partial page, and offset beyond total, asserting stable ID-sorted order
+// and post-filter pre-slice total on every page.
+func TestHandleListStewards_Pagination_PageBoundaries(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	sortedIDs := registerNStewards(t, server, 5, "linux")
+
+	t.Run("first page", func(t *testing.T) {
+		page := getStewardsPage(t, server, apiKey, "?limit=2&offset=0")
+		assert.Equal(t, sortedIDs[0:2], pageIDs(page))
+		assert.Equal(t, 5, page.Total)
+		assert.Equal(t, 2, page.Limit)
+		assert.Equal(t, 0, page.Offset)
+	})
+
+	t.Run("mid page", func(t *testing.T) {
+		page := getStewardsPage(t, server, apiKey, "?limit=2&offset=2")
+		assert.Equal(t, sortedIDs[2:4], pageIDs(page))
+		assert.Equal(t, 5, page.Total)
+		assert.Equal(t, 2, page.Limit)
+		assert.Equal(t, 2, page.Offset)
+	})
+
+	t.Run("last partial page", func(t *testing.T) {
+		page := getStewardsPage(t, server, apiKey, "?limit=2&offset=4")
+		assert.Equal(t, sortedIDs[4:5], pageIDs(page))
+		assert.Equal(t, 5, page.Total)
+	})
+
+	t.Run("offset beyond total returns empty page with correct total", func(t *testing.T) {
+		page := getStewardsPage(t, server, apiKey, "?limit=2&offset=10")
+		assert.NotNil(t, page.Stewards)
+		assert.Empty(t, page.Stewards)
+		assert.Equal(t, 5, page.Total)
+		assert.Equal(t, 10, page.Offset)
+	})
+}
+
+// TestHandleListStewards_Pagination_Deterministic verifies two identical
+// requests return identical pages (stable ID sort before slicing).
+func TestHandleListStewards_Pagination_Deterministic(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	registerNStewards(t, server, 6, "linux")
+
+	first := getStewardsPage(t, server, apiKey, "?limit=3&offset=2")
+	second := getStewardsPage(t, server, apiKey, "?limit=3&offset=2")
+	assert.Equal(t, pageIDs(first), pageIDs(second), "identical requests must return identical pages")
+	assert.Equal(t, first.Total, second.Total)
+}
+
+// TestHandleListStewards_Pagination_WithFilter verifies pagination combined
+// with an existing filter param: total reflects the post-filter count
+// regardless of page size, and pages contain only matching stewards.
+func TestHandleListStewards_Pagination_WithFilter(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	linuxIDs := registerNStewards(t, server, 3, "linux")
+	registerNStewards(t, server, 2, "windows")
+
+	pageSmall := getStewardsPage(t, server, apiKey, "?os=linux&limit=1&offset=0")
+	require.Len(t, pageSmall.Stewards, 1)
+	assert.Equal(t, 3, pageSmall.Total, "total must be the post-filter count")
+	assert.Equal(t, linuxIDs[0], pageSmall.Stewards[0].ID)
+	assert.Equal(t, "linux", pageSmall.Stewards[0].DNA.OS)
+
+	pageLarge := getStewardsPage(t, server, apiKey, "?os=linux&limit=500&offset=0")
+	assert.Equal(t, 3, pageLarge.Total, "total must not vary with page size")
+	assert.Equal(t, linuxIDs, pageIDs(pageLarge))
+}
+
+// TestHandleListStewards_Pagination_LimitWithoutOffset verifies that limit
+// without offset defaults offset to 0 (identical to an explicit offset=0).
+func TestHandleListStewards_Pagination_LimitWithoutOffset(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	sortedIDs := registerNStewards(t, server, 4, "linux")
+
+	implicit := getStewardsPage(t, server, apiKey, "?limit=2")
+	explicit := getStewardsPage(t, server, apiKey, "?limit=2&offset=0")
+	assert.Equal(t, 0, implicit.Offset)
+	assert.Equal(t, sortedIDs[0:2], pageIDs(implicit))
+	assert.Equal(t, pageIDs(explicit), pageIDs(implicit))
+}
+
+// TestHandleListStewards_Pagination_OffsetWithoutLimit_Returns400 verifies
+// offset without limit is rejected (ambiguous page size) with a specific
+// error code and no steward data in the body.
+func TestHandleListStewards_Pagination_OffsetWithoutLimit_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	registerNStewards(t, server, 2, "linux")
+
+	code, body := getStewardsRaw(t, server, apiKey, "?offset=1")
+	require.Equal(t, http.StatusBadRequest, code)
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(body, &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "INVALID_PAGINATION", errResp.Error.Code)
+	assert.NotContains(t, string(body), "stewards", "error response must carry no data")
+}
+
+// TestHandleListStewards_Pagination_InvalidParams_Return400 verifies each
+// invalid limit/offset value is rejected with HTTP 400, a specific error
+// code, and no steward data. Non-integer and negative values are caught by
+// the shared request-validation middleware (pre-existing behavior for all
+// endpoints, code VALIDATION_ERROR); values that pass the middleware but
+// violate the pinned pagination rules (limit<1, limit>500) are rejected by
+// the handler with INVALID_PAGINATION.
+func TestHandleListStewards_Pagination_InvalidParams_Return400(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	registerNStewards(t, server, 2, "linux")
+
+	cases := []struct {
+		name     string
+		query    string
+		wantCode string
+	}{
+		{name: "non-integer limit", query: "?limit=zzevilzz", wantCode: "VALIDATION_ERROR"},
+		{name: "limit below minimum", query: "?limit=0", wantCode: "INVALID_PAGINATION"},
+		{name: "limit above cap", query: "?limit=501", wantCode: "INVALID_PAGINATION"},
+		{name: "negative offset", query: "?limit=10&offset=-1", wantCode: "VALIDATION_ERROR"},
+		{name: "non-integer offset", query: "?limit=10&offset=zzevilzz", wantCode: "VALIDATION_ERROR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := getStewardsRaw(t, server, apiKey, tc.query)
+			require.Equal(t, http.StatusBadRequest, code)
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(body, &errResp))
+			require.NotNil(t, errResp.Error)
+			assert.Equal(t, tc.wantCode, errResp.Error.Code)
+			assert.NotContains(t, string(body), `"stewards"`, "error response must carry no data")
+		})
+	}
+}
+
+// TestHandleListStewards_Pagination_HandlerRejectsInvalidParams exercises the
+// handler's own validation directly (bypassing the router middleware, as on
+// the unfiltered path): every invalid value returns 400 INVALID_PAGINATION,
+// no data, and the error body names the offending param without echoing the
+// raw client-supplied value.
+func TestHandleListStewards_Pagination_HandlerRejectsInvalidParams(t *testing.T) {
+	server := setupTestServer(t)
+	require.NoError(t, server.controllerService.RegisterSteward("inv-1", "test-tenant", "addr-1", "registered"))
+
+	cases := []struct {
+		name     string
+		query    string
+		rawValue string // must not appear in the response body
+	}{
+		{name: "non-integer limit", query: "?limit=zzevilzz", rawValue: "zzevilzz"},
+		{name: "limit below minimum", query: "?limit=0", rawValue: ""},
+		{name: "limit above cap", query: "?limit=501", rawValue: ""},
+		{name: "negative offset", query: "?limit=10&offset=-1", rawValue: ""},
+		{name: "non-integer offset", query: "?limit=10&offset=zzevilzz", rawValue: "zzevilzz"},
+		{name: "offset without limit", query: "?offset=3", rawValue: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := listStewardsDirect(t, server, tc.query)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			body := rec.Body.String()
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal([]byte(body), &errResp))
+			require.NotNil(t, errResp.Error)
+			assert.Equal(t, "INVALID_PAGINATION", errResp.Error.Code)
+			assert.NotContains(t, body, `"stewards"`, "error response must carry no data")
+			if tc.rawValue != "" {
+				assert.NotContains(t, body, tc.rawValue, "error body must not echo the raw client value")
+			}
+		})
+	}
+}
+
+// TestHandleListStewards_NoParams_BackwardCompatiblePlainList asserts the
+// no-params response keeps the existing shape: data is a plain JSON array of
+// stewards (not a pagination envelope) so cfg and existing clients cannot break.
+func TestHandleListStewards_NoParams_BackwardCompatiblePlainList(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	sortedIDs := registerNStewards(t, server, 3, "linux")
+
+	code, body := getStewardsRaw(t, server, apiKey, "")
+	require.Equal(t, http.StatusOK, code)
+
+	var resp struct {
+		Data json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp))
+	trimmed := strings.TrimSpace(string(resp.Data))
+	require.True(t, strings.HasPrefix(trimmed, "["), "data must be a plain JSON array, got: %s", trimmed)
+
+	var list []StewardInfo
+	require.NoError(t, json.Unmarshal(resp.Data, &list))
+	got := make([]string, 0, len(list))
+	for _, s := range list {
+		got = append(got, s.ID)
+	}
+	sort.Strings(got)
+	assert.Equal(t, sortedIDs, got, "full list must contain every registered steward")
+	assert.NotContains(t, string(body), `"total"`, "no-params response must not grow pagination fields")
+}
+
+// ---- Unfiltered code path (empty tenant context -> GetAllStewards) ----
+
+// listStewardsDirect invokes handleListStewards directly with an empty tenant
+// context so the unfiltered GetAllStewards code path is exercised.
+func listStewardsDirect(t *testing.T, server *Server, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/stewards"+query, nil)
+	req = withTenant(req, "")
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+	return rec
+}
+
+// TestHandleListStewards_Pagination_UnfilteredPath verifies pagination is
+// applied on the unfiltered GetAllStewards path with deterministic ID order
+// and post-slice total.
+func TestHandleListStewards_Pagination_UnfilteredPath(t *testing.T) {
+	server := setupTestServer(t)
+	for _, id := range []string{"pg-c", "pg-a", "pg-b"} {
+		require.NoError(t, server.controllerService.RegisterSteward(id, "test-tenant", "addr-"+id, "registered"))
+	}
+
+	rec := listStewardsDirect(t, server, "?limit=2&offset=1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data listStewardsPage `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, []string{"pg-b", "pg-c"}, pageIDs(resp.Data), "page must be ID-sorted before slicing")
+	assert.Equal(t, 3, resp.Data.Total)
+	assert.Equal(t, 2, resp.Data.Limit)
+	assert.Equal(t, 1, resp.Data.Offset)
+}
+
+// TestHandleListStewards_UnfilteredPath_NoParams_PlainList verifies the
+// unfiltered path keeps the plain-array payload when no pagination params
+// are supplied.
+func TestHandleListStewards_UnfilteredPath_NoParams_PlainList(t *testing.T) {
+	server := setupTestServer(t)
+	require.NoError(t, server.controllerService.RegisterSteward("plain-1", "test-tenant", "addr-1", "registered"))
+
+	rec := listStewardsDirect(t, server, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	trimmed := strings.TrimSpace(string(resp.Data))
+	assert.True(t, strings.HasPrefix(trimmed, "["), "unfiltered no-params data must be a plain JSON array, got: %s", trimmed)
 }
 
 // TestHandleCreateAPIKey_AcceptsStewardReadLogs verifies that steward:read-logs is a
