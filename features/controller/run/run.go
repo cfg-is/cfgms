@@ -535,17 +535,36 @@ func nullableStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
 
+// DeviceLockReleaser releases a per-device dispatcher lock for a cancelled
+// execution. It is implemented by *dispatcher.Dispatcher. The Manager depends on
+// this narrow interface rather than importing the dispatcher package directly.
+type DeviceLockReleaser interface {
+	// ReleaseDeviceForCancelledExecution releases the device lock only if the
+	// currently-held execution matches executionID, preventing a late cancel from
+	// freeing a lock now held by a newer execution for the same device.
+	// Returns true if the lock was released.
+	ReleaseDeviceForCancelledExecution(deviceID, executionID string) bool
+}
+
 // Manager coordinates the lifecycle of run records: retrieval and cancellation.
 // Run creation is performed by the synthesis functions in synthesis.go.
 type Manager struct {
 	store          RunStore
 	executionQueue *scriptmodule.ExecutionQueue
+	lockReleaser   DeviceLockReleaser
 }
 
 // NewManager creates a Manager backed by store and executionQueue.
 // executionQueue may be nil; CancelRun will then skip queue-level cancellation.
 func NewManager(store RunStore, executionQueue *scriptmodule.ExecutionQueue) *Manager {
 	return &Manager{store: store, executionQueue: executionQueue}
+}
+
+// SetDeviceLockReleaser wires the dispatcher's cancel-release path so CancelRun
+// immediately frees the per-device dispatcher lock for cancelled jobs. Must be
+// called before any CancelRun call. Nil removes the wiring.
+func (m *Manager) SetDeviceLockReleaser(r DeviceLockReleaser) {
+	m.lockReleaser = r
 }
 
 // GetRun returns the run record for runID.
@@ -589,6 +608,9 @@ func (m *Manager) CancelRun(_ context.Context, runID string) error {
 		}
 		if m.executionQueue != nil && job.ExecutionID != "" {
 			_ = m.executionQueue.CancelExecution(job.DeviceID, job.ExecutionID)
+		}
+		if m.lockReleaser != nil && job.ExecutionID != "" {
+			m.lockReleaser.ReleaseDeviceForCancelledExecution(job.DeviceID, job.ExecutionID)
 		}
 		if updateErr := m.store.UpdateJobStatus(job.JobID, JobStatusCancelled, ""); updateErr != nil {
 			return fmt.Errorf("cancel run: update job %s: %w", job.JobID, updateErr)

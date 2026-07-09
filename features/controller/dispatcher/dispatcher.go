@@ -31,7 +31,23 @@ const (
 	// maxScriptContentBytes is the decoded size cap for script_content params.
 	// gRPC default max recv is 4 MB; 1 MB decoded ≈ 1.33 MB base64 leaves margin.
 	maxScriptContentBytes = 1 << 20 // 1 MiB
+
+	// defaultLockGraceMultiplier is multiplied by an execution's own Timeout to
+	// compute the per-device lock TTL used by the sweep. A value of 2 gives 100%
+	// headroom above the declared script timeout before a lock is considered wedged.
+	defaultLockGraceMultiplier = 2.0
 )
+
+// lockMetaEntry holds per-device lock metadata used by the TTL sweep and the
+// cancel-release path. executionID is stored alongside acquiredAt so that
+// ReleaseDeviceForCancelledExecution can verify that a late cancel does not
+// accidentally release a lock now held by a newer execution for the same device.
+type lockMetaEntry struct {
+	acquiredAt  time.Time
+	executionID string
+	// lockTTL is exec.Timeout * lockGraceMultiplier. Zero means use d.defaultLockTTL.
+	lockTTL time.Duration
+}
 
 // Dispatcher drains the ExecutionQueue and sends CommandExecuteScript to stewards.
 //
@@ -40,6 +56,11 @@ const (
 // (so nothing is dequeued when the device is already busy) and released only
 // inside handleCompletionEvent or on send failure, ensuring exactly one
 // execution is in-flight per device at any given time.
+//
+// Three release paths ensure the lock is never held permanently:
+//  1. handleCompletionEvent (normal completion)
+//  2. TTL sweep in pollLoop (no completion event within lockTTL)
+//  3. ReleaseDeviceForCancelledExecution (explicit cancellation via CancelRun)
 type Dispatcher struct {
 	queue        *script.ExecutionQueue
 	controlPlane controlplaneInterfaces.ControlPlaneProvider
@@ -57,6 +78,19 @@ type Dispatcher struct {
 	// grantManager, when set, creates and consumes per-execution relay grants
 	// (Issue #1675). Set once via SetGrantManager before Start; nil = no grants.
 	grantManager GrantManager
+
+	// lockMetaMu guards lockMetaMap for atomic check-and-delete in the cancel and
+	// TTL-sweep paths. Separate from mu so neither sweep nor cancel blocks Stop.
+	lockMetaMu  sync.Mutex
+	lockMetaMap map[string]lockMetaEntry
+
+	// defaultLockTTL is used when a lock's execution has zero Timeout.
+	// Set to 10 × pollInterval in New — conservative, covering multi-minute scripts.
+	defaultLockTTL time.Duration
+
+	// lockGraceMultiplier is applied to exec.Timeout to compute the per-execution
+	// lock TTL. Configurable via Config.LockGraceMultiplier; defaults to 2.
+	lockGraceMultiplier float64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -101,7 +135,12 @@ type Config struct {
 	// PollInterval is how often the background loop polls all devices.
 	// Defaults to 30 s when zero.
 	PollInterval time.Duration
-	Logger       logging.Logger
+	// LockGraceMultiplier is applied to each execution's Timeout to compute the
+	// per-device lock TTL for the sweep. Defaults to 2 (100% grace headroom above
+	// the declared script timeout). When the execution has no declared Timeout,
+	// 10 × PollInterval is used instead. Configurable mainly for tests.
+	LockGraceMultiplier float64
+	Logger              logging.Logger
 }
 
 // New creates a new Dispatcher. Call Start to begin operation.
@@ -121,16 +160,24 @@ func New(cfg *Config) (*Dispatcher, error) {
 		interval = defaultPollInterval
 	}
 
+	graceMultiplier := cfg.LockGraceMultiplier
+	if graceMultiplier == 0 {
+		graceMultiplier = defaultLockGraceMultiplier
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Dispatcher{
-		queue:        cfg.Queue,
-		controlPlane: cfg.ControlPlane,
-		signer:       cfg.Signer,
-		pollInterval: interval,
-		logger:       cfg.Logger,
-		ctx:          ctx,
-		cancel:       cancel,
+		queue:               cfg.Queue,
+		controlPlane:        cfg.ControlPlane,
+		signer:              cfg.Signer,
+		pollInterval:        interval,
+		logger:              cfg.Logger,
+		lockMetaMap:         make(map[string]lockMetaEntry),
+		defaultLockTTL:      10 * interval,
+		lockGraceMultiplier: graceMultiplier,
+		ctx:                 ctx,
+		cancel:              cancel,
 	}, nil
 }
 
@@ -219,26 +266,133 @@ func (d *Dispatcher) lockForDevice(deviceID string) chan struct{} {
 
 // tryAcquireDevice attempts a non-blocking send on the device's channel.
 // Returns true if the lock was acquired, false if another dispatch is in-flight.
+// On acquisition, a lockMetaEntry is recorded with the current time so the TTL
+// sweep can detect wedged locks. The executionID is filled in later via
+// setLockExecution once the dequeued execution is known.
 func (d *Dispatcher) tryAcquireDevice(deviceID string) bool {
 	ch := d.lockForDevice(deviceID)
 	select {
 	case ch <- struct{}{}:
+		d.lockMetaMu.Lock()
+		d.lockMetaMap[deviceID] = lockMetaEntry{acquiredAt: time.Now()}
+		d.lockMetaMu.Unlock()
 		return true
 	default:
 		return false
 	}
 }
 
-// releaseDevice drains the device's channel, freeing the slot for the next dispatch.
+// setLockExecution updates the lock metadata for deviceID with the in-flight
+// executionID and its computed TTL. Called immediately after DequeueForDevice
+// returns the execution so the cancel and TTL-sweep paths can match by ID.
+func (d *Dispatcher) setLockExecution(deviceID, executionID string, timeout time.Duration) {
+	d.lockMetaMu.Lock()
+	defer d.lockMetaMu.Unlock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok {
+		return
+	}
+	entry.executionID = executionID
+	if timeout > 0 {
+		entry.lockTTL = time.Duration(float64(timeout) * d.lockGraceMultiplier)
+	}
+	d.lockMetaMap[deviceID] = entry
+}
+
+// releaseDevice drains the device's channel and clears its lock metadata,
+// freeing the slot for the next dispatch.
 func (d *Dispatcher) releaseDevice(deviceID string) {
 	ch := d.lockForDevice(deviceID)
 	select {
 	case <-ch:
 	default:
 	}
+	d.lockMetaMu.Lock()
+	delete(d.lockMetaMap, deviceID)
+	d.lockMetaMu.Unlock()
 }
 
-// pollLoop fires dispatchAll on each poll interval tick.
+// releaseDeviceIfExecution releases the device lock only when the currently-held
+// executionID matches. This prevents a stale cancel or late sweep entry from
+// accidentally releasing a lock now held by a newer execution for the same device.
+// Returns true if the lock was released.
+//
+// The metadata is deleted under lockMetaMu before the channel is drained. Between
+// deletion and drain, tryAcquireDevice cannot succeed (channel still full), so no
+// new dispatch can start in that window.
+func (d *Dispatcher) releaseDeviceIfExecution(deviceID, executionID string) bool {
+	d.lockMetaMu.Lock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok || entry.executionID != executionID {
+		d.lockMetaMu.Unlock()
+		return false
+	}
+	delete(d.lockMetaMap, deviceID)
+	d.lockMetaMu.Unlock()
+
+	ch := d.lockForDevice(deviceID)
+	select {
+	case <-ch:
+	default:
+	}
+	return true
+}
+
+// ReleaseDeviceForCancelledExecution releases the per-device dispatch lock for
+// deviceID when the currently-held execution matches executionID. It is called
+// by run.Manager.CancelRun so the device is unblocked immediately on cancellation
+// rather than waiting for the TTL sweep.
+//
+// Returns true if the lock was released; false if the lock is held by a different
+// (newer) execution or is not currently held.
+func (d *Dispatcher) ReleaseDeviceForCancelledExecution(deviceID, executionID string) bool {
+	released := d.releaseDeviceIfExecution(deviceID, executionID)
+	if released {
+		d.logger.Info("Device lock released for cancelled execution",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(executionID))
+	}
+	return released
+}
+
+// sweepExpiredLocks checks all held device locks and releases any whose TTL has
+// elapsed without a completion event. The TTL is derived from the execution's own
+// Timeout (× lockGraceMultiplier); zero-Timeout executions use defaultLockTTL.
+// A Warn-level event with "event"="device_lock_ttl_released" is emitted for each
+// release so wedge incidents are distinguishable in logs from normal completions.
+func (d *Dispatcher) sweepExpiredLocks() {
+	now := time.Now()
+
+	d.lockMetaMu.Lock()
+	type expiredEntry struct {
+		deviceID    string
+		executionID string
+	}
+	var expired []expiredEntry
+	for deviceID, meta := range d.lockMetaMap {
+		ttl := meta.lockTTL
+		if ttl == 0 {
+			ttl = d.defaultLockTTL
+		}
+		if now.Sub(meta.acquiredAt) > ttl {
+			expired = append(expired, expiredEntry{deviceID, meta.executionID})
+		}
+	}
+	d.lockMetaMu.Unlock()
+
+	for _, e := range expired {
+		if d.releaseDeviceIfExecution(e.deviceID, e.executionID) {
+			d.logger.Warn("Device lock TTL exceeded; releasing wedged lock",
+				"event", "device_lock_ttl_released",
+				"device_id", logging.SanitizeLogValue(e.deviceID),
+				"execution_id", logging.SanitizeLogValue(e.executionID))
+		}
+	}
+}
+
+// pollLoop fires sweepExpiredLocks then dispatchAll on each poll interval tick.
+// sweepExpiredLocks runs first so that any freed device slots are immediately
+// available for the following dispatchAll.
 // The initial dispatch on startup is handled synchronously by Start.
 func (d *Dispatcher) pollLoop() {
 	defer d.wg.Done()
@@ -251,6 +405,7 @@ func (d *Dispatcher) pollLoop() {
 		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
+			d.sweepExpiredLocks()
 			d.dispatchAll(d.ctx)
 		}
 	}
@@ -309,6 +464,9 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// the queue's background maintenance (RequeueStale) will move them back to queued
 	// after dispatchTimeout so they can be picked up in a future cycle.
 	exec := executions[0]
+
+	// Record executionID and lock TTL now that we know the execution.
+	d.setLockExecution(deviceID, exec.ExecutionID, exec.Timeout)
 
 	prepared, err := d.queue.PrepareExecutionForDevice(ctx, deviceID, "", exec)
 	if err != nil {
