@@ -100,8 +100,8 @@ var (
 	stewardRunResultDevice string
 )
 
-// Package-level vars for steward exec (single-steward ad-hoc run). Declared
-// separately from run-command vars so the two commands cannot share state.
+// Package-level vars for steward exec. Declared separately from run-command
+// vars so the two commands cannot share state.
 var (
 	stewardExecCommand    string
 	stewardExecShell      string
@@ -149,30 +149,34 @@ Examples:
 }
 
 var stewardExecCmd = &cobra.Command{
-	Use:   "exec <steward-id>",
-	Short: "Execute an ad-hoc command on a single steward",
-	Long: `Sign and submit an inline command to a single named steward and display the result.
+	Use:   "exec <selector>",
+	Short: "Execute an ad-hoc command on matching stewards",
+	Long: `Sign and submit an inline command to matching stewards and display the result.
 
-The argument is the steward ID to target. The command is submitted as a signed
-inline script and the controller dispatches it exclusively to that steward.
-The CLI blocks until the job reaches a terminal state or the timeout elapses.
+The argument is a selector identifying which stewards to target — a bare
+hostname, id:, glob, or attribute filter. The command is submitted as a signed
+inline script and dispatched to every steward the selector matches.
+The CLI blocks until all jobs reach a terminal state or the timeout elapses.
 
 Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
 
 The --shell flag is required. Allowed values: bash, sh, pwsh (cmd on Windows as fallback).
 
-Output is capped at 64 KB in the CLI display. If the output exceeds the cap a
-truncation warning is printed to stderr.
+Output is capped at 64 KB per steward in the CLI display. If the output for a
+steward exceeds the cap a truncation warning is printed to stderr.
 
 Examples:
-  # Run a command on a specific steward with 30-second timeout
-  cfg steward exec steward-abc123 --command "hostname" --shell bash --timeout 30s
+  # Run a command on a steward by bare hostname
+  cfg steward exec host-abc123 --command "hostname" --shell bash
 
-  # Run a script file on a steward
-  cfg steward exec steward-abc123 --command ./scripts/check.sh --shell bash
+  # Run a command on a steward by explicit id: selector
+  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 30s
 
-  # Output as JSON
-  cfg steward exec steward-abc123 --command "uptime" --shell bash --json`,
+  # Run against all Linux stewards (requires --yes or interactive confirmation)
+  cfg steward exec os:linux --command "uname -r" --shell bash --yes
+
+  # Output as JSON keyed by steward
+  cfg steward exec host-abc123 --command "uptime" --shell bash --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunCommandSingle,
 }
@@ -1119,7 +1123,7 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 
 	if stewardRunWait {
 		fmt.Printf("Run ID: %s\n", runID)
-		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout)
+		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout, os.Stdout)
 	}
 
 	fmt.Println(runID)
@@ -1189,7 +1193,7 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 
 	if stewardRunWait {
 		fmt.Printf("Run ID: %s\n", runID)
-		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout)
+		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout, os.Stdout)
 	}
 
 	fmt.Println(runID)
@@ -1197,7 +1201,7 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 }
 
 // ---------------------------------------------------------------------------
-// exec (single-steward ad-hoc run)
+// exec (selector-based ad-hoc run)
 // ---------------------------------------------------------------------------
 
 // execCLIOutputCap is the maximum bytes of job output the CLI displays.
@@ -1205,7 +1209,7 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 const execCLIOutputCap = 64 * 1024
 
 func runRunCommandSingle(_ *cobra.Command, args []string) error {
-	stewardID := args[0]
+	selector := args[0]
 
 	if stewardExecCommand == "" {
 		return fmt.Errorf("--command is required")
@@ -1229,8 +1233,24 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		timeout = 30 * time.Second
 	}
 
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	// Resolve selector to determine match count for the confirm gate.
+	// exec is a mutating verb (A4): confirmMultiHost blocks when N > 1 and
+	// --yes is absent.
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
+	}
+	if err := confirmMultiHost(matches, stewardYes); err != nil {
+		return err
+	}
+
 	reqBody := map[string]interface{}{
-		"target":    "id:" + stewardID,
+		"target":    selector,
 		"content":   base64.StdEncoding.EncodeToString(content),
 		"shell":     stewardExecShell,
 		"signature": sig,
@@ -1239,11 +1259,6 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	client, err := getStewardClient()
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))
@@ -1267,18 +1282,28 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 	}
 
 	runID := apiResp.Data.RunID
-	fmt.Printf("Run ID: %s\n", runID)
+	// In --json mode, route progress text to stderr so stdout carries only
+	// the keyed JSON payload.
+	progressW := io.Writer(os.Stdout)
+	if stewardExecJSONOutput {
+		progressW = os.Stderr
+	}
+	if _, err := fmt.Fprintf(progressW, "Run ID: %s\n", runID); err != nil {
+		return fmt.Errorf("failed to write progress: %w", err)
+	}
 
-	if err := waitForRun(context.Background(), client, runID, timeout); err != nil {
+	if err := waitForRun(context.Background(), client, runID, timeout, progressW); err != nil {
 		return err
 	}
 
-	return fetchAndDisplayExecOutput(client, runID, stewardID)
+	return fetchAndDisplayExecOutput(client, runID, matches)
 }
 
-// fetchAndDisplayExecOutput retrieves job records for runID and prints the output
-// for the job targeting stewardID. Applies the 64 KB CLI display cap.
-func fetchAndDisplayExecOutput(client *APIClient, runID, stewardID string) error {
+// fetchAndDisplayExecOutput retrieves job records for runID and prints output
+// for every steward in matches. Each steward gets a host-prefixed block in
+// human mode; --json produces a keyed-by-steward array (story 4 schema).
+// Applies the 64 KB CLI display cap per steward in human mode.
+func fetchAndDisplayExecOutput(client *APIClient, runID string, matches []StewardInfo) error {
 	resp, err := client.Get(context.Background(), "/api/v1/runs/"+runID+"/jobs")
 	if err != nil {
 		return fmt.Errorf("failed to fetch job output: %w", err)
@@ -1297,29 +1322,62 @@ func fetchAndDisplayExecOutput(client *APIClient, runID, stewardID string) error
 		return fmt.Errorf("failed to parse job results: %w", err)
 	}
 
-	if stewardExecJSONOutput {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(apiResp.Data)
+	// Index returned jobs by device ID for O(1) lookup when building per-steward output.
+	jobByDevice := make(map[string]runJobRecord, len(apiResp.Data))
+	for _, job := range apiResp.Data {
+		jobByDevice[job.DeviceID] = job
 	}
 
-	for _, job := range apiResp.Data {
-		if job.DeviceID != stewardID {
+	if stewardExecJSONOutput {
+		// Build keyed-by-steward output using story 4's keyedOutput helper.
+		perStewardResult := make(map[string]fanOutResult, len(matches))
+		for _, m := range matches {
+			key := stewardKey(m)
+			job, ok := jobByDevice[m.ID]
+			if !ok {
+				perStewardResult[key] = fanOutResult{
+					Err: fmt.Errorf("no job record returned for steward %s", m.ID),
+				}
+				continue
+			}
+			payload, merr := json.Marshal(map[string]interface{}{
+				"exit_code": job.ExitCode,
+				"output":    job.Output,
+				"status":    job.Status,
+			})
+			if merr != nil {
+				return fmt.Errorf("failed to marshal job output: %w", merr)
+			}
+			perStewardResult[key] = fanOutResult{
+				Success: job.Status == "completed",
+				Payload: payload,
+			}
+		}
+		entries := keyedOutput(matches, perStewardResult)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(entries)
+	}
+
+	// Human output: one host-prefixed block per matched steward, in match order.
+	for _, m := range matches {
+		key := stewardKey(m)
+		job, ok := jobByDevice[m.ID]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "warning: no job record returned for %s\n", key)
 			continue
 		}
 		output := job.Output
 		if len(output) > execCLIOutputCap {
-			fmt.Fprintf(os.Stderr, "warning: output truncated at 64 KB\n")
+			fmt.Fprintf(os.Stderr, "warning: output for %s truncated at 64 KB\n", key)
 			output = output[:execCLIOutputCap]
 		}
+		fmt.Printf("=== %s ===\n", key)
 		fmt.Printf("Exit code: %d\n", job.ExitCode)
 		if output != "" {
 			fmt.Print(output)
 		}
-		return nil
 	}
-
-	fmt.Println("No output returned for steward", stewardID)
 	return nil
 }
 
@@ -1578,8 +1636,10 @@ func fetchRunRecord(ctx context.Context, client *APIClient, runID string) (*runR
 }
 
 // waitForRun polls GET /api/v1/runs/{runID} every runWaitPollInterval until the
-// run reaches a terminal state or the timeout elapses.
-func waitForRun(ctx context.Context, client *APIClient, runID string, timeout time.Duration) error {
+// run reaches a terminal state or the timeout elapses. Progress text is written
+// to progressW so callers can route it to stdout or stderr without mutating
+// global state.
+func waitForRun(ctx context.Context, client *APIClient, runID string, timeout time.Duration, progressW io.Writer) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
@@ -1589,8 +1649,12 @@ func waitForRun(ctx context.Context, client *APIClient, runID string, timeout ti
 		}
 
 		if isRunTerminal(run.Status) {
-			fmt.Printf("Status: %s\n", run.Status)
-			fmt.Printf("Jobs: %d total, %d completed, %d failed\n", run.JobCount, run.CompletedJobs, run.FailedJobs)
+			if _, err := fmt.Fprintf(progressW, "Status: %s\n", run.Status); err != nil {
+				return fmt.Errorf("failed to write progress: %w", err)
+			}
+			if _, err := fmt.Fprintf(progressW, "Jobs: %d total, %d completed, %d failed\n", run.JobCount, run.CompletedJobs, run.FailedJobs); err != nil {
+				return fmt.Errorf("failed to write progress: %w", err)
+			}
 			return nil
 		}
 
@@ -1599,7 +1663,9 @@ func waitForRun(ctx context.Context, client *APIClient, runID string, timeout ti
 				timeout, runID, run.Status, run.CompletedJobs, run.JobCount)
 		}
 
-		fmt.Printf("Waiting... status: %s (%d/%d completed)\n", run.Status, run.CompletedJobs, run.JobCount)
+		if _, err := fmt.Fprintf(progressW, "Waiting... status: %s (%d/%d completed)\n", run.Status, run.CompletedJobs, run.JobCount); err != nil {
+			return fmt.Errorf("failed to write progress: %w", err)
+		}
 
 		select {
 		case <-time.After(runWaitPollInterval):
