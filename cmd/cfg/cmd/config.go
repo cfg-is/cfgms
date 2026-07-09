@@ -160,8 +160,8 @@ Examples:
 
 var configUploadCmd = &cobra.Command{
 	Use:   "upload <file>",
-	Short: "Upload a YAML config to a steward",
-	Long: `Upload a YAML configuration file to a registered steward.
+	Short: "Upload a .cfg file to a steward",
+	Long: `Upload a .cfg file to a registered steward.
 
 Reads the file from disk and issues PUT /api/v1/stewards/{id}/config
 with Content-Type: application/yaml. Auth uses the admin bundle
@@ -169,13 +169,13 @@ with Content-Type: application/yaml. Auth uses the admin bundle
 
 Examples:
   # Upload a fleet config to a steward
-  cfg config upload fleet-config.yaml --steward steward-abc123
+  cfg config upload fleet-config.cfg --steward steward-abc123
 
   # Upload with JSON response output
-  cfg config upload fleet-config.yaml --steward steward-abc123 --json
+  cfg config upload fleet-config.cfg --steward steward-abc123 --json
 
   # Upload using explicit controller URL
-  cfg config upload fleet-config.yaml --steward steward-abc123 --url=https://ctrl.example.com:9080`,
+  cfg config upload fleet-config.cfg --steward steward-abc123 --url=https://ctrl.example.com:9080`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigUpload,
 }
