@@ -1466,6 +1466,14 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		"steward_id", logging.SanitizeLogValue(id.StewardID),
 		"transport_address", logging.SanitizeLogValue(id.TransportAddress))
 
+	// Populate currentDNAHash from a fresh collect so the first heartbeat after
+	// reconnect is never empty. The collector is available now; the module DNA
+	// source is wired in later (after InitializeConfigExecutor), but partial
+	// hardware-fact DNA is still a truthful, non-empty hash. (Issue #2521)
+	if err := transportClient.RefreshCurrentDNA(ctx); err != nil {
+		logger.Warn("Initial DNA refresh failed; first heartbeat DNA hash will be empty", "error", err)
+	}
+
 	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat after reconnect", "error", err)
 	}

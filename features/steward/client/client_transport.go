@@ -158,9 +158,10 @@ type TransportClient struct {
 	secretStore secretsif.SecretStore
 
 	// DNA state for hash-based sync (Issue #418).
-	// dnaMu guards currentDNAHash and lastPublishedDNA.
+	// dnaMu guards currentDNAHash, currentDNAAttrs, and lastPublishedDNA.
 	dnaMu            sync.RWMutex
-	currentDNAHash   string            // SHA-256 hash of most-recently observed DNA
+	currentDNAHash   string            // SHA-256 hash of most-recently collected DNA (Issue #2521)
+	currentDNAAttrs  map[string]string // full enriched snapshot of most-recently collected DNA (Issue #2521)
 	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
 
 	// DNA refresh loop control (Issue #1915).
@@ -1169,11 +1170,14 @@ func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[str
 	dnaAttrs = enriched
 
 	// Always update local DNA state first so the hash is available for heartbeats
-	// even when the control plane is temporarily unavailable.
+	// even when the control plane is temporarily unavailable. currentDNAAttrs and
+	// currentDNAHash track the freshest collected state; lastPublishedDNA tracks
+	// what has been sent to the controller for delta-compression. (Issue #2521)
 	c.dnaMu.Lock()
 	delta := computeDelta(c.lastPublishedDNA, dnaAttrs)
 	newHash := dna.ComputeHash(dnaAttrs)
 	c.lastPublishedDNA = copyStringMap(dnaAttrs)
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
 	c.currentDNAHash = newHash
 	c.dnaMu.Unlock()
 
@@ -1475,6 +1479,50 @@ func (c *TransportClient) triggerVersionConvergence(ctx context.Context, desired
 	}
 }
 
+// setCurrentDNAFromAttrs enriches raw collected attributes with the running
+// steward version, then atomically updates currentDNAAttrs and currentDNAHash
+// under dnaMu. It does not touch lastPublishedDNA, so heartbeat hash and
+// publish-delta state are tracked independently. (Issue #2521)
+func (c *TransportClient) setCurrentDNAFromAttrs(attrs map[string]string) {
+	enriched := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		enriched[k] = v
+	}
+	enriched["steward.version"] = version.Short()
+	hash := dna.ComputeHash(enriched)
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = enriched
+	c.currentDNAHash = hash
+	c.dnaMu.Unlock()
+}
+
+// RefreshCurrentDNA collects the current DNA attributes from the configured
+// DNACollector and updates currentDNAHash so the next heartbeat carries a
+// truthful, non-empty hash. It does not publish a delta to the controller.
+//
+// This is called by the reconnect path (tryReconnectWithStoredIdentity) before
+// the first SendHeartbeat so the steward never reports an empty hash immediately
+// after a reconnect. (Issue #2521)
+func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
+	c.mu.RLock()
+	collector := c.dnaCollector
+	c.mu.RUnlock()
+
+	if collector == nil {
+		return nil
+	}
+
+	attrs, err := collector.CollectAttributes(ctx)
+	if err != nil {
+		return fmt.Errorf("DNA collection failed: %w", err)
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	c.setCurrentDNAFromAttrs(attrs)
+	return nil
+}
+
 // StartDNARefreshLoop starts a background goroutine that re-collects system DNA
 // attributes on the configured interval and publishes delta updates to the
 // controller when at least one attribute value has changed.
@@ -1521,6 +1569,9 @@ func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) {
 				if len(attrs) == 0 {
 					continue
 				}
+				// Always refresh the current snapshot so heartbeats carry a
+				// truthful hash even when no delta is published. (Issue #2521)
+				c.setCurrentDNAFromAttrs(attrs)
 				if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
 					c.logger.Warn("DNA refresh publish failed", "error", err)
 				}
