@@ -163,9 +163,8 @@ var configUploadCmd = &cobra.Command{
 	Short: "Upload a .cfg file to a steward",
 	Long: `Upload a .cfg file to a registered steward.
 
-Reads the file from disk and issues PUT /api/v1/stewards/{id}/config
-with Content-Type: application/yaml. Auth uses the admin bundle
-(mTLS auto-discovery) by default.
+Reads the file from disk and issues PUT /api/v1/stewards/{id}/config.
+Auth uses the admin bundle (mTLS auto-discovery) by default.
 
 Examples:
   # Upload a fleet config to a steward
