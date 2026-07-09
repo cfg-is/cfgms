@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,5 +141,31 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	recovery, err := s.RecoveryActions()
 	require.NoError(t, err)
 	require.Len(t, recovery, 3, "install-parity recovery actions (3 escalating restarts)")
+	// Full parity with cmd/steward/service/manager_windows.go:254-256 — same
+	// action type and the same escalating 10s/30s/60s delays.
 	assert.Equal(t, mgr.ServiceRestart, recovery[0].Type)
+	assert.Equal(t, mgr.ServiceRestart, recovery[1].Type)
+	assert.Equal(t, mgr.ServiceRestart, recovery[2].Type)
+	assert.Equal(t, 10*time.Second, recovery[0].Delay)
+	assert.Equal(t, 30*time.Second, recovery[1].Delay)
+	assert.Equal(t, 60*time.Second, recovery[2].Delay)
+}
+
+// TestRepairServiceRegistration_ErrorsOnConflict (#2465): repairServiceRegistration
+// surfaces a CreateService failure as an error (rather than swallowing it) — the
+// error that drives the event=service_registration_repair_failed WARN log in the
+// per-tick repairServiceIfMissing path. Induced with a real name collision, since
+// the no-mock rule rules out faulting the SCM directly.
+func TestRepairServiceRegistration_ErrorsOnConflict(t *testing.T) {
+	scm := requireSCM(t)
+	name := uniqueTestServiceName(t)
+
+	// Pre-create the service so a second create collides.
+	s, err := scm.CreateService(name, testRepairExePath, mgr.Config{StartType: mgr.StartAutomatic})
+	require.NoError(t, err)
+	s.Close()
+
+	err = repairServiceRegistration(name, testRepairExePath, nil)
+	require.Error(t, err, "recreating an already-existing service must return an error, not silently succeed")
+	assert.Contains(t, err.Error(), "create service", "the error must identify the failed CreateService step")
 }

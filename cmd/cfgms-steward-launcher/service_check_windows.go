@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -127,7 +128,21 @@ func repairServiceRegistration(name, exePath string, args []string) error {
 // re-creates the service from the currently-running process's own arguments
 // (os.Args[1:]) so a repaired service starts with the same
 // --root/--child-args/--regtoken the operator originally configured.
+//
+// It acts ONLY when this process is actually running AS the CFGMSSteward SCM
+// service. An interactive `launcher run` or a unit-test binary is not the
+// service and must never CreateService against the real service name — so the
+// IsWindowsService gate no-ops there. This is both semantically correct
+// (self-repairing your own SCM registration only makes sense when you ARE that
+// service) and the test-isolation guard that keeps every Supervise()-driven
+// unit test on an elevated CI host from touching the real registration.
+// IsWindowsService stays true for the running process even after the
+// registration is deleted (the process was SCM-started; deleting the entry does
+// not re-parent it), so the repair scenario itself is unaffected.
 func maybeRepairServiceRegistration(w io.Writer) {
+	if isSvc, err := svc.IsWindowsService(); err != nil || !isSvc {
+		return
+	}
 	repairServiceIfMissing(w, launcherServiceName, launcherServiceExePath, os.Args[1:])
 }
 
@@ -140,10 +155,15 @@ func maybeRepairServiceRegistration(w io.Writer) {
 func repairServiceIfMissing(w io.Writer, name, exePath string, args []string) {
 	ok, err := serviceRegistrationOK(name)
 	if err != nil {
-		// Cannot determine ownership of the registration this tick (usually a
-		// non-elevated/standalone run where mgr.Connect is denied — the service
-		// normally runs as LocalSystem where it succeeds). Skip quietly and
-		// retry next tick rather than spam a benign, known-transient condition.
+		// The production caller (maybeRepairServiceRegistration) only reaches
+		// here when running AS the elevated SCM service, so a check error is a
+		// genuine SCM fault — not the benign non-elevated case, which the
+		// IsWindowsService gate already filtered out. Surface it (the self-repair
+		// path's own health is otherwise invisible), then skip and retry next
+		// tick. If it recurs every tick that is itself the signal of a persistent
+		// SCM problem worth seeing in C:\ProgramData\cfgms\logs.
+		_, _ = fmt.Fprintf(w, "launcher: WARN could not check service registration "+
+			"[event=service_registration_check_failed service=%s error=%v]\n", name, err)
 		return
 	}
 	if ok {

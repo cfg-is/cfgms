@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,26 +307,55 @@ func TestSupervise_RepairsMissingServiceRegistration(t *testing.T) {
 	require.False(t, ok, "precondition: registration deleted")
 
 	// Run the repair ticker on a short interval, targeting the test service.
-	var buf bytes.Buffer
-	sup := &Supervisor{Stderr: &buf}
+	// buf is mutex-guarded because the ticker goroutine writes to it concurrently
+	// with the assertion read below; repaired signals once the per-tick action has
+	// both re-created the registration AND written its event, establishing a
+	// happens-before edge so the read after <-repaired sees the completed write.
+	buf := &syncBuffer{}
+	sup := &Supervisor{Stderr: buf}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	repaired := make(chan struct{}, 1)
 	go sup.runServiceRegistrationRepair(ctx, 100*time.Millisecond, func(w io.Writer) {
 		repairServiceIfMissing(w, name, testRepairExePath, nil)
+		if ok, err := serviceRegistrationOK(name); err == nil && ok {
+			select {
+			case repaired <- struct{}{}:
+			default:
+			}
+		}
 	})
 
-	// Within a few intervals the registration must be back.
-	deadline := time.Now().Add(3 * time.Second)
-	recreated := false
-	for time.Now().Before(deadline) {
-		if ok, err := serviceRegistrationOK(name); err == nil && ok {
-			recreated = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	select {
+	case <-repaired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the supervise repair ticker did not re-create the deleted registration within 3s")
 	}
 	cancel()
-	require.True(t, recreated, "the supervise repair ticker must re-create the deleted registration within one interval")
+
+	ok, err = serviceRegistrationOK(name)
+	require.NoError(t, err)
+	require.True(t, ok, "registration must exist after the repair ticker ran")
 	assert.Contains(t, buf.String(), "event=service_registration_repaired",
 		"the repair must emit a greppable structured event")
+}
+
+// syncBuffer is a minimal mutex-guarded io.Writer for tests that read a buffer
+// written by a background goroutine — avoids the data race a bare bytes.Buffer
+// would incur under `go test -race`.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
