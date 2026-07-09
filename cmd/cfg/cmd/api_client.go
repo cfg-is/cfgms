@@ -883,6 +883,38 @@ func (c *APIClient) SetRefreshPolicy(ctx context.Context, tenantID, mode string,
 	return nil
 }
 
+// APIResolveSelectorRequest is the request body for POST /api/v1/fleet/resolve.
+type APIResolveSelectorRequest struct {
+	Selector string `json:"selector"`
+}
+
+// ResolveSelector calls POST /api/v1/fleet/resolve and returns the matched stewards.
+// The response is unwrapped from the standard {"data": [...]} envelope.
+func (c *APIClient) ResolveSelector(ctx context.Context, selector string) ([]StewardInfo, error) {
+	body, err := json.Marshal(APIResolveSelectorRequest{Selector: selector})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/fleet/resolve", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data []StewardInfo `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return envelope.Data, nil
+}
+
 // parseError extracts error message from HTTP response
 func (c *APIClient) parseError(resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
