@@ -44,6 +44,30 @@ modules when the controller is unreachable — it never falls back to `bypass`.
 An unloadable or tampered cert store triggers re-registration or stop, not a
 degraded-but-trusted continue.
 
+#### Windows service-registration self-repair (#2465)
+
+On Windows the launcher supervises the steward as a Service Control Manager
+(SCM) service (`CFGMSSteward`). The SCM's install-time recovery actions restart
+a *crashed* service, but they cannot help if the service **registration itself**
+is deleted out from under the running launcher — the failure mode observed live
+when an anti-virus product quarantined the launcher binary and removed its SCM
+entry as "remediation", leaving the steward silently and permanently dead until
+a manual reinstall.
+
+To close that gap the launcher runs a dedicated self-repair ticker inside its
+supervise loop, on its own cadence (≤ the fastest SCM recovery delay, 10 s) and
+**independent of the supervised child's lifecycle** — a stable steward may run
+for weeks between child restarts, so the check must not be gated on that. Each
+tick verifies the `CFGMSSteward` registration still exists and, if it has been
+deleted, re-creates it with the same binary path, automatic start type, and
+recovery actions as the original install, reusing the currently-running
+process's own arguments. The repair is logged loudly at warning level with a
+greppable `event=service_registration_repaired` field (visible in
+`C:\ProgramData\cfgms\logs`); a repair that itself fails is logged and the
+supervise loop continues rather than crashing (the steward child is unaffected
+by a missing SCM entry until the next reboot). This behavior is Windows-only —
+the launcher's supervise loop no-ops the check on Linux/macOS.
+
 ### Normal Operation
 
 The steward runs three concurrent activities:

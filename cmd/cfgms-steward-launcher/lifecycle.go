@@ -71,7 +71,24 @@ type Supervisor struct {
 	// <Root>/versions/ after each successful (committed) startup.
 	// Zero value means no pruning occurs.
 	RetentionPolicy RetentionPolicy
+
+	// ServiceRepairInterval is the cadence of the dedicated SCM
+	// service-registration self-repair ticker (#2465), independent of the
+	// supervised child's exit/restart cadence. Zero uses
+	// defaultServiceRepairInterval. Tests set a short interval to drive the
+	// check quickly.
+	ServiceRepairInterval time.Duration
 }
+
+// defaultServiceRepairInterval is the production cadence of the SCM
+// service-registration self-repair check (#2465). It is set at or tighter than
+// the fastest install-time SCM recovery-action delay (10s — see
+// cmd/steward/service/manager_windows.go's SetRecoveryActions) so a repair can
+// plausibly land before or alongside the SCM's own first restart attempt. It is
+// deliberately NOT gated on supervise-loop iterations: execOnce blocks for the
+// full child lifetime (days/weeks for a stable steward), so a per-iteration
+// cadence would leave a deleted registration undetected for that entire span.
+const defaultServiceRepairInterval = 10 * time.Second
 
 type clock interface {
 	Now() time.Time
@@ -82,6 +99,30 @@ type realClock struct{}
 
 func (realClock) Now() time.Time                  { return time.Now() }
 func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
+
+// runServiceRegistrationRepair runs check on its own ticker until ctx is
+// cancelled. Supervise launches it in a goroutine so the SCM
+// service-registration self-repair (#2465) runs independent of the supervised
+// child's exit/restart cadence. check is maybeRepairServiceRegistration in
+// production (a no-op on non-Windows); tests inject a check bound to a unique
+// throwaway service so they never touch the host's real registration. Uses a
+// real time.Ticker, not s.clock, because the repair cadence is wall-clock
+// (SCM recovery timing), not the injectable child-lifecycle clock.
+func (s *Supervisor) runServiceRegistrationRepair(ctx context.Context, interval time.Duration, check func(io.Writer)) {
+	if check == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			check(s.Stderr)
+		}
+	}
+}
 
 // Supervise runs the supervision loop until ctx is cancelled, the child
 // exits normally without triggering rollback, or all rollback attempts are
@@ -105,6 +146,21 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 	if s.MaxRollbackCycles < 0 {
 		s.MaxRollbackCycles = 0
 	}
+
+	// Start the SCM service-registration self-repair ticker (#2465) BEFORE the
+	// supervise loop. It runs in its own goroutine on its own ticker, fully
+	// decoupled from execOnce's blocking child lifecycle, so a registration
+	// deleted out from under a long-running healthy steward is detected and
+	// re-created within one interval rather than not until the next child exit.
+	// repairCtx is cancelled when Supervise returns (any path), stopping the
+	// goroutine. maybeRepairServiceRegistration is a no-op on non-Windows builds.
+	repairInterval := s.ServiceRepairInterval
+	if repairInterval <= 0 {
+		repairInterval = defaultServiceRepairInterval
+	}
+	repairCtx, cancelRepair := context.WithCancel(ctx)
+	defer cancelRepair()
+	go s.runServiceRegistrationRepair(repairCtx, repairInterval, maybeRepairServiceRegistration)
 
 	rollbacksRemaining := s.MaxRollbackCycles
 	for {
