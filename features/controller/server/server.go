@@ -168,6 +168,44 @@ func resolveDNADataRoot(cfg *config.Config) string {
 	return root
 }
 
+// makeHeartbeatStatusChangeCallback builds the OnStatusChange closure wired into
+// the heartbeat.Service. When a steward's liveness state changes, the callback
+// persists the new status to the durable StewardStore so that cfg steward list
+// and GET /api/v1/stewards reflect the change without a restart (Issue #2463).
+func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger logging.Logger) heartbeat.StatusChangeCallback {
+	return func(sid string, healthy bool, status heartbeat.StewardStatus) {
+		if healthy {
+			logger.Info("Steward heartbeat recovered", "steward_id", logging.SanitizeLogValue(sid))
+			if store == nil {
+				return
+			}
+			rec, getErr := store.GetSteward(context.Background(), sid)
+			if getErr != nil {
+				logger.Warn("Heartbeat recovery: failed to read current durable status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", getErr)
+				return
+			}
+			// Only promote to Active when currently Registered or Lost; never
+			// overwrite Deregistered, Archived, Dormant, or Revoked (Issue #2463).
+			if rec.Status == business.StewardStatusRegistered || rec.Status == business.StewardStatusLost {
+				if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusActive); updErr != nil {
+					logger.Warn("Heartbeat recovery: failed to persist active status",
+						"steward_id", logging.SanitizeLogValue(sid), "error", updErr)
+				}
+			}
+		} else {
+			logger.Warn("Steward heartbeat failed", "steward_id", logging.SanitizeLogValue(sid), "status", status.Status)
+			if store == nil {
+				return
+			}
+			if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusLost); updErr != nil {
+				logger.Warn("Heartbeat lost: failed to persist lost status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", updErr)
+			}
+		}
+	}
+}
+
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cfg == nil {
@@ -692,16 +730,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// IP-trust store is available (Issue #1694). Both the database provider
 		// and the OSS composite (flatfile+SQLite, Issue #1900) supply an
 		// IPTrustStore; the evaluator is skipped only when no store is wired.
+		hbStewardStore := storageManager.GetStewardStore()
 		var heartbeatTrustEvaluator heartbeat.TrustEvaluator
 		if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
-			stewardStore := storageManager.GetStewardStore()
 			ipTrustThreshold := cfg.Registration.GetIPTrustThreshold()
 			evaluator := controllerRegistration.NewIPTrustEvaluator(controllerRegistration.IPTrustEvaluatorConfig{
 				Store:     ipTrustStore,
 				Threshold: ipTrustThreshold,
 				Logger:    logger,
 			})
-			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, stewardStore, logger)
+			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, hbStewardStore, logger)
 			logger.Info("IP-trust evaluator wired into heartbeat service",
 				"threshold", ipTrustThreshold)
 		}
@@ -709,16 +747,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")
 		heartbeatService, err = heartbeat.New(&heartbeat.Config{
-			ControlPlane:     controlPlane,
-			HeartbeatTimeout: 15 * time.Second,
-			CheckInterval:    5 * time.Second,
-			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
-				if healthy {
-					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
-				} else {
-					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
-				}
-			},
+			ControlPlane:        controlPlane,
+			HeartbeatTimeout:    15 * time.Second,
+			CheckInterval:       5 * time.Second,
+			OnStatusChange:      makeHeartbeatStatusChangeCallback(hbStewardStore, logger),
 			OnHeartbeatReceived: jobDispatcher.OnHeartbeat,
 			TrustEvaluator:      heartbeatTrustEvaluator,
 			Logger:              logger,
