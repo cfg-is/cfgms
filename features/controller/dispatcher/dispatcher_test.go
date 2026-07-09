@@ -111,8 +111,9 @@ func (p *testControlPlane) injectCompletion(ctx context.Context, deviceID, execu
 }
 
 // injectCompletionWithOutput simulates a steward publishing EventScriptCompleted
-// with the stdout_preview/stderr_preview keys the steward actually emits
-// (execute_script.go), used to verify output capture (Issue #1995, root cause D).
+// with the stdout/stderr keys current stewards emit (Issue #1978: steward now sends
+// full capped output under "stdout"/"stderr"; controller prefers these over *_preview).
+// Used to verify output capture (Issue #1995, root cause D).
 func (p *testControlPlane) injectCompletionWithOutput(ctx context.Context, deviceID, executionID string, exitCode int, stdout, stderr string) error {
 	p.mu.Lock()
 	h := p.eventHandler
@@ -129,10 +130,24 @@ func (p *testControlPlane) injectCompletionWithOutput(ctx context.Context, devic
 		Details: map[string]interface{}{
 			"execution_id":   executionID,
 			"exit_code":      float64(exitCode),
-			"stdout_preview": stdout,
+			"stdout":         stdout,
+			"stderr":         stderr,
+			"stdout_preview": stdout, // kept for compat; dispatcher prefers "stdout"
 			"stderr_preview": stderr,
 			"duration_ms":    float64(100),
 		},
+	}
+	return h(ctx, event)
+}
+
+// injectEvent sends an arbitrary EventScriptCompleted event to the registered handler.
+// Used for edge-case tests (e.g. oversized output) that need full control over event fields.
+func (p *testControlPlane) injectEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	p.mu.Lock()
+	h := p.eventHandler
+	p.mu.Unlock()
+	if h == nil {
+		return fmt.Errorf("no event handler registered")
 	}
 	return h(ctx, event)
 }
@@ -1194,8 +1209,175 @@ func TestDispatcher_OutputThreadedToJobRecord(t *testing.T) {
 	jobs, err := manager.ListRunJobs(context.Background(), runID)
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
-	assert.Equal(t, "CFG-70-02\n", jobs[0].Output, "stdout_preview must be persisted as Output")
+	assert.Equal(t, "CFG-70-02\n", jobs[0].Output, "stdout must be persisted as Output")
 	assert.Equal(t, 0, jobs[0].ExitCode)
+}
+
+// TestDispatcher_OutputExceedsControllerCeiling verifies Issue #1978 AC:
+// when a completion event carries combined stdout+stderr exceeding the 4 MB controller
+// ceiling, the dispatcher drops the output before storage so the job record has empty
+// output rather than unbounded data. This is defense-in-depth against a compromised
+// steward bypassing the steward-side 1 MB cap.
+func TestDispatcher_OutputExceedsControllerCeiling(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-ceiling-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-ceiling", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-ceiling", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-ceiling", "script-ceiling", runID, "job-ceiling")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	// Inject an event with 5 MB of stdout — exceeds the 4 MB controller ceiling.
+	fiveMBOutput := strings.Repeat("X", 5*1024*1024)
+	oversizedEvent := &controlplaneTypes.Event{
+		ID:        "evt-ceiling",
+		Type:      controlplaneTypes.EventScriptCompleted,
+		StewardID: "device-1",
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"execution_id": "exec-ceiling",
+			"exit_code":    float64(0),
+			"stdout":       fiveMBOutput,
+			"stderr":       "",
+			"duration_ms":  float64(100),
+		},
+	}
+	require.NoError(t, cp.injectEvent(context.Background(), oversizedEvent))
+
+	require.Eventually(t, func() bool {
+		jobs, err := manager.ListRunJobs(context.Background(), runID)
+		return err == nil && len(jobs) == 1 && jobs[0].Status == run.JobStatusCompleted
+	}, 2*time.Second, 10*time.Millisecond, "job must reach terminal state despite ceiling enforcement")
+
+	jobs, err := manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Empty(t, jobs[0].Output,
+		"output exceeding the 4 MB ceiling must be dropped — job record must have empty output")
+}
+
+// TestDispatcher_TTLReleasesWedgedDeviceLock verifies AC1 (Story #2468):
+// a device lock held beyond the per-execution lock TTL (Timeout * graceMultiplier)
+// is automatically released by the periodic sweep, and a second execution for the
+// same device can then be dispatched.
+//
+// The dispatcher is configured with a short PollInterval so the sweep fires quickly.
+// The queued execution uses a short Timeout so the lock TTL expires within the test
+// window — no fake clock injection is needed.
+func TestDispatcher_TTLReleasesWedgedDeviceLock(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+
+	// shortTimeout drives a short lock TTL: lockTTL = shortTimeout * graceMultiplier.
+	// With the default multiplier of 2, lockTTL = 200 ms. The sweep fires every
+	// pollInterval (50 ms), so the lock is released within ~250 ms of being acquired.
+	const shortTimeout = 100 * time.Millisecond
+	const pollInterval = 50 * time.Millisecond
+
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		PollInterval: pollInterval,
+		Logger:       logging.NewLogger("debug"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue exec-wedged and dispatch it. No completion event will ever arrive,
+	// simulating a steward that silently disconnects mid-execution.
+	require.NoError(t, q.QueueExecution("device-wedge", &script.QueuedExecution{
+		ExecutionID: "exec-wedged",
+		ScriptID:    "script-wedge",
+		ScriptRef:   "script-wedge",
+		Shell:       script.ShellBash,
+		Timeout:     shortTimeout,
+	}))
+	d.OnHeartbeat("device-wedge")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "exec-wedged must be dispatched")
+
+	// Queue exec-after WHILE the device lock is held by exec-wedged.
+	require.NoError(t, q.QueueExecution("device-wedge", &script.QueuedExecution{
+		ExecutionID: "exec-after-ttl",
+		ScriptID:    "script-after",
+		ScriptRef:   "script-after",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+	}))
+
+	// The TTL sweep fires on each poll tick. Once the lock TTL elapses, the sweep
+	// releases the lock and the following dispatchAll sends a second command.
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 2
+	}, 3*time.Second, 20*time.Millisecond,
+		"TTL sweep must release the wedged lock so a second command can be sent")
+}
+
+// TestDispatcher_ReleaseForCancelledExecution verifies that
+// ReleaseDeviceForCancelledExecution releases the lock when executionID matches
+// and returns false when it does not (race-safety against stale cancels).
+func TestDispatcher_ReleaseForCancelledExecution(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Dispatch exec-A, acquiring the device lock for "device-x".
+	require.NoError(t, q.QueueExecution("device-x", queuedExec("exec-A", "script-abc")))
+	d.OnHeartbeat("device-x")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "exec-A must be dispatched")
+
+	// A cancel for a DIFFERENT executionID must not release the lock.
+	released := d.ReleaseDeviceForCancelledExecution("device-x", "exec-B-stale")
+	assert.False(t, released, "stale cancel must not release the lock held by exec-A")
+
+	// Verify the lock is still held — exec-A has not completed.
+	require.Never(t, func() bool {
+		if !d.tryAcquireDevice("device-x") {
+			return false
+		}
+		d.releaseDevice("device-x")
+		return true
+	}, 50*time.Millisecond, 5*time.Millisecond,
+		"lock must still be held after stale cancel")
+
+	// Cancel for the CORRECT executionID releases the lock immediately.
+	released = d.ReleaseDeviceForCancelledExecution("device-x", "exec-A")
+	assert.True(t, released, "cancel with matching executionID must release the lock")
+
+	// Lock is now free — a new dispatch can proceed.
+	require.Eventually(t, func() bool {
+		if !d.tryAcquireDevice("device-x") {
+			return false
+		}
+		d.releaseDevice("device-x")
+		return true
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"lock must be free after correct-ID cancel")
 }
 
 // mustOpenMemDB opens an in-memory SQLite database closed via t.Cleanup.

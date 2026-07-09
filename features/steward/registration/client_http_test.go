@@ -47,7 +47,7 @@ func TestRegister_202_ReturnsPendingResponse(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	regResp, pendingResp, err := client.Register(context.Background(), "test-token")
+	regResp, pendingResp, err := client.Register(context.Background(), RegistrationRequest{Token: "test-token"})
 	require.NoError(t, err)
 	assert.Nil(t, regResp, "RegistrationResponse must be nil on 202")
 	require.NotNil(t, pendingResp, "RegistrationPendingResponse must be non-nil on 202")
@@ -84,7 +84,7 @@ func TestRegister_ErrorStatus_ReturnsError(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			regResp, pendingResp, err := client.Register(context.Background(), "test-token")
+			regResp, pendingResp, err := client.Register(context.Background(), RegistrationRequest{Token: "test-token"})
 			require.Error(t, err, "non-200/202 status must return an error")
 			assert.Nil(t, regResp, "RegistrationResponse must be nil on error status")
 			assert.Nil(t, pendingResp, "RegistrationPendingResponse must be nil on error status")
@@ -320,4 +320,124 @@ func TestPollStatus_ErrorStatus_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, resp)
 	assert.Contains(t, err.Error(), "status poll failed with HTTP 401")
+}
+
+// TestRegistrationRequest_IncludesDeviceIDAndIdentityKeyPub verifies that the new fields
+// are serialised to JSON and sent to the controller.
+func TestRegistrationRequest_IncludesDeviceIDAndIdentityKeyPub(t *testing.T) {
+	var gotBody RegistrationRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"success":true,"steward_id":"s1","transport_address":"ctrl:4433"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	req := RegistrationRequest{
+		Token:          "tok",
+		DeviceID:       "abcd1234",
+		IdentityKeyPub: "base64pubkey==",
+	}
+	_, _, err = client.Register(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "tok", gotBody.Token)
+	assert.Equal(t, "abcd1234", gotBody.DeviceID)
+	assert.Equal(t, "base64pubkey==", gotBody.IdentityKeyPub)
+}
+
+// TestRefreshChallenge_200_ReturnsChallengeResponse verifies that a 200 response is decoded correctly.
+func TestRefreshChallenge_200_ReturnsChallengeResponse(t *testing.T) {
+	const deviceID = "aabbccdd"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/stewards/"+deviceID+"/refresh/challenge", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"nonce":"dGVzdG5vbmNl","server_ts":1234567890,"expires_in":60}`))
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := cl.RefreshChallenge(context.Background(), deviceID)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "dGVzdG5vbmNl", resp.Nonce)
+	assert.Equal(t, uint64(1234567890), resp.ServerTS)
+	assert.Equal(t, 60, resp.ExpiresIn)
+}
+
+// TestRefreshChallenge_403_ReturnsErrRefreshRejected verifies that HTTP 403 maps to ErrRefreshRejected.
+func TestRefreshChallenge_403_ReturnsErrRefreshRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "revoked", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := cl.RefreshChallenge(context.Background(), "device-id")
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrRefreshRejected)
+}
+
+// TestRefreshComplete_200_ReturnsCerts verifies that HTTP 200 with cert fields is decoded.
+func TestRefreshComplete_200_ReturnsCerts(t *testing.T) {
+	const deviceID = "aabbccdd"
+	body := `{"client_cert":"CERT","client_key":"KEY","ca_cert":"CA","server_cert":"SRV","transport_address":"ctrl:4433"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/stewards/"+deviceID+"/refresh/complete", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce123", 1234567890, []byte("signature"))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "CERT", resp.ClientCert)
+	assert.Equal(t, "KEY", resp.ClientKey)
+	assert.Equal(t, "CA", resp.CACert)
+	assert.Equal(t, "ctrl:4433", resp.TransportAddress)
+}
+
+// TestRefreshComplete_202_ReturnsErrRefreshPending verifies that HTTP 202 maps to ErrRefreshPending.
+func TestRefreshComplete_202_ReturnsErrRefreshPending(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrRefreshPending)
+}
+
+// TestRefreshComplete_403_ReturnsErrRefreshRejected verifies that HTTP 403 maps to ErrRefreshRejected.
+func TestRefreshComplete_403_ReturnsErrRefreshRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rejected", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
+	assert.Nil(t, resp)
+	require.ErrorIs(t, err, ErrRefreshRejected)
 }

@@ -14,6 +14,7 @@ import (
 // The expression is a space-separated list of key:value terms. Values may be
 // double-quoted to include spaces. Supported keys:
 //
+//	id:<steward-id>    — exact steward ID match; comma-separated for OR (id:a,b)
 //	name:<hostname>    — hostname match; trailing * enables prefix-glob
 //	os:<value>         — exact OS match
 //	platform:<value>   — exact platform match
@@ -119,8 +120,10 @@ func tokenize(expr string) ([]term, error) {
 // applyTerm merges a parsed key:value term into the filter.
 func applyTerm(f *fleet.Filter, t term) error {
 	switch {
+	case t.key == "id":
+		f.IDs = append(f.IDs, strings.Split(t.value, ",")...)
 	case t.key == "name":
-		f.Hostname = t.value
+		f.Name = t.value
 	case t.key == "os":
 		f.OS = t.value
 	case t.key == "platform":
@@ -139,7 +142,7 @@ func applyTerm(f *fleet.Filter, t term) error {
 		}
 		f.DNAAttributes[attr] = t.value
 	default:
-		return fmt.Errorf("unknown selector key %q: valid keys are name, os, platform, arch, tag, dna.<key>", t.key)
+		return fmt.Errorf("unknown selector key %q: valid keys are id, name, os, platform, arch, tag, dna.<key>", t.key)
 	}
 	return nil
 }

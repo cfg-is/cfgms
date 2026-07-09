@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -83,8 +84,22 @@ type Steward struct {
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
 
+	// monitorDNARefreshes counts DNA snapshot refreshes triggered by a
+	// monitor-driven targeted reconcile that applied changes (standalone only).
+	// Read via export_test.go.
+	monitorDNARefreshes atomic.Int64
+
+	// wg tracks the convergence loop goroutine and the health monitor goroutine
+	// for clean shutdown.
+	wg sync.WaitGroup
+
 	// Shutdown coordination
 	shutdown chan struct{}
+
+	// healthCancel cancels the health monitor goroutine's context. Called in Stop()
+	// to guarantee the goroutine exits even if Stop() is called before
+	// HealthMonitor.Start() sets running=true (TOCTOU race on running.Load()).
+	healthCancel context.CancelFunc
 }
 
 // NewStandalone creates a new Steward instance for standalone operation.
@@ -241,23 +256,35 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 		"resources", len(s.standaloneConfig.Resources),
 		"converge_interval", interval)
 
-	// Start health monitoring in background
+	// Start health monitoring in background. Tracked by s.wg so Stop() →
+	// s.wg.Wait() ensures the goroutine exits before cleanup proceeds.
+	// healthCtx is derived so Stop() can cancel it directly, covering the TOCTOU
+	// window where Stop() is called before HealthMonitor.Start() sets running=true.
+	healthCtx, healthCancel := context.WithCancel(ctx)
+	s.healthCancel = healthCancel
+	s.wg.Add(1)
 	go func() {
-		s.healthCheck.Start(ctx)
+		defer s.wg.Done()
+		s.healthCheck.Start(healthCtx)
 	}()
 
 	// Register managed resource drift handler on the execution engine.
 	// When the Compare step detects drift, this logs the event before Set corrects it.
 	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
 
-	// Give monitors a moment to start
-	time.Sleep(50 * time.Millisecond)
+	// Start monitors for modules that implement the Monitor interface.
+	// Monitor events feed a targeted reconcile of the changed resource.
+	s.startMonitors(ctx)
 
 	// Converge immediately on startup
 	s.runConvergence(ctx)
 
 	// Start scheduled convergence loop
-	go s.convergenceLoop(ctx, interval)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.convergenceLoop(ctx, interval)
+	}()
 
 	s.logger.Info("Steward started successfully in standalone mode")
 	return nil
@@ -431,6 +458,31 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// startMonitors delegates to the executor's monitor engine, registering a
+// standalone-mode reconcile observer that refreshes DNA snapshots and increments
+// monitorDNARefreshes when a targeted reconcile applies changes.
+func (s *Steward) startMonitors(ctx context.Context) {
+	// Register the standalone-specific post-reconcile observer before starting
+	// the engine so the first reconcile already has it wired.
+	s.executor.SetMonitorReconcileObserver(func(rCtx context.Context, resourceID string) {
+		s.monitorDNARefreshes.Add(1)
+		if _, err := s.detectUnmanagedDNADrift(rCtx); err != nil {
+			s.logger.Warn("DNA refresh after targeted reconcile returned error",
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", err)
+		}
+	})
+	if err := s.executor.StartMonitors(ctx, s.standaloneConfig.Resources); err != nil {
+		s.logger.Warn("Failed to start module monitors", "error", err)
+	}
+}
+
+// CollectModuleDNAAttributes delegates to the executor's monitor engine.
+// See execution.Executor.CollectModuleDNAAttributes for the key convention.
+func (s *Steward) CollectModuleDNAAttributes(ctx context.Context) map[string]string {
+	return s.executor.CollectModuleDNAAttributes(ctx)
+}
+
 // Stop gracefully shuts down the steward and cleans up resources.
 //
 // This method:
@@ -444,7 +496,7 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 func (s *Steward) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping steward", "id", s.standaloneConfig.Steward.ID)
 
-	// Signal shutdown to all background goroutines
+	// Signal shutdown to all background goroutines.
 	select {
 	case <-s.shutdown:
 		// Already closed
@@ -452,8 +504,22 @@ func (s *Steward) Stop(ctx context.Context) error {
 		close(s.shutdown)
 	}
 
-	// Stop health monitoring
+	// Cancel the health monitor's context so its goroutine exits via ctx.Done()
+	// even if Stop() races with HealthMonitor.Start() before running is set.
+	if s.healthCancel != nil {
+		s.healthCancel()
+	}
+
+	// Stop health monitoring (blocks until goroutine exits).
 	s.healthCheck.Stop()
+
+	// Wait for the convergence loop goroutine to exit.
+	s.wg.Wait()
+
+	// Stop the monitor engine: waits for all fan-in + event-loop goroutines to
+	// exit, then closes all monitor instances. Must happen before UnloadAllModules
+	// so no further ChangeEvents are produced after module Close().
+	s.executor.StopMonitors()
 
 	// Close drift detector
 	if s.driftDetector != nil {

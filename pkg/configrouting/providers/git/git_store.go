@@ -61,12 +61,15 @@ func NewGitConfigStore(
 ) (*GitConfigStore, error) {
 	// Validate tenantID against workDir before constructing any paths.
 	// ValidateAndCleanPath requires workDir to exist; callers must ensure this.
-	if _, err := security.ValidateAndCleanPath(workDir, tenantID); err != nil {
+	// The cleaned return value (not the raw tenantID) is used in filepath.Join so that
+	// the sanitizer's return value acts as a natural path-injection barrier for CodeQL.
+	cleanedBase, err := security.ValidateAndCleanPath(workDir, tenantID)
+	if err != nil {
 		return nil, fmt.Errorf("invalid tenantID %q: %w", tenantID, err)
 	}
 
 	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(source.URL)))
-	repoDir := filepath.Join(workDir, tenantID, urlHash)
+	repoDir := filepath.Join(cleanedBase, urlHash)
 
 	if err := os.MkdirAll(repoDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create repo directory: %w", err)

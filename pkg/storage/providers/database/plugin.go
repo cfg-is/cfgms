@@ -52,6 +52,10 @@ func (p *DatabaseProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *DatabaseProvider) ClusterCapable() bool { return true }
+
 // Available checks if PostgreSQL is available and accessible
 func (p *DatabaseProvider) Available() (bool, error) {
 	// Assumes PostgreSQL driver is available; live connection ping is deferred.
@@ -141,22 +145,45 @@ func (p *DatabaseProvider) CreateTenantStore(config map[string]interface{}) (bus
 	return store, nil
 }
 
-// CreateSessionStore is not supported by the database provider in this release.
-// Use the SQLite provider for SessionStore, or extend this provider in a future story.
+// CreateSessionStore creates a PostgreSQL-backed SessionStore.
+// Bearer tokens are stored as HMAC-SHA256 hashes; plaintext tokens are never written to the DB.
+// RLS is enforced by setting app.current_tenant per transaction in the store layer.
 func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (business.SessionStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseSessionStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database session store: %w", err)
+	}
+	return store, nil
 }
 
-// CreateStewardStore is not supported by the database provider.
-// StewardStore is implemented by the flat-file and SQLite providers (Issue #663).
+// CreateStewardStore creates a PostgreSQL-backed StewardStore with tenant-scoped RLS.
 func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseStewardStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database steward store: %w", err)
+	}
+	return store, nil
 }
 
-// CreateCommandStore is not supported by the database provider.
-// Command dispatch state belongs in the business-data tier (SQLite for OSS).
+// CreateCommandStore creates a PostgreSQL-backed CommandStore with tenant-scoped RLS.
 func (p *DatabaseProvider) CreateCommandStore(config map[string]interface{}) (business.CommandStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseCommandStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database command store: %w", err)
+	}
+	return store, nil
 }
 
 // CreateTriggerStore is not supported by the database provider.
@@ -175,6 +202,32 @@ func (p *DatabaseProvider) CreatePushStore(config map[string]interface{}) (busin
 // Pending registration state belongs in the business-data tier (SQLite for OSS).
 func (p *DatabaseProvider) CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error) {
 	return nil, business.ErrNotSupported
+}
+
+// CreateRefreshPolicyStore creates a PostgreSQL-backed RefreshPolicyStore (Issue #2329).
+func (p *DatabaseProvider) CreateRefreshPolicyStore(config map[string]interface{}) (business.RefreshPolicyStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseRefreshPolicyStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database refresh policy store: %w", err)
+	}
+	return store, nil
+}
+
+// CreatePendingRefreshStore creates a PostgreSQL-backed PendingRefreshStore (Issue #2329).
+func (p *DatabaseProvider) CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabasePendingRefreshStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database pending refresh store: %w", err)
+	}
+	return store, nil
 }
 
 // CreateIPTrustStore creates a PostgreSQL-backed IPTrustStore.

@@ -142,3 +142,57 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 	assert.Len(t, fields, 2,
 		"only the genuine resource-state keys should remain after exclusion; got %v", fields)
 }
+
+// TestCompareStates_DeleteConfig_ExistenceOnly locks the convergence contract
+// the hyperv DELETE bucket relied on (#2027). The contract: a config declares
+// the fields it manages and ONLY those are compared; a module's Get may return
+// additional values the config does not set — for an absent resource, Get still
+// returns a fully-typed config whose non-state fields sit at their zero values.
+// Those undeclared values must NOT register as drift.
+//
+// Surfaced live: hv-delete.yaml declared vhd_path/switch_type on resources being
+// deleted, so the comparator diffed those create-time fields against an absent
+// resource's empty values and reported permanent drift — convergence "re-deleted"
+// the gone resource every cycle and never settled (status ERROR). The fix is a
+// MINIMAL delete config (state:absent only), which this test pins: a delete
+// config declaring only `state` converges cleanly against an absent resource
+// regardless of what else Get reports.
+func TestCompareStates_DeleteConfig_ExistenceOnly(t *testing.T) {
+	comparator := stewardtesting.NewStateComparator()
+
+	// A minimal delete config declares only the lifecycle state (+ identity,
+	// which GetManagedFields excludes).
+	deleteCfg := &genericConfigState{data: map[string]interface{}{
+		"name":  "demo-vm",
+		"state": "absent",
+	}}
+
+	// Get of an absent VM: a fully-typed config with state=absent and the other
+	// managed fields at zero values. These are values "not set by the config"
+	// and must not count as drift.
+	absentCurrent := &genericConfigState{data: map[string]interface{}{
+		"name":      "demo-vm",
+		"state":     "absent",
+		"vhd_path":  "",
+		"cpu_count": 0,
+		"memory_mb": 0,
+	}}
+
+	drift, diff := comparator.CompareStates(absentCurrent, deleteCfg)
+	assert.False(t, drift,
+		"a minimal delete config must converge cleanly against an absent resource; got %+v", diff)
+
+	// Get of a present VM still drifts against the delete config (state
+	// running -> absent) so the delete is triggered.
+	presentCurrent := &genericConfigState{data: map[string]interface{}{
+		"name":      "demo-vm",
+		"state":     "running",
+		"vhd_path":  `C:\cfgms-hvtest\demo-vm.vhdx`,
+		"cpu_count": 2,
+		"memory_mb": 1024,
+	}}
+	drift, diff = comparator.CompareStates(presentCurrent, deleteCfg)
+	require.True(t, drift, "a present resource must drift against a delete config so the delete runs")
+	_, stateChanged := diff.ChangedFields["state"]
+	assert.True(t, stateChanged, "state (running -> absent) must be the drift that triggers deletion")
+}

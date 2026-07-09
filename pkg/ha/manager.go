@@ -225,6 +225,14 @@ func (m *Manager) Stop(ctx context.Context) error {
 	defer m.mu.Unlock()
 
 	if !m.isStarted {
+		// runRaft goroutine starts in NewRaftConsensus (called from initializeComponents,
+		// before Start) and must be stopped even when Stop is called on a never-started
+		// manager — otherwise it leaks. RaftConsensus.Stop is idempotent via sync.Once.
+		if m.raftConsensus != nil {
+			if err := m.raftConsensus.Stop(); err != nil {
+				return fmt.Errorf("raft consensus stop: %w", err)
+			}
+		}
 		return nil
 	}
 

@@ -2,6 +2,8 @@
 
 This document describes how issues are triaged and prioritized in the CFGMS project.
 
+> **Scope:** triage applies to **`community`** issues (public, externally filed). **`internal`** issues come from the private development pipeline already planned and validated (BA + Tech Lead) and are materialized locked at decomposition (ADR-015; `--defer` drafts at dispatch) — they do **not** pass through this triage queue. See [pipeline-substrate-migration](../operations/pipeline-substrate-migration.md#issue-classes--materialization-2026-06-24). (Note: automatic `triage`-label issue templates referenced below are not yet configured.)
+
 ## Triage Workflow
 
 ### New Issues
@@ -31,6 +33,8 @@ All new issues receive the `triage` label automatically through issue templates.
 - `good first issue` - Suitable for new contributors
 
 #### Component Labels
+
+Component labels are a **topic** axis — what the issue is *about* (which subsystem). They are distinct from, and coexist with, the **`cap:*` capability tags** (a **consumer** axis — which product capability the work is *for*; see `docs/product/roadmap.md` → Capability Tags). An issue can carry both: e.g. a `workflow` (topic) task whose consumer is the twin (`cap:twin`). Do not conflate `workflow` (component) with `cap:workflow` (capability) — same word, different axes.
 
 - `controller` - Controller component
 - `steward` - Steward component

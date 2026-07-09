@@ -17,12 +17,17 @@ CFGMS provides a modern, secure, and scalable configuration management system:
 
 - Built in Go for performance and reliability
 - Zero-Trust security architecture
-- DNA-based system identification (Metadata)
+- DNA-based system identification (Metadata) — a fragment model with typed entity ids and versioned per-entity history
 - Hierarchical multi-tenant architecture
 - Self-contained binary with no external runtime dependencies
 - Module-based architecture with workflow engine
 - Configuration validation with schema enforcement
 - Event-driven automation capabilities
+
+**Building on that foundation** (see the [roadmap's tiered rollout](roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout)):
+
+- **Digital Twin** — a live model of the estate (typed entities + topology graph + temporal state) that config, monitoring, and workflows act on. CFGMS already owns the expensive half — actuation and desired state — that observe-only twins lack; the twin adds the Model and Reason layers on top.
+- **Digital Employee Experience (DEX)** — knowing whether a user's experience on a device or app is degraded, and why, with fleet baselines ("devices where an app is in the 30th percentile for responsiveness") and experience-driven remediation. A layered track built on the same DNA foundation, and the twin's first paying consumer.
 
 ## Target Audience
 

@@ -117,6 +117,44 @@ For detailed information about our security decisions, see:
 - Permission inheritance
 - Access audit logging
 
+### Auth-Tier Policy
+
+The controller REST API assigns every endpoint to one of four authentication tiers. The tier determines what credential strength is required to reach the handler — independently of which permissions the caller holds.
+
+| Tier | Name | Credential requirement |
+|------|------|------------------------|
+| 0 | Public | No authentication (health check, registration) |
+| 1 | Any | Any valid credential: mTLS admin cert **or** API key |
+| 2 | Elevated | Reserved for future use |
+| 3 | mTLS-Only | mTLS admin certificate required; API keys are rejected even when they carry the exact matching permission |
+
+**Tier-3 discriminator:** The sole check is whether the request carries a valid mTLS admin certificate (`principal.IsAdmin`). The permission set of the caller is never consulted. An API key that holds every Tier-3 permission will still receive HTTP 403 `MTLS_REQUIRED`.
+
+**Tier-3 endpoint surface** (Issue #1419):
+
+| Permission | Endpoint |
+|------------|----------|
+| `certificate:provision` | `POST /api/v1/certificates/provision` |
+| `certificate:rotate` | `POST /api/v1/certificates/signing/rotate` |
+| `rbac:create-role` | `POST /api/v1/rbac/roles` |
+| `rbac:update-role` | `PUT /api/v1/rbac/roles/{id}` |
+| `rbac:delete-role` | `DELETE /api/v1/rbac/roles/{id}` |
+| `api-key:create` | `POST /api/v1/api-keys` |
+| `api-key:delete` | `DELETE /api/v1/api-keys/{id}` |
+| `registration:create-token` | `POST /api/v1/registration/tokens` |
+| `registration:delete-token` | `DELETE /api/v1/registration/tokens/{token}` |
+| `registration:revoke-token` | `POST /api/v1/registration/tokens/{token}/revoke` |
+| `registration:rotate-token` | `POST /api/v1/registration/tokens/{tenant_id}/rotate` |
+| `registration:approve` | `POST /api/v1/registration/{id}/approve`, `/approve-all`, `/approve-by-cidr` |
+| `registration:manage-ip-trust` | `POST /api/v1/registration/ip-trust`, `DELETE /api/v1/registration/ip-trust/{tenant}/{cidr}` |
+| `tenant:create` | `POST /api/v1/tenants` |
+| `refresh:approve` | `POST /api/v1/stewards/refresh/{pending_id}/approve` |
+| `refresh:set-policy` | `PUT /api/v1/tenants/{tenant_path}/refresh-policy` |
+
+The canonical source of truth for this list is `tier3Permissions` in `features/controller/api/auth_tiers.go`. The `TestTier3Enforcement_RouteSetMatchesCanonicalSet` test in `features/controller/api/tier_enforcement_test.go` asserts at test time that the wired route set exactly equals this map — any drift is a test failure.
+
+**Rationale:** Endpoints in this tier can issue credentials, modify trust anchors, or alter the authorization model itself. Restricting them to mTLS provides a hardware-backed authentication guarantee that cannot be replicated by a compromised or stolen API key. Operators who need these capabilities must use an admin credential bundle (mTLS client certificate) rather than an API key.
+
 ## Security Best Practices
 
 ### Certificate Management

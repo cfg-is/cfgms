@@ -73,6 +73,12 @@ func TestProviderDescription(t *testing.T) {
 	assert.NotEmpty(t, p.Description())
 }
 
+func TestFlatFileProvider_ClusterCapable_False(t *testing.T) {
+	p, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+	assert.False(t, p.ClusterCapable(), "FlatFileProvider must not be cluster-capable (no shared-state coordination across controller nodes)")
+}
+
 func TestUnsupportedStoresReturnErrNotSupported(t *testing.T) {
 	p, err := interfaces.GetStorageProvider("flatfile")
 	require.NoError(t, err)
@@ -151,6 +157,26 @@ func TestCreateAuditStoreWithRoot(t *testing.T) {
 	require.NoError(t, err)
 
 	store, err := p.CreateAuditStore(map[string]interface{}{"root": root})
+	require.NoError(t, err)
+	assert.NotNil(t, store)
+}
+
+func TestCreateIPTrustStoreRequiresRoot(t *testing.T) {
+	p, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+
+	store, err := p.CreateIPTrustStore(map[string]interface{}{})
+	assert.Nil(t, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "root")
+}
+
+func TestCreateIPTrustStoreWithRoot(t *testing.T) {
+	root := t.TempDir()
+	p, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+
+	store, err := p.CreateIPTrustStore(map[string]interface{}{"root": root})
 	require.NoError(t, err)
 	assert.NotNil(t, store)
 }

@@ -17,6 +17,7 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -659,4 +660,288 @@ func TestGetConfiguration_TenantIsolation(t *testing.T) {
 		assert.NotEqual(t, "msp-a-policy", r.Name,
 			"steward-b must not receive resources from msp-a's ancestor chain (tenant isolation violated)")
 	}
+}
+
+// --- Deployment ring integration tests (Issue #2271) ---
+
+// createTestServiceV2WithControllerSvc creates a ConfigurationServiceV2 backed by real
+// storage and a ControllerService with ring config support, for ring integration tests.
+func createTestServiceV2WithControllerSvc(t *testing.T) (*ConfigurationServiceV2, *ControllerService) {
+	t.Helper()
+	logger := logging.NewNoopLogger()
+	storageManager := pkgtesting.SetupTestStorage(t)
+	controllerSvc := NewControllerService(logger)
+	svc := NewConfigurationServiceV2(logger, storageManager, controllerSvc)
+	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
+		context.Background(),
+		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
+	))
+	return svc, controllerSvc
+}
+
+// TestGetConfiguration_RingOverridesDesiredVersion proves that when a steward's DNA
+// has deployment_ring set and the ring has a non-empty desired_version, the ring-resolved
+// version overrides the tenant-path desired_version in the delivered config.
+// This is the REQUIRED integration test for Story #2271 acceptance criterion:
+// "ring-resolved desired_version overrides the tenant-path desired_version."
+func TestGetConfiguration_RingOverridesDesiredVersion(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	// Configure the ring set: "early" ring targets v0.5.21.
+	controllerSvc.SetRingConfig(controllerconfig.DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "pre-release", DesiredVersion: "v0.6.0"},
+			{Name: "early", DesiredVersion: "v0.5.21"},
+			{Name: "default", DesiredVersion: "v0.5.20"},
+			{Name: "stable", DesiredVersion: "v0.5.19"},
+		},
+	})
+
+	stewardID := "dev-ring-test"
+
+	// Register steward with deployment_ring = "early" in DNA attributes.
+	dna := makeTestDNA(stewardID, map[string]string{"deployment_ring": "early"})
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	// Store a steward config with a different (lower) tenant-path desired_version.
+	tenantPathVersion := "v0.4.0"
+	cfg := createTestStewardConfig(stewardID)
+	cfg.Steward.Upgrade.DesiredVersion = tenantPathVersion
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, cfg))
+
+	// GetConfiguration must return the ring-resolved version, not the tenant-path version.
+	req := &controller.ConfigRequest{StewardId: stewardID}
+	resp, err := svc.GetConfiguration(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, resp.Status.Code, "GetConfiguration must succeed")
+	require.NotNil(t, resp.Config)
+	require.NotNil(t, resp.Config.Config)
+
+	effectiveCfg, err := stewardtypes.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+
+	assert.Equal(t, "v0.5.21", effectiveCfg.Steward.Upgrade.DesiredVersion,
+		"ring-resolved version (v0.5.21) must override tenant-path version (%s)", tenantPathVersion)
+}
+
+// TestGetConfiguration_ValidRingDeliversRingVersion proves: a steward with
+// dna["deployment_ring"] = "early" receives the early ring's desired_version
+// as the effective desired_version in the config response.
+// This is the REQUIRED integration test for Story #2271 acceptance criterion.
+func TestGetConfiguration_ValidRingDeliversRingVersion(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	controllerSvc.SetRingConfig(controllerconfig.DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "early", DesiredVersion: "v0.5.21"},
+			{Name: "default", DesiredVersion: "v0.5.20"},
+		},
+	})
+
+	stewardID := "dev-early-ring"
+	dna := makeTestDNA(stewardID, map[string]string{"deployment_ring": "early"})
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	cfg := createTestStewardConfig(stewardID)
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, cfg))
+
+	req := &controller.ConfigRequest{StewardId: stewardID}
+	resp, err := svc.GetConfiguration(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, resp.Status.Code)
+
+	effectiveCfg, err := stewardtypes.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+
+	assert.Equal(t, "v0.5.21", effectiveCfg.Steward.Upgrade.DesiredVersion,
+		"steward in 'early' ring must receive early ring's desired_version")
+}
+
+// TestGetConfiguration_AbsentRingFallsBack proves: a steward with no deployment_ring
+// attribute receives the fallback ring's desired_version when the fallback ring has one.
+func TestGetConfiguration_AbsentRingFallsBack(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	controllerSvc.SetRingConfig(controllerconfig.DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "early", DesiredVersion: "v0.5.21"},
+			{Name: "default", DesiredVersion: "v0.5.20"},
+		},
+	})
+
+	stewardID := "dev-no-ring"
+	dna := makeTestDNA(stewardID, map[string]string{}) // no deployment_ring
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	cfg := createTestStewardConfig(stewardID)
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, cfg))
+
+	req := &controller.ConfigRequest{StewardId: stewardID}
+	resp, err := svc.GetConfiguration(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, resp.Status.Code)
+
+	effectiveCfg, err := stewardtypes.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+
+	assert.Equal(t, "v0.5.20", effectiveCfg.Steward.Upgrade.DesiredVersion,
+		"steward with no deployment_ring must receive fallback ring's desired_version")
+}
+
+// --- Cluster cascade wiring tests (Issue #2425) ---
+
+// TestNewConfigurationServiceV2_WiresClusterRegistry verifies that when NewConfigurationServiceV2
+// is constructed with a non-nil ControllerService, the cluster-policies cascade is active:
+// a steward with cluster membership DNA attributes receives resources from the matching
+// cluster-policies config document in its effective configuration.
+func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	stewardID := "cluster-member-1"
+
+	// Register the steward in the ControllerService with cluster DNA attributes.
+	// cluster:cfg-lab.member is a valid cluster:<name>.<field> key that causes
+	// BuildRegistry to record stewardID as a member of "cfg-lab".
+	dna := makeTestDNA(stewardID, map[string]string{
+		"cluster:cfg-lab.member": "true",
+	})
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	// Store a cluster-policies/cfg-lab config document.
+	cs := svc.storageManager.GetConfigStore()
+	clusterResource := stewardtypes.ResourceConfig{Name: "cfg-lab-vm", Module: "hyperv.vm"}
+	clusterCfg := stewardtypes.StewardConfig{
+		Resources: []stewardtypes.ResourceConfig{clusterResource},
+	}
+	clusterCfgYAML, err := yaml.Marshal(clusterCfg)
+	require.NoError(t, err)
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "default", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: clusterCfgYAML,
+	}))
+
+	// Also store a device-level config so Sources is non-empty (GetEffectiveConfiguration
+	// returns the raw resolver result without the Sources>0 gate).
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, createTestStewardConfig(stewardID)))
+
+	effective, err := svc.GetEffectiveConfiguration(ctx, "default", stewardID)
+	require.NoError(t, err)
+
+	resourcesByName := make(map[string]stewardtypes.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+
+	_, hasCfgLabVM := resourcesByName["cfg-lab-vm"]
+	assert.True(t, hasCfgLabVM,
+		"steward with cluster:cfg-lab.member DNA must receive cfg-lab-vm from cluster-policies/cfg-lab")
+
+	src, hasSrc := effective.Sources["resource.cfg-lab-vm"]
+	require.True(t, hasSrc, "cluster resource source must be tracked in effective config")
+	assert.Contains(t, src.Source, "cluster-policies",
+		"source description must identify the cluster-policies namespace")
+}
+
+// TestNewConfigurationServiceV2_NoControllerSvc_NoCascade verifies that when
+// NewConfigurationServiceV2 is constructed with a nil ControllerService (test/standalone mode),
+// no cluster cascade occurs and ResolveConfiguration behaves identically to before this story.
+func TestNewConfigurationServiceV2_NoControllerSvc_NoCascade(t *testing.T) {
+	ctx := context.Background()
+	svc := createTestServiceV2(t) // nil controllerSvc
+
+	stewardID := "no-cluster-steward"
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, createTestStewardConfig(stewardID)))
+
+	effective, err := svc.GetEffectiveConfiguration(ctx, "default", stewardID)
+	require.NoError(t, err)
+	require.NotNil(t, effective, "effective config must be returned even without a cluster registry")
+
+	// No cluster-policies resources should appear (there's no registry to look up membership).
+	for _, r := range effective.Config.Resources {
+		assert.NotContains(t, r.Name, "cluster",
+			"no cluster resources expected when ControllerService is nil")
+	}
+}
+
+// TestGetConfiguration_EmptyRingVersionNoOverride proves: when the resolved ring has
+// no desired_version, the ring does not override the tenant-path desired_version.
+func TestGetConfiguration_EmptyRingVersionNoOverride(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	// Default rings with no versions set.
+	controllerSvc.SetRingConfig(controllerconfig.DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []controllerconfig.RingSpec{
+			{Name: "early"},   // no desired_version
+			{Name: "default"}, // no desired_version
+		},
+	})
+
+	stewardID := "dev-empty-ring"
+	tenantPathVersion := "v0.4.5"
+	dna := makeTestDNA(stewardID, map[string]string{"deployment_ring": "early"})
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	cfg := createTestStewardConfig(stewardID)
+	cfg.Steward.Upgrade.DesiredVersion = tenantPathVersion
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, cfg))
+
+	req := &controller.ConfigRequest{StewardId: stewardID}
+	resp, err := svc.GetConfiguration(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, resp.Status.Code)
+
+	effectiveCfg, err := stewardtypes.FromProto(resp.Config.Config)
+	require.NoError(t, err)
+
+	assert.Equal(t, tenantPathVersion, effectiveCfg.Steward.Upgrade.DesiredVersion,
+		"when ring has no desired_version, tenant-path version must be preserved")
 }

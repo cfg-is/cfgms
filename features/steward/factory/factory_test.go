@@ -5,6 +5,8 @@ package factory
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -224,10 +226,26 @@ func TestGetModuleInfo(t *testing.T) {
 
 func TestAllBuiltinModulesLoad(t *testing.T) {
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
-	for _, name := range []string{"acme", "directory", "file", "firewall", "hyperv", "package", "patch", "script"} {
+	for _, name := range []string{"acme", "directory", "file", "firewall", "github_runner", "hyperv", "package", "patch", "script"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
+	}
+}
+
+// TestGithubRunner_IsInBuiltinModuleConstructors asserts that "github_runner" is
+// present in builtinModuleConstructors (contrast with hyperv, which is absent
+// from the map and handled separately by newHypervModule). The loaded instance
+// must satisfy modules.Module.
+func TestGithubRunner_IsInBuiltinModuleConstructors(t *testing.T) {
+	ctor, ok := builtinModuleConstructors["github_runner"]
+	assert.True(t, ok, `"github_runner" must be in builtinModuleConstructors`)
+
+	if ok {
+		instance := ctor()
+		assert.NotNil(t, instance, "github_runner constructor must return a non-nil instance")
+		_, isModule := interface{}(instance).(modules.Module)
+		assert.True(t, isModule, "github_runner instance must satisfy modules.Module")
 	}
 }
 
@@ -289,14 +307,19 @@ func (s *stubSecretStore) HealthCheck(_ context.Context) error                  
 func (s *stubSecretStore) Close() error                                             { return nil }
 
 // TestInstallHyperV_BuiltinModuleNoSignatureCheck asserts that the hyperv module
-// is registered as a compiled-in builtin (not disk-loaded). Compiled-in builtins
-// do not require disk-load signature verification.
+// is a compiled-in builtin (not disk-loaded). Compiled-in builtins do not require
+// disk-load signature verification.
+//
+// hyperv is handled by newHypervModule (wires the durable provision store) and
+// early-returned in loadBuiltinModule — it is intentionally absent from
+// builtinModuleConstructors. The factory still loads it without error.
 //
 // Tracked for future: when pluggable disk-loaded modules are added, a
 // signature/integrity gate must be implemented before load.
 func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
+	// hyperv is intentionally absent from the map; it is handled via newHypervModule.
 	_, ok := builtinModuleConstructors["hyperv"]
-	assert.True(t, ok, `"hyperv" must be registered in builtinModuleConstructors`)
+	assert.False(t, ok, `"hyperv" must NOT be in builtinModuleConstructors — it is handled by newHypervModule`)
 
 	// All builtin module names are simple identifiers (no path separators).
 	// A disk-load path would contain "/" or "\" — none must exist in M1.
@@ -307,11 +330,80 @@ func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
 			"builtin module name %q must not contain path separators (no disk-load in M1)", name)
 	}
 
-	// hyperv must be loadable via the factory (exercises the constructor).
+	// hyperv must still be loadable via the factory (exercises newHypervModule).
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
 	mod, err := factory.LoadModule("hyperv")
 	assert.NoError(t, err, "hyperv builtin must load without error")
 	assert.NotNil(t, mod, "hyperv builtin module must not be nil")
+}
+
+// TestModuleFactory_Hyperv_DurableStoreCreated verifies that when LoadModule
+// creates the hyperv module, the factory attempts to construct a durable
+// provision store and creates the backing directory. Uses
+// CFGMS_HYPERV_PROVISION_STORE_DIR to redirect the store into a writable temp
+// directory — without this override the default path (/var/lib/cfgms/...) is
+// not writable in CI and the factory silently falls back to the in-memory store.
+func TestModuleFactory_Hyperv_DurableStoreCreated(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CFGMS_HYPERV_PROVISION_STORE_DIR", root)
+
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule("hyperv")
+	require.NoError(t, err, "hyperv builtin must load without error")
+	require.NotNil(t, mod, "hyperv builtin module must not be nil")
+
+	// The durable store constructor calls os.MkdirAll on the root; verify the
+	// directory exists as a side-effect proving the durable code path was reached.
+	_, statErr := os.Stat(root)
+	assert.NoError(t, statErr, "provision store root must be created by the durable store constructor")
+}
+
+// TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack verifies the
+// fallback branch of newHypervModule: when the durable provision store cannot
+// be constructed (CFGMS_HYPERV_PROVISION_STORE_DIR points at an unwritable
+// path), the factory (a) still returns a usable hyperv module with no error,
+// (b) emits the fallback Warn, and (c) selects no durable store, leaving the
+// module on its in-memory provision store for this boot.
+//
+// Without this test the degrade-to-in-memory path is silent: provision records
+// written during a session would be lost on restart, which can strand VMs in
+// surface-and-wait indefinitely.
+func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
+	// Construct a store root that os.MkdirAll cannot create regardless of uid:
+	// a regular file used as a parent path component yields ENOTDIR, which fails
+	// even when the test runs as root. (A chmod-0 directory is unreliable here
+	// because root bypasses the permission bits and MkdirAll would succeed.)
+	parent := t.TempDir()
+	occupied := filepath.Join(parent, "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
+	unwritable := filepath.Join(occupied, "provisions")
+	t.Setenv("CFGMS_HYPERV_PROVISION_STORE_DIR", unwritable)
+
+	mock := pkgtesting.NewMockLogger(true)
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, mock)
+
+	// (a) The module still loads, without error, despite the store failure.
+	mod, err := factory.LoadModule("hyperv")
+	require.NoError(t, err, "hyperv must load even when the durable store is unavailable")
+	require.NotNil(t, mod, "hyperv module must not be nil on the fallback path")
+
+	// (b) Exactly one fallback Warn was emitted by newHypervProvisionStore.
+	warnLogs := mock.GetLogs("warn")
+	require.Len(t, warnLogs, 1, "exactly one fallback Warn must be emitted")
+	assert.Equal(t,
+		"hyperv: durable provision store unavailable; using in-memory fallback for this boot",
+		warnLogs[0].Message)
+
+	// (c) No durable store was selected: the store constructor returns nil for
+	// this path, so newHypervModule builds the module on its in-memory store.
+	assert.Nil(t, factory.newHypervProvisionStore(),
+		"durable provision store must be nil when the root path is unwritable")
+
+	// The unwritable root must not have been created as a side-effect (the
+	// stat fails because a parent path component is a regular file).
+	_, statErr := os.Stat(unwritable)
+	assert.Error(t, statErr,
+		"durable store root must not exist on the fallback path")
 }
 
 func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {

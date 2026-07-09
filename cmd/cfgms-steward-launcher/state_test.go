@@ -9,6 +9,129 @@ import (
 	"testing"
 )
 
+// TestKnownGood_PersistsAndReloads verifies AC1: the known-good marker
+// (version tag + binary hash) is written atomically and survives a process
+// restart / reboot (read back from state.json by a new process).
+func TestKnownGood_PersistsAndReloads(t *testing.T) {
+	l := newLayout(t)
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	ps.KnownGood = "v1"
+	ps.KnownGoodHash = "deadbeefcafe0123456789abcdef"
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState with known-good: %v", err)
+	}
+
+	// Simulate process restart: create a fresh Layout over the same Root.
+	l2 := Layout{Root: l.Root, StewardBinaryName: l.StewardBinaryName}
+	ps2, err := l2.loadState()
+	if err != nil {
+		t.Fatalf("loadState after simulated restart: %v", err)
+	}
+	if ps2.KnownGood != "v1" {
+		t.Errorf("KnownGood = %q, want v1 — marker must survive reboot", ps2.KnownGood)
+	}
+	if ps2.KnownGoodHash != "deadbeefcafe0123456789abcdef" {
+		t.Errorf("KnownGoodHash = %q, want original hash", ps2.KnownGoodHash)
+	}
+	// Other fields must be intact.
+	if ps2.Current != "v1" {
+		t.Errorf("Current = %q, want v1", ps2.Current)
+	}
+}
+
+// TestWriteCurrent_ClearsKnownGoodOnVersionChange verifies AC6 (state side):
+// a cutover to a new version clears the known-good marker so the incoming
+// binary enters probation.
+func TestWriteCurrent_ClearsKnownGoodOnVersionChange(t *testing.T) {
+	l := newLayout(t)
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+
+	// Pre-mark v1 as known-good.
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	ps.KnownGood = "v1"
+	ps.KnownGoodHash = "abc123"
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	// Cutover to v2 (new version).
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+
+	ps2, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState after cutover: %v", err)
+	}
+	if ps2.KnownGood != "" {
+		t.Errorf("KnownGood = %q after cutover, want empty — new version must enter probation", ps2.KnownGood)
+	}
+	if ps2.KnownGoodHash != "" {
+		t.Errorf("KnownGoodHash = %q after cutover, want empty", ps2.KnownGoodHash)
+	}
+	if ps2.Current != "v2" {
+		t.Errorf("Current = %q, want v2", ps2.Current)
+	}
+	if ps2.Previous != "v1" {
+		t.Errorf("Previous = %q, want v1", ps2.Previous)
+	}
+}
+
+// TestComputeBinaryHash_MissingFileReturnsError verifies the error path of
+// computeBinaryHash: a missing file must return a non-nil error (not a zero hash).
+func TestComputeBinaryHash_MissingFileReturnsError(t *testing.T) {
+	_, err := computeBinaryHash(filepath.Join(t.TempDir(), "nonexistent-binary"))
+	if err == nil {
+		t.Fatal("computeBinaryHash of nonexistent file returned nil error, want error")
+	}
+}
+
+// TestWriteCurrent_PreservesKnownGoodOnNoOp verifies that re-writing the same
+// version does not clear the known-good marker (idempotent no-op).
+func TestWriteCurrent_PreservesKnownGoodOnNoOp(t *testing.T) {
+	l := newLayout(t)
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	ps.KnownGood = "v1"
+	ps.KnownGoodHash = "abc123"
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	// Re-write same version — must not clear marker.
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1 again: %v", err)
+	}
+
+	ps2, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if ps2.KnownGood != "v1" {
+		t.Errorf("KnownGood = %q after no-op WriteCurrent, want v1 — must not clear marker", ps2.KnownGood)
+	}
+	if ps2.KnownGoodHash != "abc123" {
+		t.Errorf("KnownGoodHash = %q, want abc123", ps2.KnownGoodHash)
+	}
+}
+
 func newLayout(t *testing.T) Layout {
 	t.Helper()
 	return Layout{

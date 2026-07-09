@@ -59,6 +59,7 @@ type EphemeralKeyManager struct {
 	mu              sync.RWMutex
 	cleanupInterval time.Duration
 	stopCleanup     chan struct{}
+	stopOnce        sync.Once
 }
 
 // NewEphemeralKeyManager creates a new ephemeral key manager
@@ -253,9 +254,9 @@ func (m *EphemeralKeyManager) performCleanup() {
 	}
 }
 
-// Stop stops the cleanup goroutine
+// Stop stops the cleanup goroutine. Safe to call multiple times.
 func (m *EphemeralKeyManager) Stop() {
-	close(m.stopCleanup)
+	m.stopOnce.Do(func() { close(m.stopCleanup) })
 }
 
 // KeyGenerationOptions provides options for key generation

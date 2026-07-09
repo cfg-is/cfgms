@@ -23,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -123,7 +124,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse selector and apply tenant scope.
-	filter, err := fleet.ParseTargetSelector(req.Selector)
+	filter, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Invalid selector: "+err.Error(),

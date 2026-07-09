@@ -31,7 +31,7 @@ func TestExperimentalBuildProvidersReturnSimulatedSuccess(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.provider, func(t *testing.T) {
 			logger := pkgtesting.NewMockLogger(true)
-			registry := NewProviderRegistry(logger)
+			registry := NewProviderRegistry(logger, nil)
 
 			config := &APIConfig{
 				Provider:  tc.provider,

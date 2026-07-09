@@ -165,11 +165,161 @@ The controller decides which steward gets which cfg based on:
 - **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
 - **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
 - **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth ✓ implemented (`InheritanceResolver.ResolveConfiguration()`)
+- **Cluster membership** — a steward that belongs to one or more clusters (Hyper-V, SQL, etc.) receives an additional `cluster-policies/<clusterName>` config layer inserted after Group-level and before Device-level in the merge order ✓ implemented (`InheritanceResolver` cluster-policies cascade, Issue #2425)
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
 - **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression — tags exist on steward records (fleet query supports tag filtering for device lists), but tag-based cfg distribution fanout is not yet implemented; the current fanout sends to all active stewards
 - **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) — desired state; not currently implemented in cfg distribution
 
-**Deployment rings (convention):** operators commonly tag stewards with ring identifiers (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) and author phased rollouts as separate cfgs or staged target lists. v1 is convention; auto-progressive ring machinery (with bake time + health gating) is a future enhancement.
+**Deployment rings:** see the Deployment Rings section below for the v1 mechanism. Operator-tagged phased rollouts using separate cfgs are still supported alongside rings.
+
+### Cluster-Policies Cascade
+
+Stewards that are members of a named cluster (Hyper-V failover cluster, SQL AG, etc.) receive an additional configuration layer sourced from `cluster-policies/<clusterName>`. This layer is applied by `InheritanceResolver.ResolveConfiguration()` after the tenant hierarchy and before device-level config.
+
+**Merge priority order (lowest → highest):**
+
+| Level | ConfigKey namespace | Source |
+|-------|--------------------|-----------------------|
+| MSP | `msp-policies/global` | Tenant hierarchy root |
+| Client | `client-policies/<tenantID>` | Tenant hierarchy |
+| Group | `group-policies/<tenantID>-groups` | Tenant hierarchy |
+| **Cluster** | **`cluster-policies/<clusterName>`** | **Cluster membership (DNA attributes)** |
+| Device | `stewards/<stewardID>` | Device-level override |
+
+A device-level resource of the same name always wins over a cluster-policy resource. A cluster-policy resource overrides group-level defaults for the same name.
+
+**Sourcing cluster membership:** the cluster registry is derived from steward DNA attributes published by the steward's `DNARefreshLoop` ticker (default 30 min). A steward that carries `cluster:<clusterName>.*` DNA attributes is recorded as a member of that cluster. Membership is **eventually consistent**: a steward joining or leaving a cluster can take up to one refresh interval before `ResolveConfiguration` reflects the change.
+
+**Authoring cluster-policies configs:** use the existing config-push path (`cfg config upload`) to store a `ConfigKey{Namespace: "cluster-policies", Name: "<clusterName>"}` document for the cluster's tenant. The resolver looks up this document automatically for every member steward.
+
+**No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
+
+## Deployment Rings
+
+Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; each steward subscribes to a ring via its DNA attribute `deployment_ring`; and config delivery resolves the effective `desired_version` from the ring.
+
+### Ring Configuration
+
+Rings are declared in the controller config under `deployment_rings:`. Example with the four default rings:
+
+```yaml
+deployment_rings:
+  fallback_ring: default          # ring used for stewards with no/invalid ring attribute
+  rings:
+    - name: pre-release           # name must match ^[a-z][a-z0-9-]{0,31}$
+      desired_version: "v0.6.0"   # version targeted at this ring; empty = no override
+    - name: early
+      desired_version: "v0.5.21"
+      soak: 24h                   # Story S3: minimum soak before promotion
+      halt_threshold: 0.05        # Story S3: error-rate threshold that halts promotion
+      concurrency_limit: 10       # Story S3: max simultaneous upgrades in this ring
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+```
+
+When `deployment_rings:` is absent from controller config, the default four-ring set is applied automatically: `pre-release → early → default → stable`, with `default` as the fallback ring.
+
+**Validation at startup:** ring names must be non-empty, unique within the set, and match `^[a-z][a-z0-9-]{0,31}$`. The `fallback_ring` must name a declared ring. Invalid config causes a startup error.
+
+### Steward Ring Subscription
+
+A steward subscribes to a ring via the `deployment_ring` DNA attribute, set by the operator:
+
+```
+cfg dna set <steward-id> deployment_ring early
+```
+
+The controller validates the attribute value at config-delivery time (not at DNA-write time). The `deployment_ring` attribute is a plain string set by the operator — stewards do not self-assign rings.
+
+### Ring-Resolved Config Delivery
+
+When the controller delivers config to a steward (`GetConfiguration`):
+
+1. The inheritance resolver walks the tenant hierarchy and produces the effective config, including any `desired_version` set at the tenant-config path.
+2. The controller reads the steward's DNA `deployment_ring` attribute.
+3. `ResolveRingVersion` (`pkg/config/inheritance.go`) looks up the ring in the declared ring set.
+4. If the resolved ring has a non-empty `desired_version`, that value **overrides** the tenant-path `desired_version`. This makes rings the authoritative targeting vocabulary for version rollouts.
+5. If `desired_version` is empty for the resolved ring, no override is applied and the tenant-path value is used unchanged.
+
+### Fallback Behavior
+
+When a steward's `deployment_ring` is absent or names a ring not in the declared set, the controller falls back to the `fallback_ring`. The fallback is logged as a structured WARN:
+
+```
+deployment_ring_fallback  steward_id=<id>  ring_value=<original or empty>  fallback_ring=default
+```
+
+This is the v1 anomaly surface; a metric/alert layer is a follow-on story. Operators should assign all fleet stewards to rings to suppress this warning.
+
+### Ring-Set Change Audit
+
+Every change to the ring set (add/remove/reorder/version change) is logged at INFO level via the structured audit logger with actor, before-state, and after-state:
+
+```
+ring_set_changed  actor=controller  before=[pre-release=v0.5.20,...] fallback=default  after=[...]
+```
+
+Ring-set mutation happens only via controller config file reload or restart. No live-mutation REST API exists in this version.
+
+### Ordered Promotion Model
+
+The ring order in `deployment_rings.rings` defines the promotion sequence: the operator advances a version from earlier rings (pre-release → early → default → stable) by setting `desired_version` on each ring. The rollout workflow that automates this advancement is described in the [Rollout Workflow](#rollout-workflow) section below.
+
+### Rollout Workflow
+
+`POST /api/v1/rollout` starts a ring-advance rollout that moves a target steward binary version through the ordered ring set. Each ring transition is governed by a configurable soak period and a health gate; if the health gate fails the rollout halts and the operator must resolve the issue before restarting.
+
+#### Ring-Advance Loop
+
+The rollout goroutine processes rings in declaration order:
+
+1. **Set desired_version** — the ring's `desired_version` is updated in-memory to the target version, making it visible to ring health queries for this controller process.
+2. **Soak** — if `ring.soak` is non-zero, the goroutine waits the soak duration before sampling health. Zero soak skips the wait.
+3. **Query ring health** — the fleet is queried for all stewards with `deployment_ring = <ring>`. Each steward is classified as:
+   - **on-version**: `RunningVersion == desired_version`
+   - **failed**: has a terminal-failure upgrade record (`status: failed` or `rolled_back`) for this version
+   - **pending**: all others (no record yet, or an in-progress upgrade)
+4. **Halt or advance**: if `failed / (on_version + failed) > halt_threshold` the rollout transitions to `halted`. Otherwise the ring is marked completed and the loop advances to the next ring.
+
+#### Failure Policy
+
+**Per-endpoint requeue**: a steward that does not reach the target version is not dropped. Its ID is appended to `RolloutRecord.DeferredStewards` after the health gate runs. The steward's `deployment_ring` attribute is never mutated by the rollout; it remains in its ring and will be retried on the next rollout pass.
+
+**Per-ring halt**: if `failed_count / (on_version_count + failed_count) > halt_threshold` (per-ring `RingSpec` field, default 0.05) the rollout halts: no further ring promotions occur, no new dispatches are issued, and a structured error is logged. The operator resolves the failures and re-issues the rollout.
+
+Pending stewards are excluded from the halt-threshold denominator — they are still in-flight and are counted separately.
+
+#### Operator Halt
+
+`POST /api/v1/rollout/{rollout_id}/halt` signals the rollout goroutine to stop advancing. The goroutine checks the halt signal at soak time and at each ring boundary. The rollout record transitions to `halted` status immediately on the API call; the goroutine exits at the next checkpoint.
+
+#### Rollout Status
+
+`GET /api/v1/rollout/{rollout_id}` returns:
+
+| Field | Description |
+|-------|-------------|
+| `current_ring` | Ring currently being processed; empty when completed |
+| `status` | `in-progress`, `halted`, or `completed` |
+| `on_version_pct` | Percentage of current-ring stewards on the target version |
+| `failed_count` | Stewards with terminal upgrade failures in the current ring |
+| `pending_count` | Stewards still in progress in the current ring |
+| `rings_completed` | Number of rings that passed the health gate |
+| `rings_total` | Total rings in the rollout plan |
+
+Health metrics are computed live against the current ring for in-progress rollouts; terminal states report the final observed values.
+
+#### v1 In-Memory Durability Risk
+
+The rollout goroutine runs in memory on the in-memory workflow engine. **A controller restart during a rollout loses the orchestration state (current ring, progress counter).** The operator must re-issue the rollout after restart.
+
+Ring `desired_version` mutations applied by the goroutine are in-memory only in v1; they survive for the lifetime of the controller process but are not persisted to the git-backed config. The `RolloutRecord` stored in `RolloutStore` is durable (git-backed or database-backed depending on the configured provider) and tracks which rings were completed before the restart.
+
+**Mitigation**: the operator re-issues `POST /api/v1/rollout` after restart. Rings already at the target version will pass their health gate quickly (soak re-runs from scratch); rings not yet reached are processed as if starting fresh. No data is lost; at most a soak period is duplicated.
+
+This risk is tracked in [ADR-008](decisions/008-durable-workflow-execution.md) and will be addressed when durable workflow execution (DBOS or equivalent) is adopted. Do not engineer around this limitation in v1 stories.
 
 ### Config Signing
 
@@ -200,8 +350,9 @@ For each steward, the controller tracks:
 | Last heartbeat | gRPC heartbeat calls | Configurable interval |
 | Health status | Heartbeat payload | With each heartbeat |
 | Compliance status | Convergence result reports | After each convergence run |
-| DNA hash | Heartbeat payload | With each heartbeat |
-| DNA snapshot | Full sync (data plane) or deltas (control plane) | On hash mismatch, initial registration, or as changes occur |
+| DNA aggregate root | Heartbeat payload | With each heartbeat |
+| DNA fragments | Full sync (initial) or partial-sync deltas (data plane); stored **versioned/append-only** | On root mismatch, initial registration, or as changes occur |
+| Steward version | Heartbeat `Version` field + `steward.version` DNA attribute | With each heartbeat and DNA delta |
 | Performance metrics | Steward metric uploads | Periodic + on-demand |
 
 ### Heartbeat Monitoring
@@ -274,11 +425,63 @@ The controller can send commands to stewards over the gRPC control plane service
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
+### Steward Auto-Upgrade via `desired_version` (Issue #2260)
+
+Operators pin the steward version fleet-wide or per-tenant via the `steward.upgrade` cfg block:
+
+```yaml
+steward:
+  upgrade:
+    desired_version: "v1.4.2"
+    allow_downgrade: false   # default; set true to permit rollback
+```
+
+**Inheritance:** `desired_version` and `allow_downgrade` flow through the normal cfg-inheritance tree (root → tenant → group → device). A child setting overrides the parent. Absence at a level means the parent value is inherited unchanged.
+
+**How a steward converges to `desired_version`:**
+
+1. The controller pushes a new steward binary to the endpoint via the `push_steward_binary` data-plane command. The steward downloads, verifies, and stages the binary under `{Root}/versions/{version}/{binaryName}`, then invokes the launcher's `swap` sub-command. On success, the staged version and path are recorded internally (`lastStagedVersion` / `lastStagedBinaryPath`).
+2. On every cfg-convergence cycle (`TriggerConvergence`), the steward reads `desired_version` from its last received cfg. If it differs from the running version, the steward re-invokes the launcher swap against the already-staged binary without downloading again.
+3. If `allow_downgrade` is `false` (the default) and `desired_version` is older than the running version, the swap is blocked. Set `allow_downgrade: true` to permit explicit rollbacks.
+
+**Downgrade guard:**
+- Blocked unless `allow_downgrade` is `true` in either the running cfg or the controller-synced config cache (`upgradeAllowDowngrade`).
+- This prevents accidental downgrades from misconfigured cfg pushes.
+
+**Version tracking in DNA and heartbeats:**
+- `steward.version` is injected into every DNA delta before publish. The controller stores it as a DNA attribute and exposes it in the fleet list API (`GET /api/v1/stewards`).
+- Every heartbeat now carries a `Version` field, which `RecordHeartbeat` uses to keep the in-memory fleet registry current.
+
+**Fleet visibility:** the steward API list response includes `version` (from `steward.version` DNA attribute) alongside `id`, `status`, and `last_seen`. Operators can filter and audit version skew across the fleet without a separate inventory tool.
+
 ## Orchestration
 
 The controller coordinates operations that span multiple stewards. Individual stewards apply their own cfgs; the controller determines sequencing and timing.
 
-> [GAP: No orchestration engine is implemented in the current codebase. This section describes the desired-state design for multi-node operation coordination. The REST API category and model below are aspirational — they define the intended behavior for future implementation tracking.]
+### Batch Job Dispatch (Issue #2296)
+
+Rolling-batch jobs are the primary orchestration primitive. A batch job:
+
+1. Resolves a fleet selector to a list of steward IDs.
+2. Partitions the list into waves of `batch_size` stewards.
+3. Dispatches a `ConfigSyncBatch` command to each wave via the `RollingBatchExecutor`.
+4. Tracks per-step status in `BatchJobStore` (pending → running → completed/failed).
+
+**REST API:**
+
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| `POST` | `/api/v1/jobs` | `jobs:write` | Submit a rolling-batch job; returns 202 Accepted with job ID |
+| `GET`  | `/api/v1/jobs/{id}` | `jobs:write` | Poll job status and step table |
+
+**CLI:**
+
+```
+cfg job submit --selector <expr> [--batch-size <n>]   # default batch-size 10
+cfg job status <job-id>
+```
+
+The executor runs asynchronously — the HTTP response returns immediately with the job ID. Callers poll `GET /api/v1/jobs/{id}` for progress.
 
 ### Orchestration Model
 
@@ -446,6 +649,7 @@ The workflow engine must support the following capabilities to fulfill its role 
 - **Debugging** — failed workflow runs retain full execution detail (inputs, outputs, and API request/response at every node) so failures can be diagnosed from history without re-execution. Successful runs retain summary-level traces. Debug depth and retention are configurable per workflow. Step-through execution with breakpoints available during development. Resume or re-run from any failed node without restarting the entire workflow
 - **Testing** — sandbox execution, replay failed runs, input/output inspection per node
 - **Versioning** — workflow version history, rollback to previous versions
+- **Operability** — operators can inspect and control running executions via the `cfg` CLI: `cfg workflow list` (definitions), `cfg workflow status <exec-id> --workflow <name>` (per-execution state and current step), `cfg workflow cancel <exec-id> --workflow <name>` (cancel a running execution). See [commands reference](../development/commands-reference.md#workflow-management).
 
 ### Workflow vs Cfg Summary
 
@@ -611,6 +815,36 @@ Three authentication mechanisms, used for different purposes.
 **Registration tokens (steward bootstrap only)**
 - Scoped, expirable tokens for the steward registration flow described in [Steward Registration](#steward-registration)
 - Not usable for general API authentication after bootstrap
+
+### Admin Session Model
+
+The zero-standing-privilege session model (ADR-014) eliminates long-lived admin credentials: a human admin authenticates once with a short-lived mTLS certificate, receives a rolling bearer token, and the token automatically expires if unused.
+
+For the operator-facing CLI workflow (first connect, reconnect, session status, disconnect), see the [cfg Operator Guide](../../deployment/cfg-operator-guide.md). This section documents the server-side mechanics.
+
+**Session lifecycle:**
+
+1. `POST /api/v1/sessions` — admin mTLS only; returns `{session_id, token, issued_at, idle_ttl, absolute_expiry}` (HTTP 201). The token is a 43-char base64url string (32 random bytes from `crypto/rand`, 256 bits of entropy). The `cfg connect` command drives this call.
+2. Every authenticated request carrying `Authorization: Bearer <session-token>` resets the idle TTL and returns a refreshed token in the `X-Session-Token` response header. The client replaces its stored token with the refreshed value on each response. The `cfg` CLI handles token rotation transparently — each subcommand that makes an API call automatically updates the stored token.
+3. `DELETE /api/v1/sessions/{id}` — revokes immediately; callable with a valid session token or an admin mTLS cert. The `cfg disconnect` command drives this call.
+
+**Token lifecycle parameters (ADR-014 ratified defaults):**
+
+| Parameter | Default | Description |
+|---|---|---|
+| Idle TTL | 15 minutes | Session expires if no request is made within this window |
+| Absolute cap | 8 hours | Hard ceiling from original connect, regardless of activity |
+| Grace window | 30 seconds | Prior token remains valid this long after a renewal (tolerates racing requests from a stateless CLI) |
+
+**Rolling-token model:** On each successful request, the controller generates a fresh token (current token → new token, old token moves to grace slot). Concurrent requests carrying the prior token during the grace window are accepted without triggering a second rotation. After the grace window, the prior token is rejected (HTTP 401).
+
+**Security properties:**
+- The controller stores only SHA-256(token) — raw token values are never persisted or logged.
+- Token values are sanitized from all log output via `logging.SanitizeLogValue()`.
+- Session-token principals carry `IsAdmin=true` with the same tenant scope as the originating mTLS cert (typically empty for admin certs, meaning no tenant restriction).
+- Session tokens are length-distinguishable from API keys: session tokens are 43 chars (base64url without padding), API keys are 44 chars (base64url with padding). The middleware uses this length difference to route auth correctly.
+- A controller restart drops all sessions (re-auth required); durable session store is deferred to the SaaS cluster story (#2051).
+- The `cfg` CLI stores the session token in the OS-native secret store (Windows Credential Manager, macOS Keychain, Linux Secret Service or kernel keyring) — never in a file on disk. The encrypted admin bundle stored alongside it is machine-bound and cannot be reused from another machine.
 
 ## Multi-Tenancy
 

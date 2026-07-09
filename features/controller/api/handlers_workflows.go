@@ -63,6 +63,8 @@ func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) {
 	router.HandleFunc("/{id}", h.handleDeleteWorkflow).Methods("DELETE")
 	router.HandleFunc("/{id}/execute", h.handleExecuteWorkflow).Methods("POST")
 	router.HandleFunc("/{id}/executions", h.handleGetWorkflowExecutions).Methods("GET")
+	router.HandleFunc("/{id}/executions/{exec_id}", h.handleGetExecution).Methods("GET")
+	router.HandleFunc("/{id}/executions/{exec_id}/cancel", h.handleCancelExecution).Methods("POST")
 }
 
 // NewRegistrationApprovalHook creates a RegistrationApprovalHook backed by this handler's
@@ -382,6 +384,116 @@ func (h *WorkflowHandler) handleGetWorkflowExecutions(w http.ResponseWriter, r *
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{
 		"executions": executions,
 		"count":      len(executions),
+	})
+}
+
+// handleGetExecution handles GET /api/v1/workflows/{id}/executions/{exec_id}
+func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.sendError(w, http.StatusServiceUnavailable, "workflow engine not available")
+		return
+	}
+
+	vars := mux.Vars(r)
+	name := vars["id"]
+	execID := vars["exec_id"]
+
+	if name == "" || execID == "" {
+		h.sendError(w, http.StatusBadRequest, "workflow name and execution ID are required")
+		return
+	}
+
+	nameForLog := logging.SanitizeLogValue(name)
+	execIDForLog := logging.SanitizeLogValue(execID)
+
+	execution, err := h.engine.GetExecution(execID)
+	if err != nil || execution == nil {
+		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", err)
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+		return
+	}
+
+	if execution.WorkflowName != name {
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found for workflow %q", execID, name))
+		return
+	}
+
+	// Tenant isolation: verify the workflow exists in the calling tenant's namespace.
+	// A future GET /api/v1/executions/{exec_id} lookup-by-ID endpoint can bypass this
+	// once executions carry a tenant_id field.
+	if h.configStore != nil {
+		store := h.workflowStoreForRequest(r)
+		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
+			h.logger.Error("Tenant isolation check failed for execution get",
+				"name", nameForLog, "exec_id", execIDForLog)
+			h.sendError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
+	h.sendJSON(w, http.StatusOK, execution)
+}
+
+// handleCancelExecution handles POST /api/v1/workflows/{id}/executions/{exec_id}/cancel
+func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.sendError(w, http.StatusServiceUnavailable, "workflow engine not available")
+		return
+	}
+
+	vars := mux.Vars(r)
+	name := vars["id"]
+	execID := vars["exec_id"]
+
+	if name == "" || execID == "" {
+		h.sendError(w, http.StatusBadRequest, "workflow name and execution ID are required")
+		return
+	}
+
+	nameForLog := logging.SanitizeLogValue(name)
+	execIDForLog := logging.SanitizeLogValue(execID)
+
+	// Pre-check existence before acting. CancelExecution returns nil for already-terminal
+	// executions (it skips the cancel when Cancel func is nil) and a plain error string for
+	// not-found — neither signal is suitable for HTTP status mapping, so we gate here.
+	execution, err := h.engine.GetExecution(execID)
+	if err != nil || execution == nil {
+		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", err)
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+		return
+	}
+
+	if execution.WorkflowName != name {
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found for workflow %q", execID, name))
+		return
+	}
+
+	// Tenant isolation: reject cross-tenant cancellation.
+	if h.configStore != nil {
+		store := h.workflowStoreForRequest(r)
+		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
+			h.logger.Error("Tenant isolation check failed for execution cancel",
+				"name", nameForLog, "exec_id", execIDForLog)
+			h.sendError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
+	// Reject already-terminal executions before calling CancelExecution.
+	status := execution.GetStatus()
+	if status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled {
+		h.sendError(w, http.StatusConflict, "execution is already in a terminal state")
+		return
+	}
+
+	if cancelErr := h.engine.CancelExecution(execID); cancelErr != nil {
+		h.logger.Error("Failed to cancel execution", "name", nameForLog, "exec_id", execIDForLog, "error", cancelErr)
+		h.sendError(w, http.StatusInternalServerError, "failed to cancel execution")
+		return
+	}
+
+	h.sendJSON(w, http.StatusOK, map[string]interface{}{
+		"cancelled": execID,
 	})
 }
 

@@ -541,3 +541,72 @@ func TestGetLastAuditEntry_TenantIsolation(t *testing.T) {
 	require.NotNil(t, lastB)
 	assert.Equal(t, uint64(1), lastB.SequenceNumber)
 }
+
+// TestGetAuditEntry_HierarchicalTenantID verifies that GetAuditEntry finds entries
+// stored under hierarchical tenant IDs (e.g. "fleet-root/fleet-child-a") whose audit
+// files live in nested subdirectories rather than directly under root.
+func TestGetAuditEntry_HierarchicalTenantID(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+
+	e := minimalEntry("hier-get-1", "fleet-root/fleet-child-a", time.Now().UTC())
+	require.NoError(t, store.StoreAuditEntry(ctx, e))
+
+	got, err := store.GetAuditEntry(ctx, "hier-get-1")
+	require.NoError(t, err)
+	assert.Equal(t, "hier-get-1", got.ID)
+	assert.Equal(t, "fleet-root/fleet-child-a", got.TenantID)
+}
+
+// TestListAuditEntries_HierarchicalTenantID verifies that ListAuditEntries with no
+// TenantID filter correctly finds entries stored under hierarchical tenant IDs
+// (e.g. "fleet-root/fleet-child-a"). The store persists them under nested subdirectories;
+// the no-filter path must walk the tree to discover them rather than only listing
+// top-level directories under root.
+func TestListAuditEntries_HierarchicalTenantID(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	childA := "fleet-root/fleet-child-a"
+	childB := "fleet-root/fleet-child-b"
+
+	eA1 := minimalEntry("hier-a1", childA, now)
+	eA1.Action = "refresh_cert_issued"
+	eA1.UserID = "device-aaa"
+	eA2 := minimalEntry("hier-a2", childA, now)
+	eA2.Action = "refresh_cert_issued"
+	eA2.UserID = "device-aaa"
+	eB1 := minimalEntry("hier-b1", childB, now)
+	eB1.Action = "refresh_queued"
+	eB1.UserID = "device-bbb"
+
+	require.NoError(t, store.StoreAuditEntry(ctx, eA1))
+	require.NoError(t, store.StoreAuditEntry(ctx, eA2))
+	require.NoError(t, store.StoreAuditEntry(ctx, eB1))
+
+	// Query with no TenantID — must find entries across all nested tenants.
+	all, err := store.ListAuditEntries(ctx, &business.AuditFilter{})
+	require.NoError(t, err)
+	assert.Len(t, all, 3, "all three hierarchical-tenant entries must be visible without a TenantID filter")
+
+	// Filter by action: only childA's entries.
+	byAction, err := store.ListAuditEntries(ctx, &business.AuditFilter{
+		Actions: []string{"refresh_cert_issued"},
+	})
+	require.NoError(t, err)
+	assert.Len(t, byAction, 2)
+
+	// Filter by user_id without specifying tenant: must still find them.
+	byUser, err := store.ListAuditEntries(ctx, &business.AuditFilter{
+		UserIDs: []string{"device-bbb"},
+	})
+	require.NoError(t, err)
+	require.Len(t, byUser, 1)
+	assert.Equal(t, "hier-b1", byUser[0].ID)
+
+	// Filter with specific TenantID still works.
+	byTenant, err := store.ListAuditEntries(ctx, &business.AuditFilter{TenantID: childA})
+	require.NoError(t, err)
+	assert.Len(t, byTenant, 2)
+}

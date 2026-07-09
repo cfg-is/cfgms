@@ -35,13 +35,25 @@ func TestParse_All_ReturnsEmptyFilter(t *testing.T) {
 func TestParse_Name(t *testing.T) {
 	f, err := Parse("name:my-server")
 	require.NoError(t, err)
-	assert.Equal(t, "my-server", f.Hostname)
+	assert.Equal(t, "my-server", f.Name)
 }
 
 func TestParse_Name_TrailingGlob(t *testing.T) {
 	f, err := Parse("name:es-hv0*")
 	require.NoError(t, err)
-	assert.Equal(t, "es-hv0*", f.Hostname)
+	assert.Equal(t, "es-hv0*", f.Name)
+}
+
+func TestParse_Name_LeadingGlob(t *testing.T) {
+	f, err := Parse("name:*web")
+	require.NoError(t, err)
+	assert.Equal(t, "*web", f.Name)
+}
+
+func TestParse_Name_MidStringGlob(t *testing.T) {
+	f, err := Parse("name:web*1")
+	require.NoError(t, err)
+	assert.Equal(t, "web*1", f.Name)
 }
 
 func TestParse_OS(t *testing.T) {
@@ -107,7 +119,7 @@ func TestParse_DNAKey_Quoted(t *testing.T) {
 func TestParse_Combined(t *testing.T) {
 	f, err := Parse(`name:es-hv0* os:"windows server" tag:prod dna.arch:arm64`)
 	require.NoError(t, err)
-	assert.Equal(t, "es-hv0*", f.Hostname)
+	assert.Equal(t, "es-hv0*", f.Name)
 	assert.Equal(t, "windows server", f.OS)
 	assert.Equal(t, []string{"prod"}, f.Tags)
 	assert.Equal(t, map[string]string{"arch": "arm64"}, f.DNAAttributes)
@@ -239,9 +251,16 @@ func TestResolve_NameGlob_NoMatch(t *testing.T) {
 	assert.Empty(t, ids)
 }
 
-func TestResolve_NameExact_SubstringMatch(t *testing.T) {
-	ids := resolveIDs(t, "name:win-srv")
+func TestResolve_Name_ExactMatch(t *testing.T) {
+	// path.Match requires the full hostname; "win-srv" does not match "win-srv-01".
+	ids := resolveIDs(t, "name:win-srv-01")
 	assert.Equal(t, []string{"s-windows"}, ids)
+}
+
+func TestResolve_Name_ExactNoMatch(t *testing.T) {
+	// Without a glob, path.Match is an exact match — a partial name returns nothing.
+	ids := resolveIDs(t, "name:win-srv")
+	assert.Empty(t, ids)
 }
 
 func TestResolve_OS_Linux(t *testing.T) {
@@ -278,4 +297,162 @@ func TestResolve_Combined_ExactSteward(t *testing.T) {
 	// name glob + os + arch must narrow to exactly one steward.
 	ids := resolveIDs(t, "name:es-hv0* os:linux arch:arm64")
 	assert.Equal(t, []string{"s-linux-arm64"}, ids)
+}
+
+// ── id: selector tests ────────────────────────────────────────────────────────
+
+func TestParse_ID_Single(t *testing.T) {
+	f, err := Parse("id:s-linux-arm64")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-linux-arm64"}, f.IDs)
+}
+
+func TestParse_ID_MultiValue(t *testing.T) {
+	f, err := Parse("id:s-linux-arm64,s-windows")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-linux-arm64", "s-windows"}, f.IDs)
+}
+
+func TestParse_UnknownKey_ErrorIncludesID(t *testing.T) {
+	_, err := Parse("typo:value")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "id")
+}
+
+func TestResolve_ID_ExactMatch(t *testing.T) {
+	ids := resolveIDs(t, "id:s-linux-arm64")
+	assert.Equal(t, []string{"s-linux-arm64"}, ids)
+}
+
+func TestResolve_ID_NoMatch(t *testing.T) {
+	ids := resolveIDs(t, "id:nonexistent-steward")
+	assert.Empty(t, ids)
+}
+
+func TestResolve_ID_MultiValue_OR(t *testing.T) {
+	ids := resolveIDs(t, "id:s-linux-arm64,s-windows")
+	assert.ElementsMatch(t, []string{"s-linux-arm64", "s-windows"}, ids)
+}
+
+func TestResolve_ID_Combined_AND_WithOS(t *testing.T) {
+	// s-linux-arm64 is linux; combining with os:windows yields no match.
+	ids := resolveIDs(t, `id:s-linux-arm64 os:"windows server"`)
+	assert.Empty(t, ids)
+}
+
+func TestResolve_ID_Combined_AND_Matches(t *testing.T) {
+	// id:s-linux-arm64 AND os:linux — s-linux-arm64 is linux, so exactly one match.
+	ids := resolveIDs(t, "id:s-linux-arm64 os:linux")
+	assert.Equal(t, []string{"s-linux-arm64"}, ids)
+}
+
+// resolveIDsFrom is like resolveIDs but uses a caller-supplied steward list.
+func resolveIDsFrom(t *testing.T, stewards []fleet.StewardData, expr string) []string {
+	t.Helper()
+	filter, err := Parse(expr)
+	require.NoError(t, err)
+	q := fleet.NewMemoryQuery(&staticProvider{stewards: stewards})
+	results, err := q.Search(context.Background(), filter)
+	require.NoError(t, err)
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+// TestResolve_Name_LeadingGlob verifies that name:*web matches hostnames ending in
+// "web" via path.Match. Previously broken: Filter.Hostname used prefix-glob only
+// (strings.HasSuffix(v,"*")), so "*web" fell through to a literal substring search
+// that never matched anything useful.
+func TestResolve_Name_LeadingGlob(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-appweb", "online", map[string]string{"hostname": "app-web"}),
+		makeSteward("s-db", "online", map[string]string{"hostname": "db-01"}),
+	}
+	ids := resolveIDsFrom(t, stewards, "name:*web")
+	assert.Equal(t, []string{"s-appweb"}, ids)
+}
+
+// TestResolve_Name_MidStringGlob verifies that name:web*1 matches hostnames like
+// "web-01" via path.Match. Previously broken: Filter.Hostname's HasSuffix("*") check
+// failed for mid-string globs, so "web*1" fell through to a literal substring search.
+func TestResolve_Name_MidStringGlob(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-web01", "online", map[string]string{"hostname": "web-01"}),
+		makeSteward("s-web02", "online", map[string]string{"hostname": "web-02"}),
+		makeSteward("s-db01", "online", map[string]string{"hostname": "db-01"}),
+	}
+	ids := resolveIDsFrom(t, stewards, "name:web*1")
+	assert.Equal(t, []string{"s-web01"}, ids)
+}
+
+// TestParse_TableCoverage is the required table test covering every selector shape
+// both legacy parsers (selector.Parse and fleet.ParseTargetSelector) handled.
+func TestParse_TableCoverage(t *testing.T) {
+	cases := []struct {
+		name    string
+		expr    string
+		want    fleet.Filter
+		wantErr string
+	}{
+		{
+			name: "id comma-OR",
+			expr: "id:a,b",
+			want: fleet.Filter{IDs: []string{"a", "b"}},
+		},
+		{
+			name: "quoted tag with space",
+			expr: `tag:"prod east"`,
+			want: fleet.Filter{Tags: []string{"prod east"}},
+		},
+		{
+			name: "name trailing glob",
+			expr: "name:web*",
+			want: fleet.Filter{Name: "web*"},
+		},
+		{
+			name: "name leading glob (previously broken via Filter.Hostname)",
+			expr: "name:*web",
+			want: fleet.Filter{Name: "*web"},
+		},
+		{
+			name: "name mid-string glob (previously broken via Filter.Hostname)",
+			expr: "name:web*1",
+			want: fleet.Filter{Name: "web*1"},
+		},
+		{
+			name: "dna attribute",
+			expr: "dna.role:db",
+			want: fleet.Filter{DNAAttributes: map[string]string{"role": "db"}},
+		},
+		{
+			name: "all returns empty filter",
+			expr: "all",
+			want: fleet.Filter{},
+		},
+		{
+			name:    "empty string rejected",
+			expr:    "",
+			wantErr: "empty selector",
+		},
+		{
+			name:    "unknown key rejected",
+			expr:    "unknown:val",
+			wantErr: "unknown selector key",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Parse(tc.expr)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

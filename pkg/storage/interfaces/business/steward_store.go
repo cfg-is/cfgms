@@ -15,6 +15,12 @@ var ErrStewardNotFound = errors.New("steward not found")
 // ErrStewardAlreadyExists is returned when attempting to register an already-registered steward.
 var ErrStewardAlreadyExists = errors.New("steward already exists")
 
+// ErrStewardRevoked is returned by callers of GetStewardByDeviceID when the
+// returned record has Status == StewardStatusRevoked. The gate handler must
+// check for revocation before verifying the proof-of-possession signature
+// (revocation-before-PoP invariant, ADR-010 §3).
+var ErrStewardRevoked = errors.New("steward revoked")
+
 // StewardStatus represents the lifecycle state of a steward in the fleet.
 // Records are never deleted; deregistered stewards are retained for audit.
 type StewardStatus string
@@ -33,6 +39,24 @@ const (
 	// StewardStatusDeregistered indicates the steward has been explicitly deregistered.
 	// Records are retained for audit history.
 	StewardStatusDeregistered StewardStatus = "deregistered"
+
+	// StewardStatusArchived indicates the steward's mTLS cert has expired and the
+	// steward is offline. The steward may re-enter the fleet via the registration-refresh
+	// flow (ADR-010). A pending_refresh_requests entry is created when a refresh challenge
+	// is received for an archived steward.
+	StewardStatusArchived StewardStatus = "archived"
+
+	// StewardStatusDormant indicates the steward has been archived for longer than
+	// RefreshPolicy.MaxDormancyDays. Refresh requests are auto-rejected unless an
+	// operator overrides the policy. MaxDormancyDays == nil means the dormancy backstop
+	// is disabled (default OFF, ADR-010 §4).
+	StewardStatusDormant StewardStatus = "dormant"
+
+	// StewardStatusRevoked indicates the steward has been permanently denied re-entry.
+	// GetStewardByDeviceID returns the record regardless; callers must check the status
+	// and return ErrStewardRevoked before performing any proof-of-possession verification
+	// (revocation-before-PoP ordering invariant, ADR-010 §3).
+	StewardStatusRevoked StewardStatus = "revoked"
 )
 
 // StewardRecord holds the durable fleet registration data for a single steward.
@@ -74,6 +98,25 @@ type StewardRecord struct {
 	// LastHeartbeatAt is the time of the last explicit heartbeat RPC.
 	// Distinct from LastSeen: a steward may be visible (last_seen recent) without sending heartbeats.
 	LastHeartbeatAt time.Time `json:"last_heartbeat_at"`
+
+	// DeviceID is the 64-character lowercase hex fingerprint of the steward's Ed25519
+	// identity key. Set by S2c (populate-identity-fields story). Empty for stewards
+	// registered before ADR-010 was implemented.
+	DeviceID string `json:"device_id"`
+
+	// IdentityKeyPub is the raw 32-byte Ed25519 public key for this steward's device
+	// identity. Separate from the rotating mTLS certificate (ADR-010 §1). Set by S2c.
+	IdentityKeyPub []byte `json:"identity_key_pub"`
+
+	// KeyProtectionLevel describes how the private key material is protected on the
+	// steward host: "file" (software-only) or "tpm" (hardware-backed). Set by S2c.
+	KeyProtectionLevel string `json:"key_protection_level"`
+
+	// LastProvenanceJSON is the last observed provenance snapshot serialised as JSON.
+	// Provenance is a set of device-identity signals (hostname, MAC, CPU serial, etc.)
+	// used by the gate handler (S3b) to score re-entry confidence. Updated at each
+	// successful refresh. Empty until the first refresh cycle completes.
+	LastProvenanceJSON string `json:"last_provenance_json"`
 }
 
 // StewardFilter defines criteria for filtering steward queries.
@@ -104,6 +147,14 @@ type StewardStore interface {
 	// Returns ErrStewardNotFound if no record exists.
 	GetSteward(ctx context.Context, stewardID string) (*StewardRecord, error)
 
+	// GetStewardByDeviceID retrieves the record whose DeviceID matches the given
+	// 64-character hex fingerprint. Returns ErrStewardNotFound when no matching
+	// record exists. Callers must inspect the returned record's Status field and
+	// return ErrStewardRevoked if Status == StewardStatusRevoked — the store does
+	// not surface the revocation error directly (ADR-010 §3 revocation-before-PoP
+	// ordering invariant).
+	GetStewardByDeviceID(ctx context.Context, deviceID string) (*StewardRecord, error)
+
 	// ListStewards returns all steward records regardless of status.
 	ListStewards(ctx context.Context) ([]*StewardRecord, error)
 
@@ -114,6 +165,10 @@ type StewardStore interface {
 	// UpdateStewardStatus updates the lifecycle status of the given steward.
 	// Returns ErrStewardNotFound if no record exists.
 	UpdateStewardStatus(ctx context.Context, stewardID string, status StewardStatus) error
+
+	// UpdateStewardTenant moves a steward to a different tenant.
+	// Returns ErrStewardNotFound if no record exists for stewardID.
+	UpdateStewardTenant(ctx context.Context, stewardID, newTenantID string) error
 
 	// DeregisterSteward marks the steward as deregistered. Records are retained
 	// for audit history; use ListStewardsByStatus to exclude them from active views.

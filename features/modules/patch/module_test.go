@@ -534,6 +534,7 @@ func TestMockPatchManager(t *testing.T) {
 		AutoReboot: false,
 		TestMode:   false,
 	}
+	beforeInstall := time.Now()
 	err = mock.InstallPatches(context.Background(), config)
 	assert.NoError(t, err)
 
@@ -545,10 +546,13 @@ func TestMockPatchManager(t *testing.T) {
 	// Test GetLastPatchDate
 	lastPatch, err := mock.GetLastPatchDate(context.Background())
 	assert.NoError(t, err)
-	// On Windows, timer resolution may cause lastPatch to equal time.Now()
-	// Accept either before or equal to current time
-	assert.True(t, lastPatch.Before(time.Now()) || lastPatch.Equal(time.Now()),
-		"Last patch date should be before or equal to current time")
+	// Verify lastPatchDate was set during InstallPatches. Use beforeInstall as the lower
+	// bound and allow 1s future tolerance for Windows low-resolution clock and VM drift
+	// where two rapid time.Now() calls can appear out-of-order.
+	assert.False(t, lastPatch.Before(beforeInstall),
+		"Last patch date should be on or after when install started")
+	assert.False(t, lastPatch.After(time.Now().Add(time.Second)),
+		"Last patch date should not be in the future")
 
 	// Test Name
 	name := mock.Name()

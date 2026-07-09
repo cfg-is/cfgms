@@ -579,3 +579,160 @@ func TestSigningCertRotateCmd_OverlapDaysFlagRegistered(t *testing.T) {
 	require.NotNil(t, f, "--overlap-days flag must be registered on signing-cert rotate")
 	assert.Equal(t, "30", f.DefValue, "--overlap-days default must be 30")
 }
+
+func TestClusterDrainCmd_PostsToDrainEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"draining"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDrainCmd.RunE(clusterDrainCmd, []string{"test-node"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/cluster/nodes/test-node/drain", gotPath)
+}
+
+func TestClusterDecommissionCmd_PostsToDecommissionEndpoint(t *testing.T) {
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"decommissioned"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDecommissionCmd.RunE(clusterDecommissionCmd, []string{"test-node"})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/cluster/nodes/test-node/decommission", gotPath)
+}
+
+func TestClusterDrainCmd_HTTP403_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDrainCmd.RunE(clusterDrainCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mTLS")
+}
+
+func TestClusterDecommissionCmd_HTTP403_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDecommissionCmd.RunE(clusterDecommissionCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mTLS")
+}
+
+func TestClusterDecommissionCmd_HTTP409_ReturnsBodyAsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte("node is not in draining state"))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDecommissionCmd.RunE(clusterDecommissionCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "draining state")
+}
+
+func TestClusterDrainCmd_OtherHTTPError_ReturnsStatusAndBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := clusterDrainCmd.RunE(clusterDrainCmd, []string{"test-node"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestClusterCmd_SubcommandsRegistered(t *testing.T) {
+	var clusterFound bool
+	for _, sub := range controllerCmd.Commands() {
+		if sub.Use == "cluster" {
+			clusterFound = true
+			var drainFound, decommissionFound bool
+			for _, csub := range sub.Commands() {
+				switch csub.Use {
+				case "drain <node-id>":
+					drainFound = true
+				case "decommission <node-id>":
+					decommissionFound = true
+				}
+			}
+			assert.True(t, drainFound, "cluster must have a drain subcommand")
+			assert.True(t, decommissionFound, "cluster must have a decommission subcommand")
+		}
+	}
+	assert.True(t, clusterFound, "controllerCmd must have a cluster subcommand")
+}

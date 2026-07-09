@@ -14,11 +14,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -33,7 +36,9 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -42,6 +47,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -65,48 +71,73 @@ type Server struct {
 	systemMonitor                  *monitoring.SystemMonitor
 	healthCollector                *health.Collector
 	haManager                      *ha.Manager
-	apiKeys                        map[string]*APIKey                // In-memory cache for fast lookup
-	secretStore                    secretsif.SecretStore             // M-AUTH-1: Central secrets provider for API keys
-	registrationTokenStore         registration.Store                // Registration token store for steward registration
-	corsConfig                     *CORSConfig                       // CORS configuration
-	signerCertSerial               string                            // Story #378: Serial of cert used for config signing
-	authDefense                    *authdefense.AuthDefenseSystem    // Story #380: Three-tier auth defense
-	rollbackManager                rollback.RollbackManager          // Story #416: Rollback system
-	reportsHandler                 *reportapi.Handler                // Story #416: Reports engine
-	workflowHandler                *WorkflowHandler                  // Story #414: Workflow engine REST API
-	approvalHook                   RegistrationApprovalHook          // Issue #422: Registration approval hook
-	fleetQuery                     fleet.FleetQuery                  // Issue #603: Single query path for device filtering
-	gitSyncWebhookHandler          http.Handler                      // Issue #666: git-sync webhook endpoint (optional)
-	auditManager                   *audit.Manager                    // Issue #775: registration audit events
-	scriptTracker                  script.ExecutionTracker           // Issue #708: durable execution audit records
-	scriptAuditLogger              *script.AuditLogger               // Issue #708: in-memory execution metrics
-	scriptMonitor                  *script.ExecutionMonitor          // Issue #708: active execution tracking
-	scriptRepo                     script.ScriptRepository           // Issue #1670: git-backed script library
-	privilegeStore                 cfgconfig.ConfigStore             // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus               leaderStatus                      // Issue #1318: leader check for config push (nil = leader)
-	commandPublisher               *commands.Publisher               // Issue #1319: fan-out config push to active stewards
-	pushStore                      business.PushStore                // Issue #1320: durable push-state persistence for HA failover
-	registry                       registry.Registry                 // Issue #1323: active steward connection registry
-	mountPointValidator            MountPointValidator               // Issue #1396: config source connection test
-	configSourceSecretStore        secretsif.SecretStore             // Issue #1396: secrets for config source validator
-	configSourceRateLimits         sync.Map                          // Issue #1396: per-tenant rate-limit counters
-	pendingStore                   business.PendingRegistrationStore // Issue #1696: durable pending-registration queue
-	ipTrustStore                   business.IPTrustStore             // Issue #1698: operator IP-trust management
-	runManager                     *controllerrun.Manager            // Issue #1673: run/job/execution model
-	runExecutionQueue              *script.ExecutionQueue            // Issue #1673: queue for ad-hoc run synthesis
-	trustedProxies                 []net.IPNet                       // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
-	blobStore                      blob.BlobStore                    // Issue #1702: installer artifact storage
-	signingRotationService         *service.SigningRotationService   // Issue #1816: signing cert rotation endpoint
-	moduleCacheLister              resolution.CacheLister            // Issue #1884: controller module cache for required_modules resolution
-	moduleBundleResolver           resolution.BundleResolver         // Issue #1884: git source resolver for uncached modules
-	moduleBundleApprover           resolution.BundleApprover         // Issue #1884: approval workflow for newly resolved modules
-	moduleTrustStore               trust.TrustStore                  // Issue #1884: publisher trust store consulted during approval
-	stewardBinaryTrustStore        trust.TrustStore                  // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
-	testAutoApproveStewardBinaries bool                              // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
-	upgradeStore                   business.UpgradeStore             // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
-	stopCleanup                    chan struct{}                     // signals startAPIKeyCleanup to exit
-	cleanupDone                    chan struct{}                     // closed when cleanup goroutine exits
-	closeOnce                      sync.Once                         // idempotent Close
+	apiKeys                        map[string]*APIKey                    // In-memory cache for fast lookup
+	secretStore                    secretsif.SecretStore                 // M-AUTH-1: Central secrets provider for API keys
+	registrationTokenStore         registration.Store                    // Registration token store for steward registration
+	corsConfig                     *CORSConfig                           // CORS configuration
+	signerCertSerial               string                                // Story #378: Serial of cert used for config signing
+	authDefense                    *authdefense.AuthDefenseSystem        // Story #380: Three-tier auth defense
+	rollbackManager                rollback.RollbackManager              // Story #416: Rollback system
+	reportsHandler                 *reportapi.Handler                    // Story #416: Reports engine
+	workflowHandler                *WorkflowHandler                      // Story #414: Workflow engine REST API
+	approvalHook                   RegistrationApprovalHook              // Issue #422: Registration approval hook
+	fleetQuery                     fleet.FleetQuery                      // Issue #603: Single query path for device filtering
+	gitSyncWebhookHandler          http.Handler                          // Issue #666: git-sync webhook endpoint (optional)
+	auditManager                   *audit.Manager                        // Issue #775: registration audit events
+	scriptTracker                  script.ExecutionTracker               // Issue #708: durable execution audit records
+	scriptAuditLogger              *script.AuditLogger                   // Issue #708: in-memory execution metrics
+	scriptMonitor                  *script.ExecutionMonitor              // Issue #708: active execution tracking
+	scriptRepo                     script.ScriptRepository               // Issue #1670: git-backed script library
+	privilegeStore                 cfgconfig.ConfigStore                 // Issue #1670: controller-side script privilege metadata
+	pushLeaderStatus               leaderStatus                          // Issue #1318: leader check for config push (nil = leader)
+	commandPublisher               *commands.Publisher                   // Issue #1319: fan-out config push to active stewards
+	pushStore                      business.PushStore                    // Issue #1320: durable push-state persistence for HA failover
+	registry                       registry.Registry                     // Issue #1323: active steward connection registry
+	mountPointValidator            MountPointValidator                   // Issue #1396: config source connection test
+	configSourceSecretStore        secretsif.SecretStore                 // Issue #1396: secrets for config source validator
+	configSourceRateLimits         sync.Map                              // Issue #1396: per-tenant rate-limit counters
+	pendingStore                   business.PendingRegistrationStore     // Issue #1696: durable pending-registration queue
+	ipTrustStore                   business.IPTrustStore                 // Issue #1698: operator IP-trust management
+	runManager                     *controllerrun.Manager                // Issue #1673: run/job/execution model
+	runExecutionQueue              *script.ExecutionQueue                // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies                 []net.IPNet                           // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	blobStore                      blob.BlobStore                        // Issue #1702: installer artifact storage
+	signingRotationService         *service.SigningRotationService       // Issue #1816: signing cert rotation endpoint
+	moduleCacheLister              resolution.CacheLister                // Issue #1884: controller module cache for required_modules resolution
+	moduleBundleResolver           resolution.BundleResolver             // Issue #1884: git source resolver for uncached modules
+	moduleBundleApprover           resolution.BundleApprover             // Issue #1884: approval workflow for newly resolved modules
+	moduleTrustStore               trust.TrustStore                      // Issue #1884: publisher trust store consulted during approval
+	stewardBinaryTrustStore        trust.TrustStore                      // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
+	testAutoApproveStewardBinaries bool                                  // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
+	upgradeStore                   business.UpgradeStore                 // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
+	stewardStore                   business.StewardStore                 // Issue #2096: durable fleet-registry store for device-ID refresh gate
+	pendingRefreshStore            business.PendingRefreshStore          // Issue #2096: durable pending-refresh queue
+	refreshPolicyStore             business.RefreshPolicyStore           // Issue #2096: per-tenant refresh policy
+	auditStore                     business.AuditStore                   // Issue #2098: direct audit store for test-mode count endpoint
+	nonceCache                     *cache.Cache                          // Issue #2096: in-memory nonce store (TTL 65s)
+	popVerifier                    PoPVerifier                           // Issue #2096: injectable for revoked-before-PoP testing
+	isolationEngine                *tenantsecurity.TenantIsolationEngine // Issue #2123: tenant isolation enforcement for scoped API keys
+	stewardEventLoggingManager     *logging.LoggingManager               // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
+	sessionManager                 session.Manager                       // Issue #2232: admin session token issuance/revocation
+	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
+	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
+	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
+	batchJobStore                  business.BatchJobStore                // Issue #2296: durable batch-job persistence
+	batchJobExecutor               *batchjob.RollingBatchExecutor        // Issue #2296: rolling-batch executor for fleet-wide updates
+	rolloutStore                   business.RolloutStore                 // Issue #2340: durable rollout-orchestration-state persistence
+	onRolloutSoak                  func(rolloutID string)                // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
+	onRolloutTerminal              func(rolloutID string)                // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
+	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
+	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
+	closeOnce                      sync.Once                             // idempotent Close
+}
+
+// SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
+// GET /api/v1/health returns HTTP 503 so the load balancer stops routing new
+// steward connections to this node. Called by cluster.Drain() after setting the
+// membership state; safe to call concurrently with handleHealth.
+func (s *Server) SetDraining(draining bool) {
+	s.clusterDraining.Store(draining)
 }
 
 // APIKey represents an API key for external authentication
@@ -202,6 +233,9 @@ func New(
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
+		nonceCache:              newNonceCache(),          // Issue #2096: nonce store for registration-refresh
+		popVerifier:             ed25519PoPVerifier{},     // Issue #2096: default PoP verifier; override in tests
+		sessionCfg:              session.DefaultConfig(),  // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -232,6 +266,11 @@ func New(
 	// M-AUTH-1: Load existing API keys from secret store
 	if err := server.loadAPIKeysFromStore(); err != nil {
 		logger.Warn("Failed to load API keys from store", "error", err)
+	}
+
+	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
+	if err := server.scanAPIKeysForPrivilegedAccess(context.Background()); err != nil {
+		logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
 	}
 
 	// Seed test API keys only when explicitly requested via environment variable.
@@ -368,9 +407,21 @@ func (s *Server) setupRouter() {
 
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
-	api.Use(s.authDefense.Middleware) // Story #380: Rate limiting before auth
-	api.Use(s.authenticationMiddleware)
+	api.Use(s.authDefense.Middleware)   // Story #380: rate limiting before auth
+	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
+	api.Use(s.requireTier(TierAny))     // Issue #1419: explicit Tier-1 default for the api subrouter
 	api.Use(s.validationMiddleware)
+
+	// --- Tier 0 (TierPublic) — no authentication required ---
+	//   GET  /api/v1/health
+	//   GET  /api/v1/ready
+	//   POST /api/v1/register
+	//   GET  /api/v1/registration/status/{pending_id}
+	//   POST /api/v1/stewards/{device_id}/refresh/challenge   (PoP-auth in handler)
+	//   POST /api/v1/stewards/{device_id}/refresh/complete    (PoP-auth in handler)
+	//   GET  /api/v1/installer/download/{platform}/{arch}
+	//   GET  /api/v1/public/steward-binaries/{version}/{platform}/{arch}
+	//   POST /raft/message                                     (internal mTLS peer CN in handler)
 
 	// Health check (no auth required) — liveness / object-presence.
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
@@ -390,6 +441,27 @@ func (s *Server) setupRouter() {
 	// TODO: Remove or protect this endpoint in production
 	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
 
+	// Issue #2098: Test-mode admin endpoints — active only when CFGMS_ENABLE_TEST_ENDPOINTS=true.
+	// Fleet E2E tests use these instead of sqlite3 CLI (not installed in Alpine container).
+	s.router.HandleFunc("/api/v1/test/stewards/{id}/status", s.handleTestSetStewardStatus).Methods("PUT")
+	s.router.HandleFunc("/api/v1/test/audit/count", s.handleTestAuditCount).Methods("GET")
+
+	// Registration-refresh endpoints (unauthenticated — authenticated by device key PoP).
+	// Registered on the base router like /api/v1/register (Issue #2096).
+	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/challenge", s.handleRefreshChallenge).Methods("POST", "OPTIONS")
+	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/complete", s.handleRefreshComplete).Methods("POST", "OPTIONS")
+
+	// --- Tier 1 (TierAny) — any valid credential: API key OR mTLS admin cert ---
+	// Default for all routes on the api subrouter. Tier-3 (TierMTLSOnly) endpoints are
+	// additionally wrapped with requireTier(TierMTLSOnly); see Issue #1419 story S3.
+
+	// Cluster registry endpoints (Issue #2424): read-only view of cluster topology
+	// derived on demand from steward DNA attributes. Eventually consistent (up to one
+	// DNARefreshInterval, default 30 min) — see docs/api/rest-api.md for details.
+	clusters := api.PathPrefix("/clusters").Subrouter()
+	clusters.Handle("", s.requirePermission("cluster", "list")(http.HandlerFunc(s.handleListClusters))).Methods("GET")
+	clusters.Handle("/{name}", s.requirePermission("cluster", "read")(http.HandlerFunc(s.handleGetCluster))).Methods("GET")
+
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()
 	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
@@ -397,6 +469,8 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
 	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
+	stewards.Handle("/{id}/move", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward)))).Methods("POST")              // Issue #2341: Tier-3 admin move-steward
+	stewards.Handle("/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward)))).Methods("DELETE") // Issue #2408: Tier-3 steward decommission
 
 	// Configuration management endpoints
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
@@ -404,6 +478,10 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "delete-config")(http.HandlerFunc(s.handleDeleteStewardConfig))).Methods("DELETE")
 	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
 	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
+
+	// Connection monitoring endpoints (Issue #2367)
+	stewards.Handle("/connections/all", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleListAllConnections))).Methods("GET")
+	stewards.Handle("/{id}/connection", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetStewardConnection))).Methods("GET")
 
 	// QUIC connection management endpoints
 	// Script management endpoints
@@ -419,6 +497,9 @@ func (s *Server) setupRouter() {
 	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
 	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
 
+	// Audit log readback endpoint (Issue #2190)
+	api.Handle("/audit/entries", s.requirePermission("audit", "list")(http.HandlerFunc(s.handleListAuditEntries))).Methods("GET")
+
 	// Configuration list endpoint (Issue #1570)
 	api.Handle("/configs", s.requirePermission("config", "list")(http.HandlerFunc(s.handleListConfigs))).Methods("GET")
 
@@ -429,15 +510,16 @@ func (s *Server) setupRouter() {
 	fleetRouter := api.PathPrefix("/fleet").Subrouter()
 	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
 
-	// Configuration push endpoint (Issue #1318)
+	// Configuration push endpoint (Issue #1318) and push-status read (Issue #2366)
 	cfgPush := api.PathPrefix("/config").Subrouter()
 	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
+	cfgPush.Handle("/push/{id}", s.requirePermission("config", "push")(http.HandlerFunc(s.handleGetConfigPush))).Methods("GET")
 
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
-	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
-	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
+	certs.Handle("/provision", s.requireTier(TierMTLSOnly)(s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate)))).Methods("POST")
+	certs.Handle("/signing/rotate", s.requireTier(TierMTLSOnly)(s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert)))).Methods("POST")
 
 	// RBAC management endpoints
 	rbac := api.PathPrefix("/rbac").Subrouter()
@@ -448,38 +530,46 @@ func (s *Server) setupRouter() {
 
 	// Roles
 	rbac.Handle("/roles", s.requirePermission("rbac", "list-roles")(http.HandlerFunc(s.handleListRoles))).Methods("GET")
-	rbac.Handle("/roles", s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole))).Methods("POST")
+	rbac.Handle("/roles", s.requireTier(TierMTLSOnly)(s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole)))).Methods("POST")
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "read-role")(http.HandlerFunc(s.handleGetRole))).Methods("GET")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
+	rbac.Handle("/roles/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole)))).Methods("PUT")
+	rbac.Handle("/roles/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole)))).Methods("DELETE")
 
 	// API key management endpoints (for managing API keys themselves)
 	apiKeys := api.PathPrefix("/api-keys").Subrouter()
 	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
-	apiKeys.Handle("", s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey))).Methods("POST")
+	apiKeys.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey)))).Methods("POST")
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
-	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
+	apiKeys.Handle("/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey)))).Methods("DELETE")
+
+	// Admin session endpoints (Issue #2232, #2368). POST requires an admin principal (IsAdmin==true);
+	// DELETE accepts either a valid session token or an admin mTLS cert; GET lists active sessions.
+	// All handlers check principal.IsAdmin internally — no tier-3 wrapper needed because
+	// session-token principals also have IsAdmin==true.
+	api.Handle("/sessions", http.HandlerFunc(s.handleSessionCreate)).Methods("POST")
+	api.Handle("/sessions", http.HandlerFunc(s.handleSessionList)).Methods("GET")
+	api.Handle("/sessions/{id}", http.HandlerFunc(s.handleSessionRevoke)).Methods("DELETE")
 
 	// Registration token management endpoints (Story #264)
 	regTokens := api.PathPrefix("/registration/tokens").Subrouter()
 	regTokens.Handle("", s.requirePermission("registration", "list-tokens")(http.HandlerFunc(s.handleListRegistrationTokens))).Methods("GET")
-	regTokens.Handle("", s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken))).Methods("POST")
+	regTokens.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken)))).Methods("POST")
 	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
-	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
-	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
-	regTokens.Handle("/{tenant_id}/rotate", s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken))).Methods("POST")
+	regTokens.Handle("/{token}", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken)))).Methods("DELETE")
+	regTokens.Handle("/{token}/revoke", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken)))).Methods("POST")
+	regTokens.Handle("/{tenant_id}/rotate", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken)))).Methods("POST")
 
 	// Registration approval endpoints (Issue #1568)
 	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
-	api.Handle("/registration/{id}/approve", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration))).Methods("POST")
+	api.Handle("/registration/{id}/approve", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration)))).Methods("POST")
 	api.Handle("/registration/{id}/deny", s.requirePermission("registration", "deny")(http.HandlerFunc(s.handleDenyRegistration))).Methods("POST")
 
 	// Bulk registration approval and IP-trust management (Issue #1698)
-	api.Handle("/registration/approve-all", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations))).Methods("POST")
-	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
-	api.Handle("/registration/ip-trust", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust))).Methods("POST")
+	api.Handle("/registration/approve-all", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations)))).Methods("POST")
+	api.Handle("/registration/approve-by-cidr", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR)))).Methods("POST")
+	api.Handle("/registration/ip-trust", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust)))).Methods("POST")
 	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
-	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")
+	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust)))).Methods("DELETE")
 
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
@@ -499,6 +589,13 @@ func (s *Server) setupRouter() {
 	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
 	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
 
+	// Cluster node lifecycle endpoints (Issue #2283, Issue #2288)
+	clusterRouter := api.PathPrefix("/cluster").Subrouter()
+	clusterRouter.Handle("/nodes/{id}/drain",
+		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDrain))).Methods("POST")
+	clusterRouter.Handle("/nodes/{id}/decommission",
+		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDecommission))).Methods("POST")
+
 	// Compliance reporting endpoints (Story #212)
 	// Steward-specific compliance endpoints
 	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
@@ -513,10 +610,28 @@ func (s *Server) setupRouter() {
 
 	// Tenant management endpoints (Issue #1396, Issue #1848)
 	tenants := api.PathPrefix("/tenants").Subrouter()
-	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
+	tenants.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant)))).Methods("POST")
 	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
+	tenants.Handle("/{id}/suspend",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleSuspendTenant))).Methods("POST")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+
+	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
+	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
+	api.Handle("/stewards/refresh/pending",
+		s.requirePermission("refresh", "list-pending")(http.HandlerFunc(s.handleListPendingRefreshes))).Methods("GET")
+	api.Handle("/stewards/refresh/{pending_id}/approve",
+		s.requireTier(TierMTLSOnly)(s.requirePermission("refresh", "approve")(http.HandlerFunc(s.handleApproveRefresh)))).Methods("POST")
+	api.Handle("/stewards/refresh/{pending_id}/reject",
+		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
+
+	// Per-tenant refresh policy endpoints (Issue #2097).
+	// {tenant_path:.+} allows '/' in the path variable for hierarchical tenant IDs.
+	tenants.Handle("/{tenant_path:.+}/refresh-policy",
+		s.requirePermission("refresh", "get-policy")(http.HandlerFunc(s.handleGetRefreshPolicy))).Methods("GET")
+	tenants.Handle("/{tenant_path:.+}/refresh-policy",
+		s.requireTier(TierMTLSOnly)(s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy)))).Methods("PUT")
 
 	// Installer artifact management endpoints (Issue #1702).
 	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
@@ -561,6 +676,22 @@ func (s *Server) setupRouter() {
 	runs.Handle("/{run_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRun))).Methods("GET")
 	runs.Handle("/{run_id}/jobs", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRunJobs))).Methods("GET")
 	runs.Handle("/{run_id}", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handleDeleteRun))).Methods("DELETE")
+
+	// Batch job endpoints (Issue #2296). Always registered — returns 503 when
+	// batchJobStore is nil (nil-safe by design).
+	jobs := api.PathPrefix("/jobs").Subrouter()
+	jobs.Handle("", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleCreateJob))).Methods("POST")
+	jobs.Handle("/{id}", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleGetJob))).Methods("GET")
+
+	// Rollout endpoints (Issue #2340). Always registered — handlers return 503 when
+	// rolloutStore is nil (nil-safe by design).
+	rollout := api.PathPrefix("/rollout").Subrouter()
+	rollout.Handle("",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleStartRollout))).Methods("POST")
+	rollout.Handle("/{rollout_id}",
+		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetRollout))).Methods("GET")
+	rollout.Handle("/{rollout_id}/halt",
+		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleHaltRollout))).Methods("POST")
 
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
@@ -708,6 +839,21 @@ func (s *Server) Close(ctx context.Context) error {
 			}
 		}
 
+		// Close nonce cache to stop its background cleanup goroutine (Issue #2096).
+		if s.nonceCache != nil {
+			s.nonceCache.Close()
+		}
+
+		// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
+		if s.runExecutionQueue != nil {
+			s.runExecutionQueue.Stop()
+		}
+
+		// Stop the config service's router cache goroutine (configrouting source cache).
+		if s.configService != nil {
+			s.configService.Close()
+		}
+
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
@@ -787,6 +933,13 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 // GetRouter returns the HTTP router for testing purposes.
 func (s *Server) GetRouter() http.Handler {
 	return s.router
+}
+
+// GetSecretStore returns the central secrets provider so callers outside the api
+// package (e.g. server.initializeWorkflowHandler) can thread it into subsystems
+// that require secret access (Issue #2374).
+func (s *Server) GetSecretStore() secretsif.SecretStore {
+	return s.secretStore
 }
 
 // SetApprovalHook replaces the registration approval hook (Issue #422).
@@ -894,6 +1047,66 @@ func (s *Server) SetUpgradeStore(store business.UpgradeStore) {
 	s.upgradeStore = store
 }
 
+// SetRolloutStore wires the durable RolloutStore used by the ring-advance rollout
+// endpoints (Issue #2340). When nil, POST /api/v1/rollout returns 503.
+func (s *Server) SetRolloutStore(store business.RolloutStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rolloutStore = store
+}
+
+// SetStewardStore wires the durable StewardStore used by the registration-refresh
+// endpoints (Issue #2096). When nil, the refresh endpoints return 503.
+func (s *Server) SetStewardStore(store business.StewardStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardStore = store
+}
+
+// SetPendingRefreshStore wires the durable PendingRefreshStore for the
+// registration-refresh approval queue (Issue #2096).
+func (s *Server) SetPendingRefreshStore(store business.PendingRefreshStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingRefreshStore = store
+}
+
+// SetRefreshPolicyStore wires the per-tenant RefreshPolicyStore (Issue #2096).
+func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshPolicyStore = store
+}
+
+// SetAuditStore wires a direct AuditStore reference for the test-mode count endpoint
+// (Issue #2098). Production code uses s.auditManager; this allows test endpoints to
+// query audit entries without needing sqlite3 CLI in the controller container.
+func (s *Server) SetAuditStore(store business.AuditStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditStore = store
+}
+
+// SetPoPVerifier replaces the proof-of-possession verifier.
+// Used in tests to assert the verifier is never called for revoked devices.
+func (s *Server) SetPoPVerifier(v PoPVerifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v != nil {
+		s.popVerifier = v
+	}
+}
+
+// SetIsolationEngine wires the tenant isolation engine used by requirePermission
+// to enforce tenant-scoped API-key isolation (Issue #2123). When nil (default),
+// isolation checks are skipped — only set in deployments that require tenant
+// boundary enforcement for agent credentials.
+func (s *Server) SetIsolationEngine(engine *tenantsecurity.TenantIsolationEngine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.isolationEngine = engine
+}
+
 // SetSigningRotationService wires the signing rotation service for the
 // POST /api/v1/certificates/signing/rotate endpoint (Issue #1816).
 // Call this after New() returns but before Start() is called.
@@ -901,6 +1114,51 @@ func (s *Server) SetSigningRotationService(svc *service.SigningRotationService) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signingRotationService = svc
+}
+
+// SetSessionManager wires the session Manager for admin session-token issuance and
+// revocation (Issue #2232). When nil (default), POST /api/v1/sessions and
+// DELETE /api/v1/sessions/{id} return 503. Call after New() but before Start().
+func (s *Server) SetSessionManager(mgr session.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionManager = mgr
+}
+
+// SetMembershipStore wires the cluster MembershipStore used by the drain endpoint
+// (Issue #2283). When nil (default), POST /api/v1/cluster/nodes/{id}/drain returns
+// 503. Call after New() but before Start().
+func (s *Server) SetMembershipStore(store cluster.MembershipStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.membershipStore = store
+}
+
+// SetBatchJobStore wires the durable BatchJobStore used by the batch job endpoints
+// (Issue #2296). When nil (default), POST /api/v1/jobs and GET /api/v1/jobs/{id}
+// return 503. Call after New() but before Start().
+func (s *Server) SetBatchJobStore(store business.BatchJobStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchJobStore = store
+}
+
+// SetBatchJobExecutor wires the rolling-batch executor used to run batch jobs
+// asynchronously (Issue #2296). When nil (default), job creation still persists
+// the record but does not start execution. Call after New() but before Start().
+func (s *Server) SetBatchJobExecutor(exec *batchjob.RollingBatchExecutor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchJobExecutor = exec
+}
+
+// SetStewardEventLoggingManager injects the dedicated steward-event
+// LoggingManager. Call after New() and before Start(). The manager is used by
+// handleGetStewardLogs (S6) to serve per-steward event queries.
+func (s *Server) SetStewardEventLoggingManager(m *logging.LoggingManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardEventLoggingManager = m
 }
 
 // SetModuleResolution wires the controller-side module resolution dependencies
@@ -1300,4 +1558,52 @@ func (s *Server) loadAPIKeysFromStore() error {
 
 	s.logger.Info("Secret store ready - API keys will be loaded on first access")
 	return nil
+}
+
+// Issue #2226: scanAPIKeysForPrivilegedAccess reports API keys that hold permissions in the
+// Tier-3 (mTLS-only) set. Those permissions are now unreachable via API key; operators should
+// revoke or reprovision the affected keys. The scan consumes tier3Permissions from auth_tiers.go
+// so the two sources can never drift.
+func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+		},
+	})
+	if err != nil {
+		s.logger.Warn("Startup scan: failed to list API keys from secret store", "error", err)
+		return err
+	}
+	for _, meta := range secrets {
+		var overlapping []string
+		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
+			if _, isT3 := tier3Permissions[p]; isT3 {
+				overlapping = append(overlapping, p)
+			}
+		}
+		if len(overlapping) > 0 {
+			s.logger.Warn(
+				"API key holds permissions that overlap Tier-3 (mTLS-only) endpoints; "+
+					"these are now unreachable via API key — consider revoking this key",
+				"key_id", logging.SanitizeLogValue(meta.Metadata["id"]),
+				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
+				"overlapping_permissions", logging.SanitizeLogValue(strings.Join(overlapping, ",")),
+			)
+		}
+	}
+	return nil
+}
+
+// newNonceCache creates the short-lived nonce cache for registration-refresh (Issue #2096).
+// Entries have a 65-second TTL; the 60-second enforcement window is applied in the handler.
+func newNonceCache() *cache.Cache {
+	return cache.NewCache(cache.CacheConfig{
+		MaxRuntimeItems: 10000,
+		DefaultTTL:      nonceTTL,
+		CleanupInterval: 30 * time.Second,
+		EvictionPolicy:  cache.EvictionLRU,
+	})
 }

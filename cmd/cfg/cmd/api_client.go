@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -19,9 +20,11 @@ import (
 
 // APIClient provides HTTP client functionality for communicating with the controller API
 type APIClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL        string
+	apiKey         string
+	httpClient     *http.Client
+	onTokenRenewed func(newToken string) error
+	onUnauthorized func() (*APIClient, error)
 }
 
 // APIClientConfig contains configuration for creating an API client
@@ -33,6 +36,18 @@ type APIClientConfig struct {
 	ClientKeyPEM  []byte // Client private key for mTLS authentication
 	TLSInsecure   bool   // Skip TLS verification (development only)
 	ServerName    string // Server name for TLS verification (extracted from URL if empty)
+
+	// OnTokenRenewed is called after each response when the server issues a renewed
+	// session token via the X-Session-Token response header. Nil = no-op.
+	// Errors from this callback are ignored (best-effort write-back).
+	OnTokenRenewed func(newToken string) error
+
+	// OnUnauthorized is called when the server returns 401 and may return a
+	// fallback APIClient to retry the request with. Nil = no fallback.
+	// When the fallback client is non-nil the request is retried once and the
+	// message "session expired or revoked — falling back to bundle auth" is
+	// printed to stderr.
+	OnUnauthorized func() (*APIClient, error)
 }
 
 // APITokenCreateRequest represents the request body for creating a registration token
@@ -101,8 +116,10 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 	}
 
 	return &APIClient{
-		baseURL: cfg.BaseURL,
-		apiKey:  cfg.APIKey,
+		baseURL:        cfg.BaseURL,
+		apiKey:         cfg.APIKey,
+		onTokenRenewed: cfg.OnTokenRenewed,
+		onUnauthorized: cfg.OnUnauthorized,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -424,6 +441,21 @@ func (c *APIClient) doRequest(ctx context.Context, method, path string, body io.
 // the request URL manually: parse the base URL, split path from query, apply the
 // pre-encoded path via RawPath, and restore RawPath after NewRequestWithContext.
 func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	// Buffer the body so it can be replayed on a 401 fallback retry.
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to buffer request body: %w", err)
+		}
+	}
+	return c.execRequest(ctx, method, path, bodyBytes, contentType, true)
+}
+
+// execRequest is the inner send-and-receive loop shared by doRequestWithContentType
+// and the 401-fallback retry path. allowFallback prevents infinite recursion.
+func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBytes []byte, contentType string, allowFallback bool) (*http.Response, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base URL: %w", err)
@@ -448,7 +480,12 @@ func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path s
 	base.RawPath = base.RawPath + rawPath
 	base.RawQuery = rawQuery
 
-	req, err := http.NewRequestWithContext(ctx, method, base.String(), body)
+	var bodyReader io.Reader
+	if bodyBytes != nil {
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, base.String(), bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -462,7 +499,28 @@ func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path s
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 
-	return c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Rolling token renewal: persist the rotated token when the server issues one.
+	if newToken := resp.Header.Get("X-Session-Token"); newToken != "" && c.onTokenRenewed != nil {
+		_ = c.onTokenRenewed(newToken) // best-effort; never fail the request
+	}
+
+	// 401 fallback: when the session token has been revoked or expired server-side,
+	// transparently retry with a bundle-auth client if one is available.
+	if allowFallback && resp.StatusCode == http.StatusUnauthorized && c.onUnauthorized != nil {
+		fallbackClient, fallbackErr := c.onUnauthorized()
+		if fallbackErr == nil && fallbackClient != nil {
+			_ = resp.Body.Close()
+			fmt.Fprintln(os.Stderr, "session expired or revoked — falling back to bundle auth")
+			return fallbackClient.execRequest(ctx, method, path, bodyBytes, contentType, false)
+		}
+	}
+
+	return resp, nil
 }
 
 // APITenantCreateRequest is the request body for POST /api/v1/tenants.
@@ -715,6 +773,116 @@ func (c *APIClient) RollbackUpgrade(ctx context.Context, upgradeID string, req *
 	return &result, nil
 }
 
+// ListPendingRefreshes lists pending registration-refresh requests.
+// An empty tenantID returns entries for all tenants.
+func (c *APIClient) ListPendingRefreshes(ctx context.Context, tenantID string) ([]APIPendingRefreshEntry, error) {
+	path := "/api/v1/stewards/refresh/pending"
+	if tenantID != "" {
+		path += "?tenant_id=" + url.QueryEscape(tenantID)
+	}
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var entries []APIPendingRefreshEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return entries, nil
+}
+
+// ApproveRefresh approves a pending registration-refresh request by pending_id.
+func (c *APIClient) ApproveRefresh(ctx context.Context, pendingID string) (*APIApproveRefreshResponse, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/refresh/"+url.PathEscape(pendingID)+"/approve", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result APIApproveRefreshResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// RejectRefresh rejects a pending registration-refresh request by pending_id.
+func (c *APIClient) RejectRefresh(ctx context.Context, pendingID, reason string) error {
+	body, err := json.Marshal(struct {
+		Reason string `json:"reason,omitempty"`
+	}{Reason: reason})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/stewards/refresh/"+url.PathEscape(pendingID)+"/reject", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	return nil
+}
+
+// GetRefreshPolicy retrieves the per-tenant registration-refresh policy.
+func (c *APIClient) GetRefreshPolicy(ctx context.Context, tenantID string) (*APIRefreshPolicyResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/refresh-policy", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var policy APIRefreshPolicyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&policy); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &policy, nil
+}
+
+// SetRefreshPolicy creates or replaces the per-tenant registration-refresh policy.
+func (c *APIClient) SetRefreshPolicy(ctx context.Context, tenantID, mode string, maxDormancyDays *int) error {
+	reqBody := struct {
+		Mode            string `json:"mode"`
+		MaxDormancyDays *int   `json:"max_dormancy_days,omitempty"`
+	}{
+		Mode:            mode,
+		MaxDormancyDays: maxDormancyDays,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "PUT", "/api/v1/tenants/"+url.PathEscape(tenantID)+"/refresh-policy", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	return nil
+}
+
 // parseError extracts error message from HTTP response
 func (c *APIClient) parseError(resp *http.Response) error {
 	body, err := io.ReadAll(resp.Body)
@@ -738,4 +906,57 @@ func (c *APIClient) parseError(resp *http.Response) error {
 
 	// Return raw body as error message
 	return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+}
+
+// sessionIssueRequest is the JSON body for POST /api/v1/sessions.
+type sessionIssueRequest struct {
+	ConnectionName string `json:"connection_name"`
+}
+
+// sessionIssueResponse is the JSON response from POST /api/v1/sessions (HTTP 201).
+type sessionIssueResponse struct {
+	SessionID      string    `json:"session_id"`
+	Token          string    `json:"token"`
+	IssuedAt       time.Time `json:"issued_at"`
+	IdleTTLSeconds int64     `json:"idle_ttl_seconds"`
+	AbsoluteExpiry time.Time `json:"absolute_expiry"`
+}
+
+// IssueSession calls POST /api/v1/sessions and returns the session response.
+// The caller must be using an admin mTLS credential (client cert).
+func (c *APIClient) IssueSession(ctx context.Context, connectionName string) (*sessionIssueResponse, error) {
+	body, err := json.Marshal(sessionIssueRequest{ConnectionName: connectionName})
+	if err != nil {
+		return nil, fmt.Errorf("session create: marshal: %w", err)
+	}
+	resp, err := c.doRequestWithContentType(ctx, "POST", "/api/v1/sessions", bytes.NewReader(body), "application/json")
+	if err != nil {
+		return nil, fmt.Errorf("session create: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+	var out sessionIssueResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("session create: decode response: %w", err)
+	}
+	return &out, nil
+}
+
+// RevokeSession calls DELETE /api/v1/sessions/{id}.
+// A 404 is treated as success (already gone).
+func (c *APIClient) RevokeSession(ctx context.Context, sessionID string) error {
+	resp, err := c.doRequestWithContentType(ctx, "DELETE", "/api/v1/sessions/"+url.PathEscape(sessionID), nil, "")
+	if err != nil {
+		return fmt.Errorf("session revoke: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil // already revoked or never existed
+	}
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	return nil
 }

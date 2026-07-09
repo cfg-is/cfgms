@@ -376,3 +376,204 @@ make security-scan           # Security validation
 ```
 
 For automation of these commands, use the CFGMS slash commands: `/story-start`, `/story-commit`, `/story-complete`.
+
+## Connection Management
+
+`cfg connect` and `cfg disconnect` manage zero-standing-privilege controller sessions. The session token is stored exclusively in the OS-native secret store (macOS Keychain, Windows Credential Manager, Linux Secret Service) — never written to any file on disk.
+
+### cfg connect (first-time import)
+
+Import an admin bundle and start a controller session.
+
+```bash
+cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443
+cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443 --name prod
+```
+
+The `--url` value must be HTTPS for any non-loopback address. On success the bundle is stored encrypted (machine-bound), a session token is issued via `POST /api/v1/sessions`, and the token is written to the OS keychain.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--bundle` | — | Path to the admin bundle YAML (required for first-time import) |
+| `--url` | — | Controller HTTPS URL (required with `--bundle`; must be HTTPS for non-loopback) |
+| `--name` | derived from URL host | Human-readable connection name stored in the local registry |
+
+### cfg connect (reconnect)
+
+Re-use a previously registered connection without re-importing the bundle.
+
+```bash
+# Reconnect by name
+cfg connect prod
+
+# Auto-select when exactly one connection is registered
+cfg connect
+
+# Interactive numbered selection when multiple connections are registered
+cfg connect
+```
+
+The encrypted bundle is unlocked with the machine-bound key, a new session token is issued, and the token replaces the previous entry in the OS keychain.
+
+### cfg disconnect
+
+Revoke the active session and remove its token from the OS keychain.
+
+```bash
+cfg disconnect
+```
+
+Sends `DELETE /api/v1/sessions/{id}` to the controller (best-effort — proceeds even on network error), then removes the token from the OS keychain. Exits 0 with a notice when no active session is found.
+
+### cfg connections current
+
+Show the active session from the OS keychain.
+
+```bash
+cfg connections current
+```
+
+Prints the connection name, controller URL, session ID, and absolute expiry. Prints `no active session` and exits 0 when no valid session is stored.
+
+### Session lifecycle and rolling renewal
+
+After `cfg connect`, all admin commands transparently use the stored session token (Bearer auth). The controller sets an `X-Session-Token` response header on each authenticated request; the CLI automatically writes the new token back to the OS keychain, keeping sessions alive without explicit re-authentication.
+
+When the token is revoked server-side (401 response), the CLI falls back to bundle auth and prints `session expired or revoked — falling back to bundle auth` on stderr.
+
+Use `--bundle` or `--no-bundle` on any command to bypass the session entirely for one-shot overrides.
+
+---
+
+The `cfg connections` commands manage the local registry of known controller connections. The registry stores non-secret metadata only — no credentials, tokens, or keys are ever written to this file.
+
+Registry location:
+
+| Platform | Path |
+|----------|------|
+| Linux | `$XDG_CONFIG_HOME/cfgms/connections.json` |
+| macOS | `~/Library/Application Support/cfgms/connections.json` |
+| Windows | `%APPDATA%\cfgms\connections.json` |
+
+File permissions: directory at `0700`, `connections.json` at `0600`.
+
+### cfg connections list
+
+List all registered controller connections.
+
+```bash
+# Print a table of known connections (name, URL, identity, last-used)
+cfg connections list
+
+# Emit a JSON array
+cfg connections list --json
+```
+
+When no connections are registered, exits 0 and prints:
+
+```
+No connections configured.
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Emit a JSON array instead of a human-readable table |
+
+## Workflow Management
+
+`cfg workflow` subcommands manage workflow definitions and their executions on the controller.
+
+### cfg workflow list
+
+List all workflow definitions registered on the controller.
+
+```bash
+cfg workflow list --url=https://controller.example.com
+cfg workflow list --url=https://controller.example.com --api-key=mykey
+```
+
+Prints a plain-text table with columns: NAME, VERSION, STEPS.
+
+Example output:
+
+```
+NAME         VERSION  STEPS
+deploy-ring  1.2.0    4
+sync-entra   2.0.0    7
+```
+
+When no workflows are registered, exits 0 and prints:
+
+```
+No workflows registered.
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--url` | — | Controller API URL (required) |
+| `--api-key` | — | API key for authentication |
+| `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+
+### cfg workflow status
+
+Show the status of a single workflow execution.
+
+```bash
+cfg workflow status <execution-id> --workflow <name> --url=https://controller.example.com
+```
+
+The `<execution-id>` is returned by `cfg workflow run`.
+
+Example output:
+
+```
+execution_id:  exec_1782879897336049056_1
+workflow:      deploy-ring
+status:        running
+current_step:  step-canary
+started_at:    2026-07-01T10:00:00Z
+error:         -
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workflow` | — | Workflow name (required) |
+| `--url` | — | Controller API URL (required) |
+| `--api-key` | — | API key for authentication |
+| `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+
+### cfg workflow cancel
+
+Cancel a running workflow execution.
+
+```bash
+cfg workflow cancel <execution-id> --workflow <name> --url=https://controller.example.com
+```
+
+Returns an error if the execution is already in a terminal state (completed, failed, or cancelled).
+
+On success:
+
+```
+Cancelled execution exec_1782879897336049056_1
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workflow` | — | Workflow name (required) |
+| `--url` | — | Controller API URL (required) |
+| `--api-key` | — | API key for authentication |
+| `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |

@@ -81,6 +81,15 @@ secrets:
 > will refuse to start if a dev-mode token or `BAO_DEV_MODE=true` is detected.
 > See `pkg/secrets/providers/openbao/README.md` for production configuration.
 
+## Operator Guide
+
+### [cfg Operator Guide: Setup to Reconnect](cfg-operator-guide.md)
+
+Install `cfg`, connect to a controller for the first time, reconnect in a fresh
+shell, check the active session, and disconnect — with an explanation of the
+zero-standing-privilege session model (machine-bound encrypted-at-rest credential,
+short-lived rolling tokens, explicit connect per session, controller-side revocation).
+
 ## Reference
 
 - [Platform Support](platform-support.md) — supported operating systems, architectures, and platform-specific notes

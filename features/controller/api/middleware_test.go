@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -442,6 +444,20 @@ func requestWithTLSCert(method, path string, peerCert *x509.Certificate) *http.R
 	return req
 }
 
+// makeAdminRequest creates an httptest.Request authenticated as an mTLS admin cert principal.
+// Pass a non-nil body for requests that require a payload (json-encoded etc.).
+// Use this helper in tests that call Tier-3 endpoints — those require IsAdmin: true which
+// only an mTLS admin cert provides.
+func makeAdminRequest(t *testing.T, method, path string, body io.Reader) *http.Request {
+	t.Helper()
+	adminCert := makeSelfSignedAdminCert(t)
+	req := httptest.NewRequest(method, path, body)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{adminCert},
+	}
+	return req
+}
+
 // wrapWithAuth wraps handler with authenticationMiddleware then requirePermission.
 func wrapWithAuth(s *Server, resourceType, action string, inner http.HandlerFunc) http.Handler {
 	return s.authenticationMiddleware(
@@ -798,4 +814,213 @@ func TestAuthMiddleware_SetsUserIDKey_CertAuth(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.NotEmpty(t, capturedUserID, "ctxkeys.UserIDKey must be set after mTLS cert auth")
 	assert.Equal(t, "test-admin", capturedUserID, "UserIDKey must equal the cert CN (sanitized)")
+}
+
+// setupTestServerWithIsolationEngine builds a test server wired with a real
+// TenantIsolationEngine. Uses real CFGMS components — no mocks.
+func setupTestServerWithIsolationEngine(t *testing.T) *Server {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	controllerService := service.NewControllerService(logging.NewNoopLogger())
+	configService := service.NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	server, err := New(
+		cfg, logging.NewNoopLogger(),
+		controllerService, configService,
+		nil, rbacService, nil, tenantManager, rbacManager,
+		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
+
+	// Wire a real TenantIsolationEngine using the same audit manager.
+	// The engine uses default isolation rules (cross-tenant access denied by default).
+	isolationAuditMgr, isoErr := audit.NewManager(storageManager.GetAuditStore(), "isolation")
+	require.NoError(t, isoErr)
+	t.Cleanup(func() { _ = isolationAuditMgr.Stop(context.Background()) })
+
+	engine := tenantsecurity.NewTenantIsolationEngine(tenantManager, isolationAuditMgr)
+	server.SetIsolationEngine(engine)
+
+	return server
+}
+
+// newAgentTestKey creates an API key with agent.dev permissions bound to tenantID.
+func newAgentTestKey(t *testing.T, server *Server, tenantID string) string {
+	t.Helper()
+	key, err := server.generateEphemeralKey(
+		"agent-dev-test",
+		agentDevAPIPermissions,
+		5*time.Minute,
+		tenantID,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		server.mu.Lock()
+		delete(server.apiKeys, key.Key)
+		server.mu.Unlock()
+	})
+	return key.Key
+}
+
+// requestWithTargetTenant builds a test request that signals a specific target tenant
+// to the isolation engine via the targetTenantContextKey context value.
+func requestWithTargetTenant(method, path, targetTenant, apiKey string) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	return req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, targetTenant))
+}
+
+// TestTenantIsolation_AgentDevKey verifies that requirePermission enforces tenant
+// isolation for scoped API-key principals using the real TenantIsolationEngine.
+//
+// [REQUIRED TEST] real TenantIsolationEngine (no mocks):
+//   - agent-test/1 key is allowed on agent-test/1 (same-tenant)
+//   - agent-test/1 key gets 403 on agent-test/2 (sibling tenant)
+//   - agent-test/1 key gets 403 on team-root/ (unrelated tenant)
+//   - agent-test/1 key gets 403 on infra-hyperv/ (unrelated tenant)
+//   - full-admin mTLS key passes all tenants
+func TestTenantIsolation_AgentDevKey(t *testing.T) {
+	server := setupTestServerWithIsolationEngine(t)
+
+	const ownTenant = "agent-test/1"
+	agentKey := newAgentTestKey(t, server, ownTenant)
+
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	tests := []struct {
+		name         string
+		targetTenant string
+		wantStatus   int
+	}{
+		{name: "same-tenant allowed", targetTenant: ownTenant, wantStatus: http.StatusOK},
+		{name: "sibling agent-test/2 denied", targetTenant: "agent-test/2", wantStatus: http.StatusForbidden},
+		{name: "team-root/ denied", targetTenant: "team-root/", wantStatus: http.StatusForbidden},
+		{name: "infra-hyperv/ denied", targetTenant: "infra-hyperv/", wantStatus: http.StatusForbidden},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := requestWithTargetTenant(http.MethodGet, "/api/v1/stewards", tc.targetTenant, agentKey)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tc.wantStatus, rec.Code,
+				"agent-test/1 key targeting %q: expected %d", tc.targetTenant, tc.wantStatus)
+			if tc.wantStatus == http.StatusForbidden {
+				assert.Contains(t, rec.Body.String(), "CROSS_TENANT_ACCESS_DENIED",
+					"denied response must carry CROSS_TENANT_ACCESS_DENIED code")
+			}
+		})
+	}
+
+	// Full-admin mTLS key must pass ALL tenants (TenantID == "" skips isolation check).
+	adminCert := makeSelfSignedAdminCert(t)
+	for _, target := range []string{ownTenant, "agent-test/2", "team-root/", "infra-hyperv/"} {
+		t.Run("admin passes "+target, func(t *testing.T) {
+			req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
+			req = req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, target))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, "admin key must pass tenant %q", target)
+		})
+	}
+}
+
+// TestLeastPrivilege_AgentDevKey verifies that a key with agent.dev permissions
+// cannot perform write operations on its own tenant.
+//
+// [REQUIRED TEST] agent.dev key attempting config.create/config.delete/steward.manage
+// on its own tenant gets 403. This is a distinct least-privilege gate — even within
+// the correct tenant, writes must be blocked by missing permissions.
+func TestLeastPrivilege_AgentDevKey(t *testing.T) {
+	server := setupTestServer(t)
+
+	const ownTenant = "agent-test/1"
+	agentKey := newAgentTestKey(t, server, ownTenant)
+
+	// Write operations that agent.dev must NOT have.
+	writeOps := []struct {
+		name         string
+		resourceType string
+		action       string
+	}{
+		{name: "config.create (write-config)", resourceType: "steward", action: "write-config"},
+		{name: "config.delete (delete-config)", resourceType: "steward", action: "delete-config"},
+		{name: "steward.manage (auth-refresh)", resourceType: "steward", action: "auth-refresh"},
+	}
+
+	for _, op := range writeOps {
+		t.Run("agent.dev denied for "+op.name, func(t *testing.T) {
+			handler := wrapWithAuth(server, op.resourceType, op.action,
+				func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test", nil)
+			req.Header.Set("X-API-Key", agentKey)
+			// Set the principal's own tenant — isolation is NOT the gate here,
+			// least-privilege permission check is.
+			req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, ownTenant))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"agent.dev key must be denied %s on own tenant", op.name)
+			assert.Contains(t, rec.Body.String(), "INSUFFICIENT_PERMISSIONS")
+		})
+	}
+
+	// Sanity-check: read operations that agent.dev DOES have must succeed.
+	readOps := []struct {
+		resourceType string
+		action       string
+	}{
+		{resourceType: "steward", action: "read"},
+		{resourceType: "steward", action: "list"},
+		{resourceType: "steward", action: "validate-config"},
+	}
+	for _, op := range readOps {
+		t.Run("agent.dev allowed for "+op.resourceType+":"+op.action, func(t *testing.T) {
+			handler := wrapWithAuth(server, op.resourceType, op.action,
+				func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/test", nil)
+			req.Header.Set("X-API-Key", agentKey)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code,
+				"agent.dev key must be allowed %s:%s", op.resourceType, op.action)
+		})
+	}
 }

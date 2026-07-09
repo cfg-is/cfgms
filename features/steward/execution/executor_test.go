@@ -15,11 +15,73 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/modules"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	"github.com/cfgis/cfgms/features/steward/factory"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// HungModule is a real test module implementation that blocks indefinitely in
+// Get() until the context is cancelled or times out. Placed here for reuse by
+// downstream tests (S7 assertion gate) that verify the controller-side timeout
+// event pipeline.
+type HungModule struct{}
+
+func (h *HungModule) Get(ctx context.Context, _ string) (modules.ConfigState, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (h *HungModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+// Compile-time check: HungModule implements modules.Module.
+var _ modules.Module = (*HungModule)(nil)
+
+// HungSetModule is a real test module that reports drift on Get() and then
+// blocks indefinitely in Set() until the context is cancelled. Used to cover
+// the module.Set timeout path in executor.go.
+type HungSetModule struct{}
+
+func (h *HungSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	// Return drifted state so the comparator detects drift and the executor calls Set.
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (h *HungSetModule) Set(ctx context.Context, _ string, _ modules.ConfigState) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+var _ modules.Module = (*HungSetModule)(nil)
+
+// HungVerifyModule is a real test module that reports drift on the first Get()
+// call, succeeds on Set(), then blocks indefinitely in the second Get() (the
+// post-Set verification call). Used to cover the verifyChanges timeout path.
+type HungVerifyModule struct {
+	getCalls int
+}
+
+func (h *HungVerifyModule) Get(ctx context.Context, _ string) (modules.ConfigState, error) {
+	h.getCalls++
+	if h.getCalls == 1 {
+		// First call: return drifted state so the executor proceeds to Set().
+		return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+	}
+	// Second call (inside verifyChanges): block until timeout.
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (h *HungVerifyModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+var _ modules.Module = (*HungVerifyModule)(nil)
 
 // testFileConfig returns a file resource config appropriate for the current platform.
 // On Unix, includes permissions (0644 = 420 decimal). On Windows, omits permissions
@@ -580,4 +642,173 @@ func TestApplyConfiguration_ApplyMode_ModeAliasConfigVerifiesClean(t *testing.T)
 	require.NoError(t, readErr)
 	assert.Equal(t, "fleet-managed-content\n", string(got),
 		"drifted resource declared with the mode alias must be re-applied to desired state")
+}
+
+// TestExecuteResource_HungModule_ProducesTimeoutOutcomeEvent verifies that a
+// module whose Get() blocks past the per-call deadline causes ExecuteResource
+// to return (not wedge) and emits a detection+outcome pair where the outcome
+// action is "did-not-finish(timeout)" with the detection event's correlation_id.
+// The HungModule helper defined in this file is placed for reuse by S7 tests.
+func TestExecuteResource_HungModule_ProducesTimeoutOutcomeEvent(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("hung", &HungModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		StewardID:            "test-steward-timeout",
+		EventEmitter:         emitter,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 1, // 1 s for test speed
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-resource",
+		Module: "hung",
+		Config: map[string]interface{}{
+			"state": "present",
+		},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	// ExecuteResource must return rather than wedging.
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"a hung module must produce StatusTimeout")
+	assert.NotEmpty(t, result.Error,
+		"timeout result must carry an error description")
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2,
+		"a hung module must emit exactly detection + timeout outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"],
+		"first entry must be the detection event")
+	assert.NotEmpty(t, detection.CorrelationId,
+		"detection must carry a non-empty correlation_id")
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"],
+		"second entry must be the outcome event")
+	assert.Equal(t, "did-not-finish(timeout)", outcome.Fields["action"],
+		"timeout outcome action must be 'did-not-finish(timeout)'")
+	assert.NotEmpty(t, outcome.Fields["timeout_ms"],
+		"timeout outcome must carry timeout_ms")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and timeout outcome must share the same correlation_id")
+}
+
+// TestExecuteResource_HungSetModule_ProducesTimeoutOutcomeEvent verifies that a
+// module whose Set() blocks past the per-call deadline yields a timeout outcome
+// event and returns StatusTimeout without wedging.
+func TestExecuteResource_HungSetModule_ProducesTimeoutOutcomeEvent(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("hung-set", &HungSetModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		StewardID:            "test-steward-set-timeout",
+		EventEmitter:         emitter,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 1,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-set-resource",
+		Module: "hung-set",
+		Config: map[string]interface{}{
+			"state": "desired",
+		},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"a module whose Set() hangs must produce StatusTimeout")
+	assert.NotEmpty(t, result.Error)
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2, "hung Set must emit detection + timeout outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"])
+	assert.NotEmpty(t, detection.CorrelationId)
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"])
+	assert.Equal(t, "did-not-finish(timeout)", outcome.Fields["action"],
+		"Set timeout must emit did-not-finish(timeout)")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and Set-timeout outcome must share correlation_id")
+}
+
+// TestExecuteResource_HungVerifyModule_ProducesTimeoutOutcomeEvent verifies that
+// a module whose post-Set Get() (inside verifyChanges) blocks past the deadline
+// yields a timeout outcome event and returns StatusTimeout without wedging.
+func TestExecuteResource_HungVerifyModule_ProducesTimeoutOutcomeEvent(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("hung-verify", &HungVerifyModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		StewardID:            "test-steward-verify-timeout",
+		EventEmitter:         emitter,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 1,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-verify-resource",
+		Module: "hung-verify",
+		Config: map[string]interface{}{
+			"state": "desired",
+		},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"a module whose verifyChanges Get() hangs must produce StatusTimeout")
+	assert.NotEmpty(t, result.Error)
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2, "hung verifyChanges must emit detection + timeout outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"])
+	assert.NotEmpty(t, detection.CorrelationId)
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"])
+	assert.Equal(t, "did-not-finish(timeout)", outcome.Fields["action"],
+		"verifyChanges timeout must emit did-not-finish(timeout)")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and verify-timeout outcome must share correlation_id")
 }

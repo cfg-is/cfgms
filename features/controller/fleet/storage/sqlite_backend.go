@@ -367,22 +367,50 @@ func (b *SQLiteBackend) prepareStatements() error {
 	var err error
 
 	// Insert DNA record statement
+	// ON CONFLICT keeps the write idempotent when two DNA snapshots for the same
+	// device resolve to the same version. GetNextVersion (MAX(version)+1) runs
+	// outside this insert's lock, so a duplicate/concurrent publish — e.g. the
+	// heartbeat path and the ring-subscription path both firing on reconnect — can
+	// assign the same (device_id, version); without the upsert the second insert
+	// fails the UNIQUE constraint, crashing DNA persist and churning the control
+	// channel. The latest snapshot wins.
 	b.stmts.insertRecord, err = b.db.Prepare(`
 		INSERT INTO dna_history
 		(device_id, timestamp, version, dna_json, content_hash,
 		 original_size, compressed_size, compression_ratio, shard_id,
 		 tenant_id, os, architecture, hostname, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(device_id, version) DO UPDATE SET
+			timestamp=excluded.timestamp,
+			dna_json=excluded.dna_json,
+			content_hash=excluded.content_hash,
+			original_size=excluded.original_size,
+			compressed_size=excluded.compressed_size,
+			compression_ratio=excluded.compression_ratio,
+			shard_id=excluded.shard_id,
+			tenant_id=excluded.tenant_id,
+			os=excluded.os,
+			architecture=excluded.architecture,
+			hostname=excluded.hostname,
+			status=excluded.status
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(device_id, version) DO UPDATE SET
+			content_hash=excluded.content_hash,
+			timestamp=excluded.timestamp,
+			shard_id=excluded.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert reference statement: %w", err)

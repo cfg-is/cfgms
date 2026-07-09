@@ -6,23 +6,24 @@
 package service
 
 import (
-	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/cfgis/cfgms/pkg/logging"
-	stewardsecrets "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 func TestWindowsManagerInstallPath(t *testing.T) {
 	m := New("cfgms-steward.exe")
 	status, err := m.Status()
 	require.NoError(t, err)
-	assert.Equal(t, windowsInstallPath, status.InstallPath)
+	// Launcher-managed install: the service's exec target is the launcher,
+	// so that is the install path Status reports (mirrors linuxLauncherPath).
+	assert.Equal(t, windowsLauncherPath, status.InstallPath)
 }
 
 func TestWindowsManagerStatusNotInstalled(t *testing.T) {
@@ -32,15 +33,19 @@ func TestWindowsManagerStatusNotInstalled(t *testing.T) {
 	status, err := m.Status()
 	require.NoError(t, err)
 	assert.Equal(t, windowsServiceName, status.ServiceName)
-	assert.Equal(t, windowsInstallPath, status.InstallPath)
+	assert.Equal(t, windowsLauncherPath, status.InstallPath)
 }
 
 func TestWindowsManagerInstallRequiresElevation(t *testing.T) {
-	m := New("cfgms-steward.exe")
+	// Stage a launcher stub next to the steward path so the pre-elevation
+	// bundle check passes and Install reaches the elevation gate.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, windowsLauncherBinaryName), []byte("stub"), 0o600))
+	m := New(filepath.Join(dir, "cfgms-steward.exe"))
 	if m.IsElevated() {
 		t.Skip("skipping elevation check — running as Administrator")
 	}
-	err := m.Install("tok_test123", "", "")
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Administrator")
 }
@@ -57,7 +62,7 @@ func TestWindowsInstallFingerprintMismatch(t *testing.T) {
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
 
 	certPEM, _ := generateTestCACert(t)
-	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	err := m.Install("tok_test123", "", certPEM, "deadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fingerprint mismatch")
 
@@ -68,7 +73,7 @@ func TestWindowsInstallFingerprintMismatch(t *testing.T) {
 }
 
 // TestWindowsInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// platform path with mode 0444 when a correct fingerprint is provided (ADR-013 §3).
 func TestWindowsInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CFGMS_INSTALL_PREFIX", dir)
@@ -82,7 +87,7 @@ func TestWindowsInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 per ADR-013 §3")
 }
 
 func TestWindowsManagerUninstallRequiresElevation(t *testing.T) {
@@ -102,210 +107,110 @@ func TestWindowsManagerNew(t *testing.T) {
 	assert.True(t, ok, "New() should return a *windowsManager on Windows")
 }
 
-// TestInstallHyperVCertParams_LocalhostInSAN verifies that buildHyperVCertParams
-// returns a parameter set with localhost, 127.0.0.1, and the machine FQDN in the
-// SAN, and a NotAfter set to 5 years from now (±1 day tolerance).
-// buildHyperVCertParams is a pure function — no elevation required.
-func TestInstallHyperVCertParams_LocalhostInSAN(t *testing.T) {
-	fqdn, err := os.Hostname()
+// TestSetServiceEnvironmentRoundTrip is the REQUIRED TEST for #2378: the
+// registry-write helper round-trips the CFGMS_LOG_DIR Environment value. It
+// targets a scratch HKCU key — writing the real HKLM service key requires
+// Administrator, which unit tests do not have (the helper's root/keyPath
+// parameters exist exactly for this).
+func TestSetServiceEnvironmentRoundTrip(t *testing.T) {
+	const scratch = `Software\CFGMS-test-svcenv`
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, scratch, registry.ALL_ACCESS)
 	require.NoError(t, err)
+	require.NoError(t, key.Close())
+	t.Cleanup(func() { _ = registry.DeleteKey(registry.CURRENT_USER, scratch) })
 
-	params := buildHyperVCertParams(fqdn)
+	logDir := `C:\ProgramData\CFGMS\logs`
+	require.NoError(t, setServiceEnvironment(registry.CURRENT_USER, scratch, logDir))
 
-	assert.Contains(t, params.DnsNames, "localhost", "SAN must include localhost")
-	assert.Contains(t, params.DnsNames, "127.0.0.1", "SAN must include 127.0.0.1")
-	assert.Contains(t, params.DnsNames, fqdn, "SAN must include machine FQDN")
-
-	fiveYears := time.Now().Add(5 * 365 * 24 * time.Hour)
-	assert.WithinDuration(t, fiveYears, params.NotAfter, 24*time.Hour,
-		"cert NotAfter must be 5 years from now (±1 day tolerance)")
+	rk, err := registry.OpenKey(registry.CURRENT_USER, scratch, registry.QUERY_VALUE)
+	require.NoError(t, err)
+	defer rk.Close()
+	vals, valType, err := rk.GetStringsValue("Environment")
+	require.NoError(t, err)
+	assert.Equal(t, uint32(registry.MULTI_SZ), valType, "Environment must be REG_MULTI_SZ — the only type the SCM accepts")
+	assert.Equal(t, []string{"CFGMS_LOG_DIR=" + logDir}, vals)
 }
 
-// TestInstallHyperV_PassNotInArgv verifies that the WinRM password is passed via
-// stdin and does not appear in any element of cmd.Args or in the PowerShell script
-// block string. Inspects the *exec.Cmd struct, not process-list output.
-func TestInstallHyperV_PassNotInArgv(t *testing.T) {
-	rec := &recordingPSRunner{}
-	password := `s3cr3t!P@ss#with"<special>'&chars` // characters that would be dangerous if interpolated
-	username := "cfgms-hyperv"
-
-	err := createLocalUser(rec, username, password)
-	require.NoError(t, err)
-
-	require.Len(t, rec.Calls, 1, "createLocalUser must make exactly one PS call")
-	call := rec.Calls[0]
-
-	// Password must NOT appear in any element of cmd.Args.
-	for _, arg := range call.Cmd.Args {
-		assert.NotContains(t, arg, password,
-			"password must not appear in cmd.Args element %q", arg)
-	}
-
-	// Password must NOT appear in the script block string.
-	assert.NotContains(t, call.ScriptBlock, password,
-		"password must not appear in the PowerShell script block string")
-
-	// Password MUST be in StdinData (the secure delivery channel).
-	assert.Equal(t, password, call.StdinData,
-		"password must be passed via stdin (StdinData)")
+// TestWindowsLauncherPathParity is the REQUIRED path-parity TEST for #2379:
+// windowsLauncherPath must equal the literal path returned by
+// features/steward/client's launcherPath() on windows
+// (client_transport_upgrade.go) — the compile-time contract push-upgrade
+// execs. Drift between install-time and the upgrade runtime path silently
+// breaks push-upgrade, so the literal is pinned here.
+func TestWindowsLauncherPathParity(t *testing.T) {
+	assert.Equal(t, `C:\Program Files\CFGMS\cfgms-steward-launcher.exe`, windowsLauncherPath,
+		"windowsLauncherPath must match client_transport_upgrade.go launcherPath() exactly")
+	assert.Equal(t, "cfgms-steward-launcher.exe", windowsLauncherBinaryName)
 }
 
-// TestInstallHyperV_RequiresElevation verifies that InstallHyperV returns an error
-// when called without Administrator privileges.
-func TestInstallHyperV_RequiresElevation(t *testing.T) {
-	m := New("cfgms-steward.exe")
-	if m.IsElevated() {
-		t.Skip("skipping: running as Administrator")
-	}
-
-	wm := m.(*windowsManager)
-	err := wm.InstallHyperV("tok_test123", "", "", "cfgms-hyperv", "testpass")
+// TestWindowsInstallLauncherMissing is the REQUIRED fail-closed TEST for
+// #2379: Install must return a clear, actionable error — before any service
+// registration — when the launcher binary is not bundled next to the steward
+// binary. The check runs before the elevation gate (like fingerprint
+// verification), so this asserts an early return without touching privileged
+// state.
+func TestWindowsInstallLauncherMissing(t *testing.T) {
+	dir := t.TempDir() // empty: no launcher next to the (hypothetical) steward binary
+	m := New(filepath.Join(dir, "cfgms-steward.exe"))
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Administrator")
+	assert.Contains(t, err.Error(), windowsLauncherBinaryName,
+		"error must name the missing launcher binary")
+	assert.Contains(t, err.Error(), "not found next to the steward binary",
+		"error must explain the bundle expectation")
+	assert.NotContains(t, err.Error(), "Administrator",
+		"launcher presence is checked before the elevation gate")
 }
 
-// TestInstallHyperV_ListenerBindsLocalhostOnly verifies that setupWinRMListener
-// creates a loopback-bound HTTPS listener via `winrm create` (NOT `winrm set`,
-// which silently no-ops on hosts with no existing HTTPS listener). The
-// `Hostname='127.0.0.1'` clause aligns the listener record with the
-// IP literal the steward will dial — using `localhost` would land on ::1
-// on IPv6-first Windows and refuse the IPv4 connection.
-//
-// Uses recordingPSRunner — no PowerShell execution, no elevation required.
-func TestInstallHyperV_ListenerBindsLocalhostOnly(t *testing.T) {
-	rec := &recordingPSRunner{}
+// TestBuildLauncherServiceArgs is the REQUIRED launcher-target TEST for
+// #2379: the Windows service must be registered to invoke the launcher
+// (`run --root ... --child-args "..."`), never the bare steward binary —
+// mirrors TestGenerateSystemdUnit's assertions for Linux.
+func TestBuildLauncherServiceArgs(t *testing.T) {
+	token := "tok_svc_args_abc123"
 
-	err := setupWinRMListener(rec, "AABBCCDDEEFF00112233445566778899AABBCCDD")
-	require.NoError(t, err)
+	args := buildLauncherServiceArgs(windowsInstallDir, token, "")
+	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args", "--regtoken " + token}, args)
 
-	// Find the listener-create call and verify it binds to IP:127.0.0.1.
-	var foundLoopback bool
-	for _, call := range rec.Calls {
-		if strings.Contains(call.ScriptBlock, "winrm create") {
-			assert.Contains(t, call.ScriptBlock, "IP:127.0.0.1",
-				"listener must be bound to IP:127.0.0.1, not *")
-			assert.NotContains(t, call.ScriptBlock, "Address=*",
-				"listener must not use Address=* (binds 0.0.0.0)")
-			assert.Contains(t, call.ScriptBlock, "Hostname='127.0.0.1'",
-				"Hostname must be the IPv4 literal so it survives IPv6-first DNS resolution")
-			foundLoopback = true
-		}
-	}
-	assert.True(t, foundLoopback, "must have a winrm create call for the HTTPS listener")
+	withURL := buildLauncherServiceArgs(windowsInstallDir, token, "https://ctrl.example.com:8443")
+	assert.Equal(t, []string{"run", "--root", windowsInstallDir, "--child-args",
+		"--regtoken " + token + " --controller-url https://ctrl.example.com:8443"}, withURL)
+
+	// The service args must never point execution at the bare steward binary.
+	joined := strings.Join(withURL, " ")
+	assert.NotContains(t, joined, windowsInstallPath+" --regtoken",
+		"service must exec the launcher, not the bare steward binary")
+
+	// Token appears exactly once (no duplication across args).
+	assert.Equal(t, 1, strings.Count(joined, token), "token should appear exactly once")
 }
 
-// TestInstallHyperV_FirewallRuleLoopbackOnly verifies that setupHyperVFirewall
-// produces a script with LocalAddress=127.0.0.1 and a Block rule for non-loopback.
-// Uses recordingPSRunner — no PowerShell execution, no elevation required.
-func TestInstallHyperV_FirewallRuleLoopbackOnly(t *testing.T) {
-	rec := &recordingPSRunner{}
-	err := setupHyperVFirewall(rec)
-	require.NoError(t, err)
-
-	require.Len(t, rec.Calls, 1, "setupHyperVFirewall must make exactly one PS call")
-	call := rec.Calls[0]
-
-	// Script must include loopback-only allow rule parameters.
-	assert.Contains(t, call.ScriptBlock, "LocalAddress 127.0.0.1",
-		"firewall script must include LocalAddress 127.0.0.1")
-	assert.Contains(t, call.ScriptBlock, "RemoteAddress 127.0.0.1",
-		"firewall script must include RemoteAddress 127.0.0.1")
-	// Script must also add a deny rule to block non-loopback.
-	assert.Contains(t, call.ScriptBlock, "Block",
-		"firewall script must include a Block (deny) rule")
+// TestWindowsLauncherUnderProgramFilesACL is the REQUIRED LPE-hardening TEST
+// for #2379: the launcher — a binary a SYSTEM service execs — must be
+// installed under the install dir whose default Program Files ACL restricts
+// writes to Administrators/SYSTEM. No install-dir ACL is loosened by this
+// package (copyBinary sets no Windows ACLs; the directory inherits Program
+// Files protection), so the load-bearing guarantee is that the path never
+// moves out from under it.
+func TestWindowsLauncherUnderProgramFilesACL(t *testing.T) {
+	assert.True(t, strings.HasPrefix(windowsLauncherPath, windowsInstallDir+`\`),
+		"launcher must live inside the install dir")
+	assert.True(t, strings.HasPrefix(windowsInstallDir, `C:\Program Files\`),
+		"install dir must be under Program Files (Administrator-only-writable default ACL)")
 }
 
-// TestInstallHyperV_SecretsPrePopulated verifies that storeWinRMSecrets writes
-// hyperv/winrm_user and hyperv/winrm_pass to the secret store, and that the
-// password value does not appear in any log output.
-func TestInstallHyperV_SecretsPrePopulated(t *testing.T) {
-	m := New("cfgms-steward.exe")
-	if !m.IsElevated() {
-		t.Skip("skipping: requires Administrator privileges")
-	}
+// TestPlatformLogDir verifies the ProgramData-with-fallback resolution mirrors
+// platformCACertPath, including CFGMS_INSTALL_PREFIX test isolation.
+func TestPlatformLogDir(t *testing.T) {
+	t.Setenv("ProgramData", `C:\ProgramData`)
+	t.Setenv("CFGMS_INSTALL_PREFIX", "")
+	assert.Equal(t, filepath.Join(`C:\ProgramData`, "CFGMS", "logs"), platformLogDir())
 
-	dir := t.TempDir()
-	provider := &stewardsecrets.StewardProvider{}
-	store, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
-	require.NoError(t, err)
+	t.Setenv("ProgramData", "")
+	assert.Equal(t, filepath.Join(`C:\ProgramData`, "CFGMS", "logs"), platformLogDir(),
+		`unset ProgramData falls back to C:\ProgramData`)
 
-	winrmUser := "cfgms-hyperv-test"
-	winrmPass := "testSecretP@ss123!"
-
-	err = storeWinRMSecrets(store, winrmUser, winrmPass)
-	require.NoError(t, err)
-
-	ctx := context.Background()
-
-	userSecret, err := store.GetSecret(ctx, "hyperv/winrm_user")
-	require.NoError(t, err)
-	assert.Equal(t, winrmUser, userSecret.Value, "winrm_user secret must match")
-
-	passSecret, err := store.GetSecret(ctx, "hyperv/winrm_pass")
-	require.NoError(t, err)
-	assert.Equal(t, winrmPass, passSecret.Value, "winrm_pass secret must match")
+	t.Setenv("CFGMS_INSTALL_PREFIX", `D:\scratch`)
+	assert.Equal(t, filepath.Join(`D:\scratch`, `ProgramData`, "CFGMS", "logs"), platformLogDir(),
+		"CFGMS_INSTALL_PREFIX nests the path under the prefix")
 }
-
-// TestInstallHyperV_SecretsReadableByServiceAccount verifies that the secret store
-// can be re-opened and secrets read back. The steward provider uses machine-level
-// DPAPI (CRYPTPROTECT_LOCAL_MACHINE flag) so any account on the machine, including
-// LocalSystem (the SCM service identity), can decrypt the blobs.
-func TestInstallHyperV_SecretsReadableByServiceAccount(t *testing.T) {
-	m := New("cfgms-steward.exe")
-	if !m.IsElevated() {
-		t.Skip("skipping: requires Administrator privileges")
-	}
-
-	dir := t.TempDir()
-	provider := &stewardsecrets.StewardProvider{}
-
-	store1, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
-	require.NoError(t, err)
-
-	winrmPass := "machineReadableP@ss456!"
-	err = storeWinRMSecrets(store1, "cfgms-hyperv-test", winrmPass)
-	require.NoError(t, err)
-
-	// Re-open the store as a fresh instance under a different identity context.
-	// Machine-level DPAPI allows any account to decrypt.
-	store2, err := provider.CreateSecretStore(map[string]interface{}{"secrets_dir": dir})
-	require.NoError(t, err)
-
-	ctx := context.Background()
-	secret, err := store2.GetSecret(ctx, "hyperv/winrm_pass")
-	require.NoError(t, err, "GetSecret must succeed: machine-level DPAPI allows cross-identity read")
-	assert.Equal(t, winrmPass, secret.Value)
-}
-
-// TestInstallHyperV_LogsAreSanitized verifies that a winrmUser value containing
-// \n and \r does not produce log forgery when processed through
-// logging.SanitizeLogValue, as required for all InstallHyperV log statements.
-func TestInstallHyperV_LogsAreSanitized(t *testing.T) {
-	craftedUsername := "legit-user\r\nINFO: fake-log-entry injected"
-	sanitized := logging.SanitizeLogValue(craftedUsername)
-
-	assert.NotContains(t, sanitized, "\r",
-		"sanitized value must not contain carriage returns")
-	assert.NotContains(t, sanitized, "\n",
-		"sanitized value must not contain newlines")
-	assert.NotContains(t, sanitized, "fake-log-entry",
-		"log-injected content after CR/LF must be stripped")
-
-	// Verify InstallHyperV log pattern: fmt.Printf("... %s ...", logging.SanitizeLogValue(winrmUser))
-	// does not propagate the injection.
-	logLine := "Creating local service account " + logging.SanitizeLogValue(craftedUsername)
-	assert.NotContains(t, logLine, "\n",
-		"log line using SanitizeLogValue must not contain newlines")
-	assert.NotContains(t, logLine, "fake-log-entry",
-		"log line using SanitizeLogValue must not contain injected content")
-}
-
-// TestInstallHyperV_HyperVInstallerInterface verifies that *windowsManager satisfies
-// the HyperVInstaller interface and that the type assertion used in main.go works.
-func TestInstallHyperV_HyperVInstallerInterface(t *testing.T) {
-	mgr := New("cfgms-steward.exe")
-	hi, ok := mgr.(HyperVInstaller)
-	assert.True(t, ok, "*windowsManager must satisfy HyperVInstaller")
-	assert.NotNil(t, hi)
-}
-

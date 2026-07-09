@@ -1,0 +1,54 @@
+# CFGMS CI Runner Config — Linux (x64)
+#
+# Push this to the runner VM's steward after enrollment:
+#   cfg config upload --steward <STEWARD_ID> --config linux-runner.cfg.yaml
+#
+# CHANGE: Replace every <placeholder> with real values for your environment.
+# See README.md for the full provisioning walkthrough.
+#
+# NO SECRETS in this file. GitHub App credentials are stored in the CFGMS
+# secrets provider, not here. See github-app-secrets.example.yaml.
+
+steward:
+  id: "ci-runner-linux-01"    # CHANGE: set to the actual enrolled steward hostname
+  mode: "standalone"
+
+resources:
+  # ── GitHub Actions Runner ────────────────────────────────────────────────────
+  # Installs and manages the GitHub Actions self-hosted runner agent as a
+  # persistent Linux service.
+  #
+  # The module fetches the agent archive, verifies the SHA-256, installs it
+  # under work_dir, and registers the service. Registration (the one-time token
+  # exchange) is handled by the controller workflow — the module only manages
+  # the installed agent state.
+  #
+  # Field reference: features/modules/github_runner/config.go
+
+  - name: "github-runner"
+    module: "github_runner"
+    config:
+      # Pinned runner agent version — update when bumping the runner.
+      # CHANGE: Set to the desired GitHub Actions runner release.
+      version: "2.319.1"
+
+      # Download URL for the agent archive at the pinned version.
+      # CHANGE: Update to match your pinned version and architecture.
+      agent_url: "https://github.com/actions/runner/releases/download/v2.319.1/actions-runner-linux-x64-2.319.1.tar.gz"
+
+      # Expected SHA-256 of the archive (lowercase hex, 64 chars).
+      # CHANGE: Replace with the actual sha256sum of the archive.
+      # Verify: sha256sum actions-runner-linux-x64-2.319.1.tar.gz
+      agent_sha256: "PLACEHOLDER_SHA256_64HEX"
+
+      # Absolute install directory on the runner VM.
+      work_dir: "/opt/actions-runner"
+
+      # OS service name for the runner daemon.
+      service_name: "github-runner"
+
+      # Runner labels surfaced to GitHub Actions workflow selectors.
+      labels:
+        - "self-hosted"
+        - "linux"
+        - "x64"

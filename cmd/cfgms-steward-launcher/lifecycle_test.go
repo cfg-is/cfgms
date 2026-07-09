@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,16 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/version"
 )
+
+// fakeClock is an injectable clock for lifecycle tests that need to control
+// whether a child "passed" its startup window without real time delays.
+type fakeClock struct {
+	now         time.Time
+	sinceResult time.Duration
+}
+
+func (f *fakeClock) Now() time.Time                { return f.now }
+func (f *fakeClock) Since(time.Time) time.Duration { return f.sinceResult }
 
 // TestHelperProcess is the canonical Go pattern for testing exec.Cmd-based
 // code without shipping separate fake binaries. The launcher test re-exec's
@@ -48,6 +59,17 @@ func TestHelperProcess(t *testing.T) {
 	// so a test can assert execOnce propagated CFGMS_STEWARD_LAUNCHER_MANAGED=1.
 	if mf := os.Getenv("FAKE_STEWARD_RECORD_MANAGED_FILE"); mf != "" {
 		_ = os.WriteFile(mf, []byte(os.Getenv(version.EnvStewardLauncherManaged)), 0o600)
+	}
+	// FAKE_STEWARD_STAGE_VERSION simulates StageBinary: "<root>:<version>:<binary_name>".
+	// When set, the fake-steward advances state.json to the given version before exiting,
+	// mimicking the steward's upgrade handler calling WriteCurrent after staging a binary.
+	// This is idempotent: WriteCurrent is a no-op when current already equals the target.
+	if sv := os.Getenv("FAKE_STEWARD_STAGE_VERSION"); sv != "" {
+		parts := strings.SplitN(sv, ":", 3)
+		if len(parts) == 3 {
+			wl := Layout{Root: parts[0], StewardBinaryName: parts[2]}
+			_ = wl.WriteCurrent(parts[1])
+		}
 	}
 	if sleepMs := os.Getenv("FAKE_STEWARD_SLEEP_MS"); sleepMs != "" {
 		if n, err := strconv.Atoi(sleepMs); err == nil && n > 0 {
@@ -532,5 +554,868 @@ func TestExecOnce_SetsLauncherManagedEnvOnChild(t *testing.T) {
 	if string(got) != "1" {
 		t.Errorf("child saw %s=%q, want \"1\" — execOnce must mark the steward child as launcher-managed (#2003)",
 			version.EnvStewardLauncherManaged, string(got))
+	}
+}
+
+// waitForFile polls for path to exist, returning true when it does or false
+// if deadline passes.
+func waitForFile(path string, deadline time.Duration) bool {
+	expire := time.Now().Add(deadline)
+	for time.Now().Before(expire) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter verifies that when
+// a child fails its startup window and the launcher auto-rolls-back, the
+// upgrade-rolled-back flag file is written with the rolled-back-to version and
+// consecutive_failures in state.json is exactly 1 (AC2 postcondition: one
+// failure+rollback → counter is 1).
+//
+// Only v2's binary is installed. After v2 fails and the launcher rolls back to
+// v1, the supervisor finds no v1 binary and returns an error before a second
+// increment can fire — so consecutive_failures stays at 1.
+func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
+	l := newLayout(t)
+	certStoreDir := t.TempDir()
+
+	// Install v2 only; v1 directory is intentionally absent so the supervisor
+	// returns early (missing binary) after the rollback, before a second failure
+	// can increment the counter.
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	// State: current=v2, previous=v1.
+
+	// v2 fails immediately (non-zero exit, sinceResult=0 < StartupWindow).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		CertStoreDir:      certStoreDir,
+		clock:             &fakeClock{sinceResult: 0}, // always < StartupWindow → failedStartup
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	if err := runSupervisor(t, s, 10*time.Second); err == nil {
+		t.Fatal("Supervise should return error when v2 fails and v1 binary is absent")
+	}
+
+	// upgrade-rolled-back must exist and contain v1 (the version rolled back TO).
+	flagPath := filepath.Join(certStoreDir, "upgrade-rolled-back")
+	data, rdErr := os.ReadFile(flagPath) //nolint:gosec // test temp path
+	if rdErr != nil {
+		t.Fatalf("upgrade-rolled-back flag file not written: %v", rdErr)
+	}
+	if got := strings.TrimSpace(string(data)); got != "v1" {
+		t.Errorf("upgrade-rolled-back = %q, want v1 (the rollback target)", got)
+	}
+
+	// consecutive_failures == 1: v2 failed once; v1 binary was absent so the
+	// supervisor returned before a second increment could fire (AC2 postcondition).
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState after rollback: %v", loadErr)
+	}
+	if ps.ConsecutiveFailures != 1 {
+		t.Errorf("consecutive_failures = %d, want 1 (one failure+rollback)", ps.ConsecutiveFailures)
+	}
+}
+
+// TestSupervise_CleanStartup_WritesFlagAndPrunesVersions verifies that after a
+// child exits cleanly past its StartupWindow:
+//   - upgrade-committed is written with the current version name.
+//   - consecutive_failures in state.json is reset to 0.
+//   - version directories beyond MaxVersions (past quarantine window) are pruned.
+//   - the active version directory is NOT deleted.
+func TestSupervise_CleanStartup_WritesFlagAndPrunesVersions(t *testing.T) {
+	l := newLayout(t)
+	certStoreDir := t.TempDir()
+
+	// Install v1–v4 and stage v4 as current.
+	for _, v := range []string{"v1", "v2", "v3", "v4"} {
+		installFakeSteward(t, l, v)
+	}
+	for _, v := range []string{"v1", "v2", "v3", "v4"} {
+		if err := l.WriteCurrent(v); err != nil {
+			t.Fatalf("WriteCurrent %s: %v", v, err)
+		}
+	}
+	// State: current=v4, previous=v3; v1,v2 are in versions/ but not in pointer state.
+
+	// Pre-seed a non-zero failure counter to prove it gets reset.
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState before pre-seed: %v", loadErr)
+	}
+	ps.ConsecutiveFailures = 7
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	// Set mod times so v1 is oldest, all past quarantine (QuarantineWindow=0).
+	now := time.Now()
+	for i, v := range []string{"v1", "v2", "v3", "v4"} {
+		vDir := filepath.Join(l.VersionsDir(), v)
+		mt := now.Add(-time.Duration(4-i) * time.Hour)
+		if err := os.Chtimes(vDir, mt, mt); err != nil {
+			t.Fatalf("chtimes %s: %v", v, err)
+		}
+	}
+
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "0",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	s := &Supervisor{
+		Layout:        l,
+		StartupWindow: 50 * time.Millisecond,
+		CertStoreDir:  certStoreDir,
+		RetentionPolicy: RetentionPolicy{
+			QuarantineWindow: 0, // no quarantine: all non-active are candidates
+			MaxVersions:      1, // keep 1 non-active → prune v1 and v2
+			MaxBytes:         0,
+		},
+		MaxRollbackCycles: 0,
+		clock:             &fakeClock{sinceResult: time.Minute}, // > StartupWindow → clean
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// The flag file is written last in the clean-startup branch, so when it
+	// exists, counter reset and pruning are both complete.
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag file never appeared within 5s")
+	}
+	cancel()
+	<-done
+
+	// upgrade-committed must contain the current version (v4).
+	data, err := os.ReadFile(flagPath) //nolint:gosec // test temp path
+	if err != nil {
+		t.Fatalf("read upgrade-committed: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "v4" {
+		t.Errorf("upgrade-committed = %q, want v4", got)
+	}
+
+	// consecutive_failures must be reset to 0.
+	ps2, loadErr2 := l.loadState()
+	if loadErr2 != nil {
+		t.Fatalf("loadState after clean startup: %v", loadErr2)
+	}
+	if ps2.ConsecutiveFailures != 0 {
+		t.Errorf("consecutive_failures = %d, want 0", ps2.ConsecutiveFailures)
+	}
+
+	// MaxVersions=1: candidates=[v1,v2,v3] (v4 active), overflow=2 → v1,v2 pruned.
+	for _, pruned := range []string{"v1", "v2"} {
+		if _, err := os.Stat(filepath.Join(l.VersionsDir(), pruned)); err == nil {
+			t.Errorf("version %s should be pruned but dir still exists", pruned)
+		}
+	}
+	// Active version v4 must survive.
+	if _, err := os.Stat(filepath.Join(l.VersionsDir(), "v4")); err != nil {
+		t.Errorf("active version v4 must not be pruned: %v", err)
+	}
+	// v3 (newest non-active, kept within MaxVersions=1) must survive.
+	if _, err := os.Stat(filepath.Join(l.VersionsDir(), "v3")); err != nil {
+		t.Errorf("v3 (within MaxVersions=1) must not be pruned: %v", err)
+	}
+}
+
+// TestSupervise_ConsecutiveFailures_CountAndReset verifies that three
+// consecutive startup-window failures accumulate consecutive_failures=3 in
+// state.json (each write atomic via saveState), and that a subsequent clean
+// startup resets the counter to 0.
+func TestSupervise_ConsecutiveFailures_CountAndReset(t *testing.T) {
+	l := newLayout(t)
+
+	// Two versions that both fail: MaxRollbackCycles=2 causes three executions
+	// (v3 → rollback → v2 → rollback → v3 → no budget → error), each incrementing.
+	installFakeSteward(t, l, "v2")
+	installFakeSteward(t, l, "v3")
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	if err := l.WriteCurrent("v3"); err != nil {
+		t.Fatalf("WriteCurrent v3: %v", err)
+	}
+	// State: current=v3, previous=v2.
+
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	fc := &fakeClock{sinceResult: 0} // always failedStartup
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 2,
+		clock:             fc,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	// Phase 1: three executions → counter = 3.
+	if err := runSupervisor(t, s, 10*time.Second); err == nil {
+		t.Fatal("phase 1: Supervise should return error when all versions fail")
+	}
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState after phase 1: %v", loadErr)
+	}
+	if ps.ConsecutiveFailures != 3 {
+		t.Errorf("after 3 failures: consecutive_failures = %d, want 3", ps.ConsecutiveFailures)
+	}
+
+	// Phase 2: subsequent clean startup must reset counter to 0.
+	// The current version after the rollback loop is whatever the last state
+	// held. Change env to clean exit and use a clock that reports healthy duration.
+	t.Setenv("FAKE_STEWARD_EXIT_CODE", "0")
+	fc.sinceResult = time.Minute // > StartupWindow → clean startup
+
+	certStoreDir := t.TempDir()
+	s2 := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0,
+		CertStoreDir:      certStoreDir,
+		clock:             fc,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() { done2 <- s2.Supervise(ctx2) }()
+
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag file never appeared after clean startup")
+	}
+	cancel2()
+	<-done2
+
+	ps2, loadErr2 := l.loadState()
+	if loadErr2 != nil {
+		t.Fatalf("loadState after phase 2: %v", loadErr2)
+	}
+	if ps2.ConsecutiveFailures != 0 {
+		t.Errorf("after clean startup: consecutive_failures = %d, want 0", ps2.ConsecutiveFailures)
+	}
+}
+
+// upgradeClock is a test clock whose Since method returns a small duration on
+// the first call (so the first child looks like it exited within the startup
+// window) and a large duration on every subsequent call (so later children
+// look like they cleared the window). Used by
+// TestSupervise_UpgradeSelfExit_AdvancesToNewVersion to verify upgrade
+// self-exit detection without any real-time delays.
+type upgradeClock struct {
+	calls atomic.Int32
+}
+
+func (c *upgradeClock) Now() time.Time { return time.Now() }
+func (c *upgradeClock) Since(_ time.Time) time.Duration {
+	if c.calls.Add(1) == 1 {
+		return 10 * time.Millisecond // first child: within startup window
+	}
+	return time.Minute // subsequent children: past startup window
+}
+
+// TestSupervise_UpgradeSelfExit_AdvancesToNewVersion verifies the fix for the
+// upgrade self-exit bug: when the steward calls StageBinary (advancing
+// state.json.current to the new version) and then self-exits cleanly so the
+// launcher re-execs the staged binary, the supervisor must NOT treat this as a
+// failed startup. Without the fix, a clean exit inside StartupWindow triggers
+// MaxRollbackCycles-based failure even when state.json advanced — the upgrade
+// is silently reversed.
+//
+// Test shape:
+//  1. v1 is the current version; v2 is the staged upgrade.
+//  2. v1 (via FAKE_STEWARD_STAGE_VERSION) calls WriteCurrent("v2") before exiting.
+//     The clock returns 10ms for v1's run (inside 50ms StartupWindow).
+//  3. The fix detects that state.json.current changed (v1→v2) on a clean exit and
+//     continues the loop to exec v2 instead of treating the exit as a crash.
+//  4. v2 calls WriteCurrent("v2") (no-op), exits cleanly; the clock returns
+//     time.Minute (past StartupWindow) so it's treated as a committed startup.
+//  5. The supervisor writes the "upgrade-committed" flag file. The test cancels
+//     on that signal, then asserts Supervise returns nil and current is "v2".
+//
+// We use the upgrade-committed flag as the termination signal (rather than a
+// fixed context deadline) so that the test is robust on slow CI runners where
+// the test binary (re-exec'd as the fake steward) can take well over 500ms to
+// load. A fixed 500ms deadline would kill v1 mid-run via exec.CommandContext,
+// turning exitErr from nil to signal:killed and hiding the upgrade detection
+// path entirely.
+func TestSupervise_UpgradeSelfExit_AdvancesToNewVersion(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// All children run WriteCurrent("v2"): v1 advances state.json to v2; v2's
+	// call is a no-op (current already == v2). Both exit cleanly with code 0.
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_STAGE_VERSION": l.Root + ":v2:" + l.StewardBinaryName,
+		"FAKE_STEWARD_SLEEP_MS":      "0",
+		"FAKE_STEWARD_EXIT_CODE":     "0",
+	})
+	certStoreDir := t.TempDir()
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0, // zero-tolerance: any unintended rollback returns an error
+		CertStoreDir:      certStoreDir,
+		clock:             &upgradeClock{},
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// The upgrade-committed flag is written only after v2 exits past StartupWindow
+	// (committed). This can only happen if the fix is in place: without it,
+	// Supervise returns an error immediately (MaxRollbackCycles=0, v1 exited
+	// inside StartupWindow) and the flag never appears.
+	//
+	// Without fix: waitForFile returns false → select detects error on done → Fatalf.
+	// With fix:    flag appears → we cancel → Supervise returns nil → assertions pass.
+	committedFlag := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(committedFlag, 15*time.Second) {
+		select {
+		case err := <-done:
+			t.Fatalf("Supervise returned %v before upgrade committed; upgrade self-exit must not trigger rollback", err)
+		default:
+			t.Fatal("upgrade-committed flag never appeared within 15s")
+		}
+	}
+	cancel()
+
+	err := <-done
+	if err != nil {
+		t.Fatalf("Supervise returned %v after upgrade committed; expected nil", err)
+	}
+	cur, readErr := l.ReadCurrent()
+	if readErr != nil {
+		t.Fatalf("ReadCurrent after upgrade: %v", readErr)
+	}
+	if cur != "v2" {
+		t.Errorf("current = %q, want v2 (no rollback must have occurred)", cur)
+	}
+}
+
+// premarkKnownGood pre-seeds the known-good marker in state.json using the
+// actual hash of the installed binary at the given version. This simulates the
+// launcher having previously run the binary past its startup window.
+func premarkKnownGood(t *testing.T, l Layout, version string) {
+	t.Helper()
+	exe, err := l.StewardExeFor(version)
+	if err != nil {
+		t.Fatalf("StewardExeFor %q: %v", version, err)
+	}
+	hash, err := computeBinaryHash(exe)
+	if err != nil {
+		t.Fatalf("computeBinaryHash for %q: %v", version, err)
+	}
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState before premarkKnownGood: %v", err)
+	}
+	ps.KnownGood = version
+	ps.KnownGoodHash = hash
+	if err := l.saveState(ps); err != nil {
+		t.Fatalf("saveState with known-good marker: %v", err)
+	}
+}
+
+// TestSupervise_KnownGood_FastExitRestartsInPlace verifies AC2: a version
+// already marked known-good that exits inside StartupWindow is restarted in
+// place — Rollback() is NOT called and state.json current is unchanged.
+func TestSupervise_KnownGood_FastExitRestartsInPlace(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v0") // previous version (must NOT become current)
+	if err := l.WriteCurrent("v0"); err != nil {
+		t.Fatalf("WriteCurrent v0: %v", err)
+	}
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// State: current=v1, previous=v0. Mark v1 as known-good.
+	premarkKnownGood(t, l, "v1")
+
+	// All children exit immediately with non-zero code — inside startup window.
+	markerFile := filepath.Join(t.TempDir(), "ran")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "1",
+		"FAKE_STEWARD_SLEEP_MS":    "0",
+		"FAKE_STEWARD_MARKER_FILE": markerFile,
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // always inside startup window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	// Run with a short timeout; the known-good loop must not return an error.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := s.Supervise(ctx)
+	// Context timeout is a clean cancel — Supervise must return nil.
+	if err != nil {
+		t.Errorf("Supervise returned %v on known-good fast-exit; want nil (restart in place, not terminal failure)", err)
+	}
+
+	// current must still be v1 — Rollback must NOT have been called.
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after known-good fast-exit: %v", curErr)
+	}
+	if cur != "v1" {
+		t.Errorf("current = %q after known-good fast-exit, want v1 (rollback must be suppressed)", cur)
+	}
+
+	// The child must have run at least once (marker file written).
+	if _, statErr := os.Stat(markerFile); statErr != nil {
+		t.Errorf("child never ran (marker absent): %v", statErr)
+	}
+
+	// Stderr must mention the restart-in-place decision.
+	if !bytes.Contains(stderr.Bytes(), []byte("known-good")) {
+		t.Errorf("stderr did not mention known-good restart:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_Probation_FastExitRollsBack verifies AC3: a freshly staged
+// (not-yet-known-good) version that exits inside StartupWindow still rolls
+// back to the previous version (existing probation behavior preserved).
+func TestSupervise_Probation_FastExitRollsBack(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	// State: current=v2, previous=v1. v2 has NO known-good marker (probation).
+
+	marker := filepath.Join(t.TempDir(), "ran")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "1",
+		"FAKE_STEWARD_SLEEP_MS":    "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // always inside startup window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	err := runSupervisor(t, s, 10*time.Second)
+	if err == nil {
+		t.Fatal("Supervise must return error when non-known-good v2 fails and v1 also fails")
+	}
+
+	// Rollback must have fired: current must be v1 after the rollback.
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after probation rollback: %v", curErr)
+	}
+	if cur != "v1" {
+		t.Errorf("current = %q after probation rollback, want v1", cur)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`rolled back to version "v1"`)) {
+		t.Errorf("stderr did not mention rollback:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_IncidentReplay_KnownGoodNotDemoted verifies AC4: replaying
+// the 2026-06-16 incident. Known-good vA is current; a forced fast-exit on
+// first start does NOT demote to vB. The launcher keeps vA current and retries.
+func TestSupervise_IncidentReplay_KnownGoodNotDemoted(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v0-5-12") // old version — must NOT become current
+	installFakeSteward(t, l, "v0-5-13") // known-good current
+	if err := l.WriteCurrent("v0-5-12"); err != nil {
+		t.Fatalf("WriteCurrent v0-5-12: %v", err)
+	}
+	if err := l.WriteCurrent("v0-5-13"); err != nil {
+		t.Fatalf("WriteCurrent v0-5-13: %v", err)
+	}
+	// Mark v0-5-13 known-good (it was running fine before the reboot).
+	premarkKnownGood(t, l, "v0-5-13")
+
+	// Simulate the boot-time race: v0-5-13 exits in under 2s (0-byte logs).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     30 * time.Second,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: time.Millisecond}, // fast exit inside 30s window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := s.Supervise(ctx)
+	if err != nil {
+		t.Errorf("Supervise returned %v in incident replay; want nil (known-good v0-5-13 never demoted)", err)
+	}
+
+	// v0-5-13 must remain current — no demotion to v0-5-12.
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after incident replay: %v", curErr)
+	}
+	if cur != "v0-5-13" {
+		t.Errorf("current = %q after incident replay, want v0-5-13 (not demoted)", cur)
+	}
+	if bytes.Contains(stderr.Bytes(), []byte("rolled back")) {
+		t.Errorf("rollback must not fire for known-good v0-5-13:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_KnownGoodCutover_NewVersionEntersProbation verifies AC6 (lifecycle
+// side): after a controller cutover to a new version (vB), a vB fast-exit follows
+// probation rules and rolls back to known-good vA — the known-good marker for vA
+// cannot protect vB from rollback.
+func TestSupervise_KnownGoodCutover_NewVersionEntersProbation(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "vA")
+	installFakeSteward(t, l, "vB")
+	if err := l.WriteCurrent("vA"); err != nil {
+		t.Fatalf("WriteCurrent vA: %v", err)
+	}
+	// Mark vA known-good (security-patch pre-condition).
+	premarkKnownGood(t, l, "vA")
+
+	// Controller pushes vB (security patch) via WriteCurrent. This must clear
+	// vA's known-good marker and enter vB into probation.
+	if err := l.WriteCurrent("vB"); err != nil {
+		t.Fatalf("WriteCurrent vB: %v", err)
+	}
+
+	// Verify marker was cleared by cutover.
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if ps.KnownGood != "" || ps.KnownGoodHash != "" {
+		t.Fatalf("cutover to vB must clear known-good marker; got KnownGood=%q KnownGoodHash=%q",
+			ps.KnownGood, ps.KnownGoodHash)
+	}
+
+	// vB fast-exits → must roll back to vA (probation rules apply).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "1",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // fast exit inside startup window
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	// Both vA and vB fail (same env), so supervise exhausts rollback budget and errors.
+	if err := runSupervisor(t, s, 10*time.Second); err == nil {
+		t.Fatal("Supervise must return error after vB fails and vA also fails")
+	}
+
+	// The rollback to vA must have fired (vB was in probation, not known-good).
+	cur, curErr := l.ReadCurrent()
+	if curErr != nil {
+		t.Fatalf("ReadCurrent after vB probation rollback: %v", curErr)
+	}
+	if cur != "vA" {
+		t.Errorf("current = %q after vB probation rollback, want vA", cur)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`rolled back to version "vA"`)) {
+		t.Errorf("stderr must mention rollback to vA:\n%s", stderr.String())
+	}
+}
+
+// TestSupervise_KnownGood_MarkedAfterHealthyRun verifies that a version which
+// runs past StartupWindow and exits cleanly has the known-good marker written to
+// state.json, and that marker survives a subsequent loadState (AC1 via lifecycle).
+func TestSupervise_KnownGood_MarkedAfterHealthyRun(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+
+	certStoreDir := t.TempDir()
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE": "0",
+		"FAKE_STEWARD_SLEEP_MS":  "0",
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0,
+		CertStoreDir:      certStoreDir,
+		clock:             &fakeClock{sinceResult: time.Minute}, // past startup window → clean
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// Wait for upgrade-committed flag (written after mark-known-good).
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag never appeared")
+	}
+	cancel()
+	<-done
+
+	ps, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState after healthy run: %v", err)
+	}
+	if ps.KnownGood != "v1" {
+		t.Errorf("KnownGood = %q, want v1 — must be set after binary survived StartupWindow", ps.KnownGood)
+	}
+	if ps.KnownGoodHash == "" {
+		t.Error("KnownGoodHash must be non-empty after healthy run")
+	}
+}
+
+// TestSupervise_HashFailureAfterCleanRun_SkipsKnownGoodUpdate verifies the
+// post-exec hash-failure code path for a clean (past-startup-window) child exit:
+//  1. Supervision does NOT abort — the loop continues.
+//  2. The upgrade-committed flag is still written (counter-reset path completes).
+//  3. The pre-existing KnownGood marker in state.json is left untouched, not
+//     cleared, when the hash of the just-exited binary cannot be computed.
+//
+// The hash failure is induced by chmod-ing the binary to 0o000 after the child
+// has started (the in-memory child is unaffected) but before it exits. This
+// causes computeBinaryHash to return an error without ever aborting the child.
+func TestSupervise_HashFailureAfterCleanRun_SkipsKnownGoodUpdate(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// Pre-seed a known-good marker to verify it survives the hash failure.
+	premarkKnownGood(t, l, "v1")
+	psInit, err := l.loadState()
+	if err != nil {
+		t.Fatalf("loadState before test: %v", err)
+	}
+	existingHash := psInit.KnownGoodHash
+	if existingHash == "" {
+		t.Fatal("premarkKnownGood must set a non-empty hash for this test to be meaningful")
+	}
+
+	markerFile := filepath.Join(t.TempDir(), "started")
+	certStoreDir := t.TempDir()
+	// Child sleeps long enough for the test goroutine to chmod the binary
+	// before the child exits. After the sleep it exits cleanly (code 0).
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_SLEEP_MS":    "300",
+		"FAKE_STEWARD_MARKER_FILE": markerFile,
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 0,
+		CertStoreDir:      certStoreDir,
+		clock:             &fakeClock{sinceResult: time.Minute}, // past startup window → clean exit
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// Wait for the child to start, then make the binary unreadable so
+	// computeBinaryHash fails on the post-exec hash call.
+	if !waitForFile(markerFile, 5*time.Second) {
+		t.Fatal("child never started (marker absent within 5s)")
+	}
+	exe, exeErr := l.StewardExeFor("v1")
+	if exeErr != nil {
+		t.Fatalf("StewardExeFor v1: %v", exeErr)
+	}
+	if chErr := os.Chmod(exe, 0o000); chErr != nil {
+		t.Fatalf("chmod 000 binary: %v", chErr)
+	}
+	// Restore permissions so t.TempDir cleanup can remove the tree.
+	t.Cleanup(func() { _ = os.Chmod(exe, 0o755) })
+
+	// upgrade-committed must be written even when the post-exec hash fails.
+	// It is written at the END of the clean-startup branch, so its presence
+	// proves that the entire clean-startup path (counter reset, prune, flag)
+	// ran to completion.
+	flagPath := filepath.Join(certStoreDir, "upgrade-committed")
+	if !waitForFile(flagPath, 5*time.Second) {
+		t.Fatal("upgrade-committed flag not written after clean run with hash failure (post-exec hash failure must not skip the committed branch)")
+	}
+	cancel()
+	<-done // supervisor exits (nil or error — both are acceptable here)
+
+	// The pre-existing KnownGood marker must be completely untouched.
+	ps, loadErr := l.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState after hash-failure clean run: %v", loadErr)
+	}
+	if ps.KnownGood != "v1" {
+		t.Errorf("KnownGood = %q, want v1 — pre-existing marker must survive post-exec hash failure", ps.KnownGood)
+	}
+	if ps.KnownGoodHash != existingHash {
+		t.Errorf("KnownGoodHash = %q, want %q — pre-existing hash must survive post-exec hash failure", ps.KnownGoodHash, existingHash)
+	}
+}
+
+// TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood verifies that
+// when computeBinaryHash fails (binary unreadable) after a known-good binary
+// fast-exits, the launcher does NOT restart in place. Without the hash the
+// launcher cannot confirm the binary is the proven one — isKnownGood stays false
+// and probation rules apply (rollback fires).
+//
+// Scenario: v1 is known-good; v1 starts, writes a marker, then sleeps. The test
+// goroutine chmod-s the binary to 0o000 after the child is running. When the child
+// exits with code 1 (failed startup), computeBinaryHash fails → isKnownGood=false
+// → rollback to v0 instead of restart-in-place.
+func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v0")
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v0"); err != nil {
+		t.Fatalf("WriteCurrent v0: %v", err)
+	}
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	// State: current=v1, previous=v0. Mark v1 known-good.
+	premarkKnownGood(t, l, "v1")
+
+	markerFile := filepath.Join(t.TempDir(), "started")
+	// Child sleeps long enough for the test to chmod the binary, then exits
+	// with code 1 (simulating a crashed steward). The clock will report 0 for
+	// ranFor (always inside startup window), making this look like a fast exit.
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_EXIT_CODE":   "1",
+		"FAKE_STEWARD_SLEEP_MS":    "300",
+		"FAKE_STEWARD_MARKER_FILE": markerFile,
+	})
+
+	exe, exeErr := l.StewardExeFor("v1")
+	if exeErr != nil {
+		t.Fatalf("StewardExeFor v1: %v", exeErr)
+	}
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     50 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		clock:             &fakeClock{sinceResult: 0}, // always inside startup window → failedStartup=true
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	// Wait for v1 to start, then make its binary unreadable.
+	if !waitForFile(markerFile, 5*time.Second) {
+		t.Fatal("child never started (marker absent within 5s)")
+	}
+	if chErr := os.Chmod(exe, 0o000); chErr != nil {
+		t.Fatalf("chmod 000 v1 binary: %v", chErr)
+	}
+	t.Cleanup(func() { _ = os.Chmod(exe, 0o755) })
+
+	// Supervise must return an error: v1 rolls back to v0 (hash failure → not
+	// known-good → probation), then v0 also fails and budget is exhausted.
+	var superviseErr error
+	select {
+	case superviseErr = <-done:
+	case <-ctx.Done():
+		t.Fatal("Supervise did not exit within 15s — rollback to v0 must have stalled")
+	}
+	if superviseErr == nil {
+		t.Error("Supervise returned nil after hash-failure rollback with exhausted budget; want non-nil error")
+	}
+
+	// current must be v0 — rollback must have fired (not restart-in-place).
+	cur, readErr := l.ReadCurrent()
+	if readErr != nil {
+		t.Fatalf("ReadCurrent after hash-failure rollback: %v", readErr)
+	}
+	if cur != "v0" {
+		t.Errorf("current = %q after v1 hash-failure fast-exit, want v0 (rollback must fire; v1 must NOT restart in place when hash fails)", cur)
 	}
 }

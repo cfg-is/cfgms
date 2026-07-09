@@ -245,6 +245,71 @@ Refresh the mTLS credentials for a steward. Called when the steward's certificat
 
 - `id` (path): Steward ID
 
+#### GET /api/v1/stewards/{id}/connection
+
+Get transport-level connection detail for a specific steward: whether it is currently streaming, when it connected, its remote network address, and the last-activity timestamp. Sourced from the live connection registry.
+
+Returns `connected: false` (HTTP 200) for a known steward that is not currently streaming. Returns 404 for an unknown steward ID.
+
+**Authentication:** Required  
+**Required permission:** `steward:read`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+**Response (connected):**
+
+```json
+{
+  "data": {
+    "steward_id": "steward-001",
+    "connected": true,
+    "connected_at": "2026-01-12T10:29:00Z",
+    "remote_addr": "198.51.100.42:54321",
+    "last_activity": "2026-01-12T10:30:00Z"
+  },
+  "timestamp": "2026-01-12T10:30:05Z"
+}
+```
+
+**Response (known but not connected):**
+
+```json
+{
+  "data": {
+    "steward_id": "steward-001",
+    "connected": false
+  },
+  "timestamp": "2026-01-12T10:30:05Z"
+}
+```
+
+#### GET /api/v1/stewards/connections/all
+
+List all currently-connected stewards from the live connection registry, filtered to the authenticated caller's tenant. Returns transport-level connection detail for each connected steward.
+
+**Authentication:** Required  
+**Required permission:** `steward:read`
+
+**Response:**
+
+```json
+{
+  "data": {
+    "connections": [
+      {
+        "steward_id": "steward-001",
+        "connected_at": "2026-01-12T10:29:00Z",
+        "remote_addr": "198.51.100.42:54321",
+        "last_activity": "2026-01-12T10:30:00Z"
+      }
+    ]
+  },
+  "timestamp": "2026-01-12T10:30:05Z"
+}
+```
+
 ### Configuration Management
 
 #### GET /api/v1/stewards/{id}/config
@@ -359,7 +424,9 @@ Validate configuration for a steward without applying it.
 
 #### POST /api/v1/config/push
 
-Trigger an immediate fan-out of a configuration version to all currently active stewards. Returns `202 Accepted` immediately; delivery is fire-and-forget in a background goroutine. The leader node returns `503 Service Unavailable` for follower nodes in an HA cluster.
+Trigger an immediate fan-out of a configuration version to the stewards matched by `selector` within the configuration's tenant. Returns `202 Accepted` immediately; delivery is fire-and-forget in a background goroutine. The leader node returns `503 Service Unavailable` for follower nodes in an HA cluster.
+
+A `selector` field is **required** — there is no implicit "all" default. Use the literal string `"all"` to target every steward in `tenant_id`'s fleet. The fan-out is always scoped to `cfg.tenant_id`: an admin pushing a tenant-A-labelled config with `"all"` reaches only tenant-A stewards, never other tenants'.
 
 **Authentication:** Required  
 **Required permission:** `config:push`
@@ -368,26 +435,75 @@ Trigger an immediate fan-out of a configuration version to all currently active 
 
 ```json
 {
+  "selector": "all",
   "config_id": "cfg-001",
   "version": "1.2.3",
   "tenant_id": "default"
 }
 ```
 
+`selector` supports the full fleet selector grammar (same as `POST /api/v1/fleet/resolve` and `POST /api/v1/jobs`): `id:`, `name:`, `os:`, `platform:`, `arch:`, `tag:`, `dna.<key>:`. Empty selector → 400. Unknown selector key → 400.
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Missing or empty `selector`, invalid selector expression, missing required config fields |
+| `401` | No valid authentication |
+| `403` | Tenant-scoped caller submitted a `tenant_id` different from their own |
+| `503` | Node is not the HA leader |
+
 **Response (202 Accepted):**
 
 ```json
 {
-  "data": {
-    "push_id": "push-1705051800000000000",
-    "status": "accepted",
-    "queued_at": "2025-01-12T10:30:00Z"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
+  "push_id": "push-1705051800000000000",
+  "status": "accepted",
+  "queued_at": "2025-01-12T10:30:00Z"
 }
 ```
 
+Use `GET /api/v1/config/push/{push_id}` to poll delivery status after receiving the 202.
+
 > **[GAP: save=deploy auto-distribution not yet wired to ConfigStore]** The push endpoint fans out `CommandSyncConfig` to active stewards but does not write through the ConfigStore. Once Epic #1501 lands, save=deploy will automatically trigger distribution on config write, making explicit pushes unnecessary for most workflows.
+
+#### GET /api/v1/config/push/{id}
+
+Retrieve the status of a single push operation by its `push_id` (returned in the `202` response from `POST /api/v1/config/push`).
+
+**Authentication:** Required  
+**Required permission:** `config:push`
+
+**Parameters:**
+
+- `id` (path): The `push_id` from the `POST /api/v1/config/push` response.
+
+**Tenant isolation:** Callers may only read push records owned by their own tenant. A push ID that exists but belongs to a different tenant returns `404` (not `403`) to avoid disclosing cross-tenant push existence. Admin (mTLS) callers may read any push record.
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| `401` | No valid authentication |
+| `404` | Push ID not found, or owned by a different tenant |
+| `503` | Push store not configured |
+
+**Response (200 OK):**
+
+```json
+{
+  "push_id": "push-1705051800000000000",
+  "config_id": "cfg-001",
+  "tenant_id": "default",
+  "version": "1.2.3",
+  "status": "completed",
+  "initiated_by": "",
+  "created_at": "2025-01-12T10:30:00Z",
+  "updated_at": "2025-01-12T10:30:05Z"
+}
+```
+
+`status` values: `pending`, `in_progress`, `completed`, `failed`.
 
 ### Script Management
 
@@ -741,6 +857,80 @@ Delete an API key. The key is immediately invalidated.
 **Parameters:**
 
 - `id` (path): API key ID
+
+### Session Management
+
+Admin auth sessions are zero-standing-privilege bearer-token sessions issued to `cfg` CLI users holding an admin mTLS bundle (ADR-014). The raw token is returned once at creation and never re-stored; the controller holds only a SHA-256 hash. Sessions have an idle TTL (15 min) and an absolute cap (8 h). These endpoints require an admin principal (`IsAdmin == true`).
+
+#### POST /api/v1/sessions
+
+Create a new admin session. The caller must present an admin mTLS certificate. Returns a one-time bearer token — store it securely in the OS keychain.
+
+**Authentication:** admin mTLS certificate
+
+**Request body:**
+
+```json
+{
+  "connection_name": "my-ctrl"
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "session_id": "abc123",
+  "token": "<43-char base64url bearer token>",
+  "issued_at": "2026-07-07T00:00:00Z",
+  "idle_ttl": 900,
+  "absolute_expiry": "2026-07-07T08:00:00Z"
+}
+```
+
+#### GET /api/v1/sessions
+
+List currently active admin sessions. A session is active if it is not revoked and has not exceeded its idle TTL or absolute cap. Tenant-scoped admins see only sessions belonging to their tenant; global admins (no tenant) see all tenants' sessions.
+
+**Authentication:** admin mTLS certificate or bearer token (`Authorization: Bearer <token>`)
+
+**Response (200 OK):**
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "abc123",
+      "principal_id": "alice",
+      "connection_name": "my-ctrl",
+      "issued_at": "2026-07-07T00:00:00Z",
+      "last_activity": "2026-07-07T00:10:00Z",
+      "absolute_expiry": "2026-07-07T08:00:00Z"
+    }
+  ]
+}
+```
+
+Fields returned: `session_id`, `principal_id`, `connection_name`, `issued_at`, `last_activity`, `absolute_expiry`. The bearer token is never included.
+
+#### DELETE /api/v1/sessions/{id}
+
+Revoke a session by ID. Accepts either a valid bearer token or an admin mTLS certificate as credentials, so an admin can revoke sessions even if a token is unavailable.
+
+**Authentication:** admin mTLS certificate or bearer token
+
+**Parameters:**
+
+- `id` (path): session ID
+
+**Response (200 OK):**
+
+```json
+{
+  "id": "abc123",
+  "revoked": true
+}
+```
 
 ### Registration Token Management
 
@@ -1125,49 +1315,533 @@ Configuration drift summary report.
 
 ### Workflow Engine
 
-Workflow endpoints are registered only when a `WorkflowHandler` is wired in (`SetWorkflowHandler()`).
+Workflow endpoints are registered only when a `WorkflowHandler` is wired in via `SetWorkflowHandler()`. All routes inherit the API subrouter's authentication middleware (API key or mTLS). No additional per-route permission scope is enforced beyond valid credentials.
 
 #### GET /api/v1/workflows
 
-List workflows.
+List workflow definitions for the calling tenant.
 
-**Authentication:** Required (inherits api subrouter auth middleware)
+**Authentication:** Required
+
+**Response:**
+
+```json
+{
+  "workflows": [
+    {
+      "name": "patch-linux-fleet",
+      "description": "Apply OS patches to Linux stewards",
+      "version": "1.0.0",
+      "steps": [
+        { "name": "run-patch", "type": "task", "module": "patch" }
+      ],
+      "semantic_version": { "major": 1, "minor": 0, "patch": 0 }
+    }
+  ],
+  "count": 1
+}
+```
 
 #### POST /api/v1/workflows
 
-Create a workflow.
+Create a new workflow definition.
 
 **Authentication:** Required
+
+**Request Body:**
+
+```json
+{
+  "name": "patch-linux-fleet",
+  "description": "Apply OS patches to Linux stewards",
+  "version": "1.0.0",
+  "steps": [
+    { "name": "run-patch", "type": "task", "module": "patch" }
+  ],
+  "variables": { "target_group": "linux-servers" }
+}
+```
+
+**Response:** `201 Created` — returns the created `VersionedWorkflow` object (same shape as the list entry above).
 
 #### GET /api/v1/workflows/{id}
 
-Get a workflow by ID.
+Get the latest version of a workflow by name.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Response:** `200 OK`
+
+```json
+{
+  "name": "patch-linux-fleet",
+  "version": "1.0.0",
+  "steps": [ { "name": "run-patch", "type": "task", "module": "patch" } ],
+  "semantic_version": { "major": 1, "minor": 0, "patch": 0 }
+}
+```
 
 #### PUT /api/v1/workflows/{id}
 
-Update a workflow.
+Replace a workflow definition. Creates a new stored version; the `name` field in the body is ignored — the path `{id}` sets the workflow name.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Request Body:** Same shape as `POST /api/v1/workflows`.
+
+**Response:** `200 OK` — returns the updated `VersionedWorkflow` object.
 
 #### DELETE /api/v1/workflows/{id}
 
-Delete a workflow.
+Delete all stored versions of a workflow.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Response:**
+
+```json
+{
+  "deleted": "patch-linux-fleet",
+  "versions": 2
+}
+```
 
 #### POST /api/v1/workflows/{id}/execute
 
-Execute a workflow immediately.
+Trigger immediate execution of a workflow.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Request Body (optional):**
+
+```json
+{
+  "variables": { "target_group": "staging" }
+}
+```
+
+**Response:** `202 Accepted`
+
+```json
+{
+  "execution_id": "exec-abc123",
+  "workflow_name": "patch-linux-fleet",
+  "status": "running",
+  "start_time": "2026-07-07T12:00:00Z"
+}
+```
 
 #### GET /api/v1/workflows/{id}/executions
 
-List execution history for a workflow.
+List all execution records for a workflow.
 
 **Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Workflow name
+
+**Response:**
+
+```json
+{
+  "executions": [
+    {
+      "id": "exec-abc123",
+      "workflow_name": "patch-linux-fleet",
+      "status": "completed",
+      "start_time": "2026-07-07T12:00:00Z",
+      "end_time": "2026-07-07T12:05:00Z",
+      "step_results": {},
+      "variables": {}
+    }
+  ],
+  "count": 1
+}
+```
+
+#### GET /api/v1/workflows/{id}/executions/{exec_id}
+
+Get the status and details of a specific workflow execution.
+
+**Authentication:** Required  
+The requesting tenant must own the workflow — cross-tenant lookups return `403 Forbidden`.
+
+**Parameters:**
+
+- `id` (path): Workflow name
+- `exec_id` (path): Execution ID
+
+**Response:** `200 OK`
+
+```json
+{
+  "id": "exec-abc123",
+  "workflow_name": "patch-linux-fleet",
+  "status": "running",
+  "start_time": "2026-07-07T12:00:00Z",
+  "current_step": "run-patch",
+  "step_results": {},
+  "variables": {}
+}
+```
+
+**Error responses:**
+
+- `404 Not Found` — execution ID does not exist or does not belong to the named workflow
+- `403 Forbidden` — workflow is not visible in the calling tenant's namespace
+
+#### POST /api/v1/workflows/{id}/executions/{exec_id}/cancel
+
+Cancel a running or pending workflow execution.
+
+**Authentication:** Required  
+Cross-tenant cancellations return `403 Forbidden`. Already-terminal executions return `409 Conflict`.
+
+**Parameters:**
+
+- `id` (path): Workflow name
+- `exec_id` (path): Execution ID
+
+**Response:** `200 OK`
+
+```json
+{
+  "cancelled": "exec-abc123"
+}
+```
+
+**Error responses:**
+
+- `404 Not Found` — execution ID does not exist or does not belong to the named workflow
+- `403 Forbidden` — workflow is not visible in the calling tenant's namespace
+- `409 Conflict` — execution is already in a terminal state (`completed`, `failed`, or `cancelled`)
+
+### Workflow Triggers
+
+Trigger endpoints manage scheduled and event-driven workflow execution. The `/triggers` subrouter is registered alongside `/workflows` when a `WorkflowHandler` is wired in (`server.go:717`). All routes inherit the API subrouter's authentication middleware. Trigger types: `schedule`, `webhook`, `siem`, `manual`.
+
+#### GET /api/v1/triggers/health
+
+Health status of the trigger subsystem.
+
+**Authentication:** Required
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-07-07T12:00:00Z",
+  "service": "workflow-trigger-api"
+}
+```
+
+#### POST /api/v1/triggers
+
+Create a new trigger.
+
+**Authentication:** Required
+
+**Request Body:**
+
+```json
+{
+  "name": "nightly-patch",
+  "description": "Run patch workflow every night at 02:00 UTC",
+  "type": "schedule",
+  "workflow_name": "patch-linux-fleet",
+  "status": "active",
+  "tenant_id": "root/msp-a/client-1",
+  "schedule": {
+    "cron": "0 2 * * *",
+    "timezone": "UTC"
+  }
+}
+```
+
+**Response:** `201 Created` — returns the created `Trigger` object.
+
+```json
+{
+  "id": "trigger-xyz789",
+  "name": "nightly-patch",
+  "type": "schedule",
+  "status": "active",
+  "workflow_name": "patch-linux-fleet",
+  "tenant_id": "root/msp-a/client-1",
+  "created_at": "2026-07-07T12:00:00Z",
+  "updated_at": "2026-07-07T12:00:00Z"
+}
+```
+
+#### GET /api/v1/triggers
+
+List triggers with optional filtering.
+
+**Authentication:** Required
+
+**Query parameters (all optional):**
+
+- `type` — `schedule` | `webhook` | `siem` | `manual`
+- `status` — `active` | `inactive` | `paused` | `error` | `deleted`
+- `tenant_id` — tenant path prefix filter
+- `tags` — comma-separated list
+- `created_after` / `created_before` — RFC 3339 timestamps
+- `limit` / `offset` — pagination (default limit: server-defined)
+
+**Response:**
+
+```json
+{
+  "triggers": [ { "id": "trigger-xyz789", "name": "nightly-patch" } ],
+  "count": 1,
+  "filter": { "type": "schedule", "status": "active" }
+}
+```
+
+#### GET /api/v1/triggers/{id}
+
+Get a trigger by ID.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:** `200 OK` — returns the `Trigger` object (same shape as the `POST /api/v1/triggers` response).
+
+#### PUT /api/v1/triggers/{id}
+
+Update a trigger. The `{id}` path value overrides any `id` field in the body.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Request Body:** Same shape as `POST /api/v1/triggers`.
+
+**Response:** `200 OK` — returns the updated `Trigger` object.
+
+#### DELETE /api/v1/triggers/{id}
+
+Delete a trigger.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:** `204 No Content`
+
+```json
+{
+  "message": "Trigger deleted successfully",
+  "trigger_id": "trigger-xyz789"
+}
+```
+
+#### POST /api/v1/triggers/{id}/enable
+
+Enable a previously disabled trigger.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:**
+
+```json
+{
+  "message": "Trigger enabled successfully",
+  "trigger_id": "trigger-xyz789",
+  "status": "active"
+}
+```
+
+#### POST /api/v1/triggers/{id}/disable
+
+Disable an active trigger without deleting it.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Response:**
+
+```json
+{
+  "message": "Trigger disabled successfully",
+  "trigger_id": "trigger-xyz789",
+  "status": "inactive"
+}
+```
+
+#### POST /api/v1/triggers/{id}/execute
+
+Manually fire a trigger immediately, bypassing its schedule or conditions.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+
+**Request Body (optional):** Key-value map of execution data passed to the triggered workflow.
+
+```json
+{
+  "override_target": "staging"
+}
+```
+
+**Response:** `200 OK` — returns the `TriggerExecution` object.
+
+```json
+{
+  "id": "texec-def456",
+  "trigger_id": "trigger-xyz789",
+  "status": "running",
+  "start_time": "2026-07-07T12:00:00Z"
+}
+```
+
+#### GET /api/v1/triggers/{id}/executions
+
+Get execution history for a trigger.
+
+**Authentication:** Required
+
+**Parameters:**
+
+- `id` (path): Trigger ID
+- `limit` (query, optional): Maximum records to return (default: 50; must be > 0)
+
+**Response:**
+
+```json
+{
+  "trigger_id": "trigger-xyz789",
+  "executions": [
+    {
+      "id": "texec-def456",
+      "trigger_id": "trigger-xyz789",
+      "status": "success",
+      "start_time": "2026-07-07T02:00:00Z"
+    }
+  ],
+  "count": 1,
+  "limit": 50
+}
+```
+
+### Cluster Management
+
+Read-only view of the Hyper-V cluster topology derived on demand from steward DNA
+attributes. **This API is eventually consistent**: it reflects whatever `cluster:<name>.*`
+DNA attributes were last published by each steward's `DNARefreshLoop` ticker (default
+30 minutes, configurable via `DNARefreshInterval`). A cluster topology change — a new
+member node, a role ownership transfer — can take up to one refresh interval to appear
+in these endpoints. This is acceptable because no safety-critical behavior (no-duplicate-VM
+enforcement, owner-gated lifecycle actions) depends on this registry; those operations gate
+off live PowerShell queries on every convergence tick, not off this read API.
+
+#### GET /api/v1/clusters
+
+List all clusters visible to the authenticated caller. Clusters are derived by parsing
+`cluster:<name>.*` keys from each steward's `DNA.Attributes`. Only clusters whose member
+stewards belong to the caller's tenant (or a descendant tenant) are returned.
+
+**Required permission:** `cluster:list`
+
+**Tenant scoping:** Caller's tenant from the authenticated context limits which stewards'
+DNA is scanned. An admin mTLS principal (empty tenant) has no scope restriction and sees
+all clusters.
+
+**Response:**
+
+```json
+{
+  "data": [
+    {
+      "name": "cfg-lab",
+      "members": ["steward-a", "steward-b"],
+      "role_owners": {
+        "csv": "CFG-70-02",
+        "cno": "CFG-AB-02"
+      }
+    }
+  ],
+  "timestamp": "2026-07-08T12:00:00Z"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Cluster name from the `cluster:<name>.*` DNA key prefix |
+| `members` | []string | Sorted steward IDs whose DNA carries `cluster:<name>.*` keys |
+| `role_owners` | object | Map of role name → owner node, parsed from `cluster:<name>.resource_owner.<role>` keys |
+
+#### GET /api/v1/clusters/{name}
+
+Get the registry entry for a single named cluster.
+
+Returns 404 when the cluster does not exist or all its member stewards are outside
+the caller's tenant scope. 404 (not 403) is used to avoid disclosing cluster existence
+across tenant boundaries.
+
+**Required permission:** `cluster:read`
+
+**Parameters:**
+
+- `name` (path): Cluster name (e.g., `cfg-lab`)
+
+**Response (200):**
+
+```json
+{
+  "data": {
+    "name": "cfg-lab",
+    "members": ["steward-a", "steward-b"],
+    "role_owners": {
+      "csv": "CFG-70-02",
+      "cno": "CFG-AB-02"
+    }
+  },
+  "timestamp": "2026-07-08T12:00:00Z"
+}
+```
+
+**Error responses:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `MISSING_CLUSTER_NAME` | `name` path variable is empty |
+| 404 | `CLUSTER_NOT_FOUND` | Cluster does not exist or is outside the caller's tenant |
 
 ### Internal Endpoints (not for external use)
 

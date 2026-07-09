@@ -18,6 +18,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 func TestNewManager(t *testing.T) {
@@ -534,4 +536,141 @@ func generateExpiredCertPEM(t *testing.T, ca *CA) []byte {
 	require.NoError(t, err)
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+}
+
+// TestNewManagerFromSecretStore_InputValidation covers the error paths for missing
+// required arguments.
+func TestNewManagerFromSecretStore_InputValidation(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+	validConfig := &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig:    &CAConfig{Organization: "Test", Country: "US", ValidityDays: 365},
+	}
+
+	tests := []struct {
+		name      string
+		store     secretsinterfaces.SecretStore
+		tenantID  string
+		caKeyPath string
+		config    *ManagerConfig
+		wantErr   string
+	}{
+		{"nil store", nil, "root", "ca", validConfig, "secret store is required"},
+		{"empty tenantID", store, "", "ca", validConfig, "tenantID and caKeyPath are required"},
+		{"empty caKeyPath", store, "root", "", validConfig, "tenantID and caKeyPath are required"},
+		{"nil config", store, "root", "ca", nil, "manager config is required"},
+		{"empty StoragePath", store, "root", "ca", &ManagerConfig{
+			CAConfig: &CAConfig{Organization: "Test"},
+		}, "storage path is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewManagerFromSecretStore(ctx, tt.store, tt.tenantID, tt.caKeyPath, tt.config)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestClusterCA_CrossInstanceValidation is the REQUIRED test for Issue #2018.
+// It verifies that two Manager instances initialized from the same SecretStore-held CA
+// produce leaf certificates that validate against each other's CA, and that no ca.key
+// file exists in any controller-accessible path.
+func TestClusterCA_CrossInstanceValidation(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	caConfig := &CAConfig{
+		Organization: "CFGMS Test Cluster",
+		Country:      "US",
+		ValidityDays: 3650,
+	}
+
+	// First Manager: bootstraps the CA and stores it in the secret store.
+	mgr1, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: dir1,
+		CAConfig:    caConfig,
+	})
+	require.NoError(t, err, "first manager must initialise successfully")
+
+	// Second Manager: loads the SAME CA from the secret store.
+	mgr2, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: dir2,
+		CAConfig:    caConfig,
+	})
+	require.NoError(t, err, "second manager must load the CA from the store")
+
+	// Verify both managers have the SAME CA (fingerprints must match).
+	ca1Info, err := mgr1.GetCAInfo()
+	require.NoError(t, err)
+	ca2Info, err := mgr2.GetCAInfo()
+	require.NoError(t, err)
+	assert.Equal(t, ca1Info.Fingerprint, ca2Info.Fingerprint,
+		"both managers must share the same CA fingerprint")
+
+	// Issue a leaf cert from manager 1.
+	leaf1, err := mgr1.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-node1",
+		Organization: "CFGMS",
+		ValidityDays: 30,
+	})
+	require.NoError(t, err)
+
+	// Issue a leaf cert from manager 2.
+	leaf2, err := mgr2.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-node2",
+		Organization: "CFGMS",
+		ValidityDays: 30,
+	})
+	require.NoError(t, err)
+
+	// Leaf cert issued by mgr1 must validate against mgr2's CA (cross-instance trust).
+	result1, err := mgr2.ValidateCertificate(leaf1.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, result1.IsValid,
+		"cert issued by node1 must be valid according to node2's CA")
+
+	// Leaf cert issued by mgr2 must validate against mgr1's CA.
+	result2, err := mgr1.ValidateCertificate(leaf2.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, result2.IsValid,
+		"cert issued by node2 must be valid according to node1's CA")
+
+	// SECURITY: the CA private key must NOT be written to any node disk.
+	for _, dir := range []string{dir1, dir2} {
+		keyPaths := []string{
+			filepath.Join(dir, "ca.key"),
+			filepath.Join(dir, "ca", "ca.key"),
+		}
+		for _, kp := range keyPaths {
+			_, statErr := os.Stat(kp)
+			assert.True(t, os.IsNotExist(statErr),
+				"ca.key must not exist at %s (CA key must remain in-process only)", kp)
+		}
+	}
+
+	// SECURITY: the CA public cert MUST be present (required for TLS config).
+	for _, dir := range []string{dir1, dir2} {
+		assert.FileExists(t, filepath.Join(dir, "ca", "ca.crt"),
+			"ca.crt must be written to disk for TLS config")
+	}
+}
+
+// TestNewManagerFromSecretStore_NoCAConfigFails verifies that NewManagerFromSecretStore
+// returns an error when the CA is absent from the store and no CAConfig is provided.
+func TestNewManagerFromSecretStore_NoCAConfigFails(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	_, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig:    nil,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CA config required")
 }

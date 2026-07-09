@@ -7,6 +7,19 @@
 // docs/architecture/operating-model.md "Concurrent Controller Execution
 // (Blue/Green Pattern)" for the full architectural context.
 //
+// # Deprecation notice (Issue #2019, ADR-007)
+//
+// This port-swap orchestrator is EXPERIMENTAL and is not the supported
+// production upgrade path. Per ADR-007
+// (docs/architecture/decisions/007-controller-upgrade-and-state-externalization.md),
+// investment in this path has stopped. The supported upgrade path is the
+// smoketest-gated restart upgrade (Issue #2015, cfg controller upgrade
+// restart). The /api/v1/ready real-state smoketest (HTTPSmoketester) and
+// the keep-previous-binary rollback pattern from this package are reused by
+// the restart-gated upgrade and remain maintained. Removal of the remaining
+// port-swap orchestration is tracked for once the restart-gated path is the
+// documented default. No new feature work should target this package.
+//
 // # The cutover state machine
 //
 //	idle ─▶ preparing ─▶ smoketesting ─▶ swapping ─▶ quarantined ─▶ idle
@@ -228,6 +241,14 @@ type Orchestrator struct {
 	swap      SwapTarget
 	spawn     func(binaryPath string) ProcessHandle
 
+	// History is the optional structured event log. When non-nil the
+	// orchestrator appends an UpgradeEvent at each major transition
+	// (staged, smoketest passed/failed, committed, rolled back,
+	// quarantine expired, aborted). nil → events are silently
+	// discarded, preserving the original Story C behaviour for tests
+	// that don't care about observability.
+	History *History
+
 	mu                   sync.Mutex
 	state                State
 	canonical            ProcessHandle
@@ -237,6 +258,19 @@ type Orchestrator struct {
 	quarantineExpiresAt  time.Time
 
 	clock func() time.Time
+}
+
+// emit appends an event to the History if one is configured. Errors
+// are swallowed — losing a history entry is strictly preferable to
+// failing an upgrade because of an unrelated disk-full condition.
+func (o *Orchestrator) emit(ev UpgradeEvent) {
+	if o.History == nil {
+		return
+	}
+	if ev.Component == "" {
+		ev.Component = "controller"
+	}
+	_ = o.History.Append(ev)
 }
 
 // NewOrchestrator constructs an Orchestrator that supervises `initial` as
@@ -350,9 +384,14 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 	// binaries before any side effects.
 	if o.validator != nil {
 		if err := o.validator.Validate(ctx, candidateBinary); err != nil {
+			o.emit(UpgradeEvent{
+				EventType: EventValidationFailed, BinaryPath: candidateBinary, Reason: err.Error(),
+			})
 			return fmt.Errorf("%w: %v", ErrValidationFailed, err)
 		}
 	}
+
+	o.emit(UpgradeEvent{EventType: EventStaged, BinaryPath: candidateBinary})
 
 	candidate := o.spawn(candidateBinary)
 	if err := candidate.Start(ctx, o.cfg.CandidateAPIAddr, o.cfg.CandidateTransportAddr); err != nil {
@@ -371,10 +410,19 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 	smokeCtx, cancel := context.WithTimeout(ctx, o.cfg.SmoketestTimeout)
 	defer cancel()
 	if o.smoke != nil {
+		smokeStart := o.clock()
 		if err := o.smoke.Probe(smokeCtx, candidate, o.cfg.CandidateAPIAddr, o.cfg.CandidateTransportAddr); err != nil {
+			o.emit(UpgradeEvent{
+				EventType: EventSmoketestFailed, BinaryPath: candidateBinary, Reason: err.Error(),
+				DurationMS: o.clock().Sub(smokeStart).Milliseconds(),
+			})
 			stopCandidate()
 			return fmt.Errorf("%w: %v", ErrSmoketestFailed, err)
 		}
+		o.emit(UpgradeEvent{
+			EventType: EventSmoketestPassed, BinaryPath: candidateBinary,
+			DurationMS: o.clock().Sub(smokeStart).Milliseconds(),
+		})
 	}
 
 	// Read the current canonical handle and transition to StateSwapping
@@ -413,6 +461,7 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 	// Promote (the swap-returned handle, NOT the original candidate
 	// pointer — they may differ when the swap respawned) → canonical
 	// and park previous → quarantined.
+	prevPath := prevCanonical.BinaryPath()
 	o.mu.Lock()
 	o.canonical = promoted
 	o.canonicalStartedAt = o.clock()
@@ -422,6 +471,10 @@ func (o *Orchestrator) runUpgrade(ctx context.Context, candidateBinary string) e
 	o.state = StateQuarantined
 	o.mu.Unlock()
 
+	o.emit(UpgradeEvent{
+		EventType: EventCommitted, BinaryPath: promoted.BinaryPath(),
+		CanonicalBinary: promoted.BinaryPath(), PreviousBinary: prevPath,
+	})
 	return nil
 }
 
@@ -475,6 +528,7 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 	defer cancel()
 	_ = currentCanonical.Stop(stopCtx)
 
+	regrettedPath := currentCanonical.BinaryPath()
 	o.mu.Lock()
 	o.canonical = promoted
 	o.canonicalStartedAt = o.clock()
@@ -483,6 +537,10 @@ func (o *Orchestrator) Rollback(ctx context.Context) error {
 	o.state = StateIdle
 	o.mu.Unlock()
 
+	o.emit(UpgradeEvent{
+		EventType: EventRolledBack, BinaryPath: promoted.BinaryPath(),
+		CanonicalBinary: promoted.BinaryPath(), PreviousBinary: regrettedPath,
+	})
 	return nil
 }
 
@@ -510,6 +568,9 @@ func (o *Orchestrator) FinalizeQuarantine(ctx context.Context) {
 	o.mu.Unlock()
 
 	_ = quarantined.Stop(ctx)
+	o.emit(UpgradeEvent{
+		EventType: EventQuarantineExpired, BinaryPath: quarantined.BinaryPath(),
+	})
 }
 
 // rollbackToIdle is the failure-cleanup path used by Upgrade when any

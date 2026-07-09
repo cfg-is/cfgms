@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ import (
 // # Architectural shape
 //
 // Idempotency, drift detection, and operation sequencing all live in Go
-// (vm.go / vswitch.go / snapshot.go). The PS host knows nothing about
+// (vm.go / vswitch.go). The PS host knows nothing about
 // "should this memory change?" or "is the VM running?" — its functions are
 // thin wrappers around single cmdlets, returning either nothing (for
 // effects) or a JSON document (for reads). The Go orchestration decides
@@ -222,6 +223,94 @@ func (t *psHostTransport) loadPreamble() error {
 // surfaced as an error if non-empty.
 //
 // Holds the transport mutex for the duration of the round trip.
+// runFresh executes a single Cfgms-* expression in a FRESH powershell.exe
+// process via -File, instead of the persistent `-Command -` host. This is
+// REQUIRED for the seed VHDX disk operations (New/Mount/Copy/Detach): Mount-VHD
+// and Dismount-VHD attach the VHD via the async Virtual Disk Service, which
+// DEADLOCKS in the persistent stdin-REPL host — and so do Start-Job and
+// Start-Process -Wait launched from inside it. A fresh `powershell -File`
+// process runs the disk cmdlets directly with no deadlock (proven on cfg-lab).
+//
+// The temp script is the full preamble (Cfgms-* defs + safe defaults) followed
+// by the expression, so the verb resolves exactly as in the persistent host.
+// The script is removed after the run. Unlike run(), this does not serialise on
+// t.mu (it spawns an independent process) and is unaffected by t.closed.
+func (t *psHostTransport) runFresh(ctx context.Context, expression string) (string, error) {
+	f, err := os.CreateTemp("", "cfgms-seedop-*.ps1")
+	if err != nil {
+		return "", fmt.Errorf("hyperv-ps-host: create temp seed script: %w", err)
+	}
+	tmpPath := f.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, werr := io.WriteString(f, psHostPreamble+"\n"+expression+"\n"); werr != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("hyperv-ps-host: write temp seed script: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return "", fmt.Errorf("hyperv-ps-host: close temp seed script: %w", cerr)
+	}
+
+	cmd := exec.CommandContext(ctx, "powershell.exe",
+		"-NoProfile", "-NonInteractive", "-File", tmpPath,
+	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return string(out), fmt.Errorf("hyperv-ps-host: fresh seed op failed: %w: %s",
+			runErr, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
+// runDetached launches a single Cfgms-* expression in a DETACHED fresh
+// powershell.exe -File process and returns as soon as the process has
+// started — it never waits for completion. This is REQUIRED for the live
+// storage migration (Cfgms-MoveVMStorage): the move can run for minutes to
+// hours, far past the executor's per-module-call deadline (ADR-012 §7), so
+// the module call must not hold it open. The MoveRecord written by the Go
+// caller is the source of truth for "started"; the detached function writes
+// a per-VM error marker on failure, and completion is judged by the converge
+// loop re-observing the VM's location.
+//
+// The temp script is preamble + expression, exactly like runFresh, with a
+// trailing self-delete (Go cannot remove the file while the child holds it
+// open; PowerShell parses the whole script before executing, so the script
+// deleting itself on its last line is safe). A background goroutine reaps
+// the process handle and removes the script if the self-delete never ran
+// (e.g. a parse-stage failure). No ctx: cancelling the dispatching call must
+// not kill an already-started migration — Windows children outlive their
+// parent, which is also what lets the move survive a steward restart.
+func (t *psHostTransport) runDetached(expression string) (string, error) {
+	f, err := os.CreateTemp("", "cfgms-moveop-*.ps1")
+	if err != nil {
+		return "", fmt.Errorf("hyperv-ps-host: create temp move script: %w", err)
+	}
+	tmpPath := f.Name()
+	body := psHostPreamble + "\n" + expression + "\n" +
+		"Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+	if _, werr := io.WriteString(f, body); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hyperv-ps-host: write temp move script: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hyperv-ps-host: close temp move script: %w", cerr)
+	}
+
+	cmd := exec.Command("powershell.exe",
+		"-NoProfile", "-NonInteractive", "-File", tmpPath,
+	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
+	if serr := cmd.Start(); serr != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hyperv-ps-host: start detached move process: %w", serr)
+	}
+	go func() {
+		_ = cmd.Wait()
+		_ = os.Remove(tmpPath) // no-op when the script already self-deleted
+	}()
+	return "", nil
+}
+
 func (t *psHostTransport) run(_ context.Context, expression string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -311,7 +400,7 @@ func generatePSNonce() (string, error) {
 // does NOT interpret backslashes or variable references inside single-
 // quoted strings, so single quotes are the safest container for arbitrary
 // argument values. Defense-in-depth: the calling code in vm.go / vswitch.go
-// / snapshot.go already validates these values against a strict allowlist,
+// already validates these values against a strict allowlist,
 // but quoting here means a value that ever slipped past would at worst be
 // passed as a literal string to the cmdlet, never executed as code.
 func quoteForPS(s string) string {

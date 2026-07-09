@@ -17,76 +17,36 @@ Final validation gate before PR creation. Orchestrates a **parallel adversarial 
 
 Auto-detect story from branch and fetch issue details. Verify all acceptance criteria are complete (100%). If < 100%, warn and confirm with user before proceeding.
 
-### 2. Create Review Team
+### 2. Run the review-fix-verify workflow
+
+The adversarial review, developer fix loop, and re-verification run as a single deterministic workflow — `.claude/workflows/story-review.js`. It fans out the four review lenses in parallel (acceptance check, `make test-quality`, QA code review, security scans + review), collects schema-validated verdicts, spawns a **developer** to fix any blocking findings, and re-runs **only the lenses that failed** — up to 3 fix rounds — then returns a structured verdict.
+
+Invoke it via the Workflow tool:
 
 ```
-TeamCreate(team_name: "story-review")
+Workflow({
+  name: "story-review",
+  args: {
+    changedFiles: [ ...files from `git diff --name-only origin/develop...HEAD` and `git status` ],
+    testTarget: "test-quality",          // interactive gate uses the full Docker-inclusive target
+    includeAcceptanceChecker: true,      // 4-lens review (AC verified pre-PR)
+    storyRef: "#<issue-number> — <title>"
+  }
+})
 ```
 
-Create four tasks on the team task list:
-1. **Acceptance check** — Verify the working tree delivers the story's named code references
-2. **Run test-quality** — Tests, linting, and builds (no security scans)
-3. **QA code review** — Review changed files for test quality
-4. **Security review** — All security scans + security code review
+The workflow returns `{ passed, reviewRounds, fixRounds, perRound, remainingFindings }`.
 
-### 3. Spawn Review Teammates (ALL IN PARALLEL)
+- **`passed: true`** → proceed to §3.
+- **`passed: false`** (fix loop exhausted after 3 rounds) → do NOT create the PR. Report `remainingFindings` (each has `file`, `severity`, `detail`) to the user for manual intervention.
 
-Spawn four teammates simultaneously via the Task tool. For each, use `subagent_type: general-purpose` with the `team_name` and `name` parameters. Read the corresponding agent file in `.claude/agents/` and include its instructions in the prompt.
+The developer stage is told to fix root causes only — NO mocks, NO `t.Skip()`, NO hacky workarounds, and NO helper-function-instead-of-the-named-fix when an AC names existing code that must change. The acceptance lens catches "AC names a stub but the stub is still there" before the PR exists (see `docs/development/acceptance-reviewer-verification.md`); the security lens is the sole owner of security scanning + review.
 
-**acceptance-checker** (sonnet):
-- Agent file: `.claude/agents/acceptance-checker.md`
-- Reads the story body, extracts concrete code references (file paths, function names, line numbers, banned-phrase quotes, required test names), and verifies each against the working tree
-- Catches "AC names a stub function but the stub is still there" before the PR is created
-- Reports blocking issues with file:line references and AC numbers
-- See `docs/development/acceptance-reviewer-verification.md` for the verification model and regression scenarios
-
-**qa-test-runner** (sonnet):
-- Agent file: `.claude/agents/qa-test-runner.md`
-- Runs `make test-quality` — unit tests, lint, production-critical, cross-platform builds, Docker integration (no security scans, no E2E)
-- Reports pass/fail with specific test names and error details
-
-**qa-code-reviewer** (sonnet):
-- Agent file: `.claude/agents/qa-code-reviewer.md`
-- Reviews all changed files for test quality issues
-- Catches mocks, t.Skip(), empty assertions, hacky workarounds
-- Reports blocking issues with file:line references
-- Does NOT check AC alignment — that's acceptance-checker's concern
-
-**security-engineer** (opus):
-- Agent file: `.claude/agents/security-engineer.md`
-- Sole owner of all security scanning and security code review
-- Runs make security-precommit, check-architecture, security-scan
-- Reviews changed files for vulnerabilities, central provider violations
-- Reports blocking issues with file:line references
-
-### 4. Collect Results
-
-Wait for all four teammates to complete and send their reports. Collect findings from each.
-
-### 5. Fix Issues (if any blocking issues found)
-
-If ANY teammate reported blocking issues, spawn a **developer** teammate:
-
-- Agent file: `.claude/agents/developer.md`
-- Model: opus
-- Provide combined findings from all reviewers with file:line references
-- For acceptance-checker FAILs specifically, tell the developer the AC number, the named symbol/file/line, and the AC's "after" behavior — and remind them that adding helper functions elsewhere is NOT a valid fix when the AC names existing code that must change
-- Developer fixes root causes properly (NO mocks, NO skips, NO hacks)
-
-After developer completes, re-spawn the reviewers that reported failures to verify fixes. Maximum 3 fix iterations. If issues persist after 3 rounds, shut down team and report to user for manual intervention.
-
-### 6. Shut Down Team
-
-Send shutdown requests to all active teammates. Wait for confirmations. Delete the team:
-```
-TeamDelete()
-```
-
-### 7. Documentation Review (invoke doc-review skill)
+### 3. Documentation Review (invoke doc-review skill)
 
 Scan for internal tracking documents that must be removed before PR. Blocks if found.
 
-### 8. Roadmap Update
+### 4. Roadmap Update
 
 Update `docs/product/roadmap.md` on the story branch:
 ```markdown
@@ -99,7 +59,7 @@ Update `docs/product/roadmap.md` on the story branch:
 
 Commit roadmap changes to the story branch so they're included in the single PR.
 
-### 9. Push to Remote
+### 5. Push to Remote
 
 ```bash
 git push -u origin HEAD
@@ -107,7 +67,7 @@ git push -u origin HEAD
 
 Verify push succeeds before creating PR.
 
-### 10. PR Creation (git-workflow skill provides rules)
+### 6. PR Creation (git-workflow skill provides rules)
 
 **Git workflow rules**: Feature/tooling branches ALWAYS target `develop`. Never `main`.
 
@@ -131,15 +91,15 @@ gh pr list --head <branch-name-from-above> --state=open
 - `Fixes #<issue-number>` on its own line (REQUIRED — develop uses squash merge, so the PR body becomes the merged commit message; without this keyword GitHub will not auto-close the linked issue)
 - `Co-Authored-By: Claude <noreply@anthropic.com>`
 
-### 11. GitHub Project Update (optional)
+### 7. GitHub Project Update (optional)
 
 Move issue to "Done" on project board if accessible.
 
 ## Error Handling
 
-- **Team creation fails**: Fall back to sequential validation (make test-complete then manual review).
-- **Teammate fails**: Report error, suggest re-running `/story-complete`.
-- **Fix iterations exhausted (3 rounds)**: Report remaining issues to user for manual intervention.
+- **Workflow fails to launch**: Fall back to sequential validation (`make test-complete` then manual review).
+- **A reviewer errors mid-workflow**: the workflow treats an errored lens as blocking (fails safe); re-run `/story-complete` after resolving the cause.
+- **Fix iterations exhausted (3 rounds, `passed: false`)**: Report `remainingFindings` to the user for manual intervention; do NOT create the PR.
 - **Doc review fails**: Block, report problematic files. User must remove/transform them.
 - **Push fails**: Block PR creation. Report error.
 - **PR creation fails**: Report error with manual alternative URL.

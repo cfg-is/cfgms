@@ -31,6 +31,7 @@ var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
 	types.CommandSyncDNA:           transportpb.CommandType_COMMAND_TYPE_SYNC_DNA,
 	types.CommandReconnect:         transportpb.CommandType_COMMAND_TYPE_RECONNECT,
 	types.CommandExecuteScript:     transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT,
+	types.CommandRelayResponse:     transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE, // Issue #1994
 	types.CommandPushSigningCert:   transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT,
 	types.CommandPushStewardBinary: transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY,
 }
@@ -41,6 +42,7 @@ var protoToCommandType = map[transportpb.CommandType]types.CommandType{
 	transportpb.CommandType_COMMAND_TYPE_SYNC_DNA:            types.CommandSyncDNA,
 	transportpb.CommandType_COMMAND_TYPE_RECONNECT:           types.CommandReconnect,
 	transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT:      types.CommandExecuteScript,
+	transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE:      types.CommandRelayResponse, // Issue #1994
 	transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT:   types.CommandPushSigningCert,
 	transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: types.CommandPushStewardBinary,
 }

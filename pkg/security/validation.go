@@ -93,6 +93,8 @@ func NewValidator() *Validator {
 	v.allowedCharsets["base64"] = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
 	// cidr: IPv4 (10.0.0.0/8) and IPv6 (2001:db8::/32) CIDR notation
 	v.allowedCharsets["cidr"] = regexp.MustCompile(`^[0-9a-fA-F.:\/]+$`)
+	// tenant_path_id: hierarchical tenant IDs use '/' as a path separator (e.g., "root/child-a")
+	v.allowedCharsets["tenant_path_id"] = regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
 
 	v.dnsLookupTimeout = 5 * time.Second
 

@@ -138,7 +138,7 @@ The controller is the central management server. It does not manage devices dire
 
 1. **Store cfgs** — Version-controlled configuration storage. Cfgs are authored here (via API, workflow, or direct edit) and distributed to stewards
 2. **Distribute cfgs** — Push cfgs to stewards over the data plane. The controller decides which steward gets which cfg (based on tenant hierarchy, groups, targeting rules)
-3. **Collect reports** — Receive status, events, DNA, health, and historical performance metrics from stewards. Aggregate for fleet-wide dashboards, compliance reporting, trend analysis, and troubleshooting. This data is the foundation for future Digital Experience (DEX) capabilities
+3. **Collect reports** — Receive status, events, DNA, health, and historical performance metrics from stewards. Aggregate for fleet-wide dashboards, compliance reporting, trend analysis, and troubleshooting. This data is the foundation for the **Digital Employee Experience (DEX)** track — a layered rollout (collection → baselines → root-cause → prediction → remediation), not a single future capability — and, with versioned DNA history, for the Digital Twin
 4. **Run workflows** — Execute automation workflows for cloud/SaaS operations that don't require a steward (desired-state convergence for cloud resources, orchestration and data sync between third-party services, and imperative automation). The workflow engine runs **workflow-kind modules** (`executors: [workflow]`) — out-of-process gRPC binaries that the controller spawns to interact with cloud APIs on behalf of the workflow. See [controller operating model](controller-operating-model.md) for details
 5. **Manage identity** — Certificate authority, steward registration, tenant management
 6. **Orchestrate multi-node operations** — The controller is aware of application dependencies and infrastructure roles (e.g., Hyper-V clusters, SQL clusters, domain controllers, DNS/DHCP roles). Operations that span multiple devices — rolling updates, coordinated reboots, cluster-aware patching — are sequenced by the controller to maintain service availability. Individual stewards apply their cfgs; the controller decides the order and timing
@@ -357,6 +357,30 @@ controller ← admin authors workflows
 ```
 
 This is the same controller — it just has no stewards registered. The workflow engine operates independently of steward management.
+
+## Cluster Prerequisites
+
+Controller startup in `ha.mode: cluster` performs an early prerequisite gate before reading or writing any state. If any prerequisite is unmet, the controller exits immediately with a clear error.
+
+### Required backends
+
+| Backend | What it provides | How to configure |
+|---------|-----------------|------------------|
+| Postgres storage provider | Shared business-store state across all controller nodes (RBAC, tenants, sessions, registrations) | `storage.cluster.postgres_dsn` or `CFGMS_STORAGE_CLUSTER_POSTGRES_DSN` |
+| S3-compatible blob store | Shared installer artifact repository so all nodes serve the same steward binaries | `CFGMS_S3_INSTALLER_BUCKET` (required); `CFGMS_S3_INSTALLER_REGION`, `CFGMS_S3_INSTALLER_ENDPOINT_URL` (optional) |
+
+### Startup error messages
+
+```
+cluster mode requires a cluster-capable storage backend; provider "flatfile" does not support cluster coordination
+cluster mode requires S3-compatible blob storage: set CFGMS_S3_INSTALLER_BUCKET
+```
+
+Both gates fire before any tenant, RBAC, or steward state is touched, so a misconfigured cluster fails fast rather than partially initialising.
+
+### Non-cluster modes
+
+Single-server and blue/green deployments skip the cluster gate entirely. They use the OSS composite backend (flatfile + SQLite) or a standalone Postgres provider, and store installer artifacts on the local filesystem under `BlobStorage.Root`.
 
 ## UX Surfaces
 

@@ -14,6 +14,8 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	clusterregistry "github.com/cfgis/cfgms/features/controller/clusterregistry"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/config"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -21,6 +23,47 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// clusterRegistryAdapter adapts *ControllerService to the clusterMembership interface
+// expected by pkg/config.InheritanceResolver. It builds a fresh Registry snapshot on
+// each MemberClusters call from the controller's live in-memory steward state, which
+// reflects DNA attributes last published by each steward's DNARefreshLoop ticker
+// (default 30 min — eventually consistent by design; see Issue #2425 Out of Scope).
+type clusterRegistryAdapter struct {
+	controllerSvc *ControllerService
+}
+
+// MemberClusters returns the sorted cluster names that stewardID belongs to,
+// derived from the current in-memory steward DNA attributes. Cluster membership
+// is scoped to the queried steward's own tenant so that same-named clusters in
+// different tenants cannot pollute each other's member lists (BuildRegistry
+// contract: "Tenant scoping must be applied by the caller").
+func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
+	info, exists := a.controllerSvc.GetStewardInfo(stewardID)
+	if !exists {
+		return nil
+	}
+	tenantID := info.TenantID
+
+	stewards := a.controllerSvc.GetAllStewards()
+	fleetData := make([]fleet.StewardData, 0, len(stewards))
+	for _, s := range stewards {
+		if s.TenantID != tenantID {
+			continue // scope to this steward's tenant only
+		}
+		var attrs map[string]string
+		if s.DNA != nil {
+			attrs = s.DNA.Attributes
+		}
+		fleetData = append(fleetData, fleet.StewardData{
+			ID:            s.ID,
+			TenantID:      s.TenantID,
+			DNAAttributes: attrs,
+		})
+	}
+	reg := clusterregistry.BuildRegistry(fleetData)
+	return reg.MemberClusters(stewardID)
+}
 
 // FanoutCallback is invoked inside SetConfiguration after a successful ConfigStore write.
 // tenantID matches the authenticated tenant that issued the write; cfgID is the steward
@@ -39,24 +82,52 @@ type ConfigurationServiceV2 struct {
 	storageManager      *interfaces.StorageManager
 	fanoutCallback      FanoutCallback
 	callbackMu          sync.RWMutex
+	routerCloser        func() // stops the router's background cache goroutine
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
 // A ConfigSourceRouter wrapping the storage manager's config and tenant stores is
 // constructed here and injected into the InheritanceResolver so that SnapshotSources
 // is called once per cascade (atomic source resolution, per story #1393).
+// When controllerSvc is non-nil, cluster-policies cascade is enabled via a
+// clusterRegistryAdapter that derives membership from the live in-memory fleet state
+// (eventually consistent; see Issue #2425).
 func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService) *ConfigurationServiceV2 {
 	router := controllerrouter.NewControllerRouter(
 		storageManager.GetConfigStore(),
 		storageManager.GetTenantStore(),
 	)
-	return &ConfigurationServiceV2{
+
+	var ir *config.InheritanceResolver
+	if controllerSvc != nil {
+		ir = config.NewInheritanceResolverWithClusters(
+			router,
+			storageManager.GetClientTenantStore(),
+			storageManager.GetTenantStore(),
+			&clusterRegistryAdapter{controllerSvc: controllerSvc},
+		)
+	} else {
+		ir = config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore())
+	}
+
+	svc := &ConfigurationServiceV2{
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
-		inheritanceResolver: config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore()),
+		inheritanceResolver: ir,
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore(), storageManager.GetTenantStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
+	}
+	if c, ok := router.(interface{ Close() }); ok {
+		svc.routerCloser = c.Close
+	}
+	return svc
+}
+
+// Close stops the router's background cache cleanup goroutine. Safe to call multiple times.
+func (s *ConfigurationServiceV2) Close() {
+	if s.routerCloser != nil {
+		s.routerCloser()
 	}
 }
 
@@ -151,6 +222,24 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 				Message: "No configuration found for steward",
 			},
 		}, nil
+	}
+
+	// Apply ring-resolved desired_version override. The ring takes precedence over any
+	// tenant-path desired_version when the steward belongs to a ring with a non-empty version.
+	if s.controllerSvc != nil {
+		if info, exists := s.controllerSvc.GetStewardInfo(req.StewardId); exists && info.DNA != nil {
+			version, ring, didFallback, original := s.controllerSvc.ResolveRingVersion(info.DNA.Attributes)
+			if didFallback {
+				s.logger.Warn("deployment_ring_fallback",
+					"steward_id", logging.SanitizeLogValue(req.StewardId),
+					"ring_value", logging.SanitizeLogValue(original),
+					"fallback_ring", logging.SanitizeLogValue(ring),
+				)
+			}
+			if version != "" {
+				effective.Config.Steward.Upgrade.DesiredVersion = version
+			}
+		}
 	}
 
 	// Filter configuration by requested modules if specified

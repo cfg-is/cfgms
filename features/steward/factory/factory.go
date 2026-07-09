@@ -34,12 +34,16 @@ package factory
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
 	acme_module "github.com/cfgis/cfgms/features/modules/acme"
 	"github.com/cfgis/cfgms/features/modules/file"
 	"github.com/cfgis/cfgms/features/modules/firewall"
+	github_runner_module "github.com/cfgis/cfgms/features/modules/github_runner"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	package_module "github.com/cfgis/cfgms/features/modules/package"
 	"github.com/cfgis/cfgms/features/modules/patch"
@@ -168,24 +172,91 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 // builtinModuleConstructors maps module names to their zero-argument constructors.
 // The "directory" name is retained as an alias for the merged file module so that
 // existing cfg files using type: directory continue to work without migration.
+// Note: "hyperv" is intentionally absent — it is handled separately by newHypervModule
+// (which wires the durable provision store) and early-returned in loadBuiltinModule.
 var builtinModuleConstructors = map[string]func() modules.Module{
-	"acme":      func() modules.Module { return acme_module.New() },
-	"directory": func() modules.Module { return file.New() }, // merged into file module (type: directory)
-	"file":      func() modules.Module { return file.New() },
-	"firewall":  func() modules.Module { return firewall.New() },
-	"hyperv":    func() modules.Module { return hyperv.New(hyperv.NewDefaultDetector()) },
-	"package":   func() modules.Module { return package_module.New() },
-	"patch":     func() modules.Module { return patch.New() },
-	"script":    func() modules.Module { return script.New() },
+	"acme":          func() modules.Module { return acme_module.New() },
+	"directory":     func() modules.Module { return file.New() }, // merged into file module (type: directory)
+	"file":          func() modules.Module { return file.New() },
+	"firewall":      func() modules.Module { return firewall.New() },
+	"github_runner": func() modules.Module { return github_runner_module.New() },
+	"package":       func() modules.Module { return package_module.New() },
+	"patch":         func() modules.Module { return patch.New() },
+	"script":        func() modules.Module { return script.New() },
 }
 
 // loadBuiltinModule creates a new instance of a built-in module.
+// The hyperv module is handled specially so a durable provision store can be
+// wired via the factory logger (required for the fallback warn path).
 func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, error) {
+	if moduleName == "hyperv" {
+		return f.newHypervModule(), nil
+	}
 	ctor, ok := builtinModuleConstructors[moduleName]
 	if !ok {
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
 	}
 	return ctor(), nil
+}
+
+// newHypervModule constructs the hyperv module with a durable provision store.
+// If the store cannot be created (e.g. the path is not writable on this boot),
+// it falls back to the module's built-in in-memory store — steward startup
+// never crashes over a non-critical store init failure.
+func (f *ModuleFactory) newHypervModule() modules.Module {
+	store := f.newHypervProvisionStore()
+	if store == nil {
+		// Fallback: hyperv.New() defaults to an in-memory provision store.
+		// Provisioning is non-durable for this boot (the Warn was already
+		// emitted by newHypervProvisionStore).
+		return hyperv.New(hyperv.NewDefaultDetector())
+	}
+	return hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(store))
+}
+
+// newHypervProvisionStore attempts to construct the durable, flatfile-backed
+// provision store rooted at defaultHypervProvisionStoreDir(). On success it
+// returns the durable store. If construction fails (e.g. the path is not
+// writable on this boot) it logs a Warn and returns nil, signalling
+// newHypervModule to fall back to the module's in-memory store. Returning nil
+// (rather than crashing) keeps steward startup resilient to a non-critical
+// store init failure; the tradeoff is that provision records are not durable
+// for that boot.
+func (f *ModuleFactory) newHypervProvisionStore() hyperv.ProvisionStore {
+	root := defaultHypervProvisionStoreDir()
+	store, err := hyperv.NewFlatFileProvisionStore(root)
+	if err != nil {
+		f.logger.Warn("hyperv: durable provision store unavailable; using in-memory fallback for this boot",
+			"root", root, "error", err)
+		return nil
+	}
+	return store
+}
+
+// defaultHypervProvisionStoreDir returns the platform-specific directory for
+// the hyperv module's durable provision store. Mirrors defaultCertStoreDir in
+// cmd/steward/main.go (same switch shape, same ProgramData/Library fallbacks).
+// CFGMS_HYPERV_PROVISION_STORE_DIR overrides the default for test isolation.
+func defaultHypervProvisionStoreDir() string {
+	if override := os.Getenv("CFGMS_HYPERV_PROVISION_STORE_DIR"); override != "" {
+		return override
+	}
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "steward", "hyperv", "provisions")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "steward", "hyperv", "provisions")
+	default:
+		return "/var/lib/cfgms/steward/hyperv/provisions"
+	}
 }
 
 // ValidateModuleInterface ensures the module implements the required Module interface.
@@ -226,6 +297,14 @@ func (f *ModuleFactory) GetLoadedModules() []string {
 		modules = append(modules, name)
 	}
 	return modules
+}
+
+// RegisterModule adds or replaces a module instance in the cache.
+// Subsequent calls to LoadModule or CreateModuleInstance for name will return mod.
+// Used in tests to inject real test implementations and in production to pre-wire
+// modules that need special construction (e.g. modules with injected dependencies).
+func (f *ModuleFactory) RegisterModule(name string, mod modules.Module) {
+	f.instances[name] = mod
 }
 
 // UnloadModule removes a module instance from the cache

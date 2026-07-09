@@ -17,6 +17,10 @@ Discovery sources:
   — one inventory entry per unique (action, sha) tuple so SHA drift across
   workflows is naturally visible (multiple entries with the same action name
   but different SHAs).
+- .mcp.json — git-pinned MCP servers (git+https://github.com/<owner>/<repo>@<tag>,
+  e.g. serena). kind="mcp"; these are agent *tooling* dependencies whose tool
+  names are consumed by name in .claude/agents/*.md, so a tool-renaming release
+  is a breaking change (see references/decision-matrix.md "MCP server pins").
 
 Run from repo root or any subdir — uses `git rev-parse --show-toplevel`
 to anchor.
@@ -265,11 +269,71 @@ def discover_github_actions(root: Path) -> list[dict]:
     return pins
 
 
+def discover_mcp_pins(root: Path) -> list[dict]:
+    """MCP server pins in .mcp.json — git+https://github.com/<owner>/<repo>@<tag>.
+
+    Each git-pinned MCP server (e.g. serena) becomes one pin entry. Generic:
+    any current/future .mcp.json server pinned to a GitHub git tag is covered.
+
+    These are agent *tooling* dependencies — the planning/dev agents consume
+    their tools by name (e.g. `mcp__serena__find_symbol` appears in
+    .claude/agents/*.md `tools:` allowlists and prose), so a release that
+    renames/removes a tool is a BREAKING change that needs a rewire story, not a
+    one-line pin bump. The blast-radius classification lives in Phase 3 (see
+    references/decision-matrix.md "MCP server pins"); this discovery only emits
+    the pin + its .mcp.json location.
+    """
+    pins: list[dict] = []
+    mcp_file = root / ".mcp.json"
+    if not mcp_file.exists():
+        return pins
+    try:
+        text = mcp_file.read_text()
+        data = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return pins
+    git_ref = re.compile(
+        r"git\+https://github\.com/([^/]+)/([^/@]+?)(?:\.git)?@(v?[0-9][^\s\"']*)"
+    )
+    raw_lines = text.splitlines()
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        return pins
+    for name in sorted(servers):
+        cfg = servers[name]
+        args = cfg.get("args", []) if isinstance(cfg, dict) else []
+        match = None
+        for arg in args:
+            if isinstance(arg, str):
+                match = git_ref.search(arg)
+                if match:
+                    break
+        if not match:
+            continue  # non-git-pinned server (uvx latest, npx, local path) — not a versioned pin
+        owner, repo, tag = match.group(1), match.group(2), match.group(3)
+        locations = [
+            {"file": ".mcp.json", "line": i, "match": line.strip()}
+            for i, line in enumerate(raw_lines, 1)
+            if git_ref.search(line)
+        ]
+        pins.append({
+            "name": name,
+            "kind": "mcp",
+            "current": tag,
+            "release_source": f"gh:{owner}/{repo}",
+            "ecosystem": None,  # git-installed; GHSA rarely resolves — Phase 2 falls back to release notes
+            "package": None,
+            "locations": locations,
+        })
+    return pins
+
+
 def main() -> int:
     root = repo_root()
     inventory = [discover_go_toolchain(root)]
     inventory.extend(discover_tool_pins(root))
     inventory.extend(discover_github_actions(root))
+    inventory.extend(discover_mcp_pins(root))
     json.dump(inventory, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0

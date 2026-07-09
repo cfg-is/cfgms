@@ -243,3 +243,88 @@ func TestFlatFileStewardStore_DeregisterNotFound(t *testing.T) {
 	err = store.DeregisterSteward(context.Background(), "ghost")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
+
+func TestFlatFileStewardStore_GetStewardByDeviceID(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	const deviceID = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	rec := testStewardRecord("s-dvc")
+	rec.DeviceID = deviceID
+	rec.IdentityKeyPub = []byte{0xde, 0xad}
+	rec.KeyProtectionLevel = "file"
+	rec.LastProvenanceJSON = `{"hostname":"host-s-dvc"}`
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	got, err := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, err)
+	assert.Equal(t, "s-dvc", got.ID)
+	assert.Equal(t, deviceID, got.DeviceID)
+	assert.Equal(t, []byte{0xde, 0xad}, got.IdentityKeyPub)
+	assert.Equal(t, "file", got.KeyProtectionLevel)
+	assert.Equal(t, `{"hostname":"host-s-dvc"}`, got.LastProvenanceJSON)
+
+	_, err = store.GetStewardByDeviceID(ctx, "0000000000000000000000000000000000000000000000000000000000000000")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+func TestFlatFileStewardStore_GetStewardByDeviceID_EmptyID(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	_, err = store.GetStewardByDeviceID(context.Background(), "")
+	require.Error(t, err, "empty device ID must return an error")
+}
+
+func TestFlatFileStewardStore_UpdateStewardTenant(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	rec := testStewardRecord("s-move")
+	rec.TenantID = "tenant-src"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	// Move to a new tenant.
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move", "tenant-dst"))
+
+	got, err := store.GetSteward(ctx, "s-move")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst", got.TenantID)
+	// Status must not change.
+	assert.Equal(t, business.StewardStatusRegistered, got.Status)
+}
+
+func TestFlatFileStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	err = store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-dst")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+func TestFlatFileStewardStore_UpdateStewardTenant_TenantPersistedInFile(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFlatFileStewardStore(dir)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	rec := testStewardRecord("s-persist")
+	rec.TenantID = "original-tenant"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-persist", "new-tenant"))
+
+	// Re-open the store — the new tenant ID must survive a reload from disk.
+	store2, err := NewFlatFileStewardStore(dir)
+	require.NoError(t, err)
+	defer func() { _ = store2.Close() }()
+
+	got, err := store2.GetSteward(ctx, "s-persist")
+	require.NoError(t, err)
+	assert.Equal(t, "new-tenant", got.TenantID)
+}

@@ -321,3 +321,349 @@ func TestWorkflowCmd_RegisteredOnRoot(t *testing.T) {
 	}
 	assert.True(t, found, "workflow command must be registered on rootCmd")
 }
+
+// ---- workflow list -----------------------------------------------------------
+
+func TestWorkflowList_CallsWorkflowsEndpoint(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []map[string]interface{}{
+				{"name": "my-workflow", "version": "1.0.0", "steps": []map[string]string{{"name": "s1"}, {"name": "s2"}}},
+				{"name": "another-wf", "version": "2.1.0", "steps": []map[string]string{{"name": "s1"}}},
+			},
+			"count": 2,
+		})
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runWorkflowList(workflowListCmd, nil)
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/workflows", requestPath)
+	assert.Contains(t, output, "my-workflow")
+	assert.Contains(t, output, "1.0.0")
+	assert.Contains(t, output, "another-wf")
+	assert.Contains(t, output, "2.1.0")
+}
+
+func TestWorkflowList_HeaderPresent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []map[string]interface{}{
+				{"name": "wf1", "version": "1.0.0", "steps": []map[string]string{{"name": "s1"}}},
+			},
+			"count": 1,
+		})
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runWorkflowList(workflowListCmd, nil)
+		require.NoError(t, err)
+	})
+
+	assert.True(t, strings.Contains(output, "NAME"), "header NAME must be present")
+	assert.True(t, strings.Contains(output, "VERSION"), "header VERSION must be present")
+	assert.True(t, strings.Contains(output, "STEPS"), "header STEPS must be present")
+}
+
+func TestWorkflowList_EmptyList_PrintsNoWorkflows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []interface{}{},
+			"count":     0,
+		})
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		err := runWorkflowList(workflowListCmd, nil)
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "No workflows")
+}
+
+func TestWorkflowList_NonOKStatus_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+
+	err := runWorkflowList(workflowListCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestWorkflowList_FlagsRegistered(t *testing.T) {
+	assert.NotNil(t, workflowListCmd.Flags().Lookup("url"), "--url flag must be registered on workflow list")
+	assert.NotNil(t, workflowListCmd.Flags().Lookup("api-key"), "--api-key flag must be registered on workflow list")
+	assert.NotNil(t, workflowListCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered on workflow list")
+	assert.NotNil(t, workflowListCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered on workflow list")
+}
+
+// ---- workflow status ---------------------------------------------------------
+
+func TestWorkflowStatus_HappyPath_PrintsFields(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":            "exec_1234_1",
+			"workflow_name": "my-workflow",
+			"status":        "running",
+			"current_step":  "step1",
+			"start_time":    "2026-07-01T10:00:00Z",
+			"error":         "",
+		})
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origWF := workflowStatusWorkflow
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowStatusWorkflow = origWF
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+	workflowStatusWorkflow = "my-workflow"
+
+	output := captureStdout(t, func() {
+		err := runWorkflowStatus(workflowStatusCmd, []string{"exec_1234_1"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/workflows/my-workflow/executions/exec_1234_1", requestPath)
+	assert.Contains(t, output, "exec_1234_1")
+	assert.Contains(t, output, "my-workflow")
+	assert.Contains(t, output, "running")
+	assert.Contains(t, output, "step1")
+	assert.Contains(t, output, "2026-07-01")
+}
+
+func TestWorkflowStatus_NotFound_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"execution not found"}`))
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origWF := workflowStatusWorkflow
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowStatusWorkflow = origWF
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+	workflowStatusWorkflow = "my-workflow"
+
+	err := runWorkflowStatus(workflowStatusCmd, []string{"exec_9999_0"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestWorkflowStatus_InvalidExecutionID_ReturnsError(t *testing.T) {
+	origWF := workflowStatusWorkflow
+	t.Cleanup(func() { workflowStatusWorkflow = origWF })
+	workflowStatusWorkflow = "my-workflow"
+
+	err := runWorkflowStatus(workflowStatusCmd, []string{"../../../etc/passwd"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+}
+
+func TestWorkflowStatus_FlagsRegistered(t *testing.T) {
+	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("url"), "--url flag must be registered on workflow status")
+	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("workflow"), "--workflow flag must be registered on workflow status")
+	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("api-key"))
+	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("tls-ca-cert"))
+	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("tls-insecure"))
+}
+
+func TestWorkflowStatus_RequiresExactlyOneArg(t *testing.T) {
+	err := workflowStatusCmd.Args(workflowStatusCmd, []string{})
+	require.Error(t, err, "zero args must error")
+
+	err = workflowStatusCmd.Args(workflowStatusCmd, []string{"exec_1_1", "extra"})
+	require.Error(t, err, "two args must error")
+}
+
+// ---- workflow cancel ---------------------------------------------------------
+
+func TestWorkflowCancel_Success_PrintsCancelled(t *testing.T) {
+	var requestPath string
+	var requestMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		requestMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"cancelled": "exec_1234_1",
+		})
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origWF := workflowCancelWorkflow
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowCancelWorkflow = origWF
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+	workflowCancelWorkflow = "my-workflow"
+
+	output := captureStdout(t, func() {
+		err := runWorkflowCancel(workflowCancelCmd, []string{"exec_1234_1"})
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, "/api/v1/workflows/my-workflow/executions/exec_1234_1/cancel", requestPath)
+	assert.Equal(t, http.MethodPost, requestMethod)
+	assert.Contains(t, output, "Cancelled execution exec_1234_1")
+}
+
+func TestWorkflowCancel_NotFound_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"execution not found"}`))
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origWF := workflowCancelWorkflow
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowCancelWorkflow = origWF
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+	workflowCancelWorkflow = "my-workflow"
+
+	err := runWorkflowCancel(workflowCancelCmd, []string{"exec_9999_0"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestWorkflowCancel_AlreadyTerminal_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"execution is already in a terminal state"}`))
+	}))
+	defer server.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origWF := workflowCancelWorkflow
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowCancelWorkflow = origWF
+	})
+	workflowURL = server.URL
+	workflowTLSInsecure = true
+	workflowCancelWorkflow = "my-workflow"
+
+	err := runWorkflowCancel(workflowCancelCmd, []string{"exec_1234_1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terminal")
+}
+
+func TestWorkflowCancel_InvalidExecutionID_ReturnsError(t *testing.T) {
+	origWF := workflowCancelWorkflow
+	t.Cleanup(func() { workflowCancelWorkflow = origWF })
+	workflowCancelWorkflow = "my-workflow"
+
+	err := runWorkflowCancel(workflowCancelCmd, []string{"../../../etc/passwd"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+}
+
+func TestWorkflowCancel_FlagsRegistered(t *testing.T) {
+	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("url"), "--url flag must be registered on workflow cancel")
+	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("workflow"), "--workflow flag must be registered on workflow cancel")
+	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("api-key"))
+	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("tls-ca-cert"))
+	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("tls-insecure"))
+}
+
+func TestWorkflowCancel_RequiresExactlyOneArg(t *testing.T) {
+	err := workflowCancelCmd.Args(workflowCancelCmd, []string{})
+	require.Error(t, err, "zero args must error")
+
+	err = workflowCancelCmd.Args(workflowCancelCmd, []string{"exec_1_1", "extra"})
+	require.Error(t, err, "two args must error")
+}
+
+// ---- subcommand registration -------------------------------------------------
+
+func TestWorkflowCmd_SubcommandsRegistered(t *testing.T) {
+	names := make(map[string]bool)
+	for _, cmd := range workflowCmd.Commands() {
+		names[cmd.Name()] = true
+	}
+	assert.True(t, names["run"], "workflow run must be registered")
+	assert.True(t, names["list"], "workflow list must be registered")
+	assert.True(t, names["status"], "workflow status must be registered")
+	assert.True(t, names["cancel"], "workflow cancel must be registered")
+}

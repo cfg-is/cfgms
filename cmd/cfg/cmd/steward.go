@@ -44,6 +44,8 @@ var (
 	stewardLogsJSON   bool
 )
 
+var stewardMoveToTenant string
+
 // stewardCmd is the parent command for steward subcommands.
 var stewardCmd = &cobra.Command{
 	Use:   "steward",
@@ -200,6 +202,72 @@ Examples:
 	RunE: runRunCancel,
 }
 
+// stewardMoveCmd moves a steward to a different tenant via the controller REST API.
+var stewardMoveCmd = &cobra.Command{
+	Use:   "move <steward-id>",
+	Short: "Move a steward to a different tenant",
+	Long: `Move a steward to a different tenant.
+
+Post-move, the steward is subject to the DESTINATION tenant's refresh policy and
+module/publisher trust configuration. Trust is never resolved from the old
+(source-tenant, device-key) pair — identity continuity is preserved while the
+trust context changes immediately to the destination tenant.
+
+Requires an admin bundle with mTLS access (Tier-3 endpoint).
+
+Examples:
+  # Move steward to a different tenant
+  cfg steward move <steward-id> --to-tenant dest-tenant
+
+  # Move steward using explicit controller URL
+  cfg steward move <steward-id> --to-tenant dest-tenant --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardMove,
+}
+
+// stewardDecommissionCmd permanently decommissions a steward from the fleet.
+var stewardDecommissionCmd = &cobra.Command{
+	Use:   "decommission <id>",
+	Short: "Decommission a steward from the fleet",
+	Long: `Mark a steward record as deregistered after its host or VM has been torn down.
+
+Requires an admin mTLS certificate. The record is retained in durable storage
+for audit but no longer appears in cfg steward list. Any active connection is dropped.
+
+Examples:
+  cfg steward decommission steward-abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardDecommission,
+}
+
+func runStewardDecommission(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+	resp, err := client.doRequest(context.Background(), http.MethodDelete,
+		"/api/v1/stewards/"+stewardID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decommission steward: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		fmt.Printf("Steward %s decommissioned.\n", stewardID)
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("steward %s not found", stewardID)
+	case http.StatusForbidden:
+		return fmt.Errorf("decommission requires an admin mTLS certificate")
+	case http.StatusServiceUnavailable:
+		return fmt.Errorf("fleet store unavailable; retry later")
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+}
+
 // stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
 var stewardLogsCmd = &cobra.Command{
 	Use:   "logs <id>",
@@ -214,6 +282,70 @@ Examples:
   cfg steward logs <steward-id> --since 1h --module file`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardLogs,
+}
+
+func runStewardMove(_ *cobra.Command, args []string) error {
+	stewardID := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	reqBody, err := json.Marshal(map[string]string{"new_tenant_id": stewardMoveToTenant})
+	if err != nil {
+		return fmt.Errorf("failed to encode request: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/stewards/"+stewardID+"/move", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to move steward: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("move denied: insufficient scope to move steward %s to tenant %s", stewardID, stewardMoveToTenant)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	var apiResp struct {
+		Data struct {
+			StewardID      string `json:"steward_id"`
+			TenantID       string `json:"tenant_id"`
+			PreviousTenant string `json:"previous_tenant"`
+			Status         string `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	d := apiResp.Data
+	switch d.Status {
+	case "no_change":
+		fmt.Printf("Steward %s is already in tenant %s (no change)\n", stewardID, d.TenantID)
+	case "moved":
+		fmt.Printf("Steward %s moved to tenant %s (was: %s)\n", stewardID, d.TenantID, d.PreviousTenant)
+	default:
+		fmt.Printf("Steward %s: status=%s tenant=%s\n", stewardID, d.Status, d.TenantID)
+	}
+	return nil
 }
 
 func runStewardLogs(_ *cobra.Command, args []string) error {
@@ -380,10 +512,28 @@ func init() {
 	stewardLogsCmd.Flags().StringVar(&stewardLogsModule, "module", "", "Filter by module name")
 	stewardLogsCmd.Flags().BoolVar(&stewardLogsJSON, "json", false, "Emit raw JSON output instead of human-readable text")
 
+	// move flags (Issue #2342)
+	stewardMoveCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardMoveCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardMoveCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardMoveCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardMoveCmd.Flags().StringVar(&stewardMoveToTenant, "to-tenant", "", "Destination tenant ID (required)")
+	if err := stewardMoveCmd.MarkFlagRequired("to-tenant"); err != nil {
+		panic(err)
+	}
+
+	// decommission flags (Issue #2408)
+	stewardDecommissionCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardDecommissionCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
+	stewardDecommissionCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardDecommissionCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
 	stewardCmd.AddCommand(stewardDNACmd)
 	stewardCmd.AddCommand(stewardModulesCmd)
+	stewardCmd.AddCommand(stewardMoveCmd)
+	stewardCmd.AddCommand(stewardDecommissionCmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
 	stewardCmd.AddCommand(stewardExecCmd)
@@ -416,6 +566,9 @@ func init() {
 	stewardCmd.AddCommand(stewardUpgradeCmd)
 	stewardUpgradeCmd.AddCommand(stewardUpgradeStatusCmd)
 	stewardUpgradeCmd.AddCommand(stewardUpgradeRollbackCmd)
+
+	// Refresh management subcommands (Issue #2097).
+	stewardCmd.AddCommand(refreshCmd)
 }
 
 // getStewardClient creates an API client using bundle auth (mTLS) when available,
@@ -426,7 +579,7 @@ func getStewardClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
+	client, err := resolveSessionOrBundleClient(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}

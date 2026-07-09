@@ -33,6 +33,7 @@ import (
 	"sync"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ErrProviderNotImplemented is returned by stub provider implementations in default builds.
@@ -108,15 +109,18 @@ type ProviderInfo struct {
 	Version             string
 }
 
-// NewProviderRegistry creates a new provider registry
-func NewProviderRegistry(logger logging.Logger) *ProviderRegistry {
+// NewProviderRegistry creates a new provider registry.
+// secrets is the controller's central secret store threaded to providers that need it
+// (e.g. the github provider for App-JWT minting). Pass nil when no secrets store is
+// available (e.g. steward-side usage); providers will surface a clear error on execution.
+func NewProviderRegistry(logger logging.Logger, secrets secretsif.SecretStore) *ProviderRegistry {
 	registry := &ProviderRegistry{
 		providers: make(map[string]APIProvider),
 		logger:    logger,
 	}
 
 	// Register built-in providers
-	registry.registerBuiltinProviders()
+	registry.registerBuiltinProviders(secrets)
 
 	return registry
 }
@@ -203,12 +207,14 @@ func (r *ProviderRegistry) ExecuteOperation(ctx context.Context, config *APIConf
 
 // registerBuiltinProviders registers the built-in API providers.
 // Entries in providerOverrides (set by providers_experimental.go init()) replace defaults.
-func (r *ProviderRegistry) registerBuiltinProviders() {
+// secrets is forwarded to providers that require a secret store (e.g. GitHubAppProvider).
+func (r *ProviderRegistry) registerBuiltinProviders(secrets secretsif.SecretStore) {
 	defaults := map[string]APIProvider{
 		"microsoft":   &MicrosoftProvider{},
 		"google":      &GoogleProvider{},
 		"salesforce":  &SalesforceProvider{},
 		"connectwise": &ConnectWiseProvider{},
+		"github":      NewGitHubAppProvider(secrets, r.logger, nil),
 	}
 	for name, p := range providerOverrides {
 		defaults[name] = p

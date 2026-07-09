@@ -5,10 +5,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,12 +22,19 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // Regex pattern for validating identifiers (prevents log injection)
 var identifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// tenantPathRegex validates a tenant path: flat IDs (e.g. "corp") and slash-separated
+// hierarchical paths (e.g. "msp-a/client-1"). Each component matches identifierRegex.
+var tenantPathRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$`)
 
 // handleListStewards handles GET /api/v1/stewards
 // Supports optional query parameters for filtered search: os, platform, arch, status, hostname,
@@ -59,6 +68,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 				ID:       res.ID,
 				Status:   res.Status,
 				LastSeen: res.LastHeartbeat,
+				Version:  res.DNAAttributes["steward.version"],
 			}
 			if len(res.DNAAttributes) > 0 {
 				info.DNA = &DNAInfo{
@@ -75,12 +85,17 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No filter: existing behavior — return all stewards including registered-but-not-connected.
+	// No filter: return all stewards including registered-but-not-connected.
+	// Deregistered stewards are excluded by default; pass ?include_deregistered=true to restore them.
+	includeDeregistered := r.URL.Query().Get("include_deregistered") == "true"
 	stewards := s.controllerService.GetAllStewards()
 
 	stewardList := make([]StewardInfo, 0, len(stewards))
 
 	for _, steward := range stewards {
+		if !includeDeregistered && steward.Status == string(business.StewardStatusDeregistered) {
+			continue
+		}
 		info := StewardInfo{
 			ID:          steward.ID,
 			Version:     steward.Version,
@@ -616,6 +631,115 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleDecommissionSteward handles DELETE /api/v1/stewards/{id}.
+// Tombstones the steward's durable record (status: deregistered), updates the in-memory
+// registry, and drops any active QUIC/gRPC session. The record is retained for audit.
+// Requires an admin mTLS certificate (TierMTLSOnly gate). Issue #2408.
+func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	if s.stewardStore == nil {
+		s.logger.Error("decommission failed: steward store not configured",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
+	if err != nil {
+		if errors.Is(err, business.ErrStewardNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+		s.logger.Error("decommission failed: store lookup error",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up steward", "INTERNAL_ERROR")
+		return
+	}
+
+	// Cross-tenant scope check using the durable record's TenantID as the authoritative source.
+	// Admin mTLS (empty callerTenant) has global scope; API-key callers are rejected at the
+	// TierMTLSOnly gate before reaching here, so callerTenant is always from an mTLS principal.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		sameTenant := record.TenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	// Tombstone in durable storage — authoritative; must succeed before in-memory updates.
+	if err := s.stewardStore.DeregisterSteward(r.Context(), stewardID); err != nil {
+		s.logger.Error("decommission failed: store write error",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decommission steward", "INTERNAL_ERROR")
+		return
+	}
+
+	// Update in-memory status — best-effort; durable storage already succeeded.
+	if err := s.controllerService.UpdateStewardStatus(stewardID, string(business.StewardStatusDeregistered)); err != nil {
+		s.logger.Warn("decommission: in-memory status update failed (non-fatal)",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Drop any active QUIC/gRPC connection.
+	s.mu.RLock()
+	reg := s.registry
+	s.mu.RUnlock()
+	if reg != nil {
+		reg.Unregister(stewardID)
+	}
+
+	// Emit audit event.
+	auditTenantID := callerTenant
+	if auditTenantID == "" {
+		auditTenantID = audit.SystemTenantID
+	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principalID := ""
+	if principal != nil {
+		principalID = principal.ID
+	}
+	s.emitDecommissionAudit(r.Context(), auditTenantID, principalID, stewardID)
+
+	s.logger.Info("Steward decommissioned",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"principal_id", logging.SanitizeLogValue(principalID))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":     stewardID,
+		"status": string(business.StewardStatusDeregistered),
+	})
+}
+
+// emitDecommissionAudit records a steward-decommission audit event. No-op when auditManager is nil.
+func (s *Server) emitDecommissionAudit(ctx context.Context, tenantID, principalID, stewardID string) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventSystemAccess).
+		Action("steward.decommissioned").
+		User(principalID, business.AuditUserTypeHuman).
+		Resource("steward", stewardID, "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh)
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit decommission audit event",
+			"error", err, "steward_id", logging.SanitizeLogValue(stewardID))
+	}
+}
+
 // handleGetStewardModules handles GET /api/v1/stewards/{id}/modules.
 // Returns a 501 placeholder when the steward has no modules.loaded DNA attribute.
 func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request) {
@@ -688,10 +812,31 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 	s.writeSuccessResponse(w, map[string]interface{}{"modules": modules})
 }
 
+// stewardLogEvent is the per-event shape returned in the logs response.
+type stewardLogEvent struct {
+	Timestamp     time.Time              `json:"timestamp"`
+	Level         string                 `json:"level"`
+	Message       string                 `json:"message"`
+	Component     string                 `json:"component,omitempty"`
+	CorrelationID string                 `json:"correlation_id,omitempty"`
+	Fields        map[string]interface{} `json:"fields,omitempty"`
+}
+
+// stewardLogRecord is one logical event in the logs response. Correlated
+// detection+outcome pairs share a CorrelationID and are rolled into one record.
+// A detection with no outcome in the query window carries PendingOutcome=true
+// (the "monitor fired, convergence never completed" wedge signal from ADR-012 §2).
+type stewardLogRecord struct {
+	CorrelationID  string           `json:"correlation_id,omitempty"`
+	Detection      *stewardLogEvent `json:"detection"`
+	Outcome        *stewardLogEvent `json:"outcome,omitempty"`
+	PendingOutcome bool             `json:"pending_outcome,omitempty"`
+}
+
 // handleGetStewardLogs handles GET /api/v1/stewards/{id}/logs.
-// Validates the steward exists and the query parameters, then returns 501 until a
-// log-pull transport is wired. The follow-up story must implement per-tenant ACL
-// gating, secret redaction via logging.SanitizeLogValue, and documented pagination caps.
+// Reads from the dedicated steward-event LoggingManager via QueryTimeRange,
+// scopes to the path steward by post-filtering on steward_id, rolls up
+// correlated detection+outcome pairs, and gates on the caller's tenant.
 func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -746,16 +891,411 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		"module", logging.SanitizeLogValue(module),
 	)
 
-	_, exists := s.controllerService.GetStewardInfo(stewardID)
-	if !exists {
+	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
+	// principals have TenantID="" meaning no scope restriction.
+	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	info, exists := s.controllerService.GetStewardInfo(stewardID)
+	if callerTenant != "" {
+		stewardTenant := ""
+		if exists {
+			stewardTenant = info.TenantID
+		}
+		sameTenant := stewardTenant == callerTenant
+		ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+		if !exists || (!sameTenant && !ancestorTenant) {
+			// 404 instead of 403 to avoid disclosing steward existence across tenants.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	} else if !exists {
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
 	}
 
-	s.respondJSON(w, http.StatusNotImplemented, map[string]string{
-		"code":    "LOGS_UNAVAILABLE",
-		"message": "steward log pull not yet supported; collect logs directly from the steward host",
+	// Return empty events when the manager is not yet wired.
+	s.mu.RLock()
+	mgr := s.stewardEventLoggingManager
+	s.mu.RUnlock()
+
+	emptyEvents := []stewardLogRecord{}
+	if mgr == nil {
+		s.writeSuccessResponse(w, map[string]interface{}{"events": emptyEvents})
+		return
+	}
+
+	// Map query params to TimeRangeQuery.
+	startTime := time.Now().Add(-24 * time.Hour) // default: last 24 hours
+	if since != "" {
+		d, _ := time.ParseDuration(since) // already validated above
+		startTime = time.Now().Add(-d)
+	}
+
+	filters := map[string]interface{}{
+		"steward_id": stewardID,
+	}
+	if level != "" {
+		filters["level"] = level
+	}
+	if module != "" {
+		filters["component"] = module
+	}
+
+	query := loggingInterfaces.TimeRangeQuery{
+		StartTime: startTime,
+		EndTime:   time.Now(),
+		Filters:   filters,
+		Limit:     tail,
+	}
+
+	entries, err := mgr.QueryTimeRange(r.Context(), query)
+	if err != nil {
+		s.logger.Error("Failed to query steward event log",
+			"steward_id", stewardIDForLog,
+			"error", err,
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
+		return
+	}
+
+	// Defensive post-filter: the shared steward-event manager co-mingles all stewards;
+	// the ACL gates endpoint access but does not scope the result set. Only entries
+	// whose steward_id field exactly matches the path parameter are returned.
+	filtered := make([]loggingInterfaces.LogEntry, 0, len(entries))
+	for _, e := range entries {
+		if sid, ok := e.Fields["steward_id"].(string); ok && sid == stewardID {
+			filtered = append(filtered, e)
+		}
+	}
+
+	records := rollupStewardLogsByCorrelationID(filtered)
+	s.writeSuccessResponse(w, map[string]interface{}{"events": records})
+}
+
+// rollupStewardLogsByCorrelationID groups log entries by correlation_id.
+// Entries without a correlation_id are standalone records. Correlated pairs
+// are merged into one record (detection = earlier timestamp, outcome = later).
+// A detection with no paired outcome is marked PendingOutcome=true.
+func rollupStewardLogsByCorrelationID(entries []loggingInterfaces.LogEntry) []stewardLogRecord {
+	var records []stewardLogRecord
+
+	// Group entries by correlation_id. Entries with no correlation_id are
+	// immediately emitted as standalone records, preserving source order.
+	grouped := make(map[string][]loggingInterfaces.LogEntry)
+	var corrOrder []string // tracks first-seen order for deterministic output
+	seen := make(map[string]bool)
+
+	for _, e := range entries {
+		if e.CorrelationID == "" {
+			records = append(records, stewardLogRecord{
+				Detection: logEntryToStewardEvent(e),
+			})
+			continue
+		}
+		if !seen[e.CorrelationID] {
+			corrOrder = append(corrOrder, e.CorrelationID)
+			seen[e.CorrelationID] = true
+		}
+		grouped[e.CorrelationID] = append(grouped[e.CorrelationID], e)
+	}
+
+	for _, corrID := range corrOrder {
+		events := grouped[corrID]
+		// Sort by timestamp: earlier = detection, later = outcome.
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].Timestamp.Before(events[j].Timestamp)
+		})
+		record := stewardLogRecord{
+			CorrelationID: corrID,
+			Detection:     logEntryToStewardEvent(events[0]),
+		}
+		if len(events) >= 2 {
+			record.Outcome = logEntryToStewardEvent(events[1])
+		} else {
+			record.PendingOutcome = true
+		}
+		records = append(records, record)
+	}
+
+	return records
+}
+
+// logEntryToStewardEvent converts a LogEntry to the API response event shape.
+func logEntryToStewardEvent(e loggingInterfaces.LogEntry) *stewardLogEvent {
+	return &stewardLogEvent{
+		Timestamp:     e.Timestamp,
+		Level:         e.Level,
+		Message:       e.Message,
+		Component:     e.Component,
+		CorrelationID: e.CorrelationID,
+		Fields:        e.Fields,
+	}
+}
+
+// moveStewardRequest is the JSON body for POST /api/v1/stewards/{id}/move.
+type moveStewardRequest struct {
+	NewTenantID string `json:"new_tenant_id"`
+}
+
+// allowedMoveSources is the set of statuses from which a steward may be moved.
+// Revoked stewards are excluded: accepting a move would silently back-door re-entry
+// into a new tenant without going through the registration-refresh approval flow.
+var allowedMoveSources = map[string]bool{
+	"registered":   true,
+	"active":       true,
+	"lost":         true,
+	"archived":     true,
+	"dormant":      true,
+	"deregistered": true,
+}
+
+// handleMoveSteward handles POST /api/v1/stewards/{id}/move.
+// Moves a steward to a different tenant: updates durable storage AND the live
+// in-memory registry, and invalidates the per-tenant config cache for both the
+// source and destination tenants. Registered in the Tier-3 (mTLS-only) endpoint
+// class (Issue #2341).
+func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+	stewardIDForLog := logging.SanitizeLogValue(stewardID)
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	var req moveStewardRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+
+	newTenantID := req.NewTenantID
+	if newTenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "new_tenant_id is required", "MISSING_TENANT_ID")
+		return
+	}
+	if !tenantPathRegex.MatchString(newTenantID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid tenant ID format", "INVALID_TENANT_ID")
+		return
+	}
+	newTenantIDForLog := logging.SanitizeLogValue(newTenantID)
+
+	// Steward must exist in durable storage.
+	if s.stewardStore == nil {
+		s.logger.Error("steward move failed: steward store not configured", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Steward store not configured", "INTERNAL_ERROR")
+		return
+	}
+
+	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
+	if err != nil {
+		s.logger.Info("steward not found for move", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
+	}
+
+	oldTenantID := record.TenantID
+	oldTenantIDForLog := logging.SanitizeLogValue(oldTenantID)
+
+	// Extract the caller's principal and scope from context once so they are available
+	// throughout authorization, audit, and the success path.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	// Dual-admin authorization (Issue #2342).
+	// An unscoped (root) admin (callerTenantID == "") is always permitted; the move is
+	// recorded as a privileged cross-tenant action. A scoped admin must have scope that is
+	// an ancestor of (or equal to) BOTH source AND destination via the anchored-prefix form.
+	// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
+	if callerTenantID != "" {
+		sourceInScope := oldTenantID == callerTenantID || strings.HasPrefix(oldTenantID, callerTenantID+"/")
+		destInScope := newTenantID == callerTenantID || strings.HasPrefix(newTenantID, callerTenantID+"/")
+		if !sourceInScope || !destInScope {
+			s.logger.Warn("steward move denied: scoped admin has insufficient scope",
+				"steward_id", stewardIDForLog,
+				"source_tenant", oldTenantIDForLog,
+				"dest_tenant", newTenantIDForLog,
+				"caller_scope", logging.SanitizeLogValue(callerTenantID),
+			)
+			s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
+				business.AuditEventSecurityEvent, "steward_move",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{
+					"decision":        "denied",
+					"reason":          "insufficient_scope",
+					"source_in_scope": sourceInScope,
+					"dest_in_scope":   destInScope,
+				})
+			s.writeErrorResponse(w, http.StatusForbidden, "Insufficient scope to move steward between these tenants", "INSUFFICIENT_SCOPE")
+			return
+		}
+	}
+
+	// Self-move: destination equals current tenant — short-circuit with no state change.
+	if oldTenantID == newTenantID {
+		s.logger.Info("steward move skipped (self-move)",
+			"steward_id", stewardIDForLog,
+			"tenant_id", newTenantIDForLog,
+		)
+		s.writeSuccessResponse(w, map[string]any{
+			"steward_id":      stewardID,
+			"tenant_id":       newTenantID,
+			"previous_tenant": oldTenantID,
+			"status":          "no_change",
+		})
+		return
+	}
+
+	// Revoked stewards may not be moved (would back-door un-revoke).
+	if string(record.Status) == "revoked" {
+		s.logger.Warn("steward move rejected: source status is revoked",
+			"steward_id", stewardIDForLog,
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Revoked stewards cannot be moved", "STEWARD_REVOKED")
+		return
+	}
+
+	// Validate source status against the allowed set.
+	if !allowedMoveSources[string(record.Status)] {
+		s.logger.Warn("steward move rejected: source status not allowed",
+			"steward_id", stewardIDForLog,
+			"status", logging.SanitizeLogValue(string(record.Status)),
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Steward status does not permit a move", "STEWARD_STATUS_INVALID")
+		return
+	}
+
+	// Destination tenant must exist and be active.
+	if s.tenantManager == nil {
+		s.logger.Error("steward move failed: tenant manager not configured", "steward_id", stewardIDForLog)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Tenant manager not configured", "INTERNAL_ERROR")
+		return
+	}
+
+	destTenant, err := s.tenantManager.GetTenant(r.Context(), newTenantID)
+	if err != nil {
+		s.logger.Info("destination tenant not found for steward move",
+			"steward_id", stewardIDForLog,
+			"new_tenant_id", newTenantIDForLog,
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Destination tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+	if destTenant.Status != "active" {
+		s.logger.Warn("destination tenant is not active",
+			"steward_id", stewardIDForLog,
+			"new_tenant_id", newTenantIDForLog,
+			"tenant_status", logging.SanitizeLogValue(string(destTenant.Status)),
+		)
+		s.writeErrorResponse(w, http.StatusBadRequest, "Destination tenant is not active", "TENANT_NOT_ACTIVE")
+		return
+	}
+
+	// Update durable storage.
+	if err := s.stewardStore.UpdateStewardTenant(r.Context(), stewardID, newTenantID); err != nil {
+		s.logger.Error("steward move: failed to update durable store",
+			"steward_id", stewardIDForLog,
+			"new_tenant_id", newTenantIDForLog,
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward tenant", "INTERNAL_ERROR")
+		return
+	}
+
+	// Update the live in-memory registry. The steward may not be connected yet
+	// (e.g. the controller just restarted); a miss here is not an error — the
+	// durable store update is authoritative and the registry will be warm on
+	// next reconnect.
+	if regErr := s.controllerService.UpdateStewardTenant(stewardID, newTenantID); regErr != nil {
+		s.logger.Info("steward move: registry entry not present (steward not yet connected)",
+			"steward_id", stewardIDForLog,
+		)
+	}
+
+	// Invalidate per-tenant config cache for both source and destination so the
+	// next config resolution uses the correct tenant path.
+	s.tenantManager.InvalidateConfigCache(oldTenantID)
+	s.tenantManager.InvalidateConfigCache(newTenantID)
+
+	s.logger.Info("steward moved to new tenant",
+		"steward_id", stewardIDForLog,
+		"old_tenant_id", oldTenantIDForLog,
+		"new_tenant_id", newTenantIDForLog,
+	)
+
+	s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
+		business.AuditEventDataModification, "steward_move",
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"decision":                "approved",
+			"privileged_cross_tenant": callerTenantID == "",
+		})
+
+	s.writeSuccessResponse(w, map[string]any{
+		"steward_id":      stewardID,
+		"tenant_id":       newTenantID,
+		"previous_tenant": oldTenantID,
+		"status":          "moved",
 	})
+}
+
+// emitMoveAudit records a steward-move audit event. It is a no-op when auditManager is nil.
+// Must be called before WriteHeader on every code path.
+func (s *Server) emitMoveAudit(
+	r *http.Request,
+	stewardID, sourceTenantID, destTenantID string,
+	principal *Principal,
+	eventType business.AuditEventType,
+	action string,
+	result business.AuditResult,
+	severity business.AuditSeverity,
+	extras map[string]interface{},
+) {
+	if s.auditManager == nil {
+		return
+	}
+	callerID := ""
+	certSerial := ""
+	certFingerprint := ""
+	if principal != nil {
+		callerID = principal.ID
+		certSerial = principal.CertSerial
+		certFingerprint = principal.CertFingerprint
+	}
+
+	b := audit.NewEventBuilder().
+		Tenant(sourceTenantID).
+		Type(eventType).
+		Action(action).
+		User(callerID, business.AuditUserTypeHuman).
+		Resource("steward", stewardID, "").
+		Result(result).
+		Severity(severity).
+		Request(s.getRequestID(r), r.Method, r.URL.Path, extractSourceIP(r, s.trustedProxies), r.Header.Get("User-Agent")).
+		Changes(
+			map[string]interface{}{"tenant_id": logging.SanitizeLogValue(sourceTenantID)},
+			map[string]interface{}{"tenant_id": logging.SanitizeLogValue(destTenantID)},
+			[]string{"tenant_id"},
+		).
+		Detail("steward_id", logging.SanitizeLogValue(stewardID)).
+		Detail("source_tenant", logging.SanitizeLogValue(sourceTenantID)).
+		Detail("dest_tenant", logging.SanitizeLogValue(destTenantID)).
+		Detail("admin_cn", logging.SanitizeLogValue(callerID)).
+		Detail("cert_serial", logging.SanitizeLogValue(certSerial)).
+		Detail("cert_fingerprint", logging.SanitizeLogValue(certFingerprint))
+
+	for k, v := range extras {
+		b = b.Detail(k, v)
+	}
+
+	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+		s.logger.Warn("Failed to emit move audit event",
+			"error", err,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+		)
+	}
 }
 
 // handleGetEffectiveConfig handles GET /api/v1/stewards/{id}/config/effective

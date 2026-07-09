@@ -173,8 +173,7 @@ We welcome contributions! Before submitting code:
 
 ## Community & Support
 
-- **Issues & Bug Reports**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues)
-- **Feature Requests**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues/new)
+- **Bug Reports & Feature Requests**: [open a GitHub Issue](https://github.com/cfg-is/cfgms/issues/new) — these become public **`community`** issues. (Issues labelled **`internal`** are locked automated pipeline items, not closed to contribution — see [CONTRIBUTING.md](CONTRIBUTING.md#issue-classes--why-some-issues-are-locked).)
 - **Security Advisories**: [GitHub Security](https://github.com/cfg-is/cfgms/security/advisories)
 - **Code Scanning Results**: [GitHub Security](https://github.com/cfg-is/cfgms/security/code-scanning)
 - **Project Roadmap**: [GitHub Project Board](https://github.com/orgs/cfg-is/projects/1)

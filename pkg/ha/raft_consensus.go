@@ -247,18 +247,31 @@ func (rc *RaftConsensus) runRaft() {
 			rc.processReady(rd)
 
 		case prop := <-rc.proposeC:
-			// Propose new entry to Raft log
-			rc.logger.Debug("Received proposal", "node_id", rc.nodeID)
-			if err := rc.node.Propose(rc.ctx, prop); err != nil {
-				rc.logger.Error("Failed to propose to Raft", "error", err)
-			}
+			// Spawn a goroutine so the raft event loop continues ticking while
+			// the proposal waits for a leader. etcd/raft's n.propc is unbuffered
+			// and n.run() nil-gates it when no leader is known, so calling
+			// Propose directly here would deadlock the election timer.
+			// Track in rc.wg so Stop() does not return until the goroutine exits.
+			rc.wg.Add(1)
+			go func(p []byte) {
+				defer rc.wg.Done()
+				if err := rc.node.Propose(rc.ctx, p); err != nil {
+					rc.logger.Error("Failed to propose to Raft", "error", err)
+				}
+			}(prop)
 
 		case cc := <-rc.confChangeC:
-			// Propose configuration change
-			rc.logger.Debug("Received conf change", "node_id", rc.nodeID)
-			if err := rc.node.ProposeConfChange(rc.ctx, cc); err != nil {
-				rc.logger.Error("Failed to propose conf change", "error", err)
-			}
+			// Same reasoning as proposeC: ProposeConfChange blocks on the
+			// unbuffered n.propc when no leader exists. Run it off the
+			// raft loop so ticks continue to fire.
+			// Track in rc.wg so Stop() does not return until the goroutine exits.
+			rc.wg.Add(1)
+			go func(c raftpb.ConfChange) {
+				defer rc.wg.Done()
+				if err := rc.node.ProposeConfChange(rc.ctx, c); err != nil {
+					rc.logger.Error("Failed to propose conf change", "error", err)
+				}
+			}(cc)
 
 		case <-rc.stopC:
 			rc.logger.Debug("Raft loop stopping", "node_id", rc.nodeID)

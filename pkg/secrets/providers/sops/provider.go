@@ -48,6 +48,10 @@ func (p *SOPSProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *SOPSProvider) ClusterCapable() bool { return false }
+
 // Available checks if SOPS and git are available
 func (p *SOPSProvider) Available() (bool, error) {
 	// Check if we can access storage provider (git provider should be registered)

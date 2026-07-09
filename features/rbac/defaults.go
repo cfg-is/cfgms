@@ -44,6 +44,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "steward",
 		Actions:      []string{"create", "read", "update", "delete"},
 	},
+	{
+		Id:           "steward.decommission",
+		Name:         "Decommission Steward",
+		Description:  "Permanently decommission a steward from the fleet (tombstones the record; requires mTLS)",
+		ResourceType: "steward",
+		Actions:      []string{"delete"},
+	},
 
 	// Configuration Management Permissions
 	{
@@ -87,6 +94,13 @@ var DefaultPermissions = []*common.Permission{
 		Description:  "Report configuration execution status",
 		ResourceType: "configuration",
 		Actions:      []string{"create", "update"},
+	},
+	{
+		Id:           "steward.event.log",
+		Name:         "Emit Steward Event Log",
+		Description:  "Allow steward to stream event log entries to the controller; grants emit-only access with no read capability",
+		ResourceType: "steward",
+		Actions:      []string{"create"},
 	},
 
 	// Tenant Management Permissions
@@ -267,10 +281,25 @@ var DefaultRoles = []*common.Role{
 			"config.read",
 			"config.validate",
 			"config.status.report",
+			"steward.event.log",
 			"module.execute",
 		},
 		IsSystemRole: true,
 		TenantId:     "", // System-wide role
+	},
+	{
+		Id:          "agent.dev",
+		Name:        "Agent Developer",
+		Description: "Least-privilege read-only role for dev agent containers bound to agent-test sub-tenants; includes config.validate but no write or admin permissions",
+		PermissionIds: []string{
+			"steward.read",
+			"config.read",
+			"module.read",
+			"tenant.read",
+			"config.validate",
+		},
+		IsSystemRole: true,
+		TenantId:     "", // System-wide; assignment is scoped to a tenant via RoleAssignment.TenantId
 	},
 
 	// Tenant Roles (will be created per tenant)

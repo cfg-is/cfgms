@@ -7,6 +7,7 @@ package hyperv
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,7 +58,77 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
 			" -CPU " + intArg(psArgs, "CPU") +
 			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
+			" -Generation " + intArg(psArgs, "Generation") +
+			optArg(psArgs, "Path", "Path"))
+	case psNewSeedVHD:
+		return emit("Cfgms-NewSeedVHD -Path " + quoteArg(psArgs, "Path") +
+			" -SizeBytes " + intArg(psArgs, "SizeBytes"))
+	case psMountSeedVHD:
+		return emit("Cfgms-MountSeedVHD -Path " + quoteArg(psArgs, "Path") +
+			optArg(psArgs, "Label", "Label"))
+	case psCopyToSeedVHD:
+		return emit("Cfgms-CopyToSeedVHD -SeedPath " + quoteArg(psArgs, "SeedPath") +
+			" -FileName " + quoteArg(psArgs, "FileName") +
+			" -Content " + quoteArg(psArgs, "Content") +
+			optArg(psArgs, "Label", "Label") +
+			optArg(psArgs, "FileName2", "FileName2") +
+			optArg(psArgs, "Content2", "Content2") +
+			optArg(psArgs, "StewardDest", "StewardDest") +
+			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
+			" -CASrc " + quoteArg(psArgs, "CASrc"))
+	case psDetachSeedVHD:
+		return emit("Cfgms-DetachSeedVHD -Path " + quoteArg(psArgs, "Path"))
+	case psDeleteSeedMedia:
+		return emit("Cfgms-DeleteSeedMedia -Path " + quoteArg(psArgs, "Path"))
+	case psPrepCloudBootDisk:
+		return emit("Cfgms-PrepCloudBootDisk -ImagePath " + quoteArg(psArgs, "ImagePath") +
+			" -VhdPath " + quoteArg(psArgs, "VhdPath") +
+			" -ResizeBytes " + intArg(psArgs, "ResizeBytes"))
+	case psCreateVMFromDisk:
+		return emit("Cfgms-CreateVMFromDisk -Name " + quoteArg(psArgs, "Name") +
+			" -MemoryMB " + intArg(psArgs, "MemoryMB") +
+			" -CPU " + intArg(psArgs, "CPU") +
+			" -VHDPath " + quoteArg(psArgs, "VHDPath") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
+			" -Generation " + intArg(psArgs, "Generation") +
+			optArg(psArgs, "Path", "Path"))
+	case psSetVMHome:
+		return emit("Cfgms-SetVMHome -Name " + quoteArg(psArgs, "Name") +
+			" -VMHome " + quoteArg(psArgs, "Home"))
+	case psVMStorageMovePreflight:
+		return emit("Cfgms-VMStorageMovePreflight -Name " + quoteArg(psArgs, "Name") +
+			" -DestDir " + quoteArg(psArgs, "DestDir"))
+	case psMoveVMStorage:
+		return emit("Cfgms-MoveVMStorage -Name " + quoteArg(psArgs, "Name") +
+			" -VMHome " + quoteArg(psArgs, "Home"))
+	case psGetVMMoveError:
+		return emit("Cfgms-GetVMMoveError -Name " + quoteArg(psArgs, "Name"))
+	case psClearVMMoveError:
+		return emit("Cfgms-ClearVMMoveError -Name " + quoteArg(psArgs, "Name"))
+	case psSetHddFirstBoot:
+		return emit("Cfgms-SetHddFirstBoot -Name " + quoteArg(psArgs, "Name") +
+			" -VHDPath " + quoteArg(psArgs, "VHDPath"))
+	case psAttachSeedDisk:
+		return emit("Cfgms-AttachSeedDisk -Name " + quoteArg(psArgs, "Name") +
+			" -SeedPath " + quoteArg(psArgs, "SeedPath"))
+	case psAttachDVD:
+		return emit("Cfgms-AttachDVD -Name " + quoteArg(psArgs, "Name") +
+			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
+	case psSetVMFirmware:
+		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
+			" -Template " + quoteArg(psArgs, "Template"))
+	case psSetDVDFirstBoot:
+		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name") +
+			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
+	case psBuildAnswerIso:
+		return emit("Cfgms-BuildAnswerIso -IsoPath " + quoteArg(psArgs, "IsoPath") +
+			" -FileName " + quoteArg(psArgs, "FileName") +
+			" -Content " + quoteArg(psArgs, "Content") +
+			" -StewardSrc " + quoteArg(psArgs, "StewardSrc") +
+			" -CASrc " + quoteArg(psArgs, "CASrc"))
+	case psBootKeypress:
+		return emit("Cfgms-BootKeypress -Name " + quoteArg(psArgs, "Name"))
 	case psRemoveVM:
 		return emit("Cfgms-RemoveVM -Name " + quoteArg(psArgs, "Name"))
 	case psStartVM:
@@ -70,6 +141,12 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psSetVMMemory:
 		return emit("Cfgms-SetVMMemory -Name " + quoteArg(psArgs, "Name") +
 			" -MemoryMB " + intArg(psArgs, "MemoryMB"))
+	case psConnectVMNic:
+		return emit("Cfgms-ConnectVMNic -Name " + quoteArg(psArgs, "Name") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
+	case psDisconnectVMNic:
+		return emit("Cfgms-DisconnectVMNic -Name " + quoteArg(psArgs, "Name") +
+			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
 	case psGetVSwitch:
 		return emit("Cfgms-GetVSwitch -Name " + quoteArg(psArgs, "Name"))
 	case psRemoveVSwitch:
@@ -78,33 +155,46 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 		return emit("Cfgms-CreateVSwitchInternal -Name " + quoteArg(psArgs, "Name"))
 	case psCreateVSwitchPrivate:
 		return emit("Cfgms-CreateVSwitchPrivate -Name " + quoteArg(psArgs, "Name"))
-	case psGetVMAttachment:
-		return emit("Cfgms-GetVMAttachment -VMName " + quoteArg(psArgs, "VMName") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
-	case psAttachVMNoAdapterName:
-		return emit("Cfgms-AttachVMDefaultAdapter -VMName " + quoteArg(psArgs, "VMName") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName"))
-	case psAttachVMWithAdapterName:
-		return emit("Cfgms-AttachVMNamedAdapter -VMName " + quoteArg(psArgs, "VMName") +
-			" -SwitchName " + quoteArg(psArgs, "SwitchName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psDetachVM:
-		return emit("Cfgms-DetachVMAdapter -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psGetSnapshot:
-		return emit("Cfgms-GetSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psCreateSnapshot:
-		return emit("Cfgms-CreateSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psRemoveSnapshot:
-		return emit("Cfgms-RemoveSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
-	case psRestoreSnapshot:
-		return emit("Cfgms-RestoreSnapshot -VMName " + quoteArg(psArgs, "VMName") +
-			" -Name " + quoteArg(psArgs, "Name"))
+	case psGetCluster:
+		return emit("Cfgms-GetCluster -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGetClusterOwnerNode:
+		return emit("Cfgms-GetClusterOwnerNode -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGetClusterResourceOwner:
+		return emit("Cfgms-GetClusterResourceOwner -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGetClusterAccessSelf:
+		return emit("Cfgms-GetClusterAccessSelf -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psAddClusterVMRole:
+		return emit("Cfgms-AddClusterVMRole -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -VMName " + quoteArg(psArgs, "VMName"))
+	case psRemoveClusterResource:
+		return emit("Cfgms-RemoveClusterResource -Name " + quoteArg(psArgs, "Name"))
+	case psSetClusterRolePreferredOwners:
+		return emit("Cfgms-SetClusterRolePreferredOwners -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -Owners " + quoteArg(psArgs, "Owners"))
+	case psSetClusterRolePossibleOwners:
+		return emit("Cfgms-SetClusterRolePossibleOwners -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -ResourceName " + quoteArg(psArgs, "ResourceName") + " -Owners " + quoteArg(psArgs, "Owners"))
+	case psSetClusterGroupPriority:
+		return emit("Cfgms-SetClusterGroupPriority -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -Priority " + quoteArg(psArgs, "Priority"))
+	case psSetClusterGroupAutoStart:
+		return emit("Cfgms-SetClusterGroupAutoStart -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -AutoStart " + quoteArg(psArgs, "AutoStart"))
+	case psSetClusterGroupAntiAffinity:
+		return emit("Cfgms-SetClusterGroupAntiAffinity -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -GroupName " + quoteArg(psArgs, "GroupName") + " -ClassName " + quoteArg(psArgs, "ClassName"))
+	case psListClusterAccessNodes:
+		return emit("Cfgms-ListClusterAccessNodes -ClusterName " + quoteArg(psArgs, "ClusterName"))
+	case psGrantClusterAccess:
+		return emit("Cfgms-GrantClusterAccess -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -NodeName " + quoteArg(psArgs, "NodeName"))
+	case psRevokeClusterAccess:
+		return emit("Cfgms-RevokeClusterAccess -ClusterName " + quoteArg(psArgs, "ClusterName") +
+			" -NodeName " + quoteArg(psArgs, "NodeName"))
 	}
-	return "", nil
+	// Mirror production ExecutePS: an unknown psCommand is an error, not a
+	// silent success — keeps this test mirror honest to the production contract.
+	return "", fmt.Errorf("hyperv-ps-host: unknown psCommand (not in dispatch table)")
 }
 
 // TestPSDispatch_VMVerbs covers every VM-lifecycle psXxx constant and asserts
@@ -152,8 +242,62 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 				"CPU":        "4",
 				"VHDPath":    "C:\\VMs\\web-01.vhdx",
 				"SwitchName": "External",
+				"Generation": "2",
 			},
-			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External'",
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External' -Generation 2",
+		},
+		{
+			name:      "New-VM Gen1",
+			psCommand: psCreateVM,
+			psArgs: map[string]string{
+				"Name":       "cfgms-t__web-01",
+				"MemoryMB":   "2048",
+				"CPU":        "2",
+				"VHDPath":    "C:\\VMs\\web-01.vhdx",
+				"SwitchName": "External",
+				"Generation": "1",
+			},
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 2048 -CPU 2 -VHDPath 'C:\\VMs\\web-01.vhdx' -SwitchName 'External' -Generation 1",
+		},
+		{
+			name:      "New-VHD seed",
+			psCommand: psNewSeedVHD,
+			psArgs:    map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "SizeBytes": "67108864"},
+			want:      "Cfgms-NewSeedVHD -Path 'C:\\VMs\\cfgms-seed-web-01.vhdx' -SizeBytes 67108864",
+		},
+		{
+			name:      "Mount-VHD seed",
+			psCommand: psMountSeedVHD,
+			psArgs:    map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"},
+			want:      "Cfgms-MountSeedVHD -Path 'C:\\VMs\\cfgms-seed-web-01.vhdx'",
+		},
+		{
+			name:      "Copy seed answer file",
+			psCommand: psCopyToSeedVHD,
+			psArgs: map[string]string{
+				"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx",
+				"FileName": "autounattend.xml",
+				"Content":  "<!-- placeholder autounattend -->",
+			},
+			want: "Cfgms-CopyToSeedVHD -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx' -FileName 'autounattend.xml' -Content '<!-- placeholder autounattend -->' -StewardSrc '' -CASrc ''",
+		},
+		{
+			name:      "Attach seed disk",
+			psCommand: psAttachSeedDisk,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"},
+			want:      "Cfgms-AttachSeedDisk -Name 'cfgms-t__web-01' -SeedPath 'C:\\VMs\\cfgms-seed-web-01.vhdx'",
+		},
+		{
+			name:      "Attach install ISO DVD",
+			psCommand: psAttachDVD,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"},
+			want:      "Cfgms-AttachDVD -Name 'cfgms-t__web-01' -ISOPath 'C:\\ISO\\server.iso'",
+		},
+		{
+			name:      "Set firmware secure-boot template",
+			psCommand: psSetVMFirmware,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"},
+			want:      "Cfgms-SetVMFirmware -Name 'cfgms-t__web-01' -Template 'MicrosoftWindows'",
 		},
 		{
 			name:      "Set-VMProcessor",
@@ -166,6 +310,67 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 			psCommand: psSetVMMemory,
 			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "8192"},
 			want:      "Cfgms-SetVMMemory -Name 'cfgms-t__web-01' -MemoryMB 8192",
+		},
+		{
+			// #2411: -Path (the VM home, dir(vhd_path)) rides New-VM as an
+			// optional arg so config files start co-located with the disk.
+			name:      "New-VM with home Path",
+			psCommand: psCreateVM,
+			psArgs: map[string]string{
+				"Name":       "cfgms-t__web-01",
+				"MemoryMB":   "4096",
+				"CPU":        "4",
+				"VHDPath":    "C:\\VMs\\web-01\\web-01.vhdx",
+				"SwitchName": "External",
+				"Generation": "2",
+				"Path":       "C:\\VMs\\web-01",
+			},
+			want: "Cfgms-CreateVM -Name 'cfgms-t__web-01' -MemoryMB 4096 -CPU 4 -VHDPath 'C:\\VMs\\web-01\\web-01.vhdx' -SwitchName 'External' -Generation 2 -Path 'C:\\VMs\\web-01'",
+		},
+		{
+			// #2411: the create-time config-only home move. NOTE the parameter is
+			// -VMHome (the Go psArgs key is "Home"): $Home is a read-only PowerShell
+			// automatic variable and cannot be a function parameter name.
+			name:      "SetVMHome",
+			psCommand: psSetVMHome,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\VMs\\web-01"},
+			want:      "Cfgms-SetVMHome -Name 'cfgms-t__web-01' -VMHome 'C:\\VMs\\web-01'",
+		},
+		{
+			name:      "VMStorageMovePreflight",
+			psCommand: psVMStorageMovePreflight,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "DestDir": "C:\\ClusterStorage\\CSV01\\web-01"},
+			want:      "Cfgms-VMStorageMovePreflight -Name 'cfgms-t__web-01' -DestDir 'C:\\ClusterStorage\\CSV01\\web-01'",
+		},
+		{
+			name:      "MoveVMStorage",
+			psCommand: psMoveVMStorage,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\ClusterStorage\\CSV01\\web-01"},
+			want:      "Cfgms-MoveVMStorage -Name 'cfgms-t__web-01' -VMHome 'C:\\ClusterStorage\\CSV01\\web-01'",
+		},
+		{
+			name:      "GetVMMoveError",
+			psCommand: psGetVMMoveError,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-GetVMMoveError -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "ClearVMMoveError",
+			psCommand: psClearVMMoveError,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01"},
+			want:      "Cfgms-ClearVMMoveError -Name 'cfgms-t__web-01'",
+		},
+		{
+			name:      "Connect-VMNic",
+			psCommand: psConnectVMNic,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"},
+			want:      "Cfgms-ConnectVMNic -Name 'cfgms-t__web-01' -SwitchName 'External'",
+		},
+		{
+			name:      "Disconnect-VMNic",
+			psCommand: psDisconnectVMNic,
+			psArgs:    map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "Mgmt"},
+			want:      "Cfgms-DisconnectVMNic -Name 'cfgms-t__web-01' -SwitchName 'Mgmt'",
 		},
 	}
 
@@ -241,36 +446,16 @@ func TestPSDispatch_VSwitchVerbs(t *testing.T) {
 	}
 }
 
-// TestPSDispatch_SnapshotVerbs covers the four snapshot verbs.
-func TestPSDispatch_SnapshotVerbs(t *testing.T) {
-	ctx := context.Background()
-	args := map[string]string{"VMName": "cfgms-t__web-01", "Name": "pre-patch"}
-
-	cases := []struct {
-		name      string
-		psCommand string
-		want      string
-	}{
-		{"Get-VMSnapshot", psGetSnapshot, "Cfgms-GetSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-		{"Checkpoint-VM", psCreateSnapshot, "Cfgms-CreateSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-		{"Remove-VMSnapshot", psRemoveSnapshot, "Cfgms-RemoveSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-		{"Restore-VMSnapshot", psRestoreSnapshot, "Cfgms-RestoreSnapshot -VMName 'cfgms-t__web-01' -Name 'pre-patch'"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tr := &recordingPSTransport{}
-			_, err := tr.ExecutePS(ctx, tc.psCommand, args)
-			require.NoError(t, err)
-			require.Len(t, tr.calls, 1)
-			assert.Equal(t, tc.want, tr.calls[0])
-		})
-	}
-}
-
-// TestPSDispatch_VMAttachment covers Get / Add (with and without explicit
-// adapter name) / Remove VM-to-switch network attachment verbs.
-func TestPSDispatch_VMAttachment(t *testing.T) {
+// TestPSDispatch_ClusterVerbs covers all FIVE failover-cluster psXxx constants
+// (three read-only + two write) and asserts the EXACT synthesised Cfgms-*
+// invocation string for each, mirroring TestPSDispatch_VMVerbs /
+// TestPSDispatch_VSwitchVerbs. The wrapper parameter names asserted here
+// (-ClusterName / -VMName / -Name) must match the param(...) declarations of the
+// corresponding Cfgms-* functions in pstransport_preamble_windows.go: notably
+// Cfgms-AddClusterVMRole takes -ClusterName/-VMName and internally maps to
+// Add-ClusterVirtualMachineRole -Cluster $ClusterName -VirtualMachine $VMName,
+// so the wrapper param is -ClusterName (NOT the real cmdlet's -Cluster).
+func TestPSDispatch_ClusterVerbs(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []struct {
@@ -280,28 +465,64 @@ func TestPSDispatch_VMAttachment(t *testing.T) {
 		want      string
 	}{
 		{
-			name:      "Get attachment",
-			psCommand: psGetVMAttachment,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"},
-			want:      "Cfgms-GetVMAttachment -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01'",
+			name:      "Get-Cluster",
+			psCommand: psGetCluster,
+			psArgs:    map[string]string{"ClusterName": "lab-hv"},
+			want:      "Cfgms-GetCluster -ClusterName 'lab-hv'",
 		},
 		{
-			name:      "Attach default adapter",
-			psCommand: psAttachVMNoAdapterName,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"},
-			want:      "Cfgms-AttachVMDefaultAdapter -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01'",
+			name:      "Get-ClusterOwnerNode",
+			psCommand: psGetClusterOwnerNode,
+			psArgs:    map[string]string{"ClusterName": "lab-hv"},
+			want:      "Cfgms-GetClusterOwnerNode -ClusterName 'lab-hv'",
 		},
 		{
-			name:      "Attach named adapter",
-			psCommand: psAttachVMWithAdapterName,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"},
-			want:      "Cfgms-AttachVMNamedAdapter -VMName 'cfgms-t__web-01' -SwitchName 'cfgms-t__sw01' -Name 'nic-mgmt'",
+			name:      "Get-ClusterResourceOwner",
+			psCommand: psGetClusterResourceOwner,
+			psArgs:    map[string]string{"ClusterName": "lab-hv"},
+			want:      "Cfgms-GetClusterResourceOwner -ClusterName 'lab-hv'",
 		},
 		{
-			name:      "Detach named adapter",
-			psCommand: psDetachVM,
-			psArgs:    map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"},
-			want:      "Cfgms-DetachVMAdapter -VMName 'cfgms-t__web-01' -Name 'nic-mgmt'",
+			name:      "Add-ClusterVMRole",
+			psCommand: psAddClusterVMRole,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"},
+			want:      "Cfgms-AddClusterVMRole -ClusterName 'lab-hv' -VMName 'web-01'",
+		},
+		{
+			name:      "Remove-ClusterResource",
+			psCommand: psRemoveClusterResource,
+			psArgs:    map[string]string{"Name": "web-01"},
+			want:      "Cfgms-RemoveClusterResource -Name 'web-01'",
+		},
+		{
+			name:      "SetClusterRolePreferredOwners",
+			psCommand: psSetClusterRolePreferredOwners,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "Owners": "NODE1,NODE2"},
+			want:      "Cfgms-SetClusterRolePreferredOwners -ClusterName 'lab-hv' -GroupName 'web-01' -Owners 'NODE1,NODE2'",
+		},
+		{
+			name:      "SetClusterRolePossibleOwners",
+			psCommand: psSetClusterRolePossibleOwners,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "ResourceName": "web-01", "Owners": "NODE1"},
+			want:      "Cfgms-SetClusterRolePossibleOwners -ClusterName 'lab-hv' -ResourceName 'web-01' -Owners 'NODE1'",
+		},
+		{
+			name:      "SetClusterGroupPriority",
+			psCommand: psSetClusterGroupPriority,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "Priority": "2000"},
+			want:      "Cfgms-SetClusterGroupPriority -ClusterName 'lab-hv' -GroupName 'web-01' -Priority '2000'",
+		},
+		{
+			name:      "SetClusterGroupAutoStart",
+			psCommand: psSetClusterGroupAutoStart,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "AutoStart": "1"},
+			want:      "Cfgms-SetClusterGroupAutoStart -ClusterName 'lab-hv' -GroupName 'web-01' -AutoStart '1'",
+		},
+		{
+			name:      "SetClusterGroupAntiAffinity",
+			psCommand: psSetClusterGroupAntiAffinity,
+			psArgs:    map[string]string{"ClusterName": "lab-hv", "GroupName": "web-01", "ClassName": "db-tier"},
+			want:      "Cfgms-SetClusterGroupAntiAffinity -ClusterName 'lab-hv' -GroupName 'web-01' -ClassName 'db-tier'",
 		},
 	}
 
@@ -317,11 +538,11 @@ func TestPSDispatch_VMAttachment(t *testing.T) {
 }
 
 // TestDispatch_AllKnownCommands verifies that dispatchForTest handles every
-// psXxx constant defined in vm.go, vswitch.go, and snapshot.go without
-// silently returning an empty expression. This guards against the production
-// dispatch switch (pstransport_dispatch_windows.go) and dispatchForTest
-// drifting apart: if a new psXxx const is added in a resource file but not
-// in either switch table, this test fails with an empty-expression assertion.
+// psXxx constant defined in vm.go and vswitch.go without silently returning
+// an empty expression. This guards against the production dispatch switch
+// (pstransport_dispatch_windows.go) and dispatchForTest drifting apart: if a
+// new psXxx const is added in a resource file but not in either switch table,
+// this test fails with an empty-expression assertion.
 func TestDispatch_AllKnownCommands(t *testing.T) {
 	ctx := context.Background()
 
@@ -332,29 +553,57 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 	}{
 		// VM verbs (vm.go)
 		{"psGetVM", psGetVM, map[string]string{"Name": "cfgms-t__web-01"}},
-		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw"}},
+		{"psCreateVM", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\test.vhdx", "SwitchName": "sw", "Generation": "2"}},
 		{"psRemoveVM", psRemoveVM, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psStartVM", psStartVM, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psStopVM", psStopVM, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psSetVMProcessor", psSetVMProcessor, map[string]string{"Name": "cfgms-t__web-01", "CPU": "2"}},
 		{"psSetVMMemory", psSetVMMemory, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048"}},
+		{"psConnectVMNic", psConnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
+		{"psDisconnectVMNic", psDisconnectVMNic, map[string]string{"Name": "cfgms-t__web-01", "SwitchName": "External"}},
+		// VM provisioning verbs (#2044)
+		{"psNewSeedVHD", psNewSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "SizeBytes": "67108864"}},
+		{"psMountSeedVHD", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psCopyToSeedVHD", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "FileName": "preseed.cfg", "Content": "# placeholder preseed"}},
+		{"psDetachSeedVHD", psDetachSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psDeleteSeedMedia", psDeleteSeedMedia, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
+		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
+		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
+		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
+		{"psBuildAnswerIso", psBuildAnswerIso, map[string]string{"IsoPath": "C:\\cfgms-seeds\\a.iso", "FileName": "autounattend.xml", "Content": "<x/>", "StewardSrc": "", "CASrc": ""}},
+		{"psBootKeypress", psBootKeypress, map[string]string{"Name": "cfgms-t__web-01"}},
+		// cloud-init (Linux VM-from-cloud-image) verbs (#2080)
+		{"psPrepCloudBootDisk", psPrepCloudBootDisk, map[string]string{"ImagePath": "C:\\images\\debian.raw", "VhdPath": "C:\\VMs\\web-01.vhdx", "ResizeBytes": "21474836480"}},
+		{"psCreateVMFromDisk", psCreateVMFromDisk, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048", "CPU": "2", "VHDPath": "C:\\VMs\\web-01.vhdx", "SwitchName": "External", "Generation": "2"}},
+		{"psSetHddFirstBoot", psSetHddFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "VHDPath": "C:\\VMs\\web-01.vhdx"}},
+		// cloud-init CIDATA seed reuses psMountSeedVHD/psCopyToSeedVHD with extra optional args
+		{"psMountSeedVHD/cidata", psMountSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA"}},
+		{"psCopyToSeedVHD/cidata", psCopyToSeedVHD, map[string]string{"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx", "Label": "CIDATA", "FileName": "user-data", "Content": "#cloud-config", "FileName2": "meta-data", "Content2": "instance-id: x", "StewardSrc": "C:\\s\\cfgms-steward-linux", "StewardDest": "cfgms-steward", "LauncherSrc": "C:\\s\\cfgms-steward-launcher-linux", "LauncherDest": "cfgms-steward-launcher", "CASrc": "C:\\s\\ca.crt"}},
 		// VSwitch verbs (vswitch.go)
 		{"psGetVSwitch", psGetVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psRemoveVSwitch", psRemoveVSwitch, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psCreateVSwitchInternal", psCreateVSwitchInternal, map[string]string{"Name": "cfgms-t__sw01"}},
 		{"psCreateVSwitchPrivate", psCreateVSwitchPrivate, map[string]string{"Name": "cfgms-t__sw01"}},
-		{"psGetVMAttachment", psGetVMAttachment, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
-		{"psAttachVMNoAdapterName", psAttachVMNoAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01"}},
-		{"psAttachVMWithAdapterName", psAttachVMWithAdapterName, map[string]string{"VMName": "cfgms-t__web-01", "SwitchName": "cfgms-t__sw01", "Name": "nic-mgmt"}},
-		{"psDetachVM", psDetachVM, map[string]string{"VMName": "cfgms-t__web-01", "Name": "nic-mgmt"}},
-		// Snapshot verbs (snapshot.go)
-		{"psGetSnapshot", psGetSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
-		{"psCreateSnapshot", psCreateSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
-		{"psRemoveSnapshot", psRemoveSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
-		{"psRestoreSnapshot", psRestoreSnapshot, map[string]string{"VMName": "cfgms-t__web-01", "Name": "snap"}},
 		// Dynamic psCreateVSwitchExternal (vswitch.go) — both AllowManagementOS values
 		{"psCreateVSwitchExternal/true", psCreateVSwitchExternal(true), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
 		{"psCreateVSwitchExternal/false", psCreateVSwitchExternal(false), map[string]string{"Name": "cfgms-t__sw01", "NetAdapter": "Ethernet0"}},
+		// Failover cluster read-only verbs (cluster.go, #2199 S1)
+		{"psGetCluster", psGetCluster, map[string]string{"ClusterName": "lab-hv"}},
+		{"psGetClusterOwnerNode", psGetClusterOwnerNode, map[string]string{"ClusterName": "lab-hv"}},
+		{"psGetClusterResourceOwner", psGetClusterResourceOwner, map[string]string{"ClusterName": "lab-hv"}},
+		{"psGetClusterAccessSelf", psGetClusterAccessSelf, map[string]string{"ClusterName": "lab-hv"}},
+		// Failover cluster write verbs (cluster.go, #2202 S2)
+		{"psAddClusterVMRole", psAddClusterVMRole, map[string]string{"ClusterName": "lab-hv", "VMName": "web-01"}},
+		{"psRemoveClusterResource", psRemoveClusterResource, map[string]string{"Name": "web-01"}},
+		// VM storage location verbs (vm_storage.go, #2411)
+		{"psCreateVM/homePath", psCreateVM, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "1024", "CPU": "1", "VHDPath": "C:\\VMs\\w\\test.vhdx", "SwitchName": "sw", "Generation": "2", "Path": "C:\\VMs\\w"}},
+		{"psCreateVMFromDisk/homePath", psCreateVMFromDisk, map[string]string{"Name": "cfgms-t__web-01", "MemoryMB": "2048", "CPU": "2", "VHDPath": "C:\\VMs\\w\\web-01.vhdx", "SwitchName": "External", "Generation": "2", "Path": "C:\\VMs\\w"}},
+		{"psSetVMHome", psSetVMHome, map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\VMs\\w"}},
+		{"psVMStorageMovePreflight", psVMStorageMovePreflight, map[string]string{"Name": "cfgms-t__web-01", "DestDir": "C:\\ClusterStorage\\CSV01\\w"}},
+		{"psMoveVMStorage", psMoveVMStorage, map[string]string{"Name": "cfgms-t__web-01", "Home": "C:\\ClusterStorage\\CSV01\\w"}},
+		{"psGetVMMoveError", psGetVMMoveError, map[string]string{"Name": "cfgms-t__web-01"}},
+		{"psClearVMMoveError", psClearVMMoveError, map[string]string{"Name": "cfgms-t__web-01"}},
 	}
 
 	for _, tc := range commands {
@@ -369,6 +618,83 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 			assert.NotEmpty(t, captured[0], "dispatchForTest must produce a non-empty expression for %s", tc.name)
 		})
 	}
+}
+
+// TestPreamble_RemoveVMStopsRunningVMFirst guards the regression that shipped
+// in v0.5.13: psRemoveVM (vm.go) carried the stop-then-remove guard, but the
+// Windows runtime never executes that const — the dispatcher maps psRemoveVM
+// to the Cfgms-RemoveVM function in psHostPreamble, which was still the old
+// un-guarded `Remove-VM -Name $Name -Force`. Result: deleting a running VM
+// failed live ("the operation cannot be performed while the object is in its
+// current state"), and its connected vSwitch stayed busy and could not be
+// removed either. The dispatch tests above only assert the SYNTHESISED call
+// string, never the function body, so they stayed green. This test asserts the
+// preamble function actually powers a running VM off before removing it, with
+// Stop-VM ordered before Remove-VM.
+func TestPreamble_RemoveVMStopsRunningVMFirst(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-RemoveVM")
+
+	assert.Contains(t, body, "Stop-VM",
+		"Cfgms-RemoveVM must power off a running VM before deleting it")
+	assert.Contains(t, body, "-TurnOff",
+		"Cfgms-RemoveVM must hard power-off (-TurnOff), matching psRemoveVM")
+	assert.Contains(t, body, "$vm.State -ne 'Off'",
+		"Cfgms-RemoveVM must only stop the VM when it is not already Off")
+	assert.Contains(t, body, "Remove-VM",
+		"Cfgms-RemoveVM must still remove the VM")
+
+	stopIdx := strings.Index(body, "Stop-VM")
+	removeIdx := strings.Index(body, "Remove-VM")
+	require.NotEqual(t, -1, stopIdx)
+	require.NotEqual(t, -1, removeIdx)
+	assert.Less(t, stopIdx, removeIdx,
+		"Stop-VM must be ordered before Remove-VM, otherwise the running VM blocks its own deletion")
+}
+
+// TestPreamble_DeleteSeedMediaUsesLiteralPathAndSilentContinue guards the
+// security and idempotency properties of the Cfgms-DeleteSeedMedia preamble
+// function (ADR-010 §5 / Issue #2081). Dispatch tests assert routing only;
+// this test asserts the function body itself:
+//   - -LiteralPath prevents wildcard/glob expansion — a crafted path like
+//     "C:\seeds\*" or "C:\seeds\[vol]*.vhdx" must not expand.
+//   - -ErrorAction SilentlyContinue makes the delete idempotent — removing an
+//     already-absent file is not an error.
+func TestPreamble_DeleteSeedMediaUsesLiteralPathAndSilentContinue(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-DeleteSeedMedia")
+
+	assert.Contains(t, body, "-LiteralPath",
+		"Cfgms-DeleteSeedMedia must use -LiteralPath to prevent wildcard glob expansion on the seed path")
+	assert.Contains(t, body, "SilentlyContinue",
+		"Cfgms-DeleteSeedMedia must use -ErrorAction SilentlyContinue for idempotency (absent file is not an error)")
+	assert.Contains(t, body, "Remove-Item",
+		"Cfgms-DeleteSeedMedia must call Remove-Item")
+}
+
+// preambleFunctionBody extracts the body of a `function <name> { ... }` block
+// from psHostPreamble, balancing braces so nested blocks (if/foreach) are
+// included. It fails the test if the function is not found.
+func preambleFunctionBody(t *testing.T, name string) string {
+	t.Helper()
+	marker := "function " + name
+	start := strings.Index(psHostPreamble, marker)
+	require.NotEqual(t, -1, start, "function %s not found in psHostPreamble", name)
+	open := strings.Index(psHostPreamble[start:], "{")
+	require.NotEqual(t, -1, open, "no opening brace for function %s", name)
+	open += start
+	depth := 0
+	for i := open; i < len(psHostPreamble); i++ {
+		switch psHostPreamble[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return psHostPreamble[open : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces for function %s in psHostPreamble", name)
+	return ""
 }
 
 // TestQuoteForPS_SingleQuoteEscapes verifies the WQL-style single-quote

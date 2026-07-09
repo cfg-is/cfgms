@@ -298,8 +298,11 @@ type DatabaseBackend struct {
 
 // NewDatabaseBackend creates a new PostgreSQL-based DNA storage backend
 func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend, error) {
-	// Get connection string from environment or config
-	connString := os.Getenv("CFGMS_DNA_DATABASE_URL")
+	// Get connection string: config field > environment variable > individual env vars
+	connString := config.DatabaseURL
+	if connString == "" {
+		connString = os.Getenv("CFGMS_DNA_DATABASE_URL")
+	}
 	if connString == "" {
 		var err error
 		connString, err = buildDNAConnString()
@@ -372,6 +375,11 @@ func (b *DatabaseBackend) StoreRecord(ctx context.Context, record *DNARecord, co
 		return fmt.Errorf("failed to marshal DNA to JSON: %w", err)
 	}
 
+	// Extract fleet query fields from DNA attributes for indexed columns
+	osVal := extractDNAAttr(record.DNA, "os")
+	arch := extractDNAAttr(record.DNA, "architecture")
+	hostname := extractDNAAttr(record.DNA, "hostname")
+
 	// Execute insert with prepared statement
 	_, err = b.stmts.insertRecord.ExecContext(ctx,
 		record.DeviceID,
@@ -383,6 +391,11 @@ func (b *DatabaseBackend) StoreRecord(ctx context.Context, record *DNARecord, co
 		record.CompressedSize,
 		record.CompressionRatio,
 		record.ShardID,
+		record.TenantID,
+		osVal,
+		arch,
+		hostname,
+		record.Status,
 	)
 
 	if err != nil {
@@ -589,7 +602,14 @@ func (b *DatabaseBackend) initializeSchema() error {
 			compression_ratio REAL NOT NULL,
 			shard_id TEXT NOT NULL DEFAULT 'default',
 			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-			
+
+			-- Fleet query fields extracted from DNA attributes for efficient filtering
+			tenant_id TEXT NOT NULL DEFAULT '',
+			os TEXT NOT NULL DEFAULT '',
+			architecture TEXT NOT NULL DEFAULT '',
+			hostname TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+
 			-- Ensure unique version per device
 			UNIQUE(device_id, version)
 		);
@@ -604,6 +624,12 @@ func (b *DatabaseBackend) initializeSchema() error {
 
 		-- GIN index for JSONB queries (PostgreSQL-specific)
 		CREATE INDEX IF NOT EXISTS idx_dna_json_gin ON dna_history USING GIN(dna_json);
+
+		-- Fleet query indexes for efficient filtered searches
+		CREATE INDEX IF NOT EXISTS idx_dna_tenant ON dna_history(tenant_id);
+		CREATE INDEX IF NOT EXISTS idx_dna_os ON dna_history(os);
+		CREATE INDEX IF NOT EXISTS idx_dna_architecture ON dna_history(architecture);
+		CREATE INDEX IF NOT EXISTS idx_dna_status ON dna_history(status);
 
 		-- Reference table for deduplication
 		CREATE TABLE IF NOT EXISTS dna_references (
@@ -649,21 +675,47 @@ func (b *DatabaseBackend) prepareStatements() error {
 	var err error
 
 	// Insert DNA record statement
+	// ON CONFLICT keeps the write idempotent when two DNA snapshots for the same
+	// device resolve to the same version (GetNextVersion runs outside this insert's
+	// transaction, so a duplicate/concurrent publish can collide on the
+	// UNIQUE(device_id, version) constraint). The latest snapshot wins.
 	b.stmts.insertRecord, err = b.db.Prepare(`
-		INSERT INTO dna_history 
-		(device_id, timestamp, version, dna_json, content_hash, 
-		 original_size, compressed_size, compression_ratio, shard_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO dna_history
+		(device_id, timestamp, version, dna_json, content_hash,
+		 original_size, compressed_size, compression_ratio, shard_id,
+		 tenant_id, os, architecture, hostname, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			timestamp=EXCLUDED.timestamp,
+			dna_json=EXCLUDED.dna_json,
+			content_hash=EXCLUDED.content_hash,
+			original_size=EXCLUDED.original_size,
+			compressed_size=EXCLUDED.compressed_size,
+			compression_ratio=EXCLUDED.compression_ratio,
+			shard_id=EXCLUDED.shard_id,
+			tenant_id=EXCLUDED.tenant_id,
+			os=EXCLUDED.os,
+			architecture=EXCLUDED.architecture,
+			hostname=EXCLUDED.hostname,
+			status=EXCLUDED.status
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert record statement: %w", err)
 	}
 
-	// Insert reference statement
+	// Insert reference statement. Same idempotency rationale as insertRecord:
+	// dna_references also has UNIQUE(device_id, version), and the dedup branch
+	// (storeReference) is the likely path when a duplicate/concurrent publish
+	// republishes identical DNA (a dedup hit). ON CONFLICT keeps it from failing
+	// the constraint; the latest reference wins.
 	b.stmts.insertReference, err = b.db.Prepare(`
-		INSERT INTO dna_references 
+		INSERT INTO dna_references
 		(device_id, content_hash, version, timestamp, shard_id)
 		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_id, version) DO UPDATE SET
+			content_hash=EXCLUDED.content_hash,
+			timestamp=EXCLUDED.timestamp,
+			shard_id=EXCLUDED.shard_id
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare PostgreSQL insert reference statement: %w", err)

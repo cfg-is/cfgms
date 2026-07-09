@@ -145,13 +145,18 @@ The git storage provider was removed in Issue #664. Existing deployments running
 
 **One-shot migration command:**
 
+Use the general-purpose migration path (`cfg migrate --provider storage`) or the legacy alias
+`cfg storage migrate`; both delegate through the same provider-agnostic migration seam (Issue #2258):
+
 ```bash
-cfg storage migrate \
+cfg migrate --provider storage \
   --from git \
   --to flatfile \
   --git-root  /var/lib/cfgms/git-storage \
   --flatfile-root /var/lib/cfgms/flatfile
 ```
+
+`cfg storage migrate` also works and delegates to the same seam when a `storage` migrator is registered.
 
 What this does:
 
@@ -161,6 +166,38 @@ What this does:
 - Leaves the source repository untouched — safe to re-run for verification
 
 **Idempotent**: running the command twice against the same target produces the same record count with no duplicates. Safe to rehearse against a copy of production data before cutting over.
+
+**Dry-run preview**: pass `--dry-run` to read all source records and report per-store counts without writing anything to the target. Use this to confirm expected counts before scheduling downtime:
+
+```bash
+cfg storage migrate --from git --to flatfile \
+  --git-root /var/lib/cfgms/git-storage \
+  --flatfile-root /var/lib/cfgms/flatfile \
+  --dry-run
+```
+
+See [docs/operations/backend-migration.md](../operations/backend-migration.md) for the full offline-cutover procedure and downtime envelope.
+
+### Stores covered by the storage migrator
+
+The `cfg migrate --provider storage` pathway covers the following store kinds. Each row shows whether the OSS (flatfile+SQLite) and database (PostgreSQL) backends support export and import for that kind.
+
+| Store kind | OSS | PostgreSQL | Notes |
+|---|---|---|---|
+| `tenant` | ✓ | ✓ | Tenant tree |
+| `config` | ✓ | ✓ | Config entries |
+| `audit` | ✓ | ✓ | Audit log entries |
+| `registration_token` | ✓ | ✓ | Steward registration tokens |
+| `session` | ✓ | ✓ | Admin sessions |
+| `steward` | ✓ | ✓ | Steward fleet records |
+| `command` | ✓ | ✓ | Command records |
+| `trigger` | ✓ | — | OSS only; Postgres backend does not expose a `TriggerStore` |
+| `push` | ✓ | — | OSS only; Postgres backend does not expose a `PushStore` |
+| `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
+| `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
+| `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
+
+Kinds marked `—` are silently skipped when the destination backend does not support that store. The integrity check at the end of a `Run` only compares kinds that both source and destination support, so a cross-backend migration (OSS → Postgres) will not fail on `trigger` or `push` records.
 
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
@@ -384,6 +421,29 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 **Implementations**:
 - `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables added to the shared SQLite schema. This is the OSS default.
 - `pkg/storage/providers/flatfile`, `database`, `git`: return `ErrNotSupported` — command state is business data, not config data.
+
+## Cluster Mode Provider Compatibility
+
+Controllers in cluster mode require a storage backend that supports shared state across multiple concurrent controller nodes. Each storage provider and secrets provider declares this via `ClusterCapable() bool` on its respective interface (`StorageProvider`, `SecretProvider`).
+
+### Storage providers
+
+| Provider | `ClusterCapable()` | Reason |
+|----------|--------------------|--------|
+| `pkg/storage/providers/database` (PostgreSQL) | `true` | Postgres handles concurrent writers from multiple controller nodes via its transaction and locking model; the same DSN is accessible from all nodes |
+| `pkg/storage/providers/flatfile` | `false` | Local filesystem — concurrent writes across nodes are not coordinated; last-writer-wins semantics are unsafe for multi-active cluster mode |
+| `pkg/storage/providers/sqlite` | `false` | Single-file SQLite is node-local; no cross-node access or coordination |
+
+### Secrets providers
+
+| Provider | `ClusterCapable()` | Reason |
+|----------|--------------------|--------|
+| `pkg/secrets/providers/openbao` | `true` | OpenBao cluster exposes a shared KV service reachable by all controller nodes |
+| `pkg/secrets/providers/sops` | `false` | Git-backed file store is node-local at runtime; no shared-state coordination |
+| `pkg/secrets/providers/oskeychain` | `false` | Host OS keychain — per-host only, inaccessible from other nodes |
+| `pkg/secrets/providers/steward` | `false` | Steward-local encrypted store on the endpoint host, not a controller backend |
+
+The startup gate (sibling Story B) uses `ClusterCapable()` to reject misconfigured cluster deployments early, before any state is written.
 
 ## References
 

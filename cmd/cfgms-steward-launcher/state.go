@@ -3,9 +3,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,8 +58,17 @@ type Layout struct {
 // falls back to the deprecated single-line pointer files (current.txt /
 // previous.txt).
 type pointerState struct {
-	Current  string `json:"current"`
-	Previous string `json:"previous,omitempty"`
+	Current             string `json:"current"`
+	Previous            string `json:"previous,omitempty"`
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
+	// KnownGood and KnownGoodHash record the version and SHA-256 content
+	// hash of the last binary that survived StartupWindow. Both fields
+	// must match the live binary for the marker to be considered valid —
+	// a version-tag reuse or an on-disk replacement voids it.
+	// The marker gates auto-rollback policy only; it is not a security
+	// control (see security note in Issue #2033).
+	KnownGood     string `json:"known_good,omitempty"`
+	KnownGoodHash string `json:"known_good_hash,omitempty"`
 }
 
 // StatePath returns the path of the single JSON document that records
@@ -107,6 +118,23 @@ func validateVersion(v string) error {
 		return fmt.Errorf("launcher: version name must not contain path separators or dot sequences: %q", v)
 	}
 	return nil
+}
+
+// computeBinaryHash returns the hex-encoded SHA-256 digest of the file at path.
+// The hash is paired with the version tag in the known-good marker so that a
+// tag reused for different binary content cannot suppress rollback for that
+// new content.
+func computeBinaryHash(path string) (string, error) {
+	f, err := os.Open(path) //#nosec G304 -- path comes from Layout.StewardExeFor which validates the version tag
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 // loadState reads the combined pointer state. If state.json exists it
@@ -226,6 +254,12 @@ func (l Layout) WriteCurrent(version string) error {
 	}
 	if ps.Current != "" && ps.Current != version {
 		ps.Previous = ps.Current
+		// Changing to a new version: the incoming binary enters probation
+		// regardless of any prior known-good marker. Clearing here ensures
+		// a controller-pushed security patch (vB) cannot be rolled back to
+		// a known-good-but-vulnerable vA if vB fast-exits (Issue #2033 AC6).
+		ps.KnownGood = ""
+		ps.KnownGoodHash = ""
 	}
 	ps.Current = version
 	return l.saveState(ps)
@@ -245,7 +279,11 @@ func (l Layout) Rollback() (string, error) {
 	if ps.Previous == "" {
 		return "", errors.New("launcher: no previous version recorded — nothing to roll back to")
 	}
-	newPS := pointerState{Current: ps.Previous, Previous: ps.Current}
+	newPS := pointerState{
+		Current:             ps.Previous,
+		Previous:            ps.Current,
+		ConsecutiveFailures: ps.ConsecutiveFailures, // preserve counter across rollback
+	}
 	if err := l.saveState(newPS); err != nil {
 		return "", err
 	}

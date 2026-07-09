@@ -194,6 +194,108 @@ func TestHandleResolveSelector_FleetQueryError_Returns500(t *testing.T) {
 	assert.Equal(t, "INTERNAL_ERROR", resp.Error.Code)
 }
 
+// ── handleResolveSelector: id: selector ──────────────────────────────────────
+
+// TestHandleResolveSelector_IDSelector_SingleMatch verifies that id:<steward-id>
+// returns the one matching steward and nothing else (exact match semantics).
+func TestHandleResolveSelector_IDSelector_SingleMatch(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-1780659937223058807", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-other", "host-b", "linux", "arm64", "dev"),
+	)
+
+	rec := postResolveSelector(server, `{"selector":"id:steward-1780659937223058807"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1, "only the targeted steward should be returned")
+
+	item := list[0].(map[string]interface{})
+	assert.Equal(t, "steward-1780659937223058807", item["id"])
+}
+
+// TestHandleResolveSelector_IDSelector_NoMatch verifies that id: with an unknown
+// steward ID returns an empty result set without error (not 404).
+func TestHandleResolveSelector_IDSelector_NoMatch(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-known", "host-a", "linux", "amd64", "prod"),
+	)
+
+	rec := postResolveSelector(server, `{"selector":"id:steward-nonexistent"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, list, "unknown steward ID must return empty result set, not an error")
+}
+
+// TestHandleResolveSelector_IDSelector_MultiValue verifies that id:a,b uses OR
+// semantics — a steward matching either ID is included.
+func TestHandleResolveSelector_IDSelector_MultiValue(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-abc", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-def", "host-b", "windows", "amd64", "prod"),
+		makeSeedSteward("steward-other", "host-c", "linux", "arm64", "dev"),
+	)
+
+	rec := postResolveSelector(server, `{"selector":"id:steward-abc,steward-def"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 2, "both comma-separated IDs should be returned")
+
+	ids := make([]string, len(list))
+	for i, item := range list {
+		ids[i] = item.(map[string]interface{})["id"].(string)
+	}
+	assert.ElementsMatch(t, []string{"steward-abc", "steward-def"}, ids)
+}
+
+// TestHandleResolveSelector_IDSelector_AND_WithOS verifies AND semantics when
+// id: is combined with another key — the steward must satisfy both.
+func TestHandleResolveSelector_IDSelector_AND_WithOS(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-linux", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-win", "host-b", "windows", "amd64", "prod"),
+	)
+
+	// steward-linux + os:windows → no match (AND semantics across keys).
+	rec := postResolveSelector(server, `{"selector":"id:steward-linux os:windows"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, list, "id: and os: must be AND-combined — no match expected")
+}
+
+// TestHandleResolveSelector_IDSelector_UnknownKeyStillRejected verifies that other
+// unknown keys remain rejected now that id: is in the accepted set.
+func TestHandleResolveSelector_IDSelector_UnknownKeyStillRejected(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postResolveSelector(server, `{"selector":"unknownkey:value"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "INVALID_SELECTOR", resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "id", "error message must list id in the valid key set")
+}
+
 // TestHandleResolveSelector_TenantIsolation verifies that a caller authenticated
 // as tenant-a cannot see tenant-b stewards even when the selector would otherwise
 // match them (e.g. "all"). The authenticated tenant is always AND-ed onto the filter.

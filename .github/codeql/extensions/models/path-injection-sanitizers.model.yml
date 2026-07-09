@@ -39,6 +39,14 @@ extensions:
     data:
       - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
       - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "Argument[1]", "ReturnValue[0]", "value", "manual"]
+      # security.ValidateAndCleanPath validates userPath against basePath and returns
+      # the cleaned canonical path. The return value (ReturnValue[0]) carries no taint
+      # from either argument — the function either returns a safe path or an error.
+      # Modeling both arguments as value-flow (not taint-flow) to ReturnValue[0] ensures
+      # that CodeQL does not propagate path-injection taint through the return value.
+      # Used in pkg/configrouting/providers/git/git_store.go to clear alerts #745/#746.
+      - ["github.com/cfgis/cfgms/pkg/security", "", false, "ValidateAndCleanPath", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
+      - ["github.com/cfgis/cfgms/pkg/security", "", false, "ValidateAndCleanPath", "", "", "Argument[1]", "ReturnValue[0]", "value", "manual"]
 
   # Durable upgrade: barrierModel (CodeQL >=2.25.2) marks safeJoin's cleaned
   # return value as a path-injection barrier directly, rather than relying on
@@ -56,3 +64,7 @@ extensions:
       extensible: barrierModel
     data:
       - ["github.com/cfgis/cfgms/pkg/storage/providers/flatfile", "", false, "safeJoin", "", "", "ReturnValue[0]", "path-injection", "manual"]
+      # ValidateAndCleanPath: belt-and-suspenders barrierModel alongside the summaryModel
+      # above. Marks the validated return value as a path-injection barrier so that taint
+      # cannot flow out through it even if the summaryModel is bypassed on some flow paths.
+      - ["github.com/cfgis/cfgms/pkg/security", "", false, "ValidateAndCleanPath", "", "", "ReturnValue[0]", "path-injection", "manual"]

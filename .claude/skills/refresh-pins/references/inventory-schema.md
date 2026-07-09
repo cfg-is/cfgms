@@ -7,7 +7,7 @@
 ```jsonc
 {
   "name": "go-toolchain",       // string — stable identifier for this pin (used in story titles, override audit log)
-  "kind": "lockstep",           // "lockstep" | "tool"
+  "kind": "lockstep",           // "lockstep" | "tool" | "mcp"
   "current": "1.25.10",         // string — version string as it appears in the source (no leading "v" for Go)
   "release_source": "https://go.dev/dl/?mode=json",  // URL or "gh:<owner>/<repo>"
   "ecosystem": "GO",            // GHSA SecurityAdvisoryEcosystem enum, or null if not GHSA-queryable
@@ -25,6 +25,7 @@
 - **`tool`** — covers two distinct sub-cases that share the same downstream Phase 2/3 handling:
   - **Tool-pin declarations** in `dependency-pin-check.yml` (gosec, staticcheck, trivy, …). `locations[]` starts with the `check_version` declaration, then every install/usage site found by grepping `.github/workflows/`, `.devcontainer/Dockerfile`, `Makefile`, `cmd/*/Dockerfile`, and `scripts/*.sh` for the literal version string. All entries must move together in a single bump PR.
   - **GitHub Action SHA pins** (`uses: <owner>/<name>@<sha>` lines in workflows). The name embeds the short SHA (`gha:actions/checkout@34e11487`) so each unique (action, sha) pair is its own inventory entry. `locations[]` lists every workflow file:line that uses that exact SHA. Multiple entries for the same action with different SHAs is the natural representation of SHA drift across workflows — a drift-finder consumer can group by stripping `@<sha>` from `name`.
+- **`mcp`** — a git-pinned MCP server in `.mcp.json` (`git+https://github.com/<owner>/<repo>@<tag>`, e.g. `serena`). `current` is the git tag (with leading `v`), `release_source` is `gh:<owner>/<repo>`, `locations[]` is the `.mcp.json` line. **Distinct downstream handling:** these are agent *tooling* dependencies — their tool names are consumed by name in `.claude/agents/*.md` (`tools:` allowlists + prose). Phase 3 applies the **blast-radius classification** (see `decision-matrix.md` "MCP server pins"): a non-breaking bump is a one-line `.mcp.json` story; a release that renames/removes/changes a consumed tool is a **rewire story** that also touches every agent file using the affected tool.
 
 ## `release_source` values
 

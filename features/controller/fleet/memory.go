@@ -5,6 +5,7 @@ package fleet
 import (
 	"context"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -53,6 +54,9 @@ func matchesFilter(s StewardData, f Filter) bool {
 	}
 
 	if f.DeviceID != "" && s.ID != f.DeviceID {
+		return false
+	}
+	if len(f.IDs) > 0 && !slices.Contains(f.IDs, s.ID) {
 		return false
 	}
 	if f.TenantID != "" && s.TenantID != f.TenantID {
@@ -123,13 +127,14 @@ func toStewardResult(s StewardData) StewardResult {
 		attrs = map[string]string{}
 	}
 	return StewardResult{
-		ID:            s.ID,
-		TenantID:      s.TenantID,
-		Hostname:      attrs["hostname"],
-		OS:            attrs["os"],
-		Architecture:  attrs["arch"],
-		Status:        s.Status,
-		LastHeartbeat: s.LastHeartbeat,
-		DNAAttributes: attrs,
+		ID:             s.ID,
+		TenantID:       s.TenantID,
+		Hostname:       attrs["hostname"],
+		OS:             attrs["os"],
+		Architecture:   attrs["arch"],
+		Status:         s.Status,
+		LastHeartbeat:  s.LastHeartbeat,
+		DNAAttributes:  attrs,
+		RunningVersion: attrs["steward.version"],
 	}
 }

@@ -13,11 +13,36 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 ### Startup
 
-1. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
-2. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
-3. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on `drift_mode` received from the controller)
-4. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
-5. **Connect to controller** (if configured) — Establish a gRPC-over-QUIC transport connection. Check for cfg updates
+The steward starts immediately when the OS service manager launches it and runs
+regardless of what else on the host is ready. Subsystems attach as they become
+available — the process never exits because a dependency is not yet up. (Issue #2034)
+
+1. **Early logger** — A stderr logger is active from the first instruction, before any disk or network call. A file-based logger is initialised next; if that fails (e.g. log dir not yet writable at early boot) the process continues with the stderr fallback.
+2. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
+3. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
+4. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on `drift_mode` received from the controller)
+5. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
+6. **Connect to controller** (if configured) — Attempt a gRPC-over-QUIC transport connection. If the network or controller is not yet reachable, the steward marks itself `degraded` and retries in the background with exponential backoff (5 s → 5 min). The process continues running during the retry period. No `depend=` / delayed-start service ordering is required or relied upon.
+
+#### Health states during startup
+
+| State | Meaning |
+|-------|---------|
+| `degraded` | Process is alive but one or more subsystems (controller, DNA/WMI) are not yet attached |
+| `healthy` | All subsystems have attached and the convergence loop is running normally |
+
+The `degraded` state is reported in the controller-facing heartbeat so operators
+and the launcher's known-good gating can distinguish "started but waiting on
+WMI/network" from "broken". A registered steward that sends no heartbeat for
+≥ 90 s (≈ 3× the 20 s base heartbeat interval + jitter per epic #1664) is
+treated as alertable by the controller.
+
+**Fail-closed during degraded mode:** integrity checks are never relaxed while
+degraded. Config-signature failures remain hard rejections (codes.DataLoss).
+Module trust verification with `module_trust.mode: controller` refuses to load
+modules when the controller is unreachable — it never falls back to `bypass`.
+An unloadable or tampered cert store triggers re-registration or stop, not a
+degraded-but-trusted continue.
 
 ### Normal Operation
 
@@ -86,6 +111,16 @@ Get → Compare → Set → Verify
 **In `monitor` mode:**
 - If current matches desired: report compliant
 - If drifted: emit `drift.detected.monitor` upstream event; skip Set and Verify; report `StatusNonCompliant`
+
+### Convergence Event Emitter (ADR-012)
+
+For every resource check that reaches the drift-comparison step, the execution engine emits a correlated detection+outcome event pair over an out-of-band `LogStream` channel to the controller. The emitter runs on its own goroutine, independent of the module-execution goroutine; the convergence loop enqueues events via a non-blocking call and never waits for the send to complete. When the buffer is full, entries are dropped and counted. The emitter reconnects automatically with exponential back-off if the `LogStream` RPC fails.
+
+**Detection event** — enqueued immediately before `module.Get()`, carrying a newly generated `correlation_id`, the `resource_id`, and the active `drift_mode`. A detection event with no matching outcome event signals that convergence hung inside a module (ADR-012 §2 crash-isolation).
+
+**Outcome event** — enqueued after convergence completes, with the same `correlation_id` and an `action` field: `applied` (convergence succeeded), `drift_reported` (monitor mode), `error` (Set or Verify failed), or `did-not-finish(timeout)` (per-call deadline exceeded — see below).
+
+**Per-call module timeout (ADR-012 §7)** — each individual `module.Get`, `module.Set`, and `verifyChanges` call runs under its own `context.WithTimeout` (default 120 s, configurable via `ExecutorConfig.ModuleCallTimeoutSec`; there is no "infinite" option). If a module call exceeds its deadline, the executor emits a `did-not-finish(timeout)` outcome event carrying `timeout_ms` (the configured ceiling) and `duration_ms` (actual elapsed), then returns `StatusTimeout` immediately — converting the former silent wedge into two queryable, correlated events. Errors that return before the deadline continue through the existing `handleResourceError` → `ConfigStatusReport` → `StatusError` path unchanged.
 
 ### Error Handling
 
@@ -203,12 +238,43 @@ Modules **should, when possible, implement the `Monitor` interface** to watch fo
 
 Some resources don't have a feasible event-source (no OS-level watcher, no vendor API hook); those modules fall back to the scheduled re-check interval (`steward.converge_interval`). Event-driven Monitor support is preferred and should be added where the underlying platform permits it.
 
-Current adoption (as of v0.9.x):
+The convergence runtime now wires `Monitor` automatically: on cfg load it calls `Monitor(ctx, resourceID, desired)` for every module that implements the interface, fans in the `Changes()` channels, and on each `ChangeEvent` runs a targeted `ExecuteResource` for the changed `resourceID` (treating the event as a hint — actual state is re-read via `module.Get()` and desired state comes from the cfg, never from `event.Details`).
 
-- **Implemented**: none
+### Monitor Resilience
+
+The Monitor consumer is hardened against event storms, slow modules, and concurrent shutdown:
+
+| Property | Behaviour |
+|----------|-----------|
+| **Debounce** | Duplicate events for the same `resourceID` within a 1.5 s window are coalesced into a single `ExecuteResource` call. The first event starts a timer; subsequent events within the window are dropped. |
+| **Bounded queue + shed-to-poll** | The fan-in channel has a fixed capacity of 64 events. When full, incoming events are dropped with a `Warn` log entry (`"Monitor event queue full, event shed to scheduled poll"`). The scheduled `convergenceLoop` continues at its normal interval and will correct any resources whose events were shed. |
+| **DNA refresh on change** | After a targeted reconcile that calls `Set` (i.e. `ChangesApplied = true`), the steward re-collects the DNA snapshot immediately. The refreshed hash is available on the next heartbeat without waiting for the next scheduled convergence tick. |
+| **Clean shutdown** | `Stop()` closes the shutdown channel (stopping all pending debounce timers), waits for fan-in and event-loop goroutines to exit via `WaitGroup`, then calls `Close()` on each active monitor before unloading modules. No `Set` call can run after `Close()`. |
+
+Current adoption:
+
+- **Implemented**: `hyperv` (VM state — power on/off and create/delete, via a single host-level Windows Event Log subscription over the Hyper-V VMMS/Worker channels; Windows only, polling backstop elsewhere)
 - **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `script`, `firewall`, `package`, `patch`
 
 Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
+
+### Monitor Load Budget and Reaction Latency
+
+Measured end-to-end on a live Hyper-V host (Windows Server 2025, CFG-70-02) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
+
+| Metric | Budget / target | Measured |
+|--------|-----------------|----------|
+| Idle goroutines | ≤ 1 reader goroutine per active subscription | +1 (one Event-Log reader pump) |
+| Idle heap allocation delta | < 2 MB | ~9 KB |
+| CFGMS-owned subscription handles | ≤ 2 (the `EvtSubscribe` handle + the auto-reset signal event) | 2 |
+| Total process OS-handle delta around `Monitor()` | observed, not a hard budget | ~16 (the extra ~14 are ALPC/RPC handles the Windows eventing service `wevtsvc` opens beneath `EvtSubscribe`; CFGMS neither owns nor can enumerate them) |
+| Per-extra-VM OS-handle growth (single-subscription invariant) | ~0 | +6 for 3 additional watched VMs (benign service-side churn, **not** new subscriptions — a per-VM subscription regression would add ~16 each) |
+| Idle CPU | < 0.1% | Not asserted in-process — the reader goroutine is idle-blocked in `WaitForSingleObject`; observed negligible. |
+| **Reaction latency — event** | < 2 s (out-of-band change → `ChangeEvent` on `Changes()`) | < 20 ms (sub-poll-granularity) |
+| **Reaction latency — correction** | < 5 s (reconcile applies `Start-VM` once the drift is visible) | ~0.9 s |
+| Teardown | `Close()` joins the reader goroutine; no goroutine leak (`goleak`) | clean (0 leaked goroutines) |
+
+**ps-host state-propagation caveat.** The Hyper-V Event Log signal fires within milliseconds of an out-of-band VM power-state change, but the persistent ps-host PowerShell session's `Get-VM` lags the true VM state by several seconds (≈5 s observed) after such a change — VMMS state propagation to that long-lived session. Because a single out-of-band change is debounced into **one** targeted reconcile, a reconcile whose `Get` runs before propagation reads the stale prior state and no-ops, dropping the correction until the next scheduled convergence tick. The production debounce (1.5 s) does not fully cover the observed lag. Operators relying on sub-tick event-driven correction of Hyper-V VM state should be aware that the *correction* (not the detection) can be delayed to the scheduled `converge_interval` when the propagation lag exceeds the debounce window; the scheduled poll is the guaranteed backstop. Tightening this (e.g. a fresh-CIM query in the ps-host `Cfgms-GetVM` verb, or a short reconcile retry when a change event finds no drift) is tracked as a follow-up.
 
 ## Self-Awareness
 
@@ -216,28 +282,54 @@ The steward continuously knows about itself. This information is collected indep
 
 ### DNA (Digital Native Attributes)
 
-A snapshot of the device's identity and state:
+The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](dna-collection.md).
 
-| Category | Examples |
-|----------|----------|
-| **Hardware** | CPU, memory, disk, motherboard, serial numbers |
-| **Software** | OS, installed packages, running services, startup programs |
-| **Network** | Interfaces, IPs, MACs, routing |
-| **Security** | Firewall status, encryption state, admin accounts |
+Fragments are sourced by class:
 
-DNA is collected on startup and periodically thereafter. It serves two purposes:
-1. **Device identity** — the controller uses DNA to identify and classify devices
-2. **Drift baseline** — DNA changes between collections indicate environmental drift
+| Class | Examples | Authority | Drift |
+|-------|----------|-----------|-------|
+| **Managed** | services, files, users, packages, firewall (from module `Get`) | managing module | enforced (`auto_correct` / `report_only`) |
+| **Observe-only** | CPU model, total memory, BIOS, OS build (osquery stable-fact allowlist) | osquery | report-only |
+
+Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
+1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
+2. **Drift baseline** — managed fragments whose state diverges from desired trigger drift correction
+
+#### Monitored module resource state as DNA attributes
+
+DNA attributes also include a namespaced snapshot of every actively-monitored
+module resource's latest observed state: the steward's monitor fan-in caches
+the newest `ChangeEvent` details per resource (last-write-wins, no history),
+and the DNA collector merges the flattened result with the hardware-fact
+attributes on the same refresh tick — the same delta-compressed publish path,
+no separate channel, no coupling to heartbeat timing.
+
+Flattening and namespacing convention:
+
+- every key is `<resourceID>.<field>` with the resource ID **verbatim** —
+  including its colon, with no module-name prefix (the resource ID is the
+  module's own `ChangeEvent` scheme): `cluster:cfg-lab.cno_owner_node`
+- nested map keys join with `.` — `cluster:cfg-lab.resource_owner.web-01`
+- slice values join with `,` — `cluster:cfg-lab.member_nodes` =
+  `CFG-70-02,CFG-AB-02,CFG-C3-02`
+- any other value stringifies (`true`, `3`)
+
+A resource that leaves monitoring (module close, steward shutdown) is evicted
+from the cache, so its keys disappear from the next collected map — the delta
+publish signals the removal. The snapshot is **eventually consistent** by
+design: it rides the DNA refresh interval, and any safety-critical decision
+(e.g. cluster ownership gating) always uses live module queries, never this
+snapshot.
 
 ### DNA Sync Model
 
-DNA is a deterministic, hashable dataset. The steward computes a hash of its current DNA and includes it in every heartbeat. This keeps the controller aware of DNA currency with near-zero bandwidth overhead.
+DNA is a deterministic, hashable dataset with a **two-level (Merkle-style) hash**: a per-fragment hash over each fragment's canonical bytes, and an **aggregate root** over the sorted `(fragment_id, fragment_hash)` manifest. The steward includes the aggregate root in every heartbeat, keeping the controller aware of DNA currency with near-zero bandwidth.
 
-- **Heartbeats** carry the DNA hash (control plane, every heartbeat interval)
-- **Deltas** are published as changes are detected (control plane, as they occur)
-- **Full sync** is only required on initial registration or when the controller detects a hash mismatch (data plane, on demand)
+- **Heartbeats** carry the aggregate root (control plane, every heartbeat interval)
+- **Partial sync**: on a root mismatch the controller diffs manifests and requests only the changed/added/removed fragments' bytes (data plane), then recomputes the root to prove its copy is fully in sync — no whole-DNA re-transfer
+- **Full sync** is required only on initial registration
 
-As long as both sides compute the same hash, the full DNA never needs to be retransmitted after the initial sync. If a delta is missed or hashes diverge, the controller requests a full sync over the data plane.
+The controller stores DNA **versioned and append-only** (ADR-017 Amendment A1.3), not last-write-wins: each accepted delta produces a new fragment version, so per-entity state stays queryable over time. Because unchanged fragments dedupe by hash, history cost tracks change volume, not fleet-size × time.
 
 ### Health
 
@@ -265,7 +357,7 @@ The steward collects and retains time-series performance metrics for the host sy
   - **On-demand**: controller requests current metrics or a historical range from the steward
   - **Real-time streaming**: controller initiates a live metrics stream for a single endpoint (e.g., admin troubleshooting a specific device)
 
-This data provides the foundation for future Digital Experience (DEX) capabilities — user experience scoring, hardware lifecycle analysis, and productivity impact assessment. Building collection and local retention now means DEX becomes an analytics layer on top, not a rebuild.
+This data is the collection foundation for **Digital Employee Experience (DEX)** — a layered track (collection → attribution → baselines → root-cause → prediction → experience-driven remediation), not a single future capability. Building collection and local retention now means DEX's later layers become an analytics + workflow-engine remediation loop on top, not a rebuild. DEX signals attach to the same typed entity ids as DNA (ADR-017 Amendment A1.4), so baselines and root-cause join against DNA and the topology graph rather than forming a separate data island.
 
 ## Reporting
 
@@ -346,7 +438,7 @@ The steward writes structured logs using the file logging provider. This is the 
 
 Log level is controlled by the `CFGMS_LOG_LEVEL` environment variable (default `INFO`). Accepted values are `debug`, `info`, `warn`, and `error` (case-insensitive). Invalid or empty values fall back to `INFO`.
 
-Log directory is controlled by `CFGMS_LOG_DIR` (default `/tmp/cfgms` with a warning; set this for production deployments).
+Log directory is controlled by `CFGMS_LOG_DIR`. The three native installers set it automatically to the platform-conventional paths listed under *Log locations* above (Linux `/var/log/cfgms/` via the systemd unit's `Environment=` line, Windows `C:\ProgramData\CFGMS\logs\` via the service's registry `Environment` value, macOS `/usr/local/var/log/cfgms/` via the launchd plist's `EnvironmentVariables` dict) — an installed steward never falls back silently. A steward run bare (no installer — dev/manual/e2e) keeps the `/tmp/cfgms`-with-a-warning fallback.
 
 ## Controller-Connected Capabilities
 
@@ -379,6 +471,35 @@ The controller can establish an interactive terminal session through the steward
 ### Orchestrated Operations
 
 The steward participates in multi-node operations coordinated by the controller (rolling updates, coordinated reboots, cluster-aware operations). The steward applies its own cfg — the controller determines sequencing and timing across devices. See the [controller operating model](controller-operating-model.md) for orchestration details.
+
+#### Cluster-Role Quorum (`dna.cluster_role`)
+
+When multiple stewards form a redundancy cluster (Hyper-V cluster, SQL Availability Group, domain controller site, etc.), rolling updates must never take down all cluster members simultaneously. The controller enforces this via the `dna.cluster_role` DNA attribute and the `DnaRoleQuorumChecker`.
+
+**Setting the attribute:**
+
+Add `cluster_role` to the steward's DNA configuration:
+
+```yaml
+dna:
+  cluster_role: hyperv-cluster
+```
+
+The value is a free-form string — pick a name that identifies the redundancy domain. All stewards that share a value form one group; stewards with no `cluster_role` are treated as independent.
+
+**Example role values:**
+
+| Value | Typical members |
+|-------|----------------|
+| `hyperv-cluster` | Hyper-V failover cluster nodes |
+| `sql-ag-primary` | SQL Server Availability Group members |
+| `dc-site-a` | Domain controllers in site A |
+
+**Quorum guarantee:**
+
+When a rolling batch job runs, the `DnaRoleQuorumChecker` partitions the fleet such that **no two stewards with the same non-empty `cluster_role` appear in the same batch wave**. A cluster with four Hyper-V nodes gets one node per wave regardless of the requested batch size — ensuring at least three nodes remain operational during any wave.
+
+Stewards without a `cluster_role` are placed freely into available slots alongside role-bearing stewards, filling up to the requested batch size.
 
 ## Registration
 
@@ -464,6 +585,7 @@ The steward binary is the same in every deployment. The table below shows which 
 | Convergence loop (apply/monitor) | Yes | Yes |
 | Scheduled re-check (`converge_interval`) | Yes | Yes (default 30m until cfg received) |
 | Event hooks | Yes | Yes |
+| Module Monitor engine (fan-in, debounce, targeted reconcile) | Yes | Yes — started by `syncConfigNow` after each cfg fetch; stopped by `Disconnect` |
 | DNA collection | Yes | Yes |
 | Health monitoring | Yes | Yes |
 | Performance monitoring | Yes | Yes |

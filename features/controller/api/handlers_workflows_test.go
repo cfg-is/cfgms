@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
@@ -32,7 +33,7 @@ func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigSto
 	configStore := storageManager.GetConfigStore()
 
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil), logger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil, nil, nil)
 
 	handler := NewWorkflowHandler(engine, configStore, nil, logger)
 	return handler, configStore
@@ -90,6 +91,8 @@ func TestWorkflowHandler_NilEngine_ReturnsServiceUnavailable(t *testing.T) {
 		{"PUT", "/workflows/wf", minimalWorkflowBody("wf")},
 		{"DELETE", "/workflows/wf", nil},
 		{"POST", "/workflows/wf/execute", nil},
+		{"GET", "/workflows/wf/executions/exec_1_1", nil},
+		{"POST", "/workflows/wf/executions/exec_1_1/cancel", nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -547,7 +550,7 @@ func TestWorkflowHandler_SpecialCharsInName_HandledSafely(t *testing.T) {
 	_, configStore := newTestWorkflowHandler(t)
 	capLogger := &capturingLogger{}
 
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil), capLogger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil)
 	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
@@ -570,4 +573,205 @@ func TestWorkflowHandler_SpecialCharsInName_HandledSafely(t *testing.T) {
 		assert.NotContains(t, name, "\n", "logger must not receive raw LF in workflow name")
 		assert.NotContains(t, name, "\r", "logger must not receive raw CR in workflow name")
 	}
+}
+
+// newTestWorkflowHandlerAndEngine creates a WorkflowHandler and returns the engine separately
+// so tests that need to inspect or wait on execution state can do so directly.
+func newTestWorkflowHandlerAndEngine(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigStore, *workflow.Engine) {
+	t.Helper()
+	storageManager := pkgtesting.SetupTestStorage(t)
+	configStore := storageManager.GetConfigStore()
+	logger := logging.NewNoopLogger()
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil, nil, nil)
+	handler := NewWorkflowHandler(engine, configStore, nil, logger)
+	return handler, configStore, engine
+}
+
+// createAndExecuteWorkflow is a test helper that creates a workflow then executes it,
+// returning the execution ID. Uses the provided router and tenant ID.
+func createAndExecuteWorkflow(t *testing.T, router *mux.Router, wfName, tenantID string, longRunning bool) string {
+	t.Helper()
+
+	// Create workflow
+	var body []byte
+	if longRunning {
+		// Delay step keeps execution alive long enough for the cancel test.
+		body = mustMarshal(CreateWorkflowRequest{
+			Name: wfName,
+			Steps: []workflow.Step{
+				{
+					Name:  "long-wait",
+					Type:  workflow.StepTypeDelay,
+					Delay: &workflow.DelayConfig{Duration: 30 * time.Second},
+				},
+			},
+		})
+	} else {
+		// Task step with no module fails immediately → execution reaches terminal state.
+		body = minimalWorkflowBody(wfName)
+	}
+
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(body))
+	createReq = withTenantContext(createReq, tenantID)
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code, "workflow create must succeed")
+
+	// Execute workflow
+	execReq := httptest.NewRequest("POST", "/workflows/"+wfName+"/execute", bytes.NewReader([]byte("{}")))
+	execReq = withTenantContext(execReq, tenantID)
+	execRec := httptest.NewRecorder()
+	router.ServeHTTP(execRec, execReq)
+	require.Equal(t, http.StatusAccepted, execRec.Code, "workflow execute must succeed")
+
+	var execResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
+	execID, ok := execResp["execution_id"].(string)
+	require.True(t, ok && execID != "", "execution_id must be non-empty")
+	return execID
+}
+
+// --- cancel execution ---------------------------------------------------------
+
+func TestWorkflowHandler_CancelExecution_UnknownExecID_Returns404(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	req := httptest.NewRequest("POST", "/workflows/my-wf/executions/exec_9999_0/cancel", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "not found")
+}
+
+func TestWorkflowHandler_CancelExecution_RunningExecution_Returns200(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	// Use a long-running delay step so the execution stays non-terminal.
+	execID := createAndExecuteWorkflow(t, router, "long-wf", "test-tenant", true)
+
+	req := httptest.NewRequest("POST", "/workflows/long-wf/executions/"+execID+"/cancel", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, execID, resp["cancelled"])
+}
+
+// waitForTerminalState blocks until the execution reaches a terminal state or fails the test
+// after 5 seconds. Uses a ticker so the goroutine scheduler drives the check, not a sleep.
+func waitForTerminalState(t *testing.T, eng *workflow.Engine, execID string) {
+	t.Helper()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ex, err := eng.GetExecution(execID)
+			if err == nil && ex != nil {
+				s := ex.GetStatus()
+				if s == workflow.StatusCompleted || s == workflow.StatusFailed || s == workflow.StatusCancelled {
+					return
+				}
+			}
+		case <-timeout.C:
+			t.Fatalf("execution %s did not reach a terminal state within 5 seconds", execID)
+		}
+	}
+}
+
+func TestWorkflowHandler_CancelExecution_TerminalExecution_Returns409(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	// Task step with no module name fails immediately → terminal state reached quickly.
+	execID := createAndExecuteWorkflow(t, router, "quick-wf", "test-tenant", false)
+	waitForTerminalState(t, engine, execID)
+
+	req := httptest.NewRequest("POST", "/workflows/quick-wf/executions/"+execID+"/cancel", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "terminal")
+}
+
+func TestWorkflowHandler_CancelExecution_CrossTenant_Returns403(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	// Create and execute the workflow in tenant A with a long delay so it stays non-terminal.
+	execID := createAndExecuteWorkflow(t, router, "xsec-cancel-wf", "tenant-a", true)
+
+	// Tenant B tries to cancel tenant A's execution. tenant-b has no workflow
+	// named "xsec-cancel-wf" in its config namespace → 403.
+	req := httptest.NewRequest("POST", "/workflows/xsec-cancel-wf/executions/"+execID+"/cancel", nil)
+	req = withTenantContext(req, "tenant-b")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// --- get execution ------------------------------------------------------------
+
+func TestWorkflowHandler_GetExecution_CorrectRecord_Returns200(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	execID := createAndExecuteWorkflow(t, router, "get-exec-wf", "test-tenant", true)
+
+	req := httptest.NewRequest("GET", "/workflows/get-exec-wf/executions/"+execID, nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, execID, resp["id"])
+	assert.Equal(t, "get-exec-wf", resp["workflow_name"])
+	assert.NotEmpty(t, resp["status"])
+}
+
+func TestWorkflowHandler_GetExecution_CrossTenant_Returns403(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	// Create and execute the workflow in tenant A.
+	execID := createAndExecuteWorkflow(t, router, "xsec-wf", "tenant-a", true)
+
+	// Tenant B tries to access tenant A's execution.
+	// tenant-b has no workflow named "xsec-wf" → 403.
+	req := httptest.NewRequest("GET", "/workflows/xsec-wf/executions/"+execID, nil)
+	req = withTenantContext(req, "tenant-b")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestWorkflowHandler_GetExecution_NotFound_Returns404(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	req := httptest.NewRequest("GET", "/workflows/my-wf/executions/exec_9999_0", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

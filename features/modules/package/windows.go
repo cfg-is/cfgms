@@ -10,14 +10,27 @@ import (
 )
 
 // wingetManager implements PackageManager for Windows Package Manager (winget)
-type wingetManager struct{}
+// bin is the winget invocation path: the bare command name when the
+// app-execution alias resolves on PATH (interactive users), or the fully
+// qualified WindowsApps binary for SYSTEM/service contexts, which have no user
+// profile and therefore no alias (#2337 — the steward itself runs as
+// LocalSystem and needs the same resolution).
+type wingetManager struct {
+	bin string
+}
 
 func newWingetManager() PackageManager {
-	return &wingetManager{}
+	return &wingetManager{bin: "winget"}
+}
+
+// newWingetManagerWithPath returns a wingetManager that invokes the given
+// fully qualified winget.exe (see resolveWingetFullPath in factory.go).
+func newWingetManagerWithPath(bin string) PackageManager {
+	return &wingetManager{bin: bin}
 }
 
 func (m *wingetManager) Install(ctx context.Context, name, version string) error {
-	cmd := exec.CommandContext(ctx, "winget", "install", "--accept-source-agreements", "--accept-package-agreements", name)
+	cmd := exec.CommandContext(ctx, m.bin, "install", "--accept-source-agreements", "--accept-package-agreements", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "--version", version)
 	}
@@ -29,7 +42,7 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 }
 
 func (m *wingetManager) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "winget", "uninstall", "--accept-source-agreements", name)
+	cmd := exec.CommandContext(ctx, m.bin, "uninstall", "--accept-source-agreements", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -38,7 +51,7 @@ func (m *wingetManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "winget", "list", "--name", name, "--accept-source-agreements")
+	cmd := exec.CommandContext(ctx, m.bin, "list", "--name", name, "--accept-source-agreements")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
@@ -59,7 +72,7 @@ func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (s
 }
 
 func (m *wingetManager) ListInstalled(ctx context.Context) (map[string]string, error) {
-	cmd := exec.CommandContext(ctx, "winget", "list", "--accept-source-agreements")
+	cmd := exec.CommandContext(ctx, m.bin, "list", "--accept-source-agreements")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list installed packages: %w\nOutput: %s", err, string(output))

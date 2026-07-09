@@ -19,6 +19,12 @@ bin/
 test-controller
 test-steward
 test-*
+# Shell test scripts in devcontainer are not binaries — allow them
+!.devcontainer/scripts/test-*.sh
+# Shell test scripts in .claude/scripts/tests/ are not binaries — allow them
+!.claude/scripts/tests/test-*.sh
+# Python test scripts in .claude/scripts/tests/ are also tracked
+!.claude/scripts/tests/test-*.py
 
 # Generated protobuf files in wrong location (should be in api/proto/)
 /steward/
@@ -77,6 +83,7 @@ certs/
 .claude/settings.local.json
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/scratch/
 
 # Test/development storage data
 features/controller/**/data/

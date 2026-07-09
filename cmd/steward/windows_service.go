@@ -55,9 +55,10 @@ func (h *stewardServiceHandler) Execute(
 	status <- svc.Status{State: svc.StartPending}
 
 	// Parse the flags directly from os.Args so the service handler can read
-	// --regtoken etc. that were stored in the service definition.
+	// --regtoken, --controller-url etc. that were stored in the service definition.
 	flags := pflag.NewFlagSet("steward-service", pflag.ContinueOnError)
 	regToken := flags.String("regtoken", "", "registration token")
+	controllerURL := flags.String("controller-url", "", "controller URL")
 	configPath := flags.String("config", "", "config path")
 	// Ignore unknown flags (e.g. subcommand names) so the service can start even
 	// if the arg list changes between versions.
@@ -69,7 +70,7 @@ func (h *stewardServiceHandler) Execute(
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runSteward(ctx, *regToken, *configPath)
+		errCh <- runSteward(ctx, *regToken, *controllerURL, *configPath)
 	}()
 
 	status <- svc.Status{

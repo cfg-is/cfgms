@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,9 +18,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -30,6 +33,10 @@ const (
 	apiKeyContextKey       contextKey = "api_key"
 	authDecisionContextKey contextKey = "auth_decision"
 	principalContextKey    contextKey = "principal"
+	// targetTenantContextKey carries the explicitly requested target tenant for the
+	// isolation check. Set by test helpers or upstream middleware; takes precedence
+	// over URL-derived tenant. Empty means same-tenant (no cross-tenant check).
+	targetTenantContextKey contextKey = "target_tenant"
 )
 
 // Principal represents an authenticated entity — either an mTLS admin cert or an API key.
@@ -220,6 +227,21 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			// Issue #2098: test-mode status update and audit count endpoints (no auth in test mode).
+			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/status") {
+				s.logger.Warn("Test endpoint accessed with authentication bypass",
+					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if r.Method == "GET" && r.URL.Path == "/api/v1/test/audit/count" {
+				s.logger.Warn("Test endpoint accessed with authentication bypass",
+					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 
 		// H2: mTLS-presented identity always wins.
@@ -239,7 +261,63 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// State (c)/(d): no admin cert presented — use API-key path.
+		// State (c)/(d): no admin cert presented.
+
+		// Session-token path (Issue #2232): intercept Bearer tokens that are 43 chars
+		// (base64url without padding for 32 random bytes — length-distinguishable from
+		// API keys, which use base64url with padding: 44 chars). Only attempted when a
+		// sessionManager is wired; falls through to API-key path otherwise.
+		//
+		// Contract:
+		//   - Token present, 43 chars, manager wired, valid   → admin Principal from session + X-Session-Token header
+		//   - Token present, 43 chars, manager wired, invalid → 401 (no fallthrough to API-key)
+		//   - Token present, non-43 chars OR manager nil       → fall through to API-key path
+		if s.sessionManager != nil {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+				// sessionTokenLen is the exact length of a session token:
+				// base64.RawURLEncoding of 32 bytes = 43 chars (no padding).
+				const sessionTokenLen = 43
+				if len(bearerToken) == sessionTokenLen {
+					sess, err := s.sessionManager.Validate(r.Context(), bearerToken)
+					if err != nil {
+						switch {
+						case errors.Is(err, session.ErrSessionRevoked):
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						case errors.Is(err, session.ErrSessionExpired):
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
+						default:
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+						}
+						return
+					}
+					// Renew the session to reset idle TTL; set X-Session-Token when
+					// a new token is issued (empty string = prior-token grace path,
+					// no new token to publish). The raw new token is never logged.
+					_, newToken, renewErr := s.sessionManager.Renew(r.Context(), bearerToken)
+					if renewErr == nil && newToken != "" {
+						w.Header().Set("X-Session-Token", newToken)
+					}
+					// Build an admin Principal from session state.
+					sessionPrincipal := &Principal{
+						ID:      sess.PrincipalID,
+						Name:    "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						IsAdmin: true,
+						// TenantID mirrors the issuing admin cert; "" means no tenant scope
+						// (same semantics as extractAdminPrincipal for mTLS admin certs).
+						TenantID: sess.TenantID,
+					}
+					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
+					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
+					ctx = context.WithValue(ctx, ctxkeys.TenantID, sess.TenantID)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+		}
+
+		// API-key path.
 
 		// Extract API key from header
 		apiKeyStr := r.Header.Get("X-API-Key")
@@ -444,6 +522,40 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				s.auditAuthorizationDecision(r, decision)
 				s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
 				return
+			}
+
+			// Tenant isolation check for scoped (non-admin) API-key principals.
+			// Admin principals (TenantID == "") skip this check entirely.
+			s.mu.RLock()
+			engine := s.isolationEngine
+			s.mu.RUnlock()
+			if engine != nil && !principal.IsAdmin && principal.TenantID != "" {
+				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
+				if targetTenant != "" && targetTenant != principal.TenantID {
+					isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
+						SubjectID:       principal.ID,
+						SubjectTenantID: principal.TenantID,
+						TargetTenantID:  targetTenant,
+						ResourceID:      resource,
+						AccessLevel:     tenantsecurity.CrossTenantLevelRead,
+					})
+					if isoErr != nil || isoResp == nil || !isoResp.Granted {
+						isoDecision := &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Cross-tenant access denied by isolation engine",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						}
+						s.auditAuthorizationDecision(r, isoDecision)
+						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+						return
+					}
+				}
 			}
 
 			// Principal has required permission — grant access.
@@ -651,4 +763,27 @@ func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 		}
 	}
 	return false
+}
+
+// extractTargetTenantFromRequest returns the tenant being targeted by this request,
+// used by the isolation engine to detect cross-tenant access. Resolution order:
+//  1. targetTenantContextKey in context (set by tests or upstream middleware).
+//  2. URL path variable "tenant_id".
+//  3. URL path variable "id" when resourceType == "tenant".
+//
+// Returns "" when no explicit target tenant is present (caller treats as same-tenant).
+func (s *Server) extractTargetTenantFromRequest(r *http.Request, resourceType string) string {
+	if t, ok := r.Context().Value(targetTenantContextKey).(string); ok && t != "" {
+		return t
+	}
+	vars := mux.Vars(r)
+	if t := vars["tenant_id"]; t != "" {
+		return t
+	}
+	if resourceType == "tenant" {
+		if t := vars["id"]; t != "" {
+			return t
+		}
+	}
+	return ""
 }

@@ -90,6 +90,11 @@ func NewControllerRouterWithGit(
 	}
 }
 
+// Close stops the background cache cleanup goroutine. Call on shutdown or after tests.
+func (r *controllerRouter) Close() {
+	r.sourceCache.Close()
+}
+
 // GetEffectiveConfigSource resolves the config source for tenantID, walking the tenant
 // path leaf-to-root and returning the first ancestor (inclusive) that has
 // config_source_type in its metadata. Results are cached for sourceCacheTTL.

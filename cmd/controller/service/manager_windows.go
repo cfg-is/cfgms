@@ -176,6 +176,35 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// StageBinaryAndRestart copies newBinaryPath to the service install path,
+// then stops and starts the Windows service for an in-place binary swap.
+// The service definition is unchanged; only the binary on disk is replaced.
+func (m *windowsManager) StageBinaryAndRestart(newBinaryPath, configPath string) error {
+	if err := copyBinary(newBinaryPath, windowsInstallPath); err != nil {
+		return fmt.Errorf("stage binary: %w", err)
+	}
+	scm, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect to SCM: %w", err)
+	}
+	defer scm.Disconnect()
+
+	existing, err := scm.OpenService(windowsServiceName)
+	if err != nil {
+		return fmt.Errorf("open service %s: %w", windowsServiceName, err)
+	}
+	defer existing.Close()
+
+	_, _ = existing.Control(svc.Stop)
+	if stopErr := waitForStop(existing, 30*time.Second); stopErr != nil {
+		return fmt.Errorf("stop service for restart: %w", stopErr)
+	}
+	if startErr := existing.Start(); startErr != nil {
+		return fmt.Errorf("start service after binary swap: %w", startErr)
+	}
+	return nil
+}
+
 // Status returns the current service state without requiring elevated privileges.
 func (m *windowsManager) Status() (*ServiceStatus, error) {
 	status := &ServiceStatus{

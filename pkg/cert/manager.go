@@ -48,9 +48,12 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ManagerConfig contains configuration for the certificate manager
@@ -773,4 +776,99 @@ func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
 // has been initiated. Use this to inspect lifecycle state without modifying it.
 func (m *Manager) GetSigningCursorState() (*SigningCertCursor, error) {
 	return loadSigningCursor(m.store.basePath)
+}
+
+// NewManagerFromSecretStore creates a Manager that loads or bootstraps the cluster CA
+// from a SecretStore. The CA private key is never written to local disk.
+//
+// If no CA exists at caKeyPath in the store, a new CA is generated using config.CAConfig
+// and stored. Only the CA public certificate is written to storagePath/ca/ca.crt so
+// the TLS stack can load it; the private key remains in-process only.
+//
+// This is the cluster-mode entry point. Use NewManager for single-node deployments.
+func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, caKeyPath string, config *ManagerConfig) (*Manager, error) {
+	if store == nil {
+		return nil, fmt.Errorf("secret store is required")
+	}
+	if tenantID == "" || caKeyPath == "" {
+		return nil, fmt.Errorf("tenantID and caKeyPath are required")
+	}
+	if config == nil {
+		return nil, fmt.Errorf("manager config is required")
+	}
+	if config.StoragePath == "" {
+		return nil, fmt.Errorf("storage path is required")
+	}
+
+	if config.RenewalThresholdDays == 0 {
+		config.RenewalThresholdDays = 30
+	}
+
+	fileStore, err := NewFileStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
+	}
+
+	ca := &CA{}
+	loadErr := ca.LoadCAFromSecretStore(ctx, store, tenantID, caKeyPath)
+	if loadErr != nil {
+		if config.CAConfig == nil {
+			return nil, fmt.Errorf("CA config required to generate new cluster CA (load failed: %w)", loadErr)
+		}
+
+		// Generate CA in-memory: StoragePath="" prevents any disk write of ca.key.
+		genConfig := &CAConfig{
+			Organization:       config.CAConfig.Organization,
+			Country:            config.CAConfig.Country,
+			State:              config.CAConfig.State,
+			City:               config.CAConfig.City,
+			OrganizationalUnit: config.CAConfig.OrganizationalUnit,
+			ValidityDays:       config.CAConfig.ValidityDays,
+			KeySize:            config.CAConfig.KeySize,
+			StoragePath:        "",
+		}
+
+		newCA, err := NewCA(genConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create cluster CA: %w", err)
+		}
+		if err := newCA.Initialize(genConfig); err != nil {
+			return nil, fmt.Errorf("failed to initialize cluster CA: %w", err)
+		}
+		if err := newCA.StoreCAToSecretStore(ctx, store, tenantID, caKeyPath); err != nil {
+			return nil, fmt.Errorf("failed to store cluster CA in secret store: %w", err)
+		}
+		ca = newCA
+	}
+
+	// Write only the CA certificate (public) to disk for TLS config.
+	// The private key is intentionally NOT written to disk on cluster nodes.
+	caDir := filepath.Join(config.StoragePath, "ca")
+	if err := os.MkdirAll(caDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create CA directory: %w", err)
+	}
+	caCertPEM, err := ca.GetCACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CA certificate: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(caDir, "ca.crt"), caCertPEM, 0600); err != nil {
+		return nil, fmt.Errorf("failed to write CA certificate to disk: %w", err)
+	}
+
+	validator := NewValidator(ca.certificate)
+	renewer := NewRenewer(ca, fileStore, validator)
+
+	revStore, err := newRevocationStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+
+	return &Manager{
+		ca:         ca,
+		store:      fileStore,
+		validator:  validator,
+		renewer:    renewer,
+		config:     config,
+		revocation: revStore,
+	}, nil
 }

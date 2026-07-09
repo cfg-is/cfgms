@@ -286,10 +286,11 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 				Status:        "online",
 				LastHeartbeat: now,
 				DNAAttributes: map[string]string{
-					"hostname": "my-host",
-					"os":       "linux",
-					"arch":     "arm64",
-					"custom":   "value",
+					"hostname":        "my-host",
+					"os":              "linux",
+					"arch":            "arm64",
+					"custom":          "value",
+					"steward.version": "v1.5.3",
 				},
 			},
 		},
@@ -309,6 +310,27 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 	assert.Equal(t, "online", r.Status)
 	assert.WithinDuration(t, now, r.LastHeartbeat, time.Second)
 	assert.Equal(t, "value", r.DNAAttributes["custom"])
+	assert.Equal(t, "v1.5.3", r.RunningVersion, "RunningVersion must be populated from steward.version DNA attribute")
+}
+
+func TestMemoryQuery_StewardResult_RunningVersionEmpty_WhenDNAAbsent(t *testing.T) {
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:       "no-version",
+				TenantID: "tenant-x",
+				Status:   "online",
+				// No steward.version in DNAAttributes
+				DNAAttributes: map[string]string{"hostname": "host-a"},
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "", results[0].RunningVersion, "RunningVersion must be empty when steward.version DNA attribute is absent")
 }
 
 func TestMemoryQuery_TenantScoping_IsolatesData(t *testing.T) {
@@ -332,4 +354,56 @@ func TestMemoryQuery_Tags_WhitespaceStripped(t *testing.T) {
 	results, err := q.Search(context.Background(), Filter{Tags: []string{"web"}})
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
+}
+
+func TestMemoryQuery_FilterByIDs_SingleMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001"}})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "device-001", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByIDs_MultiMatch_OR(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001", "device-003"}})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	ids := []string{results[0].ID, results[1].ID}
+	assert.ElementsMatch(t, []string{"device-001", "device-003"}, ids)
+}
+
+func TestMemoryQuery_FilterByIDs_NoMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"nonexistent"}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_FilterByIDs_AND_WithOS(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", map[string]string{"os": "linux"}),
+		testSteward("device-002", "t", "online", map[string]string{"os": "windows"}),
+	)
+
+	// IDs includes device-001, but device-001 is linux not windows — no match.
+	results, err := q.Search(context.Background(), Filter{
+		IDs: []string{"device-001"},
+		OS:  "windows",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, results)
 }

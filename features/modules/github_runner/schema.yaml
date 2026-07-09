@@ -1,0 +1,45 @@
+resources:
+  runner:
+    description: >
+      A GitHub Actions self-hosted runner agent installed on a steward host and
+      kept at a pinned version with its service enabled and running. This module
+      manages only token-free steady state — there is intentionally NO
+      registration-token field. Registration (and the initial creation of the
+      runner service) is performed by the publisher-signed register script driven
+      by the CI-runner provisioning workflow, which holds the single-use token.
+    required:
+      - version
+      - agent_url
+      - agent_sha256
+      - work_dir
+      - service_name
+    properties:
+      version:
+        type: string
+        description: Pinned runner agent version (e.g. "2.319.1").
+        pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+      agent_url:
+        type: string
+        description: HTTPS URL to the runner agent archive at version (.tar.gz on Linux, .zip on Windows).
+      agent_sha256:
+        type: string
+        description: >
+          Operator-pinned expected SHA-256 of the agent archive (64-char hex).
+          Verification uses this value directly — the module performs no network
+          hash lookup, keeping installs deterministic and offline-verifiable.
+        pattern: "^[a-fA-F0-9]{64}$"
+      labels:
+        type: array
+        description: Desired runner label set.
+        items:
+          type: string
+          pattern: "^[A-Za-z0-9._-]{1,64}$"
+      work_dir:
+        type: string
+        description: Absolute install directory for the runner agent (also the resource ID).
+      service_name:
+        type: string
+        description: >
+          OS service name of the runner service (systemd unit on Linux, SCM
+          service on Windows), e.g. "actions.runner.acme-repo.host1.service".
+        pattern: "^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,254}$"

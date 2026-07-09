@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 )
@@ -107,6 +108,51 @@ func resolveBundleClient(apiURL string) (*APIClient, error) {
 	}
 
 	return newClientFromBundle(path, apiURL)
+}
+
+// resolveSessionOrBundleClient tries the active OS-keychain session token first,
+// then falls through to resolveBundleClient.
+//
+// Falls through to bundle auth unconditionally when:
+//   - bundlePath is set (--bundle flag)
+//   - noBundle is set (--no-bundle flag)
+//   - apiURL is non-empty (explicit --api-url flag or CFGMS_API_URL env var)
+//   - no session token is stored
+//   - the stored token has passed its absolute expiry
+//   - the OS secret store is unavailable (Available()==false)
+//
+// When a valid session is found the returned client has OnTokenRenewed wired
+// to write rolled X-Session-Token values back to the secret store, and
+// OnUnauthorized wired to fall back to bundle auth on server-side 401.
+func resolveSessionOrBundleClient(apiURL string) (*APIClient, error) {
+	// Explicit one-shot overrides bypass the session entirely.
+	if bundlePath != "" || noBundle || apiURL != "" {
+		return resolveBundleClient(apiURL)
+	}
+
+	rec, err := loadSessionToken()
+	if err != nil || rec == nil || time.Now().After(rec.AbsoluteExpiry) {
+		return resolveBundleClient(apiURL)
+	}
+
+	// Use the stored CA cert when non-empty; nil → system cert pool (public CA controllers).
+	var caCertPEM []byte
+	if rec.CACertPEM != "" {
+		caCertPEM = []byte(rec.CACertPEM)
+	}
+
+	cfg := &APIClientConfig{
+		BaseURL:   rec.ControllerURL,
+		APIKey:    rec.Token,
+		CACertPEM: caCertPEM,
+		OnTokenRenewed: func(newToken string) error {
+			return updateSessionToken(newToken)
+		},
+		OnUnauthorized: func() (*APIClient, error) {
+			return resolveBundleClient("") // let bundle supply the URL
+		},
+	}
+	return NewAPIClient(cfg)
 }
 
 // findBundlePath walks the bundle lookup chain and returns the first path that exists.

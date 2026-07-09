@@ -113,6 +113,20 @@ func (m *linuxManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// StageBinaryAndRestart copies newBinaryPath to the service install path,
+// then issues a `systemctl restart` for an in-place binary swap. The service
+// reloads without a full enable/disable cycle; the unit file and config path
+// are unchanged.
+func (m *linuxManager) StageBinaryAndRestart(newBinaryPath, configPath string) error {
+	if err := copyBinary(newBinaryPath, linuxInstallPath); err != nil {
+		return fmt.Errorf("stage binary: %w", err)
+	}
+	if out, err := exec.Command("systemctl", "restart", linuxServiceName).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl restart %s: %w\n%s", linuxServiceName, err, out)
+	}
+	return nil
+}
+
 // Status returns the current state of the systemd service without requiring
 // elevated privileges.
 func (m *linuxManager) Status() (*ServiceStatus, error) {

@@ -50,6 +50,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
+// DNACollector is the interface used by the DNA refresh loop to re-collect
+// system attributes on each tick. Production code wraps dna.Collector; tests
+// inject a stub returning deterministic attribute maps without real I/O.
+type DNACollector interface {
+	CollectAttributes(ctx context.Context) (map[string]string, error)
+}
+
 // TransportClient represents the steward client using gRPC-over-QUIC for both
 // control plane and data plane communication with the controller.
 // Story #516: Connects once to transport_address for both CP and DP.
@@ -93,6 +100,10 @@ type TransportClient struct {
 	// Configuration executor (unified engine — same as standalone mode)
 	configExecutor *execution.Executor
 
+	// eventEmitter sends convergence observation events to the controller via LogStream.
+	// Initialised once by InitializeConfigExecutor; nil until then.
+	eventEmitter *EventEmitter
+
 	// Command authentication settings (Story #919)
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
@@ -120,10 +131,10 @@ type TransportClient struct {
 	// Connection state — single flag for unified gRPC transport
 	connected bool
 
-	// disconnected guards the one-time close of heartbeatStop/convergenceStop in
-	// Disconnect. A pushed-upgrade graceful self-exit (Issue #2001) adds a second
-	// shutdown trigger path (runCancel → runCtx.Done → Disconnect), so Disconnect
-	// can now legitimately be invoked more than once; closing an already-closed
+	// disconnected guards the one-time close of heartbeatStop/convergenceStop/
+	// dnaRefreshStop in Disconnect. A pushed-upgrade graceful self-exit (Issue #2001)
+	// adds a second shutdown trigger path (runCancel → runCtx.Done → Disconnect), so
+	// Disconnect can now legitimately be invoked more than once; closing an already-closed
 	// channel panics, so the close is gated on this flag under c.mu.
 	disconnected bool
 
@@ -152,6 +163,13 @@ type TransportClient struct {
 	currentDNAHash   string            // SHA-256 hash of most-recently observed DNA
 	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
 
+	// DNA refresh loop control (Issue #1915).
+	dnaRefreshInterval time.Duration
+	dnaRefreshStop     chan struct{}
+	// dnaCollector is the DNA collection implementation used by the refresh loop.
+	// Injectable for testing; production code uses dna.NewCollector.
+	dnaCollector DNACollector
+
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
 	certStoreDir string
@@ -164,6 +182,14 @@ type TransportClient struct {
 	// upgradeAllowDowngrade permits installing a version ≤ the running version.
 	// From steward.cfg upgrade.allow_downgrade. Protected by mu. (Issue #1943)
 	upgradeAllowDowngrade bool
+
+	// lastStagedVersion and lastStagedBinaryPath record the version and on-disk
+	// path of the binary most recently staged by handlePushStewardBinary.
+	// TriggerConvergence uses them to re-issue the launcher swap when the
+	// desired_version config key is set and the running binary hasn't changed yet.
+	// Protected by mu. (Issue #2260)
+	lastStagedVersion    string
+	lastStagedBinaryPath string
 
 	// launcherSwapFunc is the function invoked to call the launcher swap subcommand.
 	// When nil the default exec.CommandContext implementation is used. Injectable
@@ -222,6 +248,11 @@ type TransportClient struct {
 	// "use defaultUpgradeShutdownGraceDelay (3s)"; tests that want a small real
 	// timer set an explicit small positive value. Protected by mu. (Issue #2001)
 	upgradeShutdownGraceDelay time.Duration
+
+	// statusFunc returns the current health status string for the periodic heartbeat.
+	// When nil, "healthy" is used as the default. Set via SetStatusFunc after
+	// connection to wire in the subsystem state tracker. (Issue #2034)
+	statusFunc func() string
 
 	// shutdownScheduleFunc schedules trigger to run after delay. When nil the
 	// default real implementation (a timer goroutine) is used. Injectable for
@@ -339,6 +370,16 @@ type TransportConfig struct {
 	// only — production deployments leave this nil. (Issue #1948)
 	UpgradePublisherTrustStore trust.TrustStore
 
+	// DNARefreshInterval is how often the connected steward re-collects and
+	// publishes DNA attribute deltas (Issue #1915). Defaults to 30 minutes.
+	DNARefreshInterval time.Duration
+
+	// DNACollector is the implementation used by the DNA refresh loop to collect
+	// system attributes. When nil, the refresh loop is disabled (no collection
+	// is attempted). Injectable for testing — production code passes a real
+	// dna.Collector via main.go after registration.
+	DNACollector DNACollector
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -355,6 +396,11 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	heartbeatInterval := cfg.HeartbeatInterval
 	if heartbeatInterval == 0 {
 		heartbeatInterval = 20 * time.Second // epic #1664: 20s base + [0,10s) jitter
+	}
+
+	dnaRefreshInterval := cfg.DNARefreshInterval
+	if dnaRefreshInterval == 0 {
+		dnaRefreshInterval = 30 * time.Minute
 	}
 
 	// Per-instance RNG for per-tick heartbeat jitter (epic #1664).
@@ -385,8 +431,11 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		rng:                        rng,
 		heartbeatStop:              make(chan struct{}),
 		convergenceStop:            make(chan struct{}),
+		dnaRefreshStop:             make(chan struct{}),
 		convergeInterval:           30 * time.Minute,
 		convergeIntervalCh:         make(chan struct{}, 1),
+		dnaRefreshInterval:         dnaRefreshInterval,
+		dnaCollector:               cfg.DNACollector,
 		transportAddress:           cfg.ControllerURL,
 		certPath:                   cfg.TLSCertPath,
 		caCertPEM:                  cfg.CACertPEM,
@@ -415,10 +464,34 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 // This must be called after the client is connected but before config sync.
 // Uses the unified execution engine (all 7 modules, Get→Compare→Set→Verify).
 func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
+	c.mu.RLock()
+	stewardID := c.stewardID
+	controlPlane := c.controlPlane
+	existingEmitter := c.eventEmitter // may already be set by setupCommandHandler (Issue #2143)
+	c.mu.RUnlock()
+
+	// Reuse the EventEmitter started in setupCommandHandler when available; otherwise
+	// build one now (e.g. standalone InitializeConfigExecutor call without prior Connect).
+	// ADR-012 §2: emitter shares the control-plane gRPC connection.
+	emitter := existingEmitter
+	if emitter == nil {
+		if cp, ok := controlPlane.(*grpcCP.Provider); ok {
+			if tc := cp.TransportClient(); tc != nil {
+				emitter = NewEventEmitter(EventEmitterConfig{
+					Client:    tc,
+					StewardID: stewardID,
+					Logger:    c.logger,
+				})
+			}
+		}
+	}
+
 	execCfg := &execution.ExecutorConfig{
-		TenantID:    tenantID,
-		Logger:      c.logger,
-		SecretStore: c.secretStore,
+		TenantID:     tenantID,
+		Logger:       c.logger,
+		SecretStore:  c.secretStore,
+		StewardID:    stewardID,
+		EventEmitter: emitter,
 	}
 	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
@@ -427,9 +500,21 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 
 	c.mu.Lock()
 	c.configExecutor = executor
+	if emitter != nil && c.eventEmitter == nil {
+		c.eventEmitter = emitter
+	}
 	c.mu.Unlock()
 
-	c.logger.Info("Configuration executor initialized", "tenant_id", tenantID)
+	if emitter != nil {
+		// Start is idempotent — a no-op if setupCommandHandler already started this emitter.
+		// Uses context.Background() so the reconnect loop outlives any single request context.
+		// Disconnect() calls Close() to drain and stop.
+		emitter.Start(context.Background())
+		c.logger.Info("Configuration executor initialized with event emitter",
+			"tenant_id", tenantID, "steward_id", logging.RedactedID(stewardID))
+	} else {
+		c.logger.Info("Configuration executor initialized", "tenant_id", tenantID)
+	}
 	return nil
 }
 
@@ -451,11 +536,11 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("not registered - call SetStewardID first")
 	}
 
-	// Create TLS configuration for gRPC-over-QUIC
+	// Create TLS configuration for gRPC-over-QUIC. mTLS is mandatory; a
+	// configuration failure is fatal — there is no legitimate path without TLS.
 	tlsConfig, err := c.createTLSConfig()
 	if err != nil {
-		c.logger.Warn("Failed to load TLS config, continuing without TLS", "error", err)
-		tlsConfig = nil
+		return fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
 	// Initialize gRPC control plane provider if not already set
@@ -613,6 +698,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	c.mu.RLock()
 	scriptSigning := c.scriptSigning
 	caCertPEM := c.caCertPEM
+	existingEmitter := c.eventEmitter
 	c.mu.RUnlock()
 
 	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
@@ -638,6 +724,33 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			"operator certificate CA-chain verification of inline signed commands will be skipped")
 	}
 
+	// Build the EventEmitter for script output streaming (Issue #2143). Reuse the
+	// already-started emitter when available; otherwise create one now so the command
+	// handler can emit script_output LogEntries from the first connected session.
+	// The emitter shares the control-plane gRPC connection — no extra TLS required.
+	var scriptEmitter commands.EventEmitter // interface — nil unless we successfully build one
+	if existingEmitter != nil {
+		scriptEmitter = existingEmitter
+	} else {
+		c.mu.RLock()
+		cp := c.controlPlane
+		c.mu.RUnlock()
+		if grpcProv, ok := cp.(*grpcCP.Provider); ok {
+			if tc := grpcProv.TransportClient(); tc != nil {
+				built := NewEventEmitter(EventEmitterConfig{
+					Client:    tc,
+					StewardID: stewardID,
+					Logger:    c.logger,
+				})
+				built.Start(context.Background())
+				c.mu.Lock()
+				c.eventEmitter = built
+				c.mu.Unlock()
+				scriptEmitter = built
+			}
+		}
+	}
+
 	handler, err := commands.New(&commands.Config{
 		StewardID:          stewardID,
 		OnStatus:           statusCallback,
@@ -648,6 +761,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		SigningConfig:      signingConfig,
 		RequireSignedAdhoc: scriptSigning.RequireSignedAdhoc,
 		ControllerCARoots:  controllerCARoots,
+		EventEmitter:       scriptEmitter,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)
@@ -869,6 +983,12 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// cannot set it (the local-file loading path clears the field).
 	executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
 
+	// Thread allow_downgrade from the controller-delivered cfg so both
+	// handlePushStewardBinary and triggerVersionConvergence use the current value.
+	c.mu.Lock()
+	c.upgradeAllowDowngrade = goConfig.Steward.Upgrade.AllowDowngrade
+	c.mu.Unlock()
+
 	// Marshal to YAML for executor.
 	configYAML, err := yaml.Marshal(goConfig)
 	if err != nil {
@@ -896,6 +1016,13 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 			}
 		}
 		return fmt.Errorf("config application failed: %w", err)
+	}
+
+	// Start module monitors for the new config's resources (Issue #2435).
+	// Full stop+restart — previous engine (from any prior config push) is closed first.
+	// TriggerConvergence re-applies the SAME config and must NOT restart monitors.
+	if startErr := executor.StartMonitors(ctx, goConfig.Resources); startErr != nil {
+		c.logger.Warn("Failed to start module monitors after config sync", "error", startErr)
 	}
 
 	// Publish configuration status report.
@@ -1013,6 +1140,7 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		DNAHash:         currentDNAHash,
 		ActiveSessions:  activeSessions,
 		ConnectionState: connectionState,
+		Version:         version.Short(),
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {
@@ -1031,6 +1159,15 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 // the data plane.
 // If the controller is unreachable the event is queued locally and delivered on reconnect (Issue #419).
 func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[string]string, configHash, syncFingerprint string) error {
+	// Always inject the running binary version so the controller fleet view is
+	// always current. Copy to avoid mutating the caller's map. (Issue #2260)
+	enriched := make(map[string]string, len(dnaAttrs)+1)
+	for k, v := range dnaAttrs {
+		enriched[k] = v
+	}
+	enriched["steward.version"] = version.Short()
+	dnaAttrs = enriched
+
 	// Always update local DNA state first so the hash is available for heartbeats
 	// even when the control plane is temporarily unavailable.
 	c.dnaMu.Lock()
@@ -1253,7 +1390,143 @@ func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
 	} else {
 		c.logger.Info("Convergence run completed", "version", lastVersion)
 	}
+
+	// Version auto-convergence: when desired_version is set and differs from
+	// the running binary, retry the launcher swap for the already-staged binary.
+	// Errors are non-fatal — the next convergence tick will retry. (Issue #2260)
+	var parsedCfg stewardconfig.StewardConfig
+	if unmarshalErr := yaml.Unmarshal(lastCfg, &parsedCfg); unmarshalErr == nil {
+		c.triggerVersionConvergence(ctx, parsedCfg.Steward.Upgrade.DesiredVersion, parsedCfg.Steward.Upgrade.AllowDowngrade)
+	}
+
 	return nil
+}
+
+// triggerVersionConvergence checks whether the running binary version matches
+// the controller-declared desired_version and, if not, re-issues the launcher
+// swap using the last staged binary. It is idempotent: a no-op when versions
+// already match, when desired_version is absent, or when no binary has been
+// staged for the desired version yet. (Issue #2260)
+func (c *TransportClient) triggerVersionConvergence(ctx context.Context, desiredVersion string, cfgAllowDowngrade bool) {
+	if desiredVersion == "" {
+		return
+	}
+
+	if !stewardBinaryVersionRe.MatchString(desiredVersion) {
+		c.logger.Warn("desired_version has invalid format; skipping version convergence",
+			"desired_version", logging.SanitizeLogValue(desiredVersion))
+		return
+	}
+
+	runningVersion := version.Short()
+	if desiredVersion == runningVersion {
+		return
+	}
+
+	// Downgrade guard: refuse if desired_version is older and downgrade is not
+	// permitted. cfgAllowDowngrade covers inheritance from the controller cfg;
+	// c.upgradeAllowDowngrade covers the initial local steward.cfg value.
+	c.mu.RLock()
+	allowDowngrade := c.upgradeAllowDowngrade || cfgAllowDowngrade
+	stagedVersion := c.lastStagedVersion
+	stagedPath := c.lastStagedBinaryPath
+	lPathOverride := c.launcherPathOverride
+	c.mu.RUnlock()
+
+	if !allowDowngrade && !isNewerVersion(desiredVersion, version.Version) {
+		c.logger.Warn("desired_version is not newer than running version and downgrade is not permitted",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"running_version", runningVersion)
+		return
+	}
+
+	if stagedVersion != desiredVersion || stagedPath == "" {
+		c.logger.Info("Version convergence: desired_version differs from running; awaiting controller binary push",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"running_version", runningVersion,
+			"staged_version", logging.SanitizeLogValue(stagedVersion))
+		return
+	}
+
+	lPath := lPathOverride
+	if lPath == "" {
+		lPath = launcherPath()
+	}
+
+	c.logger.Info("Version convergence: retrying launcher swap for desired version",
+		"desired_version", logging.SanitizeLogValue(desiredVersion),
+		"running_version", runningVersion)
+
+	if err := c.execLauncherSwap(ctx, lPath, desiredVersion, stagedPath); err != nil {
+		c.logger.Warn("Version convergence: launcher swap failed",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"error", err)
+		return
+	}
+
+	c.logger.Info("Version convergence: launcher swap succeeded",
+		"desired_version", logging.SanitizeLogValue(desiredVersion))
+
+	c.mu.RLock()
+	launcherManaged := c.launcherManaged
+	c.mu.RUnlock()
+	if launcherManaged {
+		c.scheduleGracefulShutdownAfterSwap()
+	}
+}
+
+// StartDNARefreshLoop starts a background goroutine that re-collects system DNA
+// attributes on the configured interval and publishes delta updates to the
+// controller when at least one attribute value has changed.
+//
+// If no DNACollector was provided, the loop exits immediately after logging a
+// warning. The loop exits cleanly when ctx is cancelled or Disconnect is called.
+// The existing 15-second graceful disconnect window applies — the loop does not
+// block shutdown. (Issue #1915)
+func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) {
+	c.mu.RLock()
+	interval := c.dnaRefreshInterval
+	collector := c.dnaCollector
+	c.mu.RUnlock()
+
+	if collector == nil {
+		c.logger.Warn("DNA refresh loop started without a collector; DNA will not be refreshed periodically")
+		return
+	}
+
+	c.logger.Info("Starting DNA refresh loop", "interval", interval)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.dnaRefreshStop:
+				return
+			case <-ticker.C:
+				// Re-read collector on each tick so tests can inject a new
+				// implementation after the loop has started.
+				c.mu.RLock()
+				currentCollector := c.dnaCollector
+				c.mu.RUnlock()
+				if currentCollector == nil {
+					continue
+				}
+				attrs, err := currentCollector.CollectAttributes(ctx)
+				if err != nil {
+					c.logger.Warn("DNA refresh collection failed", "error", err)
+					continue
+				}
+				if len(attrs) == 0 {
+					continue
+				}
+				if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
+					c.logger.Warn("DNA refresh publish failed", "error", err)
+				}
+			}
+		}
+	}()
 }
 
 // SetShutdownFunc wires the graceful-shutdown trigger used after a successful
@@ -1288,9 +1561,24 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 	// idempotent at their own layers) and return cleanly.
 	if !c.disconnected {
 		c.disconnected = true
-		// Stop heartbeat and convergence loop
+		// Stop heartbeat, convergence, and DNA refresh loops.
 		close(c.heartbeatStop)
 		close(c.convergenceStop)
+		if c.dnaRefreshStop != nil {
+			close(c.dnaRefreshStop)
+		}
+	}
+
+	// Stop module monitors before closing connections so no further ExecuteResource
+	// calls fire against a disconnected transport (Issue #2435).
+	if c.configExecutor != nil {
+		c.configExecutor.StopMonitors()
+	}
+
+	// Drain and stop the event emitter before closing the gRPC connection so
+	// buffered convergence events are flushed to the controller first.
+	if c.eventEmitter != nil {
+		c.eventEmitter.Close()
 	}
 
 	// Close data plane session
@@ -1341,11 +1629,43 @@ func (c *TransportClient) SetStewardID(id string) {
 	c.stewardID = id
 }
 
+// GetConfigExecutor returns the configuration executor. Returns nil when not yet
+// initialized (before InitializeConfigExecutor is called). The executor implements
+// moduleDNASource after StartMonitors is called — wire it into the DNA collector
+// adapter immediately after InitializeConfigExecutor succeeds (Issue #2435).
+func (c *TransportClient) GetConfigExecutor() *execution.Executor {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.configExecutor
+}
+
 // SetTenantID sets the tenant ID (used after HTTP registration).
 func (c *TransportClient) SetTenantID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tenantID = id
+}
+
+// SetStatusFunc wires a health-status provider into the periodic heartbeat so the
+// controller receives the real subsystem state instead of a hardcoded "healthy".
+// Called from cmd/steward/main.go after connection to pass subsystemState.status.
+// Thread-safe. (Issue #2034)
+func (c *TransportClient) SetStatusFunc(f func() string) {
+	c.mu.Lock()
+	c.statusFunc = f
+	c.mu.Unlock()
+}
+
+// heartbeatStatus returns the current health status string for the heartbeat.
+// Returns the value from statusFunc if set, otherwise "healthy". (Issue #2034)
+func (c *TransportClient) heartbeatStatus() string {
+	c.mu.RLock()
+	fn := c.statusFunc
+	c.mu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return "healthy"
 }
 
 // SetRevokedVersions updates the cached list of revoked steward versions received
@@ -1565,6 +1885,17 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 	c.overlapExpiresAt = overlapExpiresAt
 	c.mu.Unlock()
 
+	// Refresh the command handler's verifier so subsequent commands signed with the
+	// newly pushed cert are accepted without reconnecting. Without this, the handler's
+	// verifier remains a snapshot from connection time and rejects commands signed by
+	// the new cert even after the steward's trust set has been updated (Issue #1844).
+	c.mu.RLock()
+	handler := c.commandHandler
+	c.mu.RUnlock()
+	if handler != nil {
+		handler.UpdateVerifier(c.buildVerifierOnDemand())
+	}
+
 	// Resolve the applied cert's serial for the log. Prefer the controller-supplied
 	// "serial" param (exact controller-side string form); fall back to the parsed
 	// cert's serial so the serial is always recorded even for older controllers or
@@ -1778,7 +2109,7 @@ func (c *TransportClient) startHeartbeat() {
 			return
 		case <-timer.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := c.SendHeartbeat(ctx, "healthy", nil); err != nil {
+			if err := c.SendHeartbeat(ctx, c.heartbeatStatus(), nil); err != nil {
 				c.logger.Warn("Failed to send heartbeat", "error", err)
 			} else {
 				// Heartbeat succeeded — drain any events queued during a

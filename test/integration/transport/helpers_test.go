@@ -4,8 +4,13 @@ package transport
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,11 +80,28 @@ func (h *TestHelper) CreateToken(_ *testing.T, _, _ string) string {
 	return "integration_reusable" //nolint:gosec // test-only token, requires CFGMS_SEED_TEST_TOKENS=1 on the controller
 }
 
+// generateTestDeviceIdentity generates a fresh Ed25519 key pair for integration test device identity.
+// Each call produces unique credentials to prevent DeviceID conflicts within the same tenant.
+func generateTestDeviceIdentity(t *testing.T) (deviceID, identityKeyPub string) {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate Ed25519 key for device identity: %v", err)
+	}
+	h := sha256.Sum256(pub)
+	return hex.EncodeToString(h[:]), base64.StdEncoding.EncodeToString(pub)
+}
+
 // RegisterSteward registers a steward via HTTP API and returns the response.
 func (h *TestHelper) RegisterSteward(t *testing.T, token string) *RegistrationResponse {
 	t.Helper()
 
-	reqBody := map[string]string{"token": token}
+	deviceID, identityKeyPub := generateTestDeviceIdentity(t)
+	reqBody := map[string]string{
+		"token":            token,
+		"device_id":        deviceID,
+		"identity_key_pub": identityKeyPub,
+	}
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		t.Fatalf("Failed to marshal registration request: %v", err)

@@ -441,3 +441,278 @@ func TestRegistrationConfig_DarkWindowAndTimeout_YAML(t *testing.T) {
 	assert.Equal(t, 3*24*time.Hour, cfg.Registration.GetPendingReviewTimeout(),
 		"72h must parse to 3 days")
 }
+
+// TestHAMode_YAML verifies that ha.mode: cluster is parsed correctly (Issue #2119).
+func TestHAMode_YAML(t *testing.T) {
+	yamlInput := "ha:\n  mode: cluster\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.HA, "HA config must be populated when ha block is present")
+	assert.Equal(t, "cluster", cfg.HA.Mode,
+		"ha.mode: cluster must parse to the string \"cluster\"")
+	assert.True(t, cfg.HA.IsClusterMode(), "IsClusterMode() must return true for mode=cluster")
+}
+
+// TestHAMode_YAML_Single verifies that ha.mode: single is parsed correctly.
+func TestHAMode_YAML_Single(t *testing.T) {
+	yamlInput := "ha:\n  mode: single\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.HA)
+	assert.Equal(t, "single", cfg.HA.Mode)
+	assert.False(t, cfg.HA.IsClusterMode())
+}
+
+// TestHAMode_YAML_Absent verifies that omitting ha block leaves HA nil.
+func TestHAMode_YAML_Absent(t *testing.T) {
+	yamlInput := "listen_addr: \"127.0.0.1:8080\"\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	assert.Nil(t, cfg.HA, "HA config must be nil when the ha block is absent")
+}
+
+// TestHAModeEnvVar verifies that CFGMS_HA_MODE overrides ha.mode from YAML (Issue #2119).
+func TestHAModeEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_HA_MODE", "cluster")
+	// Clear CFGMS_STORAGE_CLUSTER_POSTGRES_DSN so it doesn't interfere.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.HA, "CFGMS_HA_MODE must materialise the HA config section")
+	assert.Equal(t, "cluster", cfg.HA.Mode,
+		"CFGMS_HA_MODE=cluster must set ha.Mode to \"cluster\"")
+	assert.True(t, cfg.HA.IsClusterMode())
+}
+
+// TestClusterStorageConfig_YAML verifies that storage.cluster.postgres_dsn is parsed (Issue #2119).
+func TestClusterStorageConfig_YAML(t *testing.T) {
+	yamlInput := `
+storage:
+  cluster:
+    postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require"
+    s3:
+      bucket: "cfgms-installers"
+      region: "us-east-1"
+`
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.Storage.Cluster, "storage.cluster must be populated")
+	assert.Equal(t,
+		"host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require",
+		cfg.Storage.Cluster.PostgresDSN)
+	require.NotNil(t, cfg.Storage.Cluster.S3)
+	assert.Equal(t, "cfgms-installers", cfg.Storage.Cluster.S3["bucket"])
+	assert.Equal(t, "us-east-1", cfg.Storage.Cluster.S3["region"])
+}
+
+// TestClusterStorageDSNEnvVar verifies that CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides
+// storage.cluster.postgres_dsn (Issue #2119).
+func TestClusterStorageDSNEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable")
+	t.Setenv("CFGMS_HA_MODE", "") // clear so HA mode is not set by env
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Storage.Cluster,
+		"CFGMS_STORAGE_CLUSTER_POSTGRES_DSN must materialise storage.cluster")
+	assert.Equal(t,
+		"host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable",
+		cfg.Storage.Cluster.PostgresDSN)
+}
+
+// --- Deployment Ring Config tests (Issue #2271) ---
+
+// TestDeploymentRings_YAML_ParsesCorrectly verifies the deployment_rings section
+// is parsed from YAML with all fields populated.
+func TestDeploymentRings_YAML_ParsesCorrectly(t *testing.T) {
+	yamlInput := `
+deployment_rings:
+  fallback_ring: early
+  rings:
+    - name: pre-release
+      desired_version: "v0.6.0-rc1"
+    - name: early
+      desired_version: "v0.5.21"
+      soak: 24h
+      halt_threshold: 0.05
+      concurrency_limit: 10
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+`
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	require.NotNil(t, cfg.DeploymentRings, "deployment_rings must be populated")
+	assert.Equal(t, "early", cfg.DeploymentRings.FallbackRing)
+	require.Len(t, cfg.DeploymentRings.Rings, 4)
+	assert.Equal(t, "pre-release", cfg.DeploymentRings.Rings[0].Name)
+	assert.Equal(t, "v0.6.0-rc1", cfg.DeploymentRings.Rings[0].DesiredVersion)
+	assert.Equal(t, "early", cfg.DeploymentRings.Rings[1].Name)
+	assert.Equal(t, "v0.5.21", cfg.DeploymentRings.Rings[1].DesiredVersion)
+	assert.Equal(t, 24*time.Hour, cfg.DeploymentRings.Rings[1].Soak.AsDuration())
+	assert.InDelta(t, 0.05, cfg.DeploymentRings.Rings[1].HaltThreshold, 1e-9)
+	assert.Equal(t, 10, cfg.DeploymentRings.Rings[1].ConcurrencyLimit)
+}
+
+// TestDeploymentRings_Absent_LeavesNil verifies that omitting deployment_rings leaves the
+// field nil, signalling use of the default ring set.
+func TestDeploymentRings_Absent_LeavesNil(t *testing.T) {
+	yamlInput := `listen_addr: "127.0.0.1:8080"` + "\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+
+	assert.Nil(t, cfg.DeploymentRings, "deployment_rings must be nil when absent")
+}
+
+// TestValidateDeploymentRingConfig_Valid verifies that a well-formed ring config passes.
+func TestValidateDeploymentRingConfig_Valid(t *testing.T) {
+	rc := DeploymentRingConfig{
+		FallbackRing: "default",
+		Rings: []RingSpec{
+			{Name: "pre-release"},
+			{Name: "early"},
+			{Name: "default", DesiredVersion: "v0.5.21"},
+			{Name: "stable"},
+		},
+	}
+	assert.NoError(t, ValidateDeploymentRingConfig(rc))
+}
+
+// TestValidateDeploymentRingConfig_RejectsDuplicateNames verifies that duplicate ring
+// names are rejected at startup.
+func TestValidateDeploymentRingConfig_RejectsDuplicateNames(t *testing.T) {
+	rc := DeploymentRingConfig{
+		FallbackRing: "early",
+		Rings: []RingSpec{
+			{Name: "early"},
+			{Name: "default"},
+			{Name: "early"}, // duplicate
+		},
+	}
+	err := ValidateDeploymentRingConfig(rc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate ring name")
+	assert.Contains(t, err.Error(), "early")
+}
+
+// TestValidateDeploymentRingConfig_RejectsUnknownFallbackRing verifies that a
+// fallback_ring not in the declared set is rejected at startup.
+func TestValidateDeploymentRingConfig_RejectsUnknownFallbackRing(t *testing.T) {
+	rc := DeploymentRingConfig{
+		FallbackRing: "canary",
+		Rings: []RingSpec{
+			{Name: "pre-release"},
+			{Name: "default"},
+		},
+	}
+	err := ValidateDeploymentRingConfig(rc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fallback_ring")
+	assert.Contains(t, err.Error(), "canary")
+}
+
+// TestValidateDeploymentRingConfig_RejectsInvalidName verifies that ring names not
+// matching ^[a-z][a-z0-9-]{0,31}$ are rejected.
+func TestValidateDeploymentRingConfig_RejectsInvalidName(t *testing.T) {
+	tests := []struct {
+		name    string
+		invalid string
+	}{
+		{"uppercase", "Early"},
+		{"starts-with-digit", "1early"},
+		{"has-underscore", "early_ring"},
+		{"too-long", "a" + "b0123456789012345678901234567890"}, // 33 chars
+		{"empty", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := DeploymentRingConfig{
+				Rings: []RingSpec{{Name: tt.invalid}},
+			}
+			err := ValidateDeploymentRingConfig(rc)
+			require.Error(t, err, "ring name %q must be rejected", tt.invalid)
+		})
+	}
+}
+
+// TestConfig_ValidateDeploymentRings_AbsentIsNil verifies nil DeploymentRings is always valid.
+func TestConfig_ValidateDeploymentRings_AbsentIsNil(t *testing.T) {
+	cfg := &Config{}
+	assert.NoError(t, cfg.ValidateDeploymentRings(),
+		"nil DeploymentRings must be valid (defaults apply)")
+}
+
+// TestConfig_EffectiveRings_DefaultsApplied verifies EffectiveRings returns the four
+// default rings when DeploymentRings is nil.
+func TestConfig_EffectiveRings_DefaultsApplied(t *testing.T) {
+	cfg := &Config{}
+	rings := cfg.EffectiveRings()
+
+	require.Len(t, rings.Rings, 4, "must return the four default rings")
+	assert.Equal(t, "pre-release", rings.Rings[0].Name)
+	assert.Equal(t, "early", rings.Rings[1].Name)
+	assert.Equal(t, "default", rings.Rings[2].Name)
+	assert.Equal(t, "stable", rings.Rings[3].Name)
+	assert.Equal(t, "default", rings.FallbackRing)
+}
+
+// TestConfig_EffectiveRings_ConfigOverride verifies EffectiveRings returns the
+// operator-configured rings when present, with fallback_ring defaulted to "default".
+func TestConfig_EffectiveRings_ConfigOverride(t *testing.T) {
+	cfg := &Config{
+		DeploymentRings: &DeploymentRingConfig{
+			Rings: []RingSpec{
+				{Name: "beta", DesiredVersion: "v0.6.0"},
+				{Name: "stable", DesiredVersion: "v0.5.21"},
+			},
+		},
+		// FallbackRing deliberately left empty — should default to "default"
+	}
+	rings := cfg.EffectiveRings()
+
+	require.Len(t, rings.Rings, 2)
+	assert.Equal(t, "beta", rings.Rings[0].Name)
+	assert.Equal(t, DefaultFallbackRing, rings.FallbackRing,
+		"empty fallback_ring must default to the constant DefaultFallbackRing")
+}
+
+// TestDeploymentRings_LoadWithPath verifies deployment_rings is loaded from a config file.
+func TestDeploymentRings_LoadWithPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+
+	content := `
+deployment_rings:
+  fallback_ring: default
+  rings:
+    - name: pre-release
+      desired_version: "v0.6.0"
+    - name: early
+      desired_version: "v0.5.21"
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.DeploymentRings)
+	assert.Len(t, cfg.DeploymentRings.Rings, 4)
+	assert.Equal(t, "v0.6.0", cfg.DeploymentRings.Rings[0].DesiredVersion)
+	assert.Equal(t, "default", cfg.DeploymentRings.FallbackRing)
+}

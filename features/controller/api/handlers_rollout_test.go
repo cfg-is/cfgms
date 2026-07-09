@@ -1,0 +1,846 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+// --- Test-only in-memory RolloutStore ---
+
+type testRolloutStore struct {
+	mu      sync.RWMutex
+	records map[string]*business.RolloutRecord
+
+	// Lifecycle-signal channels fed by the server's rollout hooks (wired in
+	// setupRolloutServer). They let tests synchronize on the background goroutine
+	// deterministically instead of sleeping. Buffered so runRollout never blocks and no
+	// signal is lost before a reader arrives.
+	terminalC chan string // receives rolloutID when runRollout commits a terminal store update
+	soakC     chan string // receives rolloutID when runRollout enters a ring soak
+}
+
+func newTestRolloutStore() *testRolloutStore {
+	return &testRolloutStore{
+		records:   make(map[string]*business.RolloutRecord),
+		terminalC: make(chan string, 16),
+		soakC:     make(chan string, 16),
+	}
+}
+
+func (s *testRolloutStore) CreateRollout(_ context.Context, record *business.RolloutRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.records[record.ID]; exists {
+		return fmt.Errorf("duplicate rollout ID: %s", record.ID)
+	}
+	cp := *record
+	s.records[record.ID] = &cp
+	return nil
+}
+
+func (s *testRolloutStore) GetRollout(_ context.Context, id string) (*business.RolloutRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.records[id]
+	if !ok {
+		return nil, business.ErrRolloutNotFound
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (s *testRolloutStore) UpdateRolloutProgress(_ context.Context, id string, status business.RolloutStatus, currentRing string, ringsCompleted int, haltedAt *time.Time, errorMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[id]
+	if !ok {
+		return business.ErrRolloutNotFound
+	}
+	r.Status = status
+	r.CurrentRing = currentRing
+	r.RingsCompleted = ringsCompleted
+	r.HaltedAt = haltedAt
+	r.Error = errorMsg
+	return nil
+}
+
+func (s *testRolloutStore) AppendDeferredStewards(_ context.Context, rolloutID string, stewardIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[rolloutID]
+	if !ok {
+		return business.ErrRolloutNotFound
+	}
+	r.DeferredStewards = append(r.DeferredStewards, stewardIDs...)
+	return nil
+}
+
+func (s *testRolloutStore) ListRolloutsByTenant(_ context.Context, tenantID string) ([]*business.RolloutRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*business.RolloutRecord
+	for _, r := range s.records {
+		if r.TenantID == tenantID {
+			cp := *r
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (s *testRolloutStore) HealthCheck(_ context.Context) error { return nil }
+func (s *testRolloutStore) Initialize(_ context.Context) error  { return nil }
+func (s *testRolloutStore) Close() error                        { return nil }
+
+var _ business.RolloutStore = (*testRolloutStore)(nil)
+
+// --- Test helpers ---
+
+// newMinimalServerForRollout creates a Server with only the fields needed for rollout
+// handler tests. Rollout tests inject a Principal via withScopedPrincipal / withAdminPrincipal,
+// so authRunAccess reads from the request context and the heavyweight auth/storage
+// infrastructure created by setupTestServer (git-backed RBAC, auth defense caches, secret
+// store) is not required. Omitting that infrastructure prevents cache cleanup goroutines from
+// accumulating across the 16 rollout tests, which on Windows CI pushes the package test suite
+// past its 5-minute limit.
+func newMinimalServerForRollout(t *testing.T) *Server {
+	t.Helper()
+	// Pre-close cleanupDone: no startAPIKeyCleanup goroutine was started, so server.Close()
+	// must not block waiting for it.
+	cleanupDone := make(chan struct{})
+	close(cleanupDone)
+
+	cfg := controllerconfig.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	s := &Server{
+		logger:      logging.NewNoopLogger(),
+		cfg:         cfg,
+		stopCleanup: make(chan struct{}),
+		cleanupDone: cleanupDone,
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.Close(closeCtx); err != nil {
+			t.Logf("newMinimalServerForRollout cleanup: Close: %v", err)
+		}
+	})
+	return s
+}
+
+// setupRolloutServer creates a server wired with a rollout store, upgrade store,
+// and a fleet query backed by the given stewards.
+func setupRolloutServer(t *testing.T, tenantID string, stewards []fleet.StewardData) (*Server, *testRolloutStore, *testUpgradeStore) {
+	t.Helper()
+	server := newMinimalServerForRollout(t)
+
+	// Configure two-ring deployment_rings so tests run against a predictable ring set.
+	server.cfg.DeploymentRings = &controllerconfig.DeploymentRingConfig{
+		Rings: []controllerconfig.RingSpec{
+			{Name: "pre-release", Soak: 0, HaltThreshold: 0.05},
+			{Name: "stable", Soak: 0, HaltThreshold: 0.05},
+		},
+		FallbackRing: "pre-release",
+	}
+
+	rolloutStore := newTestRolloutStore()
+	upgradeStore := newTestUpgradeStore()
+	server.rolloutStore = rolloutStore
+	server.upgradeStore = upgradeStore
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: stewards})
+
+	// Wire the rollout lifecycle hooks so tests can synchronize on the background
+	// goroutine via channels instead of time.Sleep polling. Hooks must be set before any
+	// rollout is started so no signal is missed.
+	server.onRolloutSoak = func(rolloutID string) { rolloutStore.soakC <- rolloutID }
+	server.onRolloutTerminal = func(rolloutID string) { rolloutStore.terminalC <- rolloutID }
+
+	return server, rolloutStore, upgradeStore
+}
+
+// doStartRollout calls handleStartRollout with the given tenant and target version.
+func doStartRollout(server *Server, tenantID, targetVersion string) *httptest.ResponseRecorder {
+	body := startRolloutRequest{TargetVersion: targetVersion, TenantID: tenantID}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
+	req = withScopedPrincipal(req, tenantID)
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+	return rec
+}
+
+// parseStartRolloutID decodes the rollout_id from a handleStartRollout 202 response.
+// The response is wrapped in an APIResponse envelope: {"data": {"rollout_id": "...", ...}}.
+func parseStartRolloutID(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var wrapper struct {
+		Data startRolloutResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper), "failed to decode start rollout response")
+	return wrapper.Data.RolloutID
+}
+
+// doGetRollout calls handleGetRollout for the given rollout ID.
+func doGetRollout(server *Server, tenantID, rolloutID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rollout/"+rolloutID, nil)
+	req = withScopedPrincipal(req, tenantID)
+	req = mux.SetURLVars(req, map[string]string{"rollout_id": rolloutID})
+	rec := httptest.NewRecorder()
+	server.handleGetRollout(rec, req)
+	return rec
+}
+
+// doHaltRollout calls handleHaltRollout for the given rollout ID.
+func doHaltRollout(server *Server, tenantID, rolloutID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout/"+rolloutID+"/halt", nil)
+	req = withScopedPrincipal(req, tenantID)
+	req = mux.SetURLVars(req, map[string]string{"rollout_id": rolloutID})
+	rec := httptest.NewRecorder()
+	server.handleHaltRollout(rec, req)
+	return rec
+}
+
+// waitForRolloutStatus blocks until runRollout signals that the given rollout reached a
+// terminal (completed/halted) store update, then returns the final record. It synchronizes
+// on the store's terminalC channel — fed by the server's onRolloutTerminal hook — rather
+// than polling with sleeps, so the observed transition is deterministic. Fails the test if
+// the goroutine does not reach a terminal state within timeout.
+func waitForRolloutStatus(t *testing.T, store *testRolloutStore, rolloutID string, timeout time.Duration) *business.RolloutRecord {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case id := <-store.terminalC:
+			if id != rolloutID {
+				// Signal for a different rollout; keep waiting for ours.
+				continue
+			}
+			rec, err := store.GetRollout(context.Background(), rolloutID)
+			require.NoError(t, err)
+			return rec
+		case <-deadline:
+			t.Fatalf("rollout %s did not reach a terminal state within %s", rolloutID, timeout)
+			return nil
+		}
+	}
+}
+
+// seedFailedUpgradeRecords pre-populates the upgrade store with terminal-failure records
+// for each steward ID, targeting desiredVersion. This seeds stewards that attempted
+// but failed the upgrade before the ring health check runs.
+func seedFailedUpgradeRecords(t *testing.T, store *testUpgradeStore, tenantID, desiredVersion string, stewardIDs ...string) {
+	t.Helper()
+	for i, id := range stewardIDs {
+		rec := &business.UpgradeRecord{
+			ID:              fmt.Sprintf("upgrade-%d", i),
+			StewardID:       id,
+			TenantID:        tenantID,
+			Version:         desiredVersion,
+			Platform:        "linux",
+			Arch:            "amd64",
+			Status:          business.UpgradeStatusFailed,
+			BundleSignature: []byte{0x01}, // non-empty required by testUpgradeStore
+			CreatedAt:       time.Now().UTC(),
+		}
+		require.NoError(t, store.CreateUpgrade(context.Background(), rec))
+	}
+}
+
+// --- Required tests (AC) ---
+
+// TestRollout_HaltsWhenFailureRateExceedsThreshold verifies that when failed_pct >
+// halt_threshold, the rollout transitions to halted and no further ring promotion occurs.
+// This is an explicitly required test per the story acceptance criteria.
+func TestRollout_HaltsWhenFailureRateExceedsThreshold(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	// Two stewards in the pre-release ring, both on an older version.
+	stewards := []fleet.StewardData{
+		{
+			ID:            "steward-1",
+			TenantID:      tenantID,
+			Status:        "online",
+			DNAAttributes: map[string]string{"deployment_ring": "pre-release"},
+		},
+		{
+			ID:            "steward-2",
+			TenantID:      tenantID,
+			Status:        "online",
+			DNAAttributes: map[string]string{"deployment_ring": "pre-release"},
+		},
+	}
+	server, rolloutStore, upgradeStore := setupRolloutServer(t, tenantID, stewards)
+
+	// Pre-seed both stewards with terminal-failure upgrade records for targetVersion.
+	// With failed=2, on_version=0: rate = 2/(0+2) = 1.0, which exceeds threshold 0.05.
+	seedFailedUpgradeRecords(t, upgradeStore, tenantID, targetVersion, "steward-1", "steward-2")
+
+	rec := doStartRollout(server, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code, "POST /api/v1/rollout must return 202: %s", rec.Body.String())
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	// Wait for the goroutine to detect the failure and transition to halted.
+	// Soak is 0, so the goroutine should reach the health check immediately.
+	finalRecord := waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+
+	assert.Equal(t, string(business.RolloutStatusHalted), string(finalRecord.Status),
+		"rollout must be halted when failure rate exceeds threshold")
+	assert.NotNil(t, finalRecord.HaltedAt, "halted_at must be set")
+	assert.NotEmpty(t, finalRecord.Error, "error message must explain the halt reason")
+
+	// No promotion: pre-release ring remains at index 0 (ringsCompleted must not exceed 0).
+	assert.Equal(t, 0, finalRecord.RingsCompleted,
+		"no ring may be counted as completed when the first ring fails")
+
+	// Deferred stewards must be recorded.
+	assert.ElementsMatch(t, []string{"steward-1", "steward-2"}, finalRecord.DeferredStewards,
+		"failed stewards must be in the deferred-retry list")
+}
+
+// TestRollout_StatusReturnsRequiredFields verifies that GET /api/v1/rollout/{rollout_id}
+// returns current_ring, on_version_pct, failed_count, pending_count, and status.
+// This is an explicitly required test per the story acceptance criteria.
+func TestRollout_StatusReturnsRequiredFields(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	// One steward in pre-release, already on the target version.
+	stewards := []fleet.StewardData{
+		{
+			ID:       "steward-ok",
+			TenantID: tenantID,
+			Status:   "online",
+			// steward.version is the DNA attribute that populates StewardResult.RunningVersion.
+			DNAAttributes: map[string]string{
+				"deployment_ring": "pre-release",
+				"steward.version": targetVersion,
+			},
+		},
+	}
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, stewards)
+
+	// Start the rollout.
+	rec := doStartRollout(server, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	// Wait for goroutine to complete (soak=0, all stewards on target → completes fast).
+	waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+
+	// Query the status endpoint.
+	statusRec := doGetRollout(server, tenantID, rolloutID)
+	require.Equal(t, http.StatusOK, statusRec.Code, "GET rollout status must return 200: %s", statusRec.Body.String())
+
+	var wrapper struct {
+		Data rolloutStatusResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(statusRec.Body).Decode(&wrapper))
+	resp := wrapper.Data
+
+	// Required fields per acceptance criteria.
+	assert.NotEmpty(t, resp.RolloutID, "rollout_id must be set")
+	assert.Equal(t, targetVersion, resp.TargetVersion, "target_version must be set")
+	// current_ring is empty when completed (all rings done).
+	assert.NotEmpty(t, resp.Status, "status must be set")
+	// on_version_pct, failed_count, pending_count are returned (may be 0 for completed).
+	assert.GreaterOrEqual(t, resp.OnVersionPct, float64(0), "on_version_pct must be a valid percentage")
+	assert.GreaterOrEqual(t, resp.FailedCount, 0, "failed_count must be non-negative")
+	assert.GreaterOrEqual(t, resp.PendingCount, 0, "pending_count must be non-negative")
+	assert.Equal(t, 2, resp.RingsTotal, "rings_total must reflect the configured ring count")
+}
+
+// TestRollout_FailedStewardsRequeued verifies that stewards with terminal upgrade
+// failures are added to the RolloutRecord.DeferredStewards list, not dropped.
+func TestRollout_FailedStewardsRequeued(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	stewards := []fleet.StewardData{
+		{
+			ID:            "steward-fail",
+			TenantID:      tenantID,
+			Status:        "online",
+			DNAAttributes: map[string]string{"deployment_ring": "pre-release"},
+		},
+	}
+	server, rolloutStore, upgradeStore := setupRolloutServer(t, tenantID, stewards)
+	seedFailedUpgradeRecords(t, upgradeStore, tenantID, targetVersion, "steward-fail")
+
+	rec := doStartRollout(server, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	finalRecord := waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+
+	assert.Contains(t, finalRecord.DeferredStewards, "steward-fail",
+		"failed steward must appear in DeferredStewards, not be silently dropped")
+}
+
+// TestRollout_OperatorHalt verifies that POST /api/v1/rollout/{rollout_id}/halt
+// transitions an in-progress rollout to halted status.
+func TestRollout_OperatorHalt(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	// No stewards so the goroutine has nothing to advance — gives us a window to halt.
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Use a long soak so the goroutine blocks inside the soak select, giving the test
+	// time to issue the halt before the goroutine finishes.
+	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(30 * time.Second)
+	server.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(30 * time.Second)
+
+	rec := doStartRollout(server, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	// Wait for the goroutine to commit the ring's in-progress state and block on the soak
+	// select before issuing the halt. Synchronizing on the soak signal (instead of a fixed
+	// sleep) guarantees the goroutine's in-progress store write has already happened, so the
+	// halt's terminal write cannot be clobbered by a late in-progress update.
+	select {
+	case id := <-rolloutStore.soakC:
+		require.Equal(t, rolloutID, id, "unexpected rollout entered soak")
+	case <-time.After(2 * time.Second):
+		t.Fatal("rollout goroutine did not reach soak within 2s")
+	}
+
+	// Operator halt.
+	haltRec := doHaltRollout(server, tenantID, rolloutID)
+	require.Equal(t, http.StatusOK, haltRec.Code, "halt must return 200: %s", haltRec.Body.String())
+
+	// Verify the store reflects halted status.
+	stored, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusHalted), string(stored.Status))
+}
+
+// TestRollout_Halt_CrossTenantForbidden verifies that a scoped caller cannot halt a rollout
+// owned by another tenant. Supplying a victim tenant's rollout ID to POST /halt must return
+// 403 FORBIDDEN and must not modify the victim's record. This mirrors the GET cross-tenant
+// guard (TestRollout_GetStatus_CrossTenant) for the halt path.
+func TestRollout_Halt_CrossTenantForbidden(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	// Seed an in-progress rollout owned by tenant-b.
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "other-rollout",
+		TenantID:      "tenant-b",
+		TargetVersion: "v0.5.21",
+		CurrentRing:   "pre-release",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	// Caller is tenant-a — must be forbidden.
+	rec := doHaltRollout(server, "tenant-a", "other-rollout")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant halt must be forbidden: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "FORBIDDEN")
+
+	// The victim's rollout must not have been halted.
+	stored, err := rolloutStore.GetRollout(context.Background(), "other-rollout")
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusInProgress), string(stored.Status),
+		"cross-tenant halt must not modify the victim's rollout status")
+	assert.Nil(t, stored.HaltedAt, "cross-tenant halt must not stamp halted_at on the victim's record")
+}
+
+// TestRollout_Halt_NotFound verifies that POST /api/v1/rollout/{rollout_id}/halt returns
+// 404 ROLLOUT_NOT_FOUND for an unknown rollout ID. This mirrors TestRollout_GetStatus_NotFound
+// for the halt path.
+func TestRollout_Halt_NotFound(t *testing.T) {
+	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	rec := doHaltRollout(server, "tenant-a", "nonexistent-rollout-id")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLLOUT_NOT_FOUND")
+}
+
+// TestRollout_Halt_IdempotentOnTerminal verifies that halting a rollout that is already in a
+// terminal state (halted or completed) returns 200 with the current status and does not modify
+// the record. This covers the already-terminal short-circuit in handleHaltRollout.
+func TestRollout_Halt_IdempotentOnTerminal(t *testing.T) {
+	const tenantID = "tenant-a"
+
+	cases := []struct {
+		name   string
+		status business.RolloutStatus
+	}{
+		{"already halted", business.RolloutStatusHalted},
+		{"already completed", business.RolloutStatusCompleted},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+			// Seed a rollout already in a terminal state with distinguishing fields that must
+			// survive an idempotent halt untouched.
+			haltedAt := time.Now().UTC().Add(-time.Hour)
+			require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+				ID:             "terminal-rollout",
+				TenantID:       tenantID,
+				TargetVersion:  "v0.5.21",
+				CurrentRing:    "stable",
+				RingsCompleted: 2,
+				RingsTotal:     2,
+				Status:         tc.status,
+				StartedAt:      time.Now().UTC().Add(-2 * time.Hour),
+				HaltedAt:       &haltedAt,
+				Error:          "original terminal reason",
+			}))
+
+			rec := doHaltRollout(server, tenantID, "terminal-rollout")
+			require.Equal(t, http.StatusOK, rec.Code, "idempotent halt must return 200: %s", rec.Body.String())
+
+			// The response must echo the existing terminal status, not force it to halted.
+			var wrapper struct {
+				Data startRolloutResponse `json:"data"`
+			}
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper))
+			assert.Equal(t, string(tc.status), wrapper.Data.Status,
+				"idempotent halt must report the existing terminal status")
+
+			// The stored record must be unmodified: status, halted_at, and error preserved.
+			stored, err := rolloutStore.GetRollout(context.Background(), "terminal-rollout")
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.status), string(stored.Status),
+				"idempotent halt must not change a terminal rollout's status")
+			require.NotNil(t, stored.HaltedAt)
+			assert.Equal(t, haltedAt, *stored.HaltedAt, "idempotent halt must not overwrite halted_at")
+			assert.Equal(t, "original terminal reason", stored.Error,
+				"idempotent halt must not overwrite the original terminal reason")
+			assert.Equal(t, 2, stored.RingsCompleted, "idempotent halt must not change rings_completed")
+		})
+	}
+}
+
+// TestRollout_RequiresRolloutStore verifies that POST /api/v1/rollout returns 503 when
+// the rollout store is not configured.
+func TestRollout_RequiresRolloutStore(t *testing.T) {
+	server := newMinimalServerForRollout(t)
+	// rolloutStore is nil — not configured.
+
+	rec := doStartRollout(server, "tenant-a", "v0.5.21")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLLOUT_STORE_UNAVAILABLE")
+}
+
+// TestRollout_GetStatus_NotFound verifies that GET /api/v1/rollout/{rollout_id} returns
+// 404 for an unknown rollout ID.
+func TestRollout_GetStatus_NotFound(t *testing.T) {
+	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	rec := doGetRollout(server, "tenant-a", "nonexistent-rollout-id")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLLOUT_NOT_FOUND")
+}
+
+// TestRollout_GetStatus_CrossTenant verifies that a caller cannot read rollouts from
+// another tenant.
+func TestRollout_GetStatus_CrossTenant(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	// Seed a rollout owned by tenant-b.
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "other-rollout",
+		TenantID:      "tenant-b",
+		TargetVersion: "v0.5.21",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	// Caller is tenant-a — must be forbidden.
+	rec := doGetRollout(server, "tenant-a", "other-rollout")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestRollout_Start_CrossTenantRejected verifies that a scoped (non-admin) caller cannot
+// start a rollout attributed to another tenant by supplying req.TenantID. The override must
+// be rejected with 403 CROSS_TENANT so orchestration cannot be driven against a victim
+// tenant's fleet.
+func TestRollout_Start_CrossTenantRejected(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	// tenant-a caller attempts to start a rollout for tenant-b.
+	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-b"}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
+	req = withScopedPrincipal(req, "tenant-a")
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant start must be forbidden: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "CROSS_TENANT")
+
+	// No rollout may have been created for the victim tenant.
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-b")
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created for the victim tenant")
+}
+
+// TestRollout_Start_AdminCrossTenantAllowed verifies that an admin mTLS principal may start
+// a rollout for an explicit tenant via req.TenantID (the legitimate admin path).
+func TestRollout_Start_AdminCrossTenantAllowed(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-b"}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
+	req = withAdminPrincipal(req)
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "admin cross-tenant start must be accepted: %s", rec.Body.String())
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	// The rollout must be attributed to the requested tenant.
+	finalRecord := waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+	assert.Equal(t, "tenant-b", finalRecord.TenantID, "admin-supplied tenant_id must own the rollout")
+}
+
+// TestRollout_CompletesWhenAllRingsStewardsOnVersion verifies that when all stewards
+// are already on the target version the rollout completes without halting.
+func TestRollout_CompletesWhenAllRingsStewardsOnVersion(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	stewards := []fleet.StewardData{
+		{
+			ID:       "s1",
+			TenantID: tenantID,
+			Status:   "online",
+			DNAAttributes: map[string]string{
+				"deployment_ring": "pre-release",
+				"steward.version": targetVersion,
+			},
+		},
+		{
+			ID:       "s2",
+			TenantID: tenantID,
+			Status:   "online",
+			DNAAttributes: map[string]string{
+				"deployment_ring": "stable",
+				"steward.version": targetVersion,
+			},
+		},
+	}
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, stewards)
+
+	rec := doStartRollout(server, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	finalRecord := waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+
+	assert.Equal(t, string(business.RolloutStatusCompleted), string(finalRecord.Status),
+		"rollout must complete when all ring stewards are already on the target version")
+	assert.Equal(t, 2, finalRecord.RingsCompleted)
+}
+
+// TestRollout_GetStatus_FleetQueryFailure verifies that when the fleet health query fails
+// for an in-progress rollout, handleGetRollout does NOT report deceptively healthy all-zero
+// metrics. Instead it flags the health metrics as unavailable so operators cannot mistake a
+// query failure for a healthy ring with no failures. The record itself is still returned 200.
+func TestRollout_GetStatus_FleetQueryFailure(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Seed an in-progress rollout sitting on a current ring so the live-metrics branch runs.
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "in-progress-rollout",
+		TenantID:      tenantID,
+		TargetVersion: targetVersion,
+		CurrentRing:   "pre-release",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	// Swap in a fleet query that always fails (real interface impl, not a mock).
+	server.fleetQuery = &failingFleetQuery{}
+
+	rec := doGetRollout(server, tenantID, "in-progress-rollout")
+	require.Equal(t, http.StatusOK, rec.Code, "status must still return 200 with the record: %s", rec.Body.String())
+
+	var wrapper struct {
+		Data rolloutStatusResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper))
+	resp := wrapper.Data
+
+	assert.False(t, resp.HealthMetricsAvailable,
+		"health_metrics_available must be false when the fleet query fails")
+	assert.NotEmpty(t, resp.HealthMetricsError,
+		"health_metrics_error must explain that metrics are unavailable")
+	// The zeroed metrics must not be presented as authoritative healthy values.
+	assert.Zero(t, resp.OnVersionPct, "on_version_pct must not be fabricated on query failure")
+	assert.Zero(t, resp.FailedCount, "failed_count must not be fabricated on query failure")
+	assert.Zero(t, resp.PendingCount, "pending_count must not be fabricated on query failure")
+}
+
+// TestRollout_GetStatus_FleetQuerySuccessFlagsAvailable verifies the positive path: when the
+// fleet query succeeds for an in-progress rollout, health_metrics_available is true.
+func TestRollout_GetStatus_FleetQuerySuccessFlagsAvailable(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	stewards := []fleet.StewardData{
+		{
+			ID:       "steward-ok",
+			TenantID: tenantID,
+			Status:   "online",
+			DNAAttributes: map[string]string{
+				"deployment_ring": "pre-release",
+				"steward.version": targetVersion,
+			},
+		},
+	}
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, stewards)
+
+	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:            "in-progress-ok",
+		TenantID:      tenantID,
+		TargetVersion: targetVersion,
+		CurrentRing:   "pre-release",
+		Status:        business.RolloutStatusInProgress,
+		StartedAt:     time.Now().UTC(),
+		RingsTotal:    2,
+	}))
+
+	rec := doGetRollout(server, tenantID, "in-progress-ok")
+	require.Equal(t, http.StatusOK, rec.Code, "status must return 200: %s", rec.Body.String())
+
+	var wrapper struct {
+		Data rolloutStatusResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&wrapper))
+	resp := wrapper.Data
+
+	assert.True(t, resp.HealthMetricsAvailable,
+		"health_metrics_available must be true when the fleet query succeeds")
+	assert.Empty(t, resp.HealthMetricsError, "no error message on a successful query")
+	assert.Equal(t, float64(100), resp.OnVersionPct, "the single on-version steward yields 100%%")
+}
+
+// TestRollout_InvalidVersionRejected verifies that a malformed target_version returns 400.
+func TestRollout_InvalidVersionRejected(t *testing.T) {
+	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	rec := doStartRollout(server, "tenant-a", "not-a-semver")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_VERSION")
+}
+
+// TestRollout_Start_InvalidBodyRejected verifies that POST /api/v1/rollout returns
+// 400 INVALID_BODY when the request body is not decodable JSON. This exercises the
+// json.NewDecoder decode-error branch in handleStartRollout, and asserts that no
+// rollout record is created for a request that never got past body parsing.
+func TestRollout_Start_InvalidBodyRejected(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Malformed JSON: unterminated object, missing quotes — Decode must fail.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout",
+		bytes.NewReader([]byte("{not valid json")))
+	req = withScopedPrincipal(req, tenantID)
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"malformed body must return 400: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "INVALID_BODY")
+
+	// A request rejected at body parsing must not have created any rollout record.
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created for an undecodable body")
+}
+
+// TestRollout_Start_MissingTargetVersionRejected verifies that POST /api/v1/rollout
+// returns 400 MISSING_FIELDS when the body decodes but target_version is empty. This
+// exercises the required-field guard that sits between body decoding and version-format
+// validation, and confirms an empty target_version is rejected as missing (not as an
+// invalid version).
+func TestRollout_Start_MissingTargetVersionRejected(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Well-formed JSON that omits target_version entirely.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout",
+		bytes.NewReader([]byte(`{"tenant_id":"tenant-a"}`)))
+	req = withScopedPrincipal(req, tenantID)
+	rec := httptest.NewRecorder()
+	server.handleStartRollout(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"missing target_version must return 400: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "MISSING_FIELDS")
+
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created when target_version is missing")
+}
+
+// TestRollout_Start_NoRingsConfigured verifies that POST /api/v1/rollout returns
+// 500 NO_RINGS when the controller has an explicitly empty deployment ring set. A
+// rollout is impossible without rings, and effectiveRings surfaces an operator-declared
+// empty set rather than silently masking it with the four-ring default — so this branch
+// covers a real operational misconfiguration, not dead code.
+func TestRollout_Start_NoRingsConfigured(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+
+	// Explicitly configure an empty ring set (non-nil, zero rings).
+	server.cfg.DeploymentRings = &controllerconfig.DeploymentRingConfig{
+		Rings: []controllerconfig.RingSpec{},
+	}
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a rollout with no rings configured must return 500: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "NO_RINGS")
+
+	// No rollout record may be created when there are no rings to advance through.
+	rollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, rollouts, "no rollout record may be created when no rings are configured")
+}

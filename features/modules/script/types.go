@@ -26,7 +26,7 @@ type ShellType string
 const (
 	// Windows shells
 	ShellPowerShell ShellType = "powershell" // Windows PowerShell 5.1 (powershell.exe)
-	ShellPwsh       ShellType = "pwsh"        // PowerShell Core / cross-platform (pwsh.exe)
+	ShellPwsh       ShellType = "pwsh"       // PowerShell Core / cross-platform (pwsh.exe)
 	ShellCmd        ShellType = "cmd"
 
 	// Unix shells
