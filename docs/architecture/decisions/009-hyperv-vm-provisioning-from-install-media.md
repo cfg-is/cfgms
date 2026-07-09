@@ -140,3 +140,72 @@ This capability provisions from **install media or a vendor cloud image** (§6a)
 - **Golden-image cloning first.** Deferred to Phase 3 (#1792) — requires an image store + build pipeline; ISO install is the simpler first capability.
 - **Controller blob store for ISOs.** Deferred — host-path + the `file` module is sufficient now.
 - **Per-VM short-lived enrollment tokens for v1.** Deferred — reuse the existing steward-deploy enrollment now; harden later (§8).
+
+---
+
+## Amendment 1: Cluster-scope existence gating for `ha_role` VMs
+
+**Status:** Accepted (founder-ratified 2026-07-08). **Related:** epic #2418; stories #2420, #2421, #2447.
+
+This ADR's existence gate (§2) was written for a single host: "the VM does not
+exist (by name) **on the host**." A VM declared with `ha_role` breaks that
+framing — the identical resource cascades to **every** member steward of the
+cluster, so per-host existence alone would let N stewards each conclude
+"absent here → create," producing duplicate VMs and duplicate provisioning
+runs. This amendment re-scopes the existence question to the cluster for
+`ha_role` VMs. Non-HA VMs are unaffected.
+
+### A1.1 Cluster-wide existence gate (#2420)
+
+For an `ha_role` VM, "exists" means **exists anywhere in the cluster**: locally
+present, OR registered as a clustered VM role owned by any node (the `Get`
+membership probe reports this even when the VM is locally absent). A steward
+where the VM is locally absent but the role is registered cluster-wide takes
+**no create action** — no `New-VM`, no provisioning — and converges as an
+audited no-op.
+
+**Promote-before-cascade rule (founder ruling 2026-07-08).** Cluster-wide
+existence is evaluated as *local presence OR registered cluster role*. An
+existing-but-unregistered VM on **another** host is therefore invisible to the
+gate. Promoting a standalone VM to `ha_role` must consequently happen **on the
+owning host first** (via that host steward's config), and only after role
+registration does the definition move to the cluster config. Cascading an
+`ha_role` declaration for an unregistered VM that lives on a different host is
+undefined and risks a duplicate create.
+
+### A1.2 CNO-owner creation gate (#2421)
+
+When the role exists **nowhere** in the cluster (locally absent AND no
+registered role), exactly one node must perform the first-ever
+create/provision: the steward currently owning the cluster's CNO group. Every
+other member records an audit skip and returns cleanly — coordination, not
+authorization, the same non-owner shape as the cluster module's role-membership
+reconcile. Non-owners converge automatically once the owner creates (their next
+probe sees the registered role; A1.1 applies). The gate sits before the
+source/plain dispatch, so expensive `source` provisioning is owner-gated too. A
+transient owner-less CNO (mid-failover) means no node creates that cycle;
+an ownership-read failure fails the converge rather than silently skipping.
+
+### A1.3 Preserved §2 invariants
+
+The amendment widens *where* existence is evaluated; it changes nothing about
+*what* triggers action. Provisioning remains **existence-gated, never
+health-gated**; `on_existing: never` remains the default; nothing is destroyed
+automatically, ever.
+
+### A1.4 Cluster-visible provisioning record — Option A (ratified)
+
+A1.1/A1.2 close the duplicate-create window for *registered* roles, but a
+provisioning run in flight on the owner has no registered role yet — a CNO
+failover mid-provision could let the new owner start a second run. **Option A**
+is ratified: the per-VM provisioning record (§3) for `ha_role` VMs is stored
+**cluster-visible on the CSV**, so every member steward sees an in-progress
+record regardless of which node wrote it. A steward observing an in-progress
+record it cannot attribute to itself **surfaces-and-waits** — it never
+provisions over another node's run. Implementation is story #2447 (this
+amendment documents the decision).
+
+**Caveat:** *cluster-visible* means visible to **cluster member nodes**, NOT
+controller-visible. The controller-side completion reconciler wiring (§8's
+`ready` transition) is a separate, pre-existing gap and is unchanged by this
+amendment and its epic.

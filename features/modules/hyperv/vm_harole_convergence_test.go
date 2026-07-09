@@ -252,6 +252,208 @@ func TestSetVM_StandaloneVM_UnaffectedByGate(t *testing.T) {
 		"a standalone (non-HA) VM must still be created when locally absent")
 }
 
+// ─── Issue #2421: CNO-owner creates cluster-wide-missing HA role VMs ───────────
+//
+// When ha_role is declared and the role does not exist ANYWHERE in the cluster
+// yet (locally absent AND current.HARole == nil per the #2420 probe), only the
+// steward currently owning the CNO group proceeds to create/provision; every
+// other member records an audit skip and returns nil. Non-owners converge once
+// the owner creates it (their next getVM sees the registered role, #2420 gate).
+
+// TestSetVM_ClusterWideAbsentRole_NonOwnerSurfacesAndWaits (REQUIRED, #2421):
+// role absent cluster-wide and this node does NOT own the CNO → zero
+// New-VM/provisioning transport calls, setVM returns nil, and the skip is
+// audited — for BOTH the plain-lifecycle path and the source path.
+func TestSetVM_ClusterWideAbsentRole_NonOwnerSurfacesAndWaits(t *testing.T) {
+	const vmName = "ha-first-vm"
+	const cluster = "lab-hv"
+
+	// Five transport calls total: getVM + membership probe (role absent
+	// everywhere), then the ownership helper's CNO-owner read + role-owner map
+	// + the audit cnoOwner re-read. Anything beyond that (New-VM, provisioning)
+	// violates the gate.
+	newTransport := func() *testWinRMTransport {
+		return &testWinRMTransport{perCallOutputs: []string{
+			`{"found":false}`,   // getVM: locally absent
+			`{"owners":{}}`,     // getVM probe: role absent cluster-wide
+			`{"owner":"NODE2"}`, // ownership helper: another node owns the CNO
+			`{"owners":{}}`,     // ownership helper: role owners
+			`{"owner":"NODE2"}`, // audit cnoOwner re-read
+		}}
+	}
+
+	t.Run("plain_lifecycle_path", func(t *testing.T) {
+		transport := newTransport()
+		m := vmModuleWithTransport(transport, "t-2421")
+		m.clusterName = cluster
+		m.nodeHostname = "NODE1"
+		mgr, store := newFakeAuditManager(t)
+		m.auditMgr = mgr
+		m.stewardID = "steward-2421"
+
+		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+			Name:       vmName,
+			MemoryMB:   4096,
+			CPUCount:   2,
+			VHDPath:    `C:\VMs\ha-first-vm.vhdx`,
+			SwitchName: "Default Switch",
+			Generation: 2,
+			State:      "running",
+			HARole:     &HARoleConfig{ClusterName: cluster},
+		}))
+
+		assert.Equal(t, 0, countCmd(transport, psCreateVM),
+			"a non-CNO-owner must never issue New-VM for a first-ever ha_role create")
+		transport.mu.Lock()
+		callCount := len(transport.calls)
+		transport.mu.Unlock()
+		assert.Equal(t, 5, callCount,
+			"gate must stop after getVM+probe+ownership reads — no mutation calls")
+
+		require.NoError(t, m.auditMgr.Flush(context.Background()))
+		skips := auditEntriesByActionCT(store.captured(), "vm-set-skip-not-cno-owner")
+		require.Len(t, skips, 1, "the non-owner skip must be audited")
+	})
+
+	t.Run("source_path", func(t *testing.T) {
+		transport := newTransport()
+		m := vmModuleWithTransport(transport, "t-2421")
+		m.clusterName = cluster
+		m.nodeHostname = "NODE1"
+
+		require.NoError(t, m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+			Name:       vmName,
+			MemoryMB:   4096,
+			CPUCount:   2,
+			VHDPath:    `C:\VMs\ha-first-vm.vhdx`,
+			SwitchName: "Default Switch",
+			Generation: 2,
+			State:      "running",
+			HARole:     &HARoleConfig{ClusterName: cluster},
+			Source: &SourceConfig{
+				Image:      `C:\images\debian.raw`,
+				OSFamily:   "linux",
+				Completion: CompletionConfig{Mode: "steward-registration", Timeout: "10m"},
+			},
+		}))
+
+		assert.Equal(t, 0, countCmd(transport, psCreateVM),
+			"the owner gate must fire before applySourceGated ever provisions")
+		transport.mu.Lock()
+		callCount := len(transport.calls)
+		transport.mu.Unlock()
+		assert.Equal(t, 5, callCount,
+			"gate must stop after getVM+probe+ownership reads — no provisioning calls")
+	})
+}
+
+// TestSetVM_ClusterWideAbsentRole_OwnerCreates (REQUIRED, #2421): same
+// preconditions, but this node DOES own the CNO → the existing create path
+// (createVM + registerClusteredRole) proceeds exactly as before this story.
+func TestSetVM_ClusterWideAbsentRole_OwnerCreates(t *testing.T) {
+	const vmName = "ha-first-vm"
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`,   // getVM: locally absent
+		`{"owners":{}}`,     // getVM probe: role absent cluster-wide
+		`{"owner":"NODE1"}`, // ownership helper (#2421 gate): this node owns the CNO
+		`{"owners":{}}`,     // ownership helper: role owners
+		``,                  // New-VM
+		``,                  // Cfgms-SetVMHome: config-home move (#2411)
+		`{"owner":"NODE1"}`, // registerClusteredRole ownership helper: CNO owner
+		`{"owners":{}}`,     // registerClusteredRole ownership helper: role owners
+		`{"owner":"NODE1"}`, // registerClusteredRole audit cnoOwner re-read
+		``,                  // Add-ClusterVirtualMachineRole
+	}}
+	m := vmModuleWithTransport(transport, "t-2421")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	require.NoError(t, m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+		Name:       vmName,
+		MemoryMB:   4096,
+		CPUCount:   2,
+		VHDPath:    `C:\VMs\ha-first-vm.vhdx`,
+		SwitchName: "Default Switch",
+		Generation: 2,
+		State:      "stopped",
+		HARole:     &HARoleConfig{ClusterName: cluster},
+	}))
+
+	assert.Equal(t, 1, countCmd(transport, psCreateVM),
+		"the CNO owner must perform the first-ever create")
+	assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
+		"the created VM must still be registered as a clustered role")
+}
+
+// TestSetVM_ClusterOwnershipHelperError_PropagatesAsSetError (REQUIRED, #2421):
+// a transport error from clusterOwnershipHelper is returned as a setVM error —
+// never silently swallowed into a skip (fail-safe).
+func TestSetVM_ClusterOwnershipHelperError_PropagatesAsSetError(t *testing.T) {
+	const vmName = "ha-first-vm"
+	const cluster = "lab-hv"
+
+	// readCNOOwner reports a valid owner, then the role-owner read fails —
+	// clusterOwnershipHelper returns that error.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":false}`,   // getVM: locally absent
+			`{"owners":{}}`,     // getVM probe: role absent cluster-wide
+			`{"owner":"NODE2"}`, // ownership helper: CNO owner read
+			``,                  // ownership helper: role owners — errors below
+		},
+		perCallErrors: []error{nil, nil, nil, errors.New("cluster service down")},
+	}
+	m := vmModuleWithTransport(transport, "t-2421")
+	m.clusterName = cluster
+	m.nodeHostname = "NODE1"
+
+	err := m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+		Name:       vmName,
+		MemoryMB:   4096,
+		CPUCount:   2,
+		VHDPath:    `C:\VMs\ha-first-vm.vhdx`,
+		SwitchName: "Default Switch",
+		Generation: 2,
+		State:      "running",
+		HARole:     &HARoleConfig{ClusterName: cluster},
+	})
+	require.Error(t, err,
+		"an ownership-helper failure must fail the Set, not silently skip")
+	assert.Contains(t, err.Error(), "cluster service down")
+	assert.Equal(t, 0, countCmd(transport, psCreateVM),
+		"no create may proceed when ownership could not be determined")
+}
+
+// TestSetVM_ClusterWideAbsentRole_ScopeCapErrorPropagates (#2421): an
+// out-of-scope ha_role.cluster_name fails the Set with ErrClusterNotDeclared
+// (S5 scope cap) — never a silent skip, never a create.
+func TestSetVM_ClusterWideAbsentRole_ScopeCapErrorPropagates(t *testing.T) {
+	const vmName = "ha-rogue-vm"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`, // getVM: locally absent
+		`{"owners":{}}`,   // getVM probe (module scope): role absent cluster-wide
+	}}
+	m := vmModuleWithTransport(transport, "t-2421")
+	m.clusterName = "lab-hv"
+	m.nodeHostname = "NODE1"
+
+	err := m.Set(context.Background(), "vm:"+vmName, &VMConfig{
+		Name:       vmName,
+		MemoryMB:   4096,
+		CPUCount:   2,
+		VHDPath:    `C:\VMs\ha-rogue-vm.vhdx`,
+		SwitchName: "Default Switch",
+		Generation: 2,
+		State:      "running",
+		HARole:     &HARoleConfig{ClusterName: "rogue-cluster"},
+	})
+	require.ErrorIs(t, err, ErrClusterNotDeclared)
+	assert.Equal(t, 0, countCmd(transport, psCreateVM))
+}
+
 // ─── AC1 (REQUIRED TEST): promote / demote an existing VM, idempotent ─────────
 
 // TestSetVM_HARole_PromoteExistingVM: adding ha_role to an already-created VM
