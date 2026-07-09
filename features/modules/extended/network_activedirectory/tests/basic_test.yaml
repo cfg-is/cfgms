@@ -1,0 +1,254 @@
+name: "Active Directory Basic Tests"
+description: "Basic functionality tests for Active Directory module"
+version: "1.0.0"
+
+# Test scenarios for Active Directory module
+test_scenarios:
+  - name: "connection_test"
+    description: "Test Active Directory connection establishment"
+    type: "connection"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user", "group"]
+      username: "testuser"
+      password: "testpass"
+    expected_result:
+      success: true
+      connected: true
+      health_status: "healthy"
+
+  - name: "user_query_test"
+    description: "Test user query operation"
+    type: "query"
+    resource_id: "query:user:testuser"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user"]
+    expected_result:
+      success: true
+      query_type: "user"
+      object_id: "testuser"
+
+  - name: "group_query_test"
+    description: "Test group query operation"
+    type: "query"
+    resource_id: "query:group:testgroup"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["group"]
+    expected_result:
+      success: true
+      query_type: "group"
+      object_id: "testgroup"
+
+  - name: "list_users_test"
+    description: "Test user listing operation"
+    type: "list"
+    resource_id: "list:user"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user"]
+    expected_result:
+      success: true
+      query_type: "user"
+      total_count: 0  # May be empty in test environment
+
+  - name: "status_test"
+    description: "Test connection status query"
+    type: "status"
+    resource_id: "status"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user"]
+    expected_result:
+      domain: "test.local"
+      auth_method: "simple"
+
+  - name: "multi_domain_test"
+    description: "Test multi-domain configuration"
+    type: "config"
+    config:
+      domain: "primary.local"
+      auth_method: "kerberos"
+      operation_type: "read"
+      object_types: ["user", "group", "trust"]
+      trusted_domains: ["trusted.local"]
+      cross_domain_auth: true
+    expected_result:
+      success: true
+      cross_domain_enabled: true
+
+  - name: "cross_domain_query_test"
+    description: "Test cross-domain user query"
+    type: "query"
+    resource_id: "query:user:john.doe:trusted.local"
+    config:
+      domain: "primary.local"
+      auth_method: "kerberos"
+      operation_type: "read"
+      object_types: ["user"]
+      trusted_domains: ["trusted.local"]
+      cross_domain_auth: true
+    expected_result:
+      success: true
+      query_type: "user"
+      cross_domain: true
+
+  - name: "forest_search_test"
+    description: "Test forest-wide search"
+    type: "query"
+    resource_id: "forest:user:admin.user"
+    config:
+      domain: "corp.contoso.com"
+      auth_method: "kerberos"
+      operation_type: "read"
+      object_types: ["user"]
+      forest_root: "contoso.com"
+      global_catalog_dc: "gc1.contoso.com"
+    expected_result:
+      success: true
+      query_type: "forest_user"
+      forest_search: true
+
+  - name: "computer_query_test"
+    description: "Test computer object query"
+    type: "query"
+    resource_id: "query:computer:WORKSTATION-01"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["computer"]
+    expected_result:
+      success: true
+      query_type: "computer"
+      object_id: "WORKSTATION-01"
+
+  - name: "gpo_query_test"
+    description: "Test Group Policy Object query"
+    type: "query"
+    resource_id: "query:gpo:Default Domain Policy"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["gpo"]
+    expected_result:
+      success: true
+      query_type: "gpo"
+      object_id: "Default Domain Policy"
+
+  - name: "trust_validation_test"
+    description: "Test domain trust validation"
+    type: "query"
+    resource_id: "validate_trust:trusted.local"
+    config:
+      domain: "primary.local"
+      auth_method: "kerberos"
+      operation_type: "read"
+      object_types: ["trust"]
+      trusted_domains: ["trusted.local"]
+    expected_result:
+      success: true
+      trust_validated: true
+
+# Error test scenarios
+error_scenarios:
+  - name: "invalid_domain_test"
+    description: "Test behavior with invalid domain"
+    config:
+      domain: "nonexistent.invalid"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user"]
+    expected_error: "failed to resolve domain"
+
+  - name: "invalid_auth_test"
+    description: "Test behavior with invalid credentials"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user"]
+      username: "invalid_user"
+      password: "wrong_password"
+    expected_error: "authentication failed"
+
+  - name: "unsupported_object_type_test"
+    description: "Test behavior with unsupported object type"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["invalid_type"]
+    expected_error: "invalid object_type"
+
+  - name: "cross_domain_without_auth_test"
+    description: "Test cross-domain query without cross_domain_auth enabled"
+    resource_id: "query:user:john.doe:other.domain"
+    config:
+      domain: "test.local"
+      auth_method: "simple"
+      operation_type: "read"
+      object_types: ["user"]
+      cross_domain_auth: false
+    expected_error: "cross-domain authentication not enabled"
+
+# Performance benchmarks
+performance_tests:
+  - name: "user_query_latency"
+    description: "Measure user query response time"
+    type: "benchmark"
+    resource_id: "query:user:testuser"
+    target_latency: "100ms"
+    
+  - name: "bulk_user_list_latency"
+    description: "Measure bulk user list performance"
+    type: "benchmark"
+    resource_id: "list:user"
+    target_latency: "500ms"
+    
+  - name: "concurrent_queries"
+    description: "Test concurrent query performance"
+    type: "stress"
+    concurrent_requests: 50
+    target_success_rate: 95
+
+# Security validation tests
+security_tests:
+  - name: "credential_redaction_test"
+    description: "Verify passwords are redacted in logs and serialization"
+    type: "security"
+    validation: "password_redaction"
+    
+  - name: "tls_encryption_test"
+    description: "Verify TLS encryption is used when configured"
+    type: "security"
+    validation: "tls_enforcement"
+    
+  - name: "service_account_test"
+    description: "Verify service account permissions are minimal"
+    type: "security"
+    validation: "least_privilege"
+
+# Compliance tests
+compliance_tests:
+  - name: "audit_logging_test"
+    description: "Verify all operations are properly logged"
+    type: "compliance"
+    validation: "audit_trail"
+    
+  - name: "data_classification_test"
+    description: "Verify sensitive data handling"
+    type: "compliance"
+    validation: "data_protection"

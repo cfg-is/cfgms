@@ -1,0 +1,75 @@
+type: object
+required:
+  - name
+  - action
+  - source
+  - destination
+properties:
+  name:
+    type: string
+    description: Unique name for the firewall rule
+    minLength: 1
+    maxLength: 64
+    pattern: "^[a-zA-Z0-9_-]+$"
+
+  action:
+    type: string
+    description: Action to take for matching traffic
+    enum:
+      - allow
+      - deny
+
+  protocol:
+    type: string
+    description: Network protocol
+    enum:
+      - tcp
+      - udp
+      - icmp
+
+  service:
+    type: string
+    description: Service name (alternative to protocol/port)
+    pattern: "^[a-zA-Z0-9_-]+$"
+
+  port:
+    type: integer
+    description: Single port number
+    minimum: 0
+    maximum: 65535
+
+  ports:
+    type: array
+    description: Multiple port numbers
+    items:
+      type: integer
+      minimum: 0
+      maximum: 65535
+    minItems: 1
+    uniqueItems: true
+
+  source:
+    type: string
+    description: Source IP address or CIDR range
+    pattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\/([0-9]|[1-2][0-9]|3[0-2]))?$"
+
+  destination:
+    type: string
+    description: Destination IP address or CIDR range
+    pattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\/([0-9]|[1-2][0-9]|3[0-2]))?$"
+
+  description:
+    type: string
+    description: Optional description of the rule
+    maxLength: 256
+
+  enabled:
+    type: boolean
+    description: Whether the rule is enabled
+    default: true
+
+oneOf:
+  - required:
+      - protocol
+  - required:
+      - service 

@@ -1,0 +1,25 @@
+name: package
+description: Manages system packages across different package managers (apt, yum, brew, etc.)
+version: 0.1.0
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local package management on steward systems
+
+author: CFGMS Team
+license: MIT
+platforms:
+  - linux
+  - darwin
+  - windows
+schema: schema.yaml
+interfaces:
+  - Get
+  - Set
+  - Test
+security:
+  requires_root: true
+  capabilities: []
+  ports: []

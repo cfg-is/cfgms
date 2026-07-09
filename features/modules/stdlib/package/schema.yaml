@@ -1,0 +1,102 @@
+type: object
+required:
+  - name
+  - state
+properties:
+  name:
+    type: string
+    description: Name of the package to manage
+    minLength: 1
+    maxLength: 128
+    pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+
+  state:
+    type: string
+    description: Desired state of the package
+    enum:
+      - present
+      - absent
+
+  version:
+    type: string
+    description: Specific version to install (optional, defaults to latest)
+    pattern: "^(latest|[0-9]+[-.0-9a-zA-Z]*)?$"
+
+  update:
+    type: boolean
+    description: Whether to update the package if it's already installed
+    default: false
+
+  dependencies:
+    type: array
+    description: List of package dependencies to install
+    items:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+
+  manager:
+    type: string
+    description: Package manager to use (optional, auto-detected if not specified)
+    enum:
+      - apt
+      - yum
+      - dnf
+      - pacman
+      - brew
+      - chocolatey
+      - winget
+
+  options:
+    type: object
+    description: Additional package manager specific options
+    additionalProperties: true
+
+  force:
+    type: boolean
+    description: Force the operation even if it might be dangerous
+    default: false
+
+  allow_untrusted:
+    type: boolean
+    description: Allow installation of untrusted packages
+    default: false
+
+  timeout:
+    type: integer
+    description: Timeout in seconds for package operations
+    minimum: 0
+    maximum: 3600
+    default: 300
+
+  retry:
+    type: object
+    description: Retry configuration for failed operations
+    properties:
+      attempts:
+        type: integer
+        minimum: 1
+        maximum: 10
+        default: 3
+      delay:
+        type: integer
+        description: Delay between retries in seconds
+        minimum: 1
+        maximum: 300
+        default: 5
+
+dependencies:
+  - if:
+      properties:
+        state:
+          const: present
+      required:
+        - state
+    then:
+      anyOf:
+        - required:
+            - version
+        - not:
+            required:
+              - version 

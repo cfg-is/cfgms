@@ -1,0 +1,366 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package script
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// Module implements the modules.Module interface for script execution
+type Module struct {
+	mu sync.RWMutex
+	// executions tracks ongoing script executions by resource ID
+	executions map[string]*ExecutionState
+	// auditLogger handles comprehensive audit logging
+	auditLogger *AuditLogger
+	// stewardID identifies the steward this module belongs to
+	stewardID string
+	// signingConfig holds the steward-level signing policy injected via SetSigningConfig.
+	signingConfig ModuleSigningConfig
+	// logger provides structured logging for the module
+	logger *logging.ModuleLogger
+	// Embed default logging support for automatic injection capability
+	modules.DefaultLoggingSupport
+}
+
+// ExecutionState tracks the state of a script execution
+type ExecutionState struct {
+	Config    *ScriptConfig
+	Status    ExecutionStatus
+	Result    *ExecutionResult
+	Error     error
+	StartTime int64
+}
+
+// New creates a new instance of the Script module
+func New() modules.Module {
+	return &Module{
+		executions:  make(map[string]*ExecutionState),
+		auditLogger: NewAuditLogger(1000), // Default 1000 records per steward
+		stewardID:   "unknown",            // Will be set by steward when module is loaded
+		logger:      logging.ForModule("script").WithField("component", "module"),
+	}
+}
+
+// NewModule creates a new script module instance
+func NewModule() *Module {
+	return &Module{
+		executions:  make(map[string]*ExecutionState),
+		auditLogger: NewAuditLogger(1000),
+		stewardID:   "unknown",
+		logger:      logging.ForModule("script").WithField("component", "module"),
+	}
+}
+
+// NewModuleWithConfig creates a new script module with specific configuration
+func NewModuleWithConfig(stewardID string, maxAuditRecords int) *Module {
+	return &Module{
+		executions:  make(map[string]*ExecutionState),
+		auditLogger: NewAuditLogger(maxAuditRecords),
+		stewardID:   stewardID,
+		logger:      logging.ForModule("script").WithField("component", "module"),
+	}
+}
+
+// Get returns the current state of a script resource
+func (m *Module) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	execution, exists := m.executions[resourceID]
+	if !exists {
+		// Return empty configuration for non-existent resources
+		return &ScriptConfig{
+			SigningPolicy: SigningPolicyNone,
+		}, nil
+	}
+
+	// Return a copy of the configuration to prevent external modification
+	config := *execution.Config
+	return &config, nil
+}
+
+// Set executes a script with the given configuration
+func (m *Module) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
+	// Get effective logger (injected or fallback)
+	logger := m.GetEffectiveLogger(logging.ForModule("script"))
+	tenantID := logging.ExtractTenantFromContext(ctx)
+
+	logger.InfoCtx(ctx, "Starting script execution",
+		"operation", "script_execute",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"resource_type", "script")
+
+	if config == nil {
+		return modules.ErrInvalidInput
+	}
+
+	scriptConfig, ok := config.(*ScriptConfig)
+	if !ok {
+		// The convergence executor passes a generic map-backed ConfigState
+		// rather than a typed *ScriptConfig — the file and directory modules
+		// likewise decode from config.AsMap(). Rebuild the typed config from
+		// the map instead of rejecting it. (Issue #1572)
+		var convErr error
+		scriptConfig, convErr = scriptConfigFromMap(config.AsMap())
+		if convErr != nil {
+			logger.ErrorCtx(ctx, "Invalid script configuration provided",
+				"operation", "script_execute",
+				"resource_id", resourceID,
+				"tenant_id", tenantID,
+				"resource_type", "script",
+				"error_code", "INVALID_CONFIG_TYPE",
+				"error_details", convErr.Error())
+			return fmt.Errorf("%w: %v", modules.ErrInvalidInput, convErr)
+		}
+	}
+
+	// Validate the configuration
+	if err := scriptConfig.Validate(); err != nil {
+		logger.ErrorCtx(ctx, "Configuration validation failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"error_code", "CONFIG_VALIDATION_FAILED",
+			"error_details", err.Error())
+		return fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Create executor and validate shell availability
+	executor := NewExecutor(scriptConfig)
+	if err := executor.ValidateShellAvailability(); err != nil {
+		logger.ErrorCtx(ctx, "Shell validation failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"error_code", "SHELL_VALIDATION_FAILED",
+			"error_details", err.Error())
+		return fmt.Errorf("shell validation failed: %w", err)
+	}
+
+	// Validate script signature if signing policy requires it
+	if err := m.validateSignature(scriptConfig); err != nil {
+		logger.ErrorCtx(ctx, "Script signature validation failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"error_code", "SIGNATURE_VALIDATION_FAILED",
+			"signing_policy", string(scriptConfig.SigningPolicy),
+			"error_details", err.Error())
+		return fmt.Errorf("signature validation failed: %w", err)
+	}
+
+	// Track execution state
+	var startTime int64
+	if timestamp, ok := ctx.Value("timestamp").(int64); ok {
+		startTime = timestamp
+	} else {
+		startTime = time.Now().Unix()
+	}
+
+	m.mu.Lock()
+	m.executions[resourceID] = &ExecutionState{
+		Config:    scriptConfig,
+		Status:    StatusPending,
+		StartTime: startTime,
+	}
+	m.mu.Unlock()
+
+	// Update status to running
+	m.updateExecutionStatus(resourceID, StatusRunning, nil, nil)
+
+	// Execute the script
+	result, err := executor.Execute(ctx)
+
+	// Create audit record regardless of success/failure
+	auditRecord := CreateAuditRecord(m.stewardID, resourceID, scriptConfig, result, err)
+	if auditErr := m.auditLogger.LogExecution(ctx, auditRecord); auditErr != nil {
+		// Log audit error but don't fail the execution
+		logger.WarnCtx(ctx, "Failed to log script execution audit",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"error_code", "AUDIT_LOG_FAILED",
+			"audit_error", auditErr.Error())
+	}
+
+	if err != nil {
+		logger.ErrorCtx(ctx, "Script execution failed",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"error_code", "SCRIPT_EXECUTION_FAILED",
+			"error_details", err.Error())
+		m.updateExecutionStatus(resourceID, StatusFailed, nil, err)
+		return fmt.Errorf("script execution failed: %w", err)
+	}
+
+	// Update execution state with result
+	if result.ExitCode == 0 {
+		logger.InfoCtx(ctx, "Script execution completed successfully",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"status", "completed",
+			"exit_code", result.ExitCode,
+			"duration_ms", result.Duration.Milliseconds())
+		m.updateExecutionStatus(resourceID, StatusCompleted, result, nil)
+	} else {
+		scriptErr := fmt.Errorf("script exited with code %d: %s", result.ExitCode, result.Stderr)
+		logger.ErrorCtx(ctx, "Script execution failed with non-zero exit code",
+			"operation", "script_execute",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"resource_type", "script",
+			"error_code", "SCRIPT_NON_ZERO_EXIT",
+			"exit_code", result.ExitCode,
+			"stderr", result.Stderr,
+			"duration_ms", result.Duration.Milliseconds())
+		m.updateExecutionStatus(resourceID, StatusFailed, result, scriptErr)
+	}
+
+	return nil
+}
+
+// updateExecutionStatus updates the execution status thread-safely
+func (m *Module) updateExecutionStatus(resourceID string, status ExecutionStatus, result *ExecutionResult, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if execution, exists := m.executions[resourceID]; exists {
+		execution.Status = status
+		execution.Result = result
+		execution.Error = err
+	}
+}
+
+// validateSignature validates script signatures based on the signing policy
+func (m *Module) validateSignature(config *ScriptConfig) error {
+	switch config.SigningPolicy {
+	case SigningPolicyNone:
+		// No validation required
+		return nil
+
+	case SigningPolicyOptional:
+		// Validate only if signature is present
+		if config.Signature != nil {
+			return m.verifySignature(config)
+		}
+		return nil
+
+	case SigningPolicyRequired:
+		// Signature must be present and valid
+		if config.Signature == nil {
+			return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
+		}
+		return m.verifySignature(config)
+
+	default:
+		return fmt.Errorf("%w: invalid signing policy: %s", modules.ErrInvalidInput, config.SigningPolicy)
+	}
+}
+
+// verifySignature performs real cryptographic signature verification.
+//
+// For PowerShell scripts on Windows, Authenticode verification is used.
+// For all other scripts (and for PowerShell on non-Windows), detached RSA/ECDSA
+// signature verification is performed using the public key embedded in the signature.
+//
+// Trust mode and trusted key enforcement are applied after cryptographic verification
+// using the ModuleSigningConfig set via SetSigningConfig.
+func (m *Module) verifySignature(config *ScriptConfig) error {
+	if config.Signature == nil {
+		return fmt.Errorf("%w: signature is required but not provided", modules.ErrInvalidInput)
+	}
+
+	m.mu.RLock()
+	sigCfg := m.signingConfig
+	m.mu.RUnlock()
+
+	return verifyScriptSignature([]byte(config.Content), config.Signature, config.Shell, sigCfg)
+}
+
+// GetExecutionState returns the current execution state for a resource
+func (m *Module) GetExecutionState(resourceID string) (*ExecutionState, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	execution, exists := m.executions[resourceID]
+	if !exists {
+		return nil, false
+	}
+
+	// Return a copy to prevent external modification
+	stateCopy := *execution
+	return &stateCopy, true
+}
+
+// ListExecutions returns all current execution states
+func (m *Module) ListExecutions() map[string]*ExecutionState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string]*ExecutionState)
+	for id, execution := range m.executions {
+		// Return copies to prevent external modification
+		executionCopy := *execution
+		result[id] = &executionCopy
+	}
+
+	return result
+}
+
+// ClearExecution removes the execution state for a resource
+func (m *Module) ClearExecution(resourceID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.executions, resourceID)
+}
+
+// GetExecutionHistory returns the execution history for the steward
+func (m *Module) GetExecutionHistory(limit int) ([]*AuditRecord, error) {
+	return m.auditLogger.GetExecutionHistory(m.stewardID, limit)
+}
+
+// QueryExecutions searches execution history based on query parameters
+func (m *Module) QueryExecutions(query *AuditQuery) ([]*AuditRecord, error) {
+	if query.StewardID == "" {
+		query.StewardID = m.stewardID
+	}
+	return m.auditLogger.QueryExecutions(query)
+}
+
+// GetExecutionMetrics returns aggregated metrics for the steward
+func (m *Module) GetExecutionMetrics(since time.Time) (*AggregatedMetrics, error) {
+	return m.auditLogger.GetExecutionMetrics(m.stewardID, since)
+}
+
+// SetStewardID updates the steward ID for this module instance
+func (m *Module) SetStewardID(stewardID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stewardID = stewardID
+}
+
+// SetSigningConfig injects the steward-level signing policy into the module.
+// It must be called before any script execution when signature enforcement is needed.
+// The zero value of ModuleSigningConfig corresponds to TrustModeAnyValid (no key restriction).
+func (m *Module) SetSigningConfig(cfg ModuleSigningConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.signingConfig = cfg
+}
