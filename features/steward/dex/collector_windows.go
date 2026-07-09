@@ -345,7 +345,7 @@ func (c *Collector) probeAll(ctx context.Context) []ReachabilityResult {
 		results = append(results, c.probeETW(ctx, p))
 	}
 	for _, p := range wmiProviders {
-		results = append(results, c.probeWMI(ctx, p))
+		results = append(results, c.probeWMIWithTimeout(p))
 	}
 	return results
 }
@@ -409,9 +409,32 @@ func (c *Collector) probeETW(_ context.Context, p etwProvider) ReachabilityResul
 	}
 }
 
+// probeWMIWithTimeout calls probeWMI in a goroutine and returns a
+// ReachabilityResult within wmiOperationTimeout. On VMs where the WMI
+// provider class is absent, ExecQuery can block indefinitely; the timeout
+// prevents the probe loop from hanging.
+func (c *Collector) probeWMIWithTimeout(p wmiProvider) ReachabilityResult {
+	ch := make(chan ReachabilityResult, 1)
+	go func() {
+		ch <- c.probeWMI(p)
+	}()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(wmiOperationTimeout):
+		return ReachabilityResult{
+			Class:     p.class,
+			Mechanism: MechanismWMI,
+			Provider:  p.wmiClass,
+			Reachable: false,
+			Error:     "WMI probe timed out after 10s",
+		}
+	}
+}
+
 // probeWMI executes a WMI query against the target namespace and class to
 // confirm the class exists and returns rows.
-func (c *Collector) probeWMI(_ context.Context, p wmiProvider) ReachabilityResult {
+func (c *Collector) probeWMI(p wmiProvider) ReachabilityResult {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -631,23 +654,20 @@ func guidString(g windows.GUID) string {
 	)
 }
 
+// ─── WMI timeout ─────────────────────────────────────────────────────────────
+
+// wmiOperationTimeout caps each WMI query. On GitHub-hosted Windows VMs the
+// MSStorageDriver and MSAcpi WMI providers are often absent, causing ExecQuery
+// to block until the WMI provider host times out (up to 30 s by default).
+// A 10 s ceiling keeps test runs well within CI budgets.
+const wmiOperationTimeout = 10 * time.Second
+
 // ─── WMI polling ─────────────────────────────────────────────────────────────
 
 // runWMIPoller polls WMI for SMART and thermal data every 60 seconds until ctx
-// is done. This is intentionally simple — the spike only needs to confirm data
-// flows; scheduling optimisation is downstream work.
+// is done. COM is initialised per-query (inside queryWMIProvider goroutines)
+// so this goroutine itself needs no COM apartment.
 func (c *Collector) runWMIPoller(ctx context.Context) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
-		oleErr, ok := err.(*ole.OleError)
-		if !ok || oleErr.Code() != uintptr(0x00000001) {
-			return
-		}
-	}
-	defer ole.CoUninitialize()
-
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
@@ -671,62 +691,98 @@ func (c *Collector) pollWMI(ctx context.Context) {
 		if int(c.total.Load()) >= c.cfg.MaxEventsPerClass*len(wmiProviders) {
 			return
 		}
-		c.pollWMIProvider(p)
+		c.pollWMIProviderWithTimeout(ctx, p)
 	}
 }
 
-func (c *Collector) pollWMIProvider(p wmiProvider) {
+// pollWMIProviderWithTimeout runs the WMI query for p in a bounded goroutine
+// and writes results to the sink only if they arrive before wmiOperationTimeout.
+// The calling goroutine is never blocked past the timeout, even if ExecQuery
+// hangs (e.g. when the WMI provider class is not registered on a VM).
+func (c *Collector) pollWMIProviderWithTimeout(ctx context.Context, p wmiProvider) {
+	ch := make(chan []map[string]any, 1)
+	go func() {
+		ch <- c.queryWMIProvider(p)
+	}()
+
+	var rows []map[string]any
+	select {
+	case rows = <-ch:
+	case <-time.After(wmiOperationTimeout):
+		return
+	case <-ctx.Done():
+		return
+	}
+
+	for _, fields := range rows {
+		_ = c.sink.WriteEvent(p.class, fields)
+		c.total.Add(1)
+	}
+}
+
+// queryWMIProvider executes the WMI query for p and returns one field map per
+// result row. COM is initialised on the goroutine's locked OS thread so all
+// IDispatch calls happen on the correct apartment thread.
+func (c *Collector) queryWMIProvider(p wmiProvider) []map[string]any {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		oleErr, ok := err.(*ole.OleError)
+		// S_FALSE (0x1) means COM was already initialised on this thread; fine.
+		if !ok || oleErr.Code() != uintptr(0x00000001) {
+			return nil
+		}
+	}
+	defer ole.CoUninitialize()
+
 	locator, err := oleutil.CreateObject("WbemScripting.SWbemLocator")
 	if err != nil {
-		return
+		return nil
 	}
 	defer locator.Release()
 
 	wbem, err := locator.QueryInterface(ole.IID_IDispatch)
 	if err != nil {
-		return
+		return nil
 	}
 	defer wbem.Release()
 
 	svcRaw, err := oleutil.CallMethod(wbem, "ConnectServer", nil, p.namespace)
 	if err != nil {
-		return
+		return nil
 	}
 	svc := svcRaw.ToIDispatch()
 	defer svc.Release()
 
 	resultRaw, err := oleutil.CallMethod(svc, "ExecQuery", p.query)
 	if err != nil {
-		return
+		return nil
 	}
 	defer resultRaw.Clear()
 
 	result := resultRaw.ToIDispatch()
-
 	countRaw, err := oleutil.GetProperty(result, "Count")
 	if err != nil {
-		return
+		return nil
 	}
 	count, ok := countRaw.Value().(int32)
 	countRaw.Clear()
 	if !ok || count == 0 {
-		return
+		return nil
 	}
 
-	// Iterate results and emit one event per row.
+	rows := make([]map[string]any, 0, count)
 	for i := int32(0); i < count; i++ {
 		itemRaw, err := oleutil.CallMethod(result, "ItemIndex", i)
 		if err != nil {
 			continue
 		}
 		item := itemRaw.ToIDispatch()
-
-		fields := c.extractWMIFields(item, p)
+		rows = append(rows, c.extractWMIFields(item, p))
 		item.Release()
-
-		_ = c.sink.WriteEvent(p.class, fields)
-		c.total.Add(1)
 	}
+	return rows
 }
 
 // extractWMIFields reads the interesting properties from a WMI result row.
