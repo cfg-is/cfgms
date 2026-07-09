@@ -773,6 +773,27 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |
 | **Modules** | List cached modules, approve queued bundles |
 
+### Steward List Pagination
+
+`GET /api/v1/stewards` returns the full steward list by default and supports optional server-side pagination (Issue #2489) so browser clients can page through large fleets without downloading the full list:
+
+- **Query parameters:** `limit` (integer, 1–500) and `offset` (integer, ≥ 0). `limit` without `offset` implies `offset=0`; `offset` without `limit` is rejected with HTTP 400 (ambiguous page size). Out-of-range or non-integer values are rejected with HTTP 400 and a specific error code.
+- **Ordering:** when paginating, results are sorted by steward ID before slicing so pages are stable across requests. This ordering exists solely for pagination determinism — user-facing sort is a client-side concern.
+- **Paginated envelope:** when `limit`/`offset` are present, the response `data` payload is an object instead of the plain array:
+
+```json
+{
+  "stewards": [ ... ],
+  "total": 48123,
+  "limit": 100,
+  "offset": 200
+}
+```
+
+`total` is the post-filter, pre-slice steward count, so clients can compute page counts. Pagination composes with the existing filter parameters (`os`, `platform`, `arch`, `status`, `hostname`, `tag`) and applies on both the filtered and unfiltered code paths.
+
+- **Backward compatibility:** requests without `limit`/`offset` return the existing payload shape unchanged — a plain JSON array of stewards — so `cfg` and existing API clients are unaffected.
+
 ---
 
 ## Module Cache and Approval Workflow
