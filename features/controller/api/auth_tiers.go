@@ -39,6 +39,8 @@ var tier3Permissions = map[string]struct{}{
 	"refresh:set-policy":           {}, // PUT /tenants/{tenant_path}/refresh-policy
 	"steward:move":                 {}, // POST /stewards/{id}/move
 	"steward:decommission":         {}, // DELETE /stewards/{id}
+	"web-account:create":           {}, // POST /web/accounts (Issue #2490; also resets via upsert)
+	"web-account:delete":           {}, // DELETE /web/accounts/{username}
 }
 
 // requireTier returns middleware that enforces the given authentication tier.
