@@ -20,7 +20,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
@@ -123,15 +122,30 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse selector and apply tenant scope.
-	filter, err := selector.Parse(req.Selector)
+	// Parse selector and apply tenant subtree scope.
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Invalid selector: "+err.Error(),
 			"INVALID_SELECTOR")
 		return
 	}
-	filter.TenantID = callerTenantID
+
+	// Scope to the caller's subtree. An explicit selector prefix must be within
+	// the caller's subtree; absent prefix defaults to callerTenantID and all
+	// descendants. Admin callers (empty callerTenantID) are unrestricted.
+	if parsedTenantPath != "" {
+		if !principal.IsAdmin && callerTenantID != "" &&
+			parsedTenantPath != callerTenantID &&
+			!strings.HasPrefix(parsedTenantPath, callerTenantID+"/") {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if !principal.IsAdmin {
+		filter.TenantSubtree = callerTenantID
+	}
 
 	// Resolve matching stewards.
 	stewards, err := s.fleetQuery.Search(r.Context(), filter)
@@ -141,22 +155,9 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce tenant isolation for scoped (non-admin) callers: drop stewards from other
-	// tenants, return 403 if none remain. Admin mTLS principals (empty tenant) have global
-	// scope and act on every matched steward (Issue #1999).
-	var tenantStewards []fleet.StewardResult
-	if principal.IsAdmin {
-		tenantStewards = stewards
-	} else {
-		for _, st := range stewards {
-			if st.TenantID == callerTenantID {
-				tenantStewards = append(tenantStewards, st)
-			}
-		}
-	}
-	if len(tenantStewards) == 0 {
+	if len(stewards) == 0 {
 		s.writeErrorResponse(w, http.StatusForbidden,
-			"No stewards in caller tenant match the given selector",
+			"No stewards match the given selector within the caller's tenant scope",
 			"CROSS_TENANT")
 		return
 	}
@@ -217,7 +218,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	var created []createdRecord
 
-	for _, st := range tenantStewards {
+	for _, st := range stewards {
 		// Check for non-terminal upgrade records for this steward.
 		existing, listErr := s.upgradeStore.ListUpgradesBySteward(r.Context(), st.ID)
 		if listErr != nil {

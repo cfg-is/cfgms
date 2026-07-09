@@ -15,109 +15,110 @@ import (
 // ── Parser tests ─────────────────────────────────────────────────────────────
 
 func TestParse_Empty_IsRejected(t *testing.T) {
-	_, err := Parse("")
+	_, _, err := Parse("")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty selector")
 }
 
 func TestParse_Whitespace_IsRejected(t *testing.T) {
-	_, err := Parse("   ")
+	_, _, err := Parse("   ")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty selector")
 }
 
 func TestParse_All_ReturnsEmptyFilter(t *testing.T) {
-	f, err := Parse("all")
+	f, tp, err := Parse("all")
 	require.NoError(t, err)
 	assert.Equal(t, fleet.Filter{}, f)
+	assert.Empty(t, tp)
 }
 
 func TestParse_Name(t *testing.T) {
-	f, err := Parse("name:my-server")
+	f, _, err := Parse("name:my-server")
 	require.NoError(t, err)
 	assert.Equal(t, "my-server", f.Name)
 }
 
 func TestParse_Name_TrailingGlob(t *testing.T) {
-	f, err := Parse("name:es-hv0*")
+	f, _, err := Parse("name:es-hv0*")
 	require.NoError(t, err)
 	assert.Equal(t, "es-hv0*", f.Name)
 }
 
 func TestParse_Name_LeadingGlob(t *testing.T) {
-	f, err := Parse("name:*web")
+	f, _, err := Parse("name:*web")
 	require.NoError(t, err)
 	assert.Equal(t, "*web", f.Name)
 }
 
 func TestParse_Name_MidStringGlob(t *testing.T) {
-	f, err := Parse("name:web*1")
+	f, _, err := Parse("name:web*1")
 	require.NoError(t, err)
 	assert.Equal(t, "web*1", f.Name)
 }
 
 func TestParse_OS(t *testing.T) {
-	f, err := Parse("os:linux")
+	f, _, err := Parse("os:linux")
 	require.NoError(t, err)
 	assert.Equal(t, "linux", f.OS)
 }
 
 func TestParse_OS_Quoted(t *testing.T) {
-	f, err := Parse(`os:"windows server"`)
+	f, _, err := Parse(`os:"windows server"`)
 	require.NoError(t, err)
 	assert.Equal(t, "windows server", f.OS)
 }
 
 func TestParse_Platform(t *testing.T) {
-	f, err := Parse("platform:debian")
+	f, _, err := Parse("platform:debian")
 	require.NoError(t, err)
 	assert.Equal(t, "debian", f.Platform)
 }
 
 func TestParse_Platform_Quoted(t *testing.T) {
-	f, err := Parse(`platform:"ubuntu 22.04"`)
+	f, _, err := Parse(`platform:"ubuntu 22.04"`)
 	require.NoError(t, err)
 	assert.Equal(t, "ubuntu 22.04", f.Platform)
 }
 
 func TestParse_Arch(t *testing.T) {
-	f, err := Parse("arch:arm64")
+	f, _, err := Parse("arch:arm64")
 	require.NoError(t, err)
 	assert.Equal(t, "arm64", f.Architecture)
 }
 
 func TestParse_Tag_Single(t *testing.T) {
-	f, err := Parse("tag:prod")
+	f, _, err := Parse("tag:prod")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"prod"}, f.Tags)
 }
 
 func TestParse_Tag_Repeatable(t *testing.T) {
-	f, err := Parse("tag:prod tag:web tag:db")
+	f, _, err := Parse("tag:prod tag:web tag:db")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"prod", "web", "db"}, f.Tags)
 }
 
 func TestParse_DNAKey(t *testing.T) {
-	f, err := Parse("dna.arch:arm64")
+	f, _, err := Parse("dna.arch:arm64")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"arch": "arm64"}, f.DNAAttributes)
 }
 
 func TestParse_DNAKey_Repeatable(t *testing.T) {
-	f, err := Parse("dna.zone:us-east dna.tier:premium")
+	f, _, err := Parse("dna.zone:us-east dna.tier:premium")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"zone": "us-east", "tier": "premium"}, f.DNAAttributes)
 }
 
 func TestParse_DNAKey_Quoted(t *testing.T) {
-	f, err := Parse(`dna.label:"web server"`)
+	f, _, err := Parse(`dna.label:"web server"`)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"label": "web server"}, f.DNAAttributes)
 }
 
 func TestParse_Combined(t *testing.T) {
-	f, err := Parse(`name:es-hv0* os:"windows server" tag:prod dna.arch:arm64`)
+	f, _, err := Parse(`name:es-hv0* os:"windows server" tag:prod dna.arch:arm64`)
 	require.NoError(t, err)
 	assert.Equal(t, "es-hv0*", f.Name)
 	assert.Equal(t, "windows server", f.OS)
@@ -128,39 +129,118 @@ func TestParse_Combined(t *testing.T) {
 }
 
 func TestParse_UnknownKey_IsError(t *testing.T) {
-	_, err := Parse("typo:value")
+	_, _, err := Parse("typo:value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown selector key")
 	assert.Contains(t, err.Error(), "typo")
 }
 
 func TestParse_MissingColon_IsError(t *testing.T) {
-	_, err := Parse("namevalue")
+	_, _, err := Parse("namevalue")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "key:value")
 }
 
 func TestParse_EmptyDNASubkey_IsError(t *testing.T) {
-	_, err := Parse("dna.:value")
+	_, _, err := Parse("dna.:value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty DNA attribute key")
 }
 
 func TestParse_EmptyValue_IsError(t *testing.T) {
-	_, err := Parse("os: name:foo")
+	_, _, err := Parse("os: name:foo")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty value")
 }
 
 func TestParse_UnclosedQuote_IsError(t *testing.T) {
-	_, err := Parse(`os:"windows server`)
+	_, _, err := Parse(`os:"windows server`)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unterminated quoted value")
 }
 
 func TestParse_KeyWithSpace_IsError(t *testing.T) {
-	_, err := Parse("bad key:value")
+	_, _, err := Parse("bad key:value")
 	require.Error(t, err)
+}
+
+// ── Tenant prefix tests ───────────────────────────────────────────────────────
+
+func TestParse_TenantPrefix_ForwardSlash(t *testing.T) {
+	f, tp, err := Parse("msp-a/client-1/name:web*")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a/client-1", tp)
+	assert.Equal(t, "web*", f.Name)
+}
+
+func TestParse_TenantPrefix_Backslash(t *testing.T) {
+	f, tp, err := Parse(`msp-a\client-1\name:web*`)
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a/client-1", tp, "backslash must be normalized to forward slash")
+	assert.Equal(t, "web*", f.Name)
+}
+
+func TestParse_TenantPrefix_NormalizedIdentically(t *testing.T) {
+	_, tp1, err1 := Parse("msp-a/client-1/name:web*")
+	_, tp2, err2 := Parse(`msp-a\client-1\name:web*`)
+	require.NoError(t, err1)
+	require.NoError(t, err2)
+	assert.Equal(t, tp1, tp2, "forward slash and backslash must produce the same tenant path")
+}
+
+func TestParse_TenantPrefix_MultiSegment(t *testing.T) {
+	f, tp, err := Parse("msp-a/client-1/servers/web/os:linux")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a/client-1/servers/web", tp)
+	assert.Equal(t, "linux", f.OS)
+}
+
+func TestParse_TenantPrefix_WithAll(t *testing.T) {
+	f, tp, err := Parse("msp-a/client-1/all")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a/client-1", tp)
+	assert.Equal(t, fleet.Filter{}, f)
+}
+
+func TestParse_TenantPrefix_SingleSegment(t *testing.T) {
+	f, tp, err := Parse("msp-a/name:web*")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a", tp)
+	assert.Equal(t, "web*", f.Name)
+}
+
+func TestParse_TenantPrefix_MixedSeparators(t *testing.T) {
+	f, tp, err := Parse(`msp-a/client-1\name:web*`)
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a/client-1", tp)
+	assert.Equal(t, "web*", f.Name)
+}
+
+func TestParse_NoTenantPrefix_PlainSelector(t *testing.T) {
+	f, tp, err := Parse("name:web*")
+	require.NoError(t, err)
+	assert.Empty(t, tp)
+	assert.Equal(t, "web*", f.Name)
+}
+
+func TestParse_NoTenantPrefix_All(t *testing.T) {
+	_, tp, err := Parse("all")
+	require.NoError(t, err)
+	assert.Empty(t, tp)
+}
+
+func TestParse_TenantPrefix_EmptySelectorAfterPrefix_IsRejected(t *testing.T) {
+	_, _, err := Parse("msp-a/")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty selector")
+}
+
+func TestParse_TenantPrefix_MultipleTermsAfterPrefix(t *testing.T) {
+	f, tp, err := Parse("msp-a/client-1/os:linux name:web*")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a/client-1", tp)
+	assert.Equal(t, "linux", f.OS)
+	assert.Equal(t, "web*", f.Name)
 }
 
 // ── Resolution tests ──────────────────────────────────────────────────────────
@@ -222,7 +302,7 @@ var seedData = []fleet.StewardData{
 
 func resolveIDs(t *testing.T, expr string) []string {
 	t.Helper()
-	filter, err := Parse(expr)
+	filter, _, err := Parse(expr)
 	require.NoError(t, err)
 
 	q := fleet.NewMemoryQuery(&staticProvider{stewards: seedData})
@@ -302,19 +382,19 @@ func TestResolve_Combined_ExactSteward(t *testing.T) {
 // ── id: selector tests ────────────────────────────────────────────────────────
 
 func TestParse_ID_Single(t *testing.T) {
-	f, err := Parse("id:s-linux-arm64")
+	f, _, err := Parse("id:s-linux-arm64")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"s-linux-arm64"}, f.IDs)
 }
 
 func TestParse_ID_MultiValue(t *testing.T) {
-	f, err := Parse("id:s-linux-arm64,s-windows")
+	f, _, err := Parse("id:s-linux-arm64,s-windows")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"s-linux-arm64", "s-windows"}, f.IDs)
 }
 
 func TestParse_UnknownKey_ErrorIncludesID(t *testing.T) {
-	_, err := Parse("typo:value")
+	_, _, err := Parse("typo:value")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "id")
 }
@@ -349,7 +429,7 @@ func TestResolve_ID_Combined_AND_Matches(t *testing.T) {
 // resolveIDsFrom is like resolveIDs but uses a caller-supplied steward list.
 func resolveIDsFrom(t *testing.T, stewards []fleet.StewardData, expr string) []string {
 	t.Helper()
-	filter, err := Parse(expr)
+	filter, _, err := Parse(expr)
 	require.NoError(t, err)
 	q := fleet.NewMemoryQuery(&staticProvider{stewards: stewards})
 	results, err := q.Search(context.Background(), filter)
@@ -445,7 +525,7 @@ func TestParse_TableCoverage(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Parse(tc.expr)
+			got, _, err := Parse(tc.expr)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)

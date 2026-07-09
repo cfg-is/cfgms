@@ -254,6 +254,56 @@ func TestHandleCreateJob_TenantScoped(t *testing.T) {
 	assert.Equal(t, "tenant-x", job.TenantID)
 }
 
+// ── handleCreateJob: explicit tenant-path-prefix selectors ───────────────────
+
+// TestHandleCreateJob_ExplicitTenantPrefix_CrossTenantRejected verifies that a
+// non-admin caller whose selector carries an explicit tenant-path prefix outside
+// their authorized subtree is rejected with 403 CROSS_TENANT before any fleet
+// query runs (handlers_jobs.go:85-92). The existing bare-selector tests never
+// exercise this branch because they carry no leading tenant prefix.
+func TestHandleCreateJob_ExplicitTenantPrefix_CrossTenantRejected(t *testing.T) {
+	server := setupTestServer(t)
+	server.batchJobStore = newTestBatchJobStoreForAPI()
+
+	// Caller is scoped to tenant-a but the selector prefix targets tenant-b.
+	rec := postCreateJobWithTenant(server, `{"selector":"tenant-b/all","batch_size":3}`, "tenant-a")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "CROSS_TENANT", resp.Error.Code)
+}
+
+// TestHandleCreateJob_ExplicitTenantPrefix_ScopesToSubtree verifies that a valid
+// in-subtree tenant-path prefix drives filter.TenantSubtree = parsedTenantPath
+// (handlers_jobs.go:93): the resolved target set is scoped to the prefixed
+// sub-tenant, excluding sibling sub-tenants under the same caller tenant.
+func TestHandleCreateJob_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+
+	// Two stewards under sibling sub-tenants of tenant-a.
+	inScope := registerActiveSteward(t, server.controllerService, "job-prefix-c1", "tenant-a/client-1")
+	registerActiveSteward(t, server.controllerService, "job-prefix-c2", "tenant-a/client-2")
+
+	// Caller tenant-a targets only the client-1 subtree via an explicit prefix.
+	rec := postCreateJobWithTenant(server, `{"selector":"tenant-a/client-1/all","batch_size":2}`, "tenant-a")
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	var apiResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
+	dataMap, ok := apiResp.Data.(map[string]interface{})
+	require.True(t, ok)
+	jobID, ok := dataMap["job_id"].(string)
+	require.True(t, ok)
+
+	job, err := store.GetBatchJob(context.Background(), jobID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{inScope}, job.Targets,
+		"explicit prefix must scope targets to tenant-a/client-1, excluding sibling client-2")
+}
+
 // ── handleGetJob: auth guard ──────────────────────────────────────────────────
 
 // TestHandleGetJob_NoPrincipal_Returns401 verifies that GET without a principal is rejected.
