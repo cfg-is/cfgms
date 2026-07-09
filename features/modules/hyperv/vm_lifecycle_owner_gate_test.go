@@ -203,3 +203,73 @@ func TestApplyVMState_OwnerQueryError_SkipsQuietly(t *testing.T) {
 	assert.Equal(t, 0, countCmd(transport, psSetVMProcessor))
 	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole))
 }
+
+// TestApplyVMState_UnresolvedOwner_GoesQuiet (#2422): the owner map has an entry
+// for the VM but the owner string is empty — Get-ClusterGroup reports "" for a
+// role with no current OwnerNode, the in-flight-failover settle window. Every
+// member reads "" and goes quiet, so no two nodes ever converge the same role
+// while ownership is unsettled; it self-heals once the cluster settles an owner.
+// This is the safe bias (fail-safe-quiet), locked in against a future "empty ⇒
+// proceed on local possession" change that would risk double-action.
+func TestApplyVMState_UnresolvedOwner_GoesQuiet(t *testing.T) {
+	const vmName = "ha-unsettled-vm"
+	const cluster = "lab-hv"
+
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"owners":{"ha-unsettled-vm":""}}`, // registered role, no current owner (settling)
+	}}
+	m := vmModuleWithTransport(transport, "t-2422")
+	m.nodeHostname = "NODE1"
+
+	desired := &VMConfig{
+		Name:     vmName,
+		CPUCount: 4,
+		MemoryMB: 8192,
+		HARole:   &HARoleConfig{ClusterName: cluster},
+	}
+	current := &VMConfig{Name: vmName, CPUCount: 2, MemoryMB: 4096, State: "stopped"}
+
+	require.NoError(t, m.applyVMState(context.Background(), vmName, vmName, desired, current, "running"))
+
+	transport.mu.Lock()
+	callCount := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 1, callCount,
+		"an unresolved (empty) owner must skip after exactly one call — no lifecycle writes")
+	assert.Equal(t, 0, countCmd(transport, psStartVM))
+	assert.Equal(t, 0, countCmd(transport, psSetVMProcessor))
+}
+
+// TestApplyVMState_OutOfScopeCluster_ErrorsWithoutTransport (#2422): an ha_role
+// naming a cluster outside the module's cluster_name scope cap (S5) fails LOUD
+// with ErrClusterNotDeclared and issues ZERO transport calls — the same
+// "no transport for an out-of-scope cluster" invariant clusterOwnershipHelper /
+// reconcileRoleMembership / getCluster enforce. A scope mismatch is a persistent
+// misconfiguration, not a transient probe failure, so it errors rather than
+// taking the fail-safe-quiet path.
+func TestApplyVMState_OutOfScopeCluster_ErrorsWithoutTransport(t *testing.T) {
+	const vmName = "ha-rogue-lifecycle-vm"
+
+	transport := &testWinRMTransport{} // any transport call is a violation
+	m := vmModuleWithTransport(transport, "t-2422")
+	m.nodeHostname = "NODE1"
+	m.clusterName = "lab-hv" // scope cap
+
+	desired := &VMConfig{
+		Name:     vmName,
+		CPUCount: 4,
+		MemoryMB: 8192,
+		HARole:   &HARoleConfig{ClusterName: "rogue-cluster"}, // out of scope
+	}
+	current := &VMConfig{Name: vmName, CPUCount: 2, MemoryMB: 4096, State: "stopped"}
+
+	err := m.applyVMState(context.Background(), vmName, vmName, desired, current, "running")
+	require.ErrorIs(t, err, ErrClusterNotDeclared,
+		"an out-of-scope ha_role.cluster_name must fail loud with the scope-cap sentinel")
+
+	transport.mu.Lock()
+	callCount := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 0, callCount,
+		"the scope cap must reject before any transport call — no out-of-scope cluster query")
+}

@@ -1327,13 +1327,33 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 	// letting the next tick retry. A future reviewer must not "fix" this to match
 	// #2421/S2. Standalone VMs (desired.HARole == nil) skip this block entirely —
 	// zero added transport calls, zero behavior change.
+	//
+	// An UNRESOLVED owner (the map has an entry for the VM but the owner string is
+	// empty — Get-ClusterGroup reports "" for a role with no current OwnerNode, the
+	// in-flight-failover window this story targets) is treated the same as a
+	// different owner: the node goes quiet. This is the safe bias — while ownership
+	// is unsettled, EVERY member reads "" and waits, so no two nodes ever act at
+	// once; it self-heals the moment the cluster settles an owner. Proceeding on
+	// local possession here would instead risk two nodes converging the same role
+	// during the settle window.
 	if desired.HARole != nil {
-		owners, roErr := m.readResourceOwners(ctx, desired.HARole.ClusterName)
+		clusterName := desired.HARole.ClusterName
+		// Scope cap (S5): never issue a transport call for a cluster this steward is
+		// not permitted to read — the same invariant every other cluster-touching
+		// function enforces before the transport (clusterOwnershipHelper,
+		// reconcileRoleMembership, getCluster). A mismatched ha_role.cluster_name is
+		// a persistent misconfiguration, not a transient probe failure, so it fails
+		// LOUD (exactly as the downstream promote path's reconcileRoleMembership
+		// would) rather than taking the fail-safe-quiet path below.
+		if m.clusterName != "" && clusterName != m.clusterName {
+			return fmt.Errorf("hyperv: apply VM state %q: %w", vmName, ErrClusterNotDeclared)
+		}
+		owners, roErr := m.readResourceOwners(ctx, clusterName)
 		if roErr != nil {
 			if logger, ok := m.GetLogger(); ok {
 				logger.Warn("hyperv: ha_role owner probe failed; skipping lifecycle convergence this cycle",
 					"vm_name", logging.SanitizeLogValue(vmName),
-					"cluster", logging.SanitizeLogValue(desired.HARole.ClusterName),
+					"cluster", logging.SanitizeLogValue(clusterName),
 					"error", roErr.Error())
 			}
 			return nil
@@ -1343,7 +1363,7 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 				"vm-lifecycle-skip-not-owner", cfgResourceID, nil,
 				map[string]interface{}{
 					"skipped":      true,
-					"cluster_name": desired.HARole.ClusterName,
+					"cluster_name": clusterName,
 					"owner":        owner,
 				}, nil)
 			return nil

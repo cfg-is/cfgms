@@ -592,6 +592,7 @@ func TestSetVM_HARole_NonOwnerNoop(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
 		`{"owners":{}}`,                        // getVM probe: not a member
+		`{"owners":{}}`,                        // #2422 lifecycle owner gate: role not registered → proceed (first-time promote)
 		`{"owner":"NODE2"}`,                    // ownership helper: another node owns CNO
 		`{"owners":{}}`,                        // ownership helper: role owners
 		`{"owner":"NODE2"}`,                    // audit cnoOwner re-read
