@@ -63,17 +63,20 @@ jobs:
 
   # Native build tests on each platform
   #
-  # Windows routing (#2337, epic #565): internal events (merge_group, non-fork
-  # pull_request) build natively on the CFGMS-managed self-hosted Windows
-  # runner; fork PRs and workflow_dispatch (no fork property) use GitHub-hosted
-  # windows-latest. Linux and macOS stay hosted unconditionally. The whole
-  # include list is selected via fromJSON because individual matrix entries
-  # cannot carry conditions.
+  # Windows routing (#2337, #2503, epic #565): only merge_group (merge-gating)
+  # builds run natively on the CFGMS-managed self-hosted Windows runner. ALL
+  # pull_request events (fork or not) and workflow_dispatch use GitHub-hosted
+  # windows-latest — PR Windows builds are advisory (the merge queue re-runs
+  # everything self-hosted at merge time), so routing them to hosted removes
+  # roughly half the self-hosted Windows load without touching the merge-critical
+  # path. Linux and macOS stay hosted unconditionally. The whole include list is
+  # selected via fromJSON because individual matrix entries cannot carry
+  # conditions.
   #
-  # SECURITY: the fork expression is convenience routing, NOT the security
-  # boundary — fork PRs run the fork's workflow copy. The enforcing control is
-  # the repository Actions setting "Require approval for ALL external
-  # contributors"; do not weaken it while self-hosted runners are attached.
+  # SECURITY: routing pull_request to hosted is convenience/load management, NOT
+  # the security boundary — fork PRs run the fork's workflow copy regardless. The
+  # enforcing control is the repository Actions setting "Require approval for ALL
+  # external contributors"; do not weaken it while self-hosted runners are attached.
   native-builds:
     name: Native Build (${{ matrix.platform }})
     permissions:
@@ -81,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":"windows-latest","platform":"Windows"}]' || '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":["self-hosted","Windows","cfgms"],"platform":"Windows"}]') }}
+        include: ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":"windows-latest","platform":"Windows"}]' || '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":["self-hosted","Windows","cfgms"],"platform":"Windows"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
