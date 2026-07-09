@@ -96,7 +96,9 @@ type term struct {
 
 // tokenize splits the expression into key:value pairs. The first colon in each
 // token is the key separator; unquoted values extend to the next space;
-// double-quoted values may contain spaces.
+// double-quoted values may contain spaces. A token with no colon before its
+// next space (or end of string) is a bare token and maps to an implicit
+// name:<value> term, enabling bare hostname targeting without a key prefix.
 func tokenize(expr string) ([]term, error) {
 	var terms []term
 	i := 0
@@ -109,14 +111,24 @@ func tokenize(expr string) ([]term, error) {
 			break
 		}
 
-		// Find the colon separating key from value.
 		rest := expr[i:]
 		colonRel := strings.IndexByte(rest, ':')
-		if colonRel < 0 {
-			return nil, fmt.Errorf("invalid selector term %q: expected key:value format", rest)
-		}
-		colonIdx := i + colonRel
+		spaceRel := strings.IndexByte(rest, ' ')
 
+		// Bare token: no colon found, or colon appears after the next space.
+		// The whole token becomes an implicit name: value.
+		if colonRel < 0 || (spaceRel >= 0 && spaceRel < colonRel) {
+			end := len(expr)
+			if spaceRel >= 0 {
+				end = i + spaceRel
+			}
+			terms = append(terms, term{key: "name", value: expr[i:end]})
+			i = end
+			continue
+		}
+
+		// key:value term — colon appears before the next space.
+		colonIdx := i + colonRel
 		key := expr[i:colonIdx]
 		if key == "" {
 			return nil, fmt.Errorf("empty key in selector near position %d", i)

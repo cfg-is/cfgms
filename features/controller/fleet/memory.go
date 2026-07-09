@@ -78,7 +78,7 @@ func matchesFilter(s StewardData, f Filter) bool {
 		return false
 	}
 	if f.Name != "" {
-		matched, err := path.Match(f.Name, attrs["hostname"])
+		matched, err := path.Match(strings.ToLower(f.Name), strings.ToLower(attrs["hostname"]))
 		if err != nil || !matched {
 			return false
 		}

@@ -135,10 +135,31 @@ func TestParse_UnknownKey_IsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "typo")
 }
 
-func TestParse_MissingColon_IsError(t *testing.T) {
-	_, _, err := Parse("namevalue")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "key:value")
+func TestParse_BareToken_ParsesAsNameExact(t *testing.T) {
+	// A token without key: syntax maps to an implicit name: term (bare hostname match).
+	f, _, err := Parse("namevalue")
+	require.NoError(t, err)
+	assert.Equal(t, "namevalue", f.Name)
+}
+
+func TestParse_BareToken_Glob_ParsesAsNameGlob(t *testing.T) {
+	f, _, err := Parse("web*")
+	require.NoError(t, err)
+	assert.Equal(t, "web*", f.Name)
+}
+
+func TestParse_BareToken_Combined_BeforeKeyedTerm(t *testing.T) {
+	f, _, err := Parse("web os:linux")
+	require.NoError(t, err)
+	assert.Equal(t, "web", f.Name)
+	assert.Equal(t, "linux", f.OS)
+}
+
+func TestParse_BareToken_Combined_AfterKeyedTerm(t *testing.T) {
+	f, _, err := Parse("os:linux web")
+	require.NoError(t, err)
+	assert.Equal(t, "linux", f.OS)
+	assert.Equal(t, "web", f.Name)
 }
 
 func TestParse_EmptyDNASubkey_IsError(t *testing.T) {
@@ -426,6 +447,81 @@ func TestResolve_ID_Combined_AND_Matches(t *testing.T) {
 	assert.Equal(t, []string{"s-linux-arm64"}, ids)
 }
 
+// ── Bare-token and case-insensitive hostname tests (Issue #2440) ──────────────
+
+// TestResolve_BareToken_CaseInsensitiveExact is the REQUIRED TEST from Issue #2440:
+// a bare token matches hostnames case-insensitively and exactly (no implicit wildcards).
+func TestResolve_BareToken_CaseInsensitiveExact(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-web-upper", "online", map[string]string{"hostname": "WEB"}),
+		makeSteward("s-web-lower", "online", map[string]string{"hostname": "web"}),
+		makeSteward("s-web-01", "online", map[string]string{"hostname": "web-01"}),
+		makeSteward("s-other", "online", map[string]string{"hostname": "db-01"}),
+	}
+	// "web" must match WEB and web (exact, case-insensitive) but not web-01.
+	ids := resolveIDsFrom(t, stewards, "web")
+	assert.ElementsMatch(t, []string{"s-web-upper", "s-web-lower"}, ids)
+}
+
+// TestResolve_BareToken_AND_Composition verifies bare token composes via AND with other terms.
+func TestResolve_BareToken_AND_Composition(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-linux-web", "online", map[string]string{"hostname": "web", "os": "linux"}),
+		makeSteward("s-win-web", "online", map[string]string{"hostname": "web", "os": "windows"}),
+		makeSteward("s-linux-db", "online", map[string]string{"hostname": "db", "os": "linux"}),
+	}
+	// "web os:linux" must narrow to exactly the linux web host.
+	ids := resolveIDsFrom(t, stewards, "web os:linux")
+	assert.Equal(t, []string{"s-linux-web"}, ids)
+}
+
+// TestResolve_BareToken_GlobCaseInsensitive verifies a bare glob token remains a glob
+// and is also case-insensitive.
+func TestResolve_BareToken_GlobCaseInsensitive(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-web01", "online", map[string]string{"hostname": "WEB-01"}),
+		makeSteward("s-web02", "online", map[string]string{"hostname": "WEB-02"}),
+		makeSteward("s-db01", "online", map[string]string{"hostname": "DB-01"}),
+	}
+	// bare "web*" globs and is case-insensitive — matches WEB-01 and WEB-02.
+	ids := resolveIDsFrom(t, stewards, "web*")
+	assert.ElementsMatch(t, []string{"s-web01", "s-web02"}, ids)
+}
+
+// TestResolve_Name_CaseInsensitive verifies name: key matching is case-insensitive.
+func TestResolve_Name_CaseInsensitive(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-web", "online", map[string]string{"hostname": "web"}),
+		makeSteward("s-db", "online", map[string]string{"hostname": "db"}),
+	}
+	// name:WEB must match hostname "web" case-insensitively.
+	ids := resolveIDsFrom(t, stewards, "name:WEB")
+	assert.Equal(t, []string{"s-web"}, ids)
+}
+
+// TestResolve_Name_GlobCaseInsensitive verifies glob patterns via name: are case-insensitive.
+func TestResolve_Name_GlobCaseInsensitive(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-web01", "online", map[string]string{"hostname": "web-01"}),
+		makeSteward("s-web02", "online", map[string]string{"hostname": "web-02"}),
+		makeSteward("s-db01", "online", map[string]string{"hostname": "db-01"}),
+	}
+	// name:WEB* glob is case-insensitive — matches web-01 and web-02.
+	ids := resolveIDsFrom(t, stewards, "name:WEB*")
+	assert.ElementsMatch(t, []string{"s-web01", "s-web02"}, ids)
+}
+
+// TestResolve_ID_CaseSensitive_Unchanged verifies id: matching stays case-sensitive.
+// Device IDs are not hostnames and must not be lowercased.
+func TestResolve_ID_CaseSensitive_Unchanged(t *testing.T) {
+	stewards := []fleet.StewardData{
+		makeSteward("s-linux-arm64", "online", map[string]string{"hostname": "host1"}),
+	}
+	// id:S-LINUX-ARM64 (uppercase) must NOT match steward with ID "s-linux-arm64".
+	ids := resolveIDsFrom(t, stewards, "id:S-LINUX-ARM64")
+	assert.Empty(t, ids, "id: matching must remain case-sensitive")
+}
+
 // resolveIDsFrom is like resolveIDs but uses a caller-supplied steward list.
 func resolveIDsFrom(t *testing.T, stewards []fleet.StewardData, expr string) []string {
 	t.Helper()
@@ -476,6 +572,16 @@ func TestParse_TableCoverage(t *testing.T) {
 		want    fleet.Filter
 		wantErr string
 	}{
+		{
+			name: "bare token (no colon) is implicit name",
+			expr: "web",
+			want: fleet.Filter{Name: "web"},
+		},
+		{
+			name: "bare glob token is implicit name glob",
+			expr: "web*",
+			want: fleet.Filter{Name: "web*"},
+		},
 		{
 			name: "id comma-OR",
 			expr: "id:a,b",
