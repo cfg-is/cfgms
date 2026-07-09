@@ -35,6 +35,24 @@ _fail() {
 # ---------------------------------------------------------------------------
 _setup_certs() {
   local d="$1"
+
+  # On Git-Bash/MSYS the runtime auto-converts POSIX-looking arguments to Windows
+  # paths before handing them to the native openssl.exe. That corrupts the leading
+  # '/' of openssl's -subj value ("/CN=Test CA" becomes
+  # "C:/Program Files/Git/CN=Test CA" -> "subject name is expected to be in the
+  # format /type0=value0/..."). Excluding only /CN= arguments keeps the -subj DN
+  # intact while still letting real path arguments (keys, certs, extfiles) convert
+  # normally. The variable is ignored on Linux/macOS, so setting it here is safe on
+  # every host.
+  local MSYS2_ARG_CONV_EXCL="/CN="
+  export MSYS2_ARG_CONV_EXCL
+
+  # Extension files are written to the scratch dir instead of process substitution
+  # (-extfile <(printf ...)), which resolves to /proc/<pid>/fd/NN — unavailable in
+  # the MSYS shell ("Can't open /proc/<pid>/fd/63 for reading").
+  printf "subjectAltName=IP:127.0.0.1,DNS:localhost\n" > "$d/server.ext"
+  printf "extendedKeyUsage=clientAuth\n" > "$d/client.ext"
+
   # CA
   openssl req -x509 -newkey rsa:2048 -keyout "$d/ca.key" -out "$d/ca.crt" \
     -days 1 -nodes -subj "/CN=Test CA" 2>/dev/null
@@ -44,14 +62,14 @@ _setup_certs() {
     -nodes -subj "/CN=127.0.0.1" 2>/dev/null
   openssl x509 -req -in "$d/server.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" \
     -CAcreateserial -out "$d/server.crt" -days 1 \
-    -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost\n") 2>/dev/null
+    -extfile "$d/server.ext" 2>/dev/null
 
   # Client cert (mTLS)
   openssl req -newkey rsa:2048 -keyout "$d/client.key" -out "$d/client.csr" \
     -nodes -subj "/CN=admin" 2>/dev/null
   openssl x509 -req -in "$d/client.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" \
     -CAcreateserial -out "$d/client.crt" -days 1 \
-    -extfile <(printf "extendedKeyUsage=clientAuth\n") 2>/dev/null
+    -extfile "$d/client.ext" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
