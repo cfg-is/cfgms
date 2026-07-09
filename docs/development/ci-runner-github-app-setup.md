@@ -304,12 +304,19 @@ on Windows (`make build`) and ran the unit test suite
 (`go test -race -short -timeout=5m ./pkg/... ./features/...`), both passing on the
 self-hosted runner.
 
-### 7.5 Runner resource profile (Story #2428, instrumented 2026-07-08)
+### 7.5 Runner resource profile (Story #2428/#2485, hardened 2026-07-09)
 
-The self-hosted CI jobs now capture peak CPU% and peak memory usage during each run so
-the 4 vCPU / 8 GB VM allocation can be compared against actual utilization. This closes
-the gap between knowing the *allocation* and knowing the *utilization* before deciding
-whether to scale vertically (larger VMs) or horizontally (more VMs).
+The self-hosted CI jobs capture peak CPU% and peak memory usage during each run so
+the VM allocation can be compared against actual utilization. This closes the gap
+between knowing the *allocation* and knowing the *utilization* before deciding whether
+to scale vertically (larger VMs) or horizontally (more VMs).
+
+Story #2485 hardened the sampler: extracted inline YAML blocks to checked-in script
+files (`.github/scripts/resource-sampler.sh` / `.github/scripts/resource-sampler.ps1`),
+fixed the Linux loop guard bug (unguarded `awk` reads under `set -e` silently killed
+the sampling loop), fixed the Windows `pwsh`→`powershell` invocation error, replaced
+hardcoded `4vCPU/8GB` with dynamic CIM/proc reads, and scoped state dirs to
+`RUNNER_TEMP` (job-unique) instead of `/tmp` / `$env:TEMP`.
 
 **Jobs instrumented:**
 - `unit-tests` (Linux, `cfgms-ci-lin-01`)
@@ -325,12 +332,23 @@ Steps run only on the self-hosted path (same fork-gate as the job); fork PRs and
    step log. The line is emitted at the end of each instrumented run:
 
    ```
-   RESOURCE_PROFILE: os=linux   cpu_peak_pct=<n> mem_peak_mb=<n>/<total_mb> vm=4vCPU/8GB
-   RESOURCE_PROFILE: os=windows cpu_peak_pct=<n> mem_peak_mb=<n>/<total_mb> vm=4vCPU/8GB
+   RESOURCE_PROFILE: os=linux   cpu_peak_pct=<n> mem_peak_mb=<peak_mb>/<total_mb> vm=<n>vCPU/<n>GB
+   RESOURCE_PROFILE: os=windows cpu_peak_pct=<n> mem_peak_mb=<peak_mb>/<total_mb> vm=<n>vCPU/<n>GB
+   ```
+
+   When sampling genuinely produced no data (e.g. the background sampler could not
+   start, or the job was cancelled before the first interval), the error form is used:
+
+   ```
+   RESOURCE_PROFILE: os=linux   error=no_samples_collected vm=<n>vCPU/<n>GB
+   RESOURCE_PROFILE: os=linux   error=sampler_start_failed vm=<n>vCPU/<n>GB
    ```
 
    `cpu_peak_pct` is the highest single 5 s interval CPU% observed during the job.
-   `mem_peak_mb` is the highest used-memory reading (total − available) over the same interval.
+   `mem_peak_mb` is the highest used-memory reading (total − available) over the same
+   interval. `vm=` is derived at report time from `nproc` / `/proc/meminfo` (Linux)
+   or `Win32_ComputerSystem` (Windows) — it reflects the runner's actual configuration,
+   not a provisioning target.
 
 2. **Per-run artifact** — raw time-series samples (one line per 5 s interval:
    `HH:MM:SS cpu_pct=<n> mem_used_mb=<n>/<total_mb>`) are uploaded as an artifact
@@ -348,11 +366,18 @@ Steps run only on the self-hosted path (same fork-gate as the job); fork PRs and
    gh run download <run-id> --name resource-samples-unit-tests
    ```
 
-**Initial reading:** The instrumentation was added with this story (2026-07-08). No
-instrumented runs exist at implementation time. The `RESOURCE_PROFILE` lines and
-artifacts will populate from subsequent self-hosted runs. The VM-sizing assessment
-(under- vs over-provisioned) is an explicit follow-up once ≥~5 instrumented runs have
-accumulated.
+**Real-world readings (from Story #2485 PR):**
+
+Once this PR's self-hosted CI runs complete, the actual `RESOURCE_PROFILE` lines and
+GitHub Actions run IDs will be recorded here. The Linux `unit-tests` run and Windows
+`Native Build` run on this PR are the first instrumented runs with the hardened sampler
+(Story #2485).
+
+**Note on Linux VM RAM discrepancy:** §6 documents the Linux runner as provisioned with
+8 GB RAM, but the `vm=` field in the `RESOURCE_PROFILE` line will reflect the actual
+`MemTotal` from `/proc/meminfo` at run time. Prior observations showed ~4 GB measured
+vs 8 GB provisioned target. This discrepancy is an open follow-up for the runner-sizing
+owner and is not resolved in this story.
 
 ---
 

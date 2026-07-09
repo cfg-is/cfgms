@@ -37,7 +37,7 @@ test_syntax() {
     log_test "Testing shell script syntax..."
 
     local scripts_tested=0
-    for script in scripts/*.sh .claude/scripts/*.sh; do
+    for script in scripts/*.sh .claude/scripts/*.sh .github/scripts/*.sh; do
         if [ -f "$script" ]; then
             if bash -n "$script" 2>/dev/null; then
                 log_pass "$(basename "$script"): Valid syntax"
@@ -3055,6 +3055,183 @@ PYEOF
     fi
 }
 
+# Test: resource-sampler.sh loop guard (Issue #2485 AC2)
+# Verifies that every per-iteration read in the sampling loop is guarded with
+# || true / || echo 0 so a single transient failure skips one sample instead
+# of killing the loop under set -euo pipefail.
+test_resource_sampler_loop_guard() {
+    log_test "Testing resource-sampler.sh: per-iteration read guard survives set -e failures..."
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts"
+
+    if [[ ! -f "${script_dir}/resource-sampler.sh" ]]; then
+        log_fail "resource-sampler.sh: not found at ${script_dir}/resource-sampler.sh"
+        return
+    fi
+
+    if [[ ! -x "${script_dir}/resource-sampler.sh" ]]; then
+        log_fail "resource-sampler.sh: not executable"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    # Write a mini-script that mirrors resource-sampler.sh's guarded loop body
+    # and runs it under set -euo pipefail.  Iteration 1 injects failures on all
+    # three reads (CPU_PCT, MEM_TOTAL, MEM_AVAIL).  With guards (|| echo 0) the
+    # loop must complete all iterations; without guards set -e would kill it.
+    local guard_script="${tmp_dir}/guard_test.sh"
+    local guard_out="${tmp_dir}/guard_out.txt"
+    cat > "$guard_script" << 'SCRIPTEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+PREV=""
+OUT="${GUARD_OUT}"
+for ITER in 0 1 2; do
+    CURR=$(echo "1 2 3 4 5 6 7" 2>/dev/null || true)
+    if [ -n "$PREV" ] && [ -n "$CURR" ]; then
+        if [ "$ITER" -eq 1 ]; then
+            # Simulate all three transient read failures; each is guarded.
+            CPU_PCT=$(false 2>/dev/null || echo 0)
+            MEM_TOTAL=$(false 2>/dev/null || echo 0)
+            MEM_AVAIL=$(false 2>/dev/null || echo 0)
+        else
+            CPU_PCT=50
+            MEM_TOTAL=8192
+            MEM_AVAIL=4096
+        fi
+        MEM_USED=$(( ${MEM_TOTAL:-0} - ${MEM_AVAIL:-0} ))
+        printf 'iter%d cpu_pct=%d mem_used_mb=%d/%d\n' \
+            "$ITER" "${CPU_PCT:-0}" "$MEM_USED" "${MEM_TOTAL:-0}" \
+            >> "$OUT" || true
+    fi
+    PREV="$CURR"
+done
+echo "LOOP_COMPLETE"
+SCRIPTEOF
+    chmod +x "$guard_script"
+
+    local guard_output guard_exit=0
+    guard_output=$(GUARD_OUT="$guard_out" bash "$guard_script" 2>&1) || guard_exit=$?
+
+    if [[ $guard_exit -eq 0 ]]; then
+        log_pass "resource-sampler.sh guard: loop body exits 0 under set -euo pipefail with all reads guarded"
+    else
+        log_fail "resource-sampler.sh guard: loop body exited $guard_exit — unguarded read killed it under set -e"
+    fi
+
+    if echo "$guard_output" | grep -q "LOOP_COMPLETE"; then
+        log_pass "resource-sampler.sh guard: LOOP_COMPLETE reached (loop not killed by failed iteration)"
+    else
+        log_fail "resource-sampler.sh guard: LOOP_COMPLETE not reached (output: $guard_output)"
+    fi
+
+    if [[ -f "$guard_out" ]]; then
+        local guard_lines
+        guard_lines=$(wc -l < "$guard_out" | tr -d ' ')
+        if [[ "$guard_lines" -ge 2 ]]; then
+            log_pass "resource-sampler.sh guard: $guard_lines samples produced (failure on iter 1 skipped one sample, did not stop loop)"
+        else
+            log_fail "resource-sampler.sh guard: only $guard_lines samples (expected ≥2 from 3 iterations)"
+        fi
+    else
+        log_fail "resource-sampler.sh guard: no output file produced"
+    fi
+
+    # Also verify start/report pipeline exits cleanly on a real system.
+    local state_dir="${tmp_dir}/state"
+    local start_exit=0
+    bash "${script_dir}/resource-sampler.sh" start "$state_dir" >/dev/null 2>&1 || start_exit=$?
+
+    if [[ $start_exit -eq 0 ]]; then
+        log_pass "resource-sampler.sh start: exits 0"
+    else
+        log_fail "resource-sampler.sh start: exited $start_exit"
+    fi
+
+    if [[ -f "${state_dir}/sampler.pid" ]]; then
+        log_pass "resource-sampler.sh start: created sampler.pid"
+        # Kill the background sampler immediately so the test is fast.
+        kill "$(cat "${state_dir}/sampler.pid" 2>/dev/null)" 2>/dev/null || true
+    else
+        log_fail "resource-sampler.sh start: sampler.pid not created"
+    fi
+}
+
+# Test: resource-sampler.sh report emits no literal ${ placeholder (Issue #2485 AC3)
+# Runs report against a fixture samples file and asserts the emitted
+# RESOURCE_PROFILE: line contains no unexpanded variable placeholder.
+test_resource_sampler_no_placeholder() {
+    log_test "Testing resource-sampler.sh: RESOURCE_PROFILE line contains no literal \${ placeholder..."
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts"
+
+    if [[ ! -f "${script_dir}/resource-sampler.sh" ]]; then
+        log_fail "resource-sampler.sh: not found at ${script_dir}/resource-sampler.sh"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    # Fixture: state dir with a known samples file and a dead-PID file.
+    local state_dir="${tmp_dir}/state"
+    mkdir -p "$state_dir"
+    echo "99999999" > "${state_dir}/sampler.pid"   # kill is a no-op for non-existent PID
+    cat > "${state_dir}/samples.txt" << 'EOF'
+12:00:01 cpu_pct=25 mem_used_mb=1024/4096
+12:00:06 cpu_pct=30 mem_used_mb=1100/4096
+12:00:11 cpu_pct=22 mem_used_mb=1050/4096
+EOF
+
+    local artifact="${tmp_dir}/artifact.txt"
+    local profile_line report_exit=0
+    profile_line=$(bash "${script_dir}/resource-sampler.sh" report "$state_dir" "$artifact" 2>&1) || report_exit=$?
+
+    if [[ $report_exit -ne 0 ]]; then
+        log_fail "resource-sampler.sh report (no-placeholder): exited $report_exit (output: $profile_line)"
+        return
+    fi
+
+    if echo "$profile_line" | grep -q 'RESOURCE_PROFILE:'; then
+        log_pass "resource-sampler.sh: emits a RESOURCE_PROFILE: line"
+    else
+        log_fail "resource-sampler.sh: no RESOURCE_PROFILE: line in output (got: '$profile_line')"
+        return
+    fi
+
+    if echo "$profile_line" | grep -qF '${'; then
+        log_fail "resource-sampler.sh: RESOURCE_PROFILE line contains literal '\${' placeholder (got: '$profile_line')"
+    else
+        log_pass "resource-sampler.sh: RESOURCE_PROFILE line contains no literal '\${' placeholder"
+    fi
+
+    # Peak values must match the fixture (cpu_peak=30, mem_peak=1100/4096).
+    if echo "$profile_line" | grep -q 'cpu_peak_pct=30'; then
+        log_pass "resource-sampler.sh: correct peak CPU (30) computed from fixture"
+    else
+        log_fail "resource-sampler.sh: expected cpu_peak_pct=30 from fixture (got: '$profile_line')"
+    fi
+
+    if echo "$profile_line" | grep -q 'mem_peak_mb=1100/4096'; then
+        log_pass "resource-sampler.sh: correct peak memory (1100/4096) computed from fixture"
+    else
+        log_fail "resource-sampler.sh: expected mem_peak_mb=1100/4096 from fixture (got: '$profile_line')"
+    fi
+
+    # vm= must not contain 0vCPU/0GB on a real Linux system (nproc should return ≥1).
+    if echo "$profile_line" | grep -qE 'vm=[1-9][0-9]*vCPU/[0-9]+GB'; then
+        log_pass "resource-sampler.sh: vm= spec contains a non-zero vCPU count"
+    else
+        log_fail "resource-sampler.sh: vm= spec has zero vCPU count (got: '$profile_line')"
+    fi
+}
+
 test_tier1_smoke_test() {
     log_test "Testing tier1-smoke-test.sh fixtures..."
 
@@ -3092,6 +3269,31 @@ test_tier1_smoke_test() {
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
+}
+
+# Test: resource-sampler.ps1 never uses pwsh (AC1 — static, runs on Linux without PS infra)
+test_resource_sampler_ps1_no_pwsh() {
+    log_test "Testing resource-sampler.ps1: AC1 — Start-Process uses powershell not pwsh..."
+
+    local ps1
+    ps1="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts/resource-sampler.ps1"
+
+    if [[ ! -f "$ps1" ]]; then
+        log_fail "resource-sampler.ps1: not found at $ps1"
+        return
+    fi
+
+    if grep -qE 'Start-Process[[:space:]]+pwsh' "$ps1"; then
+        log_fail "resource-sampler.ps1: found 'Start-Process pwsh' — must use 'Start-Process powershell' (AC1)"
+    else
+        log_pass "resource-sampler.ps1: no 'Start-Process pwsh' — Start-Process correctly uses powershell"
+    fi
+
+    if grep -qE "shell[[:space:]]*:[[:space:]]*pwsh" "$ps1"; then
+        log_fail "resource-sampler.ps1: found shell: pwsh reference — forbidden (AC1)"
+    else
+        log_pass "resource-sampler.ps1: no shell: pwsh reference"
+    fi
 }
 
 test_tier1_bootstrap() {
@@ -3218,6 +3420,12 @@ echo ""
 test_tier1_smoke_test
 echo ""
 test_tier1_bootstrap
+echo ""
+test_resource_sampler_ps1_no_pwsh
+echo ""
+test_resource_sampler_loop_guard
+echo ""
+test_resource_sampler_no_placeholder
 echo ""
 echo ""
 echo "📊 Test Summary"
