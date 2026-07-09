@@ -74,8 +74,8 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
-	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948) and batch job store (Issue #2296)
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory fallback stores (Issue #1948, #2296)
+	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider; provides SQLiteUpgradeStore (Issue #2464)
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
@@ -1007,12 +1007,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetAuditStore(as)
 	}
 
-	// Issue #1948: Wire in-memory upgrade store so the dispatch/status endpoints
-	// are operational. A durable SQLite-backed store is a follow-up; for the
-	// OSS composite deployment the in-memory store is sufficient because upgrade
-	// records are short-lived (< 60s) and not required to survive a controller restart.
-	httpServer.SetUpgradeStore(memoryprovider.NewUpgradeStore())
-	logger.Info("In-memory upgrade store wired to HTTP API server (Issue #1948)")
+	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
+	// when SQLite is not configured so controller startup is never blocked on storage.
+	httpServer.SetUpgradeStore(initializeUpgradeStore(context.Background(), cfg, logger))
 
 	// Issue #2296: Wire batch job store and rolling-batch executor so that
 	// POST /api/v1/jobs and GET /api/v1/jobs/{id} are operational.
@@ -2259,6 +2256,40 @@ func initializeRunManager(
 
 	logger.Info("Run manager initialized", "sqlite_path", cfg.Storage.SQLitePath)
 	return controllerrun.NewManager(store, executionQueue)
+}
+
+// initializeUpgradeStore opens a SQLite-backed UpgradeStore at cfg.Storage.SQLitePath,
+// initializes its schema, and returns it as the interface. Falls back to an in-memory
+// store (logging a warning, no startup failure) when SQLitePath is empty or either
+// open/Initialize fails — mirroring the degrade-gracefully pattern of initializeRunManager.
+func initializeUpgradeStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) business.UpgradeStore {
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Upgrade store: SQLite path not configured, using in-memory store (records will not survive restart)")
+		return memoryprovider.NewUpgradeStore()
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	store, err := sqliteprovider.NewUpgradeStoreSQLFromDSN(dsn)
+	if err != nil {
+		logger.Warn("Upgrade store: failed to open SQLite, falling back to in-memory store", "error", err)
+		return memoryprovider.NewUpgradeStore()
+	}
+	if err := store.Initialize(ctx); err != nil {
+		logger.Warn("Upgrade store: failed to initialize schema, falling back to in-memory store", "error", err)
+		_ = store.Close()
+		return memoryprovider.NewUpgradeStore()
+	}
+
+	logger.Info("Upgrade store initialized with SQLite backend (Issue #2464)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
 }
 
 // seedFleetCascadeTestData seeds the tenant hierarchy and MSP-level parent policy
