@@ -2307,7 +2307,7 @@ type serverBatchjobFleetQuery struct {
 }
 
 func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tenantID string) ([]batchjob.StewardMeta, error) {
-	filter, err := fleetSelector.Parse(selectorStr)
+	filter, _, err := fleetSelector.Parse(selectorStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
 	}

@@ -26,6 +26,7 @@ type StewardProvider interface {
 // Multiple non-empty fields are AND-combined.
 type Filter struct {
 	TenantID      string            // Scope to this tenant (exact match)
+	TenantSubtree string            // Match stewards at or below this tenant path (exact OR prefix+"/"); additive with TenantID
 	OS            string            // Match DNA["os"] (exact)
 	Platform      string            // Match DNA["platform"] (exact)
 	Architecture  string            // Match DNA["arch"] (exact)

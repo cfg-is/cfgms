@@ -296,6 +296,167 @@ func TestHandleResolveSelector_IDSelector_UnknownKeyStillRejected(t *testing.T) 
 	assert.Contains(t, resp.Error.Message, "id", "error message must list id in the valid key set")
 }
 
+// ── handleResolveSelector: subtree boundary enforcement ──────────────────────
+
+// postResolveSelectorWithPrincipal sends a resolve request with both a principal
+// and a tenant ID in context, simulating an authenticated operator session.
+func postResolveSelectorWithPrincipal(server *Server, body, tenantID string, isAdmin bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := req.Context()
+	if tenantID != "" {
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+	}
+	if isAdmin {
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{IsAdmin: true, TenantID: ""})
+	} else {
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{IsAdmin: false, TenantID: tenantID})
+	}
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleResolveSelector(rec, req)
+	return rec
+}
+
+// multiTenantFleet returns a fleet with stewards in several tenant positions for
+// subtree boundary tests.
+func multiTenantFleet() []fleet.StewardData {
+	return []fleet.StewardData{
+		{ID: "s-msp-a-client-1", TenantID: "msp-a/client-1", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "host-1"}},
+		{ID: "s-msp-a-client-1-web", TenantID: "msp-a/client-1/servers/web", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "web-1"}},
+		{ID: "s-msp-a-client-2", TenantID: "msp-a/client-2", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "host-2"}},
+		{ID: "s-msp-b-client-1", TenantID: "msp-b/client-1", Status: "online",
+			LastHeartbeat: time.Now(), DNAAttributes: map[string]string{"hostname": "host-3"}},
+	}
+}
+
+// resolveIDs unmarshals the response steward list and returns their IDs.
+func resolveIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	ids := make([]string, len(list))
+	for i, item := range list {
+		ids[i] = item.(map[string]interface{})["id"].(string)
+	}
+	return ids
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_DefaultSubtree verifies that an
+// operator with no explicit tenant prefix in the selector sees their entire
+// subtree (exact tenant + descendants), not just the exact tenant.
+func TestHandleResolveSelector_SubtreeBoundary_DefaultSubtree(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 with "all" selector — should see client-1 AND client-1/servers/web.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1", "exact tenant must be included")
+	assert.Contains(t, ids, "s-msp-a-client-1-web", "descendant tenant must be included")
+	assert.NotContains(t, ids, "s-msp-a-client-2", "sibling tenant must be excluded")
+	assert.NotContains(t, ids, "s-msp-b-client-1", "different MSP must be excluded")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_ExplicitDescendantAllowed verifies
+// that an operator may explicitly target a descendant tenant in their selector.
+func TestHandleResolveSelector_SubtreeBoundary_ExplicitDescendantAllowed(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a targets descendant msp-a/client-1/servers/web explicitly.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/servers/web/all"}`, "msp-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1-web")
+	assert.NotContains(t, ids, "s-msp-a-client-1")
+	assert.NotContains(t, ids, "s-msp-a-client-2")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_SiblingRejected verifies that an
+// operator cannot target a sibling tenant — the request returns 403.
+func TestHandleResolveSelector_SubtreeBoundary_SiblingRejected(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 attempts to target msp-a/client-2 — must be 403.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-2/all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "CROSS_TENANT", resp.Error.Code)
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_UnrelatedTenantRejected verifies
+// that targeting a completely unrelated tenant returns 403.
+func TestHandleResolveSelector_SubtreeBoundary_UnrelatedTenantRejected(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 attempts to target msp-b/client-1 — must be 403.
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-b/client-1/all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "CROSS_TENANT", resp.Error.Code)
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_ParentTargetsDescendant verifies
+// that a parent operator can explicitly target a child or grandchild tenant.
+func TestHandleResolveSelector_SubtreeBoundary_ParentTargetsDescendant(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a (parent) targets msp-a/client-1 (child).
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/all"}`, "msp-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1")
+	assert.Contains(t, ids, "s-msp-a-client-1-web")
+	assert.NotContains(t, ids, "s-msp-a-client-2")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_AdminUnrestricted verifies that an
+// admin caller (empty tenant, IsAdmin=true) is not limited by subtree boundaries.
+func TestHandleResolveSelector_SubtreeBoundary_AdminUnrestricted(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Admin with "all" — must see everything.
+	rec := postResolveSelectorWithPrincipal(server, `{"selector":"all"}`, "", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Len(t, ids, len(multiTenantFleet()), "admin must see all stewards")
+}
+
+// TestHandleResolveSelector_SubtreeBoundary_ExplicitOwnTenantAllowed verifies
+// that a caller may explicitly name their own tenant as the selector prefix.
+func TestHandleResolveSelector_SubtreeBoundary_ExplicitOwnTenantAllowed(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	// Operator at msp-a/client-1 explicitly targets msp-a/client-1 (themselves).
+	rec := postResolveSelectorWithTenant(server, `{"selector":"msp-a/client-1/all"}`, "msp-a/client-1")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := resolveIDs(t, rec)
+	assert.Contains(t, ids, "s-msp-a-client-1")
+	assert.Contains(t, ids, "s-msp-a-client-1-web")
+}
+
 // TestHandleResolveSelector_TenantIsolation verifies that a caller authenticated
 // as tenant-a cannot see tenant-b stewards even when the selector would otherwise
 // match them (e.g. "all"). The authenticated tenant is always AND-ed onto the filter.

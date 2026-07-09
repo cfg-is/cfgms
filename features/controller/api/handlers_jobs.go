@@ -45,7 +45,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
-	_, tenantID, ok := s.authRunAccess(w, r)
+	principal, tenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -71,7 +71,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// reach the log calls below (logging.SanitizeLogValue is not modeled by CodeQL).
 	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
 
-	filter, err := selector.Parse(req.Selector)
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.logger.Info("Invalid selector expression",
 			"selector", safeSelector, "error", err)
@@ -79,7 +79,21 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter.TenantID = tenantID
+	// Scope to the caller's subtree. An explicit selector prefix must be within
+	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
+	// Admin callers (empty tenantID) are unrestricted.
+	if parsedTenantPath != "" {
+		if !principal.IsAdmin && tenantID != "" &&
+			parsedTenantPath != tenantID &&
+			!strings.HasPrefix(parsedTenantPath, tenantID+"/") {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if !principal.IsAdmin {
+		filter.TenantSubtree = tenantID
+	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {

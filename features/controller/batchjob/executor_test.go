@@ -148,7 +148,7 @@ type fleetQueryAdapter struct {
 }
 
 func (a *fleetQueryAdapter) Search(ctx context.Context, selector, tenantID string) ([]batchjob.StewardMeta, error) {
-	filter, err := fleetSelector.Parse(selector)
+	filter, _, err := fleetSelector.Parse(selector)
 	if err != nil {
 		return nil, err
 	}

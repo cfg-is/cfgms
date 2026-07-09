@@ -487,11 +487,14 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 
 // parseRunTarget converts an optional fleet selector string to a fleet.Filter.
 // An empty target matches all stewards (within the caller's tenant, enforced by synthesis).
+// The tenant path extracted by selector.Parse is discarded here; exec tenant enforcement
+// uses enforceExecTenantScope (device-ID prefix check) rather than Filter.TenantSubtree.
 func parseRunTarget(target string) (fleet.Filter, error) {
 	if target == "" || target == "all" {
 		return fleet.Filter{}, nil
 	}
-	return selector.Parse(target)
+	f, _, err := selector.Parse(target)
+	return f, err
 }
 
 // enforceExecTenantScope checks whether the principal's tenantID is a path-prefix

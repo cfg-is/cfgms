@@ -92,16 +92,26 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Strip newlines so CodeQL's go/log-injection taint cannot reach log calls.
 	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
 
-	filter, err := selector.Parse(req.Selector)
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.logger.Info("Invalid selector expression", "selector", safeSelector, "error", logging.SanitizeLogValue(err.Error()))
 		s.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Enforce tenant boundary unconditionally: always scope to cfg.TenantID,
-	// overriding anything the selector implied. Without this an admin's "all"
-	// yields an empty Filter{} and Search would fan out across every tenant.
-	filter.TenantID = cfg.TenantID
+	// Scope to cfg.TenantID subtree. An explicit selector prefix must be within
+	// that subtree; absent prefix defaults to cfg.TenantID and all descendants.
+	if parsedTenantPath != "" {
+		if parsedTenantPath != cfg.TenantID && !strings.HasPrefix(parsedTenantPath, cfg.TenantID+"/") {
+			s.logger.Info("Selector tenant outside config tenant subtree",
+				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+				"config_tenant", logging.SanitizeLogValue(cfg.TenantID))
+			s.respondError(w, http.StatusForbidden, "selector tenant outside config tenant subtree")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else {
+		filter.TenantSubtree = cfg.TenantID
+	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
