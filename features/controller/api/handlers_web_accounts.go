@@ -216,7 +216,10 @@ func validateWebPassword(password string) error {
 
 // --- account store: in-memory cache over the central secret store ---
 
-func webAccountSecretKey(username string) string {
+// webAccountStoreKey returns the secret-store lookup key for a web account.
+// The key is an identifier (prefix + username), never credential material —
+// the value stored under it is the argon2id hash.
+func webAccountStoreKey(username string) string {
 	return webAccountKeyPrefix + username
 }
 
@@ -283,7 +286,7 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 // never the password.
 func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, createdBy string) error {
 	secretReq := &secretsif.SecretRequest{
-		Key:         webAccountSecretKey(acct.Username),
+		Key:         webAccountStoreKey(acct.Username),
 		Value:       acct.PasswordHash, // argon2id PHC hash only — plaintext is never stored
 		TenantID:    acct.TenantID,
 		CreatedBy:   createdBy,
@@ -453,7 +456,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 
 	existing, err := s.getWebAccount(r.Context(), req.Username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", err,
+		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(req.Username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
 		return
@@ -499,7 +502,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	// If a reset moves the account to a different tenant, remove the old record so
 	// the store never holds two live records for one username.
 	if existing != nil && existing.TenantID != acct.TenantID {
-		oldKey := fmt.Sprintf("%s/%s", existing.TenantID, webAccountSecretKey(existing.Username))
+		oldKey := fmt.Sprintf("%s/%s", existing.TenantID, webAccountStoreKey(existing.Username))
 		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
 			s.logger.Warn("Failed to delete web account record from previous tenant",
 				"username", logging.SanitizeLogValue(acct.Username),
@@ -508,7 +511,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.persistWebAccount(r.Context(), acct, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist web account to secret store", "error", err,
+		s.logger.Error("Failed to persist web account to secret store", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(acct.Username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist web account", "STORE_ERROR")
 		return
@@ -543,7 +546,7 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 
 	acct, err := s.getWebAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", err,
+		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
 		return
@@ -558,8 +561,8 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 	delete(s.webAccountLockouts, username)
 	s.mu.Unlock()
 
-	secretKey := fmt.Sprintf("%s/%s", acct.TenantID, webAccountSecretKey(username))
-	if err := s.secretStore.DeleteSecret(r.Context(), secretKey); err != nil {
+	storeKey := fmt.Sprintf("%s/%s", acct.TenantID, webAccountStoreKey(username))
+	if err := s.secretStore.DeleteSecret(r.Context(), storeKey); err != nil {
 		s.logger.Warn("Failed to delete web account from secret store (memory cache already cleared)",
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
