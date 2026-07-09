@@ -267,6 +267,59 @@ func TestDispatch_RejectsCrossTenantSelector(t *testing.T) {
 	assert.Contains(t, body, "CROSS_TENANT")
 }
 
+// TestDispatch_ExplicitTenantPrefix_OutsideSubtreeRejected verifies that a
+// non-admin caller whose selector carries an explicit tenant-path prefix outside
+// their authorized subtree is rejected with 403 CROSS_TENANT by the early-return
+// branch (handlers_upgrade.go:137-144), before the fleet query or approval gate.
+// The existing TestDispatch_RejectsCrossTenantSelector uses a prefix-less selector
+// and hits the len(stewards)==0 path instead, leaving this branch uncovered.
+func TestDispatch_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
+	}
+	server, _ := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	// Caller tenant-a, but the selector prefix targets tenant-b (outside subtree).
+	rec := doDispatchUpgrade(server, "tenant-a", "tenant-b/id:steward-1", "v0.5.12", "linux", "amd64")
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CROSS_TENANT")
+}
+
+// TestDispatch_ExplicitTenantPrefix_ScopesToSubtree verifies that a valid
+// in-subtree tenant-path prefix drives filter.TenantSubtree = parsedTenantPath
+// (handlers_upgrade.go:145): dispatch resolves only stewards at or below the
+// prefixed sub-tenant, excluding sibling sub-tenants under the caller's tenant.
+func TestDispatch_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{ID: "steward-c1", TenantID: "tenant-a/client-1", Status: "online"},
+		{ID: "steward-c2", TenantID: "tenant-a/client-2", Status: "online"},
+	}
+	server, upgradeStore := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+
+	// Caller tenant-a targets only the client-1 subtree via an explicit prefix.
+	rec := doDispatchUpgrade(server, "tenant-a", "tenant-a/client-1/all", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	count, _ := data["steward_count"].(float64)
+	assert.Equal(t, float64(1), count,
+		"explicit prefix must scope to tenant-a/client-1, excluding sibling client-2")
+
+	// The in-subtree steward must have a record; the sibling must have none.
+	c1records, err := upgradeStore.ListUpgradesBySteward(context.Background(), "steward-c1")
+	require.NoError(t, err)
+	assert.Len(t, c1records, 1, "in-subtree steward must receive an upgrade record")
+	c2records, err := upgradeStore.ListUpgradesBySteward(context.Background(), "steward-c2")
+	require.NoError(t, err)
+	assert.Empty(t, c2records, "sibling-subtree steward must not receive an upgrade record")
+}
+
 // TestDispatch_RejectsUnapprovedBlob verifies that a blob in published state
 // (approved_by label absent) returns 403.
 func TestDispatch_RejectsUnapprovedBlob(t *testing.T) {

@@ -74,8 +74,8 @@ import (
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
-	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory upgrade store (Issue #1948) and batch job store (Issue #2296)
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"               // register sqlite provider for OSS composite manager
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory fallback stores (Issue #1948, #2296)
+	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider; provides SQLiteUpgradeStore (Issue #2464)
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
@@ -121,6 +121,7 @@ type Server struct {
 	executionQueue          *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
 	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
@@ -166,6 +167,44 @@ func resolveDNADataRoot(cfg *config.Config) string {
 		}
 	}
 	return root
+}
+
+// makeHeartbeatStatusChangeCallback builds the OnStatusChange closure wired into
+// the heartbeat.Service. When a steward's liveness state changes, the callback
+// persists the new status to the durable StewardStore so that cfg steward list
+// and GET /api/v1/stewards reflect the change without a restart (Issue #2463).
+func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger logging.Logger) heartbeat.StatusChangeCallback {
+	return func(sid string, healthy bool, status heartbeat.StewardStatus) {
+		if healthy {
+			logger.Info("Steward heartbeat recovered", "steward_id", logging.SanitizeLogValue(sid))
+			if store == nil {
+				return
+			}
+			rec, getErr := store.GetSteward(context.Background(), sid)
+			if getErr != nil {
+				logger.Warn("Heartbeat recovery: failed to read current durable status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", getErr)
+				return
+			}
+			// Only promote to Active when currently Registered or Lost; never
+			// overwrite Deregistered, Archived, Dormant, or Revoked (Issue #2463).
+			if rec.Status == business.StewardStatusRegistered || rec.Status == business.StewardStatusLost {
+				if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusActive); updErr != nil {
+					logger.Warn("Heartbeat recovery: failed to persist active status",
+						"steward_id", logging.SanitizeLogValue(sid), "error", updErr)
+				}
+			}
+		} else {
+			logger.Warn("Steward heartbeat failed", "steward_id", logging.SanitizeLogValue(sid), "status", status.Status)
+			if store == nil {
+				return
+			}
+			if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusLost); updErr != nil {
+				logger.Warn("Heartbeat lost: failed to persist lost status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", updErr)
+			}
+		}
+	}
 }
 
 // New creates a new server instance
@@ -692,16 +731,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// IP-trust store is available (Issue #1694). Both the database provider
 		// and the OSS composite (flatfile+SQLite, Issue #1900) supply an
 		// IPTrustStore; the evaluator is skipped only when no store is wired.
+		hbStewardStore := storageManager.GetStewardStore()
 		var heartbeatTrustEvaluator heartbeat.TrustEvaluator
 		if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
-			stewardStore := storageManager.GetStewardStore()
 			ipTrustThreshold := cfg.Registration.GetIPTrustThreshold()
 			evaluator := controllerRegistration.NewIPTrustEvaluator(controllerRegistration.IPTrustEvaluatorConfig{
 				Store:     ipTrustStore,
 				Threshold: ipTrustThreshold,
 				Logger:    logger,
 			})
-			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, stewardStore, logger)
+			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, hbStewardStore, logger)
 			logger.Info("IP-trust evaluator wired into heartbeat service",
 				"threshold", ipTrustThreshold)
 		}
@@ -709,16 +748,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")
 		heartbeatService, err = heartbeat.New(&heartbeat.Config{
-			ControlPlane:     controlPlane,
-			HeartbeatTimeout: 15 * time.Second,
-			CheckInterval:    5 * time.Second,
-			OnStatusChange: func(stewardID string, healthy bool, status heartbeat.StewardStatus) {
-				if healthy {
-					logger.Info("Steward heartbeat recovered", "steward_id", stewardID)
-				} else {
-					logger.Warn("Steward heartbeat failed", "steward_id", stewardID, "status", status.Status)
-				}
-			},
+			ControlPlane:        controlPlane,
+			HeartbeatTimeout:    15 * time.Second,
+			CheckInterval:       5 * time.Second,
+			OnStatusChange:      makeHeartbeatStatusChangeCallback(hbStewardStore, logger),
 			OnHeartbeatReceived: jobDispatcher.OnHeartbeat,
 			TrustEvaluator:      heartbeatTrustEvaluator,
 			Logger:              logger,
@@ -975,12 +1008,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetAuditStore(as)
 	}
 
-	// Issue #1948: Wire in-memory upgrade store so the dispatch/status endpoints
-	// are operational. A durable SQLite-backed store is a follow-up; for the
-	// OSS composite deployment the in-memory store is sufficient because upgrade
-	// records are short-lived (< 60s) and not required to survive a controller restart.
-	httpServer.SetUpgradeStore(memoryprovider.NewUpgradeStore())
-	logger.Info("In-memory upgrade store wired to HTTP API server (Issue #1948)")
+	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
+	// when SQLite is not configured so controller startup is never blocked on storage.
+	// The store is held in srv.upgradeStore so Stop() can close the SQLite handle.
+	upgradeStore := initializeUpgradeStore(context.Background(), cfg, logger)
+	httpServer.SetUpgradeStore(upgradeStore)
 
 	// Issue #2296: Wire batch job store and rolling-batch executor so that
 	// POST /api/v1/jobs and GET /api/v1/jobs/{id} are operational.
@@ -1070,6 +1102,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
 		storageManager:          storageManager,
+		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
 		executionQueue:          executionQueue,   // Issue #1672
 		jobDispatcher:           jobDispatcher,    // Issue #1672
 		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
@@ -1793,6 +1826,14 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Close upgrade store — releases the SQLite connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2464).
+	if s.upgradeStore != nil {
+		if err := s.upgradeStore.Close(); err != nil {
+			s.logger.Warn("Failed to close upgrade store", "error", err)
+		}
+	}
+
 	// Drain in-flight webhook-triggered syncs before closing storage (Issue #681).
 	// WaitForPendingSyncs must run before storageManager.Close() because webhook
 	// sync goroutines write to the config store.
@@ -2229,6 +2270,40 @@ func initializeRunManager(
 	return controllerrun.NewManager(store, executionQueue)
 }
 
+// initializeUpgradeStore opens a SQLite-backed UpgradeStore at cfg.Storage.SQLitePath,
+// initializes its schema, and returns it as the interface. Falls back to an in-memory
+// store (logging a warning, no startup failure) when SQLitePath is empty or either
+// open/Initialize fails — mirroring the degrade-gracefully pattern of initializeRunManager.
+func initializeUpgradeStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) business.UpgradeStore {
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Upgrade store: SQLite path not configured, using in-memory store (records will not survive restart)")
+		return memoryprovider.NewUpgradeStore()
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	store, err := sqliteprovider.NewUpgradeStoreSQLFromDSN(dsn)
+	if err != nil {
+		logger.Warn("Upgrade store: failed to open SQLite, falling back to in-memory store", "error", err)
+		return memoryprovider.NewUpgradeStore()
+	}
+	if err := store.Initialize(ctx); err != nil {
+		logger.Warn("Upgrade store: failed to initialize schema, falling back to in-memory store", "error", err)
+		_ = store.Close()
+		return memoryprovider.NewUpgradeStore()
+	}
+
+	logger.Info("Upgrade store initialized with SQLite backend (Issue #2464)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
+}
+
 // seedFleetCascadeTestData seeds the tenant hierarchy and MSP-level parent policy
 // required by the fleet E2E cascade test (Issue #1723). Called only when
 // CFGMS_SEED_TEST_TOKENS=1 is set. Creates a two-level tenant tree:
@@ -2307,7 +2382,7 @@ type serverBatchjobFleetQuery struct {
 }
 
 func (a *serverBatchjobFleetQuery) Search(ctx context.Context, selectorStr, tenantID string) ([]batchjob.StewardMeta, error) {
-	filter, err := fleetSelector.Parse(selectorStr)
+	filter, _, err := fleetSelector.Parse(selectorStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
 	}

@@ -46,6 +46,11 @@ var (
 
 var stewardMoveToTenant string
 
+// stewardYes is the persistent --yes/-y flag shared across the steward command
+// tree. It suppresses the multi-host confirmation prompt for mutating verbs but
+// never suppresses the 0-match fail-fast error (see confirmMultiHost).
+var stewardYes bool
+
 // stewardCmd is the parent command for steward subcommands.
 var stewardCmd = &cobra.Command{
 	Use:   "steward",
@@ -53,23 +58,29 @@ var stewardCmd = &cobra.Command{
 	Long:  `Commands for inspecting and managing stewards registered with the controller.`,
 }
 
-// stewardListCmd lists all stewards registered with the controller.
+// stewardListCmd lists stewards registered with the controller.
+// An optional selector argument limits output to matching stewards via
+// POST /api/v1/fleet/resolve; without an argument the full fleet is listed
+// via GET /api/v1/stewards (backward compatible).
 var stewardListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [selector]",
 	Short: "List registered stewards",
-	Long: `Display all stewards registered with the controller.
+	Long: `Display stewards registered with the controller.
 
-Prints a tabular list of steward IDs, tenants, statuses, and last-seen times.
+Without a selector, prints the full fleet via GET /api/v1/stewards.
+With a selector, resolves matching stewards via POST /api/v1/fleet/resolve
+and prints only those that match. A selector that matches no stewards is an
+error; use "all" to match every steward in the caller's authorized subtree.
 
 Examples:
-  # List stewards using admin bundle (mTLS auto-discovery)
+  # List all stewards
   cfg steward list
 
-  # List stewards with explicit URL
-  cfg steward list --url=https://controller.example.com
-
-  # List stewards with API key authentication
-  cfg steward list --url=https://controller.example.com --api-key=your-key`,
+  # Preview which stewards match a selector
+  cfg steward list os:linux
+  cfg steward list "group:prod os:linux"
+  cfg steward list all`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runStewardList,
 }
 
@@ -528,6 +539,12 @@ func init() {
 	stewardDecommissionCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardDecommissionCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 
+	// --yes/-y is a persistent flag on the steward command tree so it is
+	// accepted (and inert where irrelevant) by every subcommand. Mutating
+	// verbs call confirmMultiHost which checks this flag.
+	stewardCmd.PersistentFlags().BoolVarP(&stewardYes, "yes", "y", false,
+		"Skip confirmation prompts for multi-host mutating commands")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
 	stewardCmd.AddCommand(stewardDNACmd)
@@ -939,6 +956,36 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
+	// Selector path: resolve matching stewards via POST /api/v1/fleet/resolve.
+	if len(args) > 0 {
+		matches, err := resolveOrFailFast(context.Background(), client, args[0])
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(w, "ID\tSTATUS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "--\t------\t-------\t---------\t--------"); err != nil {
+			return err
+		}
+		for _, s := range matches {
+			hostname := ""
+			if s.DNA != nil {
+				hostname = s.DNA.Hostname
+			}
+			lastSeen := ""
+			if !s.LastSeen.IsZero() {
+				lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+			}
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
+				return err
+			}
+		}
+		return w.Flush()
+	}
+
+	// No-arg path: unchanged GET /api/v1/stewards behavior (backward compatible).
 	resp, err := client.Get(context.Background(), "/api/v1/stewards")
 	if err != nil {
 		return fmt.Errorf("failed to fetch stewards: %w", err)

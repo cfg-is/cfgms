@@ -844,6 +844,79 @@ func TestHandleConfigPush_FanoutTenantIsolation(t *testing.T) {
 		"steward from a different tenant must never receive SendCommand")
 }
 
+// TestHandleConfigPush_ExplicitTenantPrefix_OutsideSubtreeRejected verifies that
+// a selector carrying an explicit tenant-path prefix outside the config's tenant
+// subtree is rejected with 403 (handlers_push.go:103-110). An admin caller passes
+// the earlier caller-vs-cfg.TenantID auth check, so execution reaches the selector
+// prefix check — which the existing TestHandleConfigPush_TenantCallerCrosstenantRejected
+// never does (it is rejected at the earlier auth gate).
+func TestHandleConfigPush_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	body := configPushRequest{
+		Selector: "tenant-other/all",
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
+	}
+	// Admin caller passes the caller-vs-cfg auth check, reaching the prefix branch.
+	req := withAdminPrincipal(newPushRequest(t, body))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "outside config tenant subtree")
+
+	// The 403 prefix rejection must short-circuit before persistence and fan-out.
+	pending, err := pushStore.GetPendingPushes(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending, "403 prefix rejection must not create a push record")
+	assert.Empty(t, cp.ReceivedIDs(), "403 prefix rejection must not trigger fan-out")
+}
+
+// TestHandleConfigPush_ExplicitTenantPrefix_ScopesToSubtree verifies that a valid
+// in-subtree tenant-path prefix drives filter.TenantSubtree = parsedTenantPath
+// (handlers_push.go:111): fan-out is scoped to the prefixed sub-tenant, reaching
+// only its steward and excluding a sibling sub-tenant under the same config tenant.
+func TestHandleConfigPush_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, _ := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	// Two active stewards under sibling sub-tenants of tenant-abc.
+	inScope := registerActiveSteward(t, server.controllerService, "push-prefix-c1", "tenant-abc/client-1")
+	registerActiveSteward(t, server.controllerService, "push-prefix-c2", "tenant-abc/client-2")
+
+	body := configPushRequest{
+		Selector: "tenant-abc/client-1/all",
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
+	}
+
+	// Exactly one in-subtree steward should receive a SendCommand.
+	cp.wg.Add(1)
+
+	req := withAdminPrincipal(newPushRequest(t, body))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	cp.wg.Wait()
+	assert.ElementsMatch(t, []string{inScope}, cp.ReceivedIDs(),
+		"explicit prefix must scope fan-out to tenant-abc/client-1, excluding sibling client-2")
+}
+
 // --- GET /api/v1/config/push/{id} tests ---
 
 // newGetPushRequest builds a GET /api/v1/config/push/{id} request with the

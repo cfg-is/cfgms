@@ -62,15 +62,21 @@ func isInfrastructureRequired() bool {
 		return true
 	}
 
-	// Docker test environment explicitly set up
-	if os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
-		return true
-	}
-
 	// Integration test mode
 	if os.Getenv("CFGMS_TEST_INTEGRATION") == "1" {
 		return true
 	}
+
+	// NOTE: the mere presence of CFGMS_TEST_DB_PASSWORD is deliberately NOT
+	// treated as "infrastructure required". That variable only supplies
+	// credentials; it is set whenever .env.test is sourced (e.g. by
+	// `make test-integration-docker`) regardless of whether the backing Docker
+	// services are actually running. Agent containers without a Docker daemon
+	// source .env.test for credentials but have no live database, so keying off
+	// the password produced false "infrastructure required" hard failures. Real
+	// CI still enforces via CI/GITHUB_ACTIONS above, and a developer who wants
+	// hard failures against a live local database opts in with
+	// CFGMS_TEST_INTEGRATION=1.
 
 	return false
 }

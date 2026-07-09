@@ -2360,3 +2360,54 @@ func TestHandleMoveSteward_TenantPathWithSlash(t *testing.T) {
 	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code,
 		"auth passed and tenant lookup failed as expected")
 }
+
+// ---- handleListStewards lost-status read-path test (Issue #2463) ----
+
+// TestListStewards_SurfacesLostStatusFromStore seeds a durable StewardStore record
+// at StewardStatusLost directly (no heartbeat service involved — isolates the read
+// path) and asserts handleListStewards returns Status "lost" for that steward,
+// confirming no additional API-layer translation is needed (Issue #2463).
+func TestListStewards_SurfacesLostStatusFromStore(t *testing.T) {
+	ctx := context.Background()
+	server := setupTestServer(t)
+
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	const stewardID = "s-lost-status-2463"
+	const tenantID = "test-tenant"
+
+	// Seed the durable store with StewardStatusLost directly (bypasses heartbeat service).
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID:       stewardID,
+		TenantID: tenantID,
+		Status:   business.StewardStatusLost,
+	}))
+
+	// Also register in the in-memory controller service so handleListStewards
+	// (which reads the in-memory registry) can surface the steward.
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "addr", string(business.StewardStatusLost)))
+
+	// Call handleListStewards directly (no filter → unfiltered path that reads
+	// s.controllerService.GetAllStewards()).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req = withTenant(req, "")
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var found bool
+	for _, s := range resp.Data {
+		if s.ID == stewardID {
+			found = true
+			assert.Equal(t, "lost", s.Status,
+				"handleListStewards must surface StewardStatusLost without API-layer translation")
+		}
+	}
+	assert.True(t, found, "lost steward must appear in the list response")
+}

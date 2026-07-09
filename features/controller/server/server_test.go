@@ -4,9 +4,12 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -772,4 +775,178 @@ func TestSeedTestTokens_LogsUsefulNonSensitiveInfo(t *testing.T) {
 		"seeding path must emit at least one observable log line")
 	assert.True(t, rec.containsAny("test-tenant"),
 		"seeding log must include the tenant ID for observability")
+}
+
+// TestUpgradeStore_SurvivesControllerRestart_WhenSQLiteConfigured verifies that
+// upgrade records written through initializeUpgradeStore survive a simulated controller
+// restart (close + reopen against the same SQLitePath). This is the integration-level
+// regression test for Issue #2464.
+func TestUpgradeStore_SurvivesControllerRestart_WhenSQLiteConfigured(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "upgrade_restart.db")
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{
+			SQLitePath: dbPath,
+		},
+	}
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+
+	// First "controller instance": open the store, create a record, then close.
+	store1 := initializeUpgradeStore(ctx, cfg, logger)
+	require.NotNil(t, store1, "initializeUpgradeStore must return a non-nil store")
+
+	rec := &business.UpgradeRecord{
+		ID:        "upg-restart-001",
+		StewardID: "steward-abc",
+		TenantID:  "tenant-restart",
+		Version:   "v2.0.0",
+		Platform:  "linux",
+		Arch:      "amd64",
+		SHA256:    "deadbeefdeadbeefdeadbeefdeadbeef",
+		Status:    business.UpgradeStatusDispatched,
+		InitiatedBy: business.InitiatedByIdentity{
+			Subject:    "operator@example.com",
+			TenantID:   "tenant-restart",
+			AuthMethod: "mtls",
+		},
+		Publisher:       "cfgms",
+		SignatureDigest: "sha256:cafebabe",
+		BundleSignature: []byte{0xca, 0xfe, 0xba, 0xbe, 0x01, 0x02, 0x03, 0x04},
+		CreatedAt:       time.Now().UTC(),
+		DispatchedAt:    time.Now().UTC(),
+	}
+	require.NoError(t, store1.CreateUpgrade(ctx, rec))
+	require.NoError(t, store1.Close(), "store1 close (simulated shutdown) must not error")
+
+	// Second "controller instance": reopen the same path and verify durability.
+	store2 := initializeUpgradeStore(ctx, cfg, logger)
+	require.NotNil(t, store2)
+	defer func() { _ = store2.Close() }()
+
+	got, err := store2.GetUpgrade(ctx, "upg-restart-001")
+	require.NoError(t, err, "upgrade record must be readable after simulated controller restart")
+	assert.Equal(t, "upg-restart-001", got.ID)
+	assert.Equal(t, business.UpgradeStatusDispatched, got.Status)
+	assert.Equal(t, "steward-abc", got.StewardID)
+	assert.Equal(t, rec.BundleSignature, got.BundleSignature)
+}
+
+// TestInitializeUpgradeStore_NoSQLitePath_FallsBackToInMemory covers the
+// degrade-gracefully branch at server.go:2270: when the SQLite path is not
+// configured (nil Storage or empty SQLitePath), initializeUpgradeStore must
+// return a functional non-nil in-memory store and log a durability warning
+// rather than failing controller startup.
+func TestInitializeUpgradeStore_NoSQLitePath_FallsBackToInMemory(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "nil Storage", cfg: &config.Config{}},
+		{name: "empty SQLitePath", cfg: &config.Config{Storage: &config.StorageConfig{SQLitePath: ""}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingLogger{}
+
+			store := initializeUpgradeStore(ctx, tc.cfg, rec)
+			require.NotNil(t, store, "must return a non-nil store even without SQLite configured")
+			requireInMemoryUpgradeStore(t, store,
+				"unconfigured SQLite path must degrade to the in-memory store")
+			t.Cleanup(func() { _ = store.Close() })
+
+			assert.True(t, rec.containsAny("records will not survive restart"),
+				"silent degradation to non-durable storage must emit an observable warning")
+
+			// The fallback store must actually be usable, not just non-nil.
+			assertUpgradeStoreFunctional(t, ctx, store)
+		})
+	}
+}
+
+// TestInitializeUpgradeStore_OpenFailure_FallsBackToInMemory covers the branch
+// at server.go:2282: when the SQLite database cannot be opened (here the DSN
+// points at a directory rather than a writable file), initializeUpgradeStore
+// must fall back to a functional in-memory store and warn instead of crashing.
+func TestInitializeUpgradeStore_OpenFailure_FallsBackToInMemory(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingLogger{}
+
+	// A directory can never be opened as a SQLite database file, so the open
+	// (busy_timeout PRAGMA) fails deterministically across platforms.
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{SQLitePath: t.TempDir()},
+	}
+
+	store := initializeUpgradeStore(ctx, cfg, rec)
+	require.NotNil(t, store)
+	requireInMemoryUpgradeStore(t, store,
+		"an unopenable SQLite DSN must degrade to the in-memory store")
+	t.Cleanup(func() { _ = store.Close() })
+
+	assert.True(t, rec.containsAny("failed to open SQLite"),
+		"open failure must emit an observable warning")
+	assertUpgradeStoreFunctional(t, ctx, store)
+}
+
+// TestInitializeUpgradeStore_InitializeFailure_FallsBackToInMemory covers the
+// branch at server.go:2286: the DSN opens but schema Initialize fails because
+// the file already holds non-SQLite content. initializeUpgradeStore must close
+// the half-open handle, fall back to a functional in-memory store, and warn.
+func TestInitializeUpgradeStore_InitializeFailure_FallsBackToInMemory(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingLogger{}
+
+	dbPath := filepath.Join(t.TempDir(), "corrupt.db")
+	// Pre-place garbage so sql.Open succeeds (header is only read on first DDL)
+	// but the CREATE TABLE inside Initialize fails with "file is not a database".
+	require.NoError(t, os.WriteFile(dbPath, []byte("not a sqlite database, just raw bytes"), 0o600))
+
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{SQLitePath: dbPath},
+	}
+
+	store := initializeUpgradeStore(ctx, cfg, rec)
+	require.NotNil(t, store)
+	requireInMemoryUpgradeStore(t, store,
+		"a schema-init failure must degrade to the in-memory store")
+	t.Cleanup(func() { _ = store.Close() })
+
+	assert.True(t, rec.containsAny("failed to initialize schema"),
+		"initialize failure must emit an observable warning")
+	assertUpgradeStoreFunctional(t, ctx, store)
+}
+
+// assertUpgradeStoreFunctional performs a round-trip write/read to prove the
+// fallback store is genuinely usable, not merely non-nil.
+func assertUpgradeStoreFunctional(t *testing.T, ctx context.Context, store business.UpgradeStore) {
+	t.Helper()
+	rec := &business.UpgradeRecord{
+		ID:        "upg-fallback-001",
+		StewardID: "steward-fallback",
+		TenantID:  "tenant-fallback",
+		Version:   "v1.0.0",
+		Platform:  "linux",
+		Arch:      "amd64",
+		SHA256:    "feedfacefeedfacefeedfacefeedface",
+		Status:    business.UpgradeStatusDispatched,
+		InitiatedBy: business.InitiatedByIdentity{
+			Subject:    "operator@example.com",
+			TenantID:   "tenant-fallback",
+			AuthMethod: "mtls",
+		},
+		Publisher:       "cfgms",
+		SignatureDigest: "sha256:feedface",
+		BundleSignature: []byte{0xfe, 0xed, 0xfa, 0xce},
+		CreatedAt:       time.Now().UTC(),
+		DispatchedAt:    time.Now().UTC(),
+	}
+	require.NoError(t, store.CreateUpgrade(ctx, rec), "fallback store must accept writes")
+
+	got, err := store.GetUpgrade(ctx, "upg-fallback-001")
+	require.NoError(t, err, "fallback store must serve reads")
+	assert.Equal(t, "upg-fallback-001", got.ID)
+	assert.Equal(t, business.UpgradeStatusDispatched, got.Status)
 }

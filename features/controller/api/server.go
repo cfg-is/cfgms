@@ -61,6 +61,7 @@ type Server struct {
 	logger                         logging.Logger
 	httpServer                     *http.Server
 	router                         *mux.Router
+	apiRouter                      *mux.Router // /api/v1 subrouter; used by Set* methods for lazy route registration
 	controllerService              *service.ControllerService
 	configService                  *service.ConfigurationServiceV2
 	certProvisioningService        *service.CertificateProvisioningService
@@ -413,6 +414,7 @@ func (s *Server) setupRouter() {
 	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
 	api.Use(s.requireTier(TierAny))     // Issue #1419: explicit Tier-1 default for the api subrouter
 	api.Use(s.validationMiddleware)
+	s.apiRouter = api // saved so Set* methods can lazy-register routes after construction
 
 	// --- Tier 0 (TierPublic) — no authentication required ---
 	//   GET  /api/v1/health
@@ -710,51 +712,6 @@ func (s *Server) setupRouter() {
 	// Raft status endpoint: requires HA read-status permission via API authentication
 	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
 
-	// Rollback management endpoints (Story #416)
-	if s.rollbackManager != nil {
-		// Read the principal from the request context (set by authenticationMiddleware)
-		// so both mTLS admin principals and scoped API-key principals are evaluated.
-		rollbackPrincipalExtractor := func(r *http.Request) *Principal {
-			p, _ := r.Context().Value(principalContextKey).(*Principal)
-			return p
-		}
-		// Resolve the steward's registered tenant from the controller registry.
-		// This is the authoritative cross-tenant check — it cannot be bypassed by
-		// the caller supplying a fabricated steward_tenant_path in the request body.
-		stewardTenantLookup := func(stewardID string) string {
-			if s.controllerService != nil {
-				if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
-					return info.TenantID
-				}
-			}
-			return ""
-		}
-		rollbackHandler := NewRollbackHandler(s.rollbackManager, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
-		rollbackRouter := api.PathPrefix("/rollback").Subrouter()
-		// Require config/rollback permission for all rollback endpoints — same gate pattern
-		// as every other mutating endpoint in this server.
-		rollbackRouter.Use(s.requirePermission("config", "rollback"))
-		rollbackHandler.RegisterRoutes(rollbackRouter)
-		s.logger.Info("Rollback API routes registered")
-	}
-
-	// Reports engine endpoints (Story #416)
-	if s.reportsHandler != nil {
-		reportsRouter := api.PathPrefix("/reports").Subrouter()
-		s.reportsHandler.RegisterRoutes(reportsRouter)
-		s.logger.Info("Reports API routes registered")
-	}
-
-	// Workflow engine endpoints (Issue #414)
-	if s.workflowHandler != nil {
-		workflowRouter := api.PathPrefix("/workflows").Subrouter()
-		s.workflowHandler.RegisterWorkflowRoutes(workflowRouter)
-
-		triggerRouter := api.PathPrefix("/triggers").Subrouter()
-		s.workflowHandler.RegisterTriggerRoutes(triggerRouter)
-		s.logger.Info("Workflow and trigger API routes registered")
-	}
-
 	// TODO(#997): Wire terminal WebSocket handler when HTTP route is added (gated on epic #750).
 	// When the terminal route is registered, parse CFGMS_TERMINAL_ALLOWED_ORIGINS and pass the
 	// resulting slice to terminal.NewWebSocketHandler as the third argument. Parsing pattern
@@ -913,22 +870,58 @@ func (s *Server) Stop() error {
 	return s.Close(ctx)
 }
 
-// SetRollbackManager sets the rollback manager for rollback API routes (Story #416)
+// SetRollbackManager sets the rollback manager and registers rollback API routes (Story #416).
+// Call this after New() returns but before Start() is called.
 func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollbackManager = m
+	if m == nil {
+		return
+	}
+	// Read the principal from the request context (set by authenticationMiddleware)
+	// so both mTLS admin principals and scoped API-key principals are evaluated.
+	rollbackPrincipalExtractor := func(r *http.Request) *Principal {
+		p, _ := r.Context().Value(principalContextKey).(*Principal)
+		return p
+	}
+	// Resolve the steward's registered tenant from the controller registry.
+	// This is the authoritative cross-tenant check — it cannot be bypassed by
+	// the caller supplying a fabricated steward_tenant_path in the request body.
+	stewardTenantLookup := func(stewardID string) string {
+		if s.controllerService != nil {
+			if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
+				return info.TenantID
+			}
+		}
+		return ""
+	}
+	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
+	rollbackRouter := s.apiRouter.PathPrefix("/rollback").Subrouter()
+	// Require config/rollback permission for all rollback endpoints — same gate pattern
+	// as every other mutating endpoint in this server.
+	rollbackRouter.Use(s.requirePermission("config", "rollback"))
+	rollbackHandler.RegisterRoutes(rollbackRouter)
+	s.logger.Info("Rollback API routes registered")
 }
 
-// SetReportsHandler sets the reports handler for reports API routes (Story #416)
+// SetReportsHandler sets the reports handler and registers reports API routes (Story #416).
+// Call this after New() returns but before Start() is called.
 func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reportsHandler = h
+	if h == nil {
+		return
+	}
+	reportsRouter := s.apiRouter.PathPrefix("/reports").Subrouter()
+	h.RegisterRoutes(reportsRouter)
+	s.logger.Info("Reports API routes registered")
 }
 
-// SetWorkflowHandler sets the workflow handler for workflow and trigger API routes (Issue #414).
-// Propagates the server's fleet query so that script dispatch targeting is wired at setup time (Issue #609).
+// SetWorkflowHandler sets the workflow handler and registers workflow and trigger API routes
+// (Issue #414). Propagates the server's fleet query so that script dispatch targeting is wired
+// at setup time (Issue #609). Call this after New() returns but before Start() is called.
 func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -936,6 +929,14 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	if h != nil && s.fleetQuery != nil {
 		h.SetFleetQuery(s.fleetQuery)
 	}
+	if h == nil {
+		return
+	}
+	workflowRouter := s.apiRouter.PathPrefix("/workflows").Subrouter()
+	h.RegisterWorkflowRoutes(workflowRouter)
+	triggerRouter := s.apiRouter.PathPrefix("/triggers").Subrouter()
+	h.RegisterTriggerRoutes(triggerRouter)
+	s.logger.Info("Workflow and trigger API routes registered")
 }
 
 // GetRouter returns the HTTP router for testing purposes.
