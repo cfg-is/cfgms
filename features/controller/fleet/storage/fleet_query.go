@@ -259,6 +259,22 @@ func (m *Manager) GetLatestByDeviceID(ctx context.Context, deviceID string) (*DN
 	}
 }
 
+// GetHistoryByDeviceID returns all DNA records for a device in version-descending
+// order, read directly from the SQL store. Unlike GetHistory (which consults the
+// in-memory index), this path returns correct results after a controller restart
+// when the in-memory index starts empty.
+//
+// options may be nil; Limit, Offset, and TimeRange are applied when set.
+// The second return value is the total count of matching records before pagination.
+func (m *Manager) GetHistoryByDeviceID(ctx context.Context, deviceID string, options *QueryOptions) ([]*DNARecord, int64, error) {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.GetHistoryByDeviceID(ctx, deviceID, options)
+	default:
+		return nil, 0, fmt.Errorf("GetHistoryByDeviceID requires SQLite backend, got %T", m.storage)
+	}
+}
+
 // listAllDeviceIDs queries the distinct device IDs stored in dna_history.
 func (b *SQLiteBackend) listAllDeviceIDs(ctx context.Context) ([]string, error) {
 	b.mutex.RLock()
@@ -280,6 +296,92 @@ func (b *SQLiteBackend) listAllDeviceIDs(ctx context.Context) ([]string, error) 
 	}
 
 	return ids, rows.Err()
+}
+
+// GetHistoryByDeviceID queries dna_history for all records belonging to a device,
+// applying optional time-range and pagination from options. Results are ordered
+// by version descending (newest first) to match MemoryIndexer.QueryRecords ordering.
+func (b *SQLiteBackend) GetHistoryByDeviceID(ctx context.Context, deviceID string, options *QueryOptions) ([]*DNARecord, int64, error) {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	conditions := []string{"device_id = ?"}
+	args := []interface{}{deviceID}
+
+	if options != nil && options.TimeRange != nil {
+		conditions = append(conditions, "timestamp >= ?", "timestamp <= ?")
+		args = append(args, options.TimeRange.Start, options.TimeRange.End)
+	}
+
+	where := " WHERE " + strings.Join(conditions, " AND ")
+
+	// Count query for TotalCount (pagination-independent).
+	countArgs := make([]interface{}, len(args))
+	copy(countArgs, args)
+	var totalCount int64
+	if err := b.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dna_history"+where, countArgs...).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count history for device %s: %w", deviceID, err)
+	}
+
+	// where is built exclusively from static literal strings; all caller-supplied
+	// values are bound through ? placeholders in args.
+	query := "SELECT device_id, tenant_id, os, architecture, hostname, status," +
+		" version, timestamp, dna_json, content_hash," +
+		" original_size, compressed_size, compression_ratio, shard_id" +
+		" FROM dna_history" + where + " ORDER BY version DESC" // #nosec G202 -- where uses only static string literals; user values bound via ? placeholders
+
+	// LIMIT and OFFSET are formatted as integers (%d) — type-safe, no string injection risk.
+	if options != nil && options.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", options.Limit)
+	}
+	if options != nil && options.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", options.Offset)
+	}
+
+	rows, err := b.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query history for device %s: %w", deviceID, err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Close() error is non-actionable after row iteration completes
+
+	var records []*DNARecord
+	for rows.Next() {
+		var rec DNARecord
+		var storedAt time.Time
+		var dnaJSON string
+		if err := rows.Scan(
+			&rec.DeviceID,
+			&rec.TenantID,
+			new(string), // os — available in DNA.Attributes
+			new(string), // architecture
+			new(string), // hostname
+			&rec.Status,
+			&rec.Version,
+			&storedAt,
+			&dnaJSON,
+			&rec.ContentHash,
+			&rec.OriginalSize,
+			&rec.CompressedSize,
+			&rec.CompressionRatio,
+			&rec.ShardID,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan history record for device %s: %w", deviceID, err)
+		}
+		rec.StoredAt = storedAt
+
+		var dna commonpb.DNA
+		if err := json.Unmarshal([]byte(dnaJSON), &dna); err != nil {
+			return nil, 0, fmt.Errorf("failed to unmarshal DNA JSON for device %s: %w", deviceID, err)
+		}
+		rec.DNA = &dna
+
+		records = append(records, &rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("history query row iteration error for device %s: %w", deviceID, err)
+	}
+
+	return records, totalCount, nil
 }
 
 // GetLatestByDeviceID retrieves the most recent DNA record for a device using

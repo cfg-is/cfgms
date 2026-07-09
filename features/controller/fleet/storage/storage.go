@@ -248,8 +248,17 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA,
 	// Determine shard for storage
 	shardID := m.getShardID(deviceID, time.Now())
 
-	// Get next version number for this device
-	version, err := m.indexer.GetNextVersion(ctx, deviceID)
+	// Get the next version from the durable backend when possible. The in-memory
+	// indexer resets to version 1 on every controller restart, which causes
+	// (device_id, version) collisions with rows written by the previous process.
+	// SQLiteBackend.GetNextVersion reads MAX(version)+1 from dna_history, so it
+	// always picks up where the last process left off.
+	var version int64
+	if sqliteBackend, ok := m.storage.(*SQLiteBackend); ok {
+		version, err = sqliteBackend.GetNextVersion(ctx, deviceID)
+	} else {
+		version, err = m.indexer.GetNextVersion(ctx, deviceID)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get next version: %w", err)
 	}
@@ -319,45 +328,68 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 		options = &QueryOptions{IncludeData: true}
 	}
 
-	// Query index for matching records
-	recordRefs, totalCount, err := m.indexer.QueryRecords(ctx, deviceID, options)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query DNA records: %w", err)
-	}
-
 	var records []*DNARecord
+	var totalCount int64
 	var bytesProcessed int64
 	var compressionSavings int64
+	var recordsScanned int64
 
-	// Retrieve and decompress records
-	for _, ref := range recordRefs {
-		record, err := m.storage.GetRecord(ctx, ref.ContentHash, ref.ShardID)
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		// Read directly from the durable store — the in-memory indexer starts empty
+		// after every controller restart, so using it here would make GetHistory return
+		// zero records for any device that was not seen in the current process lifetime.
+		durableRecords, count, err := backend.GetHistoryByDeviceID(ctx, deviceID, options)
 		if err != nil {
-			m.logger.Error("Failed to retrieve DNA record", "error", err, "content_hash", ref.ContentHash)
-			continue
+			return nil, fmt.Errorf("failed to query DNA records: %w", err)
 		}
-
-		// Override the device ID with the one from the reference (for deduplication support)
-		record.DeviceID = ref.DeviceID
-		record.Version = ref.Version
-		record.StoredAt = ref.StoredAt
-
-		// Decompress data if requested
-		if options.IncludeData {
-			if err := m.decompressRecord(record); err != nil {
-				m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", ref.ContentHash)
+		totalCount = count
+		recordsScanned = int64(len(durableRecords))
+		for _, record := range durableRecords {
+			if options.IncludeData {
+				if err := m.decompressRecord(record); err != nil {
+					m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", record.ContentHash)
+					continue
+				}
+			}
+			if len(options.Attributes) > 0 && record.DNA != nil {
+				record.DNA = m.filterAttributes(record.DNA, options.Attributes)
+			}
+			records = append(records, record)
+			bytesProcessed += record.OriginalSize
+			compressionSavings += (record.OriginalSize - record.CompressedSize)
+		}
+	default:
+		// Fall back to in-memory indexer for non-durable backends (file, memory).
+		recordRefs, count, err := m.indexer.QueryRecords(ctx, deviceID, options)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query DNA records: %w", err)
+		}
+		totalCount = count
+		recordsScanned = int64(len(recordRefs))
+		for _, ref := range recordRefs {
+			record, err := m.storage.GetRecord(ctx, ref.ContentHash, ref.ShardID)
+			if err != nil {
+				m.logger.Error("Failed to retrieve DNA record", "error", err, "content_hash", ref.ContentHash)
 				continue
 			}
+			// Override the device ID with the one from the reference (for deduplication support)
+			record.DeviceID = ref.DeviceID
+			record.Version = ref.Version
+			record.StoredAt = ref.StoredAt
+			if options.IncludeData {
+				if err := m.decompressRecord(record); err != nil {
+					m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", ref.ContentHash)
+					continue
+				}
+			}
+			if len(options.Attributes) > 0 && record.DNA != nil {
+				record.DNA = m.filterAttributes(record.DNA, options.Attributes)
+			}
+			records = append(records, record)
+			bytesProcessed += record.OriginalSize
+			compressionSavings += (record.OriginalSize - record.CompressedSize)
 		}
-
-		// Filter attributes if requested
-		if len(options.Attributes) > 0 && record.DNA != nil {
-			record.DNA = m.filterAttributes(record.DNA, options.Attributes)
-		}
-
-		records = append(records, record)
-		bytesProcessed += record.OriginalSize
-		compressionSavings += (record.OriginalSize - record.CompressedSize)
 	}
 
 	executionTime := time.Since(startTime)
@@ -369,7 +401,7 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 		Metadata: &QueryMetadata{
 			ExecutionTime:      executionTime,
 			CacheHit:           false, // TODO: Implement caching
-			RecordsScanned:     int64(len(recordRefs)),
+			RecordsScanned:     recordsScanned,
 			BytesProcessed:     bytesProcessed,
 			CompressionSavings: compressionSavings,
 		},
