@@ -1018,6 +1018,13 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 		return fmt.Errorf("config application failed: %w", err)
 	}
 
+	// Start module monitors for the new config's resources (Issue #2435).
+	// Full stop+restart — previous engine (from any prior config push) is closed first.
+	// TriggerConvergence re-applies the SAME config and must NOT restart monitors.
+	if startErr := executor.StartMonitors(ctx, goConfig.Resources); startErr != nil {
+		c.logger.Warn("Failed to start module monitors after config sync", "error", startErr)
+	}
+
 	// Publish configuration status report.
 	report.StewardID = sid
 	if err := c.publishConfigStatus(report); err != nil {
@@ -1562,6 +1569,12 @@ func (c *TransportClient) Disconnect(ctx context.Context) error {
 		}
 	}
 
+	// Stop module monitors before closing connections so no further ExecuteResource
+	// calls fire against a disconnected transport (Issue #2435).
+	if c.configExecutor != nil {
+		c.configExecutor.StopMonitors()
+	}
+
 	// Drain and stop the event emitter before closing the gRPC connection so
 	// buffered convergence events are flushed to the controller first.
 	if c.eventEmitter != nil {
@@ -1614,6 +1627,16 @@ func (c *TransportClient) SetStewardID(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stewardID = id
+}
+
+// GetConfigExecutor returns the configuration executor. Returns nil when not yet
+// initialized (before InitializeConfigExecutor is called). The executor implements
+// moduleDNASource after StartMonitors is called — wire it into the DNA collector
+// adapter immediately after InitializeConfigExecutor succeeds (Issue #2435).
+func (c *TransportClient) GetConfigExecutor() *execution.Executor {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.configExecutor
 }
 
 // SetTenantID sets the tenant ID (used after HTTP registration).

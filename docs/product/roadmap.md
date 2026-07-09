@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-07-07
+**Last Updated**: 2026-07-08
 
 ## Versioning Strategy
 
@@ -208,8 +208,8 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: self-install subcommand with interactive mode for GUI launch (Issue #472 - 8-13 points) - `install`/`uninstall`/`status` subcommands, interactive token prompt on double-click, native Windows Service/systemd/launchd registration
 
 **E2E validation:**
-- [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
-- [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
+- [ ] End-to-end deployment validation on real VMs - Deferred to v0.9.13; the original tracking issue (#390) was repurposed into the Phase 2 Hyper-V dev-infrastructure epic and closed 2026-06-25
+- [x] Beta deployment guide (Issue #391 - 3-5 points) ✅ - Production-like deployment documentation beyond dev-focused QUICK_START.md
 
 **Post-validation (discovered gaps, do not block #390):**
 - [x] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Single code path, 30-min default converge_interval, controller as additive overlay
@@ -229,12 +229,12 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: implement Windows ACL support for file/directory modules (Issue #553) - Created, future work
 
 **Post-E2E infrastructure:**
-- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - Linux + Windows runners, 3x CI speed improvement, dog-food validation
-- [ ] GitHub Actions dispatch — trigger agent containers from label changes (Issue #596) - Depends on #565, replaces manual `/dispatch` with Actions workflows triggered by `agent:ready`/`pipeline:fix` labels on self-hosted runners
+- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - In progress: self-hosted Windows runner live for native Windows builds on non-fork PRs; Linux runners and broader CI migration pending
+- Issue #596 (GitHub Actions dispatch from label changes) - Closed not-planned 2026-06-19: the label-based queue it depended on was decommissioned (board Status is the only queue signal; dispatch is owned by the PO cron cycle)
 
-**Deferred to v0.10.0:**
-- [ ] Controller: implement multi-node orchestration (Issue #415) - Rolling updates, cluster quorum, dependency awareness
-- [ ] Controller: per-tenant config source routing Phases 2-3 (Issue #428) - External git integration, observability
+**Deferred to v0.10.0 (both since delivered):**
+- [x] Controller: implement multi-node orchestration (Issue #415) ✅ - Closed 2026-07-02
+- [x] Controller: per-tenant config source routing Phases 2-3 (Issue #428) ✅ - Closed 2026-05-20
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 
@@ -270,32 +270,37 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Epic #1550 — Post-audit follow-ups
 - [x] Epic #1664 — Steward registration trust model (perennial tokens, IP-trust)
 - [x] Epic #1714 — Fleet resilience (restart-recovery, cert-reuse, drift)
-- [ ] Epic #1661 — Steward provisioning installer + trust bootstrap (in flight)
-- [ ] Epic #1754 — Decouple controller from steward-internal packages (in flight)
+- [x] Epic #1661 — Steward provisioning installer + trust bootstrap
+- [x] Epic #1754 — Decouple controller from steward-internal packages
 
-#### v0.9.6 — Consolidation + AGPL Governance Release
+#### v0.9.6 — Consolidation + AGPL Governance Release ✅ COMPLETED
 
-- [ ] Epic #1716 — Migrate licensing model to AGPL-3.0 single license (in flight)
+- [x] Epic #1716 — Migrate licensing model to AGPL-3.0 single license
 
-#### v0.9.7 — Tier 1 Hyper-V controller bringup
+#### v0.9.7 — Tier 1 Hyper-V controller bringup ✅ COMPLETED
 
-- [ ] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
+- [x] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
 
-#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity
+#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity ✅ COMPLETED
 
-- [ ] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
+- [x] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
 
-#### v0.9.9 — Hyper-V management module
+#### v0.9.9 — Hyper-V management module ✅ COMPLETED
 
-- [ ] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
+- [x] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
 
-#### v0.9.10 — Stewards on Hyper-V hosts
+#### v0.9.10 — Stewards on Hyper-V hosts ✅ COMPLETED
 
-- [ ] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
+- [x] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
 
-#### v0.9.11 — Phase 2 dev-agent conventions
+#### v0.9.11 — Phase 2 dev-agent conventions — CLOSED (not planned)
 
-- [ ] Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1
+- Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1 — closed not-planned 2026-06-25 alongside the Phase 2 epic closeout
+
+#### Post-Phase-2 epics on develop (untagged, in flight)
+
+- [ ] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership
+- [ ] Epic #2359 — Operator-first CLI targeting: hostname & attribute selectors across `cfg steward` verbs
 
 #### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
 
@@ -307,12 +312,12 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 
 #### v0.10.0 - Web Interface Foundation
 
-**Deferred from v0.9.x** (functional but not on beta critical path):
-- [ ] Workflow management REST API (engine works internally, API needed for Web UI)
-- [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
-- [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
+**Deferred from v0.9.x** — now tracked as Epic #2343 (Controller REST APIs; 5 of 6 stories complete):
+- [ ] Workflow management REST API (endpoint coverage + reference docs delivered via #2369/#2374; final story #2373 — route-registration fix — queued Ready)
+- [x] Config broadcast push API (Issue #2366 - selector targeting + push-status read)
+- [x] Session/connection monitoring API (Issues #2367, #2368 - transport + admin-session read APIs)
 
-**Web Interface**:
+**Web Interface** — tracked as Epic #2344 (framework, session-token auth, controller-served fleet overview; story decomposition gated on the inline web-session ADR + founder design checkpoint):
 - [ ] Web UI framework and authentication
 - [ ] Dashboard with fleet overview
 - [ ] Configuration management interface
@@ -558,8 +563,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.1
-- **Last Updated**: 2026-07-07
+- **Document Version**: 4.2
+- **Last Updated**: 2026-07-08
 
 ### Related Documentation
 

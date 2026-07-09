@@ -635,8 +635,8 @@ existence gate closes the duplicate-VM window this creates:
   `vm-set-skip-hosted-elsewhere` audit event and converges as a no-op.
 - The gate keys on the role's **existence**, not its owner — a non-hosting
   steward never needs to know who hosts the VM, only that someone does.
-  (Owner-side creation of a cluster-wide-missing role is a separate concern,
-  #2421.)
+  (Owner-side creation of a cluster-wide-missing role is the CNO-owner
+  creation gate below, #2421.)
 - A transient membership-probe failure degrades to "no role observed" for that
   cycle (unchanged from #2372): the gate simply cannot fire, and the pre-#2420
   create logic — whose clustered-role registration is still CNO-gated and
@@ -644,6 +644,28 @@ existence gate closes the duplicate-VM window this creates:
   converge; no new error-path behavior is introduced.
 - Non-HA VMs (`ha_role` absent) are untouched: a locally-absent standalone VM
   is created exactly as before.
+
+#### CNO-owner creation gate (#2421)
+
+The existence gate answers "someone already hosts this role — don't create".
+Its complement is the first-ever create: the role exists **nowhere** in the
+cluster (locally absent **and** no clustered role registered), yet the identical
+declaration just cascaded to every member steward at once. First-ever creation
+of an `ha_role` VM is therefore **CNO-owner-gated**, exactly like
+`hyperv.cluster`'s existing role-membership reconcile:
+
+- Only the steward currently owning the cluster's CNO group proceeds to
+  create/provision. The gate sits **before** the source/plain dispatch, so a
+  source-provisioned VM's expensive provisioning is owner-gated too.
+- Every other member records a `vm-set-skip-not-cno-owner` audit event (with
+  the observed CNO owner) and returns `nil` — coordination, not authorization,
+  the same non-owner shape as the role-membership reconcile. Non-owners
+  converge automatically once the owner creates: their next `Get` sees the
+  registered role and the existence gate above takes over.
+- A transient "CNO has no current owner" cycle (mid-failover) means **no**
+  node creates that cycle — creation is delayed one cycle, never duplicated.
+- An ownership-read failure is **fail-safe**: it fails the `Set` (surfaced as
+  a converge error) rather than being silently swallowed into a skip.
 
 **Drift detection requires the module-level `cluster_name` scope cap.** `Get`
 reports a VM's current cluster-role membership by probing the scope-capped

@@ -1269,6 +1269,10 @@ func connectWithApprovedRegistration(
 	// offline queue encryption (Issue #920).
 	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, logger)
 
+	// Build the composite DNA collector early so we can wire the executor into it
+	// after InitializeConfigExecutor creates it (Issue #2435).
+	dnaAdapter := newDNACollectorAdapter(logger, nil)
+
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               reg.TransportAddress,
 		RegistrationToken:           token,
@@ -1284,7 +1288,7 @@ func connectWithApprovedRegistration(
 		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:          dnaRefreshInterval,
-		DNACollector:                newDNACollectorAdapter(logger, nil), // no monitor engine in this mode (#2423)
+		DNACollector:                dnaAdapter,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1322,6 +1326,13 @@ func connectWithApprovedRegistration(
 	}
 
 	logger.Info("Configuration executor initialized", "tenant_id", reg.TenantID)
+
+	// Wire the executor as the module DNA source now that it exists (Issue #2435).
+	// The DNA adapter was constructed with nil; setting the executor here means
+	// the first DNA refresh tick after config sync will include module attributes.
+	if executor := transportClient.GetConfigExecutor(); executor != nil {
+		dnaAdapter.setModuleDNASource(executor)
+	}
 
 	return transportClient, nil
 }
@@ -1406,6 +1417,10 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(cfg)
 	}
 
+	// Build the composite DNA collector early so we can wire the executor into it
+	// after InitializeConfigExecutor creates it (Issue #2435).
+	dnaAdapterReconnect := newDNACollectorAdapter(logger, nil)
+
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               id.TransportAddress,
 		RegistrationToken:           token,
@@ -1421,7 +1436,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:          dnaRefreshIntervalReconnect,
-		DNACollector:                newDNACollectorAdapter(logger, nil), // no monitor engine in this mode (#2423)
+		DNACollector:                dnaAdapterReconnect,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1460,6 +1475,11 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	}
 
 	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
+
+	// Wire the executor as the module DNA source now that it exists (Issue #2435).
+	if executor := transportClient.GetConfigExecutor(); executor != nil {
+		dnaAdapterReconnect.setModuleDNASource(executor)
+	}
 
 	return transportClient, nil
 }
@@ -1803,22 +1823,30 @@ type moduleDNASource interface {
 // dnaCollectorAdapter adapts dna.Collector to the client.DNACollector interface
 // by extracting the Attributes map from the proto DNA result (Issue #1915),
 // merged with a flattened, namespaced snapshot of monitored module resource
-// state when a moduleDNASource is wired (#2423). Both attribute sets ride the
-// same PublishDNAUpdate delta-compression path — a change in only a module
-// attribute still triggers a publish.
+// state when a moduleDNASource is wired (#2423 / #2435). Both attribute sets
+// ride the same PublishDNAUpdate delta-compression path — a change in only a
+// module attribute still triggers a publish.
 type dnaCollectorAdapter struct {
 	collector *dna.Collector
+	mu        sync.RWMutex
 	modules   moduleDNASource
 }
 
-// newDNACollectorAdapter builds the composite DNA collector. modules may be
-// nil: the monitor fan-in (and therefore CollectModuleDNAAttributes) lives on
-// the standalone steward engine (features/steward.Steward.startMonitors),
-// which the controller-mode transport paths do not construct today — they pass
-// nil and publish hardware facts only, exactly as before #2423. Wire the
-// steward engine (or a narrow method-value) here when a mode has one.
+// newDNACollectorAdapter builds the composite DNA collector. modules may be nil;
+// call setModuleDNASource after InitializeConfigExecutor to wire the real producer
+// (Issue #2435).
 func newDNACollectorAdapter(logger logging.Logger, modules moduleDNASource) *dnaCollectorAdapter {
 	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), modules: modules}
+}
+
+// setModuleDNASource wires the module DNA producer after construction. Thread-safe:
+// the DNA refresh loop may be reading modules concurrently. Called once, right after
+// InitializeConfigExecutor succeeds, at both registration and reconnect call sites
+// (Issue #2435).
+func (a *dnaCollectorAdapter) setModuleDNASource(src moduleDNASource) {
+	a.mu.Lock()
+	a.modules = src
+	a.mu.Unlock()
 }
 
 func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string]string, error) {
@@ -1826,7 +1854,10 @@ func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string
 	if err != nil {
 		return nil, err
 	}
-	if result == nil && a.modules == nil {
+	a.mu.RLock()
+	moduleSrc := a.modules
+	a.mu.RUnlock()
+	if result == nil && moduleSrc == nil {
 		return nil, nil
 	}
 	// Union of hardware facts and module attributes. The two key spaces cannot
@@ -1838,8 +1869,8 @@ func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string
 			attrs[k] = v
 		}
 	}
-	if a.modules != nil {
-		for k, v := range a.modules.CollectModuleDNAAttributes(ctx) {
+	if moduleSrc != nil {
+		for k, v := range moduleSrc.CollectModuleDNAAttributes(ctx) {
 			attrs[k] = v
 		}
 	}

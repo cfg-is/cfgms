@@ -1419,6 +1419,8 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 		transport := &testWinRMTransport{perCallOutputs: []string{
 			`{"found":false}`,   // getVM: VM absent
 			`{"owners":{}}`,     // getVM probe (#2420): role absent cluster-wide
+			`{"owner":"NODE1"}`, // #2421 owner gate: CNO owner read (this node owns)
+			`{"owners":{}}`,     // #2421 owner gate: resource owners
 			``,                  // New-VM: create succeeds
 			``,                  // Cfgms-SetVMHome: config-home move (#2411)
 			`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
@@ -1527,6 +1529,8 @@ func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: VM absent
 		`{"owners":{}}`,     // getVM probe (#2420): role absent cluster-wide
+		`{"owner":"NODE1"}`, // #2421 owner gate: CNO owner read (this node owns)
+		`{"owners":{}}`,     // #2421 owner gate: resource owners
 		``,                  // New-VM: create succeeds
 		``,                  // Cfgms-SetVMHome: config-home move (#2411)
 		`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
