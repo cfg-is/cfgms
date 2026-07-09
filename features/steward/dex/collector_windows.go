@@ -217,6 +217,21 @@ type etwEventRecord struct {
 	UserContext       uintptr
 }
 
+// ─── ETW event message ───────────────────────────────────────────────────────
+
+// etwEventMsg carries the minimal data from an ETW event record for
+// off-callback processing. Only primitive types and SignalClass (a string
+// whose backing data lives in static memory) are used so the struct can be
+// sent from a windows.NewCallback context without triggering heap allocation
+// or Go scheduler interaction beyond the lock-free write barrier.
+type etwEventMsg struct {
+	class     SignalClass
+	eventID   uint16
+	processID uint32
+	threadID  uint32
+	timestamp int64
+}
+
 // ─── WMI provider config ────────────────────────────────────────────────────
 
 type wmiProvider struct {
@@ -562,44 +577,103 @@ func (c *Collector) stopETWSession(handle uintptr) error {
 
 // runETWConsumer opens the real-time trace and processes events until ctx is
 // cancelled or the session is stopped.
-func (c *Collector) runETWConsumer(ctx context.Context, sessionHandle uintptr) {
+//
+// CALLBACK SAFETY: the ETW event callback is invoked by ProcessTrace on the
+// goroutine's locked OS thread while that goroutine is in a Proc.Call()
+// (syscall) state. In that context any Go operation that allocates on the heap
+// (fmt.Sprintf, map writes with new keys, json.Encode, etc.) or acquires a
+// sync.Mutex that might yield the goroutine will corrupt the Go runtime's sudog
+// cache (fatal: acquireSudog: found s.elem != nil in cache).
+// The callback therefore uses only:
+//   - atomic.Int32 loads/stores (lock-free, no scheduler interaction)
+//   - GUID struct-equality comparison (no allocation)
+//   - a non-blocking select+default send on a pre-allocated buffered channel
+//     (chansend with block=false never allocates a sudog)
+//
+// All heap allocation and sync.Mutex use is deferred to the drain goroutine,
+// which runs under normal Go scheduler control.
+func (c *Collector) runETWConsumer(ctx context.Context, _ uintptr) {
 	sessionNamePtr, err := windows.UTF16PtrFromString(c.cfg.SessionName)
 	if err != nil {
 		return
 	}
 
-	// eventCounts tracks how many events we've seen per class.
-	var mu sync.Mutex
-	eventCounts := make(map[SignalClass]int)
+	// Pre-compute GUID → class+index lookup using struct equality so the
+	// callback never calls fmt.Sprintf (via guidString/classForGUID).
+	type providerEntry struct {
+		guid  windows.GUID
+		class SignalClass
+		idx   int // index into etwProviders / counts
+	}
+	providerGUIDs := make([]providerEntry, 0, len(etwProviders))
+	for i, p := range etwProviders {
+		guid, err := parseGUID(p.guidStr)
+		if err != nil {
+			continue
+		}
+		providerGUIDs = append(providerGUIDs, providerEntry{guid: guid, class: p.class, idx: i})
+	}
 
-	// The event callback is invoked from the ProcessTrace thread.
+	// Per-provider atomic event counters replace the mutex-protected map.
+	counts := make([]atomic.Int32, len(etwProviders))
+
+	// Buffered channel: the callback posts here with a non-blocking send.
+	// Buffer is generous so that slow drain goroutine bursts don't drop events.
+	const chanBuf = 256
+	eventCh := make(chan etwEventMsg, chanBuf)
+
+	// Drain goroutine: the only place that allocates or uses sync.Mutex.
+	// It runs under the normal Go scheduler and is safe to write to the sink.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for msg := range eventCh {
+			fields := map[string]any{
+				"event_id":   msg.eventID,
+				"process_id": msg.processID,
+				"thread_id":  msg.threadID,
+				"timestamp":  msg.timestamp,
+			}
+			if c.sink.WriteEvent(msg.class, fields) == nil {
+				c.total.Add(1)
+			} else {
+				c.sinkErrors.Add(1)
+			}
+		}
+	}()
+
+	// Callback: invoked by ProcessTrace on the locked OS thread.
+	// Must not allocate, must not block — see function-level comment.
 	callback := func(record *etwEventRecord) uintptr {
 		if record == nil {
 			return 0
 		}
-		class := classForGUID(record.EventHeader.ProviderId)
+		recGUID := record.EventHeader.ProviderId
+		var class SignalClass
+		var idx int
+		for _, prov := range providerGUIDs {
+			if prov.guid == recGUID { // struct equality: no allocation, no fmt.Sprintf
+				class = prov.class
+				idx = prov.idx
+				break
+			}
+		}
 		if class == "" {
 			return 0
 		}
-		mu.Lock()
-		n := eventCounts[class]
-		if n >= c.cfg.MaxEventsPerClass {
-			mu.Unlock()
+		if counts[idx].Load() >= int32(c.cfg.MaxEventsPerClass) {
 			return 0
 		}
-		eventCounts[class] = n + 1
-		mu.Unlock()
-
-		fields := map[string]any{
-			"event_id":   record.EventHeader.EventDescriptor.Id,
-			"process_id": record.EventHeader.ProcessId,
-			"thread_id":  record.EventHeader.ThreadId,
-			"timestamp":  record.EventHeader.TimeStamp,
-		}
-		if c.sink.WriteEvent(class, fields) == nil {
-			c.total.Add(1)
-		} else {
-			c.sinkErrors.Add(1)
+		counts[idx].Add(1)
+		select {
+		case eventCh <- etwEventMsg{
+			class:     class,
+			eventID:   record.EventHeader.EventDescriptor.Id,
+			processID: record.EventHeader.ProcessId,
+			threadID:  record.EventHeader.ThreadId,
+			timestamp: record.EventHeader.TimeStamp,
+		}:
+		default: // drop if drain goroutine is behind; acceptable for a PoC spike
 		}
 		return 0
 	}
@@ -608,40 +682,42 @@ func (c *Collector) runETWConsumer(ctx context.Context, sessionHandle uintptr) {
 
 	var logfile eventTraceLogfile
 	logfile.LoggerName = sessionNamePtr
-	// EvtSubscribeToFutureEvents (1) equivalent: PROCESS_TRACE_MODE_REAL_TIME = 0x100
 	logfile.ProcessMode = 0x00000100 // PROCESS_TRACE_MODE_REAL_TIME
 	logfile.EventCallback = cb
 
 	traceHandle, _, _ := procOpenTraceW.Call(uintptr(unsafe.Pointer(&logfile)))
 	if traceHandle == invalidProcessTraceHandle {
+		close(eventCh)
+		<-drainDone
 		return
 	}
-	// CloseTrace returns INVALID_PROCESSTRACE_HANDLE on error; safe to ignore
-	// because we are already in a cleanup path and have no recovery action.
-	defer procCloseTrace.Call(traceHandle) //nolint:errcheck
 
 	// ProcessTrace blocks until the session is stopped or context is done.
 	done := make(chan struct{})
 	go func() {
-		// ProcessTrace fires callbacks on this thread — pin the M so the scheduler can't hand it off while blocked.
+		// Pin M to this OS thread so the scheduler cannot hand it off while
+		// ProcessTrace is blocked — callbacks fire on this very thread.
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 		defer close(done)
-		// ProcessTrace returns ERROR_SUCCESS or a cancellation code (e.g.
-		// ERROR_CANCELLED when CloseTrace is called from the select below);
-		// the session state is authoritative, so the return value is unused.
+		// Return value is unused: ERROR_SUCCESS or ERROR_CANCELLED are both
+		// expected outcomes; the session state is the authoritative signal.
 		procProcessTrace.Call(uintptr(unsafe.Pointer(&traceHandle)), 1, 0, 0) //nolint:errcheck
 	}()
 
 	select {
 	case <-ctx.Done():
-		// Calling CloseTrace unblocks ProcessTrace in the goroutine above.
-		// The return value is an INVALID_PROCESSTRACE_HANDLE sentinel; the
-		// handle is no longer valid after this call, so an error is expected.
-		procCloseTrace.Call(traceHandle) //nolint:errcheck
+		// CloseTrace unblocks ProcessTrace in the goroutine above.
+		procCloseTrace.Call(traceHandle) //nolint:errcheck // teardown; error non-actionable after session stop
 		<-done
 	case <-done:
+		// ProcessTrace exited on its own; release the handle.
+		procCloseTrace.Call(traceHandle) //nolint:errcheck // teardown; error non-actionable after session stop
 	}
+
+	// Signal the drain goroutine to stop and wait for all events to be written.
+	close(eventCh)
+	<-drainDone
 }
 
 // classForGUID maps a provider GUID back to its SignalClass.
