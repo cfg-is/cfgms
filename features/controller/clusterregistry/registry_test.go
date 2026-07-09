@@ -25,7 +25,7 @@ func TestClusterRegistry_ParsesDNAAttributes_MultiSteward(t *testing.T) {
 				"cluster:cfg-lab.member_nodes":       "CFG-70-02,CFG-AB-02",
 				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
 				"cluster:cfg-lab.resource_owner.cno": "CFG-AB-02",
-				"hostname": "CFG-70-02",
+				"hostname":                           "CFG-70-02",
 			},
 		},
 		{
@@ -35,7 +35,7 @@ func TestClusterRegistry_ParsesDNAAttributes_MultiSteward(t *testing.T) {
 				"cluster:cfg-lab.member_nodes":       "CFG-70-02,CFG-AB-02",
 				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
 				"cluster:cfg-lab.resource_owner.cno": "CFG-AB-02",
-				"hostname": "CFG-AB-02",
+				"hostname":                           "CFG-AB-02",
 			},
 		},
 	}
@@ -103,9 +103,9 @@ func TestClusterRegistry_MalformedKeySkipped(t *testing.T) {
 			TenantID: "default",
 			DNAAttributes: map[string]string{
 				// Malformed: no dot separator → should be silently skipped.
-				"cluster:badkey":                     "val",
+				"cluster:badkey": "val",
 				// Malformed: empty cluster name → should be silently skipped.
-				"cluster:.member_nodes":              "x",
+				"cluster:.member_nodes": "x",
 				// Valid key alongside the bad ones.
 				"cluster:cfg-lab.member_nodes":       "CFG-70-02",
 				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
@@ -129,10 +129,10 @@ func TestClusterRegistry_MultipleClusters(t *testing.T) {
 			ID:       "steward-a",
 			TenantID: "default",
 			DNAAttributes: map[string]string{
-				"cluster:cfg-lab.member_nodes":         "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.csv":   "CFG-70-02",
-				"cluster:cfg-prod.member_nodes":        "CFG-70-02",
-				"cluster:cfg-prod.resource_owner.cno":  "CFG-70-02",
+				"cluster:cfg-lab.member_nodes":        "CFG-70-02",
+				"cluster:cfg-lab.resource_owner.csv":  "CFG-70-02",
+				"cluster:cfg-prod.member_nodes":       "CFG-70-02",
+				"cluster:cfg-prod.resource_owner.cno": "CFG-70-02",
 			},
 		},
 	}
