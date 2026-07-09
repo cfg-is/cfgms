@@ -9,7 +9,7 @@
 #
 # When cfg steward list / cfg config upload are implemented (Epic #1501),
 # the deploy command will be:
-#   cfg config upload --steward <STEWARD_ID> --config example-fleet-config.yaml
+#   cfg config upload example-fleet-config.yaml --steward <STEWARD_ID>
 #
 # Until then, upload via the REST API (see Phase 6 of the walkthrough).
 
