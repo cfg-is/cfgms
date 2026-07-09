@@ -165,6 +165,55 @@ failover.
 > the location drift and performs a live storage migration, then completes the
 > registration on a subsequent converge.
 
+#### Owner-gated lifecycle convergence (#2422)
+
+For an `ha_role` VM, the module gates **all** lifecycle convergence — power
+state, CPU/memory resize, NIC reconcile, and the #2411 storage-move — on cluster
+**role ownership**: it runs only on the node that `Get-ClusterGroup` currently
+reports as the role's owner. On every convergence tick the module reads the
+per-role owner map and, if the map affirmatively names a **different** node as
+the VM's owner, takes **no** lifecycle action and goes quiet (the skip is audited
+as `vm-lifecycle-skip-not-owner`).
+
+This matters most **immediately after a failover**. When the cluster moves a role
+from node A to node B, node A's local `Get-VM` view may transiently still show
+the VM. Without the owner gate, node A's next convergence cycle could issue
+power/resize/NIC calls against a VM the cluster has already reassigned. The gate
+makes the previous owner go quiet and lets the **new** owner converge — even in
+the window where local `Get-VM` visibility lags cluster-role ownership.
+
+A **missing** owner-map entry (the role is not registered anywhere yet) does
+**not** skip: local possession decides. This is the first-time promote of an
+existing standalone VM to `ha_role` — the node that holds the VM locally proceeds
+so the promote path can register the role. Standalone (non-HA) VMs are wholly
+unaffected: the owner check is never invoked and no cluster query is issued.
+
+A transient owner-probe failure is **fail-safe-quiet** — the module skips that
+cycle (logs a warning, no error) and retries on the next tick, rather than either
+blocking a legitimate owner or letting a non-owner act. This deliberately differs
+from the first-creation CNO gate (#2421), which fails loud: that call happens
+once, at create time; the owner gate runs on every tick of every existing HA VM,
+where a hard error would spam the steward's error state on a known-transient
+condition.
+
+#### Promote procedure (founder ruling 2026-07-08)
+
+Promoting an **existing standalone** VM to `ha_role` is done on the host that
+owns the VM **first**: add the `ha_role` block to the VM's definition in **that
+host's steward config**. Only after the role is registered does the definition
+move from the steward config into the **cluster config** (the cascade). Moving an
+unpromoted-but-existing VM's definition straight into the cluster config is
+**unsupported** — the cluster-wide existence gate (#2420) cannot see a VM that is
+not yet a registered role on any node, so no node would ever create or adopt it.
+
+#### One-reporter rule (#2418)
+
+The node currently hosting an `ha_role` is the **sole reporter** of the VM's
+observed state. A non-hosting member's `Get("vm:<name>")` returns `state: absent`
+with `HARole` populated and no other VM object fields, and its `Set` path is a
+no-op (audited as `vm-set-skip-hosted-elsewhere`, #2420). One logical VM, one
+reporter — a precursor to ADR-017's shared typed entity identity (A1.2).
+
 ### Declarative storage location (#2411)
 
 The directory containing the declared `vhd_path` is the VM's **home** — its

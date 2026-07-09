@@ -465,6 +465,7 @@ func TestSetVM_HARole_PromoteExistingVM(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
 		`{"owners":{}}`,                        // getVM probe: not a member
+		`{"owners":{}}`,                        // #2422 lifecycle owner gate: role not yet registered → proceed (first-time promote)
 		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
 		`{"owners":{}}`,                        // ownership helper: role owners
 		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
@@ -531,6 +532,7 @@ func TestSetVM_HARole_PromoteIdempotent(t *testing.T) {
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
 		`{"owners":{"ha-steady-vm":"NODE1"}}`,  // getVM probe: already a member
+		`{"owners":{"ha-steady-vm":"NODE1"}}`,  // #2422 lifecycle owner gate: this node owns the role → proceed
 	}}
 	m := vmModuleWithTransport(transport, "t-ha")
 	m.clusterName = cluster
@@ -550,8 +552,8 @@ func TestSetVM_HARole_PromoteIdempotent(t *testing.T) {
 	assert.Equal(t, 0, countCmd(transport, psRemoveClusterResource))
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	assert.Len(t, transport.calls, 2,
-		"steady state must be exactly getVM + probe — no membership machinery")
+	assert.Len(t, transport.calls, 3,
+		"steady state must be exactly getVM + probe + #2422 owner gate — no membership machinery")
 }
 
 // TestSetVM_HARole_DemoteIdempotent: a VM that is already standalone with no

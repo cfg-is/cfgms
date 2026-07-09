@@ -1299,6 +1299,57 @@ func (m *hypervModule) connectAdditionalNics(ctx context.Context, cfgResourceID,
 func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
 	cfgResourceID := "vm:" + vmName
 
+	// Role-owner gate (#2422): lifecycle convergence (storage move, NIC reconcile,
+	// promote/demote, resize, power) for an ha_role VM runs ONLY on the node that
+	// currently owns the role. A non-owner — most importantly the PREVIOUS owner
+	// right after a failover, whose local Get-VM view may transiently still show
+	// the VM — takes no lifecycle action and goes quiet; the new owner converges
+	// instead. This makes success criterion #3 ("after failover the new owner
+	// converges and the previous owner goes quiet") hold even in the edge case
+	// where local Get-VM visibility lags cluster-role ownership, not just when they
+	// already agree.
+	//
+	// Skip only on an AFFIRMATIVE different-owner report: the owner map contains an
+	// entry for this VM AND that entry is a node other than us. A MISSING entry
+	// (role not yet registered — the first-time promote of an existing standalone
+	// VM to ha_role) does NOT skip: local possession decides, and this node holds
+	// the VM locally (applyVMState is the existing-VM path), so it proceeds and the
+	// promote/demote switch below registers the role (founder ruling 2026-07-08:
+	// promotion happens on the host that owns the VM first; only then does the
+	// definition move from the steward config to the cluster config).
+	//
+	// A probe error here is fail-safe-QUIET, deliberately UNLIKE #2421's
+	// clusterOwnershipHelper (which propagates): that call happens once, at
+	// first-creation time, where fail-safe-loud is correct. This call happens on
+	// every convergence tick of every already-existing HA VM, so a transient
+	// cluster-service hiccup must not surface as a steward error state or spam the
+	// error log — treat it as "cannot determine ownership this cycle" and skip,
+	// letting the next tick retry. A future reviewer must not "fix" this to match
+	// #2421/S2. Standalone VMs (desired.HARole == nil) skip this block entirely —
+	// zero added transport calls, zero behavior change.
+	if desired.HARole != nil {
+		owners, roErr := m.readResourceOwners(ctx, desired.HARole.ClusterName)
+		if roErr != nil {
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: ha_role owner probe failed; skipping lifecycle convergence this cycle",
+					"vm_name", logging.SanitizeLogValue(vmName),
+					"cluster", logging.SanitizeLogValue(desired.HARole.ClusterName),
+					"error", roErr.Error())
+			}
+			return nil
+		}
+		if owner, isMember := owners[vmName]; isMember && !strings.EqualFold(owner, m.nodeHostname) {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"vm-lifecycle-skip-not-owner", cfgResourceID, nil,
+				map[string]interface{}{
+					"skipped":      true,
+					"cluster_name": desired.HARole.ClusterName,
+					"owner":        owner,
+				}, nil)
+			return nil
+		}
+	}
+
 	// Storage-location convergence (#2411) runs FIRST: an ha_role registration
 	// on a mislocated VM fails (Add-ClusterVirtualMachineRole refuses a VM whose
 	// configuration files are off cluster storage), and power/resize actions are
