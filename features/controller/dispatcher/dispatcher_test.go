@@ -1274,6 +1274,112 @@ func TestDispatcher_OutputExceedsControllerCeiling(t *testing.T) {
 		"output exceeding the 4 MB ceiling must be dropped — job record must have empty output")
 }
 
+// TestDispatcher_TTLReleasesWedgedDeviceLock verifies AC1 (Story #2468):
+// a device lock held beyond the per-execution lock TTL (Timeout * graceMultiplier)
+// is automatically released by the periodic sweep, and a second execution for the
+// same device can then be dispatched.
+//
+// The dispatcher is configured with a short PollInterval so the sweep fires quickly.
+// The queued execution uses a short Timeout so the lock TTL expires within the test
+// window — no fake clock injection is needed.
+func TestDispatcher_TTLReleasesWedgedDeviceLock(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+
+	// shortTimeout drives a short lock TTL: lockTTL = shortTimeout * graceMultiplier.
+	// With the default multiplier of 2, lockTTL = 200 ms. The sweep fires every
+	// pollInterval (50 ms), so the lock is released within ~250 ms of being acquired.
+	const shortTimeout = 100 * time.Millisecond
+	const pollInterval = 50 * time.Millisecond
+
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		PollInterval: pollInterval,
+		Logger:       logging.NewLogger("debug"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue exec-wedged and dispatch it. No completion event will ever arrive,
+	// simulating a steward that silently disconnects mid-execution.
+	require.NoError(t, q.QueueExecution("device-wedge", &script.QueuedExecution{
+		ExecutionID: "exec-wedged",
+		ScriptID:    "script-wedge",
+		ScriptRef:   "script-wedge",
+		Shell:       script.ShellBash,
+		Timeout:     shortTimeout,
+	}))
+	d.OnHeartbeat("device-wedge")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "exec-wedged must be dispatched")
+
+	// Queue exec-after WHILE the device lock is held by exec-wedged.
+	require.NoError(t, q.QueueExecution("device-wedge", &script.QueuedExecution{
+		ExecutionID: "exec-after-ttl",
+		ScriptID:    "script-after",
+		ScriptRef:   "script-after",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+	}))
+
+	// The TTL sweep fires on each poll tick. Once the lock TTL elapses, the sweep
+	// releases the lock and the following dispatchAll sends a second command.
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 2
+	}, 3*time.Second, 20*time.Millisecond,
+		"TTL sweep must release the wedged lock so a second command can be sent")
+}
+
+// TestDispatcher_ReleaseForCancelledExecution verifies that
+// ReleaseDeviceForCancelledExecution releases the lock when executionID matches
+// and returns false when it does not (race-safety against stale cancels).
+func TestDispatcher_ReleaseForCancelledExecution(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Dispatch exec-A, acquiring the device lock for "device-x".
+	require.NoError(t, q.QueueExecution("device-x", queuedExec("exec-A", "script-abc")))
+	d.OnHeartbeat("device-x")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "exec-A must be dispatched")
+
+	// A cancel for a DIFFERENT executionID must not release the lock.
+	released := d.ReleaseDeviceForCancelledExecution("device-x", "exec-B-stale")
+	assert.False(t, released, "stale cancel must not release the lock held by exec-A")
+
+	// Verify the lock is still held — exec-A has not completed.
+	require.Never(t, func() bool {
+		if !d.tryAcquireDevice("device-x") {
+			return false
+		}
+		d.releaseDevice("device-x")
+		return true
+	}, 50*time.Millisecond, 5*time.Millisecond,
+		"lock must still be held after stale cancel")
+
+	// Cancel for the CORRECT executionID releases the lock immediately.
+	released = d.ReleaseDeviceForCancelledExecution("device-x", "exec-A")
+	assert.True(t, released, "cancel with matching executionID must release the lock")
+
+	// Lock is now free — a new dispatch can proceed.
+	require.Eventually(t, func() bool {
+		if !d.tryAcquireDevice("device-x") {
+			return false
+		}
+		d.releaseDevice("device-x")
+		return true
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"lock must be free after correct-ID cancel")
+}
+
 // mustOpenMemDB opens an in-memory SQLite database closed via t.Cleanup.
 func mustOpenMemDB(t *testing.T) *sql.DB {
 	t.Helper()
