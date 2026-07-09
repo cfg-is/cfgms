@@ -21,7 +21,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"
 )
 
 // testNonClusterProvider implements interfaces.StorageProvider with ClusterCapable() == false.
@@ -854,7 +853,7 @@ func TestInitializeUpgradeStore_NoSQLitePath_FallsBackToInMemory(t *testing.T) {
 
 			store := initializeUpgradeStore(ctx, tc.cfg, rec)
 			require.NotNil(t, store, "must return a non-nil store even without SQLite configured")
-			require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store,
+			requireInMemoryUpgradeStore(t, store,
 				"unconfigured SQLite path must degrade to the in-memory store")
 			t.Cleanup(func() { _ = store.Close() })
 
@@ -883,7 +882,7 @@ func TestInitializeUpgradeStore_OpenFailure_FallsBackToInMemory(t *testing.T) {
 
 	store := initializeUpgradeStore(ctx, cfg, rec)
 	require.NotNil(t, store)
-	require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store,
+	requireInMemoryUpgradeStore(t, store,
 		"an unopenable SQLite DSN must degrade to the in-memory store")
 	t.Cleanup(func() { _ = store.Close() })
 
@@ -911,7 +910,7 @@ func TestInitializeUpgradeStore_InitializeFailure_FallsBackToInMemory(t *testing
 
 	store := initializeUpgradeStore(ctx, cfg, rec)
 	require.NotNil(t, store)
-	require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store,
+	requireInMemoryUpgradeStore(t, store,
 		"a schema-init failure must degrade to the in-memory store")
 	t.Cleanup(func() { _ = store.Close() })
 

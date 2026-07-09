@@ -121,6 +121,7 @@ type Server struct {
 	executionQueue          *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
 	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
@@ -1009,7 +1010,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
 	// when SQLite is not configured so controller startup is never blocked on storage.
-	httpServer.SetUpgradeStore(initializeUpgradeStore(context.Background(), cfg, logger))
+	// The store is held in srv.upgradeStore so Stop() can close the SQLite handle.
+	upgradeStore := initializeUpgradeStore(context.Background(), cfg, logger)
+	httpServer.SetUpgradeStore(upgradeStore)
 
 	// Issue #2296: Wire batch job store and rolling-batch executor so that
 	// POST /api/v1/jobs and GET /api/v1/jobs/{id} are operational.
@@ -1099,6 +1102,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
 		storageManager:          storageManager,
+		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
 		executionQueue:          executionQueue,   // Issue #1672
 		jobDispatcher:           jobDispatcher,    // Issue #1672
 		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
@@ -1819,6 +1823,14 @@ func (s *Server) Stop() error {
 	if s.runManager != nil {
 		if err := s.runManager.Close(); err != nil {
 			s.logger.Warn("Failed to close run manager", "error", err)
+		}
+	}
+
+	// Close upgrade store — releases the SQLite connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2464).
+	if s.upgradeStore != nil {
+		if err := s.upgradeStore.Close(); err != nil {
+			s.logger.Warn("Failed to close upgrade store", "error", err)
 		}
 	}
 
