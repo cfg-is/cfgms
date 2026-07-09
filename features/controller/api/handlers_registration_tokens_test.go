@@ -119,9 +119,6 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 func TestCreateRegistrationToken(t *testing.T) {
 	server, _ := setupTestServerWithTokenStore(t)
 
-	// Create API key with token creation permission
-	apiKey := NewTestKey(t, server, []string{"registration:create-token"})
-
 	t.Run("successful token creation", func(t *testing.T) {
 		reqBody := registration.TokenCreateRequest{
 			TenantID:      "test-tenant",
@@ -133,8 +130,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		body, err := json.Marshal(reqBody)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -158,8 +154,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		// single_use was removed in Issue #1690; sending it must return 400
 		body := []byte(`{"tenant_id":"test-tenant","controller_url":"grpc://controller.example.com:7443","single_use":true}`)
 
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -177,8 +172,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		body, err := json.Marshal(reqBody)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -196,8 +190,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		body, err := json.Marshal(reqBody)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -208,8 +201,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("invalid JSON returns error", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader([]byte("not json")))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader([]byte("not json")))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -409,9 +401,6 @@ func TestGetRegistrationToken(t *testing.T) {
 
 func TestDeleteRegistrationToken(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
-
-	// Create API key with delete permission
-	apiKey := NewTestKey(t, server, []string{"registration:delete-token"})
 	ctx := context.Background()
 
 	t.Run("delete existing token", func(t *testing.T) {
@@ -424,8 +413,7 @@ func TestDeleteRegistrationToken(t *testing.T) {
 		err = tokenStore.SaveToken(ctx, token)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("DELETE", "/api/v1/registration/tokens/"+token.Token, nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/"+token.Token, nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -438,8 +426,7 @@ func TestDeleteRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("delete non-existent token returns 404", func(t *testing.T) {
-		req := httptest.NewRequest("DELETE", "/api/v1/registration/tokens/nonexistent-token", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/nonexistent-token", nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -459,9 +446,6 @@ func TestDeleteRegistrationToken(t *testing.T) {
 
 func TestRevokeRegistrationToken(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
-
-	// Create API key with revoke permission
-	apiKey := NewTestKey(t, server, []string{"registration:revoke-token"})
 	ctx := context.Background()
 
 	t.Run("revoke existing token", func(t *testing.T) {
@@ -474,8 +458,7 @@ func TestRevokeRegistrationToken(t *testing.T) {
 		err = tokenStore.SaveToken(ctx, token)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/"+token.Token+"/revoke", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/"+token.Token+"/revoke", nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -497,8 +480,7 @@ func TestRevokeRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("revoke non-existent token returns 404", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/nonexistent-token/revoke", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/nonexistent-token/revoke", nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -518,9 +500,6 @@ func TestRevokeRegistrationToken(t *testing.T) {
 
 func TestRotateRegistrationToken(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
-
-	// Create API key with rotate permission
-	apiKey := NewTestKey(t, server, []string{"registration:rotate-token"})
 	ctx := context.Background()
 
 	// Seed a token for rotation
@@ -534,8 +513,7 @@ func TestRotateRegistrationToken(t *testing.T) {
 
 	t.Run("rotate returns new token and revokes old", func(t *testing.T) {
 		body := []byte(`{"group":"rotate-group"}`)
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/rotate-tenant/rotate", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/rotate-tenant/rotate", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -561,8 +539,7 @@ func TestRotateRegistrationToken(t *testing.T) {
 	})
 
 	t.Run("rotate with no active tokens returns 404", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/nonexistent-tenant/rotate", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/nonexistent-tenant/rotate", nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -583,18 +560,9 @@ func TestRotateRegistrationToken(t *testing.T) {
 func TestRegistrationTokenCRUDFlow(t *testing.T) {
 	server, _ := setupTestServerWithTokenStore(t)
 
-	// Create API key with all token permissions
-	apiKey := NewTestKey(t, server, []string{
-		"registration:create-token",
-		"registration:list-tokens",
-		"registration:read-token",
-		"registration:revoke-token",
-		"registration:delete-token",
-	})
-
 	var createdToken string
 
-	// 1. Create a token
+	// 1. Create a token (Tier-3: requires admin cert)
 	t.Run("1_create_token", func(t *testing.T) {
 		reqBody := registration.TokenCreateRequest{
 			TenantID:      "crud-test-tenant",
@@ -606,8 +574,7 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		body, err := json.Marshal(reqBody)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -623,10 +590,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		assert.NotEmpty(t, createdToken)
 	})
 
-	// 2. List tokens and verify our token is included
+	// 2. List tokens and verify our token is included (Tier-1: admin cert still works)
 	t.Run("2_list_tokens", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/v1/registration/tokens?tenant_id=crud-test-tenant", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "GET", "/api/v1/registration/tokens?tenant_id=crud-test-tenant", nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -649,10 +615,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		assert.True(t, found, "Created token should be in the list")
 	})
 
-	// 3. Get specific token
+	// 3. Get specific token (Tier-1)
 	t.Run("3_get_token", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/v1/registration/tokens/"+createdToken, nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "GET", "/api/v1/registration/tokens/"+createdToken, nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -669,10 +634,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		assert.False(t, resp.Revoked)
 	})
 
-	// 4. Revoke the token
+	// 4. Revoke the token (Tier-3)
 	t.Run("4_revoke_token", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/v1/registration/tokens/"+createdToken+"/revoke", nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/"+createdToken+"/revoke", nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -686,10 +650,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		assert.True(t, resp.Revoked)
 	})
 
-	// 5. Verify token is revoked when getting it again
+	// 5. Verify token is revoked when getting it again (Tier-1)
 	t.Run("5_verify_revoked", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/v1/registration/tokens/"+createdToken, nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "GET", "/api/v1/registration/tokens/"+createdToken, nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -704,10 +667,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		assert.NotNil(t, resp.RevokedAt)
 	})
 
-	// 6. Delete the token
+	// 6. Delete the token (Tier-3)
 	t.Run("6_delete_token", func(t *testing.T) {
-		req := httptest.NewRequest("DELETE", "/api/v1/registration/tokens/"+createdToken, nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/"+createdToken, nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -715,10 +677,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		require.Equal(t, http.StatusNoContent, rec.Code)
 	})
 
-	// 7. Verify token is deleted
+	// 7. Verify token is deleted (Tier-1)
 	t.Run("7_verify_deleted", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/v1/registration/tokens/"+createdToken, nil)
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, "GET", "/api/v1/registration/tokens/"+createdToken, nil)
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)

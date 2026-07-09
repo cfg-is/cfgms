@@ -92,13 +92,29 @@ func (s *emptyBulkStream) RecvMsg(interface{}) error             { return nil }
 // Compile-time check.
 var _ grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk] = (*emptyBulkStream)(nil)
 
+// emptyLogStream implements grpc.ClientStreamingServer[LogEntry, LogStreamResponse].
+// Recv immediately returns EOF so the nil-handler fallback path is tested.
+type emptyLogStream struct{}
+
+func (s *emptyLogStream) Recv() (*transportpb.LogEntry, error)              { return nil, io.EOF }
+func (s *emptyLogStream) SendAndClose(*transportpb.LogStreamResponse) error { return nil }
+func (s *emptyLogStream) SetHeader(metadata.MD) error                       { return nil }
+func (s *emptyLogStream) SendHeader(metadata.MD) error                      { return nil }
+func (s *emptyLogStream) SetTrailer(metadata.MD)                            {}
+func (s *emptyLogStream) Context() context.Context                          { return context.Background() }
+func (s *emptyLogStream) SendMsg(interface{}) error                         { return nil }
+func (s *emptyLogStream) RecvMsg(interface{}) error                         { return nil }
+
+// Compile-time check.
+var _ grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse] = (*emptyLogStream)(nil)
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 func TestComposite_RegisterDelegatesToCP(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
 
 	_, err := composite.Register(context.Background(), &controllerpb.RegisterRequest{})
 	require.NoError(t, err)
@@ -107,7 +123,7 @@ func TestComposite_RegisterDelegatesToCP(t *testing.T) {
 
 func TestComposite_PingDelegatesToCP(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
 
 	_, err := composite.Ping(context.Background(), &transportpb.PingRequest{})
 	require.NoError(t, err)
@@ -116,7 +132,7 @@ func TestComposite_PingDelegatesToCP(t *testing.T) {
 
 func TestComposite_ControlChannelDelegatesToCP(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
 
 	err := composite.ControlChannel(nil)
 	require.NoError(t, err)
@@ -125,7 +141,7 @@ func TestComposite_ControlChannelDelegatesToCP(t *testing.T) {
 
 func TestComposite_SyncDNA_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
 
 	err := composite.SyncDNA(&emptyDNAStream{})
 	require.Error(t, err, "SyncDNA with nil dnaHandler should return unimplemented error")
@@ -135,7 +151,7 @@ func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
 	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue())
-	composite := newCompositeTransportServer(cp, dnaHandler, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, dnaHandler, nil, nil, nil, nil)
 
 	// Empty stream with background context (no mTLS peer) → Unauthenticated from handler.
 	// This proves that dnaHandler.HandleGRPC is called, not the Unimplemented fallback.
@@ -147,7 +163,7 @@ func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 
 func TestComposite_BulkTransfer_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
 
 	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.Error(t, err, "BulkTransfer with nil bulkHandler should return unimplemented error")
@@ -157,7 +173,7 @@ func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
 	bulkHandler := controllerTransport.NewBulkHandler(logger, controllerTransport.NewTenantQueue())
-	composite := newCompositeTransportServer(cp, nil, bulkHandler, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, bulkHandler, nil, nil, nil)
 
 	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.NoError(t, err, "BulkTransfer with valid handler and empty stream must succeed")
@@ -165,8 +181,18 @@ func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 
 func TestComposite_SyncConfigWithoutHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
 
 	err := composite.SyncConfig(&transportpb.ConfigSyncRequest{}, nil)
 	require.Error(t, err, "SyncConfig without handler should return unimplemented error")
+}
+
+func TestComposite_LogStream_NilHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+
+	err := composite.LogStream(&emptyLogStream{})
+	require.Error(t, err, "LogStream with nil logStreamHandler should return unimplemented error")
+	assert.Contains(t, err.Error(), "not implemented",
+		"LogStream with nil handler must return Unimplemented")
 }

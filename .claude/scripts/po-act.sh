@@ -5,8 +5,11 @@
 # All actions target the cfg-is/cfgms repo and the develop branch queue.
 #
 # Subcommands:
-#   dispatch <STORY_NUM>            Fresh story: check-conflicts + clone + launch + status update
-#   dispatch-fix <PR_NUM>           Fix cycle: remove stale container + clone-pr + launch
+#   dispatch <STORY_NUM>            Fresh story: lease + claim (Ready->In Progress) + check-conflicts + clone + launch
+#   claim <ITEM_ID>                 Lease + claim a Ready story (Ready->In Progress) for in-session work; CLAIMED/CLAIM_LOST
+#   release-story <ITEM_ID>         Release a story lease held by an in-session (§7) self-dispatch after the PR is up
+#   dispatch-fix <PR_NUM>           Fix cycle: lease pr-<N> + remove stale container + clone-pr + launch
+#   resolve-conflict <PR_NUM>       Conflict resolution: lease pr-<N> + author-gate + clone-pr + launch resolve-conflict agent
 #   close-merged <ISSUE> <PR>       Close issue that didn't auto-close after PR merge
 #   enqueue <PR_NUM> [<STORY>]      Add PR to merge queue. If STORY is given,
 #                                   prepends "Fixes #STORY" to the PR body when
@@ -25,11 +28,21 @@
 set -euo pipefail
 
 REPO="cfg-is/cfgms"
-WORKTREE_BASE="$(cd "$(dirname "$0")/../.." && pwd)/../worktrees"
-WORKTREE_BASE="$(cd "$WORKTREE_BASE" 2>/dev/null && pwd || echo "/home/jrdn/git/cfg.is/worktrees")"
-DISPATCH="$(dirname "$0")/agent-dispatch.sh"
+WORKTREE_BASE="${CFGMS_TEST_WORKTREE_BASE:-}"
+if [[ -z "$WORKTREE_BASE" ]]; then
+  WORKTREE_BASE="$(cd "$(dirname "$0")/../.." && pwd)/../worktrees"
+  WORKTREE_BASE="$(cd "$WORKTREE_BASE" 2>/dev/null && pwd || echo "/home/jrdn/git/cfg.is/worktrees")"
+fi
+DISPATCH="${CFGMS_TEST_DISPATCH:-$(dirname "$0")/agent-dispatch.sh}"
 PREFLIGHT="$(dirname "$0")/po-cycle-preflight.py"
 PROJECT_QUEUE="$(cd "$(dirname "$0")/../.." && pwd)/scripts/project-queue.sh"
+PIPELINE_HELPER="${CFGMS_TEST_PIPELINE_HELPER:-$(cd "$(dirname "$0")/../.." && pwd)/scripts/pipeline-helper.sh}"
+
+# Default lease TTLs (seconds). A held lease past its TTL is reclaimable by any
+# host — the backstop for a host that died holding it. Sized well above the
+# normal operation duration so a live op is never reclaimed out from under it.
+LEASE_TTL_STORY="${CFGMS_LEASE_TTL_STORY:-7200}"   # dev container: long stories
+LEASE_TTL_PR="${CFGMS_LEASE_TTL_PR:-3600}"         # review/fix/resolve container
 
 # Cache path (matches po-cycle-preflight.py defaults). No /tmp writes.
 if [ -n "${PO_CACHE_DIR:-}" ]; then
@@ -41,6 +54,110 @@ else
 fi
 CACHE_FILE="$CACHE_DIR/preflight.json"
 
+# ── Shared claim / routing helpers ──────────────────────────────────────────
+# The pipeline can run `/po cron` on MORE THAN ONE host concurrently, including
+# homogeneous (e.g. multiple Linux) hosts. Cross-host mutual exclusion is provided
+# by a distributed lease (an atomic git ref — see pipeline-helper.sh lease-*),
+# acquired on the work unit BEFORE any side effect. The lease is the hard
+# interlock; the Projects V2 status flip below is the human-readable dashboard
+# signal layered on top (it is NOT relied on for concurrency — Projects V2 has no
+# CAS, so the status flip alone is last-writer-wins).
+
+# _acquire_lease <key> <ttl> <skip_label>
+#   Try to claim <key>. On success (ACQUIRED/RECLAIMED) records it in LEASE_HELD
+#   and returns 0. On contention (HELD) or error, prints a DISPATCH_SKIPPED line
+#   tagged <skip_label> and returns 1 — the caller should exit 0 (clean skip).
+LEASE_HELD=""
+_acquire_lease() {
+  local key="$1" ttl="$2" label="$3" out
+  out=$(bash "$PIPELINE_HELPER" lease-acquire "$key" "$ttl" 2>/dev/null || true)
+  case "$out" in
+    ACQUIRED:*|RECLAIMED:*) LEASE_HELD="$key"; return 0 ;;
+    HELD:*)  echo "DISPATCH_SKIPPED:${label}:lease_held (${out})"; return 1 ;;
+    *)       echo "DISPATCH_SKIPPED:${label}:lease_error (${out:-no output})"; return 1 ;;
+  esac
+}
+
+# _release_lease [key]
+#   Release the named key, or LEASE_HELD if no arg. Idempotent; never fails the
+#   caller. Used on rollback paths where the container that would own the lease
+#   never launched. (When a container DOES launch, it owns release — the host
+#   must NOT release after a successful launch.)
+_release_lease() {
+  local key="${1:-$LEASE_HELD}"
+  [ -n "$key" ] || return 0
+  bash "$PIPELINE_HELPER" lease-release "$key" >/dev/null 2>&1 || true
+}
+
+# _capacity_ok
+#   Resource admission gate (delegates to agent-dispatch.sh capacity). Returns 0
+#   when the host has room for another agent container; on no room, echoes the
+#   CAPACITY_FULL line and returns 1. Bypass with CFGMS_AGENT_CAPACITY_GATE=off.
+_capacity_ok() {
+  [[ "${CFGMS_AGENT_CAPACITY_GATE:-on}" == "off" ]] && return 0
+  local out
+  out=$("$DISPATCH" capacity 2>/dev/null) && return 0
+  echo "$out"
+  return 1
+}
+
+# _claim_item <item_id>
+#   Re-read status; proceed only if still Ready; set it to In Progress. Prints
+#   CLAIMED:<item> (rc 0) or CLAIM_LOST:<item> (rc 1). This is the dashboard-state
+#   transition and a same-host overlap guard; cross-host safety comes from the
+#   lease the caller already holds, NOT from this read-then-set.
+_claim_item() {
+  local item_id="$1" cur
+  cur=$(bash "$PROJECT_QUEUE" get-item "$item_id" 2>/dev/null \
+    | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('status') or '')
+except Exception: print('')" 2>/dev/null || echo "")
+  if [ "$cur" != "Ready" ]; then
+    echo "CLAIM_LOST:${item_id} (status=${cur:-unknown})"
+    return 1
+  fi
+  if ! bash "$PROJECT_QUEUE" update-field "$item_id" status "In Progress" >/dev/null 2>&1; then
+    echo "CLAIM_LOST:${item_id} (status update failed)"
+    return 1
+  fi
+  echo "CLAIMED:${item_id}"
+  return 0
+}
+
+# _requires_env <item_id> [<issue_num>]
+#   Resolve the story's required execution environment, reusing the preflight's
+#   single-sourced detection (## Environment body section + needs-<env> labels).
+#   Always prints one of: linux | windows | macos.
+_requires_env() {
+  local item_id="$1" issue="${2:-}" body labels_json="[]"
+  body=$(bash "$PROJECT_QUEUE" get-item "$item_id" 2>/dev/null \
+    | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('body') or '')
+except Exception: print('')" 2>/dev/null || echo "")
+  if [ -n "$issue" ]; then
+    labels_json=$(gh issue view "$issue" --repo "$REPO" --json labels --jq '.labels' 2>/dev/null || echo "[]")
+  fi
+  STORY_BODY="$body" STORY_LABELS="$labels_json" PF="$PREFLIGHT" python3 - <<'PY' 2>/dev/null || echo "linux"
+import importlib.util, json, os
+spec = importlib.util.spec_from_file_location("preflight", os.environ["PF"])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+try:
+    labels = json.loads(os.environ.get("STORY_LABELS", "[]"))
+except Exception:
+    labels = []
+print(m.detect_required_env(m.extract_section(os.environ.get("STORY_BODY", ""), "Environment"), labels))
+PY
+}
+
+# _host_serves_env <env>
+#   True if CFGMS_PO_HOST_CAPS (comma-separated, default "linux") includes <env>.
+_host_serves_env() {
+  local env caps
+  env="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  caps=",$(printf '%s' "${CFGMS_PO_HOST_CAPS:-linux}" | tr -d ' ' | tr '[:upper:]' '[:lower:]'),"
+  [[ "$caps" == *",${env},"* ]]
+}
+
 cmd="${1:-}"
 shift || true
 
@@ -48,6 +165,13 @@ case "$cmd" in
   dispatch)
     arg="${1:?story number or item_id required}"
     PROJECT_QUEUE="$(cd "$(dirname "$0")/../.." && pwd)/scripts/project-queue.sh"
+
+    # Resource admission gate (before any lease/materialize/clone). Defer if the
+    # host has no room for another agent container — RAM/disk 90%, CPU 75%.
+    if ! cap=$(_capacity_ok); then
+      echo "DISPATCH_DEFERRED:${arg}:resources (${cap})"
+      exit 0
+    fi
 
     # If arg is an item_id (non-numeric), resolve it to the underlying GitHub
     # issue number. A project item linked to a public issue carries `issue_num`;
@@ -69,15 +193,15 @@ except Exception: print('')" 2>/dev/null || echo "")
       fi
     fi
 
+    # Phase 1 — resolve identifiers WITHOUT side effects (no clone yet). We must
+    # know the item_id so we can claim the story (status -> In Progress) BEFORE
+    # any clone/launch work; otherwise a second host's out-of-phase cycle could
+    # clone+launch the same Ready story before this one records the claim.
+    story=""
+    issue_for_env=""
     if [[ "$arg" =~ ^[0-9]+$ ]]; then
-      # Issue number path: existing create-clone flow
       story="$arg"
-      "$DISPATCH" check-conflicts "$story" >/dev/null
-      "$DISPATCH" create-clone "$story" | tail -1
-
-      # Fetch item_id BEFORE launch so CFGMS_PROJECT_ITEM_ID can be passed to the
-      # container. The entrypoint refuses to run without this var. When we
-      # resolved from an item_id arg we already have it; otherwise look it up.
+      issue_for_env="$story"
       if [[ -n "$resolved_item_id" ]]; then
         item_id="$resolved_item_id"
       else
@@ -89,20 +213,86 @@ except Exception: print('')" 2>/dev/null || echo "")
           exit 1
         fi
       fi
-
       clone_path="${WORKTREE_BASE}/story-${story}"
       container_name="cfg-agent-${story}"
       first_arg="${story}"
+      # Acquire the story lease before any clone/launch so a second host's
+      # out-of-phase cycle can't dispatch the same existing Ready issue.
+      _acquire_lease "story-${item_id}" "$LEASE_TTL_STORY" "${story}" || exit 0
     else
-      # Item ID path: genuine issueless project drafts only (non-numeric arg
-      # that did not resolve to an issue number above).
+      # Issueless project draft → materialize it into a locked `internal` issue
+      # now, then run the rest of dispatch first-class on feature/story-<N>.
+      # Since ADR-015, stories materialize at DECOMPOSITION (create-story), so
+      # this path only serves `--defer` drafts (security-sensitive bodies held
+      # private until dispatch). (The old item-<id> branch path is review-sweep-
+      # invisible — Issue #1700 — so we always convert rather than dispatching
+      # the draft directly.)
       item_id="$arg"
-      LAST12=$(echo "$item_id" | tr -cd 'a-zA-Z0-9' | rev | cut -c1-12 | rev)
-      "$DISPATCH" create-clone-item "$item_id" | tail -1
+      # Acquire the story lease BEFORE materialize — materialize-issue mints a
+      # fresh GitHub issue every call, so two racing hosts would otherwise create
+      # two issues (+ two branches/containers/PRs) for the same draft.
+      _acquire_lease "story-${item_id}" "$LEASE_TTL_STORY" "${item_id}" || exit 0
+      epic_num=$(bash "$PROJECT_QUEUE" get-item "$item_id" 2>/dev/null \
+        | python3 -c "import json,sys,re
+try:
+    b=json.load(sys.stdin).get('body') or ''
+    m=re.search(r'[Pp]arent epic[:#\s]*#?(\d+)', b)
+    print(m.group(1) if m else '')
+except Exception: print('')" 2>/dev/null || echo "")
+      mat=$(bash "$PIPELINE_HELPER" materialize-issue "$item_id" "$epic_num" 2>&1) || {
+        echo "ERROR: materialize-issue failed for ${item_id}: ${mat}" >&2
+        exit 1
+      }
+      story=$(echo "$mat" | grep -oE '#[0-9]+' | tr -d '#' | head -1)
+      if [ -z "${story:-}" ]; then
+        echo "ERROR: materialize-issue returned no issue number: ${mat}" >&2
+        exit 1
+      fi
+      echo "MATERIALIZED_AT_DISPATCH:${item_id}:#${story}"
+      issue_for_env="$story"
+      clone_path="${WORKTREE_BASE}/story-${story}"
+      container_name="cfg-agent-${story}"
+      first_arg="${story}"
+    fi
 
-      clone_path="${WORKTREE_BASE}/item-${LAST12}"
-      container_name="cfg-agent-item-${LAST12}"
-      first_arg="${item_id}"
+    # Phase 2 — capability guard (defense in depth; the preflight already filters
+    # by host caps). Refuse to dispatch a story whose required execution env this
+    # host cannot serve — e.g. a windows-tagged story on the linux orchestrator
+    # must not land in a Linux container.
+    req_env=$(_requires_env "$item_id" "$issue_for_env")
+    req_env="${req_env:-linux}"
+    if ! _host_serves_env "$req_env"; then
+      echo "DISPATCH_REFUSED:${first_arg}:requires ${req_env} env; host caps=${CFGMS_PO_HOST_CAPS:-linux}"
+      exit 0
+    fi
+
+    # Phase 3 — claim before work. We already hold the story lease (cross-host
+    # interlock); this flips the dashboard status. On the rare CLAIM_LOST (status
+    # changed by a human or a same-host overlap) release the lease and exit clean.
+    if ! _claim_item "$item_id"; then
+      _release_lease "story-${item_id}"
+      exit 0
+    fi
+
+    # Phase 4 — now do the work. Roll the claim back to Ready on any failure so a
+    # later cycle (or another host) can retry. The ERR trap covers the steps that
+    # run under `set -e` (check-conflicts, create-clone); without it a clone/conflict
+    # failure would exit with the story stuck In Progress. The docker-run failure is
+    # handled explicitly in the LAUNCH_FAILED branch below (it runs inside an `if`
+    # condition, which `set -e`/ERR does not trap).
+    trap 'rc=$?; bash "$PROJECT_QUEUE" update-field "$item_id" status "Ready" >/dev/null 2>&1 || true; bash "$PIPELINE_HELPER" lease-release "story-${item_id}" >/dev/null 2>&1 || true; echo "ROLLED_BACK:${item_id} -> Ready (dispatch failed before launch, rc=$rc)"; exit "$rc"' ERR
+    # Branch on the RESOLVED story number ($first_arg), not the raw input ($arg).
+    # An issueless draft is materialized above into issue #$story and $first_arg
+    # is set to that number, so it must clone first-class as feature/story-<N>
+    # (matching clone_path=$WORKTREE_BASE/story-<N>). Testing $arg here instead
+    # left materialized drafts on the review-invisible feature/item-<id> path AND
+    # mounted a non-existent worktree (clone_path=story-<N> vs the item-<id> clone
+    # that create-clone-item actually made) → empty /workspace → entrypoint crash.
+    if [[ "$first_arg" =~ ^[0-9]+$ ]]; then
+      "$DISPATCH" check-conflicts "$story" >/dev/null
+      "$DISPATCH" create-clone "$story" | tail -1
+    else
+      "$DISPATCH" create-clone-item "$item_id" | tail -1
     fi
 
     # Launch with CFGMS_PROJECT_ITEM_ID so entrypoint sources content from Projects V2.
@@ -133,31 +323,116 @@ except Exception: print('')" 2>/dev/null || echo "")
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_PROJECT_ITEM_ID=${item_id}" \
+      -e "CFGMS_LEASE_KEY=story-${item_id}" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${first_arg}" 2>&1); then
+      trap - ERR
       echo "LAUNCHED:${first_arg}:${container_id}"
     else
+      trap - ERR
       echo "LAUNCH_FAILED:${first_arg}:${container_id}"
       rm -rf "$clone_path"
       echo "CLEANED:clone:${clone_path}"
+      # Release the claim + lease: launch never happened, so return the story to
+      # Ready and free the lease for the next cycle/host.
+      bash "$PROJECT_QUEUE" update-field "$item_id" status "Ready" >/dev/null 2>&1 || true
+      _release_lease "story-${item_id}"
+      echo "ROLLED_BACK:${item_id} -> Ready"
       exit 1
     fi
 
-    bash "$PROJECT_QUEUE" update-field "$item_id" status "In Progress" >/dev/null 2>&1 || true
+    # Status is already In Progress from the claim in Phase 3.
     echo "DISPATCHED:${first_arg}"
+    ;;
+
+  claim)
+    # Standalone claim primitive for self-dispatch (no-docker, in-session) mode:
+    # a host claims a Ready story before working it locally. Acquires the story
+    # lease (cross-host interlock) THEN flips Ready->In Progress. The in-session
+    # work has no container to release the lease on exit, so §7 must call
+    # `po-act.sh release-story <item_id>` once the PR is up (TTL reclaim is the
+    # backstop if the session dies). Exit 0 = CLAIMED, 1 = lost/held.
+    item_id="${1:?item_id required}"
+    # Acquire the cross-host lease first; report contention as CLAIM_LOST so §7's
+    # drain loop treats it like any other lost claim.
+    acq=$(bash "$PIPELINE_HELPER" lease-acquire "story-${item_id}" "$LEASE_TTL_STORY" 2>/dev/null || true)
+    case "$acq" in
+      ACQUIRED:*|RECLAIMED:*) LEASE_HELD="story-${item_id}" ;;
+      *) echo "CLAIM_LOST:${item_id} (lease held: ${acq:-error})"; exit 1 ;;
+    esac
+    if ! _claim_item "$item_id"; then
+      _release_lease "story-${item_id}"
+      exit 1
+    fi
+    ;;
+
+  release-story)
+    # Release a story lease held by a self-dispatch (§7) session — call after the
+    # PR is up so another host can pick up review/fix. Idempotent.
+    item_id="${1:?item_id required}"
+    _release_lease "story-${item_id}"
+    echo "RELEASED:story-${item_id}"
     ;;
 
   dispatch-fix)
     pr="${1:?PR number required}"
     container="cfg-agent-pr-fix-${pr}"
+    # External-author gate (Issue #1786): refuse before touching any PR content.
+    if ! "$DISPATCH" check-pr-author "$pr"; then
+      echo "DISPATCH_FIX_REFUSED:${pr}:external_author"
+      exit 3
+    fi
+    # Resource admission gate before claiming the lease.
+    if ! cap=$(_capacity_ok); then
+      echo "DISPATCH_FIX_DEFERRED:${pr}:resources (${cap})"
+      exit 0
+    fi
+    # Cross-host PR lease — pr-<N> is shared by review/fix/resolve (mutually
+    # exclusive ops on one PR). If another host already holds it, skip cleanly.
+    _acquire_lease "pr-${pr}" "$LEASE_TTL_PR" "pr-${pr}" || exit 0
+    # Release the lease if clone/launch fails; on success the container owns it.
+    trap '_release_lease "pr-${pr}"' ERR
     # Remove any stale exited container from a previous attempt
     docker rm -f "$container" >/dev/null 2>&1 || true
     # Remove any stale worktree directory
     rm -rf "${WORKTREE_BASE}/pr-fix-${pr}" 2>/dev/null || true
     "$DISPATCH" create-clone-pr "$pr" | tail -1
-    "$DISPATCH" launch-generic "$container" "${WORKTREE_BASE}/pr-fix-${pr}" --fix-pr "$pr" | tail -1
+    CFGMS_LEASE_KEY="pr-${pr}" "$DISPATCH" launch-generic "$container" "${WORKTREE_BASE}/pr-fix-${pr}" --fix-pr "$pr" | tail -1
+    trap - ERR
     echo "DISPATCHED_FIX:$pr"
+    ;;
+
+  resolve-conflict)
+    pr="${1:?PR number required}"
+    [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: PR number must be numeric, got: ${pr}"; exit 1; }
+    container="cfg-agent-resolve-conflict-${pr}"
+    # Subcommand-level author gate (defense in depth — must run before any
+    # clone/fetch/checkout/launch). Uses #1786's permission-level helper
+    # (push/maintain/admin). The interim authorAssociation check was replaced
+    # once #1786 landed; this subcommand-level assertion stays regardless.
+    if ! "$DISPATCH" check-pr-author "$pr"; then
+      echo "RESOLVE_CONFLICT_REFUSED:${pr}:external_author"
+      exit 3
+    fi
+    # Resource admission gate before claiming the lease.
+    if ! cap=$(_capacity_ok); then
+      echo "RESOLVE_CONFLICT_DEFERRED:${pr}:resources (${cap})"
+      exit 0
+    fi
+    # Cross-host PR lease (same pr-<N> key as review/fix — they never run together
+    # on one PR). Skip cleanly if another host holds it.
+    _acquire_lease "pr-${pr}" "$LEASE_TTL_PR" "pr-${pr}" || exit 0
+    trap '_release_lease "pr-${pr}"' ERR
+    # Remove any stale exited container from a previous attempt
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    # Remove any stale worktree directory (separate namespace from pr-fix-<PR>)
+    rm -rf "${WORKTREE_BASE}/resolve-conflict-${pr}" 2>/dev/null || true
+    "$DISPATCH" create-clone-pr --dest-prefix "resolve-conflict-" "$pr" | tail -1
+    CFGMS_LEASE_KEY="pr-${pr}" "$DISPATCH" launch-generic "$container" "${WORKTREE_BASE}/resolve-conflict-${pr}" --resolve-conflict "$pr" | tail -1
+    trap - ERR
+    echo "DISPATCHED_RESOLVE_CONFLICT:${pr}"
     ;;
 
   close-merged)
@@ -171,6 +446,13 @@ except Exception: print('')" 2>/dev/null || echo "")
   enqueue)
     pr="${1:?PR number required}"
     story="${2:-}"
+    # TOCTOU re-check: verify author trust at enqueue time (Issue #1786).
+    # Even if review-pr passed earlier, labels or collaborator status may have
+    # changed between review and merge. Fail-closed: refuse if not internal.
+    if ! "$DISPATCH" check-pr-author "$pr"; then
+      echo "ENQUEUE_REFUSED:${pr}:external_author"
+      exit 3
+    fi
     # If a story is provided, ensure the PR body contains a GitHub auto-close
     # keyword for that issue. Dev agents miss this ~85% of the time, leaving
     # orphan issues that stay open after the PR merges. Patching here is cheap
@@ -316,28 +598,35 @@ except Exception: print('')" 2>/dev/null || echo "")
     ;;
 
   block)
-    # Usage: po-act.sh block <ISSUE_NUM> <reason>
-    # Sets project status to Blocked, assigns to founder, posts escalation comment.
-    issue="${1:?issue number required}"
+    # Usage: po-act.sh block <ISSUE_NUM|ITEM_ID> <reason>
+    # Sets project status to Blocked. For a public issue, also posts an escalation
+    # comment; a draft item (no issue) is set by item_id and takes no comment.
+    arg="${1:?issue number or item_id required}"
     reason="${2:?reason required (use - to read stdin)}"
     ts=$(date -u +"%Y-%m-%d %H:%MZ")
     if [ "$reason" = "-" ]; then
       reason=$(cat)
     fi
     body=$(printf '## Pipeline blocked — %s\n\n%s\n\n_Escalated to founder by PO cycle._\n' "$ts" "$reason")
-    # Update project status to Blocked (idempotently add issue to project first)
-    item_id=$(bash "$PROJECT_QUEUE" add-issue "$issue" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
-    if [ -n "${item_id:-}" ]; then
-      bash "$PROJECT_QUEUE" update-field "$item_id" status "Blocked" >/dev/null 2>&1 || true
+    if [[ "$arg" =~ ^[0-9]+$ ]]; then
+      # Public issue: add to project (idempotent), set Blocked, post escalation comment.
+      item_id=$(bash "$PROJECT_QUEUE" add-issue "$arg" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
+      if [ -n "${item_id:-}" ]; then
+        bash "$PROJECT_QUEUE" update-field "$item_id" status "Blocked" >/dev/null 2>&1 || true
+      fi
+      printf '%s\n' "$body" | gh issue comment "$arg" --repo "$REPO" --body-file - >/dev/null 2>&1 || true
+    else
+      # Draft item: already in the project; set Blocked by item_id (drafts take no comment).
+      bash "$PROJECT_QUEUE" update-field "$arg" status "Blocked" >/dev/null 2>&1 || true
     fi
-    printf '%s\n' "$body" | gh issue comment "$issue" --repo "$REPO" --body-file - >/dev/null
-    echo "BLOCKED:$issue"
+    echo "BLOCKED:$arg"
     ;;
 
   unblock)
-    # Usage: po-act.sh unblock <ISSUE_NUM> <reason> [--as-fix]
-    # Sets project status to Ready (or Fix with --as-fix), posts resolution comment.
-    issue="${1:?issue number required}"
+    # Usage: po-act.sh unblock <ISSUE_NUM|ITEM_ID> <reason> [--as-fix]
+    # Sets project status to Ready (or Fix with --as-fix). Posts a resolution
+    # comment for a public issue; a draft item is set by item_id (no comment).
+    arg="${1:?issue number or item_id required}"
     reason="${2:?reason required (use - to read stdin)}"
     mode="${3:-}"
     ts=$(date -u +"%Y-%m-%d %H:%MZ")
@@ -345,17 +634,18 @@ except Exception: print('')" 2>/dev/null || echo "")
       reason=$(cat)
     fi
     body=$(printf '## Pipeline unblocked — %s\n\n%s\n' "$ts" "$reason")
-    # Update project status (idempotently add issue to project first)
-    item_id=$(bash "$PROJECT_QUEUE" add-issue "$issue" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
-    if [ -n "${item_id:-}" ]; then
-      new_status="Ready"
-      if [ "$mode" = "--as-fix" ]; then
-        new_status="Fix"
+    new_status="Ready"
+    [ "$mode" = "--as-fix" ] && new_status="Fix"
+    if [[ "$arg" =~ ^[0-9]+$ ]]; then
+      item_id=$(bash "$PROJECT_QUEUE" add-issue "$arg" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
+      if [ -n "${item_id:-}" ]; then
+        bash "$PROJECT_QUEUE" update-field "$item_id" status "$new_status" >/dev/null 2>&1 || true
       fi
-      bash "$PROJECT_QUEUE" update-field "$item_id" status "$new_status" >/dev/null 2>&1 || true
+      printf '%s\n' "$body" | gh issue comment "$arg" --repo "$REPO" --body-file - >/dev/null 2>&1 || true
+    else
+      bash "$PROJECT_QUEUE" update-field "$arg" status "$new_status" >/dev/null 2>&1 || true
     fi
-    printf '%s\n' "$body" | gh issue comment "$issue" --repo "$REPO" --body-file - >/dev/null
-    echo "UNBLOCKED:$issue${mode:+ ($mode)}"
+    echo "UNBLOCKED:$arg${mode:+ ($mode)}"
     ;;
 
   ""|-h|--help|help)

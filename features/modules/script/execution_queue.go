@@ -467,7 +467,12 @@ func (q *ExecutionQueue) performMaintenance() {
 
 // Stop halts the background maintenance goroutine. Safe to call more than once.
 func (q *ExecutionQueue) Stop() {
-	q.stopOnce.Do(func() { close(q.stopCh) })
+	q.stopOnce.Do(func() {
+		close(q.stopCh)
+		if q.keyManager != nil {
+			q.keyManager.Stop()
+		}
+	})
 }
 
 // entryToQueued converts a QueueEntry to a QueuedExecution for API compatibility.

@@ -23,7 +23,7 @@ type Manager struct {
 // NewManager creates a new workflow manager
 func NewManager(moduleFactory *factory.ModuleFactory, logger logging.Logger) *Manager {
 	return &Manager{
-		engine: NewEngine(moduleFactory, logger, nil),
+		engine: NewEngine(moduleFactory, logger, nil, nil, nil),
 		parser: NewParser(),
 		logger: logger,
 		workflowPaths: []string{

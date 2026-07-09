@@ -20,6 +20,7 @@ import (
 	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -274,11 +275,22 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
 	// steward.tenant_path. Applied only when the principal has a non-empty TenantID
 	// (API key users). Admin mTLS principals (TenantID="") have global access.
-	if filter.DeviceID != "" && principal.TenantID != "" {
-		if forbidden := s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID); forbidden {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"access denied: steward is not in your tenant scope", "FORBIDDEN")
-			return
+	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
+	// legacy query-param path only.
+	if principal.TenantID != "" {
+		for _, targetID := range filter.IDs {
+			if forbidden := s.enforceExecTenantScope(r.Context(), targetID, principal.TenantID); forbidden {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			}
+		}
+		if filter.DeviceID != "" {
+			if forbidden := s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID); forbidden {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			}
 		}
 	}
 
@@ -305,7 +317,13 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 
 	// Audit dispatch for single-steward exec (id: target). command_hash and
 	// output_hash are computed here; exit_code and output are not yet available.
-	if filter.DeviceID != "" {
+	// selector.Parse places the id: value in filter.IDs; emit when exactly one ID
+	// is targeted (multi-ID comma-OR runs are not audited here, only per-job).
+	auditDeviceID := filter.DeviceID
+	if auditDeviceID == "" && len(filter.IDs) == 1 {
+		auditDeviceID = filter.IDs[0]
+	}
+	if auditDeviceID != "" {
 		commandHash := sha256.Sum256(inlineContent)
 		sigID := ""
 		if req.Signature != nil {
@@ -313,7 +331,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 			h := sha256.Sum256(sigBytes)
 			sigID = hex.EncodeToString(h[:])
 		}
-		s.emitExecCommandAudit(r.Context(), tenantID, principal.ID, filter.DeviceID,
+		s.emitExecCommandAudit(r.Context(), tenantID, principal.ID, auditDeviceID,
 			hex.EncodeToString(commandHash[:]), sigID, runID)
 	}
 
@@ -469,11 +487,14 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 
 // parseRunTarget converts an optional fleet selector string to a fleet.Filter.
 // An empty target matches all stewards (within the caller's tenant, enforced by synthesis).
+// The tenant path extracted by selector.Parse is discarded here; exec tenant enforcement
+// uses enforceExecTenantScope (device-ID prefix check) rather than Filter.TenantSubtree.
 func parseRunTarget(target string) (fleet.Filter, error) {
 	if target == "" || target == "all" {
 		return fleet.Filter{}, nil
 	}
-	return fleet.ParseTargetSelector(target)
+	f, _, err := selector.Parse(target)
+	return f, err
 }
 
 // enforceExecTenantScope checks whether the principal's tenantID is a path-prefix

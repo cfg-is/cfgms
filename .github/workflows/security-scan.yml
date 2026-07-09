@@ -47,18 +47,18 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
     - name: Install Trivy
       env:
-        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.71.0 is
+        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.72.0 is
         # the post-incident clean release. The install helper verifies the
         # archive SHA-256 against this pinned value before extraction. See
         # docs/runbooks/trivy-rollback.md for rollback procedure.
-        TRIVY_VERSION: 'v0.71.0'
-        TRIVY_SHA256: '30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814'
+        TRIVY_VERSION: 'v0.72.0'
+        TRIVY_SHA256: 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
       run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Run Trivy Scan
@@ -81,7 +81,7 @@ jobs:
         fi
     
     - name: Upload Trivy SARIF
-      uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+      uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
       if: always() && hashFiles('sarif-results/trivy.sarif') != ''
       with:
         sarif_file: sarif-results/trivy.sarif
@@ -89,7 +89,7 @@ jobs:
       continue-on-error: true
     
     - name: Upload Trivy Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: trivy-results
@@ -106,18 +106,18 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+    #   uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
@@ -152,18 +152,18 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+    #   uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
@@ -206,7 +206,7 @@ jobs:
     # configuration, and results are still available via workflow artifacts.
     #
     # - name: Upload gosec SARIF
-    #   uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+    #   uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
     #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
     #   with:
     #     sarif_file: sarif-results/gosec.sarif
@@ -214,7 +214,7 @@ jobs:
     #   continue-on-error: true
 
     - name: Upload gosec Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: gosec-results
@@ -231,18 +231,18 @@ jobs:
       issues-found: ${{ steps.scan.outputs.issues-found }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
 
     # Cache disabled due to parallel job conflicts causing tar extraction failures
     # - name: Cache Go modules
-    #   uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+    #   uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
     #   with:
     #     path: ~/go/pkg/mod
     #     key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
@@ -283,12 +283,12 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
 
@@ -324,10 +324,10 @@ jobs:
         make install-nancy
         
         # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
-        # v0.71.0 is the post-incident clean release. The install helper
+        # v0.72.0 is the post-incident clean release. The install helper
         # verifies the archive SHA-256 against the pinned value before
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
-        sudo .github/scripts/install-trivy.sh 'v0.71.0' '30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814'
+        sudo .github/scripts/install-trivy.sh 'v0.72.0' 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
 
         # Install gosec and staticcheck
         go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
@@ -349,7 +349,7 @@ jobs:
         fi
     
     - name: Upload Consolidated Security Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: security-scan-consolidated

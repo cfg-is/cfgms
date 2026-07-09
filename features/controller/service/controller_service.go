@@ -7,14 +7,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"google.golang.org/protobuf/proto"
 )
 
 // ControllerService implements the Controller service
@@ -23,6 +27,9 @@ type ControllerService struct {
 	mu         sync.RWMutex
 	stewards   map[string]*StewardInfo
 	dnaStorage *fleetStorage.Manager
+
+	ringMu     sync.RWMutex
+	ringConfig controllerconfig.DeploymentRingConfig
 }
 
 // StewardInfo holds connection/heartbeat state for a registered steward.
@@ -36,6 +43,38 @@ type StewardInfo struct {
 	Status        string
 	Metrics       map[string]string
 	Token         string
+
+	// RingResolvedVersion is the desired_version resolved from the steward's
+	// deployment_ring DNA attribute and the controller ring config. Empty when
+	// the resolved ring has no version set. Applied as an override over any
+	// tenant-path desired_version when delivering config to the steward.
+	RingResolvedVersion string
+	// ResolvedRing is the ring name that was matched (or fell back to).
+	ResolvedRing string
+}
+
+// maxVersionLen is the maximum number of bytes stored for a steward-supplied
+// Version string. Caps memory amplification at 50k-steward scale against a
+// malicious or buggy steward sending an oversized value (threat model: stewards
+// on compromised hosts).
+const maxVersionLen = 64
+
+// cloneDNA returns a deep copy of a DNA proto message, or nil if dna is nil.
+// Safe to call under s.mu.RLock() — proto.Clone reads only, never writes.
+func cloneDNA(dna *common.DNA) *common.DNA {
+	if dna == nil {
+		return nil
+	}
+	return proto.Clone(dna).(*common.DNA)
+}
+
+// copyMetrics returns a shallow copy of a string→string metrics map.
+func copyMetrics(m map[string]string) map[string]string {
+	copied := make(map[string]string, len(m))
+	for k, v := range m {
+		copied[k] = v
+	}
+	return copied
 }
 
 // NewControllerService creates a new Controller service without DNA storage.
@@ -347,12 +386,21 @@ func (s *ControllerService) GetStewardCount() int {
 	return len(s.stewards)
 }
 
-// GetStewardInfo returns information about a specific steward
+// GetStewardInfo returns information about a specific steward. The returned
+// value is a copy-on-read: the DNA pointer is deep-cloned and the Metrics map
+// is shallow-copied under the read lock, so callers can safely read (or
+// marshal) the result concurrently with SyncDNA writes.
 func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	info, exists := s.stewards[stewardID]
-	return info, exists
+	if !exists {
+		return nil, false
+	}
+	copied := *info
+	copied.DNA = cloneDNA(info.DNA)
+	copied.Metrics = copyMetrics(info.Metrics)
+	return &copied, true
 }
 
 // RecordHeartbeat advances the live heartbeat state for a registered steward in
@@ -372,6 +420,9 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.Time) bool {
 	if ts.IsZero() {
 		ts = time.Now()
+	}
+	if len(version) > maxVersionLen {
+		version = version[:maxVersionLen]
 	}
 
 	// Fast path: the steward is already in the registry. Hold the lock only long
@@ -526,6 +577,94 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 		"status", logging.SanitizeLogValue(status))
 }
 
+// SetRingConfig updates the deployment ring set. If the ring set has changed,
+// an audit log entry is written with actor, before-state, and after-state.
+// Ring-set mutation in this story happens only via controller config reload or restart.
+func (s *ControllerService) SetRingConfig(rings controllerconfig.DeploymentRingConfig) {
+	s.ringMu.Lock()
+	prev := s.ringConfig
+	s.ringConfig = rings
+	s.ringMu.Unlock()
+	s.logRingSetChange(prev, rings)
+}
+
+// GetRingConfig returns the current deployment ring configuration.
+func (s *ControllerService) GetRingConfig() controllerconfig.DeploymentRingConfig {
+	s.ringMu.RLock()
+	defer s.ringMu.RUnlock()
+	return s.ringConfig
+}
+
+// ResolveRingVersion resolves the effective desired_version and ring name for a steward
+// given its DNA attributes and the current ring configuration.
+// Returns (version, resolvedRing, didFallback, originalRingValue).
+func (s *ControllerService) ResolveRingVersion(dnaAttrs map[string]string) (version, ring string, didFallback bool, originalValue string) {
+	s.ringMu.RLock()
+	rings := s.ringConfig
+	s.ringMu.RUnlock()
+	return pkgconfig.ResolveRingVersion(dnaAttrs, rings)
+}
+
+// ApplyRingResolution resolves the deployment ring for a steward, stores the result in
+// the StewardInfo, and logs a WARN when ring fallback occurs (absent or invalid ring).
+// steward must be the live registry entry; caller must hold s.mu (at least read lock
+// for reading DNA, write lock if updating RingResolvedVersion).
+func (s *ControllerService) ApplyRingResolution(stewardID string, steward *StewardInfo) {
+	if steward.DNA == nil {
+		return
+	}
+	version, ring, didFallback, original := s.ResolveRingVersion(steward.DNA.Attributes)
+	steward.RingResolvedVersion = version
+	steward.ResolvedRing = ring
+	if didFallback {
+		s.logger.Warn("deployment_ring_fallback",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"ring_value", logging.SanitizeLogValue(original),
+			"fallback_ring", logging.SanitizeLogValue(ring),
+		)
+	}
+}
+
+// logRingSetChange emits a structured audit entry when the ring set changes.
+// actor is always "controller" (ring changes come from config reload/restart).
+func (s *ControllerService) logRingSetChange(prev, next controllerconfig.DeploymentRingConfig) {
+	if ringConfigEqual(prev, next) {
+		return
+	}
+	s.logger.Info("ring_set_changed",
+		"actor", "controller",
+		"before", ringConfigSummary(prev),
+		"after", ringConfigSummary(next),
+	)
+}
+
+// ringConfigSummary produces a compact human-readable representation for audit log entries.
+func ringConfigSummary(rc controllerconfig.DeploymentRingConfig) string {
+	parts := make([]string, len(rc.Rings))
+	for i, r := range rc.Rings {
+		if r.DesiredVersion != "" {
+			parts[i] = r.Name + "=" + r.DesiredVersion
+		} else {
+			parts[i] = r.Name
+		}
+	}
+	return fmt.Sprintf("[%s] fallback=%s", strings.Join(parts, ","), rc.FallbackRing)
+}
+
+// ringConfigEqual returns true when two ring configs are semantically identical
+// (same ring order, names, versions, and fallback ring).
+func ringConfigEqual(a, b controllerconfig.DeploymentRingConfig) bool {
+	if a.FallbackRing != b.FallbackRing || len(a.Rings) != len(b.Rings) {
+		return false
+	}
+	for i := range a.Rings {
+		if a.Rings[i].Name != b.Rings[i].Name || a.Rings[i].DesiredVersion != b.Rings[i].DesiredVersion {
+			return false
+		}
+	}
+	return true
+}
+
 // lookupDurableTenant resolves a steward's authoritative tenant (and last DNA
 // snapshot) from durable storage by stewardID. The tenant comes from the
 // registration-minted DNA record, never from a steward-supplied value, so that
@@ -571,6 +710,20 @@ func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, 
 	return nil
 }
 
+// SetStewardDNA sets the in-memory DNA pointer for a registered steward,
+// replacing whatever was there (including to nil). Returns false if the
+// steward is not present in the registry.
+func (s *ControllerService) SetStewardDNA(stewardID string, dna *common.DNA) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return false
+	}
+	steward.DNA = dna
+	return true
+}
+
 // UpdateStewardStatus updates the status of a registered steward.
 // Returns an error if the steward is not found.
 func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error {
@@ -584,26 +737,54 @@ func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error 
 	return nil
 }
 
-// GetAllStewards returns a list of all registered stewards
+// UpdateStewardTenant reassigns a steward to a different tenant in the live registry.
+// The steward need not be currently connected — the update is applied to the in-memory
+// entry so the next config resolution uses the new tenant path. Returns an error if
+// the steward is not in the registry (it may have been loaded from durable storage but
+// not yet reconnected; callers must ensure the durable store is also updated).
+func (s *ControllerService) UpdateStewardTenant(stewardID, newTenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+	steward.TenantID = newTenantID
+	return nil
+}
+
+// GetAllStewards returns a list of all registered stewards. Each entry is a
+// copy-on-read: DNA is deep-cloned and Metrics is shallow-copied under the
+// read lock, so callers can safely read the results concurrently with SyncDNA
+// writes without holding a reference into the live registry.
 func (s *ControllerService) GetAllStewards() []*StewardInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	stewards := make([]*StewardInfo, 0, len(s.stewards))
 	for _, info := range s.stewards {
-		stewards = append(stewards, info)
+		copied := *info
+		copied.DNA = cloneDNA(info.DNA)
+		copied.Metrics = copyMetrics(info.Metrics)
+		stewards = append(stewards, &copied)
 	}
 	return stewards
 }
 
-// findStewardByDNAId finds an existing steward by DNA ID
+// findStewardByDNAId finds an existing steward by DNA ID and returns a
+// copy-on-read. The caller (verifySyncStatus) reads DNA fields — e.g.
+// SyncFingerprint, AttributeCount — after the lock is released, so returning
+// the live pointer would race with a concurrent SyncDNA write.
 func (s *ControllerService) findStewardByDNAId(dnaId string) *StewardInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, steward := range s.stewards {
 		if steward.DNA != nil && steward.DNA.Id == dnaId {
-			return steward
+			copied := *steward
+			copied.DNA = cloneDNA(steward.DNA)
+			copied.Metrics = copyMetrics(steward.Metrics)
+			return &copied
 		}
 	}
 	return nil

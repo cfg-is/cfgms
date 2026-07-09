@@ -1,0 +1,421 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package hyperv
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// These tests drive the REAL executor path: module.Set(ctx, "vm:<name>", cfg)
+// with a MAP-backed ConfigState (the shape the steward executor hands the module
+// via config.AsMap) AND a transport whose getVM output controls the simulated
+// HOST state. They are the regression coverage for the live-found bugs that the
+// *VMConfig-based unit tests missed:
+//
+//   - Part 1: host object names are the EXACT config names (no cfgms- prefix).
+//   - Part 2: setVM reconciles against HOST TRUTH (getVM), never the stale cache,
+//     so SET (multi-NIC connect) and delete cannot be computed as no-ops.
+//
+// Each case sets the host state via the transport's getVM JSON (call 0) and then
+// asserts the intended host mutation calls.
+
+// scriptIndex returns the indices of recorded calls whose scriptBlock contains
+// the given substring, in call order.
+func callsContaining(calls []winRMCall, substr string) []winRMCall {
+	var out []winRMCall
+	for _, c := range calls {
+		if strings.Contains(c.scriptBlock, substr) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func argsContain(call winRMCall, want string) bool {
+	for _, a := range call.args {
+		if s, ok := a.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconcile_CreateWhenHostMissing_ConnectsEachSwitchByExactName drives a
+// create through the map path: getVM reports not-found, so Set issues New-VM with
+// the exact name and connects each additional desired switch by its exact name.
+func TestReconcile_CreateWhenHostMissing_ConnectsEachSwitchByExactName(t *testing.T) {
+	// Call 0: getVM → not found. Subsequent calls succeed.
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":false}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":        "web-01",
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"vhd_path":    `C:\VMs\web-01.vhdx`,
+		"generation":  2,
+		"state":       "stopped",
+		"switch_name": []interface{}{"sw-a", "sw-b"}, // LIST via the map
+	}}
+
+	require.NoError(t, m.Set(context.Background(), "vm:web-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	newVM := callsContaining(calls, "New-VM")
+	require.Len(t, newVM, 1, "exactly one New-VM expected")
+	// New-VM connects the FIRST switch (sw-a) by exact name and uses the exact VM name.
+	assert.True(t, argsContain(newVM[0], "web-01"), "New-VM must use the exact VM name")
+	assert.True(t, argsContain(newVM[0], "sw-a"), "New-VM must connect the first switch by exact name")
+
+	adds := callsContaining(calls, "Add-VMNetworkAdapter")
+	require.Len(t, adds, 1, "one Add-VMNetworkAdapter expected for the second switch")
+	assert.True(t, argsContain(adds[0], "sw-b"), "second switch must connect by exact name")
+	assert.NotContains(t, adds[0].scriptBlock, "sw-b", "switch name must travel via args, not the script")
+}
+
+// TestReconcile_MultiNICSet_AddsAdapterFromHostTruth drives the multi-NIC SET via
+// the map path: host VM is on [sw-a], desired is ["sw-a","sw-b"] → one
+// Add-VMNetworkAdapter for sw-b, no New-VM. Proves the reconcile reads the host
+// adapters (Part 2), not a cache that might say otherwise.
+func TestReconcile_MultiNICSet_AddsAdapterFromHostTruth(t *testing.T) {
+	// Call 0: getVM reports the host on [sw-a].
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a"],"State":"Off"}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	// Seed the cache with a DIVERGENT (stale) view that already shows both
+	// adapters — if reconcile used the cache it would (wrongly) skip the add.
+	m.vmsMu.Lock()
+	m.vms["web-01"] = VMConfig{
+		Name: "web-01", State: "stopped", CPUCount: 2, MemoryMB: 4096,
+		SwitchName: "sw-a", SwitchNames: stringOrStringList{"sw-a", "sw-b"},
+	}
+	m.vmsMu.Unlock()
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":        "web-01",
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"state":       "stopped",
+		"switch_name": []interface{}{"sw-a", "sw-b"},
+	}}
+
+	require.NoError(t, m.Set(context.Background(), "vm:web-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"), "must not create an existing VM")
+	adds := callsContaining(calls, "Add-VMNetworkAdapter")
+	require.Len(t, adds, 1, "host truth ([sw-a]) vs desired ([sw-a,sw-b]) must add sw-b despite the stale cache")
+	assert.True(t, argsContain(adds[0], "sw-b"), "must connect sw-b by exact name")
+}
+
+// TestReconcile_MultiNICUnSet_RemovesAdapterFromHostTruth drives the multi-NIC
+// UN-SET via the map path: host VM is on [sw-a,sw-b], desired is "sw-a" (a scalar)
+// → one Remove-VMNetworkAdapter for sw-b.
+func TestReconcile_MultiNICUnSet_RemovesAdapterFromHostTruth(t *testing.T) {
+	// Call 0: getVM reports the host on [sw-a, sw-b].
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a","sw-b"],"State":"Off"}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":        "web-01",
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"state":       "stopped",
+		"switch_name": "sw-a", // scalar — desired set is just {sw-a}
+	}}
+
+	require.NoError(t, m.Set(context.Background(), "vm:web-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"), "must not create an existing VM")
+	removes := callsContaining(calls, "Remove-VMNetworkAdapter")
+	require.Len(t, removes, 1, "host truth ([sw-a,sw-b]) vs desired ([sw-a]) must remove sw-b")
+	assert.True(t, argsContain(removes[0], "sw-b"), "must disconnect sw-b by exact name")
+}
+
+// TestReconcile_Idempotent_NoHostMutationWhenConverged drives a fully-converged
+// apply: host == desired → only the getVM read runs, zero mutations.
+func TestReconcile_Idempotent_NoHostMutationWhenConverged(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a","sw-b"],"State":"Off"}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":        "web-01",
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"state":       "stopped",
+		"switch_name": []interface{}{"sw-a", "sw-b"},
+	}}
+
+	require.NoError(t, m.Set(context.Background(), "vm:web-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.Len(t, calls, 1, "converged apply must issue only the getVM host-truth read")
+	for _, c := range calls {
+		assert.NotContains(t, c.scriptBlock, "Add-VMNetworkAdapter")
+		assert.NotContains(t, c.scriptBlock, "Remove-VMNetworkAdapter")
+		assert.NotContains(t, c.scriptBlock, "Stop-VM")
+		assert.NotContains(t, c.scriptBlock, "Start-VM")
+		assert.NotContains(t, c.scriptBlock, "New-VM")
+	}
+}
+
+// TestReconcile_Delete_RemovesVMByExactName drives state:absent via the map path
+// on an existing VM → Remove-VM with the exact name. This is the delete path that
+// the cache short-circuit previously let skip when the cache disagreed with host.
+func TestReconcile_Delete_RemovesVMByExactName(t *testing.T) {
+	transport := &testWinRMTransport{}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":  "web-01",
+		"state": "absent",
+	}}
+
+	require.NoError(t, m.Set(context.Background(), "vm:web-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	removes := callsContaining(calls, "Remove-VM")
+	require.Len(t, removes, 1, "state:absent must issue Remove-VM")
+	assert.True(t, argsContain(removes[0], "web-01"), "Remove-VM must target the exact VM name")
+	assert.NotContains(t, removes[0].scriptBlock, "web-01", "name must travel via args, not the script")
+	// Hyper-V refuses to remove a non-Off VM (and the connected switch stays "in
+	// use"), so the delete script hard-powers-off a running VM before removing it.
+	assert.Contains(t, removes[0].scriptBlock, "Stop-VM", "delete must stop a running VM before Remove-VM")
+	assert.Contains(t, removes[0].scriptBlock, "-TurnOff", "delete uses a hard power-off")
+}
+
+// TestReconcile_PowerIdempotent_NoStartWhenAlreadyRunning drives desired:running
+// against a host already running (via getVM) → no Start-VM. Proves the power
+// decision is made off host truth (Part 2).
+func TestReconcile_PowerIdempotent_NoStartWhenAlreadyRunning(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx","SwitchName":"sw-a","SwitchNames":["sw-a"],"State":"Running"}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":        "web-01",
+		"memory_mb":   4096,
+		"cpu_count":   2,
+		"state":       "running",
+		"switch_name": "sw-a",
+	}}
+
+	require.NoError(t, m.Set(context.Background(), "vm:web-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Start-VM"),
+		"already-running host must not be issued a redundant Start-VM")
+	assert.Empty(t, callsContaining(calls, "Stop-VM"))
+	require.Len(t, calls, 1, "fully converged running VM: only the getVM read runs")
+}
+
+// ── Existence-gating safety invariant (ADR-009 §2, Story #2048) ─────────────
+//
+// These tests prove the non-negotiable safety invariant: source provisioning is
+// existence-gated, never health-gated. An existing VM is NEVER auto-destroyed or
+// recreated by default; a broken existing VM is surfaced as degraded, not torn
+// down; only an explicit on_existing: recreate permits destruction; an own
+// in-progress attempt surfaces-and-waits rather than auto-retrying.
+
+// existingSourceVMJSON builds a getVM-shaped JSON for a VM that already exists on
+// the host, in the given raw Hyper-V State string (e.g. "Running", "Off",
+// "Critical"). Used to drive the existence-gating decision tree against a VM the
+// host reports as present.
+func existingSourceVMJSON(name, hvState string) string {
+	return `{"found":true,"Name":"` + name + `","MemoryStartupBytes":4294967296,` +
+		`"ProcessorCount":2,"Generation":2,"Path":"C:\\ClusterStorage\\CSV01\\` + name + `.vhdx",` +
+		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"` + hvState + `"}`
+}
+
+// TestExistenceGating_ExistingVMNotRecreatedByDefault is the headline [REQUIRED
+// TEST]: when a VM already exists on the host and the desired config carries a
+// source block with on_existing: never (the default), the module must issue
+// ZERO New-VM and ZERO Remove-VM calls — the existing VM is never auto-destroyed
+// or recreated. This is the core ADR-009 §2 safety invariant.
+func TestExistenceGating_ExistingVMNotRecreatedByDefault(t *testing.T) {
+	// getVM (call 0) reports the VM already present and running.
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // on_existing: never
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"existing VM must NEVER be (re)created when on_existing is never")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"existing VM must NEVER be destroyed when on_existing is never")
+	// Source orchestration must not have run any of its create-path verbs either.
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"no seed VHDX may be built for an existing VM under the default")
+	assert.Empty(t, callsContaining(calls, "Add-VMDvdDrive"),
+		"no install ISO may be attached to an existing VM under the default")
+}
+
+// TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault proves the invariant
+// holds for an existing STOPPED VM too — existence, not power state, gates source.
+// A stopped VM with desired state running is started, but never recreated.
+func TestExistenceGating_ExistingStoppedVMNotRecreatedByDefault(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Off"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // desired running, on_existing: never
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"), "existing stopped VM must not be recreated")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"), "existing stopped VM must not be destroyed")
+	// Plain lifecycle still converges power state: desired running → Start-VM.
+	require.Len(t, callsContaining(calls, "Start-VM"), 1,
+		"an existing healthy VM still converges to its declared power state")
+}
+
+// TestExistenceGating_BrokenVMSurfacesAsDegraded is the second [REQUIRED TEST]:
+// a VM that exists in an unexpected/broken Hyper-V state ("Critical") under the
+// default on_existing must be surfaced as a degraded provisioning record with
+// LastError describing the observed state — and NEVER torn down.
+func TestExistenceGating_BrokenVMSurfacesAsDegraded(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Critical"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // on_existing: never
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"a broken existing VM must NEVER be torn down — degraded is observed, not remediated")
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"a broken existing VM must NEVER be recreated")
+
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err, "a degraded provisioning record must be written")
+	assert.Equal(t, ProvisionStateDegraded, rec.State,
+		"a broken existing VM surfaces as a degraded provisioning record")
+	assert.Contains(t, strings.ToLower(rec.LastError), "critical",
+		"LastError must describe the observed broken VM state")
+}
+
+// TestExistenceGating_RecreateOnlyWhenExplicit proves the ONLY destructive path:
+// when on_existing is recreate and the VM exists, the module issues Remove-VM
+// THEN New-VM (in that order) — the explicit opt-in reprovision.
+func TestExistenceGating_RecreateOnlyWhenExplicit(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	configMap := sourceVMConfigMap(2, "linux")
+	src := configMap["source"].(map[string]interface{})
+	src["on_existing"] = "recreate"
+
+	cfg := rawConfigState{m: configMap}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	removes := callsContaining(calls, "Remove-VM")
+	news := callsContaining(calls, "New-VM")
+	require.Len(t, removes, 1, "on_existing: recreate must destroy the existing VM exactly once")
+	require.Len(t, news, 1, "on_existing: recreate must recreate the VM exactly once")
+
+	// Remove must precede New (tear down, then rebuild) — assert by call ordering.
+	var removeIdx, newIdx int
+	for i, c := range calls {
+		if strings.Contains(c.scriptBlock, "Remove-VM") && !strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
+			removeIdx = i
+		}
+		if strings.Contains(c.scriptBlock, "New-VM") {
+			newIdx = i
+		}
+	}
+	assert.Less(t, removeIdx, newIdx, "Remove-VM must precede New-VM on the recreate path")
+}
+
+// TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry proves surface-and-
+// wait: when an own provisioning record exists at installing but the VM is
+// absent from the host (mid-install / transiently not yet visible), the module
+// must NOT re-issue New-VM — auto-retry is off by default (ADR-009 §2).
+func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: `{"found":false}`, // host reports the VM absent
+	}
+	m := provisionModuleWithTransport(t, transport)
+	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(),
+	}))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"an own in-progress provisioning attempt must surface-and-wait, not auto-retry New-VM")
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"no seed rebuild for an in-progress own attempt")
+
+	// The record must remain at installing — surface-and-wait leaves it untouched.
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateInstalling, rec.State,
+		"surface-and-wait must leave the in-progress record at installing")
+}

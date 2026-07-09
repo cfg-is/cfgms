@@ -5,12 +5,19 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/cfgis/cfgms/features/controller/push"
+	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -21,11 +28,21 @@ type leaderStatus interface {
 	IsLeader() bool
 }
 
+// configPushRequest is the JSON body for POST /api/v1/config/push.
+// Selector selects which stewards receive the push; it is required and must not
+// be empty — use "all" to target every steward in the configuration's tenant.
+// The StewardConfiguration fields (config_id, version, tenant_id, …) are promoted
+// to the top-level JSON object by Go's embedded-struct encoding.
+type configPushRequest struct {
+	Selector string `json:"selector"`
+	push.StewardConfiguration
+}
+
 // handleConfigPush implements POST /api/v1/config/push.
 //
-// Validates the StewardConfiguration body, rejects non-leader nodes with 503,
-// records an audit event, triggers a fire-and-forget fan-out to all active
-// stewards via commandPublisher, and returns 202 Accepted immediately.
+// Validates the request, resolves the target selector scoped to cfg.TenantID
+// (never the caller's tenant), records an audit event, triggers a fire-and-forget
+// fan-out to matched stewards via commandPublisher, and returns 202 Accepted.
 func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Reject followers immediately — only the leader accepts config pushes.
 	if checker := s.pushLeaderStatus; checker != nil && !checker.IsLeader() {
@@ -33,13 +50,21 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Require an authenticated principal.
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
+		s.respondError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	// Decode and validate request body.
-	var cfg push.StewardConfiguration
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var req configPushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.Warn("Failed to decode config push body", "error", err)
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	cfg := req.StewardConfiguration
 
 	if cfg.ConfigID == "" || cfg.Version == "" || cfg.TenantID == "" {
 		s.logger.Warn("Config push request missing required fields",
@@ -49,6 +74,64 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		)
 		s.respondError(w, http.StatusBadRequest, "config_id, version, and tenant_id are required")
 		return
+	}
+
+	// Authorize caller: tenant-scoped callers may only push configs labelled with
+	// their own tenant. Admin callers (TenantID == "") may push any cfg.TenantID,
+	// but the fan-out is still scoped to that specific tenant — never left empty.
+	if principal.TenantID != "" && principal.TenantID != cfg.TenantID {
+		s.respondError(w, http.StatusForbidden, "caller may only push configs for their own tenant")
+		return
+	}
+
+	// Require an explicit, non-empty selector — no implicit "all" default.
+	if req.Selector == "" {
+		s.respondError(w, http.StatusBadRequest, "selector is required: use 'all' to match all stewards")
+		return
+	}
+	// Strip newlines so CodeQL's go/log-injection taint cannot reach log calls.
+	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
+
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
+	if err != nil {
+		s.logger.Info("Invalid selector expression", "selector", safeSelector, "error", logging.SanitizeLogValue(err.Error()))
+		s.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Scope to cfg.TenantID subtree. An explicit selector prefix must be within
+	// that subtree; absent prefix defaults to cfg.TenantID and all descendants.
+	if parsedTenantPath != "" {
+		if parsedTenantPath != cfg.TenantID && !strings.HasPrefix(parsedTenantPath, cfg.TenantID+"/") {
+			s.logger.Info("Selector tenant outside config tenant subtree",
+				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+				"config_tenant", logging.SanitizeLogValue(cfg.TenantID))
+			s.respondError(w, http.StatusForbidden, "selector tenant outside config tenant subtree")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else {
+		filter.TenantSubtree = cfg.TenantID
+	}
+
+	results, err := s.fleetQuery.Search(r.Context(), filter)
+	if err != nil {
+		s.logger.Error("Fleet query failed during config push", "error", err, "selector", safeSelector)
+		s.respondError(w, http.StatusInternalServerError, "fleet query failed")
+		return
+	}
+
+	// Build matched-ID set, then filter GetAllStewards() to those IDs.
+	// This bridges fleet.StewardResult → *service.StewardInfo for Fanout
+	// without any new interface methods.
+	matchedIDs := make(map[string]struct{}, len(results))
+	for _, res := range results {
+		matchedIDs[res.ID] = struct{}{}
+	}
+	targeted := make([]*service.StewardInfo, 0, len(matchedIDs))
+	for _, st := range s.controllerService.GetAllStewards() {
+		if _, hit := matchedIDs[st.ID]; hit {
+			targeted = append(targeted, st)
+		}
 	}
 
 	pushID := fmt.Sprintf("push-%d", time.Now().UnixNano())
@@ -79,14 +162,13 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fan-out CommandSyncConfig to every active steward. Fire-and-forget: the
+	// Fan-out CommandSyncConfig to matched stewards only. Fire-and-forget: the
 	// goroutine uses context.Background so it is not cancelled when the HTTP
 	// response is written. 202 is returned to the caller immediately.
 	if s.commandPublisher != nil {
-		stewards := s.controllerService.GetAllStewards()
 		cfgSnapshot := cfg
 		go func() {
-			result := push.Fanout(context.Background(), &cfgSnapshot, stewards, s.commandPublisher, s.logger)
+			result := push.Fanout(context.Background(), &cfgSnapshot, targeted, s.commandPublisher, s.logger)
 			s.logger.Info("Config push fan-out complete",
 				"push_id", pushID,
 				"succeeded", len(result.Succeeded),
@@ -113,6 +195,60 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		PushID:   pushID,
 		Status:   "accepted",
 		QueuedAt: queuedAt,
+	})
+}
+
+// handleGetConfigPush implements GET /api/v1/config/push/{id}.
+//
+// Retrieves a single push record by ID. Returns 404 for unknown IDs or records
+// owned by a different tenant — returning 403 would disclose that the push ID
+// exists (mirrors runVisibleTo in handlers_runs.go). Returns 503 when the push
+// store is unavailable.
+func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
+	if s.pushStore == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "push store not available")
+		return
+	}
+
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok || principal == nil {
+		s.respondError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	id := mux.Vars(r)["id"]
+
+	record, err := s.pushStore.GetPush(r.Context(), id)
+	if errors.Is(err, business.ErrPushNotFound) {
+		s.respondError(w, http.StatusNotFound, "push not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("Failed to retrieve push record",
+			"push_id", logging.SanitizeLogValue(id), "error", err)
+		s.respondError(w, http.StatusInternalServerError, "failed to retrieve push record")
+		return
+	}
+
+	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
+	// cross-tenant push existence. requirePermission path-var isolation does not
+	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
+	// Admin callers (IsAdmin == true, TenantID == "") may read any push record.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if !principal.IsAdmin && record.TenantID != callerTenant {
+		s.respondError(w, http.StatusNotFound, "push not found")
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, PushStatusResponse{
+		PushID:      record.ID,
+		ConfigID:    record.ConfigID,
+		TenantID:    record.TenantID,
+		Version:     record.Version,
+		Status:      string(record.Status),
+		InitiatedBy: record.InitiatedBy,
+		CreatedAt:   record.CreatedAt,
+		UpdatedAt:   record.UpdatedAt,
 	})
 }
 

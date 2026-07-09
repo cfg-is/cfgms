@@ -5,6 +5,27 @@
 # Build: docker build -t cfg-agent:latest -f .devcontainer/Dockerfile .
 # Rebuild weekly to refresh Trivy DB: docker build --no-cache -t cfg-agent:latest -f .devcontainer/Dockerfile .
 
+# Stage 0 (builder): compile cfg binary in an isolated stage so the source tree
+# and .git history are never baked into the final image's layers.
+# CLI_BINARY=cfg  Entry point: ./cmd/cfg
+FROM golang:1.26.4-bookworm AS cfg-builder
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN set -eu; \
+    VERSION=$(git describe --tags --always 2>/dev/null || echo "dev"); \
+    COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown"); \
+    BUILDDATE=$(date -u +%Y-%m-%dT%H:%M:%SZ); \
+    GOVERS=$(go version | awk '{print $3}'); \
+    go build \
+       -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=${VERSION} -X github.com/cfgis/cfgms/pkg/version.GitCommit=${COMMIT} -X github.com/cfgis/cfgms/pkg/version.BuildDate=${BUILDDATE} -X github.com/cfgis/cfgms/pkg/version.GoVersion=${GOVERS}" \
+       -o /usr/local/bin/cfg \
+       ./cmd/cfg
+
+# Stage 1 (runtime): main agent container with full tooling
 FROM golang:1.26.4-bookworm
 
 # System dependencies
@@ -52,8 +73,8 @@ RUN go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1 \
 # fetched at install time and can be tampered with). See
 # docs/runbooks/trivy-rollback.md for rollback procedure.
 RUN set -eu; \
-    TRIVY_VERSION='v0.71.0'; \
-    TRIVY_SHA256='30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814'; \
+    TRIVY_VERSION='v0.72.0'; \
+    TRIVY_SHA256='bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'; \
     ARCHIVE="trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz"; \
     curl -sSfL -o "/tmp/${ARCHIVE}" \
       "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/${ARCHIVE}"; \
@@ -64,12 +85,12 @@ RUN set -eu; \
 
 # Nancy (Go dependency scanner)
 RUN GOPATH=$(go env GOPATH) \
-    && curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64" \
+    && curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64" \
        -o "$GOPATH/bin/nancy" \
     && chmod +x "$GOPATH/bin/nancy"
 
 # truffleHog (optional, best-effort secret scanning — pinned version, not @main)
-RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/v3.95.3/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.3 || true
+RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/v3.95.8/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.8 || true
 
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code
@@ -95,6 +116,10 @@ RUN go mod download \
     && rm go.mod go.sum
 WORKDIR /
 
+# CLI_BINARY=cfg — install cfg CLI built in the builder stage above.
+# The builder stage is discarded; only the binary is copied to this layer.
+COPY --from=cfg-builder /usr/local/bin/cfg /usr/local/bin/cfg
+
 # Copy container scripts and DNS allowlist
 COPY .devcontainer/init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY .devcontainer/scripts/setup-env.sh /usr/local/bin/setup-env.sh
@@ -108,6 +133,40 @@ ENV CFGMS_AGENT_MODE=true
 ENV TRIVY_CACHE_DIR=/home/agent/.cache/trivy
 ENV GOMODCACHE=/home/agent/go/pkg/mod
 ENV GOFLAGS=-modcacherw
+
+# === Serena MCP server (semantic code navigation for PO/dev sessions) ===
+# Everything is fetched at BUILD time (unrestricted network) and baked into the
+# image. At RUNTIME serena resolves entirely from the warmed uv cache with
+# UV_OFFLINE=1, so NO pypi/astral egress is added to the container firewall.
+#
+# uv/uvx — pinned release binary + SHA-256 (same supply-chain pattern as trivy).
+RUN set -eu; \
+    UV_VERSION='0.11.24'; \
+    UV_SHA256='5ce1ad074a78f96c5c8122088bb85a12eb282195bc1453151a48762e4fc31fed'; \
+    curl -sSfL -o /tmp/uv.tgz \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"; \
+    printf '%s  /tmp/uv.tgz\n' "${UV_SHA256}" | sha256sum -c -; \
+    tar -xzf /tmp/uv.tgz -C /tmp; \
+    install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uv  /usr/local/bin/uv; \
+    install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/uvx; \
+    rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu
+
+# gopls — serena's Go language server (pinned), on the shared PATH.
+RUN go install golang.org/x/tools/gopls@v0.22.0 \
+    && install -m 0755 "$(go env GOPATH)/bin/gopls" /usr/local/bin/gopls
+
+# Install serena (pinned v1.5.3) as a self-contained tool for the agent user.
+# This bakes serena + all its Python deps into the image (~/.local/share/uv +
+# the `serena` launcher on ~/.local/bin), so at runtime serena starts directly
+# from the binary with no uvx git re-resolution and no pypi/astral egress.
+# setup-env.sh repoints the project .mcp.json at this binary.
+ENV UV_CACHE_DIR=/home/agent/.cache/uv
+RUN install -d -o agent -g agent /home/agent/.cache/uv /home/agent/.local \
+    && su agent -c 'set -e; export UV_CACHE_DIR=/home/agent/.cache/uv; \
+         uv tool install --from git+https://github.com/oraios/serena@v1.5.3 serena-agent' \
+    && chown -R agent:agent /home/agent/.cache/uv /home/agent/.local
+# Defense-in-depth: keep any stray uv invocation offline behind the firewall.
+ENV UV_OFFLINE=1
 
 # Not a long-running service; health checks are not applicable for on-demand
 # agent containers. HEALTHCHECK NONE suppresses the Trivy DS-0026 advisory.

@@ -1,0 +1,65 @@
+name: github_runner
+version: 0.1.0
+description: >
+  Manages the idempotent steady state of a GitHub Actions self-hosted runner
+  agent on a steward host: agent installed at a pinned version under a work
+  directory, the desired label set tracked, and the runner service kept enabled
+  and running. The module is token-free — it never mints or consumes registration
+  tokens and never registers/deregisters the runner (that is the CI-runner
+  provisioning workflow's publisher-signed register step).
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward # Local runner-agent and service management on the steward host
+
+author: CFGMS Team
+license: AGPL-3.0
+platforms:
+  - linux
+  - windows
+
+requirements:
+  os: [linux, windows]
+  arch: [amd64, arm64]
+  min_memory: "64MB"
+  min_disk: "500MB" # the runner agent archive unpacks to a few hundred MiB
+
+schema: schema.yaml
+interfaces:
+  - Get
+  - Set
+  - Test
+
+security:
+  requires_root: true # service enable/start and writing under work_dir need elevation
+  capabilities: []
+  ports: []
+
+# Behavioral envelope (docs/architecture/modules/behavioral-envelope.md). This is
+# the first module.yaml to populate it: the module's runtime behavior is download
+# + in-process unpack + native service control. Agent unpacking uses the Go
+# standard library (archive/tar, compress/gzip, archive/zip) — there is no
+# shell-out to tar or Expand-Archive. The only declared shell-outs are the native
+# service managers used to converge the already-registered runner service.
+behavioral_envelope:
+  shells_out_to:
+    - "/usr/bin/systemctl" # Linux: query/enable/start the runner systemd unit
+    - "C:\\Windows\\System32\\sc.exe" # Windows: query/config/start the runner SCM service
+  reads_paths:
+    - "<work_dir>" # runner install dir + the module's .cfgms-github-runner.json state marker
+  writes_paths:
+    - "<work_dir>" # unpacked agent binaries + state marker
+  network_egress:
+    - "github.com:443" # agent archive download (agent_url; operators with a mirror update this)
+    - "objects.githubusercontent.com:443"
+  lolbin_usage_justification: |
+    The module invokes systemctl (Linux) and sc.exe (Windows) to converge the
+    runner service's enabled/running state. Both are the platform-native service
+    managers; the argument lists are fully static except the service_name, which
+    is validated against ^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,254}$ before use (no shell
+    string composition, no -Command/-EncodedCommand). The module does NOT invoke
+    the vendor config.cmd/config.sh register tool — registration requires a
+    single-use token the module deliberately never handles, and is performed by
+    the provisioning workflow's publisher-signed register script instead.

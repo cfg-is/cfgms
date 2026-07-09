@@ -91,6 +91,10 @@ type Handler struct {
 	// Issue #1675: per-execution relay registry.
 	// relays maps executionID → *scriptrelay.Relay for CommandRelayResponse dispatch.
 	relays sync.Map
+
+	// eventEmitter streams script output events to the controller via LogStream (Issue #2143).
+	// When nil, script output emission is skipped (e.g. tests without a live gRPC connection).
+	eventEmitter EventEmitter
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -146,6 +150,10 @@ type Config struct {
 	// ControllerCARoots is the certificate pool for verifying operator-signed inline
 	// command certs. When nil, CA chain verification of operator certs is skipped.
 	ControllerCARoots *x509.CertPool
+
+	// EventEmitter, when non-nil, receives script output LogEntry events after each
+	// CommandExecuteScript completes (Issue #2143). Enqueue must never block.
+	EventEmitter EventEmitter
 }
 
 const (
@@ -190,6 +198,7 @@ func New(cfg *Config) (*Handler, error) {
 		signingConfig:      cfg.SigningConfig,
 		requireSignedAdhoc: cfg.RequireSignedAdhoc,
 		controllerCARoots:  cfg.ControllerCARoots,
+		eventEmitter:       cfg.EventEmitter,
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -208,6 +217,16 @@ func New(cfg *Config) (*Handler, error) {
 // Useful for graceful shutdown and deterministic test synchronization.
 func (h *Handler) Wait() {
 	h.wg.Wait()
+}
+
+// UpdateVerifier replaces the handler's signature verifier. Called after a
+// push_signing_cert command updates the steward's trust set so that subsequent
+// commands signed with the newly trusted cert are accepted without reconnecting
+// (Issue #1844).
+func (h *Handler) UpdateVerifier(v signature.Verifier) {
+	h.mu.Lock()
+	h.verifier = v
+	h.mu.Unlock()
 }
 
 // sweepStaleExecutingCommands marks commands that were left in "executing" state
@@ -282,7 +301,12 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	cmd := &signed.Command
 
 	// 1. Signature verification (only when a verifier is configured).
-	if h.verifier != nil {
+	// Read verifier under the lock because UpdateVerifier may replace it concurrently
+	// after a push_signing_cert delivery (Issue #1844).
+	h.mu.RLock()
+	verifier := h.verifier
+	h.mu.RUnlock()
+	if verifier != nil {
 		if signed.Signature == nil {
 			return ErrUnauthenticatedCommand
 		}
@@ -297,7 +321,7 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err != nil {
 			return fmt.Errorf("marshal command for verification: %w", err)
 		}
-		if err := h.verifier.Verify(cmdBytes, signed.Signature); err != nil {
+		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
 	}

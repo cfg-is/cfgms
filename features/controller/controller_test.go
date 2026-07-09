@@ -63,6 +63,10 @@ func TestControllerCreation(t *testing.T) {
 						tt.cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 					}
 				}
+				// Required when ListenAddr binds 0.0.0.0 (the default): set external address.
+				if tt.cfg.Transport != nil && tt.cfg.Transport.ExternalAddress == "" {
+					tt.cfg.Transport.ExternalAddress = "localhost"
+				}
 				// Pre-initialize if cert management is enabled (Story #410)
 				if tt.cfg.Certificate != nil && tt.cfg.Certificate.EnableCertManagement {
 					pkgtestutil.PreInitControllerForTest(t, tt.cfg.CertPath, tt.cfg.Certificate.CAPath)
@@ -189,6 +193,10 @@ func TestModuleRegistration(t *testing.T) {
 		if cfg.Storage.Config != nil {
 			cfg.Storage.Config["repository_path"] = tempDir + "/storage"
 		}
+	}
+	// Required when ListenAddr binds 0.0.0.0 (the default): set external address.
+	if cfg.Transport != nil {
+		cfg.Transport.ExternalAddress = "localhost"
 	}
 	pkgtestutil.PreInitControllerForTest(t, cfg.CertPath, cfg.Certificate.CAPath)
 	ctrl, err := New(cfg, logger)

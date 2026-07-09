@@ -20,8 +20,9 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "cfg",
-	Short: "CFGMS Configuration Management CLI",
+	Use:     "cfg",
+	Version: version.Info(),
+	Short:   "CFGMS Configuration Management CLI",
 	Long: `cfg is the command-line interface for CFGMS (Config Management System).
 It provides tools for comparing, validating, and managing configuration files
 across different environments and versions.`,
@@ -59,6 +60,10 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(installerCmd)
 	rootCmd.AddCommand(moduleCmd)
+	rootCmd.AddCommand(connectionsCmd)
+	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(disconnectCmd)
+	rootCmd.AddCommand(jobCmd)
 }
 
 // versionCmd represents the version command

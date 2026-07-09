@@ -141,3 +141,82 @@ func TestSaveIdentity_OverwritesExistingFile(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "second", got.StewardID)
 }
+
+func TestSaveAndLoadPendingState_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	state := PendingState{PendingID: "pending-abc123"}
+
+	require.NoError(t, savePendingState(dir, state))
+
+	got, err := loadPendingState(dir)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "pending-abc123", got.PendingID)
+}
+
+func TestLoadPendingState_MissingFile_ReturnsNilNoError(t *testing.T) {
+	dir := t.TempDir()
+	got, err := loadPendingState(dir)
+	assert.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestLoadPendingState_CorruptJSON_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, pendingStateFileName)
+	require.NoError(t, os.WriteFile(path, []byte("{not valid json"), 0600))
+
+	got, err := loadPendingState(dir)
+	assert.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "corrupt")
+}
+
+func TestLoadPendingState_MissingPendingID_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, pendingStateFileName)
+	require.NoError(t, os.WriteFile(path, []byte(`{}`), 0600))
+
+	got, err := loadPendingState(dir)
+	assert.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "missing pending_id")
+}
+
+func TestClearPendingState_RemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, savePendingState(dir, PendingState{PendingID: "test-id"}))
+
+	require.NoError(t, clearPendingState(dir))
+
+	got, err := loadPendingState(dir)
+	assert.NoError(t, err)
+	assert.Nil(t, got, "pending state must be absent after clear")
+}
+
+func TestClearPendingState_NoOp_WhenFileAbsent(t *testing.T) {
+	dir := t.TempDir()
+	assert.NoError(t, clearPendingState(dir))
+}
+
+func TestSavePendingState_FileMode_IsOwnerReadWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permission check not applicable on Windows")
+	}
+	dir := t.TempDir()
+	require.NoError(t, savePendingState(dir, PendingState{PendingID: "p1"}))
+
+	info, err := os.Stat(filepath.Join(dir, pendingStateFileName))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+func TestSavePendingState_CreatesDirectoryIfAbsent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "subdir")
+	require.NoError(t, savePendingState(dir, PendingState{PendingID: "p1"}))
+
+	got, err := loadPendingState(dir)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "p1", got.PendingID)
+}

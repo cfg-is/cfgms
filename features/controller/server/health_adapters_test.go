@@ -186,9 +186,21 @@ func (s *testStewardStore) ListStewardsByStatus(_ context.Context, _ business.St
 func (s *testStewardStore) UpdateStewardStatus(_ context.Context, _ string, _ business.StewardStatus) error {
 	return nil
 }
-func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error { return nil }
+func (s *testStewardStore) UpdateStewardTenant(_ context.Context, _, _ string) error { return nil }
+func (s *testStewardStore) DeregisterSteward(_ context.Context, _ string) error      { return nil }
 func (s *testStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
 	return nil, nil
+}
+func (s *testStewardStore) GetStewardByDeviceID(_ context.Context, deviceID string) (*business.StewardRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.stewards {
+		if r.DeviceID == deviceID {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, business.ErrStewardNotFound
 }
 func (s *testStewardStore) HealthCheck(_ context.Context) error { return nil }
 func (s *testStewardStore) Initialize(_ context.Context) error  { return nil }

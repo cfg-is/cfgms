@@ -18,8 +18,12 @@ const maxLogValueLength = 1024
 // Built once at package init using a trie-based replacer for single-pass performance.
 //
 // Coverage: C0 (U+0000-U+001F), DEL (U+007F), C1 (U+0080-U+009F) — 65 characters total.
-// CodeQL recognizes strings.NewReplacer as a sanitizer when \n and \r are explicitly listed,
-// which resolves go/log-injection (CWE-117) taint tracking through the logging infrastructure.
+//
+// Note: CodeQL's go/log-injection query does NOT recognize strings.Replacer.Replace
+// (nor Models-as-Data barrier extensions) as a sanitizer — it only recognizes
+// strings.ReplaceAll with a literal "\n"/"\r". SanitizeLogValue therefore adds
+// explicit strings.ReplaceAll calls after this replacer so the sanitization is
+// legible to CodeQL. See SanitizeLogValue for details.
 var logSanitizer = strings.NewReplacer(
 	// C0 control characters (U+0000 - U+001F)
 	"\x00", "_", // NUL
@@ -95,26 +99,34 @@ var logSanitizer = strings.NewReplacer(
 // It replaces all Unicode control characters (C0: U+0000-U+001F, DEL: U+007F,
 // C1: U+0080-U+009F) with underscores and truncates values exceeding 1024 characters.
 //
-// Uses strings.NewReplacer for single-pass trie-based replacement. CodeQL recognizes
-// this pattern as a log injection sanitizer (CWE-117), resolving taint tracking alerts
-// at both call sites and within the logging infrastructure.
+// The logSanitizer (strings.NewReplacer) already maps LF/CR to "_", so the explicit
+// strings.ReplaceAll calls below are functionally redundant. They exist solely so that
+// CodeQL's built-in go/log-injection sanitizer (ReplaceSanitizer = StringOps::ReplaceAll
+// with getReplacedString() = ["\r","\n"]) recognizes the returned value as sanitized.
+// That query hardcodes its sanitizers and does NOT consult strings.Replacer.Replace or
+// Models-as-Data barrier extensions, so without these explicit calls every wrapped call
+// site raises a CWE-117 false positive. Every return path flows through them so the
+// function's result is uniformly sanitized in CodeQL's model.
 //
 // Usage:
 //
 //	logger.Info("request received", "steward_id", logging.SanitizeLogValue(stewardID))
 func SanitizeLogValue(s string) string {
-	if s == "" {
-		return s
-	}
-
-	// Truncate long values to prevent log flooding
+	// Truncate long values to prevent log flooding.
 	truncated := false
 	if len(s) > maxLogValueLength {
 		s = s[:maxLogValueLength]
 		truncated = true
 	}
 
+	// Comprehensive single-pass replacement of all C0/C1/DEL control characters.
 	s = logSanitizer.Replace(s)
+
+	// Explicit CR/LF stripping in the exact form CodeQL's log-injection
+	// ReplaceSanitizer recognizes (see doc comment above). Redundant with
+	// logSanitizer, kept last so the returned value traces through them.
+	s = strings.ReplaceAll(s, "\n", "_")
+	s = strings.ReplaceAll(s, "\r", "_")
 
 	if truncated {
 		return s + "[truncated]"

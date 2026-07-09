@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -121,6 +122,14 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 
 	var stewardsNotified int
 	if publisher != nil && controllerSvc != nil {
+		// push_signing_cert must be signed with the OLD cert (the cert stewards already
+		// trust), not the new cert. After rotation the DynamicSigner resolves to the new
+		// cert; a steward that hasn't received the refresh yet has no way to verify a
+		// new-cert-signed command, creating a bootstrapping deadlock (Issue #1844).
+		// Sign the fan-out with the rotating cert so the steward's existing verifier
+		// can authenticate the command before updating its trust set.
+		oldSigner := s.buildRotatingSigner(oldSerial)
+
 		stewards := controllerSvc.GetAllStewards()
 		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
 		params := map[string]interface{}{
@@ -129,7 +138,13 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 			"overlap_expires_at": overlapExpiresAt,
 		}
 		for _, steward := range stewards {
-			if _, pubErr := publisher.PublishCommand(ctx, steward.ID, types.CommandPushSigningCert, params); pubErr != nil {
+			var pubErr error
+			if oldSigner != nil {
+				_, pubErr = publisher.PublishCommandWithSigner(ctx, steward.ID, types.CommandPushSigningCert, params, oldSigner)
+			} else {
+				_, pubErr = publisher.PublishCommand(ctx, steward.ID, types.CommandPushSigningCert, params)
+			}
+			if pubErr != nil {
 				s.logger.Error("failed to push signing cert to steward",
 					"steward_id", logging.SanitizeLogValue(steward.ID),
 					"error", pubErr)
@@ -182,10 +197,23 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 	}
 
 	// Compute overlap_expires_at from the active cursor if rotation is in progress.
+	// Also capture the rotating serial: push_signing_cert must be signed with the
+	// rotating (old) cert so stewards that were offline during the rotation fan-out
+	// can verify the command before their trust set is updated (Issue #1844).
 	var overlapExpiresAt string
+	var rotatingSigner signature.Signer
 	if rotCursor, cursorErr := s.certManager.GetSigningCursorState(); cursorErr == nil && rotCursor != nil && rotCursor.RotatingSerial != "" {
 		deadline := rotCursor.RotatedAt.Add(time.Duration(rotCursor.OverlapWindowDays) * 24 * time.Hour)
 		overlapExpiresAt = deadline.UTC().Format(time.RFC3339)
+		// Always sign push_signing_cert with the rotating (old) cert, regardless of
+		// whether the overlap window has expired. A steward that was offline during
+		// the rotation fan-out only trusts the rotating cert; signing with the new
+		// cert would make verification fail before the trust set is updated —
+		// the bootstrapping deadlock from Issue #1844. The overlap expiry only controls
+		// how the steward filters its own trust set after receiving this push.
+		// If the rotating cert has been purged, buildRotatingSigner returns nil and
+		// we fall back to the DynamicSigner (requiring re-enrollment via Issue #1845).
+		rotatingSigner = s.buildRotatingSigner(rotCursor.RotatingSerial)
 	}
 
 	params := map[string]interface{}{
@@ -194,7 +222,13 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		"overlap_expires_at": overlapExpiresAt,
 	}
 
-	if _, pubErr := publisher.PublishCommand(ctx, stewardID, types.CommandPushSigningCert, params); pubErr != nil {
+	var pubErr error
+	if rotatingSigner != nil {
+		_, pubErr = publisher.PublishCommandWithSigner(ctx, stewardID, types.CommandPushSigningCert, params, rotatingSigner)
+	} else {
+		_, pubErr = publisher.PublishCommand(ctx, stewardID, types.CommandPushSigningCert, params)
+	}
+	if pubErr != nil {
 		return fmt.Errorf("signing rotation service: publish push_signing_cert to steward %s: %w", stewardID, pubErr)
 	}
 
@@ -203,6 +237,34 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		"serial", logging.SanitizeLogValue(signingCert.SerialNumber))
 
 	return nil
+}
+
+// buildRotatingSigner exports the cert identified by serial and returns a Signer
+// backed by it, or nil if the export or signer construction fails. Used to sign
+// push_signing_cert commands with the rotating (old) cert so stewards that haven't
+// yet received the new cert can still verify the command (Issue #1844).
+func (s *SigningRotationService) buildRotatingSigner(serial string) signature.Signer {
+	if serial == "" {
+		return nil
+	}
+	certPEM, keyPEM, err := s.certManager.ExportCertificate(serial, true)
+	if err != nil || len(keyPEM) == 0 {
+		s.logger.Warn("signing rotation: could not export rotating cert for push_signing_cert signing; falling back to dynamic signer",
+			"serial", logging.SanitizeLogValue(serial),
+			"error", err)
+		return nil
+	}
+	signer, err := signature.NewSigner(&signature.SignerConfig{
+		CertificatePEM: certPEM,
+		PrivateKeyPEM:  keyPEM,
+	})
+	if err != nil {
+		s.logger.Warn("signing rotation: could not create rotating cert signer; falling back to dynamic signer",
+			"serial", logging.SanitizeLogValue(serial),
+			"error", err)
+		return nil
+	}
+	return signer
 }
 
 // OnConnect implements the StewardOnConnectHook interface. Called by the gRPC

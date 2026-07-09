@@ -52,6 +52,9 @@ func TestConvergenceLoopStopsOnContextCancel(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	// Disable DNA collection: this test exercises convergence loop lifecycle only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -74,6 +77,9 @@ func TestConvergenceLoopStopsOnShutdown(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	// Disable DNA collection: this test exercises convergence loop lifecycle only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx := context.Background()
 
@@ -107,6 +113,9 @@ func TestStandaloneRunsInitialConvergenceOnStart(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	// Disable DNA collection: this test exercises initial convergence success only.
+	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
+	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

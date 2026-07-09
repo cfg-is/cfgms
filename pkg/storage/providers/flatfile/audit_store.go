@@ -136,25 +136,26 @@ func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 	return nil
 }
 
-// GetAuditEntry retrieves an audit entry by ID, scanning daily JSONL files newest-first.
+// GetAuditEntry retrieves an audit entry by ID, walking the full directory tree.
+// Hierarchical tenant IDs (e.g. "fleet-root/fleet-child-a") store their audit files
+// under nested subdirectories, so a single-level ReadDir(root) would miss them.
 func (s *FlatFileAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
-	tenantDirs, err := os.ReadDir(s.root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, business.ErrAuditNotFound
+	var found *business.AuditEntry
+	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || d.Name() != "audit" {
+			return nil
 		}
-		return nil, fmt.Errorf("failed to read audit root: %w", err)
+		entry, scanErr := s.scanDirForID(path, id)
+		if scanErr == nil {
+			found = entry
+		}
+		return nil
+	})
+	if found != nil {
+		return found, nil
 	}
-
-	for _, tenantDir := range tenantDirs {
-		if !tenantDir.IsDir() {
-			continue
-		}
-		auditDir := filepath.Join(s.root, tenantDir.Name(), "audit")
-		entry, err := s.scanDirForID(auditDir, id)
-		if err == nil {
-			return entry, nil
-		}
+	if walkErr != nil && !os.IsNotExist(walkErr) {
+		return nil, fmt.Errorf("failed to read audit root: %w", walkErr)
 	}
 	return nil, business.ErrAuditNotFound
 }
@@ -246,22 +247,41 @@ func (s *FlatFileAuditStore) ListAuditEntries(ctx context.Context, filter *busin
 }
 
 // tenantIDsForFilter returns the list of tenant IDs to scan, based on the filter.
+// When no specific tenant is requested, it walks the root directory tree to find
+// every directory that contains an "audit" subdirectory. This supports hierarchical
+// tenant IDs (e.g. "fleet-root/fleet-child-a") whose audit files are stored under
+// nested subdirectories rather than directly under root.
 func (s *FlatFileAuditStore) tenantIDsForFilter(filter *business.AuditFilter) ([]string, error) {
 	if filter != nil && filter.TenantID != "" {
 		return []string{filter.TenantID}, nil
 	}
-	dirs, err := os.ReadDir(s.root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to list tenants: %w", err)
-	}
 	var ids []string
-	for _, d := range dirs {
-		if d.IsDir() {
-			ids = append(ids, d.Name())
+	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
 		}
+		// Check if this directory has an "audit" subdirectory with JSONL files.
+		auditSub := filepath.Join(path, "audit")
+		entries, readErr := os.ReadDir(auditSub)
+		if readErr != nil {
+			return nil // no audit subdir — keep walking
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+				// This directory is a tenant leaf: compute its ID relative to root.
+				rel, relErr := filepath.Rel(s.root, path)
+				if relErr != nil {
+					return nil
+				}
+				// Convert OS path separator to '/' for tenant ID consistency.
+				ids = append(ids, filepath.ToSlash(rel))
+				return nil
+			}
+		}
+		return nil
+	})
+	if walkErr != nil && !os.IsNotExist(walkErr) {
+		return nil, fmt.Errorf("failed to walk tenant dirs: %w", walkErr)
 	}
 	return ids, nil
 }

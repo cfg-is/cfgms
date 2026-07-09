@@ -70,6 +70,10 @@ func (p *SQLiteProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	}
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *SQLiteProvider) ClusterCapable() bool { return false }
+
 // Available reports whether the SQLite library is usable and, when basePath is set,
 // whether that directory exists and is writable.
 //
@@ -326,6 +330,8 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		Trigger:             &SQLiteTriggerStore{db: db},
 		Push:                &SQLitePushStore{db: db},
 		PendingRegistration: &SQLitePendingRegistrationStore{db: db},
+		PendingRefresh:      &SQLitePendingRefreshStore{db: db},
+		RefreshPolicy:       &SQLiteRefreshPolicyStore{db: db},
 	}, nil
 }
 

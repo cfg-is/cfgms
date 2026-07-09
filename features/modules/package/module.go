@@ -24,11 +24,16 @@ func New() modules.Module {
 
 // errPackageModule is returned by New when no real package manager is available.
 // All operations return the initialization error so callers see a clear failure.
+// It embeds DefaultLoggingSupport so the factory can inject loggers regardless of
+// whether a package manager was found — needed for logging validation on Windows CI
+// runners that lack winget/choco.
 type errPackageModule struct {
+	modules.DefaultLoggingSupport
 	err error
 }
 
 var _ modules.Module = (*errPackageModule)(nil)
+var _ modules.LoggingInjectable = (*errPackageModule)(nil)
 
 func (m *errPackageModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
 	return nil, m.err

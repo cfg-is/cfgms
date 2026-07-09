@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-05-25
+**Last Updated**: 2026-07-08
 
 ## Versioning Strategy
 
@@ -208,8 +208,8 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: self-install subcommand with interactive mode for GUI launch (Issue #472 - 8-13 points) - `install`/`uninstall`/`status` subcommands, interactive token prompt on double-click, native Windows Service/systemd/launchd registration
 
 **E2E validation:**
-- [ ] End-to-end deployment validation on real VMs (Issue #390 - 13-21 points) - Deploy controller + stewards on actual Windows/Linux VMs, test all modules, fix blockers
-- [ ] Beta deployment guide (Issue #391 - 3-5 points) - Production-like deployment documentation beyond dev-focused QUICK_START.md
+- [ ] End-to-end deployment validation on real VMs - Deferred to v0.9.13; the original tracking issue (#390) was repurposed into the Phase 2 Hyper-V dev-infrastructure epic and closed 2026-06-25
+- [x] Beta deployment guide (Issue #391 - 3-5 points) ✅ - Production-like deployment documentation beyond dev-focused QUICK_START.md
 
 **Post-validation (discovered gaps, do not block #390):**
 - [x] Steward: unify operating model — cfg-driven convergence with optional controller channel (Issue #411) - Single code path, 30-min default converge_interval, controller as additive overlay
@@ -229,12 +229,12 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: implement Windows ACL support for file/directory modules (Issue #553) - Created, future work
 
 **Post-E2E infrastructure:**
-- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - Linux + Windows runners, 3x CI speed improvement, dog-food validation
-- [ ] GitHub Actions dispatch — trigger agent containers from label changes (Issue #596) - Depends on #565, replaces manual `/dispatch` with Actions workflows triggered by `agent:ready`/`pipeline:fix` labels on self-hosted runners
+- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - In progress: self-hosted Windows runner live for native Windows builds on non-fork PRs; Linux runners and broader CI migration pending
+- Issue #596 (GitHub Actions dispatch from label changes) - Closed not-planned 2026-06-19: the label-based queue it depended on was decommissioned (board Status is the only queue signal; dispatch is owned by the PO cron cycle)
 
-**Deferred to v0.10.0:**
-- [ ] Controller: implement multi-node orchestration (Issue #415) - Rolling updates, cluster quorum, dependency awareness
-- [ ] Controller: per-tenant config source routing Phases 2-3 (Issue #428) - External git integration, observability
+**Deferred to v0.10.0 (both since delivered):**
+- [x] Controller: implement multi-node orchestration (Issue #415) ✅ - Closed 2026-07-02
+- [x] Controller: per-tenant config source routing Phases 2-3 (Issue #428) ✅ - Closed 2026-05-20
 
 #### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
 
@@ -270,32 +270,37 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Epic #1550 — Post-audit follow-ups
 - [x] Epic #1664 — Steward registration trust model (perennial tokens, IP-trust)
 - [x] Epic #1714 — Fleet resilience (restart-recovery, cert-reuse, drift)
-- [ ] Epic #1661 — Steward provisioning installer + trust bootstrap (in flight)
-- [ ] Epic #1754 — Decouple controller from steward-internal packages (in flight)
+- [x] Epic #1661 — Steward provisioning installer + trust bootstrap
+- [x] Epic #1754 — Decouple controller from steward-internal packages
 
-#### v0.9.6 — Consolidation + AGPL Governance Release
+#### v0.9.6 — Consolidation + AGPL Governance Release ✅ COMPLETED
 
-- [ ] Epic #1716 — Migrate licensing model to AGPL-3.0 single license (in flight)
+- [x] Epic #1716 — Migrate licensing model to AGPL-3.0 single license
 
-#### v0.9.7 — Tier 1 Hyper-V controller bringup
+#### v0.9.7 — Tier 1 Hyper-V controller bringup ✅ COMPLETED
 
-- [ ] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
+- [x] Epic #1787 — persistent controller on Hyper-V cluster VM, manual install, durable git+SOPS storage, mTLS
 
-#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity
+#### v0.9.8 — `cfg` CLI on agent containers + Tier 1 connectivity ✅ COMPLETED
 
-- [ ] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
+- [x] Epic #1788 — `cfg` CLI baked into agent image, per-agent mTLS bundle, routable reach to Tier 1
 
-#### v0.9.9 — Hyper-V management module
+#### v0.9.9 — Hyper-V management module ✅ COMPLETED
 
-- [ ] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
+- [x] Epic #1789 — `features/modules/hyperv/`: VM lifecycle, snapshot/restore, vSwitch (PowerShell-over-WinRM)
 
-#### v0.9.10 — Stewards on Hyper-V hosts
+#### v0.9.10 — Stewards on Hyper-V hosts ✅ COMPLETED
 
-- [ ] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
+- [x] Epic #1790 — registered, healthy stewards on every Hyper-V cluster node; service account, WinRM, module loading
 
-#### v0.9.11 — Phase 2 dev-agent conventions
+#### v0.9.11 — Phase 2 dev-agent conventions — CLOSED (not planned)
 
-- [ ] Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1
+- Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1 — closed not-planned 2026-06-25 alongside the Phase 2 epic closeout
+
+#### Post-Phase-2 epics on develop (untagged, in flight)
+
+- [ ] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership
+- [ ] Epic #2359 — Operator-first CLI targeting: hostname & attribute selectors across `cfg steward` verbs
 
 #### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
 
@@ -307,12 +312,12 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 
 #### v0.10.0 - Web Interface Foundation
 
-**Deferred from v0.9.x** (functional but not on beta critical path):
-- [ ] Workflow management REST API (engine works internally, API needed for Web UI)
-- [ ] Config broadcast push API (individual `PUT /stewards/{id}/config` works)
-- [ ] Session/connection monitoring API (steward list + health endpoints cover beta)
+**Deferred from v0.9.x** — now tracked as Epic #2343 (Controller REST APIs; 5 of 6 stories complete):
+- [ ] Workflow management REST API (endpoint coverage + reference docs delivered via #2369/#2374; final story #2373 — route-registration fix — queued Ready)
+- [x] Config broadcast push API (Issue #2366 - selector targeting + push-status read)
+- [x] Session/connection monitoring API (Issues #2367, #2368 - transport + admin-session read APIs)
 
-**Web Interface**:
+**Web Interface** — tracked as Epic #2344 (framework, session-token auth, controller-served fleet overview; story decomposition gated on the inline web-session ADR + founder design checkpoint):
 - [ ] Web UI framework and authentication
 - [ ] Dashboard with fleet overview
 - [ ] Configuration management interface
@@ -431,12 +436,36 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 
 **Goal**: Realize the full potential of DNA-based system identification and expand into advanced resource management and specialized capabilities.
 
-#### Digital Twin Implementation
+#### Digital Twin & Digital Employee Experience (DEX) — Tiered Rollout
 
-- [ ] Implement comprehensive Digital Twin model
-- [ ] Add support for real-time asset inventory
-- [ ] Develop predictive analytics capabilities
-- [ ] Implement root cause analysis based on Digital Twin
+The twin and DEX share the same foundations and ship as **layers threaded across the timeline**, not as monolithic milestones. The rule: bake data-model commitments in early (cheap now, brutal to retrofit); build the reason layer late (needs the foundation mature). Neither is a prerequisite for the other — but DEX is the twin's first paying consumer, the concrete use case that pulls the foundation into existence. The foundation itself lives in the Captured Backlog module/DNA chain above; this section is the end-state those foundations build toward. **Guard:** none of this jumps the Hyper-V beta bringup queue (v0.9.6–v0.9.13); Tier 1 is schema discipline inside already-scheduled DNA work, so it carries no schedule cost.
+
+**Tier 1 — data-model commitments** (land with the baseline-DNA epic; no separate milestone). Detailed on that Captured Backlog entry. `twin` `dex` `cms`
+- [ ] Per-fragment/entity provenance & freshness `{source, observed_at, authority, confidence}`
+- [ ] Stable **typed entity id** per managed object (identity primitive for edges + history)
+- [ ] Controller **retains versioned fragment history** — per-entity state queryable over time
+- [ ] DEX signals attach to the typed device/app entity as an extensible, timestamped, provenanced attribute set
+
+**Tier 2 — first visible surfaces** (Web-UI window, ~v0.10.x). `twin` `dex` `web`
+- [ ] Temporal query surface — "what was true at time T", diff two points, correlate a change with its effect
+- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Gated on a to-draft storage-shape ADR** (property graph + temporal store ≠ git+SOPS KV) — drafted inline (per the ADR practice), companion to ADR-017 Amendment 1 which guarantees only the identity + history substrate this builds on
+- [ ] Unified entity query API — "every entity of type X related to Z" (the model surface the Web UI renders)
+- [ ] DEX collection v0 + single-device **experience timeline** — per-process/service streams (asset-page views) + "pull up Bob's machine"
+
+**Tier 3 — reason layer & rolling DEX track** (v0.11+; each item dependency-gated).
+
+> **DEX collection — settled architecture (research 2026-07-07).** Collection is **pure usermode, ETW-centric — no kernel-mode driver.** Proof: Microsoft's own Intune Endpoint Analytics derives boot/login/GP/sign-in-responsiveness/app-reliability (and top-processes-at-boot with per-process CPU) driver-free from in-box ETW; per-process CPU/mem/disk is the usermode WinRT `ProcessDiagnosticInfo` API (or classic Win32 `GetProcess*`). The DEX market leader (Nexthink) ships a kernel driver, but its only advantage is anti-tamper — a security property irrelevant to DEX fidelity — and the post-CrowdStrike (Jul 2024) platform direction is decisively *out* of the kernel (Windows Endpoint Security Platform), so a new DEX driver would run against Microsoft's own trajectory. **Language: Go across all three OSes.** Windows + Linux are pure-Go (ETW via `x/sys/windows`+`syscall.NewCallback`, proven by Velociraptor; Linux `/proc`+`/sys`+PSI file reads); **macOS is the one cgo case** (IOKit/libproc) → **implies a macOS CI build runner not yet in #565 (Linux+Windows only).** Design note: run the steward's **own** ETW sessions against `Microsoft-Windows-Diagnostics-Performance` et al. — do **not** depend on the DiagTrack service (breaks if an enterprise sets telemetry to Security/Off). No Rust/Zig required for any signal in scope.
+
+- [ ] **DEX de-risking spike (do FIRST, before committing the collection architecture)** — a Go PoC ETW consumer on Windows that (a) captures the not-yet-independently-verified signals from in-box providers (app-hang/UI-responsiveness via Win32k, SMART via WMI `MSStorageDriver`, thermal via `MSAcpi`, disk queue depth, hard-fault paging, network/DNS/Wi-Fi) and (b) measures **sustained CPU under the chosen provider selection against the sub-1% budget** (the one Go-specific unknown: ETW callback cost). Converts "high-plausibility" → "verified for CFGMS". `dex`
+- [ ] DEX **collection track** — *rolling, not a release*; one probe at a time (usermode ETW / WMI / PDH / WinRT, per the architecture note above): app-hang/ETW stalls, boot/login/profile-load duration, disk I/O wait & queue depth, paging pressure, SMART/storage health, thermal throttling, network latency/jitter/DNS. `dex`
+- [ ] Experience scoring & normalization model. `dex`
+- [ ] Fleet **baselines & percentiles** — "devices where QuickBooks is in the 30th percentile" (needs Tier-1 temporal). `dex` `twin`
+- [ ] **Root-cause / correlation** — "Bob is slow *because* X", including causes that never surface in Task Manager (needs Tier-2 graph). `dex` `twin`
+- [ ] **Predictive analytics & refresh recommendation** — degradation forecast, replace-by-experience-not-age (needs temporal + scoring). `twin` `dex`
+- [ ] **Experience-driven remediation** — degraded experience triggers a workflow-engine fix (kill runaway process, push config). The config-management moat pure-observability DEX vendors can't match. `dex` `workflow` `cms`
+- [ ] Twin **simulation / what-if** — "if I push this config / if this host dies, what breaks?" against the model, not production (needs graph + temporal + desired/actual). `twin` `cms`
+- [ ] **Discovery of the undeclared** — reflect unmanaged/rogue reality (network scan, cloud inventory); OSquery is the seed, overlaps Outpost (v0.11.0). `twin`
+- [ ] Cross-fleet anonymized baselines — requires an explicit tenant consent/aggregation model (parked decision; must not block collection). `dex`
 
 #### LLM Integration Evaluation
 
@@ -447,9 +476,44 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 #### Further Expansion & Specialization
 
 - [ ] Implement advanced resource management capabilities
-- [ ] Develop Digital Employee Experience (DEX) monitoring
 - [ ] Implement Cluster-Aware Patching
 - [ ] Explore further specialized integrations and features
+
+*(DEX monitoring moved to the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) above — it is a layered track, not a single feature.)*
+
+## Capability Tags
+
+Feature work is tagged with the **product capability that consumes it** — the end-in-mind, not the topic. Tags are **multi-valued**: a story that serves several capabilities carries all of them, and a multi-tag story is a signal that it is *foundational* — its schema/interface must satisfy every listed consumer at once. This is how the twin's and DEX's Tier-1 data-model commitments get built in early instead of retrofitted.
+
+Controlled vocabulary (grows deliberately, not ad hoc):
+
+- `cms` — core config management: desired-state convergence, drift, modules
+- `twin` — digital twin: entity model, topology graph, temporal state, simulation
+- `dex` — digital employee experience: endpoint experience signals, baselines, root-cause
+- `workflow` — automation / workflow engine
+- `directory` — identity & directory services (M365, AD/Entra)
+- `web` — web UI and visualization surfaces
+- `msp` — MSP tool integrations (PSA / RMM / documentation)
+
+Applied going forward (backlog + future work); pure hygiene/infra (CI, refactors, security sweeps) carries no capability tag. Roadmap items carry these tags inline; the parallel **`cap:*` GitHub label namespace** (orthogonal to Projects-V2 work-queue state, purely descriptive, multi-valued) is live end-to-end — created by `/agent-setup`, applied at epic/story creation via `pipeline-helper.sh create-epic|create-story --cap`, inherited epic→story at decomposition (`.claude/agents/po.md` §7, `ba.md`), and carried issue→PR by `lock-sweep`. A capability tag names the *consumer* of the work, never queue state. It coexists with the community **component** labels (`workflow`, `dna`, `security`, `api`, `modules` in `docs/development/issue-triage.md`), which are a distinct *topic* axis — cap = who consumes it, component = what it's about.
+
+## Captured Backlog (unscheduled)
+
+Founder-captured todos awaiting placement in a versioned milestone. Each carries enough context to decompose later; suggested homes are notes, not commitments.
+
+> **Design status:** the module and DNA items below are now designed in **[ADR-016](../architecture/decisions/016-steward-module-foundation.md)** (steward module foundation) and **[ADR-017](../architecture/decisions/017-dna-composition-and-sync.md)** (DNA composition & sync), both *Proposed*. Those ADRs are authoritative for the specifics; the entries here are the roadmap placeholders. Sequencing settled during design: **module foundation → OSquery → baseline DNA → asset page**, with OSquery deliberately *before* baseline DNA so DNA is built on osquery rather than reinventing it.
+>
+> **Twin/DEX foundation:** the module → OSquery → baseline-DNA → asset-page chain below **is** the Tier-1/Tier-2 foundation of the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) in Future Features. Entries are tagged with their downstream consumer(s) and tier so the foundation work is built for its end-state, not as isolated plumbing.
+
+- [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* these live views are **telemetry, not DNA** (ADR-017 excludes ephemeral state from the hashed DNA); live service read/control also overlaps the `service` module's desired-state enforcement — clarify the boundary. *Suggested home:* Web UI backend APIs (Epic #2343) + Web UI Foundation (Epic #2344), plus a steward monitoring/streaming capability epic. *Latest of the group — depends on Web UI Foundation.* · **Tags:** `dex`, `twin`, `web` · **Tier 2** — this is DEX collection v0 (the endpoint experience-signal seed).
+
+- [ ] **Full OSquery support** — Integrate osquery as the **unmanaged-host-fact** data source for DNA plus ad-hoc fleet queries. Per ADR-017, osquery feeds DNA only through a **curated stable-fact allowlist** (`host:*` fragments, observe-only) — never its dynamic tables — and the specific query list is gated on the stdlib set being confirmed (ADR-016). Decisions remaining: bundled vs. host-detected binary, scheduling, security envelope. *Suggested home:* its own OSquery-integration epic, sequenced **before** baseline DNA. · **Tags:** `twin`, `cms` · **Tier 1–2** — host-fact source feeds both baseline DNA and later twin *discovery of the undeclared*.
+
+- [ ] **Define & build the standard-library steward modules** — **Decided in ADR-016:** a closed **10-module** stdlib set — `file`, `service`, `package`, `script`, `firewall`, `patch`, **`user`, `cert_trust`, `time`, `hostname`**. Six exist (patch needs a `module.yaml` + stub resolution); **four are net-new cross-platform builds** (`user`, `cert_trust`, `time`, `hostname`). Also adds the `Get`→canonical-DNA-fragment contract, atomic object-level ownership declaration, and a stdlib completeness gate. *This is a build epic, not an audit* — likely splits into (a) reorg + contract + gate + `patch`, and (b) the four new modules. *Suggested home:* near-term module foundation. · **Tags:** `cms` · **Tier 1** — module `Get`→canonical-DNA-fragment contract is the substrate all twin/DEX state hangs on.
+
+- [ ] **Split non-stdlib modules into an on-demand directory** — **Decided in ADR-016:** `features/modules/stdlib/` (installer payload) ↔ `features/modules/extended/` (CFGMS-authored, non-stdlib, pulled on demand per ADR-006), with a build-enforced installer-payload boundary. Registry/scheduled_task/network/mount/sysctl/env are the excluded-from-stdlib candidates that live under `extended/` when built. *Suggested home:* same module-foundation epic as the stdlib work above. · **Tags:** `cms` · **Tier 1**.
+
+- [ ] **Controller baseline DNA per steward** — **Designed in ADR-017:** DNA becomes a fragment set (managed fragments from module `Get`, observe-only host facts from osquery), with object-canonical ids, a module-preempts-osquery authority resolver, a two-level per-fragment + aggregate-root hash, and delta-based partial-sync validation. *Suggested home:* DNA-composition epic, **downstream of both** the module foundation and OSquery. · **Tags:** `twin`, `dex`, `cms` · **Tier 1 — carries the twin/DEX data-model commitments.** This epic must land the four bake-in-now decisions or they become expensive retrofits: (1) per-fragment `{source, observed_at, authority, confidence}` provenance; (2) stable **typed entity id** per managed object; (3) controller **retains versioned fragment history** (per-entity state queryable over time — restores the DNA "memory" that current-state-only sync would discard); (4) DEX signals attach to the typed device/app entity as an extensible, timestamped, provenanced attribute set. See the [tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) for how these unlock Tier 2/3.
 
 ## Architectural Concepts
 
@@ -499,8 +563,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.0
-- **Last Updated**: 2026-05-25
+- **Document Version**: 4.2
+- **Last Updated**: 2026-07-08
 
 ### Related Documentation
 

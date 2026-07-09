@@ -8,7 +8,15 @@ import (
 )
 
 // cfgmsPublisherPublicKey is the base64-encoded Ed25519 public key for the CFGMS
-// publisher. This is a placeholder (32 zero bytes) for development builds.
+// publisher. This default is a placeholder (32 zero bytes) for development builds
+// that have not been configured with a real publisher key.
+//
+// SECURITY: the all-zero placeholder is a small-order Ed25519 point, NOT a safe
+// "no-op" key. ed25519.Verify does not fail closed against it — it accepts forged
+// signatures. VerifyBundleSignature therefore explicitly rejects small-order and
+// placeholder keys (see isUnsafePublisherKey / ErrUntrustedPublisherKey in verify.go),
+// so a build that ships this placeholder refuses ALL bundles rather than accepting
+// attacker-forged ones. Do not treat the placeholder as a trusted anchor anywhere.
 //
 // The real key is injected by the release pipeline at build time:
 //

@@ -454,3 +454,8 @@ func TestStore_EncryptedAtRest(t *testing.T) {
 func readBlobFile(secretsDir, blobFile string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(secretsDir, "blobs", blobFile)) //#nosec G304
 }
+
+func TestStewardProvider_ClusterCapable_False(t *testing.T) {
+	p := &StewardProvider{}
+	assert.False(t, p.ClusterCapable(), "StewardProvider must not be cluster-capable (endpoint-local storage, inaccessible from other controller nodes)")
+}

@@ -167,6 +167,7 @@ type PermissionCheckResult struct {
 type APIKeyCreateRequest struct {
 	Name        string     `json:"name"`
 	Permissions []string   `json:"permissions"`
+	RoleID      string     `json:"role_id,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id,omitempty"`
 }
@@ -244,6 +245,18 @@ type ConfigDeploymentsResponse struct {
 	Summary     DeploymentSummary         `json:"summary"`
 	Stewards    []StewardDeploymentStatus `json:"stewards"`
 	PushHistory []PushSummary             `json:"push_history"`
+}
+
+// PushStatusResponse is returned by GET /api/v1/config/push/{id}.
+type PushStatusResponse struct {
+	PushID      string    `json:"push_id"`
+	ConfigID    string    `json:"config_id"`
+	TenantID    string    `json:"tenant_id"`
+	Version     string    `json:"version"`
+	Status      string    `json:"status"`
+	InitiatedBy string    `json:"initiated_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Helper functions to convert protobuf messages to API types

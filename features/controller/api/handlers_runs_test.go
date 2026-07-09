@@ -81,10 +81,14 @@ func newTestRunManager(t *testing.T) *controllerrun.Manager {
 }
 
 // newTestRunQueue creates a real ExecutionQueue backed by an in-memory store.
-func newTestRunQueue() *scriptmodule.ExecutionQueue {
+// Registers cleanup via t so the queue's EphemeralKeyManager goroutine is stopped.
+func newTestRunQueue(t *testing.T) *scriptmodule.ExecutionQueue {
+	t.Helper()
 	monitor := scriptmodule.NewExecutionMonitor()
 	keyManager := scriptmodule.NewEphemeralKeyManager()
-	return scriptmodule.NewExecutionQueue(monitor, keyManager, 0, "", nil, nil, 0)
+	queue := scriptmodule.NewExecutionQueue(monitor, keyManager, 0, "", nil, nil, 0)
+	t.Cleanup(queue.Stop)
+	return queue
 }
 
 // setupRunServer creates a test server wired with a run manager, execution queue,
@@ -94,7 +98,7 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	server := setupTestServer(t)
 
 	manager := newTestRunManager(t)
-	queue := newTestRunQueue()
+	queue := newTestRunQueue(t)
 
 	server.SetRunManager(manager, queue)
 	server.fleetQuery = &staticRunFleetQuery{results: stewards}

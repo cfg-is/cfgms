@@ -39,6 +39,11 @@ func TestOpenBaoProvider_GetCapabilities(t *testing.T) {
 	assert.Greater(t, caps.MaxKeyLength, 0)
 }
 
+func TestOpenBaoProvider_ClusterCapable_True(t *testing.T) {
+	p := &OpenBaoProvider{}
+	assert.True(t, p.ClusterCapable(), "OpenBaoProvider must be cluster-capable (OpenBao cluster supports shared state across controller nodes)")
+}
+
 // TestProductionGuard_Reject verifies that a dev-mode token is refused when
 // CFGMS_TELEMETRY_ENVIRONMENT=production.
 func TestProductionGuard_Reject(t *testing.T) {
@@ -98,6 +103,46 @@ func TestProductionGuard_AcceptProductionWithServiceToken(t *testing.T) {
 
 	err := enforceProductionGuard(&OpenBaoConfig{Token: "hvs.AAAA..."})
 	assert.NoError(t, err, "a non-dev token should be accepted in production")
+}
+
+// TestProductionGuard_RejectHTTPAddress verifies that an http:// vault address is
+// refused in production to prevent CA keys from being transmitted in cleartext.
+func TestProductionGuard_RejectHTTPAddress(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	err := enforceProductionGuard(&OpenBaoConfig{
+		Token:   "hvs.AAAA",
+		Address: "http://vault.example.com:8200",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "http://",
+		"error should reference the plaintext address, got: %s", err.Error())
+	assert.Contains(t, err.Error(), "https://",
+		"error should suggest using https://, got: %s", err.Error())
+}
+
+// TestProductionGuard_AcceptHTTPSAddress verifies that an https:// vault address
+// passes the production guard.
+func TestProductionGuard_AcceptHTTPSAddress(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	err := enforceProductionGuard(&OpenBaoConfig{
+		Token:   "hvs.AAAA",
+		Address: "https://vault.example.com:8200",
+	})
+	assert.NoError(t, err, "https:// vault address must be accepted in production")
+}
+
+// TestProductionGuard_HTTPAddressAllowedInDev verifies that an http:// vault address
+// is accepted in non-production environments (dev/test).
+func TestProductionGuard_HTTPAddressAllowedInDev(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "development")
+
+	err := enforceProductionGuard(&OpenBaoConfig{
+		Token:   "root",
+		Address: "http://127.0.0.1:8200",
+	})
+	assert.NoError(t, err, "http:// vault address must be accepted in non-production")
 }
 
 func TestParseOpenBaoConfig_Defaults(t *testing.T) {

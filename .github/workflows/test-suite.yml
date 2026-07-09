@@ -34,19 +34,49 @@ env:
 
 jobs:
   # Fast unit tests - runs on every push/PR
+  #
+  # runs-on routing (#2337, epic #565): internal events (push, merge_group,
+  # non-fork pull_request) run on the CFGMS-managed self-hosted Linux runner;
+  # fork PRs and workflow_dispatch (no fork property) stay on GitHub-hosted.
+  # The full label set targets the Linux runner specifically — a bare
+  # 'self-hosted' would also match the Windows runner.
+  #
+  # SECURITY: this expression is convenience routing, NOT the security
+  # boundary — a fork PR executes the FORK's copy of this file and could
+  # rewrite it. The enforcing control is the repository Actions setting
+  # "Require approval for ALL external contributors" (fork-PR workflow runs
+  # need maintainer approval before any runner is assigned). Do not weaken
+  # that setting while self-hosted runners are attached to this public repo.
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
+    # The self-hosted runner VM is itself a CFGMS-managed steward endpoint, so
+    # host-state-sensitive tests (platform CA path, launcher state) would read
+    # the live steward's files — the container keeps the job hermetic there.
+    # The whole container object is conditional: 'null' on the hosted/fork path
+    # (no container at all — hosted runners are already hermetic), the golang
+    # image on the self-hosted path. Options: --user 1000 matches the runner
+    # user (workspace writable; chmod-based failure-injection tests work);
+    # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
+    # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
+    # golang image lacks but hosted runners ship (jq for the script tests).
+    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.4-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 15
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+    - name: Mark workspace safe for git (container UID differs from host mount)
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    - name: Add host-staged CI tools to PATH (no-op unless /opt/ci-tools is mounted)
+      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
+
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -57,13 +87,41 @@ jobs:
     - name: Install dependencies
       run: go mod download
     
+    - name: Start Linux resource sampler (self-hosted only, best-effort)
+      if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        (
+          PREV=""
+          while true; do
+            CURR=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8; exit}' /proc/stat 2>/dev/null || true)
+            if [ -n "$PREV" ] && [ -n "$CURR" ]; then
+              CPU_PCT=$(awk -v p="$PREV" -v c="$CURR" 'BEGIN{
+                split(p,pa); split(c,ca)
+                tot=0; for(i=1;i<=7;i++) tot+=ca[i]-pa[i]
+                idle=(ca[4]-pa[4])+(ca[5]-pa[5])
+                print (tot>0)?int(100*(tot-idle)/tot):0
+              }')
+              MEM_TOTAL=$(awk '/^MemTotal:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_AVAIL=$(awk '/^MemAvailable:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_USED=$(( ${MEM_TOTAL:-0} - ${MEM_AVAIL:-0} ))
+              printf '%s cpu_pct=%d mem_used_mb=%d/%d\n' \
+                "$(date -u +%H:%M:%S 2>/dev/null || echo time)" \
+                "${CPU_PCT:-0}" "$MEM_USED" "${MEM_TOTAL:-0}" \
+                >> /tmp/resource-samples.txt
+            fi
+            PREV="$CURR"
+            sleep 5
+          done
+        ) & echo $! > /tmp/resource-sampler.pid || true
+
     - name: Run Fast Unit Tests
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test
-    
+
     - name: Upload test results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: unit-test-results
@@ -72,22 +130,66 @@ jobs:
           test-results.xml
         retention-days: 5
 
+    - name: Report resource profile (self-hosted only, best-effort)
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        set +e
+        kill "$(cat /tmp/resource-sampler.pid 2>/dev/null)" 2>/dev/null
+        if [ -f /tmp/resource-samples.txt ]; then
+          CPU_PEAK=$(awk -F'cpu_pct=' 'NF>1{n=split($2,a," ");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_PEAK=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_TOTAL=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");t=a[2]+0}END{print t}' /tmp/resource-samples.txt)
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=${CPU_PEAK:-0} mem_peak_mb=${MEM_PEAK:-0}/${MEM_TOTAL:-0} vm=4vCPU/8GB"
+          cp /tmp/resource-samples.txt resource-samples-unit-tests.txt
+        else
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=0 mem_peak_mb=0/0 vm=4vCPU/8GB (no samples collected)"
+          touch resource-samples-unit-tests.txt
+        fi
+        true
+
+    - name: Upload resource samples (self-hosted only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      with:
+        name: resource-samples-unit-tests
+        path: resource-samples-unit-tests.txt
+        retention-days: 30
+
   # Integration tests - runs on PRs to develop/main, workflow_dispatch, or push to main
+  # runs-on routing (#2337): same fork-gated self-hosted routing as unit-tests.
   integration-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
+    # Hermetic container for the same reason as unit-tests (steward-enrolled
+    # runner VM host state must not leak into tests); self-hosted path only.
+    # The whole container object is conditional: 'null' on the hosted/fork path
+    # (no container at all — hosted runners are already hermetic), the golang
+    # image on the self-hosted path. Options: --user 1000 matches the runner
+    # user (workspace writable; chmod-based failure-injection tests work);
+    # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
+    # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
+    # golang image lacks but hosted runners ship (jq for the script tests).
+    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.4-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+    - name: Mark workspace safe for git (container UID differs from host mount)
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    - name: Add host-staged CI tools to PATH (no-op unless /opt/ci-tools is mounted)
+      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
+
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -98,14 +200,42 @@ jobs:
     - name: Install dependencies
       run: go mod download
     
+    - name: Start Linux resource sampler (self-hosted only, best-effort)
+      if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        (
+          PREV=""
+          while true; do
+            CURR=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8; exit}' /proc/stat 2>/dev/null || true)
+            if [ -n "$PREV" ] && [ -n "$CURR" ]; then
+              CPU_PCT=$(awk -v p="$PREV" -v c="$CURR" 'BEGIN{
+                split(p,pa); split(c,ca)
+                tot=0; for(i=1;i<=7;i++) tot+=ca[i]-pa[i]
+                idle=(ca[4]-pa[4])+(ca[5]-pa[5])
+                print (tot>0)?int(100*(tot-idle)/tot):0
+              }')
+              MEM_TOTAL=$(awk '/^MemTotal:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_AVAIL=$(awk '/^MemAvailable:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)
+              MEM_USED=$(( ${MEM_TOTAL:-0} - ${MEM_AVAIL:-0} ))
+              printf '%s cpu_pct=%d mem_used_mb=%d/%d\n' \
+                "$(date -u +%H:%M:%S 2>/dev/null || echo time)" \
+                "${CPU_PCT:-0}" "$MEM_USED" "${MEM_TOTAL:-0}" \
+                >> /tmp/resource-samples.txt
+            fi
+            PREV="$CURR"
+            sleep 5
+          done
+        ) & echo $! > /tmp/resource-sampler.pid || true
+
     - name: Run Fast Comprehensive Tests
       run: make test-fast
-    
+
     - name: Run Production Critical Tests
       run: make test-production-critical
-    
+
     - name: Upload integration test results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: integration-test-results
@@ -113,6 +243,33 @@ jobs:
           integration-coverage.out
           integration-results.xml
         retention-days: 5
+
+    - name: Report resource profile (self-hosted only, best-effort)
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      run: |
+        set +e
+        kill "$(cat /tmp/resource-sampler.pid 2>/dev/null)" 2>/dev/null
+        if [ -f /tmp/resource-samples.txt ]; then
+          CPU_PEAK=$(awk -F'cpu_pct=' 'NF>1{n=split($2,a," ");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_PEAK=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");v=a[1]+0;if(v>m)m=v}END{print m+0}' /tmp/resource-samples.txt)
+          MEM_TOTAL=$(awk -F'mem_used_mb=' 'NF>1{split($2,a,"/");t=a[2]+0}END{print t}' /tmp/resource-samples.txt)
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=${CPU_PEAK:-0} mem_peak_mb=${MEM_PEAK:-0}/${MEM_TOTAL:-0} vm=4vCPU/8GB"
+          cp /tmp/resource-samples.txt resource-samples-integration-tests.txt
+        else
+          echo "RESOURCE_PROFILE: os=linux cpu_peak_pct=0 mem_peak_mb=0/0 vm=4vCPU/8GB (no samples collected)"
+          touch resource-samples-integration-tests.txt
+        fi
+        true
+
+    - name: Upload resource samples (self-hosted only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      with:
+        name: resource-samples-integration-tests
+        path: resource-samples-integration-tests.txt
+        retention-days: 30
 
   # Cross-feature integration tests - chunked for efficiency
   cross-feature-tests:
@@ -130,15 +287,15 @@ jobs:
           "multi-tenant-saas"
         ]
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
     
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -185,15 +342,15 @@ jobs:
           "monitoring-integration"
         ]
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
     
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
@@ -225,7 +382,7 @@ jobs:
         esac
     
     - name: Upload production test results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: production-test-results-${{ matrix.readiness-test }}
@@ -241,15 +398,15 @@ jobs:
     if: github.event.inputs.test_level == 'full'
     needs: production-readiness
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
     
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version: ${{ env.GO_VERSION }}
     
     - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}

@@ -14,6 +14,74 @@ import (
 
 // identityFileName is the name of the on-disk steward identity file,
 // stored alongside the cert store in defaultCertStoreDir().
+// pendingStateFileName is the name of the on-disk pending registration state file.
+// Stored alongside the identity file in defaultCertStoreDir() so restarts resume
+// the same pending record rather than creating a new one on each restart (Issue #1899).
+const pendingStateFileName = "steward-pending.json"
+
+// PendingState holds the pending registration ID issued by the controller when
+// registration.workflow is set to "manual". Persisted between restarts so the
+// steward resumes polling the same record instead of creating duplicate entries.
+type PendingState struct {
+	PendingID string `json:"pending_id"`
+}
+
+// savePendingState writes state to dir/steward-pending.json with permissions 0600.
+// The write is atomic: content goes to a temp file then renamed into place.
+func savePendingState(dir string, state PendingState) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create pending state dir: %w", err)
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal pending state: %w", err)
+	}
+	path := filepath.Join(dir, pendingStateFileName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write pending state file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit pending state file: %w", err)
+	}
+	return nil
+}
+
+// loadPendingState reads dir/steward-pending.json.
+// Returns (nil, nil) when the file does not exist — caller performs fresh registration.
+// Returns (nil, err) on read/parse failure.
+func loadPendingState(dir string) (*PendingState, error) {
+	path := filepath.Join(dir, pendingStateFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read pending state file: %w", err)
+	}
+	var state PendingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("pending state file corrupt (JSON parse failed): %w", err)
+	}
+	if state.PendingID == "" {
+		return nil, fmt.Errorf("pending state file missing pending_id")
+	}
+	return &state, nil
+}
+
+// clearPendingState removes dir/steward-pending.json if it exists.
+// Returns nil when the file does not exist (no-op).
+func clearPendingState(dir string) error {
+	path := filepath.Join(dir, pendingStateFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear pending state file: %w", err)
+	}
+	return nil
+}
+
+// identityFileName is the name of the on-disk steward identity file,
+// stored alongside the cert store in defaultCertStoreDir().
 const identityFileName = "steward-identity.json"
 
 // StewardIdentity is the persisted record written after first HTTP registration
@@ -31,6 +99,10 @@ const identityFileName = "steward-identity.json"
 // SigningCertPEM (singular) is kept for backward-compatible reading of identity
 // files written before multi-cert support. loadIdentity migrates it into
 // SigningCertPEMs automatically on read.
+//
+// TrustMode and CAPinFingerprint record the trust anchor established at enrollment
+// (ADR-013 §3). The downgrade guard uses these to ensure trust is never silently
+// weakened across restarts or re-enrollments.
 type StewardIdentity struct {
 	StewardID        string     `json:"steward_id"`
 	TenantID         string     `json:"tenant_id"`
@@ -40,6 +112,12 @@ type StewardIdentity struct {
 	SigningCertPEM   string     `json:"signing_cert_pem,omitempty"`   // backward compat: single cert (legacy)
 	SigningCertPEMs  []string   `json:"signing_cert_pems,omitempty"`  // Issue #1816: mutable rotation set
 	OverlapExpiresAt *time.Time `json:"overlap_expires_at,omitempty"` // Issue #1816: rotation overlap deadline
+	// Device identity fields (Issue #2094): stable across mTLS cert rotations.
+	DeviceID       string `json:"device_id,omitempty"`        // 64-char lowercase hex SHA-256 of Ed25519 public key
+	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (32 bytes)
+	// Trust anchor fields (ADR-013 §3, Issue #1517).
+	TrustMode        string `json:"trust_mode,omitempty"`         // "compile-baked", "install-pinned", "tofu"
+	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"` // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600

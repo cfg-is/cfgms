@@ -137,6 +137,27 @@ func (s *FlatFileStewardStore) GetSteward(_ context.Context, stewardID string) (
 	return s.readSteward(stewardID)
 }
 
+// GetStewardByDeviceID returns the record whose DeviceID matches the given
+// 64-character hex fingerprint. Scans all steward files via readAllStewards.
+// Returns ErrStewardNotFound when no matching record exists.
+func (s *FlatFileStewardStore) GetStewardByDeviceID(_ context.Context, deviceID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("flatfile: device ID cannot be empty")
+	}
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	all, err := s.readAllStewards()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range all {
+		if r.DeviceID == deviceID {
+			return r, nil
+		}
+	}
+	return nil, business.ErrStewardNotFound
+}
+
 // ListStewards returns all steward records. Reads every file in the stewards directory.
 // For large fleets this is O(n); prefer the SQLite provider if query latency matters.
 func (s *FlatFileStewardStore) ListStewards(_ context.Context) ([]*business.StewardRecord, error) {
@@ -206,6 +227,19 @@ func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID 
 	}
 	record.Status = status
 	record.LastSeen = time.Now().UTC()
+	return s.writeSteward(record)
+}
+
+// UpdateStewardTenant moves a steward to a different tenant by updating its TenantID field.
+func (s *FlatFileStewardStore) UpdateStewardTenant(_ context.Context, stewardID, newTenantID string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	record.TenantID = newTenantID
 	return s.writeSteward(record)
 }
 

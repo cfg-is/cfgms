@@ -1,5 +1,5 @@
 name: hyperv
-description: Remote Hyper-V management via WinRM — manages VMs, snapshots, and virtual switches on Windows Server hosts
+description: Remote Hyper-V management via WinRM — manages VMs and virtual switches on Windows Server hosts
 version: 0.1.0
 
 publisher: cfgms
@@ -17,9 +17,73 @@ interfaces:
   - Get
   - Set
   - Test
+  - Monitor
 
 security:
   requires_root: false
   capabilities: []
   ports:
-    - 5986  # WinRM HTTPS
+    - 5986  # WinRM HTTPS (fallback transport only; default is in-host PS host)
+  # module_trust is part of the signing manifest contract (ADR-006). The
+  # read-only cluster surface (#2199 S1) requires strict independent verification
+  # by the steward — the steward must not rely on the controller's word for a
+  # module that reads failover-cluster ownership/topology.
+  module_trust:
+    required_mode: strict
+
+# behavioral_envelope documents the runtime behaviour of the module for the
+# signing/approval workflow. The hyperv module shells out to powershell.exe. The
+# read-only failover-cluster surface (#2199 S1) invokes the four Get-Cluster*
+# cmdlets; #2202 S2 adds the cluster WRITE cmdlets below
+# (Add-ClusterVirtualMachineRole, Remove-ClusterGroup, Get-VM) — clustered-VM-role
+# create + destructive teardown. Cluster FORMATION (New-Cluster, Add-ClusterNode,
+# Remove-ClusterNode, quorum cmdlets) is NOT declared and out of scope.
+#
+# ADR-006 re-sign: this envelope change (adding the two write cmdlets) is a
+# material change to the module's behavioural contract. The bundle MUST be
+# re-signed by the publisher and re-approved before module_trust: strict stewards
+# will accept the updated module — strict stewards verify the signature
+# independently of the controller.
+behavioral_envelope:
+  shells_out_to:
+    - powershell.exe
+  lolbin_usage_justification: >-
+    Hyper-V and Failover Clustering are managed exclusively through their
+    PowerShell modules; there is no in-process managed API. The read-only
+    failover-cluster cmdlets (#2199 S1, #2306) are: Get-Cluster, Get-ClusterNode,
+    Get-ClusterGroup, Get-ClusterSharedVolume, Get-ClusterAccess (the last is the
+    onboarding self-check reading whether this node's computer account holds
+    cluster-management access). The failover-cluster WRITE
+    cmdlets (#2202 S2) are: Add-ClusterVirtualMachineRole (cluster an existing
+    VM as a highly-available role — invoked only by the CNO-owner node, gated
+    exactly-once; the VM is resolved to its Id via a local Get-VM and clustered
+    by -VMId, avoiding a cross-node WMI name-enumeration that is denied when the
+    module runs as the LocalSystem steward) and Remove-ClusterGroup
+    -RemoveResources (remove a clustered VM role group by name — reached only
+    by the hyperv.vm ha_role demote path since #2372: removing ha_role from a
+    previously-HA vm resource converges by removing the ROLE, never the VM;
+    both cmdlets are CNO-owner-gated and scope-capped, and the pre-#2372
+    operator-facing hyperv.cluster role teardown surface is hard-refused). The
+    cluster-role PROPERTY write
+    cmdlets (#2306) are: Set-ClusterOwnerNode (preferred owners on the role group,
+    possible owners on the VM resource) and Set-ClusterGroup group-property
+    assignment (Priority, AutoStart, AntiAffinityClassNames) — reconciled only on
+    the CNO-owner node after the role exists, idempotent. The cluster-ACCESS
+    lifecycle cmdlets (#2306 option 3) are: Grant-ClusterAccess and
+    Remove-ClusterAccess (grant/revoke a node computer account's cluster-management
+    access) — a PRIVILEGED, controller-orchestrated action tied to node lifecycle,
+    NOT reachable from routine cluster cfg convergence (a lateral-movement
+    primitive). The VM STORAGE-LOCATION cmdlets (#2411) are: Move-VMStorage
+    (live, non-destructive storage migration homing a VM's configuration files
+    and disks at the directory of its declared vhd_path — a synchronous
+    config-only move at create, and a converge-time full migration dispatched
+    as a DETACHED powershell.exe -File process because the migration outlives
+    the executor's per-module-call deadline; directory-level, file names never
+    change; tracked on a durable move record, never a stop/delete/recreate)
+    and Get-Volume (read-only free-space preflight on the destination volume
+    before any migration is dispatched).
+    All arguments travel via
+    ArgumentList (never string-composed). Cluster FORMATION cmdlets
+    (New-Cluster, Add-ClusterNode, Remove-ClusterNode, quorum) are NOT declared
+    and out of scope. This envelope change requires ADR-006 module re-signing
+    before module_trust: strict stewards accept the updated module.

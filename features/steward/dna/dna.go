@@ -162,6 +162,20 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 	return dna, nil
 }
 
+// WaitForBackground blocks until the asynchronous background collection started
+// by the first Collect call has completed, or until ctx is cancelled. Background
+// collection is kicked off by Collect (via bgOnce), so callers must call Collect
+// at least once before WaitForBackground for it to make progress; a second
+// Collect after this returns yields the merged full snapshot. It exists so that
+// external packages (e.g. integration tests) can wait for the full snapshot
+// without reaching into the unexported bgDone channel.
+func (c *Collector) WaitForBackground(ctx context.Context) {
+	select {
+	case <-c.bgDone:
+	case <-ctx.Done():
+	}
+}
+
 // runBackgroundCollection collects slow software and security data asynchronously.
 // Software and security run concurrently since they write to separate attribute keys.
 // It merges results into slowAttrs and closes bgDone when finished.

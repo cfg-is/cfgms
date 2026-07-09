@@ -31,8 +31,15 @@ is_allowed() {
     [[ "$file" == test/* ]] && return 0
     [[ "$file" == cmd/controller/main.go ]] && return 0
     [[ "$file" == cmd/cfg/cmd/storage.go ]] && return 0
+    [[ "$file" == pkg/migrate/storage/* ]] && return 0
+    [[ "$file" == pkg/migrate/secrets/* ]] && return 0
+    [[ "$file" == pkg/migrate/blob/* ]] && return 0
     [[ "$file" == features/controller/initialization/initialization.go ]] && return 0
     [[ "$file" == features/controller/server/server.go ]] && return 0
+    # hyperv provision store: NewFlatFileProvisionStore is the durable-store
+    # constructor for the hyperv module's provision store (Issue #2371). It
+    # wraps flatfile directly — analogous to controller initialization files.
+    [[ "$file" == features/modules/hyperv/provision.go ]] && return 0
     [[ "$file" == */providers_test.go ]] && return 0
     return 1
 }
@@ -70,8 +77,12 @@ else
     echo "  test/                                                       (integration and e2e tests)"
     echo "  cmd/controller/main.go                                      (registry bootstrap)"
     echo "  cmd/cfg/cmd/storage.go                                      (CLI registry bootstrap)"
+    echo "  pkg/migrate/storage/                                        (migration engine registry bootstrap)"
+    echo "  pkg/migrate/secrets/                                        (migration engine registry bootstrap)"
+    echo "  pkg/migrate/blob/                                           (migration engine registry bootstrap)"
     echo "  features/controller/initialization/initialization.go        (registry bootstrap)"
     echo "  features/controller/server/server.go                        (registry bootstrap)"
+    echo "  features/modules/hyperv/provision.go                        (hyperv durable store constructor, Issue #2371)"
     echo "  */providers_test.go                                         (per-package test provider registration)"
     exit 1
 fi

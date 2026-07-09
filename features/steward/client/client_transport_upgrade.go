@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -41,6 +42,10 @@ const MaxBinarySizeBytes = 200 * 1024 * 1024
 // ErrDowngradeDenied is returned when the upgrade version is not newer than
 // the running version and allow_downgrade is not enabled. (Issue #1943)
 var ErrDowngradeDenied = errors.New("downgrade denied: target version is not newer than running version")
+
+// stewardBinaryVersionRe validates version strings before using them in paths
+// or commands. Accepts "v1.2.3" and "v1.2.3-pre.release" forms. (Issue #2260)
+var stewardBinaryVersionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$`)
 
 // upgradeSeq is used to generate unique temp file names without crypto/rand.
 var upgradeSeq atomic.Int64
@@ -256,6 +261,13 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("push_steward_binary: launcher swap failed: %w", err)
 	}
+
+	// Record the staged binary so TriggerConvergence can re-issue the swap if
+	// the steward has not restarted yet when the convergence loop fires. (Issue #2260)
+	c.mu.Lock()
+	c.lastStagedVersion = params.Version
+	c.lastStagedBinaryPath = tmpPath
+	c.mu.Unlock()
 
 	// Step 13: Swap succeeded — the new binary is now the launcher's "current".
 	// Schedule a graceful shutdown so the launcher's supervise loop re-execs the

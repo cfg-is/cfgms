@@ -179,6 +179,8 @@ func (t *TestStorageProvider) GetVersion() string {
 	return "1.0.0-test"
 }
 
+func (t *TestStorageProvider) ClusterCapable() bool { return false }
+
 // TestWorkflowTrigger implements a test workflow trigger that records executions
 type TestWorkflowTrigger struct {
 	executions []*workflow.WorkflowExecution

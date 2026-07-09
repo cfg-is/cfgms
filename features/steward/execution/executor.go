@@ -8,9 +8,13 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -27,6 +31,10 @@ import (
 type ExecutorConfig struct {
 	// TenantID for this steward (controller mode; may be empty in standalone mode)
 	TenantID string
+
+	// StewardID is the registered steward identity stamped into emitted LogEntry
+	// events. Leave empty in standalone mode or when event emission is not configured.
+	StewardID string
 
 	// Logger for execution logging
 	Logger logging.Logger
@@ -54,19 +62,49 @@ type ExecutorConfig struct {
 	// Ignored when Factory is supplied — callers wiring their own factory are
 	// responsible for injecting the secret store themselves.
 	SecretStore secretsif.SecretStore
+
+	// EventEmitter, when non-nil, receives convergence detection and outcome events.
+	// Enqueue must never block the caller; the concrete implementation drops when full.
+	EventEmitter EventEmitter
+
+	// ModuleCallTimeoutSec is the per-call timeout (in seconds) applied individually
+	// to each module.Get, module.Set, and verifyChanges invocation. Zero or negative
+	// values default to 120 s. There is no "infinite" option — all module calls have
+	// a finite deadline to prevent a hung module from wedging the convergence loop
+	// (ADR-012 §7).
+	ModuleCallTimeoutSec int
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
 // It serves both standalone mode (direct ExecuteConfiguration calls) and controller
 // mode (ApplyConfiguration with raw config bytes in, ConfigStatusReport out).
 type Executor struct {
-	factory      *factory.ModuleFactory
-	comparator   *stewardtesting.StateComparator
-	config       config.ErrorHandlingConfig
-	tenantID     string
-	logger       logging.Logger
+	factory    *factory.ModuleFactory
+	comparator *stewardtesting.StateComparator
+	config     config.ErrorHandlingConfig
+	tenantID   string
+	stewardID  string
+	logger     logging.Logger
+
+	// mu protects driftHandler and driftMode. Both can be written after construction
+	// (controller delivers new cfg, tests replace the handler) while ExecuteResource
+	// reads them concurrently from the monitor event loop.
+	mu           sync.RWMutex
 	driftHandler DriftEventHandler
 	driftMode    config.DriftMode
+
+	// eventEmitter, when non-nil, receives convergence detection and outcome events
+	// (ADR-012 §2). Enqueue is the only emitter call on the convergence goroutine;
+	// the actual LogStream send runs on the emitter's own goroutine.
+	eventEmitter EventEmitter
+
+	// moduleCallTimeout is the per-call deadline applied to module.Get, module.Set,
+	// and verifyChanges. Derived from ModuleCallTimeoutSec at construction; defaults
+	// to 120 s when the config field is zero or negative (ADR-012 §7).
+	moduleCallTimeout time.Duration
+
+	// Monitor engine fields (Issue #2435). Protected by monitorMu except where noted.
+	monitorFields
 }
 
 // NewExecutor creates an Executor. When cfg.Factory is nil, an empty registry and
@@ -102,27 +140,39 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		comp = stewardtesting.NewStateComparator()
 	}
 
+	callTimeout := time.Duration(cfg.ModuleCallTimeoutSec) * time.Second
+	if callTimeout <= 0 {
+		callTimeout = 120 * time.Second
+	}
+
 	return &Executor{
-		factory:    f,
-		comparator: comp,
-		config:     errCfg,
-		tenantID:   cfg.TenantID,
-		logger:     cfg.Logger,
-		driftMode:  cfg.DriftMode,
+		factory:           f,
+		comparator:        comp,
+		config:            errCfg,
+		tenantID:          cfg.TenantID,
+		stewardID:         cfg.StewardID,
+		logger:            cfg.Logger,
+		driftMode:         cfg.DriftMode,
+		eventEmitter:      cfg.EventEmitter,
+		moduleCallTimeout: callTimeout,
 	}, nil
 }
 
 // SetDriftEventHandler registers a callback invoked when the Compare step detects
 // drift on a managed resource, before Set corrects it. Pass nil to remove a handler.
 func (e *Executor) SetDriftEventHandler(handler DriftEventHandler) {
+	e.mu.Lock()
 	e.driftHandler = handler
+	e.mu.Unlock()
 }
 
 // SetDriftMode updates the executor's drift mode. Call this when the
 // controller delivers a new cfg with an updated drift_mode field.
 // An empty string is treated as DriftModeApply (default behavior).
 func (e *Executor) SetDriftMode(mode config.DriftMode) {
+	e.mu.Lock()
 	e.driftMode = mode
+	e.mu.Unlock()
 }
 
 // ExecuteConfiguration executes the complete configuration for all resources.
@@ -150,7 +200,7 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 			switch result.Status {
 			case StatusSuccess, StatusNoChange:
 				report.SuccessfulCount++
-			case StatusFailed:
+			case StatusFailed, StatusTimeout:
 				report.FailedCount++
 			case StatusSkipped:
 				report.SkippedCount++
@@ -185,14 +235,38 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	// For modules that manage filesystem resources (file, directory), use the path
 	// from config as the identifier. Otherwise fall back to the resource name.
+	// For typed module refs (e.g. "hyperv.vm"), this builds the module-internal
+	// typed resourceID (e.g. "vm:m2-test-vm").
 	resourceID := e.getResourceIdentifier(resource)
+
+	// A module ref may carry a resource-type suffix (e.g. "hyperv.vm"). The
+	// bundle component ("hyperv") selects the signed module bundle to load;
+	// the type suffix is resolved into the resourceID by getResourceIdentifier.
+	// Loading MUST use the bundle name only — there is one signed bundle per
+	// module (ADR-006), and the ".vm"/".vswitch" suffix is a
+	// resource-type selector, not a separate module.
+	bundle, _ := parseModuleRef(resource.Module)
+
+	// Snapshot drift mode and handler once for this resource's execution.
+	// Both may be updated concurrently while the monitor event loop dispatches calls.
+	e.mu.RLock()
+	driftMode := e.driftMode
+	driftHandler := e.driftHandler
+	e.mu.RUnlock()
+
+	// Generate correlation ID for the detection+outcome event pair (ADR-012 §2).
+	correlationID := uuid.New().String()
+	driftModeStr := "apply"
+	if driftMode == config.DriftModeMonitor {
+		driftModeStr = "report"
+	}
 
 	e.logger.Info("Executing resource configuration",
 		"resource", resource.Name,
 		"resource_id", resourceID,
 		"module", resource.Module)
 
-	module, err := e.factory.CreateModuleInstance(resource.Module)
+	module, err := e.factory.CreateModuleInstance(bundle)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to load module: %v", err)
 		result.ExecutionTime = time.Since(startTime)
@@ -236,10 +310,29 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		}
 	}
 
-	currentState, err := module.Get(ctx, resourceID)
+	// Detection event: enqueued before module.Get so a module hang still leaves
+	// the detection observable on the out-of-band channel (ADR-012 §2 crash-isolation).
+	e.enqueueDetection(correlationID, resourceID, driftModeStr)
+
+	// module.Get with per-call deadline so a hung module cannot wedge the
+	// convergence loop (ADR-012 §7). The deadline is derived from the ambient ctx
+	// so outer cancellation still propagates.
+	getCtx, getCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer getCancel()
+	currentState, err := module.Get(getCtx, resourceID)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("module.Get did not finish within %s", e.moduleCallTimeout)
+			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			e.logger.Warn("module.Get timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -269,30 +362,47 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// Tag the event type for upstream telemetry before invoking the handler.
 	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
 	// from apply-mode stewards that simply have not drifted.
-	if e.driftMode == config.DriftModeMonitor {
+	if driftMode == config.DriftModeMonitor {
 		stateDiff.EventType = "drift.detected.monitor"
 	} else {
 		stateDiff.EventType = "drift.detected"
 	}
 
 	// Emit drift event. Handler fires in both modes — ordering is always preserved.
-	if e.driftHandler != nil {
-		e.driftHandler(resource.Name, resource.Module, &stateDiff)
+	if driftHandler != nil {
+		driftHandler(resource.Name, resource.Module, &stateDiff)
 	}
 
 	// In monitor mode, report non-compliance without correcting the drift.
-	if e.driftMode == config.DriftModeMonitor {
+	if driftMode == config.DriftModeMonitor {
 		result.Status = StatusNonCompliant
 		result.ExecutionTime = time.Since(startTime)
+		// Outcome: drift detected and reported; no correction applied.
+		e.enqueueOutcome(correlationID, "drift_reported", result.ExecutionTime)
 		e.logger.Info("Monitor mode: drift detected, skipping Set",
 			"resource", resource.Name,
 			"event_type", stateDiff.EventType)
 		return result
 	}
 
-	if err := module.Set(ctx, resourceID, desiredState); err != nil {
-		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
+	// module.Set with per-call deadline (ADR-012 §7).
+	setCtx, setCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer setCancel()
+	if err := module.Set(setCtx, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("module.Set did not finish within %s", e.moduleCallTimeout)
+			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			e.logger.Warn("module.Set timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
+		// Outcome: Set failed; record before error-handling may continue.
+		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -302,9 +412,25 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	result.ChangesApplied = true
 
-	if err := e.verifyChanges(ctx, module, resourceID, desiredState); err != nil {
-		result.Error = fmt.Sprintf("verification failed: %v", err)
+	// verifyChanges with per-call deadline (ADR-012 §7). The deadline applies to
+	// the module.Get call inside verifyChanges.
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer verifyCancel()
+	if err := e.verifyChanges(verifyCtx, module, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("verifyChanges did not finish within %s", e.moduleCallTimeout)
+			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			e.logger.Warn("verifyChanges timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("verification failed: %v", err)
+		// Outcome: post-Set verification failed.
+		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -314,6 +440,8 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	result.Status = StatusSuccess
 	result.ExecutionTime = time.Since(startTime)
+	// Outcome: convergence applied and verified successfully.
+	e.enqueueOutcome(correlationID, "applied", result.ExecutionTime)
 
 	e.logger.Info("Resource configuration applied successfully",
 		"resource", resource.Name,
@@ -327,13 +455,58 @@ func (e *Executor) createConfigState(configData map[string]interface{}) (modules
 	return &genericConfigState{data: configData}, nil
 }
 
-// getResourceIdentifier returns the appropriate identifier for a module.
-// File/directory/script modules use the "path" config field; others use the resource name.
-func (e *Executor) getResourceIdentifier(resource config.ResourceConfig) string {
-	if path, ok := resource.Config["path"].(string); ok && path != "" {
-		return path
+// GetResourceID returns the module-internal resource identifier for the given
+// ResourceConfig. This is the identifier passed to module.Get, module.Set, and
+// Monitor() — callers that need to match ChangeEvent.ResourceID against cfg
+// resources must use this method to ensure the IDs are consistent.
+func (e *Executor) GetResourceID(resource config.ResourceConfig) string {
+	return e.getResourceIdentifier(resource)
+}
+
+// parseModuleRef splits a module reference into its bundle and resource-type
+// components on the FIRST ".". A ref without a dot has no resource type:
+//
+//	"hyperv.vm"   -> ("hyperv", "vm")
+//	"hyperv.vswitch" -> ("hyperv", "vswitch")
+//	"directory"   -> ("directory", "")
+//
+// The bundle component names the one signed module bundle to load (ADR-006);
+// the resource-type component is resolved by the steward executor into the
+// module's internal typed resourceID — the bundle is never split.
+func parseModuleRef(module string) (bundle, resourceType string) {
+	idx := strings.IndexByte(module, '.')
+	if idx < 0 {
+		return module, ""
 	}
-	return resource.Name
+	return module[:idx], module[idx+1:]
+}
+
+// getResourceIdentifier returns the module-internal identifier passed to the
+// module's Get/Set for a resource.
+//
+// Rules:
+//   - Untyped module ref (no "." — e.g. "file", "directory", "script"): keep
+//     the legacy behaviour — the "path" config field when set & non-empty,
+//     else the plain resource name. This preserves back-compat for the
+//     filesystem modules that key on a path.
+//   - Typed module ref (e.g. "hyperv.vm", "hyperv.vswitch"): build the module's
+//     typed resourceID as "<resourceType>:<name>" (e.g. "vm:m2-test-vm"). The
+//     plain resource name stays strictly validated; the type lives in the
+//     module field. This is uniform across all typed modules — there is no
+//     compound id and no config folding.
+func (e *Executor) getResourceIdentifier(resource config.ResourceConfig) string {
+	_, resourceType := parseModuleRef(resource.Module)
+
+	if resourceType == "" {
+		// Untyped module: legacy path/name behaviour (file, directory, script, …).
+		if path, ok := resource.Config["path"].(string); ok && path != "" {
+			return path
+		}
+		return resource.Name
+	}
+
+	// Typed resource: "<type>:<name>" (e.g. "vm:m2-test-vm", "vswitch:m2-test-vsw").
+	return resourceType + ":" + resource.Name
 }
 
 // verifyChanges confirms that the applied configuration matches the desired state.
@@ -458,7 +631,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		switch result.Status {
 		case StatusSuccess, StatusNoChange:
 			successCount++
-		case StatusFailed:
+		case StatusFailed, StatusTimeout:
 			errorCount++
 			hasErrors = true
 			moduleStatus.Status = "ERROR"

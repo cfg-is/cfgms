@@ -14,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // executionIDCounter ensures unique IDs even when time.Now().UnixNano() returns
@@ -29,25 +30,37 @@ type TransformStepExecutor interface {
 	ExecuteTransformStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
+// RingHealthStepExecutor executes a workflow step of type query_ring_health.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers pass *nodes.RingHealthNodeExecutor.
+type RingHealthStepExecutor interface {
+	ExecuteRingHealthStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory     ModuleLoader
-	logger            *logging.ModuleLogger
-	executions        map[string]*WorkflowExecution
-	workflows         map[string]Workflow
-	mutex             sync.RWMutex
-	httpClient        *HTTPClient
-	providerRegistry  *ProviderRegistry
-	errorHandler      ErrorHandler
-	syncManager       *SyncManager
-	debugEngine       *DebugEngineImpl
-	transformExecutor TransformStepExecutor
+	moduleFactory      ModuleLoader
+	logger             *logging.ModuleLogger
+	executions         map[string]*WorkflowExecution
+	workflows          map[string]Workflow
+	mutex              sync.RWMutex
+	httpClient         *HTTPClient
+	providerRegistry   *ProviderRegistry
+	errorHandler       ErrorHandler
+	syncManager        *SyncManager
+	debugEngine        *DebugEngineImpl
+	transformExecutor  TransformStepExecutor
+	ringHealthExecutor RingHealthStepExecutor
 }
 
 // NewEngine creates a new workflow engine instance.
-// transformExecutor handles StepTypeTransform steps; pass nil if transform steps
-// are not used (executeStep will return an error for any transform step encountered).
-func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecutor TransformStepExecutor) *Engine {
+// secrets is the controller's central secret store; pass nil when no store is available
+// (e.g. steward-side) — providers that require secrets will surface a clear error.
+// transformExecutor handles StepTypeTransform steps; pass nil if transform steps are not used.
+// ringHealthExecutor handles StepTypeQueryRingHealth steps; pass nil if ring-health steps are not used.
+// executeStep returns a clear error for any step type whose executor is nil.
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -64,18 +77,19 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, transformExecu
 
 	// Design decision: ProviderRegistry is retained for backwards compatibility with workflows
 	// registered before the pluggable provider system; new workflows use the provider interface directly.
-	providerRegistry := NewProviderRegistry(logger)
+	providerRegistry := NewProviderRegistry(logger, secrets)
 
 	engine := &Engine{
-		moduleFactory:     moduleFactory,
-		logger:            workflowLogger,
-		executions:        make(map[string]*WorkflowExecution),
-		workflows:         make(map[string]Workflow),
-		httpClient:        httpClient,
-		providerRegistry:  providerRegistry,
-		errorHandler:      NewDefaultErrorHandler(),
-		syncManager:       NewSyncManager(),
-		transformExecutor: transformExecutor,
+		moduleFactory:      moduleFactory,
+		logger:             workflowLogger,
+		executions:         make(map[string]*WorkflowExecution),
+		workflows:          make(map[string]Workflow),
+		httpClient:         httpClient,
+		providerRegistry:   providerRegistry,
+		errorHandler:       NewDefaultErrorHandler(),
+		syncManager:        NewSyncManager(),
+		transformExecutor:  transformExecutor,
+		ringHealthExecutor: ringHealthExecutor,
 	}
 
 	// Initialize debug engine
@@ -177,27 +191,40 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 	e.mutex.Lock()
 
 	if err != nil {
-		// Handle workflow-level error
-		var workflowErr *WorkflowError
-		if wfErr, ok := err.(*WorkflowError); ok {
-			workflowErr = wfErr
+		// If the execution context was explicitly cancelled (via CancelExecution),
+		// treat this as a cancellation rather than a failure. This prevents the
+		// async goroutine from overriding StatusCancelled with StatusFailed.
+		// Context timeout (DeadlineExceeded) is still treated as a failure.
+		if execution.Context.Err() == context.Canceled {
+			e.mutex.Unlock()
+			if execution.GetStatus() != StatusCancelled {
+				execution.SetStatus(StatusCancelled)
+			}
+			e.logger.Info("Workflow execution cancelled",
+				"execution_id", execution.ID)
 		} else {
-			workflowErr = NewWorkflowError(
-				ErrorCodeStepExecution,
-				err.Error(),
-				execution.GetCurrentStep(),
-				"",
-				err,
-			).WithVariableState(execution.Variables)
-		}
+			// Handle workflow-level error
+			var workflowErr *WorkflowError
+			if wfErr, ok := err.(*WorkflowError); ok {
+				workflowErr = wfErr
+			} else {
+				workflowErr = NewWorkflowError(
+					ErrorCodeStepExecution,
+					err.Error(),
+					execution.GetCurrentStep(),
+					"",
+					err,
+				).WithVariableState(execution.Variables)
+			}
 
-		execution.SetError(workflowErr.Error())
-		execution.SetErrorDetails(workflowErr)
-		e.mutex.Unlock()
-		execution.SetStatus(StatusFailed)
-		e.logger.Error("Workflow execution failed",
-			"execution_id", execution.ID,
-			"error", workflowErr.FullError())
+			execution.SetError(workflowErr.Error())
+			execution.SetErrorDetails(workflowErr)
+			e.mutex.Unlock()
+			execution.SetStatus(StatusFailed)
+			e.logger.Error("Workflow execution failed",
+				"execution_id", execution.ID,
+				"error", workflowErr.FullError())
+		}
 	} else {
 		e.mutex.Unlock()
 		execution.SetStatus(StatusCompleted)
@@ -448,6 +475,14 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 			var transformResult StepResult
 			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
 			execution.SetStepResult(step.Name, transformResult)
+		}
+	case StepTypeQueryRingHealth:
+		if e.ringHealthExecutor == nil {
+			err = fmt.Errorf("ring health executor not configured")
+		} else {
+			var rhResult StepResult
+			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
+			execution.SetStepResult(step.Name, rhResult)
 		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)

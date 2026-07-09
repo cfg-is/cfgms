@@ -68,6 +68,19 @@
                 Name="cfgms-steward.exe"
                 KeyPath="yes" />
         </Component>
+        <!--
+          Launcher binary — must be in the MSI payload next to cfgms-steward.exe
+          BEFORE the RunInstall* custom actions run: cfgms-steward.exe install
+          (windowsManager.Install) fails closed when the launcher is absent, and
+          registers the service to exec the launcher (launcher-managed install,
+          push-upgradeable). Bundled only; never fetched post-install.
+        -->
+        <Component Id="StewardLauncherBinary" Guid="*">
+          <File Id="StewardLauncherExe"
+                Source="$(var.LauncherPath)"
+                Name="cfgms-steward-launcher.exe"
+                KeyPath="yes" />
+        </Component>
         <Directory Id="MODULESDIR" Name="modules">
           <Component Id="ModuleFile" Guid="*">
             <File Id="ModuleFileExe" Source="$(var.ModulesDir)\cfgms-module-file.exe" Name="cfgms-module-file.exe" KeyPath="yes" />
@@ -93,6 +106,7 @@
 
     <Feature Id="ProductFeature" Title="CFGMS Steward" Level="1">
       <ComponentRef Id="StewardBinary" />
+      <ComponentRef Id="StewardLauncherBinary" />
       <ComponentRef Id="ModuleFile" />
       <ComponentRef Id="ModuleService" />
       <ComponentRef Id="ModulePackage" />

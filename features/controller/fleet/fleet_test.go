@@ -55,66 +55,6 @@ func TestFleetQuery_InterfaceContract(t *testing.T) {
 	})
 }
 
-// TestParseTargetSelector covers selector parsing per the acceptance criteria.
-func TestParseTargetSelector(t *testing.T) {
-	t.Run("multi-key selector", func(t *testing.T) {
-		f, err := ParseTargetSelector("os:linux name:web-* tag:production")
-		require.NoError(t, err)
-		assert.Equal(t, "linux", f.OS)
-		assert.Equal(t, "web-*", f.Name)
-		assert.Equal(t, []string{"production"}, f.Tags)
-	})
-
-	t.Run("dna key selector", func(t *testing.T) {
-		f, err := ParseTargetSelector("dna.custom_key:val")
-		require.NoError(t, err)
-		assert.Equal(t, map[string]string{"custom_key": "val"}, f.DNAAttributes)
-	})
-
-	t.Run("unknown key returns error naming the key", func(t *testing.T) {
-		_, err := ParseTargetSelector("unknown:x")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown")
-	})
-
-	t.Run("empty selector returns error", func(t *testing.T) {
-		_, err := ParseTargetSelector("")
-		require.Error(t, err)
-	})
-
-	t.Run("all returns empty filter", func(t *testing.T) {
-		f, err := ParseTargetSelector("all")
-		require.NoError(t, err)
-		assert.Equal(t, Filter{}, f)
-	})
-
-	t.Run("multiple tag keys accumulate", func(t *testing.T) {
-		f, err := ParseTargetSelector("tag:production tag:web")
-		require.NoError(t, err)
-		assert.Equal(t, []string{"production", "web"}, f.Tags)
-	})
-
-	t.Run("all supported keys parse without error", func(t *testing.T) {
-		f, err := ParseTargetSelector("os:linux platform:ubuntu arch:amd64 name:web-*")
-		require.NoError(t, err)
-		assert.Equal(t, "linux", f.OS)
-		assert.Equal(t, "ubuntu", f.Platform)
-		assert.Equal(t, "amd64", f.Architecture)
-		assert.Equal(t, "web-*", f.Name)
-	})
-
-	t.Run("token without colon returns error", func(t *testing.T) {
-		_, err := ParseTargetSelector("badtoken")
-		require.Error(t, err)
-	})
-
-	t.Run("id selector sets DeviceID", func(t *testing.T) {
-		f, err := ParseTargetSelector("id:steward-abc123")
-		require.NoError(t, err)
-		assert.Equal(t, "steward-abc123", f.DeviceID)
-	})
-}
-
 // TestFleetQuery_DeviceIDFilter verifies that Filter.DeviceID matches only the exact device.
 func TestFleetQuery_DeviceIDFilter(t *testing.T) {
 	q := newQuery(

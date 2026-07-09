@@ -42,6 +42,10 @@ Example:
 
 Claude reads this in Phase 3 and applies the per-pin value when present.
 
+### MCP/agent-tooling pins (kind `mcp`, e.g. serena)
+
+These use the **default 3-day cooldown** for the *version* decision — same few days as any other pin. We deliberately do NOT lengthen the cooldown for them. The extra safety for agent tooling is not a longer wait; it's the **blast-radius classification** in `decision-matrix.md` ("MCP server pins"): a release that renames/removes a tool we consume routes to a human-reviewed **rewire story** (touching the `.claude/agents/*.md` allowlists + prose), not a mechanical bump that could auto-merge. So a non-breaking serena patch refreshes routinely after 3 days, while a breaking one is gated by review regardless of how long it's been out.
+
 ## Override conditions (skip the cooldown)
 
 The cooldown is overridden when ANY of these are true:

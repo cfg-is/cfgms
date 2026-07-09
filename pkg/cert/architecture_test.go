@@ -368,7 +368,9 @@ func TestSetAdminMarker_Architecture(t *testing.T) {
 		if d.IsDir() {
 			// Skip agent dispatch worktrees — they contain nested repo copies
 			// from /dispatch agents and are not part of this checkout's source.
-			if d.Name() == "worktrees" {
+			// Skip the in-tree module cache — GOMODCACHE is set to .cache/go-mod
+			// inside the working tree, and third-party code there is not first-party.
+			if d.Name() == "worktrees" || d.Name() == ".cache" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -493,7 +495,7 @@ func TestNoGetCertificatesByTypeOutsideCertPackage(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == "vendor" || d.Name() == "worktrees" {
+			if d.Name() == "vendor" || d.Name() == "worktrees" || d.Name() == ".cache" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -549,7 +551,7 @@ func TestNoCertSliceIndex0InNonTest(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == "vendor" || d.Name() == "worktrees" {
+			if d.Name() == "vendor" || d.Name() == "worktrees" || d.Name() == ".cache" {
 				return filepath.SkipDir
 			}
 			return nil

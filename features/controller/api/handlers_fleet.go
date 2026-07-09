@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
@@ -36,7 +37,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter, err := selector.Parse(req.Selector)
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.logger.Info("Invalid selector expression",
 			"selector", logging.SanitizeLogValue(req.Selector), "error", err)
@@ -44,10 +45,22 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce tenant scope from the authenticated context — the selector expression
-	// must never be able to broaden or override the caller's tenant boundary.
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		filter.TenantID = tid
+	// Enforce tenant subtree scope. An explicit tenant prefix in the selector
+	// must be at or below the caller's own node; absent prefix defaults to the
+	// caller's entire subtree. Admin callers (empty tid) are unrestricted.
+	tid, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if parsedTenantPath != "" {
+		if tid != "" && parsedTenantPath != tid && !strings.HasPrefix(parsedTenantPath, tid+"/") {
+			s.logger.Info("Selector tenant outside caller subtree",
+				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+				"caller_tenant", logging.SanitizeLogValue(tid))
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if tid != "" {
+		filter.TenantSubtree = tid
 	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)

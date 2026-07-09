@@ -8,16 +8,205 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/modules/script"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// ---------------------------------------------------------------------------
+// recordingEmitter — real in-process EventEmitter for tests (no mocks).
+// ---------------------------------------------------------------------------
+
+// recordingEmitter is a real channel-backed EventEmitter that satisfies the
+// commands.EventEmitter interface. It records every Enqueue call for assertion.
+type recordingEmitter struct {
+	mu      sync.Mutex
+	entries []*transportpb.LogEntry
+}
+
+func (r *recordingEmitter) Enqueue(entry *transportpb.LogEntry) {
+	r.mu.Lock()
+	r.entries = append(r.entries, entry)
+	r.mu.Unlock()
+}
+
+func (r *recordingEmitter) Entries() []*transportpb.LogEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*transportpb.LogEntry, len(r.entries))
+	copy(out, r.entries)
+	return out
+}
+
+// Compile-time check: recordingEmitter implements commands.EventEmitter.
+var _ EventEmitter = (*recordingEmitter)(nil)
+
+// firstScriptOutputEntry returns the first LogEntry with event_kind=script_output,
+// or nil if none was emitted.
+func firstScriptOutputEntry(entries []*transportpb.LogEntry) *transportpb.LogEntry {
+	for _, e := range entries {
+		if e.GetFields()["event_kind"] == "script_output" {
+			return e
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1978 — 1 MB hard cap on exec output.
+// ---------------------------------------------------------------------------
+
+// overCapStdoutScriptBody returns a script that writes approximately 2 MB to stdout
+// — twice the execOutputHardCapBytes limit — using fast shell builtins.
+func overCapStdoutScriptBody() string {
+	if runtime.GOOS == "windows" {
+		// PowerShell: write 2 MB of 'A' without buffering overhead.
+		return `[Console]::Out.Write([string]::new('A', 2097152))`
+	}
+	// bash: yes generates an infinite stream; head -c cuts at exactly 2 MB.
+	return `yes A | head -c 2097152`
+}
+
+// underCapStdoutScriptBody returns a script that writes 512 KB to stdout —
+// well under the execOutputHardCapBytes limit — using fast shell builtins.
+func underCapStdoutScriptBody() string {
+	if runtime.GOOS == "windows" {
+		return `[Console]::Out.Write([string]::new('A', 524288))`
+	}
+	return `yes A | head -c 524288`
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for applyOutputCap.
+// ---------------------------------------------------------------------------
+
+func TestApplyOutputCap_BelowLimit_NoChange(t *testing.T) {
+	out, err := applyOutputCap("hello", "world", execOutputHardCapBytes)
+	assert.Equal(t, "hello", out)
+	assert.Equal(t, "world", err)
+}
+
+func TestApplyOutputCap_AtExactLimit_NoChange(t *testing.T) {
+	stdout := strings.Repeat("A", execOutputHardCapBytes)
+	out, err := applyOutputCap(stdout, "", execOutputHardCapBytes)
+	assert.Equal(t, stdout, out, "output exactly at limit must not be truncated")
+	assert.Empty(t, err)
+	assert.NotContains(t, out, execOutputTruncMarker)
+}
+
+// TestApplyOutputCap_StdoutExceedsLimit is a required test verifying that
+// when a command produces 2 MB of stdout, the capped output contains the
+// truncation marker and does not exceed the 1 MB ceiling (plus marker length).
+func TestApplyOutputCap_StdoutExceedsLimit_TruncatedWithMarker(t *testing.T) {
+	twoMB := strings.Repeat("A", 2*execOutputHardCapBytes)
+	out, err := applyOutputCap(twoMB, "", execOutputHardCapBytes)
+	assert.True(t, strings.HasSuffix(out, execOutputTruncMarker),
+		"capped stdout must end with the truncation marker")
+	assert.Empty(t, err, "stderr must be empty when stdout fills the cap")
+	assert.LessOrEqual(t, len(out)+len(err), execOutputHardCapBytes+len(execOutputTruncMarker),
+		"combined capped output must not exceed cap + marker")
+	assert.NotEqual(t, twoMB, out, "output must be shorter than original 2 MB")
+}
+
+func TestApplyOutputCap_CombinedExceedsLimit_StderrTruncated(t *testing.T) {
+	halfCap := strings.Repeat("A", execOutputHardCapBytes/2)
+	// stdout alone fits; adding extra stderr pushes combined over the cap.
+	out, err := applyOutputCap(halfCap, halfCap+strings.Repeat("B", 100), execOutputHardCapBytes)
+	assert.Equal(t, halfCap, out, "stdout must be unchanged when it fits in the cap")
+	assert.True(t, strings.HasSuffix(err, execOutputTruncMarker),
+		"stderr must end with the truncation marker when it is the buffer that overflows")
+	assert.LessOrEqual(t, len(out)+len(err), execOutputHardCapBytes+len(execOutputTruncMarker))
+}
+
+func TestApplyOutputCap_EmptyInputs_NoChange(t *testing.T) {
+	out, err := applyOutputCap("", "", execOutputHardCapBytes)
+	assert.Empty(t, out)
+	assert.Empty(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests via handleExecuteScript — required by AC.
+// ---------------------------------------------------------------------------
+
+// TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker is a required test (Issue #1978 AC):
+// an exec command producing 2 MB of output must result in capped output ending with the
+// truncation marker. Verified via the full stdout field in EventScriptCompleted.
+func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(overCapStdoutScriptBody()))
+	sc := testSignedCommandWithParams("esc-cap-over-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          platformShell(),
+		"execution_id":   "esc-cap-over-001",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+
+	// Full capped output is sent under the "stdout" key.
+	stdout, ok := evt.Details["stdout"].(string)
+	require.True(t, ok, "stdout field must be present and a string in EventScriptCompleted")
+
+	assert.True(t, strings.HasSuffix(stdout, execOutputTruncMarker),
+		"capped stdout must end with %q; got %d bytes ending in: %q",
+		execOutputTruncMarker, len(stdout), lastN(stdout, 50))
+	assert.LessOrEqual(t, len(stdout), execOutputHardCapBytes+len(execOutputTruncMarker),
+		"capped stdout must not exceed 1 MB + marker length")
+}
+
+// TestExecuteScriptHandler_OutputUnderCap_CapturedFully is a required test (Issue #1978 AC):
+// an exec command producing under 1 MB of output must be captured fully without a truncation marker.
+func TestExecuteScriptHandler_OutputUnderCap_CapturedFully(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(underCapStdoutScriptBody()))
+	sc := testSignedCommandWithParams("esc-cap-under-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content": scriptContent,
+		"shell":          platformShell(),
+		"execution_id":   "esc-cap-under-001",
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+
+	stdout, ok := evt.Details["stdout"].(string)
+	require.True(t, ok, "stdout field must be present and a string in EventScriptCompleted")
+
+	assert.NotContains(t, stdout, execOutputTruncMarker,
+		"output under 1 MB must not contain the truncation marker")
+	// 512 KB = 524288; allow for newlines added by the shell.
+	assert.GreaterOrEqual(t, len(stdout), 500*1024,
+		"output under cap must not be silently dropped (expected ~512 KB)")
+}
+
+// lastN returns the last n bytes of s as a string, for readable test failure messages.
+func lastN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
 
 // TestResolveRelayUID_SystemContext verifies that a system-context script
 // resolves to the steward process UID, making the relay socket chown a no-op.
@@ -156,6 +345,141 @@ func TestExecuteScriptHandler_LibraryScriptNoScope_NoRelaySocket(t *testing.T) {
 
 	assert.Empty(t, socketVal,
 		"library script with empty required_api_scope must NOT create a relay socket")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #2143 — stream script output to controller (secret-redacted).
+// ---------------------------------------------------------------------------
+
+// secretScriptBody returns a script that writes known-sensitive patterns to
+// stdout in the key=value form caught by audit.RedactString.
+func secretScriptBody() string {
+	if runtime.GOOS == "windows" {
+		return `Write-Output "password=hunter2 token=abc123 api_key=secret-key-value"`
+	}
+	return `echo "password=hunter2 token=abc123 api_key=secret-key-value"`
+}
+
+// TestScriptOutput_SecretsRedacted is a required test (Issue #2143 AC):
+// script output containing password=... / token=... / api-key patterns must
+// emit [REDACTED] in the LogEntry fields; cleartext secrets must be absent from
+// the emitted entry.
+func TestScriptOutput_SecretsRedacted(t *testing.T) {
+	emitter := &recordingEmitter{}
+	cb, _ := collectEvents()
+	h, err := New(&Config{
+		StewardID:    "steward-test",
+		OnStatus:     cb,
+		Logger:       newTestLogger(t),
+		EventEmitter: emitter,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	// Inline command (no script_id) so no library-script signature is required.
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(secretScriptBody()))
+	cmd := &cpTypes.Command{
+		ID:        "sec-redact-001",
+		Type:      cpTypes.CommandExecuteScript,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"script_content": scriptContent,
+			"shell":          platformShell(),
+			"execution_id":   "exec-sec-redact-001",
+		},
+	}
+	require.NoError(t, h.handleExecuteScript(context.Background(), cmd))
+
+	entry := firstScriptOutputEntry(emitter.Entries())
+	require.NotNil(t, entry, "expected a script_output LogEntry to be emitted")
+
+	stdout := entry.GetFields()["stdout"]
+
+	// Cleartext secrets must be absent.
+	assert.NotContains(t, stdout, "hunter2",
+		"cleartext password value must not appear in emitted LogEntry stdout")
+	assert.NotContains(t, stdout, "abc123",
+		"cleartext token value must not appear in emitted LogEntry stdout")
+	assert.NotContains(t, stdout, "secret-key-value",
+		"cleartext api_key value must not appear in emitted LogEntry stdout")
+
+	// Redaction placeholder must be present.
+	assert.Contains(t, stdout, "[REDACTED]",
+		"emitted stdout must contain [REDACTED] where secrets appeared")
+}
+
+// TestScriptOutput_BoundedAndAttributed is a required test (Issue #2143 AC):
+// oversized output is truncated to the preview cap; the emitted LogEntry carries
+// correct script_id, cfg_id, exit_code, and duration_ms attribution.
+func TestScriptOutput_BoundedAndAttributed(t *testing.T) {
+	emitter := &recordingEmitter{}
+	cb, _ := collectEvents()
+	h, err := New(&Config{
+		StewardID:    "steward-test",
+		OnStatus:     cb,
+		Logger:       newTestLogger(t),
+		EventEmitter: emitter,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	const wantScriptID = "lib-big-script"
+	const wantExecID = "exec-bounded-001"
+	const cmdID = "bounded-001"
+
+	// Use the existing 2 MB script to produce output well above scriptPreviewMaxBytes.
+	// Call handleExecuteScript directly so we can set script_id without a library-script
+	// signature (signature verification is the preflightScriptSignature concern, not ours here).
+	scriptContent := base64.StdEncoding.EncodeToString([]byte(overCapStdoutScriptBody()))
+	cmd := &cpTypes.Command{
+		ID:        cmdID,
+		Type:      cpTypes.CommandExecuteScript,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"script_content": scriptContent,
+			"shell":          platformShell(),
+			"execution_id":   wantExecID,
+			"script_id":      wantScriptID,
+		},
+	}
+
+	before := time.Now()
+	require.NoError(t, h.handleExecuteScript(context.Background(), cmd))
+	elapsed := time.Since(before)
+
+	entry := firstScriptOutputEntry(emitter.Entries())
+	require.NotNil(t, entry, "expected a script_output LogEntry to be emitted")
+
+	fields := entry.GetFields()
+
+	// Attribution checks.
+	assert.Equal(t, "script_output", fields["event_kind"])
+	assert.Equal(t, wantScriptID, fields["script_id"],
+		"script_id field must match the dispatched script_id param")
+	assert.Equal(t, cmdID, fields["cfg_id"],
+		"cfg_id field must equal the command ID (triggering cfg/script identifier)")
+	assert.Equal(t, "0", fields["exit_code"],
+		"exit_code field must be '0' for a successful script")
+
+	durationMS := fields["duration_ms"]
+	require.NotEmpty(t, durationMS, "duration_ms field must be present")
+	// Sanity: duration_ms must be a non-negative decimal integer.
+	var durVal int64
+	for _, ch := range durationMS {
+		require.True(t, ch >= '0' && ch <= '9',
+			"duration_ms %q contains non-digit character %q", durationMS, ch)
+		durVal = durVal*10 + int64(ch-'0')
+	}
+	assert.GreaterOrEqual(t, durVal, int64(0), "duration_ms must be non-negative")
+	assert.LessOrEqual(t, time.Duration(durVal)*time.Millisecond, elapsed+time.Second,
+		"duration_ms must not exceed wall-clock elapsed time plus slack")
+
+	// Bounds check: stdout field in the LogEntry must be bounded to scriptPreviewMaxBytes.
+	stdout := fields["stdout"]
+	assert.LessOrEqual(t, len(stdout), scriptPreviewMaxBytes,
+		"stdout in the emitted LogEntry must be bounded to scriptPreviewMaxBytes (%d bytes)", scriptPreviewMaxBytes)
 }
 
 // TestExecuteScriptHandler_InlineCommandWithScope_NoRelaySocket is the AC1

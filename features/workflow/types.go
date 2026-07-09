@@ -226,6 +226,11 @@ const (
 
 	// StepTypeTransform executes data transformation operations
 	StepTypeTransform StepType = "transform"
+
+	// StepTypeQueryRingHealth queries the health of a deployment ring for rollout gating.
+	// Counts on-version, failed, and pending stewards in the ring and exposes the results
+	// as step outputs (on_version_pct, failed_pct, pending_count).
+	StepTypeQueryRingHealth StepType = "query_ring_health"
 )
 
 // Condition defines execution conditions for conditional steps

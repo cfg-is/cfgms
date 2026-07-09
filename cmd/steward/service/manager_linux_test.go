@@ -26,7 +26,7 @@ func TestLinuxInstallFingerprintMismatch(t *testing.T) {
 
 	certPEM, _ := generateTestCACert(t)
 	m := New("/usr/bin/cfgms-steward")
-	err := m.Install("tok_test123", certPEM, "deadbeefdeadbeefdeadbeef")
+	err := m.Install("tok_test123", "", certPEM, "deadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fingerprint mismatch")
 
@@ -37,7 +37,7 @@ func TestLinuxInstallFingerprintMismatch(t *testing.T) {
 }
 
 // TestLinuxInstallCACertWritten verifies that the CA cert is written to the prefixed
-// platform path with mode 0644 when a correct fingerprint is provided.
+// platform path with mode 0444 (ADR-013 §3: immutable to non-root, tamper-evident).
 func TestLinuxInstallCACertWritten(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, fingerprint := generateTestCACert(t)
@@ -51,7 +51,7 @@ func TestLinuxInstallCACertWritten(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm(), "CA cert must be written with mode 0644")
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm(), "CA cert must be written with mode 0444 per ADR-013 §3")
 }
 
 func TestLinuxManagerIsElevated(t *testing.T) {
@@ -67,7 +67,7 @@ func TestLinuxManagerInstallRequiresElevation(t *testing.T) {
 		t.Skip("skipping elevation check — running as root")
 	}
 	m := New("/usr/bin/cfgms-steward")
-	err := m.Install("tok_test123", "", "")
+	err := m.Install("tok_test123", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "root")
 }
@@ -94,20 +94,25 @@ func TestLinuxManagerStatusNotInstalled(t *testing.T) {
 		assert.False(t, status.Running, "should not be running when unit file is absent")
 	}
 	assert.Equal(t, linuxServiceName, status.ServiceName)
-	assert.Equal(t, linuxInstallPath, status.InstallPath)
+	assert.Equal(t, linuxLauncherPath, status.InstallPath)
 }
 
 func TestGenerateSystemdUnit(t *testing.T) {
 	token := "tok_unit_test_abc123"
-	unit := generateSystemdUnit(token)
+	unit := generateSystemdUnit(token, "")
 
 	assert.Contains(t, unit, "[Unit]")
 	assert.Contains(t, unit, "[Service]")
 	assert.Contains(t, unit, "[Install]")
 	assert.Contains(t, unit, "Restart=always")
 	assert.Contains(t, unit, "RestartSec=10")
-	assert.Contains(t, unit, `--regtoken "`+token+`"`)
-	assert.Contains(t, unit, linuxInstallPath)
+	assert.Contains(t, unit, "--regtoken "+token)
+	// Launcher-managed: ExecStart runs the launcher, which supervises the steward
+	// and forwards the token via --child-args. This is what makes the steward
+	// push-upgradeable.
+	assert.Contains(t, unit, linuxLauncherPath+" run ")
+	assert.Contains(t, unit, "--child-args")
+	assert.NotContains(t, unit, linuxInstallPath+" --regtoken", "ExecStart must run the launcher, not the bare steward")
 	assert.Contains(t, unit, "WantedBy=multi-user.target")
 
 	// Verify token appears exactly once (no duplication).
@@ -116,9 +121,29 @@ func TestGenerateSystemdUnit(t *testing.T) {
 }
 
 func TestGenerateSystemdUnitContainsRestartPolicy(t *testing.T) {
-	unit := generateSystemdUnit("tok_test")
+	unit := generateSystemdUnit("tok_test", "")
 	assert.Contains(t, unit, "Restart=always", "Restart=always required by acceptance criteria")
 	assert.Contains(t, unit, "RestartSec=10", "RestartSec=10 required by acceptance criteria")
+}
+
+// TestGenerateSystemdUnitWithControllerURL verifies that generateSystemdUnit embeds
+// --controller-url in ExecStart when a non-empty URL is provided (ADR-013 §3, Issue #1517).
+func TestGenerateSystemdUnitWithControllerURL(t *testing.T) {
+	token := "tok_test_url"
+	controllerURL := "https://ctrl.example.com"
+	unit := generateSystemdUnit(token, controllerURL)
+
+	assert.Contains(t, unit, "--controller-url "+controllerURL)
+	assert.Contains(t, unit, "--regtoken "+token)
+	assert.Contains(t, unit, linuxLauncherPath)
+
+	// Verify token and URL each appear exactly once.
+	assert.Equal(t, 1, strings.Count(unit, token), "token should appear exactly once")
+	assert.Equal(t, 1, strings.Count(unit, controllerURL), "controller URL should appear exactly once")
+
+	// Without URL: --controller-url must not appear.
+	unitNoURL := generateSystemdUnit(token, "")
+	assert.NotContains(t, unitNoURL, "--controller-url")
 }
 
 func TestCopyBinaryPermissions(t *testing.T) {
@@ -136,11 +161,19 @@ func TestCopyBinaryPermissions(t *testing.T) {
 
 func TestSystemdUnitFilePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cfgms-steward.service")
-	content := generateSystemdUnit("tok_test")
+	content := generateSystemdUnit("tok_test", "")
 	require.NoError(t, writeSystemdUnit(path, []byte(content)))
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	// 0600: owner rw (root only); systemd reads as root, group read exposes the token
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+// TestGenerateSystemdUnitSetsLogDir: the installer-managed steward must log to
+// the platform-conventional path (#2378) — never the /tmp/cfgms fallback.
+func TestGenerateSystemdUnitSetsLogDir(t *testing.T) {
+	unit := generateSystemdUnit("tok_test", "")
+	assert.Contains(t, unit, "Environment=CFGMS_LOG_DIR=/var/log/cfgms",
+		"systemd unit must set the platform-conventional log directory")
 }

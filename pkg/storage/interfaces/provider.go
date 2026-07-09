@@ -48,6 +48,8 @@ type BusinessStoreBundle struct {
 	Push                business.PushStore
 	PendingRegistration business.PendingRegistrationStore
 	IPTrust             business.IPTrustStore
+	PendingRefresh      business.PendingRefreshStore // Issue #2098: registration-refresh approval queue
+	RefreshPolicy       business.RefreshPolicyStore  // Issue #2098: per-tenant refresh policy
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -56,6 +58,14 @@ type BusinessStoreBundle struct {
 // store would otherwise open its own connection to the same file.
 type BusinessStoreOpener interface {
 	OpenBusinessStores(path string) (*BusinessStoreBundle, error)
+}
+
+// RefreshStoreCreator is an optional StorageProvider extension for backends that
+// support the per-tenant refresh policy and pending-refresh approval queue (Issue #2329).
+// Backends that do not implement this interface leave those stores nil in the manager.
+type RefreshStoreCreator interface {
+	CreateRefreshPolicyStore(config map[string]interface{}) (business.RefreshPolicyStore, error)
+	CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error)
 }
 
 // StorageProvider defines the interface that all storage backends must implement.
@@ -84,6 +94,10 @@ type StorageProvider interface {
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
 	GetVersion() string
+
+	// ClusterCapable returns true if this provider can serve as shared state
+	// across multiple CFGMS controller nodes in cluster mode.
+	ClusterCapable() bool
 }
 
 // Global provider registry (Salt-style auto-registration)
@@ -528,6 +542,8 @@ type StorageManager struct {
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
+	pendingRefreshStore      business.PendingRefreshStore // Issue #2098: registration-refresh approval queue
+	refreshPolicyStore       business.RefreshPolicyStore  // Issue #2098: per-tenant refresh policy
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -620,6 +636,28 @@ func (sm *StorageManager) SetIPTrustStore(s business.IPTrustStore) {
 	sm.ipTrustStore = s
 }
 
+// GetPendingRefreshStore returns the pending-refresh approval queue (Issue #2098).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetPendingRefreshStore() business.PendingRefreshStore {
+	return sm.pendingRefreshStore
+}
+
+// SetPendingRefreshStore wires the pending-refresh store after construction.
+func (sm *StorageManager) SetPendingRefreshStore(s business.PendingRefreshStore) {
+	sm.pendingRefreshStore = s
+}
+
+// GetRefreshPolicyStore returns the per-tenant refresh policy store (Issue #2098).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetRefreshPolicyStore() business.RefreshPolicyStore {
+	return sm.refreshPolicyStore
+}
+
+// SetRefreshPolicyStore wires the per-tenant refresh policy store after construction.
+func (sm *StorageManager) SetRefreshPolicyStore(s business.RefreshPolicyStore) {
+	sm.refreshPolicyStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -663,6 +701,9 @@ func (sm *StorageManager) Close() error {
 		sm.triggerStore,
 		sm.pushStore,
 		sm.pendingRegistrationStore,
+		sm.ipTrustStore,
+		sm.refreshPolicyStore,
+		sm.pendingRefreshStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -753,6 +794,122 @@ func NewStorageManagerFromStores(
 	}
 }
 
+// CreateClusterStorageManager composes the cluster storage tier from the database provider
+// (Postgres-backed business stores) using pgConnStr as the libpq connection string.
+//
+// s3Config documents the S3-compatible blob store configuration required for cluster
+// installer artifact storage. The blob store itself is NOT created here — callers are
+// responsible for initialising it separately (e.g. via blob.CreateBlobStoreFromConfig("s3", s3Config)).
+// Passing nil is accepted but means the caller must configure S3 via CFGMS_S3_INSTALLER_BUCKET.
+//
+// The "database" provider must be registered before calling this function via a blank-import
+// in the calling binary's main.go or in a providers_test.go file for tests.
+//
+// Used by initialization.go (--init) and server.go (startup) when ha.mode == cluster.
+func CreateClusterStorageManager(pgConnStr string, _ map[string]interface{}) (*StorageManager, error) {
+	if pgConnStr == "" {
+		return nil, fmt.Errorf("cluster storage requires a Postgres connection string (storage.cluster.postgres_dsn or CFGMS_STORAGE_CLUSTER_POSTGRES_DSN)")
+	}
+
+	dbCfg := map[string]interface{}{"dsn": pgConnStr}
+
+	provider, err := GetStorageProvider("database")
+	if err != nil {
+		return nil, fmt.Errorf("database provider not registered for cluster storage (blank-import database provider in calling binary or test providers_test.go): %w", err)
+	}
+
+	clientTenantStore, err := provider.CreateClientTenantStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create client tenant store: %w", err)
+	}
+	configStore, err := provider.CreateConfigStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create config store: %w", err)
+	}
+	auditStore, err := provider.CreateAuditStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create audit store: %w", err)
+	}
+	rbacStore, err := provider.CreateRBACStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create RBAC store: %w", err)
+	}
+	tenantStore, err := provider.CreateTenantStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create tenant store: %w", err)
+	}
+	registrationTokenStore, err := provider.CreateRegistrationTokenStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create registration token store: %w", err)
+	}
+	sessionStore, err := provider.CreateSessionStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create session store: %w", err)
+	}
+	stewardStore, err := provider.CreateStewardStore(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster storage: failed to create steward store: %w", err)
+	}
+	commandStore, err := provider.CreateCommandStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create command store: %w", err)
+	}
+	triggerStore, err := provider.CreateTriggerStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create trigger store: %w", err)
+	}
+	pushStore, err := provider.CreatePushStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create push store: %w", err)
+	}
+	ipTrustStore, err := provider.CreateIPTrustStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create IP trust store: %w", err)
+	}
+	pendingRegStore, err := provider.CreatePendingRegistrationStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create pending registration store: %w", err)
+	}
+
+	sm := &StorageManager{
+		providerName:           "database",
+		provider:               provider,
+		clientTenantStore:      clientTenantStore,
+		configStore:            configStore,
+		auditStore:             auditStore,
+		rbacStore:              rbacStore,
+		tenantStore:            tenantStore,
+		registrationTokenStore: registrationTokenStore,
+		sessionStore:           sessionStore,
+		stewardStore:           stewardStore,
+		commandStore:           commandStore,
+		triggerStore:           triggerStore,
+		pushStore:              pushStore,
+		ipTrustStore:           ipTrustStore,
+	}
+	if pendingRegStore != nil {
+		sm.SetPendingRegistrationStore(pendingRegStore)
+	}
+	// Wire refresh stores if the provider implements the optional RefreshStoreCreator extension.
+	if rsc, ok := provider.(RefreshStoreCreator); ok {
+		refreshPolicyStore, err := rsc.CreateRefreshPolicyStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create refresh policy store: %w", err)
+		}
+		if refreshPolicyStore != nil {
+			sm.SetRefreshPolicyStore(refreshPolicyStore)
+		}
+		pendingRefreshStore, err := rsc.CreatePendingRefreshStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create pending refresh store: %w", err)
+		}
+		if pendingRefreshStore != nil {
+			sm.SetPendingRefreshStore(pendingRefreshStore)
+		}
+	}
+	return sm, nil
+}
+
 // CreateOSSStorageManager composes the OSS storage tier from a flatfile provider (for
 // config/audit/steward stores) and a SQLite provider (for business-data stores), following
 // the ADR-003 store-to-provider mapping.
@@ -790,6 +947,10 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil {
 		return nil, fmt.Errorf("failed to create steward store (flatfile): %w", err)
 	}
+	ipTrustStore, err := ffProvider.CreateIPTrustStore(flatfileCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ip trust store (flatfile): %w", err)
+	}
 
 	// Prefer single-connection bundle when the provider supports it.
 	// This opens the SQLite database exactly once and shares the *sql.DB across
@@ -807,6 +968,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 			stewardStore, bundle.Command, bundle.Trigger, bundle.Push,
 		)
 		sm.SetPendingRegistrationStore(bundle.PendingRegistration)
+		sm.SetIPTrustStore(ipTrustStore)
+		sm.SetPendingRefreshStore(bundle.PendingRefresh)
+		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
 		return sm, nil
 	}
 
@@ -853,5 +1017,10 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sessionStore, stewardStore, commandStore, triggerStore, pushStore,
 	)
 	sm.SetPendingRegistrationStore(pendingRegStore)
+	sm.SetIPTrustStore(ipTrustStore)
+	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle
+	// (OpenBusinessStores). The non-bundle fallback path leaves them nil — acceptable since
+	// this path is only taken when the provider does not implement BusinessStoreOpener,
+	// which in practice means unit tests that do not exercise the refresh flow.
 	return sm, nil
 }

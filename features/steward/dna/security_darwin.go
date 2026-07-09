@@ -8,7 +8,6 @@ package dna
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -19,11 +18,9 @@ const darwinSecCmdTimeout = 30 * time.Second
 // CollectUsers gathers user account information on macOS
 func (d *DarwinSecurityCollector) CollectUsers(ctx context.Context, attributes map[string]string) error {
 	// System users using dscl
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "dscl", ".", "-list", "/Users").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "dscl", ".", "-list", "/Users"); err == nil {
 		d.parseSystemUsers(ctx, string(output), attributes)
 	}
-	cancel()
 
 	// User account details
 	d.collectUserDetails(ctx, attributes)
@@ -37,18 +34,14 @@ func (d *DarwinSecurityCollector) CollectUsers(ctx context.Context, attributes m
 // CollectGroups gathers group information on macOS
 func (d *DarwinSecurityCollector) CollectGroups(ctx context.Context, attributes map[string]string) error {
 	// System groups using dscl
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "dscl", ".", "-list", "/Groups").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "dscl", ".", "-list", "/Groups"); err == nil {
 		d.parseSystemGroups(ctx, string(output), attributes)
 	}
-	cancel()
 
 	// Administrative users
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx2, "dseditgroup", "-o", "checkmember", "-m", "admin").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "dseditgroup", "-o", "checkmember", "-m", "admin"); err == nil {
 		d.parseAdminUsers(ctx, string(output), attributes)
 	}
-	cancel2()
 
 	return nil
 }
@@ -59,8 +52,7 @@ func (d *DarwinSecurityCollector) CollectPermissions(ctx context.Context, attrib
 	d.collectSystemPermissions(ctx, attributes)
 
 	// SIP (System Integrity Protection) status
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "csrutil", "status").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "csrutil", "status"); err == nil {
 		sipStatus := strings.TrimSpace(string(output))
 		if strings.Contains(sipStatus, "enabled") {
 			attributes["sip_status"] = "enabled"
@@ -70,14 +62,11 @@ func (d *DarwinSecurityCollector) CollectPermissions(ctx context.Context, attrib
 			attributes["sip_status"] = "unknown"
 		}
 	}
-	cancel()
 
 	// Gatekeeper status
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx2, "spctl", "--status").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "spctl", "--status"); err == nil {
 		attributes["gatekeeper_status"] = strings.TrimSpace(string(output))
 	}
-	cancel2()
 
 	// File system permissions on key directories
 	d.collectKeyDirectoryPermissions(ctx, attributes)
@@ -94,12 +83,10 @@ func (d *DarwinSecurityCollector) CollectCertificates(ctx context.Context, attri
 	d.collectKeychainCertificates(ctx, attributes, "login")
 
 	// System roots
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "security", "list-keychains").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "security", "list-keychains"); err == nil {
 		keychains := strings.Split(strings.TrimSpace(string(output)), "\n")
 		attributes["keychain_count"] = fmt.Sprintf("%d", len(keychains))
 	}
-	cancel()
 
 	// Code signing certificates
 	d.collectCodeSigningCertificates(ctx, attributes)
@@ -120,8 +107,7 @@ func (d *DarwinSecurityCollector) parseSystemUsers(ctx context.Context, output s
 		}
 
 		// Get user ID to distinguish system vs regular users
-		cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-		if uidOutput, err := exec.CommandContext(cmdCtx, "id", "-u", user).Output(); err == nil {
+		if uidOutput, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "id", "-u", user); err == nil {
 			uidStr := strings.TrimSpace(string(uidOutput))
 			if uid, parseErr := strconv.Atoi(uidStr); parseErr == nil {
 				if uid >= 500 && uid < 65534 { // Regular user range on macOS
@@ -131,7 +117,6 @@ func (d *DarwinSecurityCollector) parseSystemUsers(ctx context.Context, output s
 				}
 			}
 		}
-		cancel()
 	}
 
 	attributes["total_user_count"] = fmt.Sprintf("%d", len(users))
@@ -153,8 +138,7 @@ func (d *DarwinSecurityCollector) parseSystemUsers(ctx context.Context, output s
 // collectUserDetails collects detailed user information
 func (d *DarwinSecurityCollector) collectUserDetails(ctx context.Context, attributes map[string]string) {
 	// Currently logged in users
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "who").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "who"); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		var loggedInUsers []string
 		for _, line := range lines {
@@ -171,11 +155,9 @@ func (d *DarwinSecurityCollector) collectUserDetails(ctx context.Context, attrib
 			attributes["logged_in_users"] = strings.Join(loggedInUsers, ",")
 		}
 	}
-	cancel()
 
 	// Last login information
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx2, "last", "-10").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "last", "-10"); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var recentLogins []string
 		for i, line := range lines {
@@ -194,16 +176,12 @@ func (d *DarwinSecurityCollector) collectUserDetails(ctx context.Context, attrib
 			attributes["recent_login_users"] = strings.Join(recentLogins, ",")
 		}
 	}
-	cancel2()
 }
 
 // collectLoginShells collects login shell information
 func (d *DarwinSecurityCollector) collectLoginShells(ctx context.Context, attributes map[string]string) {
 	// Available shells
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	defer cancel()
-
-	if output, err := exec.CommandContext(cmdCtx, "cat", "/etc/shells").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "cat", "/etc/shells"); err == nil {
 		shells := strings.Split(string(output), "\n")
 		var validShells []string
 		for _, shell := range shells {
@@ -232,8 +210,7 @@ func (d *DarwinSecurityCollector) parseSystemGroups(ctx context.Context, output 
 		}
 
 		// Get group ID to distinguish system vs regular groups
-		cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-		if gidOutput, err := exec.CommandContext(cmdCtx, "dscl", ".", "-read", "/Groups/"+group, "PrimaryGroupID").Output(); err == nil {
+		if gidOutput, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "dscl", ".", "-read", "/Groups/"+group, "PrimaryGroupID"); err == nil {
 			gidLine := strings.TrimSpace(string(gidOutput))
 			if strings.Contains(gidLine, ":") {
 				parts := strings.SplitN(gidLine, ":", 2)
@@ -249,7 +226,6 @@ func (d *DarwinSecurityCollector) parseSystemGroups(ctx context.Context, output 
 				}
 			}
 		}
-		cancel()
 	}
 
 	attributes["total_group_count"] = fmt.Sprintf("%d", len(groups))
@@ -271,10 +247,7 @@ func (d *DarwinSecurityCollector) parseSystemGroups(ctx context.Context, output 
 // parseAdminUsers parses administrative users
 func (d *DarwinSecurityCollector) parseAdminUsers(ctx context.Context, _ string, attributes map[string]string) {
 	// This is a simple approach - in practice, we'd want to list admin group members
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	defer cancel()
-
-	if output, err := exec.CommandContext(cmdCtx, "dseditgroup", "-o", "read", "-t", "user", "admin").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "dseditgroup", "-o", "read", "-t", "user", "admin"); err == nil {
 		adminOutput := string(output)
 		// Count admin users by looking for "Users:" line
 		lines := strings.Split(adminOutput, "\n")
@@ -299,8 +272,7 @@ func (d *DarwinSecurityCollector) collectSystemPermissions(ctx context.Context, 
 	keyDirs := []string{"/System", "/usr", "/bin", "/sbin", "/Applications"}
 
 	for _, dir := range keyDirs {
-		cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-		if output, err := exec.CommandContext(cmdCtx, "ls", "-ld", dir).Output(); err == nil {
+		if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "ls", "-ld", dir); err == nil {
 			permLine := strings.TrimSpace(string(output))
 			fields := strings.Fields(permLine)
 			if len(fields) > 0 {
@@ -312,44 +284,37 @@ func (d *DarwinSecurityCollector) collectSystemPermissions(ctx context.Context, 
 				attributes["permissions_"+dirName] = perms
 			}
 		}
-		cancel()
 	}
 }
 
 // collectKeyDirectoryPermissions collects permissions on key directories
 func (d *DarwinSecurityCollector) collectKeyDirectoryPermissions(ctx context.Context, attributes map[string]string) {
 	// Check /etc permissions
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "ls", "-ld", "/etc").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "ls", "-ld", "/etc"); err == nil {
 		permLine := strings.TrimSpace(string(output))
 		fields := strings.Fields(permLine)
 		if len(fields) > 0 {
 			attributes["etc_permissions"] = fields[0]
 		}
 	}
-	cancel()
 
 	// Check /tmp permissions
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx2, "ls", "-ld", "/tmp").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "ls", "-ld", "/tmp"); err == nil {
 		permLine := strings.TrimSpace(string(output))
 		fields := strings.Fields(permLine)
 		if len(fields) > 0 {
 			attributes["tmp_permissions"] = fields[0]
 		}
 	}
-	cancel2()
 
 	// Check /var permissions
-	cmdCtx3, cancel3 := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx3, "ls", "-ld", "/var").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "ls", "-ld", "/var"); err == nil {
 		permLine := strings.TrimSpace(string(output))
 		fields := strings.Fields(permLine)
 		if len(fields) > 0 {
 			attributes["var_permissions"] = fields[0]
 		}
 	}
-	cancel3()
 }
 
 // collectKeychainCertificates collects certificates from keychains
@@ -360,10 +325,7 @@ func (d *DarwinSecurityCollector) collectKeychainCertificates(ctx context.Contex
 		args = append(args, "-s", keychainName)
 	}
 
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	defer cancel()
-
-	if output, err := exec.CommandContext(cmdCtx, "security", args...).Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "security", args...); err == nil {
 		certOutput := string(output)
 		// Count certificate entries
 		certCount := strings.Count(certOutput, "keychain:")
@@ -404,8 +366,7 @@ func (d *DarwinSecurityCollector) extractCertificateNames(output string, attribu
 // collectCodeSigningCertificates collects code signing certificate information
 func (d *DarwinSecurityCollector) collectCodeSigningCertificates(ctx context.Context, attributes map[string]string) {
 	// List code signing identities
-	cmdCtx, cancel := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx, "security", "find-identity", "-v", "-p", "codesigning").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "security", "find-identity", "-v", "-p", "codesigning"); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var validCerts int
 
@@ -418,11 +379,9 @@ func (d *DarwinSecurityCollector) collectCodeSigningCertificates(ctx context.Con
 
 		attributes["code_signing_certificates"] = fmt.Sprintf("%d", validCerts)
 	}
-	cancel()
 
 	// Check for Developer ID certificates specifically
-	cmdCtx2, cancel2 := context.WithTimeout(ctx, darwinSecCmdTimeout)
-	if output, err := exec.CommandContext(cmdCtx2, "security", "find-identity", "-v", "-s", "Developer ID").Output(); err == nil {
+	if output, err := darwinRunCmd(ctx, darwinSecCmdTimeout, "security", "find-identity", "-v", "-s", "Developer ID"); err == nil {
 		lines := strings.Split(string(output), "\n")
 		var devIDCerts int
 
@@ -437,5 +396,4 @@ func (d *DarwinSecurityCollector) collectCodeSigningCertificates(ctx context.Con
 			attributes["developer_id_certificates"] = fmt.Sprintf("%d", devIDCerts)
 		}
 	}
-	cancel2()
 }

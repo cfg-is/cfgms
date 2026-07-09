@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// createJobRequest is the JSON body for POST /api/v1/jobs.
+type createJobRequest struct {
+	Selector          string `json:"selector"`
+	BatchSize         int    `json:"batch_size"`
+	PreviousConfigRef string `json:"previous_config_ref,omitempty"`
+}
+
+// createJobResponse is the JSON body returned on 202 Accepted.
+type createJobResponse struct {
+	JobID       string `json:"job_id"`
+	Status      string `json:"status"`
+	TargetCount int    `json:"target_count"`
+}
+
+// handleCreateJob handles POST /api/v1/jobs.
+//
+// Accepts a fleet selector and batch size, resolves the selector to a steward
+// set, persists an initial BatchJob record, starts the rolling-batch executor
+// asynchronously, and returns 202 Accepted with the job ID and target count.
+func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
+	if s.batchJobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Batch job service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+
+	var req createJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+
+	if req.Selector == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"selector is required: use 'all' to match all stewards", "MISSING_SELECTOR")
+		return
+	}
+
+	batchSize := req.BatchSize
+	if batchSize <= 0 {
+		batchSize = 10
+	}
+
+	// safeSelector strips newlines so CodeQL's go/log-injection taint does not
+	// reach the log calls below (logging.SanitizeLogValue is not modeled by CodeQL).
+	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
+
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
+	if err != nil {
+		s.logger.Info("Invalid selector expression",
+			"selector", safeSelector, "error", err)
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
+		return
+	}
+
+	// Scope to the caller's subtree. An explicit selector prefix must be within
+	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
+	// Admin callers (empty tenantID) are unrestricted.
+	if parsedTenantPath != "" {
+		if !principal.IsAdmin && tenantID != "" &&
+			parsedTenantPath != tenantID &&
+			!strings.HasPrefix(parsedTenantPath, tenantID+"/") {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if !principal.IsAdmin {
+		filter.TenantSubtree = tenantID
+	}
+
+	results, err := s.fleetQuery.Search(r.Context(), filter)
+	if err != nil {
+		s.logger.Error("Fleet query failed during job creation", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+		return
+	}
+
+	targetIDs := make([]string, 0, len(results))
+	for _, res := range results {
+		targetIDs = append(targetIDs, res.ID)
+	}
+
+	// jobID is captured before the struct so log calls in this handler and the
+	// goroutine reference a local that CodeQL does not taint via job.Selector.
+	jobID := uuid.New().String()
+	now := time.Now().UTC()
+	job := &batchjob.BatchJob{
+		ID:       jobID,
+		TenantID: tenantID,
+		Selector: req.Selector,
+		Config: batchjob.BatchJobConfig{
+			BatchSize:         batchSize,
+			PreviousConfigRef: req.PreviousConfigRef,
+		},
+		Targets:   targetIDs,
+		Status:    batchjob.BatchJobStatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := s.batchJobStore.CreateBatchJob(r.Context(), job); err != nil {
+		s.logger.Error("Failed to persist batch job", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create job", "INTERNAL_ERROR")
+		return
+	}
+
+	s.logger.Info("Batch job created",
+		"job_id", jobID,
+		"selector", safeSelector,
+		"target_count", len(targetIDs),
+		"batch_size", strings.ReplaceAll(strconv.Itoa(batchSize), "\n", ""))
+
+	// Start the executor asynchronously — the HTTP response returns immediately.
+	if s.batchJobExecutor != nil {
+		executor := s.batchJobExecutor
+		go func() {
+			if execErr := executor.Execute(context.Background(), job); execErr != nil {
+				s.logger.Error("Batch job execution failed",
+					"job_id", jobID, "error", execErr)
+			}
+		}()
+	}
+
+	s.writeResponse(w, http.StatusAccepted, createJobResponse{
+		JobID:       job.ID,
+		Status:      string(job.Status),
+		TargetCount: len(targetIDs),
+	})
+}
+
+// handleGetJob handles GET /api/v1/jobs/{id}.
+//
+// Returns the full BatchJob JSON for the caller's tenant. Rejects with 404
+// when the job does not exist and 403 when the job belongs to a different tenant.
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	if s.batchJobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Batch job service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+
+	vars := mux.Vars(r)
+	jobID := vars["id"]
+
+	job, err := s.batchJobStore.GetBatchJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, batchjob.ErrBatchJobNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Job not found", "NOT_FOUND")
+			return
+		}
+		s.logger.Error("Failed to retrieve batch job",
+			"job_id", logging.SanitizeLogValue(jobID), "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve job", "INTERNAL_ERROR")
+		return
+	}
+
+	if !principal.IsAdmin && job.TenantID != tenantID {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+		return
+	}
+
+	s.writeSuccessResponse(w, job)
+}

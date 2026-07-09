@@ -13,14 +13,20 @@ import (
 	"os"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/modules/script"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
+	"github.com/cfgis/cfgms/pkg/audit"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 const (
 	scriptPreviewMaxBytes   = 4096
+	execOutputHardCapBytes  = 1 << 20 // 1 MB combined stdout+stderr cap
+	execOutputTruncMarker   = "\n[output truncated at 1 MB]"
 	defaultScriptTimeoutSec = 900 // 15 minutes
 )
 
@@ -194,6 +200,9 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 		return nil
 	}
 
+	// Apply 1 MB hard cap on combined stdout+stderr before generating previews.
+	result.Stdout, result.Stderr = applyOutputCap(result.Stdout, result.Stderr, execOutputHardCapBytes)
+
 	// Truncate previews to cap; excess bytes are silently dropped.
 	// stdout_preview and stderr_preview are NEVER logged — only byte counts are.
 	stdoutPreview := truncatePreview(result.Stdout, scriptPreviewMaxBytes)
@@ -219,9 +228,60 @@ func (h *Handler) handleExecuteScript(ctx context.Context, cmd *cpTypes.Command)
 			"duration_ms":    result.Duration.Milliseconds(),
 			"stdout_preview": stdoutPreview,
 			"stderr_preview": stderrPreview,
+			"stdout":         result.Stdout, // full capped output (up to 1 MB); controller reads this key
+			"stderr":         result.Stderr, // full capped output (up to 1 MB); controller reads this key
 		},
 	})
+
+	// Emit script output via the S3 EventEmitter (additive to the ControlChannel path above).
+	// stdout/stderr previews are secret-redacted then control-char-sanitized before emission.
+	// Enqueue is non-blocking; the caller is never stalled on a slow or full emitter buffer.
+	h.emitScriptOutput(cmd.ID, scriptID, executionID, result.ExitCode, result.Duration, stdoutPreview, stderrPreview)
+
 	return nil
+}
+
+// emitScriptOutput enqueues a script_output LogEntry on the S3 EventEmitter when one is
+// configured. stdout and stderr are the already-bounded preview strings (scriptPreviewMaxBytes).
+// Redaction is applied before sanitization: RedactString catches key=value patterns in free-form
+// text; SanitizeLogValue strips control characters. RedactMap catches any field whose key matches
+// the RedactedKeys deny-list. A nil emitter is a silent no-op.
+func (h *Handler) emitScriptOutput(cmdID, scriptID, executionID string, exitCode int, duration time.Duration, stdout, stderr string) {
+	if h.eventEmitter == nil {
+		return
+	}
+
+	redactedStdout := logging.SanitizeLogValue(audit.RedactString(stdout))
+	redactedStderr := logging.SanitizeLogValue(audit.RedactString(stderr))
+
+	rawFields := map[string]interface{}{
+		"event_kind":   "script_output",
+		"cfg_id":       cmdID,
+		"execution_id": executionID,
+		"exit_code":    fmt.Sprintf("%d", exitCode),
+		"duration_ms":  fmt.Sprintf("%d", duration.Milliseconds()),
+		"stdout":       redactedStdout,
+		"stderr":       redactedStderr,
+	}
+	if scriptID != "" {
+		rawFields["script_id"] = scriptID
+	}
+
+	redactedFields := audit.RedactMap(rawFields)
+	pbFields := make(map[string]string, len(redactedFields))
+	for k, v := range redactedFields {
+		if sv, ok := v.(string); ok {
+			pbFields[k] = sv
+		}
+	}
+
+	h.eventEmitter.Enqueue(&transportpb.LogEntry{
+		StewardId: h.stewardID,
+		Level:     transportpb.Severity_SEVERITY_INFO,
+		Message:   "script_output",
+		Timestamp: timestamppb.Now(),
+		Fields:    pbFields,
+	})
 }
 
 // resolveRelayUID returns the UID the per-execution relay socket should be
@@ -239,6 +299,28 @@ func resolveRelayUID(execCtx script.ExecutionContext, logger logging.Logger) int
 		return os.Getuid()
 	}
 	return uid
+}
+
+// applyOutputCap enforces a combined hard cap on stdout+stderr.
+// stdout is filled first; remaining capacity goes to stderr.
+// Appends execOutputTruncMarker to whichever buffer is truncated.
+// Returns unchanged strings when len(stdout)+len(stderr) <= capBytes.
+func applyOutputCap(stdout, stderr string, capBytes int) (string, string) {
+	if len(stdout)+len(stderr) <= capBytes {
+		return stdout, stderr
+	}
+	markerLen := len(execOutputTruncMarker)
+	available := capBytes - markerLen
+	if available < 0 {
+		available = 0
+	}
+	if len(stdout) >= available {
+		// stdout alone fills or exceeds the available budget; drop stderr.
+		return stdout[:available] + execOutputTruncMarker, ""
+	}
+	// stdout fits; give stderr the remaining budget.
+	remaining := available - len(stdout)
+	return stdout, stderr[:remaining] + execOutputTruncMarker
 }
 
 // truncatePreview returns at most maxBytes bytes of s; excess is silently dropped.

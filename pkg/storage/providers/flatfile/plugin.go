@@ -53,10 +53,11 @@
 //
 // # Supported Stores
 //
-// This provider implements ConfigStore and AuditStore. All other store factory
-// methods (CreateRBACStore, CreateTenantStore,
-// CreateRegistrationTokenStore, CreateClientTenantStore) return ErrNotSupported,
-// as these belong to the business-data tier (SQLite, sub-story C).
+// This provider implements ConfigStore, AuditStore, StewardStore, and
+// IPTrustStore (Issue #1900). All other store factory methods (CreateRBACStore,
+// CreateTenantStore, CreateRegistrationTokenStore, CreateClientTenantStore)
+// return ErrNotSupported, as these belong to the business-data tier (SQLite,
+// sub-story C).
 package flatfile
 
 import (
@@ -113,6 +114,10 @@ func (p *FlatFileProvider) GetCapabilities() interfaces.ProviderCapabilities {
 		MaxAuditRetentionDays:  3650,             // 10 years; operator manages disk
 	}
 }
+
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *FlatFileProvider) ClusterCapable() bool { return false }
 
 // Available returns true if the flat-file provider can operate on this system.
 // The flat-file provider only requires the OS filesystem and is always available.
@@ -243,10 +248,19 @@ func (p *FlatFileProvider) CreatePendingRegistrationStore(config map[string]inte
 	return nil, ErrNotSupported
 }
 
-// CreateIPTrustStore returns ErrNotSupported.
-// IP trust storage belongs in the business-data tier (Issue #1691).
-func (p *FlatFileProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, ErrNotSupported
+// CreateIPTrustStore creates a flat-file-backed IPTrustStore.
+// Config map must contain "root" (string): the root directory.
+// Entries are stored at <root>/ip-trust/ip_trust.json with atomic writes.
+func (p *FlatFileProvider) CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileIPTrustStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create ip trust store: %w", err)
+	}
+	return store, nil
 }
 
 // init auto-registers the flat-file provider so that a blank import is sufficient.

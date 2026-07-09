@@ -410,6 +410,8 @@ func (p *mockProvider) GetVersion() string {
 	return "1.0.0"
 }
 
+func (p *mockProvider) ClusterCapable() bool { return false }
+
 // Mock store implementations
 type mockClientTenantStore struct {
 	tenants map[string]*business.ClientTenant

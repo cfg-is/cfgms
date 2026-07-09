@@ -6,14 +6,19 @@ package ha
 import (
 	"context"
 	"crypto/tls"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/raft/v3/raftpb"
 
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -439,6 +444,36 @@ func TestConfig_LoadFromEnvironment_InvalidQuorum(t *testing.T) {
 	_, err = NewManager(cfg, logger, storageManager)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "quorum")
+}
+
+// TestModeFromString verifies all valid mode strings (case-insensitive) and the
+// error path for unrecognised values.
+func TestModeFromString(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  DeploymentMode
+		isErr bool
+	}{
+		{"single", SingleServerMode, false},
+		{"Single", SingleServerMode, false},
+		{"SINGLE", SingleServerMode, false},
+		{"blue-green", BlueGreenMode, false},
+		{"Blue-Green", BlueGreenMode, false},
+		{"cluster", ClusterMode, false},
+		{"CLUSTER", ClusterMode, false},
+		{"", SingleServerMode, true},
+		{"clustr", SingleServerMode, true},
+		{"Cluster!", SingleServerMode, true},
+	} {
+		got, err := ModeFromString(tc.input)
+		if tc.isErr {
+			require.Error(t, err, "ModeFromString(%q) should return error", tc.input)
+			assert.Equal(t, SingleServerMode, got, "error path must return SingleServerMode")
+		} else {
+			require.NoError(t, err, "ModeFromString(%q) must not error", tc.input)
+			assert.Equal(t, tc.want, got, "ModeFromString(%q) wrong mode", tc.input)
+		}
+	}
 }
 
 // TestHashStringToUint64_DistinguishesKnownPolynomialColliders verifies that the
@@ -1148,4 +1183,130 @@ func TestManager_Start_WiresOnBecomeLeaderCallback(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("steward did not receive CommandReconnect within 5s via wired callback")
 	}
+}
+
+// TestManager_TwoNodeCluster verifies that two Manager instances in cluster mode,
+// each configured with the other as a peer, complete Raft leader election so that
+// exactly one is IsLeader()==true within 15 seconds. Real RaftConsensus instances
+// are used throughout; httptest.NewTLSServer provides the transport layer.
+//
+// The production HandleMessage handler requires mTLS peer-CN verification, which in
+// turn requires the transport client to present a client certificate — a capability
+// not yet wired into raftTransport. This test therefore routes Raft messages directly
+// through RaftConsensus.Process (the same code path HandleMessage uses internally),
+// bypassing only the TLS CN gate that is irrelevant to testing leader election.
+func TestManager_TwoNodeCluster(t *testing.T) {
+	sm1, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	sm2, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeA = "two-node-cluster-a"
+	const nodeB = "two-node-cluster-b"
+
+	// Start HTTPS test servers before creating managers so we have real listen
+	// addresses to put into the discovery configs. Handlers are registered after
+	// the RaftConsensus pointers are available (no race: first election tick fires
+	// after HeartbeatInterval=100ms, well after the Go setup below completes).
+	muxA := http.NewServeMux()
+	muxB := http.NewServeMux()
+
+	srvA := httptest.NewTLSServer(muxA)
+	t.Cleanup(srvA.Close)
+	addrA := strings.TrimPrefix(srvA.URL, "https://")
+
+	srvB := httptest.NewTLSServer(muxB)
+	t.Cleanup(srvB.Close)
+	addrB := strings.TrimPrefix(srvB.URL, "https://")
+
+	logger := logging.GetLogger()
+
+	makeCfg := func(selfID, peerID, selfAddr, peerAddr string) *Config {
+		cfg := DefaultConfig()
+		cfg.Mode = ClusterMode
+		cfg.Node.ID = selfID
+		cfg.Node.ExternalAddress = selfAddr
+		cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+		cfg.Cluster.ElectionTimeout = 1 * time.Second
+		cfg.Cluster.ExpectedSize = 2
+		cfg.Cluster.MinQuorum = 2
+		cfg.Cluster.Discovery.Config = map[string]interface{}{
+			"nodes": []interface{}{
+				map[string]interface{}{"id": selfID, "address": selfAddr},
+				map[string]interface{}{"id": peerID, "address": peerAddr},
+			},
+		}
+		return cfg
+	}
+
+	managerA, err := NewManager(makeCfg(nodeA, nodeB, addrA, addrB), logger, sm1)
+	require.NoError(t, err)
+	require.NotNil(t, managerA.raftConsensus)
+	t.Cleanup(func() { assert.NoError(t, managerA.raftConsensus.Stop()) })
+
+	managerB, err := NewManager(makeCfg(nodeB, nodeA, addrB, addrA), logger, sm2)
+	require.NoError(t, err)
+	require.NotNil(t, managerB.raftConsensus)
+	t.Cleanup(func() { assert.NoError(t, managerB.raftConsensus.Stop()) })
+
+	rcA := managerA.raftConsensus
+	rcB := managerB.raftConsensus
+
+	// raftMessageHandler reads a binary-encoded Raft message from the request body
+	// and steps it into the target RaftConsensus via Process (= node.Step). This is
+	// the same operation HandleMessage performs after passing the mTLS CN gate.
+	var handlerCallCount atomic.Int64
+	raftMessageHandler := func(rc *RaftConsensus) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			handlerCallCount.Add(1)
+			data, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				http.Error(w, readErr.Error(), http.StatusBadRequest)
+				return
+			}
+			var msg raftpb.Message
+			if unmarshalErr := msg.Unmarshal(data); unmarshalErr != nil {
+				http.Error(w, unmarshalErr.Error(), http.StatusBadRequest)
+				return
+			}
+			if stepErr := rc.Process(r.Context(), msg); stepErr != nil {
+				http.Error(w, stepErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}
+
+	muxA.HandleFunc("/raft/message", raftMessageHandler(rcA))
+	muxB.HandleFunc("/raft/message", raftMessageHandler(rcB))
+
+	// Replace each transport's HTTP client with one that trusts the httptest CA.
+	// All httptest.NewTLSServer instances share the same hardcoded CA, so a client
+	// from either server can reach both.
+	testHTTPClient := srvA.Client()
+	testHTTPClient.Timeout = 3 * time.Second
+
+	managerA.raftConsensus.transport.mu.Lock()
+	managerA.raftConsensus.transport.client = testHTTPClient
+	managerA.raftConsensus.transport.mu.Unlock()
+
+	managerB.raftConsensus.transport.mu.Lock()
+	managerB.raftConsensus.transport.client = testHTTPClient
+	managerB.raftConsensus.transport.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		la, lb := managerA.IsLeader(), managerB.IsLeader()
+		return (la && !lb) || (!la && lb)
+	}, 15*time.Second, 50*time.Millisecond, "exactly one of the two managers must be leader")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopCancel()
+	require.NoError(t, managerA.Stop(stopCtx))
+	require.NoError(t, managerB.Stop(stopCtx))
 }

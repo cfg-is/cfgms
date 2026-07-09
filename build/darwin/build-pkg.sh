@@ -44,6 +44,7 @@ ARCH="amd64"
 VERSION="0.0.0"
 BINARY_PATH=""
 CONTROLLER_URL=""
+PUBLISHER_KEY=""
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --version)       VERSION="$2";        shift 2 ;;
         --binary-path)   BINARY_PATH="$2";    shift 2 ;;
         --controller-url) CONTROLLER_URL="$2"; shift 2 ;;
+        --publisher-key) PUBLISHER_KEY="$2";  shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -67,6 +69,7 @@ echo "=== CFGMS Steward macOS .pkg Build ==="
 echo "Version:        $VERSION"
 echo "Pkg version:    $PKG_VERSION"
 echo "ControllerURL:  ${CONTROLLER_URL:-(not set — generic build)}"
+echo "PublisherKey:   ${PUBLISHER_KEY:+(set)}${PUBLISHER_KEY:-(not set — placeholder key)}"
 echo "Arch:           $ARCH"
 
 # ── Step 1: Build the binary (when not pre-supplied) ─────────────────────────
@@ -85,6 +88,9 @@ if [[ -z "$BINARY_PATH" ]]; then
     else
         LD_FLAGS="-s -w $VERSION_FLAG"
     fi
+    if [[ -n "$PUBLISHER_KEY" ]]; then
+        LD_FLAGS="$LD_FLAGS -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PUBLISHER_KEY"
+    fi
 
     GOOS=darwin GOARCH="$ARCH" CGO_ENABLED=0 go build \
         -trimpath \
@@ -101,6 +107,27 @@ else
     fi
 fi
 
+# ── Step 1b: Build the launcher binary ───────────────────────────────────────
+# The launcher must be bundled in the .pkg payload — Install() hard-fails when
+# it is absent, so we always build it inline (not from a pre-existing artifact).
+
+echo ""
+echo "Building cfgms-steward-launcher binary for darwin/$ARCH..."
+
+LAUNCHER_BUILD_DIR="$REPO_ROOT/bin/darwin-$ARCH"
+LAUNCHER_BUILD_PATH="$LAUNCHER_BUILD_DIR/cfgms-steward-launcher"
+mkdir -p "$LAUNCHER_BUILD_DIR"
+
+LAUNCHER_LD_FLAGS="-s -w -X github.com/cfgis/cfgms/pkg/version.Version=$VERSION"
+
+GOOS=darwin GOARCH="$ARCH" CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags "$LAUNCHER_LD_FLAGS" \
+    -o "$LAUNCHER_BUILD_PATH" \
+    "$REPO_ROOT/cmd/cfgms-steward-launcher"
+
+echo "  Launcher: $LAUNCHER_BUILD_PATH"
+
 # ── Step 2: Assemble the package payload ──────────────────────────────────────
 # pkgbuild expects a directory tree that mirrors the target filesystem.
 
@@ -115,9 +142,20 @@ SCRIPTS_DIR="$WORK_DIR/scripts"
 mkdir -p "$PAYLOAD_DIR/usr/local/bin"
 mkdir -p "$SCRIPTS_DIR"
 
-# Install the binary into the payload tree.
+# Install the steward binary into the payload tree.
 cp "$BINARY_PATH" "$PAYLOAD_DIR/usr/local/bin/cfgms-steward"
 chmod 755 "$PAYLOAD_DIR/usr/local/bin/cfgms-steward"
+
+# Install the launcher binary into the payload tree. This is required — Install()
+# hard-fails when the launcher is absent, so we fail loudly here rather than
+# producing a broken .pkg.
+if [[ ! -f "$LAUNCHER_BUILD_PATH" ]]; then
+    echo "ERROR: launcher binary not found after build: $LAUNCHER_BUILD_PATH" >&2
+    exit 1
+fi
+cp "$LAUNCHER_BUILD_PATH" "$PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
+chmod 755 "$PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
+echo "  Launcher payload: $PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 
 # Install stdlib module binaries into the payload tree.
 STDLIB_MODULES=(cfgms-module-file cfgms-module-service cfgms-module-package cfgms-module-script cfgms-module-firewall cfgms-module-patch)

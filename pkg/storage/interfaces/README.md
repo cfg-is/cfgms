@@ -42,6 +42,7 @@ pkg/storage/interfaces/
 | `steward_store.go` | `StewardStore`, `StewardRecord`, `StewardStatus` | Durable fleet registry |
 | `command_store.go` | `CommandStore`, `CommandRecord`, `CommandStatus`, `CommandTransition` | Durable command dispatch state |
 | `dna_history_store.go` | `DNAHistoryStore` | DNA history access interface used by drift detection |
+| `batch_job_store.go` | `BatchJobStore`, `ErrBatchJobNotFound` | Fleet rolling-batch update job persistence (types in `features/controller/batchjob`) |
 
 Sentinel errors live in the sub-packages: `business.ErrNotSupported`,
 `business.ErrImmutable`, `business.ErrStewardNotFound`,

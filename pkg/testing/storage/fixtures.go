@@ -62,15 +62,21 @@ func isInfrastructureRequired() bool {
 		return true
 	}
 
-	// Docker test environment explicitly set up
-	if os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
-		return true
-	}
-
 	// Integration test mode
 	if os.Getenv("CFGMS_TEST_INTEGRATION") == "1" {
 		return true
 	}
+
+	// NOTE: the mere presence of CFGMS_TEST_DB_PASSWORD is deliberately NOT
+	// treated as "infrastructure required". That variable only supplies
+	// credentials; it is set whenever .env.test is sourced (e.g. by
+	// `make test-integration-docker`) regardless of whether the backing Docker
+	// services are actually running. Agent containers without a Docker daemon
+	// source .env.test for credentials but have no live database, so keying off
+	// the password produced false "infrastructure required" hard failures. Real
+	// CI still enforces via CI/GITHUB_ACTIONS above, and a developer who wants
+	// hard failures against a live local database opts in with
+	// CFGMS_TEST_INTEGRATION=1.
 
 	return false
 }
@@ -150,15 +156,24 @@ func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
 		testDB = fmt.Sprintf("cfgms_test_%d", time.Now().Unix())
 	}
 
+	// session_hmac_key is required by the database SessionStore constructor; the constructor
+	// fails closed (no silent insecure fallback) when it is absent. Use an env-override so
+	// CI can inject a real key; fall back to a fixed test-only key for local development.
+	hmacKey := os.Getenv("CFGMS_TEST_SESSION_HMAC_KEY")
+	if hmacKey == "" {
+		hmacKey = "test-hmac-key-for-storage-fixture-tests-only"
+	}
+
 	f.Configs["database"] = &StorageTestConfig{
 		Provider: "database",
 		Config: map[string]interface{}{
-			"host":     testHost,
-			"port":     testPort,
-			"database": testDB,
-			"username": "cfgms_test",
-			"password": testPassword,
-			"sslmode":  "disable", // For testing only
+			"host":             testHost,
+			"port":             testPort,
+			"database":         testDB,
+			"username":         "cfgms_test",
+			"password":         testPassword,
+			"sslmode":          "disable", // For testing only
+			"session_hmac_key": hmacKey,
 		},
 	}
 }

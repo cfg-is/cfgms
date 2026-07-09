@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -38,12 +41,16 @@ type stubLeaderStatus struct{ leader bool }
 
 func (s *stubLeaderStatus) IsLeader() bool { return s.leader }
 
-// validPushPayload returns a minimal valid StewardConfiguration body.
-func validPushPayload() push.StewardConfiguration {
-	return push.StewardConfiguration{
-		ConfigID: "cfg-001",
-		Version:  "1.0.0",
-		TenantID: "tenant-abc",
+// validPushPayload returns a minimal valid configPushRequest body.
+// The default selector is "all"; the TenantID is "tenant-abc".
+func validPushPayload() configPushRequest {
+	return configPushRequest{
+		Selector: "all",
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
 	}
 }
 
@@ -52,6 +59,16 @@ func marshalPayload(t *testing.T, v interface{}) *bytes.Buffer {
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
 	return bytes.NewBuffer(b)
+}
+
+// newPushRequest builds a POST /api/v1/config/push request with the given
+// principal and body. Use withAdminPrincipal or withScopedPrincipal to inject
+// the principal after calling this.
+func newPushRequest(t *testing.T, payload interface{}) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", marshalPayload(t, payload))
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
 // setupPushServer creates a test server and returns the audit manager so tests
@@ -112,12 +129,9 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 // returns 202 Accepted with a non-empty push_id and status "accepted".
 func TestHandleConfigPush_Leader(t *testing.T) {
 	server := setupTestServer(t)
-	// nil pushLeaderStatus → treated as leader (OSS single-node default)
-	server.pushLeaderStatus = nil
+	server.pushLeaderStatus = nil // nil → treated as leader
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	req := withAdminPrincipal(newPushRequest(t, validPushPayload()))
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -136,8 +150,8 @@ func TestHandleConfigPush_NonLeader(t *testing.T) {
 	server := setupTestServer(t)
 	server.pushLeaderStatus = &stubLeaderStatus{leader: false}
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	// Leader check runs before principal check — no principal needed here.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", marshalPayload(t, validPushPayload()))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -184,9 +198,7 @@ func TestHandleConfigPush_MissingFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := setupTestServer(t)
 
-			body := marshalPayload(t, tt.payload)
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-			req.Header.Set("Content-Type", "application/json")
+			req := withAdminPrincipal(newPushRequest(t, tt.payload))
 			rec := httptest.NewRecorder()
 
 			server.handleConfigPush(rec, req)
@@ -208,6 +220,7 @@ func TestHandleConfigPush_InvalidJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push",
 		bytes.NewBufferString("{not valid json"))
 	req.Header.Set("Content-Type", "application/json")
+	req = withAdminPrincipal(req)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -224,8 +237,7 @@ func TestHandleConfigPush_InvalidJSON(t *testing.T) {
 func TestHandleConfigPush_RouteRegistered(t *testing.T) {
 	server := setupTestServer(t)
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", marshalPayload(t, validPushPayload()))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -242,9 +254,7 @@ func TestHandleConfigPush_AuditEventEmitted(t *testing.T) {
 	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
-	body := marshalPayload(t, payload)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -327,12 +337,12 @@ func (c *syncedControlPlane) GetStats(_ context.Context) (*controlplaneTypes.Con
 
 func (c *syncedControlPlane) Reconnect(_ context.Context) error { return nil }
 
-// registerActiveSteward registers a steward and immediately transitions it to
-// "active" status via a heartbeat, matching the real steward lifecycle.
-// Returns the controller-assigned steward ID (not the DNA ID).
-func registerActiveSteward(t *testing.T, svc *service.ControllerService, dnaID string) string {
+// registerActiveSteward registers a steward with the given tenantID and
+// immediately transitions it to "active" status via a heartbeat, matching
+// the real steward lifecycle. Returns the controller-assigned steward ID.
+func registerActiveSteward(t *testing.T, svc *service.ControllerService, dnaID string, tenantID string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 	resp, err := svc.AcceptRegistration(ctx, &ctrlproto.RegisterRequest{
 		Version:    "1.0.0",
 		InitialDna: &common.DNA{Id: dnaID},
@@ -369,9 +379,8 @@ func TestHandleConfigPush_FanoutNoActiveStewards(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server.commandPublisher = makeSyncedPublisher(t, cp)
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	payload := validPushPayload()
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -383,8 +392,8 @@ func TestHandleConfigPush_FanoutNoActiveStewards(t *testing.T) {
 }
 
 // TestHandleConfigPush_FanoutToActiveStewards verifies that when commandPublisher is
-// wired and an active steward exists, the fire-and-forget goroutine dispatches
-// TriggerConfigSync (via SendCommand) to that steward.
+// wired and an active steward exists in the push's tenant, the fire-and-forget
+// goroutine dispatches TriggerConfigSync (via SendCommand) to that steward.
 func TestHandleConfigPush_FanoutToActiveStewards(t *testing.T) {
 	server := setupTestServer(t)
 	server.pushLeaderStatus = nil // leader
@@ -392,14 +401,13 @@ func TestHandleConfigPush_FanoutToActiveStewards(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server.commandPublisher = makeSyncedPublisher(t, cp)
 
-	stewardID := registerActiveSteward(t, server.controllerService, "fanout-dna-1")
+	payload := validPushPayload()
+	stewardID := registerActiveSteward(t, server.controllerService, "fanout-dna-1", payload.TenantID)
 
 	// Expect exactly one TriggerConfigSync call (one active steward).
 	cp.wg.Add(1)
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -470,9 +478,7 @@ func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
 	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
-	body := marshalPayload(t, payload)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -508,9 +514,55 @@ func (c *failingControlPlane) SendCommand(_ context.Context, _ *controlplaneType
 	return c.sendErr
 }
 
+// syncedPushStore wraps a real PushStore and signals statusUpdated after each
+// UpdatePushStatus call has committed to the underlying store. The fan-out
+// goroutine calls UpdatePushStatus as its final action (after SendCommand →
+// wg.Done fires), so tests that assert on the terminal record status must block
+// on this signal — not on the control plane's WaitGroup, which unblocks too early.
+// This replaces the prohibited time.Sleep polling loop with a deterministic
+// completion primitive tied to the exact write the test is asserting on.
+type syncedPushStore struct {
+	business.PushStore
+	statusUpdated chan struct{}
+}
+
+func newSyncedPushStore(inner business.PushStore) *syncedPushStore {
+	return &syncedPushStore{
+		PushStore:     inner,
+		statusUpdated: make(chan struct{}, 1),
+	}
+}
+
+// UpdatePushStatus delegates to the wrapped store, then signals statusUpdated
+// after the write returns so a waiting test observes the committed final state.
+// The buffered channel plus non-blocking send means callers that never drain it
+// (tests that don't assert on status) are unaffected.
+func (s *syncedPushStore) UpdatePushStatus(ctx context.Context, id string, status business.PushStatus) error {
+	err := s.PushStore.UpdatePushStatus(ctx, id, status)
+	select {
+	case s.statusUpdated <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+// waitForStatusUpdate blocks until the fan-out goroutine's UpdatePushStatus call
+// completes, failing the test on timeout. Deterministic: the signal fires only
+// after the underlying store write returns.
+func (s *syncedPushStore) waitForStatusUpdate(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.statusUpdated:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fan-out goroutine to update push status")
+	}
+}
+
 // makePushServerWithStore creates a test server wired with both a command publisher
 // and a real push store so that the fan-out goroutine's UpdatePushStatus paths can be exercised.
-func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, business.PushStore) {
+// The returned store is a syncedPushStore wrapping the real store; tests that assert on
+// the terminal push status use waitForStatusUpdate to synchronize with the goroutine.
+func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, *syncedPushStore) {
 	t.Helper()
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
 
@@ -543,8 +595,9 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
-	pushStore := storageManager.GetPushStore()
-	require.NotNil(t, pushStore)
+	rawPushStore := storageManager.GetPushStore()
+	require.NotNil(t, rawPushStore)
+	pushStore := newSyncedPushStore(rawPushStore)
 
 	pub, err := commands.New(&commands.Config{ControlPlane: cp, Signer: nil, Logger: logger})
 	require.NoError(t, err)
@@ -555,7 +608,7 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 		nil, nil, nil, "", nil,
 		auditMgr,
 		pub,       // real command publisher
-		pushStore, // real push store
+		pushStore, // synced push store (wraps the real store, signals on status update)
 		nil,       // No blob store needed
 	)
 	require.NoError(t, err)
@@ -574,12 +627,11 @@ func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	server, pushStore := makePushServerWithStore(t, cp)
 	server.pushLeaderStatus = nil // leader
 
-	stewardID := registerActiveSteward(t, server.controllerService, "persist-complete-dna-1")
+	payload := validPushPayload()
+	stewardID := registerActiveSteward(t, server.controllerService, "persist-complete-dna-1", payload.TenantID)
 	cp.wg.Add(1)
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -593,18 +645,13 @@ func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.PushID)
 
-	// UpdatePushStatus runs after wg.Done() inside the goroutine, so poll until
-	// the record reflects completed status before asserting on pending records.
+	// UpdatePushStatus runs after wg.Done() inside the goroutine. Block on the
+	// push store's completion signal so the terminal status write has committed
+	// before we assert — no sleep-based polling.
+	pushStore.waitForStatusUpdate(t)
+
 	ctx := context.Background()
-	var updated *business.PushRecord
-	var err error
-	for i := 0; i < 20; i++ {
-		updated, err = pushStore.GetPush(ctx, resp.PushID)
-		if err == nil && updated.Status == business.PushStatusCompleted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	updated, err := pushStore.GetPush(ctx, resp.PushID)
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusCompleted, updated.Status,
 		"push record must be marked completed after successful fan-out delivery")
@@ -625,13 +672,12 @@ func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {
 	server, pushStore := makePushServerWithStore(t, cp)
 	server.pushLeaderStatus = nil // leader
 
+	payload := validPushPayload()
 	// Register an active steward so the fanout targets it and fails.
-	registerActiveSteward(t, server.controllerService, "persist-fail-dna-1")
+	registerActiveSteward(t, server.controllerService, "persist-fail-dna-1", payload.TenantID)
 	cp.wg.Add(1)
 
-	body := marshalPayload(t, validPushPayload())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", body)
-	req.Header.Set("Content-Type", "application/json")
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
@@ -644,18 +690,485 @@ func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.PushID)
 
-	// Poll briefly for the status update to land.
+	// Block on the push store's completion signal so the terminal status write
+	// has committed before we assert — no sleep-based polling.
+	pushStore.waitForStatusUpdate(t)
+
 	ctx := context.Background()
-	var updated *business.PushRecord
-	var err error
-	for i := 0; i < 20; i++ {
-		updated, err = pushStore.GetPush(ctx, resp.PushID)
-		if err == nil && updated.Status == business.PushStatusFailed {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	updated, err := pushStore.GetPush(ctx, resp.PushID)
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusFailed, updated.Status,
 		"push record must be marked failed when all targeted stewards fail delivery")
+}
+
+// --- Selector targeting + tenant isolation tests (Issue #2366 ACs) ---
+
+// TestHandleConfigPush_EmptySelector verifies that a request with an empty
+// selector is rejected with 400 — there is no implicit "all" default.
+func TestHandleConfigPush_EmptySelector(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil
+
+	body := configPushRequest{
+		Selector: "", // explicitly empty
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
+	}
+	req := withAdminPrincipal(newPushRequest(t, body))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "selector is required")
+}
+
+// TestHandleConfigPush_MissingPrincipal verifies that a request without an
+// authenticated principal is rejected with 401.
+func TestHandleConfigPush_MissingPrincipal(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil
+
+	// No principal injected into context.
+	req := newPushRequest(t, validPushPayload())
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleConfigPush_TenantCallerCrosstenantRejected verifies that a
+// tenant-scoped caller submitting a cfg.TenantID different from their own is
+// rejected with 403, and no push record or fan-out is produced.
+func TestHandleConfigPush_TenantCallerCrosstenantRejected(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil
+
+	payload := validPushPayload() // TenantID = "tenant-abc"
+	// Caller belongs to "tenant-other" — different from cfg.TenantID "tenant-abc".
+	req := withScopedPrincipal(newPushRequest(t, payload), "tenant-other")
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "tenant")
+
+	// No push record must have been created.
+	ctx := context.Background()
+	pending, err := pushStore.GetPendingPushes(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, pending, "403 must not produce a push record")
+
+	// No fan-out must have been triggered.
+	assert.Empty(t, cp.ReceivedIDs(), "403 must not trigger fan-out")
+}
+
+// TestHandleConfigPush_AdminCallerTenantScoped verifies that an admin caller
+// (TenantID == "") pushing a config labelled with "tenant-a" reaches ONLY
+// tenant-a stewards — never stewards from another tenant.
+func TestHandleConfigPush_AdminCallerTenantScoped(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, _ := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil
+
+	// Register one steward in each tenant.
+	stewardA := registerActiveSteward(t, server.controllerService, "admin-scope-dna-a", "tenant-a")
+	registerActiveSteward(t, server.controllerService, "admin-scope-dna-b", "tenant-b")
+
+	// Admin push targets only "tenant-a" stewards.
+	payload := configPushRequest{
+		Selector: "all",
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-admin-scope",
+			Version:  "1.0.0",
+			TenantID: "tenant-a",
+		},
+	}
+
+	// Exactly one steward (stewardA) should receive a SendCommand.
+	cp.wg.Add(1)
+
+	req := withAdminPrincipal(newPushRequest(t, payload))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	cp.wg.Wait()
+
+	received := cp.ReceivedIDs()
+	assert.ElementsMatch(t, []string{stewardA}, received,
+		"admin push must reach only the tenant-a steward, not tenant-b")
+}
+
+// TestHandleConfigPush_FanoutTenantIsolation verifies that a steward belonging
+// to a different tenant, or excluded by the selector, never receives
+// SendCommand / TriggerConfigSync.
+func TestHandleConfigPush_FanoutTenantIsolation(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, _ := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil
+
+	payload := validPushPayload() // TenantID = "tenant-abc"
+
+	// Register target steward (matching tenant).
+	stewardTarget := registerActiveSteward(t, server.controllerService, "isolation-dna-target", payload.TenantID)
+	// Register non-target steward (different tenant — must NOT receive command).
+	stewardOther := registerActiveSteward(t, server.controllerService, "isolation-dna-other", "tenant-other")
+
+	// Expect exactly one SendCommand call (only the matching-tenant steward).
+	cp.wg.Add(1)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	cp.wg.Wait()
+
+	received := cp.ReceivedIDs()
+	assert.ElementsMatch(t, []string{stewardTarget}, received,
+		"fan-out must reach only the tenant-matched steward")
+	assert.NotContains(t, received, stewardOther,
+		"steward from a different tenant must never receive SendCommand")
+}
+
+// TestHandleConfigPush_ExplicitTenantPrefix_OutsideSubtreeRejected verifies that
+// a selector carrying an explicit tenant-path prefix outside the config's tenant
+// subtree is rejected with 403 (handlers_push.go:103-110). An admin caller passes
+// the earlier caller-vs-cfg.TenantID auth check, so execution reaches the selector
+// prefix check — which the existing TestHandleConfigPush_TenantCallerCrosstenantRejected
+// never does (it is rejected at the earlier auth gate).
+func TestHandleConfigPush_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	body := configPushRequest{
+		Selector: "tenant-other/all",
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
+	}
+	// Admin caller passes the caller-vs-cfg auth check, reaching the prefix branch.
+	req := withAdminPrincipal(newPushRequest(t, body))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "outside config tenant subtree")
+
+	// The 403 prefix rejection must short-circuit before persistence and fan-out.
+	pending, err := pushStore.GetPendingPushes(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending, "403 prefix rejection must not create a push record")
+	assert.Empty(t, cp.ReceivedIDs(), "403 prefix rejection must not trigger fan-out")
+}
+
+// TestHandleConfigPush_ExplicitTenantPrefix_ScopesToSubtree verifies that a valid
+// in-subtree tenant-path prefix drives filter.TenantSubtree = parsedTenantPath
+// (handlers_push.go:111): fan-out is scoped to the prefixed sub-tenant, reaching
+// only its steward and excluding a sibling sub-tenant under the same config tenant.
+func TestHandleConfigPush_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, _ := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	// Two active stewards under sibling sub-tenants of tenant-abc.
+	inScope := registerActiveSteward(t, server.controllerService, "push-prefix-c1", "tenant-abc/client-1")
+	registerActiveSteward(t, server.controllerService, "push-prefix-c2", "tenant-abc/client-2")
+
+	body := configPushRequest{
+		Selector: "tenant-abc/client-1/all",
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
+	}
+
+	// Exactly one in-subtree steward should receive a SendCommand.
+	cp.wg.Add(1)
+
+	req := withAdminPrincipal(newPushRequest(t, body))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	cp.wg.Wait()
+	assert.ElementsMatch(t, []string{inScope}, cp.ReceivedIDs(),
+		"explicit prefix must scope fan-out to tenant-abc/client-1, excluding sibling client-2")
+}
+
+// --- GET /api/v1/config/push/{id} tests ---
+
+// newGetPushRequest builds a GET /api/v1/config/push/{id} request with the
+// push ID already injected as a mux URL variable (for direct handler calls).
+func newGetPushRequest(t *testing.T, pushID string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config/push/"+pushID, nil)
+	return mux.SetURLVars(req, map[string]string{"id": pushID})
+}
+
+// createPushRecord inserts a push record directly into the store, returning the ID.
+// Data is set to a minimal JSON blob to satisfy the NOT NULL column constraint.
+func createPushRecord(t *testing.T, store business.PushStore, id, tenantID, configID string) *business.PushRecord {
+	t.Helper()
+	now := time.Now().UTC()
+	rec := &business.PushRecord{
+		ID:        id,
+		ConfigID:  configID,
+		TenantID:  tenantID,
+		Version:   "1.0.0",
+		Status:    business.PushStatusCompleted,
+		Data:      []byte(`{"config_id":"` + configID + `","tenant_id":"` + tenantID + `","version":"1.0.0"}`),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, store.CreatePush(context.Background(), rec))
+	return rec
+}
+
+// TestHandleGetConfigPush_NilStoreSends503 verifies that GET /api/v1/config/push/{id}
+// returns 503 (not a panic) when the push store is not configured.
+func TestHandleGetConfigPush_NilStoreSends503(t *testing.T) {
+	server := setupTestServer(t)
+	// pushStore is nil in setupTestServer (no store passed to New).
+
+	req := newGetPushRequest(t, "push-does-not-matter")
+	// No principal needed — nil-store check fires first.
+	rec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "push store not available")
+}
+
+// failingGetPushStore wraps a real PushStore and overrides only GetPush to return
+// a generic (non-ErrPushNotFound) error, exercising the 500 branch of
+// handleGetConfigPush. It is not a mock: every method other than GetPush delegates
+// to the wrapped real store, so any unanticipated call still hits a real
+// implementation rather than a nil embedded interface.
+type failingGetPushStore struct {
+	business.PushStore
+}
+
+// newFailingGetPushStore wraps a real PushStore so all methods except GetPush
+// delegate to a real implementation.
+func newFailingGetPushStore(inner business.PushStore) *failingGetPushStore {
+	return &failingGetPushStore{PushStore: inner}
+}
+
+func (f *failingGetPushStore) GetPush(_ context.Context, _ string) (*business.PushRecord, error) {
+	return nil, errors.New("forced push store retrieval failure")
+}
+
+// TestHandleGetConfigPush_StorageError_Returns500 verifies that when GetPush
+// returns a generic (non-ErrPushNotFound) error, handleGetConfigPush returns 500
+// with "failed to retrieve push record" rather than 404 or a panic.
+func TestHandleGetConfigPush_StorageError_Returns500(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, rawPushStore := makePushServerWithStore(t, cp)
+	// Swap in a store whose GetPush always fails with a generic error, wrapping the
+	// real store so every other method delegates to a real implementation. The
+	// nil-store guard passed (store is non-nil); this exercises the 500 branch.
+	server.pushStore = newFailingGetPushStore(rawPushStore)
+
+	req := withAdminPrincipal(newGetPushRequest(t, "push-storage-error"))
+	rec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "failed to retrieve push record", resp["error"])
+}
+
+// TestHandleGetConfigPush_UnknownID404 verifies that an unknown push ID returns 404.
+func TestHandleGetConfigPush_UnknownID404(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, _ := makePushServerWithStore(t, cp)
+
+	req := withAdminPrincipal(newGetPushRequest(t, "nonexistent-push-id"))
+	rec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "push not found", resp["error"])
+}
+
+// TestHandleGetConfigPush_OwnTenantCanRead verifies that a caller retrieves the
+// push record when their tenant matches the record's tenant.
+func TestHandleGetConfigPush_OwnTenantCanRead(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	const ownerTenant = "tenant-abc"
+	rec := createPushRecord(t, pushStore, "push-readable-001", ownerTenant, "cfg-001")
+
+	req := withScopedPrincipal(newGetPushRequest(t, rec.ID), ownerTenant)
+	httpRec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(httpRec, req)
+
+	require.Equal(t, http.StatusOK, httpRec.Code)
+
+	var resp PushStatusResponse
+	require.NoError(t, json.Unmarshal(httpRec.Body.Bytes(), &resp))
+	assert.Equal(t, rec.ID, resp.PushID)
+	assert.Equal(t, ownerTenant, resp.TenantID)
+	assert.Equal(t, "cfg-001", resp.ConfigID)
+	assert.Equal(t, string(business.PushStatusCompleted), resp.Status)
+}
+
+// TestHandleGetConfigPush_CrossTenantReturn404 verifies that a caller from a
+// different tenant receives 404 (not 403, not the record) to avoid leaking
+// cross-tenant push existence.
+func TestHandleGetConfigPush_CrossTenantReturn404(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	const ownerTenant = "tenant-abc"
+	rec := createPushRecord(t, pushStore, "push-owned-by-abc", ownerTenant, "cfg-001")
+
+	// Caller belongs to a different tenant.
+	req := withScopedPrincipal(newGetPushRequest(t, rec.ID), "tenant-other")
+	httpRec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(httpRec, req)
+
+	// Must return 404, not 403, to avoid confirming the push ID exists.
+	require.Equal(t, http.StatusNotFound, httpRec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(httpRec.Body.Bytes(), &resp))
+	assert.Equal(t, "push not found", resp["error"])
+}
+
+// TestHandleGetConfigPush_AdminCanReadAnyTenant verifies that an admin caller
+// can read a push record regardless of its tenant.
+func TestHandleGetConfigPush_AdminCanReadAnyTenant(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	rec := createPushRecord(t, pushStore, "push-any-tenant-001", "tenant-xyz", "cfg-001")
+
+	req := withAdminPrincipal(newGetPushRequest(t, rec.ID))
+	httpRec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(httpRec, req)
+
+	require.Equal(t, http.StatusOK, httpRec.Code)
+	var resp PushStatusResponse
+	require.NoError(t, json.Unmarshal(httpRec.Body.Bytes(), &resp))
+	assert.Equal(t, rec.ID, resp.PushID)
+	assert.Equal(t, "tenant-xyz", resp.TenantID)
+}
+
+// TestHandleGetConfigPush_RouteRegistered verifies that GET /api/v1/config/push/{id}
+// is wired into the router and enforces authentication (no key → 401, not 404).
+func TestHandleGetConfigPush_RouteRegistered(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config/push/some-push-id", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	// No API key supplied → 401, not 404. Route exists and auth is enforced.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleGetConfigPush_MissingPrincipal verifies that a request without an
+// authenticated principal returns 401 (after the push store nil-check passes).
+func TestHandleGetConfigPush_MissingPrincipal(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	rec := createPushRecord(t, pushStore, "push-no-principal", "tenant-abc", "cfg-001")
+
+	// No principal injected.
+	req := newGetPushRequest(t, rec.ID)
+	httpRec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(httpRec, req)
+
+	require.Equal(t, http.StatusUnauthorized, httpRec.Code)
+}
+
+// TestHandleConfigPush_SelectorParseError verifies that an invalid selector
+// expression returns 400 with the parse error message.
+func TestHandleConfigPush_SelectorParseError(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil
+
+	body := configPushRequest{
+		Selector: "badkey:value", // "badkey" is not a valid selector key
+		StewardConfiguration: push.StewardConfiguration{
+			ConfigID: "cfg-001",
+			Version:  "1.0.0",
+			TenantID: "tenant-abc",
+		},
+	}
+	req := withAdminPrincipal(newPushRequest(t, body))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "badkey")
+}
+
+// TestHandleConfigPush_FleetQueryError_Returns500 verifies that when the fleet
+// query fails during selector resolution, the handler returns 500 with
+// "fleet query failed" and produces no push record or fan-out. Uses the shared
+// failingFleetQuery double (handlers_stewards_test.go) — a real FleetQuery
+// implementation with deterministic error behavior, not a mock.
+func TestHandleConfigPush_FleetQueryError_Returns500(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+	server.fleetQuery = &failingFleetQuery{}
+
+	payload := validPushPayload()
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "fleet query failed", resp["error"])
+
+	// A failed fleet query must short-circuit before persistence and fan-out.
+	pending, err := pushStore.GetPendingPushes(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending, "500 fleet-query failure must not create a push record")
+	assert.Empty(t, cp.ReceivedIDs(), "500 fleet-query failure must not trigger fan-out")
 }

@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -23,6 +25,11 @@ import (
 // RegistrationRequest represents the steward registration request
 type RegistrationRequest struct {
 	Token string `json:"token"`
+
+	// Device identity fields (Issue #2095, ADR-010 §1): stable across mTLS cert rotations.
+	DeviceID           string `json:"device_id,omitempty"`            // 64-char lowercase hex SHA-256 of Ed25519 public key
+	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64-encoded Ed25519 public key (32 bytes)
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"` // "file" or "tpm"
 }
 
 // RegistrationResponse represents the steward registration response for an approved registration.
@@ -313,13 +320,18 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		}
 	}
 
+	transportAddr, err := s.getTransportAddress()
+	if err != nil {
+		return nil, fmt.Errorf("transport address unavailable: %w", err)
+	}
+
 	resp := &RegistrationStatusResponse{
 		Status:           business.PendingRegistrationStatusClaimed,
 		StewardID:        entry.StewardID,
 		TenantID:         entry.TenantID,
 		Group:            tok.Group,
 		ControllerURL:    tok.ControllerURL,
-		TransportAddress: s.getTransportAddress(),
+		TransportAddress: transportAddr,
 		ClientCert:       string(clientCert.CertificatePEM),
 		ClientKey:        string(clientCert.PrivateKeyPEM),
 		CACert:           string(caCert),
@@ -446,6 +458,20 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isValidDeviceID returns true if id is exactly 64 lowercase hex characters.
+// The DeviceID is the SHA-256 fingerprint of the steward's Ed25519 identity key (ADR-010 §1).
+func isValidDeviceID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // handleRegister handles steward registration via REST API
 // POST /api/v1/register
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -520,6 +546,29 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"tenant_id", token.TenantID,
 		"steward_id", stewardID)
 
+	// Validate device identity fields (Issue #2095, ADR-010 §1).
+	if !isValidDeviceID(req.DeviceID) {
+		http.Error(w, "device_id is required and must be a 64-character lowercase hex string", http.StatusBadRequest)
+		return
+	}
+	identityKeyBytes, keyErr := base64.StdEncoding.DecodeString(req.IdentityKeyPub)
+	if keyErr != nil || len(identityKeyBytes) != ed25519.PublicKeySize {
+		http.Error(w, "identity_key_pub is required and must be a base64-encoded 32-byte Ed25519 public key", http.StatusBadRequest)
+		return
+	}
+
+	// Reject duplicate DeviceID within the same tenant. Cross-tenant collision is allowed —
+	// each tenant namespace is independent (matching the tenant-isolation pattern at line ~221).
+	if s.stewardStore != nil {
+		if existing, lookupErr := s.stewardStore.GetStewardByDeviceID(r.Context(), req.DeviceID); lookupErr == nil && existing.TenantID == token.TenantID {
+			s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
+				"device_id", logging.SanitizeLogValue(req.DeviceID),
+				"tenant_id", logging.SanitizeLogValue(token.TenantID))
+			http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
+			return
+		}
+	}
+
 	// Issue #422: Run registration approval hook.
 	// Hook errors are non-fatal: we log and fall back to approve so transient failures
 	// do not block legitimate registrations.
@@ -553,7 +602,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 					"tenant_id", token.TenantID,
 					"pending_id", pendingID)
 
-				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, s.getTransportAddress(), "quarantined"); err != nil {
+				quarantineTransportAddr, taErr := s.getTransportAddress()
+				if taErr != nil {
+					s.logger.Error("Transport address not configured; steward cannot reconnect after approval",
+						"steward_id", stewardID, "error", taErr)
+					http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
+					return
+				}
+				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, quarantineTransportAddr, "quarantined"); err != nil {
 					s.logger.Error("Failed to register quarantined steward in controller service",
 						"steward_id", stewardID, "error", err)
 				}
@@ -606,12 +662,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"group", token.Group)
 
 	// Build response with connection details
+	approveTransportAddr, taErr := s.getTransportAddress()
+	if taErr != nil {
+		s.logger.Error("Transport address not configured; steward cannot connect after registration",
+			"steward_id", stewardID, "error", taErr)
+		http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
+		return
+	}
 	resp := RegistrationResponse{
 		StewardID:        stewardID,
 		TenantID:         token.TenantID,
 		Group:            token.Group,
 		ControllerURL:    token.ControllerURL,
-		TransportAddress: s.getTransportAddress(),
+		TransportAddress: approveTransportAddr,
 	}
 
 	// Story #294 Phase 3: Generate client certificates for mTLS (REQUIRED)
@@ -698,6 +761,28 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			"steward_id", stewardID, "error", err)
 	}
 
+	// Persist device identity to the durable StewardStore so the S3b PoP verification
+	// gate (registration-refresh) has a stored public key to verify against (Issue #2095).
+	// Without this write, record.IdentityKeyPub is empty and refresh verification is impossible.
+	if s.stewardStore != nil {
+		now := time.Now().UTC()
+		if storeErr := s.stewardStore.RegisterSteward(r.Context(), &business.StewardRecord{
+			ID:                 stewardID,
+			TenantID:           token.TenantID,
+			Status:             business.StewardStatusRegistered,
+			RegisteredAt:       now,
+			LastSeen:           now,
+			DeviceID:           req.DeviceID,
+			IdentityKeyPub:     identityKeyBytes,
+			KeyProtectionLevel: req.KeyProtectionLevel,
+		}); storeErr != nil {
+			s.logger.Error("Failed to persist device identity to steward store",
+				"steward_id", stewardID,
+				"device_id", logging.SanitizeLogValue(req.DeviceID),
+				"error", storeErr)
+		}
+	}
+
 	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 	s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 		business.AuditEventAuthentication, "steward_registered",
@@ -712,25 +797,37 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // getTransportAddress returns the unified transport address for steward connections.
-func (s *Server) getTransportAddress() string {
-	addr := "localhost:4433" // Default transport address
+// Returns an error if ListenAddr binds 0.0.0.0 and neither transport.external_address
+// nor CFGMS_EXTERNAL_HOSTNAME is configured.
+func (s *Server) getTransportAddress() (string, error) {
+	addr := "localhost:4433"
 	if s.cfg.Transport != nil && s.cfg.Transport.ListenAddr != "" {
 		addr = s.cfg.Transport.ListenAddr
 	}
-	return replaceBindAddress(addr)
+
+	// Resolve the external address: config file takes precedence over env var.
+	externalAddress := ""
+	if s.cfg.Transport != nil {
+		externalAddress = s.cfg.Transport.ExternalAddress
+	}
+	if externalAddress == "" {
+		externalAddress = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+	}
+
+	return replaceBindAddress(addr, externalAddress)
 }
 
-// replaceBindAddress replaces 0.0.0.0 bind addresses with external hostname
-func replaceBindAddress(addr string) string {
+// replaceBindAddress substitutes the 0.0.0.0 wildcard with the resolved external address.
+// Returns an error when addr starts with "0.0.0.0:" and externalAddress is empty.
+func replaceBindAddress(addr, externalAddress string) (string, error) {
 	if !strings.HasPrefix(addr, "0.0.0.0:") {
-		return addr
+		return addr, nil
 	}
-	externalHostname := os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
-	if externalHostname == "" {
-		externalHostname = "localhost"
+	if externalAddress == "" {
+		return "", fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
 	}
 	port := strings.TrimPrefix(addr, "0.0.0.0:")
-	return externalHostname + ":" + port
+	return externalAddress + ":" + port, nil
 }
 
 // extractSourceIP returns the source IP from the HTTP request.

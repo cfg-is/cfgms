@@ -374,6 +374,27 @@ func TestManager_UpdateTenant_InvalidatesConfigCache(t *testing.T) {
 	assert.Equal(t, tenant.ID, inv.calls[0], "InvalidateTenantCache must receive the updated tenant ID")
 }
 
+func TestManager_InvalidateConfigCache_CallsRouter(t *testing.T) {
+	manager := newTestTenantManager(t)
+
+	inv := &recordingInvalidator{}
+	manager.WithConfigRouter(inv)
+
+	manager.InvalidateConfigCache("tenant-to-evict")
+
+	require.Len(t, inv.calls, 1, "InvalidateConfigCache must delegate to the wired router exactly once")
+	assert.Equal(t, "tenant-to-evict", inv.calls[0], "router must receive the tenant ID passed to InvalidateConfigCache")
+}
+
+func TestManager_InvalidateConfigCache_NoRouterWired_NoError(t *testing.T) {
+	// Manager with no router wired must not panic when InvalidateConfigCache is called.
+	manager := newTestTenantManager(t)
+
+	require.NotPanics(t, func() {
+		manager.InvalidateConfigCache("any-tenant")
+	}, "InvalidateConfigCache without a wired router must be a safe no-op")
+}
+
 func TestManager_UpdateTenant_NoRouterWired_NoError(t *testing.T) {
 	// Manager with no router wired must not panic on UpdateTenant.
 	manager := newTestTenantManager(t)
@@ -683,4 +704,27 @@ func TestManager_CreateTenant_InvalidExplicitID_ReturnsError(t *testing.T) {
 	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "Team_Root"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid explicit tenant ID")
+}
+
+func TestManager_SuspendTenant(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "suspend-test"})
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status)
+
+	require.NoError(t, manager.SuspendTenant(ctx, "suspend-test"))
+
+	suspended, err := manager.GetTenant(ctx, "suspend-test")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, suspended.Status)
+}
+
+func TestManager_SuspendTenant_NotFound(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	err := manager.SuspendTenant(ctx, "nonexistent-tenant")
+	require.Error(t, err)
 }

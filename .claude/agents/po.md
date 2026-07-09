@@ -1,7 +1,7 @@
 ---
 name: po
 description: Product Owner agent — stays in role for pipeline dashboard, intent capture, targeted unblocks, and autonomous orchestration. Launch when the founder wants to interact with the pipeline.
-tools: Bash, Read, Grep, Glob, Agent, Edit, Write, CronCreate, CronDelete
+tools: Bash, Read, Grep, Glob, Agent, Edit, Write, CronCreate, CronDelete, TaskStop
 ---
 
 # Product Owner — CFGMS Autonomous Pipeline
@@ -92,25 +92,42 @@ gh api graphql -f query='
 Also read:
 - `docs/product/roadmap.md` — find the first uncompleted milestone (section without "COMPLETED"). Count `- [x]` vs `- [ ]` items.
 - `./.claude/scripts/agent-dispatch.sh list-running` — running container count and names
-- Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for a trigger named "po-cron". Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
+- `./.claude/scripts/agent-dispatch.sh capacity` — host resource headroom (§4.-1): `CAPACITY_OK:slots=<n>` or `CAPACITY_FULL:<binding>:slots=0`. The binding resource (disk/mem/cpu) tells you what's constraining dispatch on this host.
+- `./scripts/pipeline-helper.sh lease-list` — active distributed leases (multi-host; §4.-1). Each row is `<key>  <holder>  <exp>  <expired>`. Shows what other hosts are currently working.
+- Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for **this host's** trigger, named `po-cron-<CFGMS_HOST_ID>` (multiple hosts each run their own; a bare legacy `po-cron` counts as this host's if `CFGMS_HOST_ID` is unset). Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
 
-### 1.2 Dashboard Output
+### 1.2 Dashboard Output — flow-priority ladder
 
-Display sections in this order. **Omit any section with zero items.**
+Render pipeline state as a strict **priority ladder ordered by flow impact**, not a flat list of sections. The goal is a single glance that answers "what should I focus on?" Lead with one **DO NEXT** line drawn from the highest non-empty tier that is *in my lane* (🧑). **Omit any tier with zero items.**
 
-**Section 1: NEEDS ATTENTION** — project items with `Blocked` status. Flag items older than 7 days as stale.
+**Two axes — never collapse them:**
+- **Tier** = flow impact (below). This sets the order.
+- **Ownership tag** = who acts, overlaid on every item: 🤖 cron · 🧑 me (this session) · 👤 founder. The tag **never changes an item's tier.**
 
-**Section 2: MERGE DECISIONS** — Open PRs where `has_acceptance_review_comment: false` and CI is not failing (read from `review_recommendations` in the preflight output). Show QA verdict summary and CI status.
+**Ownership split (load-bearing).** The hardware host's po **cron loop owns all dispatch** — story, fix, and acceptance-review containers — and merges pipeline-branch PRs via the acceptance reviewer. **This session does NOT dispatch.** My lane (🧑) is exactly three things: (1) **land the PRs that fall through the cracks** — CI-green, in my lane (docs / ADR / roadmap / clean non-pipeline), no founder judgment needed → `gh pr merge --squash` **without asking**; anything with findings or on a pipeline branch → flag for cron/founder; (2) **decompose the next epic** via the Planning Team (§4.1 Step 7, inline main session); (3) **surface 👤 decisions.**
 
-**Section 3: ACTIVE MILESTONE** — current roadmap milestone, open item count, blockers.
+**Founder-only inherits urgency.** An item only the founder can resolve is tiered by *what it blocks*, not by who owns it. A 👤 decision gating P0/P1 work appears **in that tier**, flagged 👤 — never demoted. P2 holds only *non-blocking* strategic 👤 calls.
 
-**Section 4: AGENT TEAM** — running containers, fix cycle PRs, failed agents, queued stories.
+---
 
-**Section 5: PIPELINE DEPTH** — counts by stage (epics, drafts, ready, fix, review).
+**P0 — In-flight work decaying** (spent capacity, actively rotting; delay causes rework + rebase debt). Highest priority.
+- 🚨 **EXTERNAL PR QUARANTINE** — untrusted-author PRs (`external_prs` from preflight): PR#, author login, head branch, title, `is_released` (`human-reviewed:ok` from a push+ actor). Surfaces here when present.
+- 🧑 **Land open green PRs in my lane** — read `review_recommendations` / open PRs; those that are CI-passing, non-pipeline (docs/ADR/roadmap/clean), and need no founder judgment → **merge without asking**, oldest-first (age = rebase debt). Pipeline-branch or has-findings PRs → flag for 🤖 cron / 👤.
+- 🤖 **Merge-blocked / CI-red PRs** → cron fix cycle; I flag and shepherd.
+- 🤖 **Stalled or Failed-status stories** (the dispatched agent couldn't finish) → cron re-dispatches; I flag.
 
-**Section 6: CRON PO** — scheduled agent status: enabled/disabled/not configured, last run, next run. If not configured, suggest setting it up. If disabled (idle), explain why.
+**P1 — Keep the pipeline fed** (future flow). Refill when the Ready queue is thin.
+- 🤖 **Dispatch of Ready stories** → cron. Show Ready depth + host `capacity` (free slots + binding resource; when `free_slots` is 0 name it, e.g. "disk full — dispatch paused") as the fed/starved signal.
+- 🧑 **Decompose the next epic** (Planning Team, inline) when Ready is thin — rubric, in order: **critical-path** (unblocks the milestone / other epics) → **continue-over-start** (top up an in-progress epic before opening a new one, unless it can't yield parallel work) → **fan-out** (prefer epics whose stories are mutually independent over a long dependency chain — this is how we guarantee parallel work exists) → **roadmap order** (tie-break). This is my main P1 action.
+- ⏸️ **WINDOWS QUEUE** — Ready stories this host can't serve (`windows_queue`, or `gh issue list --repo cfg-is/cfgms --label needs-windows --state open`), held for the Windows host's Self-Dispatch Mode (§7). Surfaces here as fed-but-parked work.
 
-**Section 7: FORWARD EDGE** — next milestone definition quality. Prompt founder if thin.
+**P2 — Strategic, non-blocking founder calls.** Only 👤 `Blocked` items **not** gating P0/P1 work (e.g. "is #1792 still a deliberate hold?"). Flag items >7 days as stale.
+
+**P3 — Hygiene.** Board status drift, epic closeouts (`/pipeline-sweep`), genuinely-stale non-blocking items. Batchable, bottom of the page.
+
+---
+
+**Context footer (grounding, not a tier)** — one line each below the ladder: **Active milestone** (roadmap milestone, open count, blockers) · **Cron PO** (this host's `po-cron-<CFGMS_HOST_ID>` trigger: enabled/disabled/not-configured, last/next run; note leases held by *other* holders as expected healthy multi-host activity, §4.-1) · **Forward edge** (next-milestone definition quality — prompt founder if thin).
 
 ### 1.3 Error Handling
 
@@ -152,11 +169,13 @@ State all 5 fields back. Ask for explicit confirmation. Loop until confirmed.
 
 ### 2.4 Epic Creation
 
-On confirmation, create the issue:
+On confirmation, create the issue. Include the epic's **`cap:*` capability tags** — the product capabilities this epic serves (`cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`; multi-valued, descriptive, orthogonal to queue state). Stories inherit these at decomposition (Step 7a). If the epic is sourced from a `docs/product/roadmap.md` item, map its inline `**Tags:**` to the `cap:*` set:
 ```bash
+# one --label per capability this epic serves (add/remove as needed)
 gh issue create --repo cfg-is/cfgms \
   --title "<concise title, <70 chars>" \
   --label "epic" \
+  --label "cap:twin" --label "cap:dex" \
   --body "<structured body>"
 ```
 
@@ -183,15 +202,16 @@ Confirm with issue link: "Epic #NNN created. It will appear in the BA queue for 
 
 ### 2.5 Cron Re-Enable
 
-After creating an epic, check if the cron PO trigger is disabled:
+After creating an epic, check if **this host's** cron PO trigger is disabled:
 ```
 RemoteTrigger tool: action: "list"
 ```
-If a trigger named "po-cron" exists and `enabled: false`, re-enable it:
+If a trigger named `po-cron-<CFGMS_HOST_ID>` (or a bare legacy `po-cron` when
+`CFGMS_HOST_ID` is unset) exists and `enabled: false`, re-enable it:
 ```
 RemoteTrigger tool: action: "update", trigger_id: "<id>", body: {"enabled": true}
 ```
-Inform the founder: "Cron PO was paused (idle). Re-enabled — next cycle at <next_run_at>."
+Inform the founder: "Cron PO was paused (idle). Re-enabled — next cycle at <next_run_at>." Only ever enable/disable/cancel **this host's own** trigger — never another host's `po-cron-*`.
 
 -----
 
@@ -199,13 +219,13 @@ Inform the founder: "Cron PO was paused (idle). Re-enabled — next cycle at <ne
 
 Analyze pipeline state and recommend the single most valuable action.
 
-### Priority Order (first match wins)
+### Priority Order (first match wins) — follows the P0→P3 flow ladder (§1.2)
 
-1. **Stale blocked items** (>7 days): "Unblock #NNN — stale for X days, blocking Y stories"
-2. **Merge decisions pending**: "Review and merge PR #NNN — QA passed, CI green"
-3. **Failed agents**: "Check draft PR #NNN from failed agent — fix, re-dispatch, or close"
-4. **Empty pipeline**: "Run `/po intent <topic>` to add work"
-5. **Forward edge thin**: "Next milestone needs definition"
+1. **P0 · Decaying in-flight work**: green PR in my lane sitting unlanded → "Land PR #NNN (docs/ADR/clean) — CI green, aging X days"; else flag a merge-blocked/stalled item for cron. Founder-only items that *block* in-flight work belong here too, tagged 👤.
+2. **P1 · Pipeline starving**: Ready queue thin → "Decompose epic #NNN — <rubric reason: critical-path / fan-out for parallel work>"
+3. **P2 · Non-blocking founder call**: "Decide #NNN — <stale-blocked or strategic hold>, not gating flow"
+4. **P3 · Hygiene**: "Run `/pipeline-sweep` — N closeable epics / stale board items"
+5. **Empty pipeline**: "Run `/po intent <topic>` to add work"
 6. **Everything healthy**: "Pipeline is running. Nothing needs your attention."
 
 -----
@@ -215,6 +235,74 @@ Analyze pipeline state and recommend the single most valuable action.
 Run the full autonomous pipeline cycle once. Use when the founder says "cron", "run cycle", "run pipeline", or via `/loop 20m /po cron`.
 
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
+
+**Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because the Planning Team is a **live team of named `Agent` teammates that coordinate via `SendMessage`** — teammates address the orchestrator as `main`, so the team is driven from the main conversation, not from a backgrounded `po` subagent. (The old `TeamCreate`/`TeamDelete` tools no longer exist; the session has a **single implicit team** — you create teammates simply by spawning named background `Agent`s. See Step 7.) When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
+- **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent (synchronous — see next bullet) that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
+- **Nested `Agent` spawns are synchronous — never background them.** Spawn every nested `Agent` this cycle needs (the pin-refresh runner in Step 1.6, the pipeline-sweep runner in Step 7.5, and the Tech Lead in Step 2) with `run_in_background: false` (the default). A foreground spawn **blocks and returns its result on the same turn**, so you consume each result inline and move straight to the next step — no waiting, no orphaned task entries, nothing to reap. Do **NOT** set `run_in_background: true`, and do **NOT** end your turn after spawning in the expectation that the harness will re-invoke you when the child finishes: a backgrounded `po` subagent parent is **not** re-invoked on a nested child's completion, so the cycle stalls in a spawn-and-pause loop (this is the failure the async model in earlier revisions caused; verified 2026-07-02 that a `run_in_background: false` nested spawn from a `po` subagent completes and returns control inline in ~2s). The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
+
+### 4.-1 Multi-host coordination (stateless cron — run on many hosts at once)
+
+`/po cron` is safe to run **concurrently on multiple hosts**, including homogeneous
+(e.g. several Linux) hosts. There is **no shared local state** between cycles — the
+preflight cache, worktree clones, and docker containers are per-host scratch,
+re-derived every cycle from GitHub (the single source of truth). Cross-host mutual
+exclusion is provided by a **distributed lease**: an atomic git ref under
+`refs/cfgms-lease/<key>` (`pipeline-helper.sh lease-acquire/release/...`). Creating
+a ref is the one server-atomic operation GitHub exposes, so exactly one racing host
+wins a given key regardless of how many attempt it.
+
+**The lease is the hard interlock; project status is the dashboard signal.** Every
+collision-prone action acquires a lease on its work unit BEFORE acting:
+
+| Lease key | Held by | Released by |
+|---|---|---|
+| `story-<item>` | dev dispatch (or §7 self-dispatch claim) | the dev container's entrypoint on exit (`release-story` for §7); TTL reclaim on crash |
+| `pr-<N>` | review / fix / resolve (mutually exclusive on one PR) + inline rebase | the review/fix container's entrypoint on exit; inline rebase releases it itself; TTL on crash |
+| `epic-decompose-<N>` | Step 7 planning team | the host, in-session, after posting the decomposition summary |
+| `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after posting the `po-pin-refresh` marker |
+| `sweep` | Step 7.5 pipeline-sweep | the host, after the sweep returns |
+
+The container-op leases (`story-*`, `pr-*`) are acquired by the script helpers
+automatically (`po-act.sh dispatch` / `dispatch-fix` / `resolve-conflict`,
+`agent-dispatch.sh review-pr`) and released by the container — **you do not manage
+them by hand.** This is the "dispatch locks it, the returning agent unlocks it"
+lifecycle: when a dev agent submits its PR and its container exits, the `story-*`
+lease frees, and whichever cron host's next cycle comes first acquires `pr-<N>` to
+review it. The **inline-op leases** (`epic-decompose-*`, `pin-refresh-*`, `sweep`)
+ARE yours to manage in the steps below — acquire, run, release.
+
+**Host identity.** Export `CFGMS_HOST_ID` (default `hostname`) once per shell on
+each host; it tags lease holders for debugging and names this host's cron trigger
+(§6). Set `CFGMS_LEASE_TTL_STORY` / `CFGMS_LEASE_TTL_PR` only to override the
+defaults (7200s / 3600s).
+
+**Per-host resource admission gate (replaces the old container-count cap).** A new
+agent container is admitted only while the host stays under its ceilings — RAM and
+disk below 90% utilization, committed CPU below 75% of cores, with a `2×ncpu`
+count as a runaway backstop. This is **per-host and self-tuning**: a big box runs
+more agents, a laptop fewer, and it adapts to whatever else is running. It is the
+correct shape for multi-host — resource exhaustion is inherently per-host, so each
+host limits itself to what it can actually hold (no global container budget, and
+no hand-tuned magic number).
+
+- **Enforcement is automatic.** Every launch path (`po-act dispatch` /
+  `dispatch-fix` / `resolve-conflict`, `agent-dispatch review-pr`) calls the gate
+  before leasing/cloning and defers when full — you'll see
+  `DISPATCH_DEFERRED:<id>:resources (…)` / `REVIEW_REFUSED:<pr>:resources`. Trust
+  it; deferred work is picked up a later cycle (or by a host with room).
+- **Planning hint.** The preflight surfaces `capacity` (`free_slots`, `binding`
+  resource); read it to decide how many reviews/dispatches to *attempt* this cycle.
+  Query directly with `./.claude/scripts/agent-dispatch.sh capacity` (→
+  `CAPACITY_OK:slots=<n>` / `CAPACITY_FULL:<binding>:slots=0`).
+- **Knobs** (env, all optional): per-agent RAM/disk reservations
+  `CFGMS_AGENT_MEM_MB` (4096), `CFGMS_AGENT_DISK_GB` (8); CPU is **load-based** —
+  `CFGMS_AGENT_CPU_LOAD` (1.5) is the expected sustained cores per agent measured
+  against the live 1-min load average, not a per-core reservation. Ceilings
+  `CFGMS_AGENT_MEM_CEIL` (0.90), `CFGMS_AGENT_DISK_CEIL` (0.90), `CFGMS_AGENT_CPU_CEIL`
+  (0.75); bypass `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
+
+**Expired-lease GC** runs inside `agent-dispatch.sh cleanup-stale` (Step 1.5) — no
+separate call needed.
 
 ### Helper scripts (prefer these — one approval per action, no `/tmp` writes)
 
@@ -230,6 +318,8 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
   - `log <ISSUE> <text>` — post timestamped session log (stdin if text is `-`)
   - `merge-queue` — queue state as JSON
   - `block <ISSUE> <reason>` — set project status Blocked, post escalation comment
+  - `release-story <ITEM_ID>` — release a §7 self-dispatch story lease after the PR is up
+- `./scripts/pipeline-helper.sh lease-{acquire,release,status,list,gc}` — distributed-lease primitive (multi-host coordination, §4.-1). `lease-acquire <key> [ttl]` prints `ACQUIRED`/`RECLAIMED` (rc0), `HELD` (rc1), or `ACQUIRE_ERROR` (rc2). Used directly only for the inline-op leases below; container-op leases are managed by the dispatch helpers.
 - `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
 - `./.claude/scripts/agent-dispatch.sh` — lower-level primitives (called by `po-act.sh`)
 
@@ -284,7 +374,12 @@ The preflight handles all label queries, PR CI summaries, merge queue state, cod
 
 Each step sets project status `Blocked` on unrecoverable failure and continues to the next.
 
-**Priority order (cap-constrained):** in-flight work is processed before new work. The 7-container cap is shared across all autonomous activity (dev agents, fix-pr, review containers), so when slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If the cap is exhausted by Steps 3-5, defer Step 6 to the next cycle.
+**Priority order (capacity-constrained):** in-flight work is processed before new work. Host capacity (the resource admission gate, §4.-1) is shared across all autonomous activity (dev agents, fix-pr, review containers), so when free slots are scarce the cycle finishes existing PRs first — they unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them. The numbered steps below reflect this priority: Step 3 (rebase) → Step 4 (review) → Step 5 (fix-cycle) → Step 6 (dispatch new dev). If capacity is exhausted by Steps 3-5, the gate auto-defers Step 6 dispatches to the next cycle.
+
+Maintenance steps that create new work (Step 1.6 — pin refresh) or reconcile state run regardless of capacity, since they do not launch agent containers.
+
+**Step 0 — External PR triage (Issue #1786):**
+Read `external_prs` from the preflight output (`po-act.sh state '.external_prs'`). For each entry where `is_released == false`, log the quarantine and skip all pipeline actions for that PR. For entries where `is_released == true` (maintainer has applied `human-reviewed:ok` via a push+ actor), treat the PR as internal and allow it through normal review/merge flow. Do NOT call `review-pr`, `dispatch-fix`, or `enqueue` on any PR where `is_released == false`.
 
 **Step 1 — Unblock check:**
 Find recently merged PRs. Check if any `Draft` stories had `## Dependencies` referencing the merged story. If satisfied, they're eligible for Tech Lead review.
@@ -296,12 +391,97 @@ Remove stale agent containers and clones. Run:
 ```
 This finds containers whose stories are closed, have project status `Failed`, or project status `Blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
 
+**Step 1.6 — Lock sweep:**
+Keep the public tracker's injection surface closed. Run:
+```bash
+./scripts/pipeline-helper.sh lock-sweep
+```
+Locks open pipeline PRs (`feature/story-*` / `feature/item-*`) + tags them `internal`, and re-locks any unlocked `internal` issue (backstop for the materialize/create-epic create→lock race). Idempotent; safe every cycle.
+
+**Step 1.6 — Dependency pin refresh (cron + cycle):**
+
+The `dependency-pin-check` GitHub Actions workflow appends a `## Weekly Pin Check — <date>` comment (authored by `github-actions`) to a long-lived issue labelled `dependency-pins` whenever a pinned tool/toolchain has a newer upstream release. This step turns that signal into dispatchable bump stories by running the `refresh-pins` skill — which researches every pin against upstream, applies the cooldown + CVE policy, and creates one Draft `story,dependencies` issue per pin that should bump. Those drafts are then promoted by the Tech Lead pass (Step 2) in this same cycle.
+
+Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-docker self-dispatch hosts do not run §4 steps. It needs no Docker (just `gh`/`curl`/`WebFetch`), so the remote `po-cron` trigger can run it too.
+
+**Idempotency gate (do this BEFORE invoking the skill — the skill does a full network sweep, so don't run it every cycle):**
+
+1. Find the open pin-check issue:
+   ```bash
+   gh issue list --repo cfg-is/cfgms --label dependency-pins --state open \
+     --json number --jq '.[0].number'
+   ```
+   If none, skip the step.
+
+2. Compare the latest automated weekly-check comment against the last time this step processed one. Both are read from the issue's comments — the marker is an HTML comment `<!-- po-pin-refresh -->` this step posts after a run:
+   ```bash
+   gh issue view <PIN_ISSUE> --repo cfg-is/cfgms --json comments --jq '{
+     latest_check: ([.comments[] | select(.author.login=="github-actions") | select(.body|test("Weekly Pin Check")) | .createdAt] | last // ""),
+     last_processed: ([.comments[] | select(.body|test("po-pin-refresh")) | .createdAt] | last // "")
+   }'
+   ```
+   Run the skill only if `latest_check` is non-empty AND (`last_processed` is empty OR `latest_check > last_processed`) — ISO-8601 UTC strings compare lexicographically. Otherwise report "pins current (last processed <last_processed>)" and skip.
+
+3. **Acquire the inline lease** so a second host doesn't sweep the same weekly
+   check concurrently. Key on the check timestamp (sanitized):
+   ```bash
+   ./scripts/pipeline-helper.sh lease-acquire "pin-refresh-<latest_check>" 1200
+   ```
+   On `HELD:*` another host owns this sweep — report "pin refresh in flight on
+   another host" and skip the step. On `ACQUIRED`/`RECLAIMED`, run the skill
+   (empty args = sweep every pin; it is itself idempotent and will comment on, not
+   duplicate, any bump story that already exists):
+   ```
+   Skill: refresh-pins
+   ```
+
+4. After it returns, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported:
+   ```bash
+   ./.claude/scripts/po-act.sh log <PIN_ISSUE> - <<'EOF'
+   <!-- po-pin-refresh -->
+   Processed weekly pin check via refresh-pins. Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Drafts enter the Tech Lead queue (Step 2).
+   EOF
+   ```
+   Then **release the lease**: `./scripts/pipeline-helper.sh lease-release "pin-refresh-<latest_check>"`.
+   If the marker post fails (network, etc.), the next cycle re-sweeps the same
+   check — harmless, because `refresh-pins` is idempotent (it comments on, never
+   duplicates, an existing bump story); the only cost is one redundant network
+   sweep. If `gh issue list` ever returns more than one open `dependency-pins`
+   issue, treat that as an anomaly and process the most recently updated one (the
+   label is meant for a single long-lived issue).
+
+Include the skill's headline (bumping / holding / up-to-date counts + story numbers) in the cycle summary's pipeline-depth section.
+
 **Step 2 — Tech Lead pass (legacy only):**
 Handles `Draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `Ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
 
-Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`. Collect their issue numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item <ITEM_ID_NNN>"`, mode `auto`.
+Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`.
+**Filter out revision-pending drafts first:** a Draft that already carries an
+unaddressed `<!-- tl-revision -->` comment (a Tech Lead "Revision Needed" marker
+newer than the story's last body update) is waiting on BA / Planning Team rework,
+not on Tech Lead — skip it, or it churns the Tech Lead every cycle. It re-enters
+the queue when its body is updated. For the remaining drafts, collect their issue
+numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech
+Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent
+executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item
+<ITEM_ID_NNN>"`, mode `auto`, `run_in_background: false` (synchronous — the
+verdicts return on the same turn; see the §4 nested-spawn adaptation).
 
-The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency ordering, implementation notes, scope, constraints, and ambiguity. Passing stories get their project status set to `Ready`. Failing stories get their project status set to `Blocked`.
+The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency
+ordering, implementation notes, scope, constraints, and ambiguity, and resolves
+each story to one of three outcomes (see its "Outcomes" section):
+
+- **Ready** — passes all checks. A well-formed but still-*open* dependency does
+  **not** prevent Ready; the preflight gates dispatch on open deps automatically
+  (`action: hold, reason: deps not closed`). The Tech Lead never Blocks or holds
+  on an open dependency.
+- **Revision Needed** → status stays `Draft` with a `<!-- tl-revision -->`
+  comment (BA-fixable: missing sections, vague ACs, oversized/needs-split, wrong
+  paths). Not a founder escalation.
+- **Blocked** → reserved for decisions only the founder/PO can make (genuine
+  product ambiguity, an architecture/constraint exception, a non-v1 item with no
+  actionable AC, a circular dependency). Per the status taxonomy, `Blocked`
+  means "needs founder decision" — do not use it as a generic rejection bucket.
 
 **Step 3 — Rebase stuck PRs:**
 
@@ -321,7 +501,20 @@ The preflight surfaces three actions in `review_recommendations`:
 | `rebase_then_investigate` | CI red (any required check failed) | Run `rebase-pr.sh`. If `REBASE_OK`, wait one cycle for CI to re-run. If `REBASE_NOOP`, the branch was already current → the failure is real → diagnose + dispatch-fix. |
 | `investigate` (legacy) | rare; falls through if neither rebase nor red applies | Same handling as rebase_then_investigate's NOOP branch. |
 
-For each `rebase` or `rebase_then_investigate` recommendation:
+For each `rebase` or `rebase_then_investigate` recommendation, first acquire the
+`pr-<N>` lease (§4.-1) so a concurrent host's review/fix/rebase on the same PR
+can't race the force-push:
+
+```bash
+./scripts/pipeline-helper.sh lease-acquire "pr-<PR_NUM>" 600
+```
+
+On `HELD:*`, another host controls this PR right now — skip it this cycle. On
+`ACQUIRED`/`RECLAIMED`, run the rebase, then **release `pr-<PR_NUM>` immediately
+after `rebase-pr.sh` returns** (`./scripts/pipeline-helper.sh lease-release
+"pr-<PR_NUM>"`) — before acting on the outcome. Releasing first is required so the
+`REBASE_CONFLICT` path's `resolve-conflict` dispatch (which re-acquires `pr-<N>`)
+doesn't self-block:
 
 ```bash
 ./.claude/scripts/rebase-pr.sh <PR_NUM>
@@ -334,11 +527,23 @@ Outcomes:
   ./.claude/scripts/po-act.sh diagnose <PR>
   ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
   ```
-- `REBASE_CONFLICT:<PR>` — real conflicts that need code changes. Set status to Fix and post a comment on the PR with the conflicting files (the script prints them):
+- `REBASE_CONFLICT:<PR>` — real conflicts requiring code understanding. **Immediately** (in this same Step 3 execution, without waiting for the next cycle) dispatch a resolve-conflict agent:
   ```bash
-  ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
+  ./.claude/scripts/po-act.sh resolve-conflict <PR>
   ```
-  Step 5 will pick it up next cycle for dispatch-fix.
+  The resolve-conflict agent: rebases onto `origin/develop`, resolves conflict markers (understanding both sides' intent, deduplicating helpers, preserving both stories' logic), validates (`go build ./...` + affected tests), and force-pushes with `--force-with-lease` to the PR's own branch. **One attempt per PR per cycle** — the inline call here is the only dispatch; the preflight never emits a separate `resolve-conflict` action type.
+
+  After a successful dispatch (`DISPATCHED_RESOLVE_CONFLICT:<PR>`):
+  - The next cycle will see the PR with a new commit (from the rebase). Because the new commit's `committedDate` is newer than any prior review comment, the preflight routes the PR to **`spawn_acceptance_reviewer`** (AC4 re-review) before enqueue — this applies to prior-PASS, prior-FAIL, and never-reviewed PRs alike. No additional status change is needed.
+
+  If the resolve-conflict dispatch fails (author gate refused, validation failure inside the container):
+  - The agent will have posted the conflict files + failure summary on the PR
+  - Set status Fix for human triage:
+    ```bash
+    ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
+    ```
+
+  **Do NOT re-dispatch** if the PR is still DIRTY in the next cycle after a successful push — surface for human triage instead (the resolve-conflict guard in `active_fix_pr_nums` in the preflight suppresses dispatch while the container is in flight, and after that you get at most one attempt per cycle because Step 3 runs once per PR per cycle).
 - `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
 
 This step is REQUIRED before Step 4 because:
@@ -394,11 +599,11 @@ Cross-check the story's project status: skip any story with status `Fix`. Use `p
 
 **Dispatch reviews for ALL eligible PRs each cycle, in parallel.** Iterate the
 `spawn_acceptance_reviewer` PRs in FIFO order (oldest `createdAt` first) and
-dispatch a headless review container for each, up to the 7-container cap
-(`feedback_max_running_agents`). The cap is shared with dev and fix containers;
-reviews are in-flight work, so they claim their slots before Step 6 dispatches
-any new dev. If eligible reviews exceed the free slots, dispatch up to the cap
-and the rest are picked up next cycle.
+dispatch a headless review container for each, until the host runs out of
+capacity (the resource gate, §4.-1, auto-defers with `REVIEW_REFUSED:<pr>:resources`
+once full). Capacity is shared with dev and fix containers; reviews are in-flight
+work, so they claim their slots before Step 6 dispatches any new dev. Reviews the
+gate defers are picked up next cycle (or by a host with room).
 
 ```bash
 ./.claude/scripts/agent-dispatch.sh review-pr <PR_NUM>
@@ -445,10 +650,47 @@ For each story with project status `Fix`, find its PR and dispatch the fix agent
 ```
 This cleans any stale container from a prior failed attempt, re-clones, and launches.
 
+`dispatch-fix` and `resolve-conflict` are sibling modes: `dispatch-fix` addresses review/CI failures on an otherwise-rebased branch; `resolve-conflict` (Step 3) addresses rebase conflicts. The two never run on the same PR simultaneously — the `active_fix_pr_nums` suppression guard in the preflight recognizes both `cfg-agent-pr-fix-<PR>` and `cfg-agent-resolve-conflict-<PR>` containers.
+
 **Step 6 — Dispatch:**
+
+**6a — Stalled-dispatch recovery (run before new dispatch):**
+
+The preflight emits `stalled_dispatches` — a list of `In Progress` stories whose agent container (`cfg-agent-<N>`) is not running AND which have no open PR (including WIP drafts). These are silently stalled stories: the container was hard-killed (OOM, docker daemon crash, host restart, `docker rm -f`) and left the pipeline item frozen with no artifact.
+
+For each entry in `preflight.stalled_dispatches`:
+- If the story has a WIP draft PR (`is_draft: true` in `prs_open`): route through `dispatch-fix` instead (Step 5 path) — the draft PR is the work artifact to resume.
+- Otherwise: re-dispatch the story to restart the agent from scratch:
+```bash
+./.claude/scripts/po-act.sh dispatch <ITEM_ID>
+```
+
+The `item_id` comes from `stalled_dispatches[*].item_id`. Re-dispatch resets the story to `In Progress` with a fresh container. This is safe — no existing container or PR would be clobbered (preflight only flags stories where neither exists).
+
+Report stalled recoveries in the cycle summary as: `Re-dispatched stalled story #NNN (no container, no PR)`.
+
+**6b — New story dispatch:**
 Find stories with project status `Ready` that are not `In Progress`. Before dispatching, check for file conflicts with in-flight agents:
 
 Both gates are computed by the preflight script (`dispatch_recommendations` with `action: "dispatch"` vs `"hold"` and a `reason` string). Trust its recommendation by default, override only if `parse_warnings` are non-empty on the story.
+
+**Execution-environment routing (multi-host).** The preflight filters dispatch by
+this host's capabilities (`CFGMS_PO_HOST_CAPS`, default `linux`). A story whose
+required execution environment isn't in this host's caps gets `action: "hold"`
+with a `route` hint (e.g. `route: "windows"`) — it is **not** container-dispatched
+here. On the Linux orchestrator, windows-tagged stories therefore stay held and
+appear in the dashboard's Windows queue (§1.2); the Windows host picks them up via
+Self-Dispatch Mode (§7). A story's required env comes from a `## Environment` body
+section and/or a `needs-<env>` label (see Reference: Story Body Conventions).
+
+**Cross-host safety (any number of homogeneous hosts).** Environment routing makes
+hosts work *different* stories when their caps differ, but it is **not** the safety
+mechanism — two identical-caps hosts (or two Linux orchestrators) are fully
+supported. `po-act.sh dispatch` acquires the `story-<item>` lease (§4.-1) BEFORE it
+materializes, claims, clones, or launches, so exactly one host proceeds; a loser
+prints `DISPATCH_SKIPPED:<id>:lease_held` and exits clean. The lease — not the
+`Ready → In Progress` status flip (Projects V2 has no CAS) — is the interlock. You
+do not manage `story-*` leases by hand; just trust the `DISPATCH_SKIPPED` output.
 
 For each story the preflight recommends dispatching:
 ```bash
@@ -457,7 +699,7 @@ For each story the preflight recommends dispatching:
 
 where `<ITEM_ID>` comes from `dispatch_recommendations[*].item_id` in the preflight output. Note: the `dispatch` subcommand handles both issue_nums (all-digits, legacy path) and item_ids (non-numeric) transparently — Story B wired this.
 
-**This step is intentionally last in priority order.** If the 7-container cap is exhausted by Steps 3-5 (rebase, review, fix-cycle), defer dispatch to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
+**This step is intentionally last in priority order.** If host capacity is exhausted by Steps 3-5 (rebase, review, fix-cycle), the admission gate auto-defers these dispatches (`DISPATCH_DEFERRED:<id>:resources`) to the next cycle. Existing in-flight PRs unblock the merge queue, which is more valuable than starting more dev work that would just queue behind them.
 
 **Step 7 — Planning Team (BA + Tech Lead collaboration):**
 Find `epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each epic, orchestrate a collaborative planning session where BA and Tech Lead work together to produce stories that are ready on the first try.
@@ -468,32 +710,61 @@ gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
 ```
 Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
 
-**7b. Create the planning team:**
+**Capture the epic's `cap:*` capability tags** from `labels` (the product capabilities that consume this work — `cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`). If the epic has none but was sourced from a roadmap item, map that item's inline `**Tags:**` (in `docs/product/roadmap.md`) to the corresponding `cap:*` set. **Each story inherits its epic's `cap:*` tags** (a story may narrow to a subset if it only serves some of them, but never invents a capability the epic lacks). A multi-tag story is the signal it is foundational — its interface/schema must satisfy every listed consumer.
+
+**7b. Acquire the decompose lease:**
+
+Decomposition is a multi-minute operation; sub-issue links only appear once the
+planning conversation converges and `create-story` runs, so two hosts starting
+near-simultaneously would both run a full planning team and double-create the
+story set. Guard it:
+```bash
+./scripts/pipeline-helper.sh lease-acquire "epic-decompose-<NUM>" 2400
 ```
-TeamCreate(team_name: "planning-epic-<NUM>")
-```
+On `HELD:*`, another host is decomposing this epic — skip it. On
+`ACQUIRED`/`RECLAIMED`, proceed. **Release `epic-decompose-<NUM>` after 7g (summary
+posted) or on any early exit** — including the 7i convergence-failure path.
+
+There is **no separate team-creation step**. The session has a **single implicit
+team** (the `Agent` tool's `team_name` parameter is deprecated and ignored), so you
+create teammates simply by spawning named background `Agent`s in 7c; they become
+addressable for `SendMessage` the moment they start.
 
 **7c. Spawn BA and Tech Lead as teammates (in parallel):**
 
-Spawn both using the **Agent tool** with `team_name` and `name` parameters. Read each agent's `.claude/agents/*.md` file and include the **Team Mode** section instructions in the prompt. Use `subagent_type: "general-purpose"`, `model: "sonnet"`, `mode: "auto"`.
+Spawn both using the **Agent tool** with a `name` (their handle for `SendMessage`)
+and `run_in_background: true` (so they stay live and addressable while you
+orchestrate). Read each agent's `.claude/agents/*.md` file and include the **Team
+Mode** section instructions in the prompt. Use `subagent_type: "general-purpose"`,
+`model: "sonnet"`, `mode: "auto"`. Do **not** pass `team_name` — it is deprecated
+and ignored.
 
-- BA: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "ba", model: "sonnet", mode: "auto", prompt: <ba.md Team Mode instructions>)`
-- Tech Lead: `Agent(subagent_type: "general-purpose", team_name: "planning-epic-<NUM>", name: "tech-lead", model: "sonnet", mode: "auto", prompt: <tech-lead.md Team Mode instructions>)`
+- BA: `Agent(subagent_type: "general-purpose", name: "ba", run_in_background: true, model: "sonnet", mode: "auto", prompt: <ba.md Team Mode instructions>)`
+- Tech Lead: `Agent(subagent_type: "general-purpose", name: "tech-lead", run_in_background: true, model: "sonnet", mode: "auto", prompt: <tech-lead.md Team Mode instructions>)`
 
-**7d. Broadcast epic context to the team:**
+Teammates address you as `main` (`SendMessage(to: "main", ...)`) and each other by
+name; you address them by name.
+
+**7d. Send epic context to the team:**
+There is no `to: "*"` broadcast in the implicit-team model — send the context to
+each teammate by name:
 ```
-SendMessage(to: "*", summary: "Epic context for planning", message: <epic body + architectural context from CLAUDE.md>)
+SendMessage(to: "ba", summary: "Epic context for planning", message: <epic body + architectural context from CLAUDE.md>)
+SendMessage(to: "tech-lead", summary: "Epic context for planning", message: <same context>)
 ```
 
-**7e. Orchestrate the planning conversation:**
+**7e. Run the collaborative planning conversation:**
 
-The conversation follows this protocol:
+This is a **three-way adversarial collaboration**, not a relay through the PO. The BA and Tech Lead talk **directly** to each other; the PO (addressed by teammates as `main`) participates as a full member and owns the final product synthesis. The goal is for all three to converge on the right answer together.
 
-1. **BA proposes** — BA surveys the codebase and sends story proposals to PO via `SendMessage`
-2. **PO relays to Tech Lead** — forward BA's proposals: `SendMessage(to: "tech-lead", message: <proposals>)`
-3. **Tech Lead reviews** — validates proposals against the codebase (5-check validation) and sends per-story verdicts (APPROVED / REVISION NEEDED) to PO. Tech Lead may also message BA directly for clarifications.
-4. **If revisions needed** — PO relays Tech Lead feedback to BA: `SendMessage(to: "ba", message: <feedback>)`. BA revises and re-proposes. PO relays to Tech Lead for re-review. Only unresolved stories iterate — approved stories are locked.
-5. **PO product decisions** — if BA and Tech Lead disagree on scope, priority, or approach, PO makes the product call and sends the decision to both: `SendMessage(to: "*", message: "PO DECISION: ...")`
+1. **BA proposes** — BA surveys the codebase and sends story proposals to **both** the Tech Lead (`SendMessage(to: "tech-lead")`) and the PO (`SendMessage(to: "main")`).
+2. **Tech Lead challenges directly** — the Tech Lead validates against the codebase (7-check validation) and sends per-story verdicts (APPROVED / REVISION NEEDED, with codebase evidence) **directly to the BA**, copying `main`. The BA defends or revises **directly** with the Tech Lead — they iterate between themselves without waiting on a PO relay.
+3. **PO interjects** — the PO reads the exchange and weighs in whenever a **product** question is at stake (scope, priority, an AC that misreads intent, a split that's wrong for the roadmap) or when the two are converging on something the PO disagrees with. The PO can challenge either agent, and either agent can challenge the PO. Send product calls to each teammate by name: `SendMessage(to: "ba", ...)` and `SendMessage(to: "tech-lead", ...)`.
+4. **Converge** — an item is locked when the BA and Tech Lead agree AND the PO has no product objection. Only unresolved items keep iterating.
+
+**Everyone can challenge everyone.** The value of the team is adversarial cross-examination — the Tech Lead catching a BA mis-grounding, the BA out-verifying a Tech Lead claim, the PO catching a scope drift both agents missed. Encourage disagreement backed by evidence; the PO adjudicates genuine deadlocks.
+
+**File handoff for large artifacts.** Teammate `SendMessage` bodies over a few paragraphs reach the PO only as truncated idle-notification summaries. Instruct both agents up front to **write big artifacts** (full story proposals, full verdicts) to `/tmp/<role>-<epic>-*.md` and send a short `SendMessage` with just the file path + headline; the reader `Read`s the file.
 
 **Maximum 3 revision rounds.** A round = BA revises + Tech Lead re-reviews. After 3 rounds, any remaining REVISION NEEDED stories are resolved by PO decision: either accept with a PO note, or drop and document the convergence failure by blocking the epic (use `po-act.sh block <EPIC_NUM> "<reason>"`). Do NOT create a parallel tracking issue — the epic's Blocked status + comment IS the escalation.
 
@@ -501,65 +772,41 @@ The conversation follows this protocol:
 
 Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
 
-Once all stories are APPROVED (or PO-decided), create them in the project queue. There are two paths — pick **one** per epic, don't mix.
+Once all stories are APPROVED (or PO-decided), create them via `create-story` — **never `gh issue create`.** Decomposition has exactly one path.
 
-**Path A (default) — project draft items (private, no public GH issue):**
+**Create stories in dependency order** — foundational stories first. Each `create-story` call returns the real issue number immediately, so later siblings reference real `#NNN` in their `## Dependencies` sections. No placeholders, no two-pass edit flow.
 
 ```bash
 cat > /tmp/story-body.md <<'STORY_EOF'
-<full story body from final agreed proposal>
+<full parser-compliant story body (## Dependencies, ## Files In Scope, etc.)>
 STORY_EOF
 
-./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md
-# Returns: CREATED_DRAFT:<item_id>
+./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md --cap "<inherited cap tags, e.g. cms,twin>"
+# Returns: CREATED_ISSUE:<item_id>:#NNN  — locked `internal` issue, sub-issue-linked under the epic, tagged cap:*
 rm /tmp/story-body.md
 
 bash ./scripts/project-queue.sh update-field <item_id> status "Ready"
 ```
 
-Path A produces project drafts only — there is no public GH issue and no GitHub sub-issue link to the parent epic. The preflight's `sub_issues_total` for the epic stays 0, but the `body_referencing_issues` count is also 0 (drafts aren't issues), so undecomposed-detection requires the parent epic to be closed or have a decomposition-complete marker comment. Use this path when stories don't need external visibility (the common case for internal-engineering work).
+**Materialize-at-decomposition (ADR-015).** `create-story` converts the story into a GitHub issue **at creation** — born **locked**, labelled **`internal` + `story`**, and sub-issue-linked under its epic. The issue is created by *convert* (`project-queue.sh materialize`), never `gh issue create`, so the autonomous-creation gate stays intact. The lock is what closes the injection surface (locked issues take no external comments); deferring creation never added protection. Early `#NNN` makes dependencies real at authoring time and decomposition machine-visible via `sub_issues_total` — no marker comment needed.
 
-**Path B — public GitHub issues (when external visibility is needed):**
+**Public-body hygiene (MANDATORY).** Story bodies are world-readable the moment they're created. No secrets, no credentials, no customer/business specifics, and no exploit-grade detail about unfixed vulnerabilities in any materialized body.
 
-Use when stories should be referenceable from outside the team (open-source contributors, cross-team coordination, public roadmap tracking). Requires four calls per story; **all four are required** or the story will not be visible to the pipeline:
+**`--defer` — the exception path.** A story whose body cannot be public while queued (a security fix describing a live vulnerability, business-adjacent content) is created with `create-story <EPIC_NUM> "<title>" <body_file> --defer`. `--defer` and `--cap` compose in any order; on a deferred story the cap intent rides a body marker until materialize applies the labels at dispatch. It stays a private project draft (returns `CREATED_DRAFT:<item_id>`) and is materialized by `po-act.sh dispatch` when work starts. Use it deliberately, not by default. If an epic decomposes ENTIRELY into `--defer` drafts, post a decomposition-complete marker comment on the epic — deferred drafts aren't sub-issues, so the preflight can't see them.
 
-```bash
-cat > /tmp/story-body.md <<'STORY_EOF'
-## Parent epic: #<EPIC_NUM>
+**Work-product test — what may EVER become an issue.** If the deliverable is a **repo artifact** (code, docs, config that lives in the repo), it becomes an issue via create-story. If the deliverable does **not** live in the repo (business setup, legal/licensing review as a decision, ops, finance), it stays a project item forever and is **never** an issue. License-*file* edits are repo artifacts (OK); "have a lawyer review licensing" is not.
 
-<full story body, including the parser-required ## Dependencies and ## Files In Scope sections>
-STORY_EOF
-
-# 1. Create the public GH issue
-issue_num=$(gh issue create --repo cfg-is/cfgms \
-  --title "<scope>: <title>" \
-  --label story \
-  --body-file /tmp/story-body.md \
-  | grep -oE '[0-9]+$')
-
-# 2. Link as sub-issue of the parent epic (so subIssuesSummary tracks completion)
-./scripts/pipeline-helper.sh link-child <EPIC_NUM> "$issue_num"
-
-# 3. Add the issue to the project queue (so the preflight can see it)
-item_id=$(./scripts/project-queue.sh add-issue "$issue_num" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
-
-# 4. Mark Ready (skipping Draft — Tech Lead validated during planning)
-./scripts/project-queue.sh update-field "$item_id" status "Ready"
-
-rm /tmp/story-body.md
-```
-
-**Common failure mode (caught 2026-05-18 on epic #1500):** decomposition created public GH issues via `gh issue create` but skipped steps 2–4. The stories were visible on GitHub but invisible to the pipeline — no sub-issue link (epic looked undecomposed), no project item (`list-by-status Ready` returned `[]`), no status (dispatcher could never pick them up). If you create a GH issue, you must do all four calls.
+**Never apply `pipeline:*` / `agent:*` labels** — those are decommissioned; the board **Status** field is the only queue signal. Dev issues carry `story` (+ `epic` for epics), `internal` (applied by the materialize step), and any inherited **`cap:*` capability tags** (applied via `create-story --cap`). `cap:*` is **descriptive only** — it names the consuming product capability, never queue state, and must never gate dispatch or drive Status.
 
 **7g. Post summary on epic:**
 ```bash
 cat > /tmp/planning-summary.md <<'SUMMARY_EOF'
 ## Planning Team — Decomposition Complete
 
-Stories created (Ready status in project queue):
+Stories created (locked internal issues, Ready status in project queue):
 - #NNN — <title>
 - #NNN — <title>
+(--defer drafts, if any: <item_id> — <title> — reason held private)
 
 Dependency order: #A → #B → #C
 
@@ -572,10 +819,18 @@ SUMMARY_EOF
 rm /tmp/planning-summary.md
 ```
 
-**7h. Shutdown the planning team:**
-Send shutdown to both teammates: `SendMessage(to: "*", message: {type: "shutdown_request"})`. Then clean up:
+**7h. Shut down the planning team and release the lease:**
+Send each still-live teammate a shutdown request by name (no `to: "*"` broadcast, and
+no `TeamDelete` — there is no explicit team object to tear down):
 ```
-TeamDelete()
+SendMessage(to: "ba", message: {type: "shutdown_request"})
+SendMessage(to: "tech-lead", message: {type: "shutdown_request"})
+```
+A background teammate that has already returned its PROPOSALS FINAL / verdicts has
+exited and needs no shutdown — shutdown only matters for one still running.
+Release the decompose lease so it doesn't linger until TTL:
+```bash
+./scripts/pipeline-helper.sh lease-release "epic-decompose-<NUM>"
 ```
 
 **7i. Fallback — convergence failure:**
@@ -604,9 +859,18 @@ rm /tmp/convergence-failure-<EPIC_NUM>.md
 
 Run the `pipeline-sweep` skill. It closes every open epic whose sub-tasks are all done AND whose AC verification passes on `origin/develop`, drafts a remediation story under any epic whose sub-tasks are done but AC verification fails, and moves any CLOSED-on-GitHub project item whose status is stale (anything other than `Done`) to `Done`. Runs in both `cycle` and `cron` modes; cheap and idempotent.
 
+Guard with the `sweep` lease so two hosts don't both draft remediation stories
+(the sweep is only *mostly* idempotent — concurrent runs can double-draft, per
+`epic_review_dup_remediation`):
+```bash
+./scripts/pipeline-helper.sh lease-acquire "sweep" 900
+```
+On `HELD:*`, another host is sweeping — skip this step. On `ACQUIRED`/`RECLAIMED`,
+run the skill, then release `sweep`:
 ```
 Skill: pipeline-sweep
 ```
+After it returns: `./scripts/pipeline-helper.sh lease-release "sweep"`.
 
 Include the sweep's headline + verdict tables in the cycle summary you return to the founder. If the sweep surfaces a "Needs founder review" Blocked anomaly (project item Blocked but GH issue closed — e.g. a founder action was completed but the project status was not advanced), flag it in the §6 (Cron PO) section of the cycle report.
 
@@ -615,6 +879,9 @@ If active milestone >80% complete and next milestone has no epics, create a `hig
 
 **Step 9 — Session log:**
 Post timestamped summary on each active epic. Skip if no actions taken.
+
+**Step 10 — (no reap needed):**
+Nested `Agent` spawns are now **synchronous** (§4): they complete and are consumed on the same turn, leaving no orphaned task-registry entries. There is nothing to `TaskStop`. Do **not** re-introduce a background-spawn + reap step — that was a workaround for the abandoned async-spawn model that caused the cron subagent to stall.
 
 ### 4.2 Idempotency
 
@@ -649,6 +916,101 @@ When the founder asks about a specific issue or PR:
 3. Check for related PR: `gh pr list --search "head:feature/story-<NUM>" --json number,state,title`
 4. Check parent epic via sub-issue relationship
 5. Report: project status, any blockers, related PR status, position in pipeline
+
+-----
+
+## 7. Self-Dispatch Mode (no-docker, in-session)
+
+Triggered by `/po work`. For a host whose `CFGMS_PO_HOST_CAPS` names a non-default
+execution environment (e.g. a Windows host with `CFGMS_PO_HOST_CAPS=windows`),
+this mode lets the **local session** work that host's tagged stories natively —
+no docker container, because a Linux container can't provide a Windows execution
+environment. Stories are worked **one at a time, in-process**.
+
+**Cross-host safety.** `po-act.sh claim` acquires the `story-<item>` lease (§4.-1)
+before flipping `Ready → In Progress`, so this in-session drain and every other
+host's cron compete for the same atomic lock — no two hosts work the same story,
+even with identical caps. Because this mode has **no container** to release the
+lease on exit, you MUST release it yourself once the PR is up (step 5 below).
+`CLAIM_LOST` on `claim` means another host won the lease (or the story left
+`Ready`) — skip it and move on. The execution-environment slicing still routes
+*which* stories this host sees, but the lease — not the slicing — is what prevents
+collisions.
+
+### Drain loop (availability-gated — drain-then-stop, NOT a timer)
+
+`/po work` is **availability-gated, not time-gated**: it works every story this
+host can currently claim, back-to-back, **in one invocation**, then **stops**.
+
+**Do NOT wrap `/po work` in a fixed-interval `/loop` / cron.** There is nothing
+to do "every N minutes" — work is gated on a story *becoming claimable* (a
+blocking dependency PR merging, a new tagged story going `Ready`), which are
+**events, not a clock**. A timer just burns idle invocations when nothing is
+claimable and doesn't accelerate a backlog. Re-invoke `/po work` **on demand**
+(or when you know a blocker has cleared); within the invocation it drains
+everything already claimable.
+
+Each iteration:
+
+1. **Preflight FRESH** — re-run this at the start of *every* iteration (after each
+   completed story) and read the LIVE result. **Never reuse a prior preflight's
+   output or your own remembered pipeline view.** The Linux orchestrator runs on
+   **another host** and drains the pipeline **concurrently** (merging deps,
+   promoting stories to `Ready`, clearing holds), so a story that was held when
+   you started the last story may be claimable now — and vice-versa. Beware even
+   the preflight's own on-disk cache: a stale cache can hide a now-`Ready` story,
+   so re-running `preflight` (which re-queries GitHub/project state) is required,
+   not optional. `CFGMS_PO_HOST_CAPS` must be exported in the shell first:
+   ```bash
+   export CFGMS_PO_HOST_CAPS=windows   # set once per shell/session on this host
+   ./.claude/scripts/po-act.sh preflight
+   ```
+   Read `dispatch_recommendations` entries with `action: "dispatch"` (under this
+   host's caps its environment's stories are dispatchable; other-environment
+   stories are `hold`). Honor the `dispatch_blocked` code-health gate exactly as
+   §4.0 (don't start work on a broken `develop`).
+
+2. **If nothing is `action: "dispatch"` → STOP.** No claimable story for this
+   host's caps means the drain is done — exit the invocation. **Do not idle,
+   poll, or schedule a tick.** A tagged story that merely *exists but is held* on
+   a dependency or file-conflict owned by the orchestrator (e.g. a `needs-windows`
+   story blocked behind a non-windows PR) is **not claimable** and **not yours to
+   wait on** — it becomes claimable on a future `/po work` once its blocker
+   clears. Report what (if anything) you shipped and what remains held, then end.
+
+3. **Otherwise pick the first eligible story** (ascending order) and **claim it**:
+   ```bash
+   ./.claude/scripts/po-act.sh claim <ITEM_ID>
+   ```
+   - `CLAIMED:<item>` → proceed.
+   - `CLAIM_LOST:<item>` → another host/cycle took it (or it left `Ready`); go
+     back to step 1 (fresh preflight). Never work an unclaimed story.
+
+4. **Work it to completion, in-process** — the standard dev workflow against the
+   claimed story: `/story-start <NUM>` → implement (TDD, real components, no
+   mocks) → validation gates (`make test-complete`) → `/story-complete`
+   (adversarial review → PR targeting `develop`). **One invocation carries the
+   story start-to-finish; there are no timer ticks mid-story.** This runs natively
+   on the host, so the environment's build/test paths are exercised for real.
+
+5. **Release the story lease** once the PR is up — there is no container to do it
+   for you, so the orchestrator can pick up review/fix:
+   ```bash
+   ./.claude/scripts/po-act.sh release-story <ITEM_ID>
+   ```
+   (If the session dies before this, TTL reclaim frees the lease eventually.)
+
+6. **Loop back to step 1** (fresh preflight). Keep draining until step 2 stops you.
+
+**Scope.** This host only **produces** PRs for its environment's stories. Review,
+fix-cycle, merge-queue, and decomposition stay with the Linux orchestrator
+(host-agnostic; they run fine in Linux containers). Exception: a `Fix` cycle on a
+PR whose story is windows-required cannot be auto-fixed in a Linux container —
+it must be picked up the same way (work it in this session). Until that routing
+is automated, treat a windows-required PR in `Fix` as manual pickup.
+
+**Idempotency.** Same as §4.2 — never work a story that isn't `Ready` at claim
+time; the `claim` guard enforces this.
 
 -----
 
@@ -712,6 +1074,34 @@ Every file the story will touch listed in either backtick-quoted form (`` `path/
 
 If the section is present but contains no recognizable file paths, `parse_warnings` is set. Do not write prose-only file lists like "all controller package files".
 
+### `## Environment` (optional)
+
+Declares the execution environment the story must run in, for multi-host routing.
+Recognized values (first match wins, case-insensitive): `windows`, `macos`,
+`linux`. **Absent ⇒ `linux`** (the default; most stories omit this section). The
+parser only looks for the keyword in the section text, so `Requires a Windows
+host for live testing` resolves to `windows`.
+
+```
+## Environment
+windows
+```
+
+A `windows`/`macos` story is held by the Linux orchestrator (not container-
+dispatched) and worked on a host that serves that environment via Self-Dispatch
+Mode (§7). Equivalent to applying the `needs-windows` / `needs-macos` GitHub label
+— the label is the ergonomic way to tag an existing **issue**; the body section is
+the way to tag a project **draft** (which has no labels). Either signal suffices;
+the label wins if both are present.
+
+**When to tag `windows`.** Two cases, not just OS-native code:
+1. **Native Windows/macOS behavior** a Linux container can't build or live-test.
+2. **Full end-to-end deployment tests and troubleshooting.** The Windows host is
+   the e2e lab — it runs the complete deployment matrix (a Linux controller with
+   Linux *or* Windows minions/stewards), which a Linux container can't. Route e2e
+   fleet/deployment validation and reproduce-on-real-hardware troubleshooting to
+   `windows` even when the changed code is Linux-buildable.
+
 ### When the parser disagrees with you
 
 The parser is strict on purpose — it's a gate, not a lint. If a story body looks valid to a human but produces a `parse_warning`, normalize the body to match the parser rather than relaxing the gate. The cost of a body edit is one second; the cost of a held story is a wasted cycle.
@@ -726,7 +1116,7 @@ Work queue is managed via GitHub Projects V2 (see `scripts/project-queue.sh` and
 |----------------|---------|
 | Draft | Story awaiting Tech Lead review |
 | Ready | Story approved — eligible for dispatch |
-| In Progress | Dev agent container running |
+| In Progress | Claimed and being worked — a dev agent container (orchestrator) or a self-dispatch session (§7). Set at claim time, before any work starts. |
 | Reviewing | PR under acceptance review (container-gated, no label) |
 | Fix | PR failed QA — fix agent dispatched |
 | Failed | Dev agent failed, draft PR created |
@@ -739,3 +1129,8 @@ GitHub issue labels still in use:
 | `epic` | Top-level epic issue |
 | `story` | Story sub-issue of an epic |
 | `high-priority` | Escalation tracking issue requiring founder attention |
+| `needs-windows` | Story requires the Windows host — native Windows code OR full e2e deployment testing / troubleshooting (the Windows host runs the Linux-controller + Linux/Windows-minion matrix). Held by the Linux orchestrator, worked via Self-Dispatch Mode (§7). Equivalent to a `## Environment: windows` body section. |
+| `needs-macos` | Story requires a macOS execution environment (reserved; same routing as `needs-windows`). |
+| `internal` | Automated pipeline item (epic/story/PR), locked to external comment |
+| `community` | Public, unlocked, human-filed external issue |
+| `cap:cms` `cap:twin` `cap:dex` `cap:workflow` `cap:directory` `cap:web` `cap:msp` | **Descriptive** capability tags — the product capability that *consumes* the work (multi-valued, inherited epic→story). Orthogonal to Projects-V2 queue state; never gate dispatch. Vocabulary: `docs/product/roadmap.md` → Capability Tags. |

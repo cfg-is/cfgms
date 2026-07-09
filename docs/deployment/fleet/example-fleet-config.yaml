@@ -76,3 +76,30 @@ resources:
       packages:
         - name: "myapp"
           state: "installed"
+
+  # ── Hyper-V resources (Windows Hyper-V host only) ────────────────────────────
+  #
+  # Hyper-V resources select their type with the module-type convention:
+  #   module: hyperv.vm | hyperv.vswitch
+  #
+  # The `name` is the plain object name (strict [a-zA-Z0-9_-]); the steward
+  # executor translates module + name into the module's internal typed resource
+  # ID (vm:<name>, vswitch:<name>). Relationships are config properties: a VM's
+  # network is declared via `switch_name`.
+
+  - name: "m2-test-vsw"
+    module: "hyperv.vswitch"
+    config:
+      switch_type: "external"
+      net_adapter_name: "Ethernet"
+      state: "present"
+
+  - name: "m2-test-vm"
+    module: "hyperv.vm"
+    config:
+      memory_mb: 2048
+      cpu_count: 2
+      vhd_path: "C:\\VMs\\m2.vhdx"
+      switch_name: "m2-test-vsw"   # declarative network — single switch (the common case)
+      generation: 2
+      state: "running"

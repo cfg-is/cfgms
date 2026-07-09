@@ -286,10 +286,11 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 				Status:        "online",
 				LastHeartbeat: now,
 				DNAAttributes: map[string]string{
-					"hostname": "my-host",
-					"os":       "linux",
-					"arch":     "arm64",
-					"custom":   "value",
+					"hostname":        "my-host",
+					"os":              "linux",
+					"arch":            "arm64",
+					"custom":          "value",
+					"steward.version": "v1.5.3",
 				},
 			},
 		},
@@ -309,6 +310,27 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 	assert.Equal(t, "online", r.Status)
 	assert.WithinDuration(t, now, r.LastHeartbeat, time.Second)
 	assert.Equal(t, "value", r.DNAAttributes["custom"])
+	assert.Equal(t, "v1.5.3", r.RunningVersion, "RunningVersion must be populated from steward.version DNA attribute")
+}
+
+func TestMemoryQuery_StewardResult_RunningVersionEmpty_WhenDNAAbsent(t *testing.T) {
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:       "no-version",
+				TenantID: "tenant-x",
+				Status:   "online",
+				// No steward.version in DNAAttributes
+				DNAAttributes: map[string]string{"hostname": "host-a"},
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "", results[0].RunningVersion, "RunningVersion must be empty when steward.version DNA attribute is absent")
 }
 
 func TestMemoryQuery_TenantScoping_IsolatesData(t *testing.T) {
@@ -332,4 +354,173 @@ func TestMemoryQuery_Tags_WhitespaceStripped(t *testing.T) {
 	results, err := q.Search(context.Background(), Filter{Tags: []string{"web"}})
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
+}
+
+func TestMemoryQuery_FilterByIDs_SingleMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001"}})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "device-001", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByIDs_MultiMatch_OR(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001", "device-003"}})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	ids := []string{results[0].ID, results[1].ID}
+	assert.ElementsMatch(t, []string{"device-001", "device-003"}, ids)
+}
+
+func TestMemoryQuery_FilterByIDs_NoMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"nonexistent"}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_FilterByIDs_AND_WithOS(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", map[string]string{"os": "linux"}),
+		testSteward("device-002", "t", "online", map[string]string{"os": "windows"}),
+	)
+
+	// IDs includes device-001, but device-001 is linux not windows — no match.
+	results, err := q.Search(context.Background(), Filter{
+		IDs: []string{"device-001"},
+		OS:  "windows",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+// resultIDs extracts IDs from a StewardResult slice for assertion convenience.
+func resultIDs(results []StewardResult) []string {
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+// ── TenantSubtree filter tests ────────────────────────────────────────────────
+
+func TestMemoryQuery_TenantSubtree_ExactMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", nil),
+		testSteward("s2", "msp-a/client-2", "online", nil),
+	)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_TenantSubtree_DescendantIncluded(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", nil),
+		testSteward("s2", "msp-a/client-1/servers/web", "online", nil),
+		testSteward("s3", "msp-a/client-2", "online", nil),
+	)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.ElementsMatch(t, []string{"s1", "s2"}, resultIDs(results))
+}
+
+func TestMemoryQuery_TenantSubtree_SiblingExcluded(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", nil),
+		testSteward("s2", "msp-a/client-2", "online", nil),
+		testSteward("s3", "msp-b/client-1", "online", nil),
+	)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_TenantSubtree_NoPrefixFalsePositive(t *testing.T) {
+	// "msp-a/client-10" must NOT match subtree "msp-a/client-1" — requires "/" suffix.
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", nil),
+		testSteward("s2", "msp-a/client-10", "online", nil),
+	)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_TenantSubtree_EmptyIsUnrestricted(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", nil),
+		testSteward("s2", "msp-b/client-1", "online", nil),
+	)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: ""})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+}
+
+// TestMemoryQuery_TenantSubtree_BoundaryRequiredTest covers the required subtree
+// boundary scenarios from issue #2439: descendant target allowed, sibling rejected,
+// parent targeting descendant allowed, admin (empty TenantSubtree) unrestricted.
+func TestMemoryQuery_TenantSubtree_BoundaryRequiredTest(t *testing.T) {
+	stewards := []StewardData{
+		testSteward("s-msp-a-client-1", "msp-a/client-1", "online", nil),
+		testSteward("s-msp-a-client-1-web", "msp-a/client-1/servers/web", "online", nil),
+		testSteward("s-msp-a-client-2", "msp-a/client-2", "online", nil),
+	}
+
+	t.Run("descendant_target_allowed", func(t *testing.T) {
+		q := NewMemoryQuery(&staticProvider{stewards: stewards})
+		// operator at msp-a/client-1 targets msp-a/client-1/servers/web (descendant).
+		results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+		require.NoError(t, err)
+		ids := resultIDs(results)
+		assert.Contains(t, ids, "s-msp-a-client-1-web", "descendant tenant must be included")
+		assert.Contains(t, ids, "s-msp-a-client-1", "exact tenant must be included")
+		assert.NotContains(t, ids, "s-msp-a-client-2", "sibling tenant must be excluded")
+	})
+
+	t.Run("sibling_tenant_rejected", func(t *testing.T) {
+		q := NewMemoryQuery(&staticProvider{stewards: stewards})
+		// operator at msp-a/client-1 cannot see msp-a/client-2.
+		results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+		require.NoError(t, err)
+		assert.NotContains(t, resultIDs(results), "s-msp-a-client-2")
+	})
+
+	t.Run("parent_can_target_descendant", func(t *testing.T) {
+		q := NewMemoryQuery(&staticProvider{stewards: stewards})
+		// operator at msp-a (parent) targets msp-a/client-1/servers/web (grandchild).
+		results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a"})
+		require.NoError(t, err)
+		ids := resultIDs(results)
+		assert.Contains(t, ids, "s-msp-a-client-1", "child tenant must be included")
+		assert.Contains(t, ids, "s-msp-a-client-1-web", "grandchild tenant must be included")
+		assert.Contains(t, ids, "s-msp-a-client-2", "second child tenant must be included")
+	})
+
+	t.Run("admin_unrestricted", func(t *testing.T) {
+		q := NewMemoryQuery(&staticProvider{stewards: stewards})
+		// admin (empty TenantSubtree) sees all stewards.
+		results, err := q.Search(context.Background(), Filter{TenantSubtree: ""})
+		require.NoError(t, err)
+		assert.Len(t, results, len(stewards))
+	})
 }

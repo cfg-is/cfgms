@@ -20,6 +20,8 @@ var knownPermissions = map[string]bool{
 	"steward:read-compliance": true,
 	"steward:read-modules":    true,
 	"steward:delete-config":   true,
+	"steward:move":            true,
+	"steward:decommission":    true,
 	// Config management
 	"config:list":             true,
 	"config:list-deployments": true,
@@ -70,6 +72,7 @@ var knownPermissions = map[string]bool{
 	// Compliance
 	"compliance:read-summary": true,
 	// Tenant management
+	"tenant:read":   true,
 	"tenant:manage": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,
@@ -82,6 +85,16 @@ var knownPermissions = map[string]bool{
 	// Steward upgrade dispatch and approval (Issue #1945)
 	"installer:dispatch:steward": true,
 	"installer:approve:steward":  true,
+	// Registration-refresh management (Issue #2096)
+	"registration:list-refresh":          true,
+	"registration:approve-refresh":       true,
+	"registration:deny-refresh":          true,
+	"registration:manage-refresh-policy": true,
+	// Batch job management (Issue #2296)
+	"jobs:write": true,
+	// Cluster registry (Issue #2424)
+	"cluster:list": true,
+	"cluster:read": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

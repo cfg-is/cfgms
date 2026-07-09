@@ -29,6 +29,7 @@ that would inherit the broken base.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,6 +50,51 @@ BARE_PATH_RE = re.compile(
 )
 BRANCH_STORY_RE = re.compile(r"feature/(?:story-(\d+)|item-([a-zA-Z0-9]+)-agent)")
 
+# Permission levels that indicate a trusted (first-party) collaborator.
+_TRUSTED_PERMS = frozenset({"push", "maintain", "admin"})
+
+# Execution-environment routing. A story declares the environment it must run in
+# via a `## Environment` body section and/or a `needs-<env>` GitHub label; a host
+# declares the environments it can serve via CFGMS_PO_HOST_CAPS. The default for
+# both is "linux". A host only works stories whose required env is in its caps —
+# this is how the Linux orchestrator and a Windows self-dispatch host stay on
+# disjoint slices without a shared lock.
+DEFAULT_ENV = "linux"
+
+
+def host_caps():
+    """Environments this host can serve. Comma-separated CFGMS_PO_HOST_CAPS,
+    lowercased; defaults to {"linux"}."""
+    raw = os.environ.get("CFGMS_PO_HOST_CAPS", DEFAULT_ENV)
+    caps = {c.strip().lower() for c in raw.split(",") if c.strip()}
+    return caps or {DEFAULT_ENV}
+
+
+def detect_required_env(env_section, labels):
+    """Resolve a story's required execution environment from its `## Environment`
+    section text and its GitHub labels. Label wins (explicit founder/Planning
+    signal); body marker is the fallback that also works for label-less project
+    drafts. Defaults to "linux".
+
+    macOS is deliberately NOT a routing env: there is no macOS dev host, so
+    darwin-targeting stories (macOS launcher/.pkg, `manager_darwin.go`, etc.) are
+    written and cross-compiled on Linux and validated by CI's macOS runners.
+    `needs-macos` / a macos-mentioning `## Environment` therefore fall through to
+    the Linux default rather than parking forever for a host that will never
+    self-dispatch them. Windows routing stays (a real Windows host self-dispatches
+    those via §7)."""
+    label_names = {
+        ((l.get("name") if isinstance(l, dict) else l) or "").lower()
+        for l in (labels or [])
+    }
+    if "needs-windows" in label_names:
+        return "windows"
+    if env_section:
+        t = env_section.strip().lower()
+        if "windows" in t:
+            return "windows"
+    return DEFAULT_ENV
+
 
 def cache_dir():
     """Auto-discover a cache directory under $HOME so we don't hit /tmp."""
@@ -68,6 +114,10 @@ CACHE_FILE_NAME = "preflight.json"
 # regress back to per-issue / per-PR fan-out.
 _GH_CALL_COUNT = 0
 
+# Per-cycle collaborator permission cache. Key: login (str), value: permission
+# string or None (None = API failure / 404 / unknown → treated as external).
+_perm_cache: dict = {}
+
 
 def gh_graphql_tolerant(query):
     """Run a GraphQL query that may produce partial errors (e.g. mixed-type
@@ -82,7 +132,7 @@ def gh_graphql_tolerant(query):
     _GH_CALL_COUNT += 1
     result = subprocess.run(
         ["gh", "api", "graphql", "-f", f"query={query}"],
-        capture_output=True, text=True, check=False, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
     )
     if not result.stdout.strip():
         return None
@@ -97,7 +147,7 @@ def gh(*args, check=True):
     global _GH_CALL_COUNT
     _GH_CALL_COUNT += 1
     result = subprocess.run(
-        ["gh", *args], capture_output=True, text=True, check=False, timeout=60
+        ["gh", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60
     )
     if result.returncode != 0:
         if check:
@@ -112,6 +162,75 @@ def gh(*args, check=True):
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return result.stdout
+
+
+def _collab_permission(login):
+    """Return collaborator permission level for a login, or None on any failure.
+
+    Permission levels GitHub returns: 'admin', 'maintain', 'push', 'triage',
+    'read', 'none'.  A non-affirmative outcome (404, 403, 5xx, timeout, JSON
+    error) returns None — callers treat None as external (fail-closed).
+
+    Test hook: set CFGMS_TEST_COLLAB_PERM_MAP to a JSON object {"login": "perm"}.
+    Logins absent from the map return None (simulates 404).
+
+    Cached per module lifetime (one Python process = one preflight cycle).
+    """
+    global _GH_CALL_COUNT, _perm_cache
+    if login in _perm_cache:
+        return _perm_cache[login]
+
+    test_map_env = os.environ.get("CFGMS_TEST_COLLAB_PERM_MAP")
+    if test_map_env is not None:
+        try:
+            test_map = json.loads(test_map_env)
+            perm = test_map.get(login)  # None if absent → simulates 404
+        except (json.JSONDecodeError, TypeError):
+            perm = None
+        _perm_cache[login] = perm
+        return perm
+
+    _GH_CALL_COUNT += 1
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/cfg-is/cfgms/collaborators/{login}/permission",
+             "--jq", ".permission"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False, timeout=15,
+        )
+        perm = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+    except Exception:
+        perm = None
+    _perm_cache[login] = perm
+    return perm
+
+
+def is_external(login):
+    """Return True if the login is NOT a trusted (push+/maintain/admin) collaborator.
+
+    Fails closed: null/empty login, deleted/ghost accounts, API errors, 403/404,
+    and any non-affirmative permission outcome all resolve to True (external).
+    This is the single source of truth for author-trust classification (Issue #1786).
+    """
+    if not login or not str(login).strip():
+        return True  # null/empty login = ghost/deleted account = external
+    perm = _collab_permission(str(login).strip())
+    return perm not in _TRUSTED_PERMS
+
+
+def _release_marker_actor_login(timeline_items):
+    """Return the actor login of the most recent 'human-reviewed:ok' LABELED_EVENT.
+
+    GitHub returns timeline items in chronological order; iterating to the last
+    matching item gives the most recent applicant of the release label.
+    Returns empty string if no matching event is found.
+    """
+    actor = ""
+    for item in (timeline_items or []):
+        label_name = ((item.get("label") or {}).get("name")) or ""
+        if label_name == "human-reviewed:ok":
+            actor = ((item.get("actor") or {}).get("login")) or ""
+    return actor
 
 
 PARENT_EPIC_RE = re.compile(r"Parent epic:\s*#(\d+)", re.IGNORECASE)
@@ -177,6 +296,17 @@ query {
         mergeable
         mergeStateStatus
         autoMergeRequest { enabledAt }
+        author { login }
+        labels(first: 20) { nodes { name } }
+        timelineItems(itemTypes: [LABELED_EVENT], first: 20) {
+          nodes {
+            ... on LabeledEvent {
+              createdAt
+              label { name }
+              actor { login }
+            }
+          }
+        }
         comments(first: 30) { nodes { author { login } body createdAt } }
         commits(last: 1) {
           nodes {
@@ -247,6 +377,9 @@ query {
             "mergeable": n.get("mergeable"),
             "mergeStateStatus": n.get("mergeStateStatus"),
             "autoMergeRequest": n.get("autoMergeRequest"),
+            "author_login": ((n.get("author") or {}).get("login")) or "",
+            "labels": ((n.get("labels") or {}).get("nodes")) or [],
+            "timeline_items": ((n.get("timelineItems") or {}).get("nodes")) or [],
             "comments": ((n.get("comments") or {}).get("nodes")) or [],
             "statusCheckRollup": _normalize_status_check_rollup(rollup),
             "latest_commit_date": latest_commit_date,
@@ -371,19 +504,26 @@ _ACCEPTANCE_REVIEW_HEADING = "## acceptance review"
 def is_trusted_review_comment(comment):
     """Return True for genuine acceptance-review comments.
 
-    Matches by machine sentinel or structural heading:
-    1. Machine sentinel <!-- cfgms-acceptance-review --> — emitted by the
-       acceptance-reviewer agent in every comment (added in item #BX5ezzgtQqQA).
-    2. Structural heading '## Acceptance Review' — backward-compatible with
-       existing comments that predate the sentinel (e.g. PR #1589 authored by
-       jrdnr via the host gh token before the sentinel was introduced).
+    Both conditions must hold:
+    1. Text match — machine sentinel <!-- cfgms-acceptance-review --> (emitted by
+       the acceptance-reviewer agent, added in item #BX5ezzgtQqQA) OR structural
+       heading '## Acceptance Review' (backward-compatible with pre-sentinel
+       comments such as PR #1589 authored by jrdnr via the host gh token).
+    2. Author trust — the comment author must be a push+/maintain/admin
+       collaborator per is_external() (Issue #2228). Text match alone is
+       insufficient: any collaborator or attacker can post a comment containing
+       the sentinel/heading with a PASS verdict, so author identity is now
+       required to close that first-party forge vector.
 
-    Author-login matching was removed because review comments are posted via
-    the host gh token (identity: jrdnr), not a dedicated cfg-agent bot account.
-    Forgery resistance is an accepted tradeoff documented in item #BX5ezzgtQqQA.
+    Review comments posted via the host gh token (identity: jrdnr) continue to
+    pass as long as jrdnr is a push+ collaborator. The is_external() helper
+    consults the cached _collab_permission() result — no additional API calls
+    for logins already seen in the current cycle.
     """
     body = (comment.get("body") or "").lower()
-    return _ACCEPTANCE_REVIEW_SENTINEL in body or _ACCEPTANCE_REVIEW_HEADING in body
+    text_matches = _ACCEPTANCE_REVIEW_SENTINEL in body or _ACCEPTANCE_REVIEW_HEADING in body
+    author_login = (comment.get("author") or {}).get("login") or ""
+    return text_matches and not is_external(author_login)
 
 
 # Matches the verdict heading `## Acceptance Review — PASS|FAIL` emitted by the
@@ -461,6 +601,67 @@ def fix_landed_after_review(pr):
     return commit_dt > review_dt
 
 
+def resolve_bash(platform=None, environ=None, exists=None, which=None):
+    """Resolve a usable ``bash`` executable for running project-queue.sh.
+
+    On Linux/macOS a bare ``bash`` resolves correctly via PATH, so we return it
+    unchanged. On a Windows self-dispatch host (#2039) Python resolves a bare
+    ``bash`` against the *Windows* PATH, which finds the WSL launcher
+    (``System32\\bash.exe``) or the Store alias (``WindowsApps\\bash.exe``)
+    before Git Bash. WSL is typically not functional on the Hyper-V host, so
+    those stubs fail with ``execvpe(/bin/bash) failed`` and degrade the whole
+    preflight (Issue #2054). Prefer an explicit ``CFGMS_BASH`` override, then
+    Git Bash (including the path derived from the ``git`` executable), and reject
+    the WSL/Store stubs outright.
+
+    All inputs are injectable so the Windows branch is testable on a Linux CI
+    runner without a real Windows host.
+    """
+    if platform is None:
+        platform = sys.platform
+    if environ is None:
+        environ = os.environ
+    if exists is None:
+        exists = os.path.exists
+    if which is None:
+        which = shutil.which
+
+    override = environ.get("CFGMS_BASH")
+    if override and exists(override):
+        return override
+
+    is_windows = platform.startswith("win") or platform == "cygwin"
+    if not is_windows:
+        return "bash"
+
+    candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    git = which("git")
+    if git:
+        # ...\Git\cmd\git.exe -> ...\Git ; append bin/ and usr/bin/ bash.
+        git_root = os.path.dirname(os.path.dirname(git))
+        candidates.append(os.path.join(git_root, "bin", "bash.exe"))
+        candidates.append(os.path.join(git_root, "usr", "bin", "bash.exe"))
+    for cand in candidates:
+        if exists(cand):
+            return cand
+
+    # Last resort: a PATH bash that is NOT the WSL launcher or Store alias.
+    found = which("bash")
+    if found:
+        low = found.lower()
+        if "system32" not in low and "windowsapps" not in low:
+            return found
+
+    raise RuntimeError(
+        "no usable bash found on Windows (the WSL/Store 'bash' stub is rejected); "
+        "set CFGMS_BASH to a Git Bash bash.exe (Issue #2054)"
+    )
+
+
 def _pq_script_path():
     """Return the project-queue.sh path, honoring CFGMS_TEST_PROJECT_QUEUE override."""
     override = os.environ.get("CFGMS_TEST_PROJECT_QUEUE")
@@ -477,8 +678,8 @@ def project_queue_list_by_status(status):
     """
     script = _pq_script_path()
     result = subprocess.run(
-        ["bash", script, "list-by-status", status],
-        capture_output=True, text=True, check=False, timeout=60,
+        [resolve_bash(), script, "list-by-status", status],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -510,8 +711,8 @@ def auto_close_merged_items(degraded_reasons=None):
     script = _pq_script_path()
 
     result = subprocess.run(
-        ["bash", script, "list-by-status", "In Progress"],
-        capture_output=True, text=True, check=False, timeout=60,
+        [resolve_bash(), script, "list-by-status", "In Progress"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
     )
     if result.returncode != 0:
         degraded_reasons.append(
@@ -536,8 +737,8 @@ def auto_close_merged_items(degraded_reasons=None):
             continue
         try:
             get_result = subprocess.run(
-                ["bash", script, "get-item", item_id],
-                capture_output=True, text=True, check=False, timeout=60,
+                [resolve_bash(), script, "get-item", item_id],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
             )
             if get_result.returncode != 0:
                 degraded_reasons.append(
@@ -583,8 +784,8 @@ def auto_close_merged_items(degraded_reasons=None):
             continue
         try:
             update_result = subprocess.run(
-                ["bash", script, "update-field", item_id, "status", "Done"],
-                capture_output=True, text=True, check=False, timeout=60,
+                [resolve_bash(), script, "update-field", item_id, "status", "Done"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
             )
             if update_result.returncode != 0:
                 degraded_reasons.append(
@@ -604,11 +805,33 @@ def running_containers():
     try:
         result = subprocess.run(
             ["docker", "ps", "--filter", "name=cfg-agent-", "--format", "{{.Names}}"],
-            capture_output=True, text=True, check=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=10,
         )
         return [n for n in result.stdout.splitlines() if n.strip()]
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return None
+
+
+def host_capacity():
+    """Resource-admission snapshot for this host (planning hint for the cron).
+
+    Delegates to ``agent-dispatch.sh capacity --json`` — the same gate every
+    launch path enforces — so the dashboard/cron can see how many more agent
+    containers fit before the host hits its ceilings (RAM/disk 90%, CPU 75%).
+    Returns the parsed dict, or {"available": None} when docker/the script is
+    unavailable (e.g. a non-orchestrator host).
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-dispatch.sh")
+    try:
+        result = subprocess.run(
+            ["bash", script, "capacity", "--json"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+        )
+        data = json.loads(result.stdout.strip() or "{}")
+        data["available"] = bool(data.get("can_launch"))
+        return data
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, ValueError):
+        return {"available": None}
 
 
 def code_health_check():
@@ -652,17 +875,17 @@ def code_health_check():
     try:
         sha_proc = subprocess.run(
             ["git", "-C", str(repo_root), "rev-parse", "origin/develop"],
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=10,
         )
         if sha_proc.returncode != 0:
             # Try fetching first
             subprocess.run(
                 ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "develop"],
-                capture_output=True, text=True, check=False, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=30,
             )
             sha_proc = subprocess.run(
                 ["git", "-C", str(repo_root), "rev-parse", "origin/develop"],
-                capture_output=True, text=True, check=False, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=10,
             )
         if sha_proc.returncode != 0:
             result["skipped"] = True
@@ -685,7 +908,7 @@ def code_health_check():
         # Stale from a previous crash — remove via git so refs stay clean.
         subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree)],
-            capture_output=True, text=True, check=False, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=15,
         )
         if worktree.exists():
             # Filesystem leftover (worktree metadata already gone)
@@ -695,7 +918,7 @@ def code_health_check():
     add_proc = subprocess.run(
         ["git", "-C", str(repo_root), "worktree", "add", "--quiet", "--detach",
          str(worktree), develop_sha],
-        capture_output=True, text=True, check=False, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=30,
     )
     if add_proc.returncode != 0:
         result["skipped"] = True
@@ -708,7 +931,7 @@ def code_health_check():
         arch = subprocess.run(
             ["make", "check-architecture"],
             cwd=str(worktree),
-            capture_output=True, text=True, check=False, timeout=120,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=120,
         )
         result["checks"]["architecture"] = {
             "ok": arch.returncode == 0,
@@ -721,7 +944,7 @@ def code_health_check():
         build = subprocess.run(
             ["go", "build", "./..."],
             cwd=str(worktree),
-            capture_output=True, text=True, check=False, timeout=300,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=300,
         )
         result["checks"]["build"] = {
             "ok": build.returncode == 0,
@@ -739,7 +962,7 @@ def code_health_check():
     finally:
         subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree)],
-            capture_output=True, text=True, check=False, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=15,
         )
 
     return result
@@ -770,6 +993,8 @@ def parse_story(issue):
 
     deps_raw = extract_section(body, "Dependencies")
     files_raw = extract_section(body, "Files In Scope")
+    env_raw = extract_section(body, "Environment")
+    requires_env = detect_required_env(env_raw, issue.get("labels"))
 
     deps_parsed = []
     if deps_raw is None:
@@ -805,6 +1030,8 @@ def parse_story(issue):
         "deps_raw": deps_raw,
         "files_parsed": files_parsed,
         "files_raw": files_raw,
+        "requires_env": requires_env,
+        "env_raw": env_raw,
         "all_issue_numbers_in_body": all_nums,
         "all_paths_in_body": all_paths,
     }
@@ -851,14 +1078,64 @@ def ci_summary(checks):
     }
 
 
-def compute_dispatch_recommendations(ready_stories, active_stories, dep_states):
+def compute_stalled_dispatches(in_progress_issues, containers, pr_summaries):
+    """Detect In-Progress stories with no running agent container and no open PR.
+
+    A story is stalled when:
+    - Its project status is `In Progress`
+    - No container named `cfg-agent-<N>` is currently running
+    - No open PR (including WIP drafts) references this story number
+
+    Draft PRs count as "open PR" — they should go through dispatch-fix, not
+    re-dispatch. Only pure container deaths with no PR artifact trigger this.
+
+    Returns a list of:
+      {"number": N, "item_id": "...", "title": "...", "reason": "..."}
+
+    Pure draft items (number=None) are skipped — they have no container or
+    branch naming convention to cross-reference.
+    """
+    running_story_nums = set()
+    for name in containers or []:
+        tail = name.removeprefix("cfg-agent-")
+        if tail != name and tail.isdigit():
+            running_story_nums.add(int(tail))
+
+    pr_story_nums = {
+        s["story_number"]
+        for s in pr_summaries
+        if s.get("story_number") is not None
+    }
+
+    stalled = []
+    for item in in_progress_issues:
+        n = item.get("number")
+        if n is None:
+            continue
+        if n in running_story_nums:
+            continue
+        if n in pr_story_nums:
+            continue
+        stalled.append({
+            "number": n,
+            "item_id": item.get("item_id", ""),
+            "title": item.get("title", ""),
+            "reason": f"no container cfg-agent-{n} running and no open PR",
+        })
+    return stalled
+
+
+def compute_dispatch_recommendations(ready_stories, active_stories, dep_states, caps=None):
     """Greedy conflict-free selection.
 
     Order: ascending story number (stable, predictable); pure drafts (number=None) last.
+    Hold if the story's required execution env is not in this host's caps (routing
+    to another host — e.g. windows stories on the linux orchestrator).
     Skip if any dep is not CLOSED.
     Skip if files overlap with an active story (status In Progress or open PR) or a
     story already picked this cycle.
     """
+    caps = caps or {DEFAULT_ENV}
     active_file_sets = [
         (s["number"], set(s["files_parsed"])) for s in active_stories
     ]
@@ -869,7 +1146,22 @@ def compute_dispatch_recommendations(ready_stories, active_stories, dep_states):
     for s in sorted(ready_stories, key=lambda x: (x.get("number") is None, x.get("number") or 0)):
         num = s["number"]
         item_id = s.get("item_id", "")
-        open_deps = [d for d in s["deps_parsed"] if dep_states.get(d) != "CLOSED"]
+        req_env = s.get("requires_env", DEFAULT_ENV)
+        if req_env not in caps:
+            recommendations.append({
+                "number": num,
+                "item_id": item_id,
+                "action": "hold",
+                "reason": f"requires {req_env} execution env; host caps={','.join(sorted(caps))}",
+                "route": req_env,
+            })
+            continue
+
+        # A dependency is satisfied whether it resolves to a CLOSED issue or a
+        # MERGED pull request. PR numbers appear in deps when the body annotates
+        # "(PR: #MMM)" (per ba.md); a merged PR means the dependency is delivered,
+        # so it must NOT hold the dependent story (Issue: dep-gate held on MERGED PRs).
+        open_deps = [d for d in s["deps_parsed"] if dep_states.get(d) not in ("CLOSED", "MERGED")]
         if open_deps:
             dep_desc = ", ".join(
                 f"#{d}({dep_states.get(d, 'UNKNOWN')})" for d in open_deps
@@ -1007,6 +1299,27 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers, active_fix_p
             })
             continue
 
+        # PRIORITY 0.55: external-author PR quarantine (Issue #1786).
+        # A PR whose author is not a push+/maintain/admin collaborator must never
+        # be rebased, reviewed, fixed, or enqueued by the autonomous pipeline.
+        # Applies BEFORE the draft/blocked check so an external draft still gets
+        # the quarantine reason, not the founder-managed reason.
+        # Exception: a validly-released PR (human-reviewed:ok applied by push+
+        # actor) is cleared and proceeds through the normal pipeline.
+        if pr.get("is_external") and not pr.get("is_released"):
+            recs.append({
+                "pr": pr["pr"],
+                "story": pr["story_number"],  # always None for external PRs (#1786 AC4)
+                "action": "skip",
+                "reason": (
+                    f"external-author PR quarantined (author: {pr.get('author_login') or 'unknown'}) — "
+                    "pipeline will not fetch, review, or merge until a maintainer applies "
+                    "the human-reviewed:ok label (verified to push+ actor). "
+                    "See docs/development/external-contributors.md for release process."
+                ),
+            })
+            continue
+
         # PRIORITY 0.6: founder-managed / fenced-off PRs. A draft PR that is NOT
         # a wip_session_failed resume is manual work in progress; a PR whose
         # linked story has project status Blocked was deliberately removed from
@@ -1041,7 +1354,7 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers, active_fix_p
                 "pr": pr["pr"],
                 "story": pr["story_number"],
                 "action": "rebase",
-                "reason": "mergeStateStatus=DIRTY (conflicts with develop) — run `./.claude/scripts/rebase-pr.sh <PR>`; if it returns REBASE_CONFLICT, escalate to dispatch-fix",
+                "reason": "mergeStateStatus=DIRTY (conflicts with develop) — run `./.claude/scripts/rebase-pr.sh <PR>`; if it returns REBASE_CONFLICT, escalate to resolve-conflict",
             })
             continue
         if not in_queue and ms == "BEHIND" and pr.get("auto_merge_enabled"):
@@ -1100,6 +1413,36 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers, active_fix_p
             continue
 
         if pr["has_acceptance_review_comment"]:
+            # AC4 (Issue #1977): a new commit landed AFTER a passing review invalidates
+            # the verdict — the reviewer has not seen the new code (e.g. a
+            # resolve-conflict rebase). Route to re-review so the trust chain is
+            # closed. This check runs before the enqueue_merge path so a
+            # prior-PASS PR is never enqueued without a re-review of the new head.
+            if verdict == "pass" and fix_landed_after_review(pr):
+                if overall == "green":
+                    recs.append({
+                        "pr": pr["pr"],
+                        "story": pr["story_number"],
+                        "action": "spawn_acceptance_reviewer",
+                        "reason": "commit landed after review PASS — prior verdict invalidated; re-review required before enqueue",
+                    })
+                elif overall == "pending":
+                    pending = pr["ci_summary"]["pending_checks"][:3]
+                    recs.append({
+                        "pr": pr["pr"],
+                        "story": pr["story_number"],
+                        "action": "defer",
+                        "reason": f"commit landed after review PASS; CI re-running: {', '.join(pending)} — re-review once CI completes",
+                    })
+                else:
+                    recs.append({
+                        "pr": pr["pr"],
+                        "story": pr["story_number"],
+                        "action": "skip",
+                        "reason": "commit landed after review PASS but CI is red — fix cycle owns this before re-review",
+                    })
+                continue
+
             # Review passed (or verdict unparseable). Flag as stuck if CI green
             # + mergeable but not in queue and not already auto-merge-enabled.
             if (
@@ -1310,6 +1653,78 @@ def compute_fix_recommendations(fix_stories, pr_summaries, active_fix_pr_nums=No
     return recs
 
 
+def _build_pr_summaries(prs):
+    """Build pr_summaries from raw PR nodes (Phase 4 of the preflight cycle).
+
+    Each summary includes author trust signals (is_external, is_released) and
+    story_number (None when author is external — defeats branch-name impersonation).
+
+    Extracted as a standalone function so it is unit-testable without mocking
+    the full main() flow (Issue #1786 — external-author gating).
+    """
+    summaries = []
+    for pr in prs:
+        head = pr.get("headRefName", "")
+        title = pr.get("title", "")
+        body = pr.get("body") or ""
+
+        # Author trust classification (fail-closed).
+        author_login = pr.get("author_login", "")
+        pr_is_external = is_external(author_login)
+
+        # Release marker: human-reviewed:ok label present AND applied by push+ actor.
+        labels = pr.get("labels", [])
+        pr_label_names = {
+            (l.get("name") if isinstance(l, dict) else l) or ""
+            for l in labels
+        }
+        pr_is_released = False
+        if "human-reviewed:ok" in pr_label_names:
+            actor_login = _release_marker_actor_login(pr.get("timeline_items", []))
+            if actor_login and not is_external(actor_login):
+                pr_is_released = True
+
+        # story_number only assigned to internal-author PRs.
+        # An external author naming their branch feature/story-N-agent gains no
+        # pipeline trust from the branch name (impersonation defeated — AC4).
+        story_number = None
+        if not pr_is_external:
+            m = BRANCH_STORY_RE.match(head)
+            if m and m.group(1) and m.group(1).isdigit():
+                story_number = int(m.group(1))
+
+        comments = pr.get("comments") or []
+        has_review_comment = any(is_trusted_review_comment(c) for c in comments)
+        review_verdict_val, review_comment_date = latest_review(comments)
+        is_draft = bool(pr.get("isDraft"))
+        wip_session_failed = is_draft and (
+            body.startswith("Agent session failed with exit code")
+            or (title.startswith("WIP:") and title.endswith("(agent failed)"))
+        )
+
+        summaries.append({
+            "pr": pr["number"],
+            "title": title,
+            "head_ref": head,
+            "author_login": author_login,
+            "is_external": pr_is_external,
+            "is_released": pr_is_released,
+            "story_number": story_number,
+            "comment_count": len(comments),
+            "has_acceptance_review_comment": has_review_comment,
+            "latest_review_verdict": review_verdict_val,
+            "latest_review_comment_date": review_comment_date,
+            "latest_commit_date": pr.get("latest_commit_date"),
+            "is_draft": is_draft,
+            "wip_session_failed": wip_session_failed,
+            "merge_state_status": pr.get("mergeStateStatus"),
+            "mergeable": pr.get("mergeable"),
+            "auto_merge_enabled": pr.get("autoMergeRequest") is not None,
+            "ci_summary": ci_summary(pr.get("statusCheckRollup") or []),
+        })
+    return summaries
+
+
 def main():
     degraded_reasons = []
     out = {
@@ -1409,6 +1824,7 @@ def main():
         "blocked": blocked_issues,
     }
     out["running_containers"] = containers
+    out["capacity"] = host_capacity()
     out["merge_queue"] = merge_queue
     out["code_health"] = code_health
     out["done_on_merge_count"] = done_on_merge_count
@@ -1446,10 +1862,14 @@ def main():
     out["epics_caveat"] = (
         "Two decomposition signals are checked: (1) GitHub sub-issue links "
         "(sub_issues_total), (2) open issues with 'Parent epic: #NNN' body refs "
-        "(body_referencing_issues — catches issue-based decompositions that "
-        "skipped addSubIssue). Pure project-draft decompositions are NOT "
-        "detected by either signal; those need a manual decomposition-complete "
-        "marker on the epic (or close the epic when stories ship)."
+        "(body_referencing_issues — catches decompositions that skipped "
+        "addSubIssue). Since ADR-015, create-story materializes stories as "
+        "sub-issue-linked internal issues at decomposition, so signal (1) is "
+        "authoritative for new epics. Exception: an epic decomposed ENTIRELY "
+        "into --defer drafts (security-sensitive bodies held private until "
+        "dispatch) is invisible to both signals — those still need a manual "
+        "decomposition-complete marker comment on the epic (or close the epic "
+        "when stories ship)."
     )
 
     # Phase 2: fetch story bodies relevant to conflict detection.
@@ -1512,8 +1932,8 @@ def main():
     def _fetch_draft_body(item):
         try:
             res = subprocess.run(
-                ["bash", _pq, "get-item", item["item_id"]],
-                capture_output=True, text=True, check=False, timeout=60,
+                [resolve_bash(), _pq, "get-item", item["item_id"]],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
             )
             if res.returncode != 0:
                 return item["item_id"], None
@@ -1630,57 +2050,72 @@ def main():
         if s.get("number") is not None and s["number"] in pr_story_nums and s["number"] not in in_progress_nums
     ]
 
-    # Phase 4: PR summaries
-    pr_summaries = []
-    for pr in prs:
-        head = pr.get("headRefName", "")
-        m = BRANCH_STORY_RE.match(head)
-        if m and m.group(1) and m.group(1).isdigit():
-            story_number = int(m.group(1))
-        else:
-            story_number = None
-        comments = pr.get("comments") or []
-        has_review_comment = any(is_trusted_review_comment(c) for c in comments)
-        review_verdict_val, review_comment_date = latest_review(comments)
-        body = pr.get("body") or ""
-        title = pr.get("title", "")
-        is_draft = bool(pr.get("isDraft"))
-        # Detect WIP draft PRs created by .devcontainer/entrypoint.sh on agent
-        # session failure (token reauth, token-limit truncation, etc.). The
-        # entrypoint pushes draft PRs with the literal markers below.
-        wip_session_failed = is_draft and (
-            body.startswith("Agent session failed with exit code")
-            or title.startswith("WIP:") and title.endswith("(agent failed)")
-        )
-        pr_summaries.append({
-            "pr": pr["number"],
-            "title": title,
-            "head_ref": head,
-            "story_number": story_number,
-            "comment_count": len(comments),
-            "has_acceptance_review_comment": has_review_comment,
-            "latest_review_verdict": review_verdict_val,
-            "latest_review_comment_date": review_comment_date,
-            "latest_commit_date": pr.get("latest_commit_date"),
-            "is_draft": is_draft,
-            "wip_session_failed": wip_session_failed,
-            "merge_state_status": pr.get("mergeStateStatus"),
-            "mergeable": pr.get("mergeable"),
-            "auto_merge_enabled": pr.get("autoMergeRequest") is not None,
-            "ci_summary": ci_summary(pr.get("statusCheckRollup") or []),
-        })
+    # Phase 3.5: pre-warm collaborator permission cache in parallel (Issue #1786).
+    # Resolve each unique PR author login once before Phase 4 processes pr_summaries,
+    # so all is_external() calls below are cache hits (no per-PR serial API calls).
+    unique_author_logins = {
+        pr.get("author_login", "")
+        for pr in prs
+        if pr.get("author_login")
+    }
+    if unique_author_logins:
+        with ThreadPoolExecutor(max_workers=min(len(unique_author_logins), 5)) as ex:
+            warmup_futures = {ex.submit(_collab_permission, login): login
+                              for login in unique_author_logins}
+            for fut in as_completed(warmup_futures):
+                try:
+                    fut.result()  # Result stored in _perm_cache by _collab_permission
+                except Exception as e:
+                    degraded_reasons.append(
+                        f"permission cache warmup failed for {warmup_futures[fut]!r}: {e}"
+                    )
+
+    # Phase 4: PR summaries (includes author trust classification — Issue #1786).
+    pr_summaries = _build_pr_summaries(prs)
     out["prs_open"] = pr_summaries
 
+    # Surface external-author PRs as a top-priority cron section (AC7).
+    out["external_prs"] = [
+        {
+            "pr": s["pr"],
+            "author_login": s.get("author_login", ""),
+            "head_ref": s.get("head_ref", ""),
+            "title": s.get("title", ""),
+            "is_released": s.get("is_released", False),
+        }
+        for s in pr_summaries
+        if s.get("is_external")
+    ]
+
+    caps = host_caps()
+    out["host_caps"] = sorted(caps)
+    # Ready stories whose required env this host cannot serve — surfaced so the
+    # dashboard can show the cross-host backlog (e.g. the Windows queue) and so a
+    # self-dispatch host can pick up exactly its slice. Windows-only by design:
+    # macOS is not a routing env (no macOS dev host — darwin stories dev on Linux
+    # + validate in CI, see detect_required_env), so there is no macos_queue.
+    out["windows_queue"] = [
+        {"number": s["number"], "item_id": s.get("item_id", ""), "title": s["title"]}
+        for s in ready_parsed
+        if s.get("requires_env", DEFAULT_ENV) == "windows"
+    ]
     out["dispatch_recommendations"] = compute_dispatch_recommendations(
-        ready_parsed, active_parsed, dep_states,
+        ready_parsed, active_parsed, dep_states, caps,
     )
     # Pull the active fix-agent set out of running_containers so the review
     # recommender can skip rebase/dispatch-fix work for any PR with an
-    # in-flight fix container. Container name pattern: cfg-agent-pr-fix-<PR>.
+    # in-flight fix or resolve-conflict container. Container name patterns:
+    #   cfg-agent-pr-fix-<PR>         — fix-pr agent (Issue #1786)
+    #   cfg-agent-resolve-conflict-<PR> — conflict-resolution agent (Issue #1977)
+    # Both push to the PR branch and must not race with a rebase or second dispatch.
     active_fix_pr_nums = set()
     for name in containers or []:
         if name.startswith("cfg-agent-pr-fix-"):
             tail = name.removeprefix("cfg-agent-pr-fix-")
+            if tail.isdigit():
+                active_fix_pr_nums.add(int(tail))
+        elif name.startswith("cfg-agent-resolve-conflict-"):
+            tail = name.removeprefix("cfg-agent-resolve-conflict-")
             if tail.isdigit():
                 active_fix_pr_nums.add(int(tail))
     # Story numbers with project status Blocked — their PRs are fenced off from
@@ -1696,6 +2131,9 @@ def main():
     )
     out["fix_recommendations"] = compute_fix_recommendations(
         fix_issues, pr_summaries, active_fix_pr_nums, queued_pr_numbers,
+    )
+    out["stalled_dispatches"] = compute_stalled_dispatches(
+        in_progress_issues, containers, pr_summaries,
     )
 
     parse_warning_count = sum(
@@ -1757,6 +2195,10 @@ def write_output(out, mode):
             "merge_queue": len(out.get("merge_queue", [])),
             "undecomposed_epics": len(out.get("epics_undecomposed", [])),
         },
+        "host_caps": out.get("host_caps", [DEFAULT_ENV]),
+        "capacity": out.get("capacity", {}),
+        "external_prs": out.get("external_prs", []),
+        "windows_queue": out.get("windows_queue", []),
         "running_containers": out.get("running_containers", []),
         "merge_queue": out.get("merge_queue", []),
         "dispatch_recommendations": out.get("dispatch_recommendations", []),

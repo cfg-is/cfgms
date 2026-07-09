@@ -94,6 +94,10 @@ func runSuperviseWithCtx(ctx context.Context, args []string) int {
 	startupWindow := fs.Duration("startup-window", 30*time.Second, "How long a child must run to be considered healthy")
 	maxRollbacks := fs.Int("max-rollbacks", 1, "Cap on auto-rollback attempts per Supervise call")
 	childArgs := fs.String("child-args", "", "Space-separated args forwarded to the supervised steward (e.g. \"--regtoken xxx\")")
+	certStoreDir := fs.String("cert-store-dir", defaultCertStoreDir(), "Directory where upgrade flag files are written for the steward to pick up on reconnect")
+	maxVersions := fs.Int("max-versions", 3, "Maximum number of old version directories to retain past the quarantine window (0 = unlimited)")
+	maxBytes := fs.Int64("max-bytes", 500*1024*1024, "Maximum total bytes for retained version directories past the quarantine window (0 = unlimited)")
+	quarantineWindow := fs.Duration("quarantine-window", time.Hour, "Minimum time a previous version directory is kept available for rollback")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "launcher run: %v\n", err)
 		return 2
@@ -106,6 +110,12 @@ func runSuperviseWithCtx(ctx context.Context, args []string) int {
 		Stdout:            os.Stdout,
 		Stderr:            os.Stderr,
 		ExtraArgs:         strings.Fields(*childArgs),
+		CertStoreDir:      *certStoreDir,
+		RetentionPolicy: RetentionPolicy{
+			QuarantineWindow: *quarantineWindow,
+			MaxVersions:      *maxVersions,
+			MaxBytes:         *maxBytes,
+		},
 	}
 
 	if err := sup.Supervise(ctx); err != nil {
@@ -169,17 +179,23 @@ func runStatus(args []string) int {
 	}
 
 	layout := Layout{Root: *root, StewardBinaryName: defaultStewardBinaryName()}
-	current, _ := layout.ReadCurrent()
-	previous, _ := layout.ReadPrevious()
+	ps, stateErr := layout.loadState()
+	if stateErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "launcher status: read state: %v\n", stateErr)
+		return 1
+	}
+	current := ps.Current
+	previous := ps.Previous
 	if current == "" {
 		current = "<none>"
 	}
 	if previous == "" {
 		previous = "<none>"
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "Root:     %s\n", *root)
-	_, _ = fmt.Fprintf(os.Stdout, "Current:  %s\n", current)
-	_, _ = fmt.Fprintf(os.Stdout, "Previous: %s\n", previous)
+	_, _ = fmt.Fprintf(os.Stdout, "Root:                %s\n", *root)
+	_, _ = fmt.Fprintf(os.Stdout, "Current:             %s\n", current)
+	_, _ = fmt.Fprintf(os.Stdout, "Previous:            %s\n", previous)
+	_, _ = fmt.Fprintf(os.Stdout, "ConsecutiveFailures: %d\n", ps.ConsecutiveFailures)
 	return 0
 }
 
@@ -205,4 +221,27 @@ func defaultStewardBinaryName() string {
 		return "cfgms-steward.exe"
 	}
 	return "cfgms-steward"
+}
+
+// defaultCertStoreDir returns the platform-specific stable directory for the
+// steward's on-demand client certificate store. Mirrors defaultCertStoreDir()
+// in cmd/steward/main.go so the launcher writes upgrade flag files to the same
+// path the steward process reads them from.
+func defaultCertStoreDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "steward", "certs")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "steward", "certs")
+	default:
+		return "/var/lib/cfgms/steward/certs"
+	}
 }

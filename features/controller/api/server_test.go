@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -302,10 +304,7 @@ func TestListStewards(t *testing.T) {
 func TestAPIKeyManagement(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Use ephemeral key for API key management (more secure for testing)
-	adminAPIKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list"})
-
-	// Test creating a new API key
+	// POST /api/v1/api-keys is Tier-3 (mTLS-only): use admin cert.
 	createReq := APIKeyCreateRequest{
 		Name:        "Test Key",
 		Permissions: []string{"steward:read"},
@@ -315,8 +314,7 @@ func TestAPIKeyManagement(t *testing.T) {
 	reqBody, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
-	req.Header.Set("X-API-Key", adminAPIKey)
+	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -335,9 +333,10 @@ func TestAPIKeyManagement(t *testing.T) {
 	assert.Contains(t, keyData, "key") // Should include the actual key on creation
 	assert.Contains(t, keyData, "id")
 
-	// Test listing API keys
+	// Test listing API keys (GET /api/v1/api-keys is Tier-1)
+	listKey := NewTestKey(t, server, []string{"api-key:list"})
 	req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
-	req.Header.Set("X-API-Key", adminAPIKey)
+	req.Header.Set("X-API-Key", listKey)
 	rec = httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
@@ -439,13 +438,8 @@ func TestConfigurationValidation(t *testing.T) {
 func TestErrorResponses(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Use ephemeral keys for error response testing (more secure)
-	apiKeyCreateKey := NewTestKey(t, server, []string{"api-key:create"})
-	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
-
-	// Test invalid JSON
-	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
-	req.Header.Set("X-API-Key", apiKeyCreateKey)
+	// Test invalid JSON on POST /api/v1/api-keys (Tier-3: use admin cert to reach the handler).
+	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -458,7 +452,8 @@ func TestErrorResponses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "INVALID_JSON", errorResponse.Error.Code)
 
-	// Test not found
+	// Test not found on a Tier-1 endpoint (API key sufficient).
+	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
 	req = httptest.NewRequest("GET", "/api/v1/stewards/nonexistent", nil)
 	req.Header.Set("X-API-Key", stewardReadKey)
 	rec = httptest.NewRecorder()
@@ -478,6 +473,7 @@ func TestPermissionDenial(t *testing.T) {
 		method         string
 		permissions    []string
 		expectedStatus int
+		expectedCode   string
 		body           []byte
 	}{
 		{
@@ -486,13 +482,16 @@ func TestPermissionDenial(t *testing.T) {
 			method:         "GET",
 			permissions:    []string{"api-key:read"}, // Wrong permission
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 		},
 		{
-			name:           "Insufficient permissions for API key creation",
+			// POST /api/v1/api-keys is Tier-3: API keys get MTLS_REQUIRED regardless of permissions.
+			name:           "API key cannot access Tier-3 endpoint (api-key creation)",
 			endpoint:       "/api/v1/api-keys",
 			method:         "POST",
-			permissions:    []string{"steward:list"}, // Wrong permission
+			permissions:    []string{"steward:list"},
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "MTLS_REQUIRED",
 			body:           []byte(`{"name":"Test","permissions":["test"],"tenant_id":"test"}`),
 		},
 		{
@@ -501,13 +500,13 @@ func TestPermissionDenial(t *testing.T) {
 			method:         "POST",
 			permissions:    []string{"steward:list"}, // Wrong permission
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 			body:           []byte(`{"config":{},"version":"1.0.0"}`),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create key with insufficient permissions
 			insufficientKey := NewTestKey(t, server, tt.permissions)
 
 			var req *http.Request
@@ -528,7 +527,7 @@ func TestPermissionDenial(t *testing.T) {
 				var errorResponse ErrorResponse
 				err := json.Unmarshal(rec.Body.Bytes(), &errorResponse)
 				require.NoError(t, err)
-				assert.Contains(t, errorResponse.Error.Code, "INSUFFICIENT_PERMISSIONS")
+				assert.Equal(t, tt.expectedCode, errorResponse.Error.Code)
 			}
 		})
 	}
@@ -539,10 +538,11 @@ func TestActualAPIFunctionality(t *testing.T) {
 	server := setupTestServer(t)
 
 	t.Run("API Key CRUD operations work with proper permissions", func(t *testing.T) {
-		// Use proper admin permissions for full API key management
-		adminKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list", "api-key:read", "api-key:delete"})
+		// POST/DELETE /api/v1/api-keys are Tier-3 (mTLS-only): use admin cert.
+		// GET /api/v1/api-keys and GET /api/v1/api-keys/{id} are Tier-1: API key suffices.
+		listReadKey := NewTestKey(t, server, []string{"api-key:list", "api-key:read"})
 
-		// 1. Create a new API key
+		// 1. Create a new API key (Tier-3: admin cert required).
 		createReq := APIKeyCreateRequest{
 			Name:        "Functional Test Key",
 			Permissions: []string{"steward:list"},
@@ -552,14 +552,13 @@ func TestActualAPIFunctionality(t *testing.T) {
 		reqBody, err := json.Marshal(createReq)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
-		req.Header.Set("X-API-Key", adminKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with proper permissions")
+		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with admin cert")
 
 		var createResponse APIResponse
 		err = json.Unmarshal(rec.Body.Bytes(), &createResponse)
@@ -570,7 +569,7 @@ func TestActualAPIFunctionality(t *testing.T) {
 		createdKeyID := keyData["id"].(string)
 		actualKey := keyData["key"].(string)
 
-		// 2. Verify the created key actually works for its intended purpose
+		// 2. Verify the created key actually works for its intended purpose.
 		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", actualKey)
 		rec = httptest.NewRecorder()
@@ -578,9 +577,9 @@ func TestActualAPIFunctionality(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code, "New API key should work for steward:list")
 
-		// 3. List API keys should include the created key
+		// 3. List API keys should include the created key (Tier-1).
 		req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
-		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("X-API-Key", listReadKey)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -594,9 +593,9 @@ func TestActualAPIFunctionality(t *testing.T) {
 		require.True(t, ok)
 		assert.GreaterOrEqual(t, len(keys), 1, "Should have at least one key")
 
-		// 4. Get specific API key by ID
+		// 4. Get specific API key by ID (Tier-1).
 		req = httptest.NewRequest("GET", "/api/v1/api-keys/"+createdKeyID, nil)
-		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("X-API-Key", listReadKey)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -610,16 +609,15 @@ func TestActualAPIFunctionality(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "Functional Test Key", keyDetails["name"])
 
-		// 5. Delete the API key
-		req = httptest.NewRequest("DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
-		req.Header.Set("X-API-Key", adminKey)
+		// 5. Delete the API key (Tier-3: admin cert required).
+		req = makeAdminRequest(t, "DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work")
+		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work with admin cert")
 
-		// 6. Verify deleted key no longer works
+		// 6. Verify deleted key no longer works.
 		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", actualKey)
 		rec = httptest.NewRecorder()
@@ -973,6 +971,24 @@ func TestTestEndpointAuthGate(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for QUIC endpoint when env var is unset")
 		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: env var unset → auth required
+		handlerCalled = false
+		req = httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/status", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for status endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// GET /api/v1/test/audit/count — Issue #2098: env var unset → auth required
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/audit/count", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for audit count endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
 	})
 
 	t.Run("bypass works when CFGMS_ENABLE_TEST_ENDPOINTS is true", func(t *testing.T) {
@@ -1003,6 +1019,24 @@ func TestTestEndpointAuthGate(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for QUIC test endpoint")
 		assert.True(t, handlerCalled, "Handler should be called for QUIC test endpoint (auth bypassed)")
+
+		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/status", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for status test endpoint")
+		assert.True(t, handlerCalled, "Handler should be called for status test endpoint (auth bypassed)")
+
+		// GET /api/v1/test/audit/count — Issue #2098: should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/audit/count", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for audit count test endpoint")
+		assert.True(t, handlerCalled, "Handler should be called for audit count test endpoint (auth bypassed)")
 	})
 
 	t.Run("warn log emitted on bypass", func(t *testing.T) {
@@ -1542,4 +1576,143 @@ func TestSeedTestAPIKeys(t *testing.T) {
 				"loop key %s must NOT have installer permissions (regression guard for Issue #1709)", k)
 		}
 	})
+}
+
+// TestSetupRouter_Tier0Routes_AccessibleWithoutCredentials verifies that Tier-0 routes
+// registered on the base router (not the api subrouter) are reachable without any
+// authentication credentials (Issue #2224).
+func TestSetupRouter_Tier0Routes_AccessibleWithoutCredentials(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"Tier-0 route GET /api/v1/health must return 200 with no auth credentials")
+}
+
+// TestSetupRouter_Tier1Routes_RequireAuthentication verifies that Tier-1 routes on the
+// api subrouter reject unauthenticated callers with HTTP 401 (Issue #2224). The
+// requireTier(TierAny) middleware added to the api subrouter is pass-through (tier < 3),
+// so authentication is enforced by authenticationMiddleware, not requireTier — this test
+// confirms the full middleware chain rejects anonymous callers as expected.
+func TestSetupRouter_Tier1Routes_RequireAuthentication(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"Tier-1 route GET /api/v1/stewards must return 401 with no auth credentials")
+}
+
+// errListSecretStore wraps a real SecretStore and forces ListSecrets to return an error.
+// Used by TestStartupScan_ContinuesOnListError to exercise the error path in
+// scanAPIKeysForPrivilegedAccess without mocking unrelated store operations.
+type errListSecretStore struct {
+	secretsif.SecretStore
+	listErr error
+}
+
+func (s *errListSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, s.listErr
+}
+
+// TestStartupScan_ContinuesOnListError verifies that scanAPIKeysForPrivilegedAccess emits
+// a Warn and returns the error when ListSecrets fails, and that the caller (New()) treats
+// this as non-fatal — confirmed by the server being fully constructed in every other test
+// whose setup calls New() with the scan wired in (Issue #2226).
+func TestStartupScan_ContinuesOnListError(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear entries from server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Replace the secret store with one whose ListSecrets always fails.
+	listErr := fmt.Errorf("simulated store failure")
+	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
+
+	err := server.scanAPIKeysForPrivilegedAccess(context.Background())
+	assert.ErrorIs(t, err, listErr, "scan must return the ListSecrets error to the caller")
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn when ListSecrets fails")
+}
+
+// TestStartupScan_WarnsOnPrivilegedAPIKey verifies that scanAPIKeysForPrivilegedAccess
+// emits a Warn entry containing key_id and overlapping_permissions when a stored API key
+// holds at least one Tier-3 permission (Issue #2226).
+func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear any entries accumulated during server construction (scan ran against empty store).
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Seed a key that holds the Tier-3 permission "api-key:create".
+	const keyID = "test-privileged-key-id"
+	const tenantID = "default"
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-privileged-test-key",
+		Value:     "hash-privileged-test-key",
+		TenantID:  tenantID,
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   "steward:read,api-key:create",
+		},
+	})
+	require.NoError(t, err, "seeding privileged key into secret store must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn entry for a key with Tier-3 permissions")
+	assert.Equal(t, keyID, capLog.kvValue("key_id"),
+		"Warn entry must include the key_id of the over-privileged key")
+	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
+	assert.Contains(t, overlapping, "api-key:create",
+		"overlapping_permissions must name the Tier-3 permission held by the key")
+}
+
+// TestStartupScan_NoWarnForUnprivilegedKey verifies that scanAPIKeysForPrivilegedAccess
+// does not emit a Tier-3 over-privilege warning when the stored API key only holds
+// non-Tier-3 permissions (Issue #2226).
+func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear any entries accumulated during server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Seed a key that holds only the non-Tier-3 permission "steward:read".
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-unprivileged-test-key",
+		Value:     "hash-unprivileged-test-key",
+		TenantID:  "default",
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            "test-unprivileged-key-id",
+			"permissions":                   "steward:read",
+		},
+	})
+	require.NoError(t, err, "seeding unprivileged key into secret store must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	// No Warn entry whose overlapping_permissions field is populated — the key is clean.
+	assert.Nil(t, capLog.kvValue("overlapping_permissions"),
+		"scan must not emit an overlapping_permissions warning for a key with no Tier-3 permissions")
 }

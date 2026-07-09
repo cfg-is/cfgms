@@ -92,7 +92,7 @@ func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigS
 	configStore := storageManager.GetConfigStore()
 
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil), logger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil, nil, nil)
 
 	hook := NewWorkflowApprovalHook(engine, configStore, logger)
 	return hook, configStore
@@ -476,7 +476,11 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 	err := tokenStore.SaveToken(context.Background(), token)
 	require.NoError(t, err)
 
-	body, _ := json.Marshal(RegistrationRequest{Token: token.Token})
+	body, _ := json.Marshal(RegistrationRequest{
+		Token:          token.Token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -514,7 +518,11 @@ func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
 	err := tokenStore.SaveToken(context.Background(), token)
 	require.NoError(t, err)
 
-	body, _ := json.Marshal(RegistrationRequest{Token: token.Token})
+	body, _ := json.Marshal(RegistrationRequest{
+		Token:          token.Token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

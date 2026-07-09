@@ -3,13 +3,20 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -481,6 +489,292 @@ func (s *FleetTestSuite) waitForStewardVersion(t *testing.T, container, version 
 		time.Sleep(2 * time.Second)
 	}
 	return false
+}
+
+// expireStewardCerts replaces the steward's stored mTLS client certificate with an
+// expired one, simulating a steward that has been offline past cert expiry.
+//
+// It docker-copies the cert store from the container to a host temp dir, loads a
+// cert.Manager from it to find existing client cert serials, writes expired cert/key/
+// metadata files directly into each existing serial directory, and copies the modified
+// store back. The in-place serial-directory approach sidesteps docker cp's additive
+// behaviour: files inside existing directories are overwritten, but no new serial
+// directories are created and no container-side deletions are needed.
+//
+// device_identity.enc and steward-identity.json are preserved because they live in
+// the cert store root, not in per-serial subdirectories.
+//
+// The container must be stopped before calling this helper.
+func (s *FleetTestSuite) expireStewardCerts(t *testing.T, container string) {
+	t.Helper()
+	if err := validateFleetContainer(container); err != nil {
+		t.Fatalf("expireStewardCerts: %v", err)
+	}
+
+	const certStoreDir = "/var/lib/cfgms/steward/certs"
+
+	// Copy cert store from container to a host temp directory.
+	hostCertDir := filepath.Join(s.tmpDir, "certstore-"+container)
+	if err := os.MkdirAll(hostCertDir, 0o750); err != nil {
+		t.Fatalf("expireStewardCerts: create host cert dir: %v", err)
+	}
+
+	cpOutCtx, cpOutCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// docker cp container:dir/. dst copies directory CONTENTS (not the dir itself).
+	out, err := exec.CommandContext(cpOutCtx, "docker", "cp",
+		fmt.Sprintf("%s:%s/.", container, certStoreDir), hostCertDir).CombinedOutput()
+	cpOutCancel()
+	require.NoError(t, err, "expireStewardCerts: docker cp cert store out: %s", string(out))
+
+	// Load the cert.Manager from the copied store.
+	mgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    hostCertDir,
+		LoadExistingCA: true,
+	})
+	require.NoError(t, err, "expireStewardCerts: load cert manager")
+
+	// Record serial numbers of existing client certs to replace in-place.
+	certs, err := mgr.ListCertificates()
+	require.NoError(t, err, "expireStewardCerts: list certificates")
+	var oldSerials []string
+	for _, c := range certs {
+		if c.Type == cert.CertificateTypeClient {
+			oldSerials = append(oldSerials, c.SerialNumber)
+		}
+	}
+	require.NotEmpty(t, oldSerials,
+		"expireStewardCerts: no client certs found in %s cert store; steward may not be registered", container)
+
+	// Generate a self-signed cert+key pair with NotBefore/NotAfter both in the past.
+	expiredCertPEM, expiredKeyPEM := generateExpiredClientCertPEM(t)
+
+	// Replace each client cert IN-PLACE: write expired cert data into the same serial
+	// directories that already exist in the container. docker cp is additive — it merges
+	// files into the destination but never deletes directories. By overwriting the files
+	// in the existing serial directories (rather than creating a new serial directory),
+	// the docker cp below replaces the valid cert data with expired data in-place, so
+	// the steward's cert store contains only expired client certs after the copy-back.
+	now := time.Now().UTC()
+	for _, serial := range oldSerials {
+		serialDir := filepath.Join(hostCertDir, serial)
+		if err := os.WriteFile(filepath.Join(serialDir, "cert.pem"), expiredCertPEM, 0o600); err != nil {
+			t.Fatalf("expireStewardCerts: overwrite cert.pem for serial %s: %v", serial, err)
+		}
+		if err := os.WriteFile(filepath.Join(serialDir, "key.pem"), expiredKeyPEM, 0o600); err != nil {
+			t.Fatalf("expireStewardCerts: overwrite key.pem for serial %s: %v", serial, err)
+		}
+		// Overwrite metadata.json with expired timestamps so loadCertificates recomputes
+		// IsValid = false (time.Now().Before(ExpiresAt) → false when ExpiresAt is in the past).
+		meta := &cert.CertificateInfo{
+			Type:         cert.CertificateTypeClient,
+			CommonName:   "cfgms-expired-test-client",
+			SerialNumber: serial,
+			CreatedAt:    now.Add(-48 * time.Hour),
+			ExpiresAt:    now.Add(-24 * time.Hour),
+			IsValid:      false,
+		}
+		metaJSON, jerr := json.MarshalIndent(meta, "", "  ")
+		require.NoError(t, jerr, "expireStewardCerts: marshal metadata for serial %s", serial)
+		if err := os.WriteFile(filepath.Join(serialDir, "metadata.json"), metaJSON, 0o600); err != nil {
+			t.Fatalf("expireStewardCerts: overwrite metadata.json for serial %s: %v", serial, err)
+		}
+	}
+
+	// Copy the modified cert store back to the container — preserving the steward's
+	// ownership. The steward process runs as user cfgms (UID/GID 1001; see
+	// cmd/steward/Dockerfile.debian), and /var/lib/cfgms/steward/certs is chowned to
+	// cfgms at image build. A plain `docker cp src/. container:dst` re-creates the
+	// copied files (and the destination dir) owned by the HOST uid running the test
+	// (empirically the host UID, not the container's), so the steward can no longer
+	// read steward-identity.json or write machine-id in that directory. That silently
+	// disables registration-refresh ("Failed to create device identity key store;
+	// registration-refresh disabled") and the steward falls back to a FULL HTTP
+	// re-registration instead of the refresh handshake — making every refresh-path
+	// assertion fail. To avoid that, stream a tar of the cert store with every entry
+	// forced to 1001:1001 and feed it to `docker cp -`, which extracts to DEST
+	// preserving the tar's uid/gid. This restores the steward's access on restart.
+	const stewardUIDGID = "1001" // cfgms user/group in cmd/steward/Dockerfile.debian
+	cpInCtx, cpInCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cpInCancel()
+	var tarBuf bytes.Buffer
+	tarCmd := exec.CommandContext(cpInCtx, "tar", "-C", hostCertDir,
+		"--owner="+stewardUIDGID, "--group="+stewardUIDGID, "-cf", "-", ".")
+	tarCmd.Stdout = &tarBuf
+	var tarErr bytes.Buffer
+	tarCmd.Stderr = &tarErr
+	require.NoError(t, tarCmd.Run(), "expireStewardCerts: tar cert store with cfgms ownership: %s", tarErr.String())
+
+	cpInCmd := exec.CommandContext(cpInCtx, "docker", "cp", "-",
+		fmt.Sprintf("%s:%s", container, certStoreDir))
+	cpInCmd.Stdin = &tarBuf
+	out, err = cpInCmd.CombinedOutput()
+	require.NoError(t, err, "expireStewardCerts: docker cp modified cert store back: %s", string(out))
+
+	t.Logf("expireStewardCerts: replaced %d client cert(s) with expired version in %s (in-place)",
+		len(oldSerials), container)
+}
+
+// generateExpiredClientCertPEM creates a self-signed RSA cert+key pair with
+// NotBefore=-48h and NotAfter=-24h, simulating a cert that expired yesterday.
+// The cert does not need to be CA-signed; cert.Manager.ImportCertificate only
+// validates that the cert and key match, not that the cert is CA-signed.
+func generateExpiredClientCertPEM(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err, "generateExpiredClientCertPEM: generate RSA key")
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err, "generateExpiredClientCertPEM: generate serial")
+
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "cfgms-expired-test-client"},
+		NotBefore:    now.Add(-48 * time.Hour),
+		NotAfter:     now.Add(-24 * time.Hour), // expired 24 hours ago
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	// Self-signed: parent == template, signer == key.
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err, "generateExpiredClientCertPEM: create certificate")
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER := x509.MarshalPKCS1PrivateKey(key)
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+// ---- Registration-refresh helper functions (Issue #2098) ---------------------
+
+// getDeviceIDFromContainer reads the device_id from the steward-identity.json
+// stored in the container's cert store. The container must be running.
+func (s *FleetTestSuite) getDeviceIDFromContainer(t *testing.T, container string) string {
+	t.Helper()
+	const identityFile = "/var/lib/cfgms/steward/certs/steward-identity.json"
+	raw, err := s.dockerExec(t, container, "cat", identityFile)
+	require.NoError(t, err, "getDeviceIDFromContainer: read %s from %s", identityFile, container)
+	var id struct {
+		DeviceID string `json:"device_id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &id),
+		"getDeviceIDFromContainer: parse steward-identity.json from %s", container)
+	require.NotEmpty(t, id.DeviceID,
+		"getDeviceIDFromContainer: device_id is empty in %s:%s", container, identityFile)
+	return id.DeviceID
+}
+
+// setStewardStatusByID sets the lifecycle status of the steward with the given ID
+// via the controller's test-mode REST endpoint (PUT /api/v1/test/stewards/{id}/status).
+// The fleet-controller must have CFGMS_ENABLE_TEST_ENDPOINTS=true.
+func (s *FleetTestSuite) setStewardStatusByID(t *testing.T, stewardID, status string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/test/stewards/%s/status", s.controllerURL, stewardID)
+	body, err := json.Marshal(map[string]string{"status": status})
+	require.NoError(t, err, "setStewardStatusByID: marshal request body")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, strings.NewReader(string(body)))
+	require.NoError(t, err, "setStewardStatusByID: build request")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "setStewardStatusByID: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode,
+		"setStewardStatusByID: unexpected response for steward %s → %s", stewardID, status)
+}
+
+// setRefreshPolicy sets the per-tenant refresh policy via the controller REST API.
+// mode is one of: "auto_accept", "require_approval", "reject".
+func (s *FleetTestSuite) setRefreshPolicy(t *testing.T, tenantID, mode string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/refresh-policy", s.controllerURL, tenantID)
+	body, err := json.Marshal(map[string]string{"mode": mode})
+	require.NoError(t, err, "setRefreshPolicy: marshal request body")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, url, strings.NewReader(string(body)))
+	require.NoError(t, err, "setRefreshPolicy: build request")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "setRefreshPolicy: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"setRefreshPolicy: unexpected response for tenant %s mode %s: %s", tenantID, mode, resp.Status)
+}
+
+// pendingRefreshEntry is the API representation of a pending refresh queue entry.
+type pendingRefreshEntry struct {
+	PendingID string `json:"pending_id"`
+	DeviceID  string `json:"device_id"`
+	TenantID  string `json:"tenant_id"`
+	Status    string `json:"status"`
+}
+
+// listPendingRefreshes fetches pending refresh entries from the controller.
+// An empty tenant_id returns all entries (admin-scoped call).
+func (s *FleetTestSuite) listPendingRefreshes(t *testing.T, tenantID string) []pendingRefreshEntry {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/stewards/refresh/pending", s.controllerURL)
+	if tenantID != "" {
+		url += "?tenant_id=" + strings.ReplaceAll(tenantID, "/", "%2F")
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	require.NoError(t, err, "listPendingRefreshes: build request")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "listPendingRefreshes: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"listPendingRefreshes: unexpected response: %s", resp.Status)
+	var entries []pendingRefreshEntry
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&entries), "listPendingRefreshes: decode response")
+	return entries
+}
+
+// approveRefreshViaCLI approves a pending refresh using the operator-facing
+// `cfg steward refresh approve <pending_id>` CLI verb — the acceptance criterion
+// names the CLI command, and the CLI is the user-facing UX (a raw REST call is not
+// an acceptable substitute). Authenticates with the admin bundle over mTLS, the
+// same way the other cfg invocations in this suite do (see uploadConfig).
+func (s *FleetTestSuite) approveRefreshViaCLI(t *testing.T, pendingID string) {
+	t.Helper()
+	require.NotEmpty(t, s.bundlePath, "approveRefreshViaCLI: admin bundle path not set; call rebuildClients first")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// #nosec G204 - cfgBinary() and all args are test-controlled, not user input.
+	cmd := exec.CommandContext(ctx, cfgBinary(),
+		"steward", "refresh", "approve", pendingID,
+		"--bundle", s.bundlePath,
+		"--api-url", s.controllerURL)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "approveRefreshViaCLI: cfg steward refresh approve %s failed: %s",
+		pendingID, strings.TrimSpace(string(out)))
+	t.Logf("Approved pending refresh %s via cfg steward refresh approve: %s",
+		pendingID, strings.TrimSpace(string(out)))
+}
+
+// queryAuditActionCount returns the number of audit entries with the given action
+// attributed to the given device_id. Calls the test-mode controller endpoint which
+// flushes the audit manager before querying.
+func (s *FleetTestSuite) queryAuditActionCount(t *testing.T, action, deviceID string) int {
+	t.Helper()
+	params := url.Values{}
+	params.Set("action", action)
+	if deviceID != "" {
+		params.Set("device_id", deviceID)
+	}
+	rawURL := fmt.Sprintf("%s/api/v1/test/audit/count?%s", s.controllerURL, params.Encode())
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	require.NoError(t, err, "queryAuditActionCount: build request")
+	resp, err := s.httpClient.Do(req)
+	require.NoError(t, err, "queryAuditActionCount: send request")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"queryAuditActionCount: unexpected response: %s", resp.Status)
+	var result struct {
+		Count int `json:"count"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result), "queryAuditActionCount: decode response")
+	return result.Count
 }
 
 // TestFleetWalkthrough is the single ordered entry point for all fleet walkthrough scenarios.

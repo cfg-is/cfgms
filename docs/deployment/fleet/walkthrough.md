@@ -269,14 +269,19 @@ tar -C /tmp/cfgms-install -xzf cfgms-steward-linux-amd64.tar.gz
 
 ### 4c — Install on Linux (`install.sh`)
 
-The install package includes `build/linux/install.sh`. Copy it alongside the extracted
-archive and run it with the CA fingerprint from `installer/ca.fingerprint`:
+The install package includes `build/linux/install.sh`. The preferred installation for
+self-hosted controllers uses **install-pinned** trust: the controller URL and CA cert are
+provided at install time, so the binary does not need to be rebuilt per controller
+(ADR-013 §3, Issue #1517).
 
 ```bash
 FINGERPRINT="$(cat /tmp/cfgms-install/installer/ca.fingerprint)"
+CA_CERT="/tmp/cfgms-install/installer/ca.crt"
 
 sudo bash install.sh \
   --regtoken <REGISTRATION_TOKEN> \
+  --controller-url https://<CONTROLLER_IP>:9080 \
+  --controller-ca "$CA_CERT" \
   --fingerprint "$FINGERPRINT"
 ```
 
@@ -284,14 +289,24 @@ The script:
 1. Verifies the CA cert fingerprint matches the supplied value (aborts on mismatch)
 2. Copies the steward binary to `/usr/local/bin/cfgms-steward`
 3. Writes the CA cert to `/etc/cfgms/controller-ca.crt`
-4. Registers the systemd service and starts it
+4. Registers the systemd service with `--controller-url` embedded in the unit file and starts it
 
-> **CA fingerprint**: `install.sh` computes the fingerprint from `ca.crt` and compares it
+> **CA fingerprint**: `install.sh` computes the fingerprint from the cert and compares it
 > against the value you provide. Retrieve the fingerprint at any time from the controller:
 > `cfg controller info --url=https://<IP>:9080 | grep fingerprint`
 
 > **Non-interactive install** (CI, RMM scripts): pass `--fingerprint` to skip the
 > interactive confirmation prompt.
+
+> **Compile-baked URL** (alternative): if the binary was built with
+> `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080`, you can omit
+> `--controller-url` and `--controller-ca`. The URL is baked in and trusted as strongly
+> as the signed binary itself. Install-pinned is preferred when distributing the same
+> binary to multiple controllers.
+
+> **TOFU (lab only)**: omit `--controller-ca` to use trust-on-first-use semantics. The CA
+> from the first registration response is pinned and immutable thereafter. Only use TOFU in
+> lab environments where the initial registration is known to be untampered.
 
 ### 4d — Install on Windows (MSI via RMM — `msiexec /qn`)
 
@@ -728,7 +743,7 @@ sudo journalctl -u cfgms-steward -f
 | `cfg controller status` returns cert error | Bundle CA does not match controller CA | Re-copy `admin.bundle.yaml` from controller |
 | Steward registration fails: `x509: certificate signed by unknown authority` | `CFGMS_HTTP_CA_CERT_PATH` not set or wrong path | Set env var to the controller's CA cert (`/var/lib/cfgms/certs/ca/ca.crt` on controller) |
 | Steward registration fails: `token expired` or `token not found` | Token expired or already used | `cfg token create` to issue a new token |
-| Steward registration fails: `controller URL not set` | Binary not built with `STEWARD_CONTROLLER_URL` | `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` |
+| Steward registration fails: `controller URL not set` | Neither `--controller-url` nor compile-baked URL set | Pass `--controller-url` to `install.sh`, or rebuild with `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` |
 | `Connected Stewards: 0` in controller metrics | Stewards registered but not connecting on 4433/UDP | Check firewall — port 4433 must be open for UDP |
 | `curl` REST API call returns `401` | No valid auth credentials | Extract cert/key from admin bundle; see Phase 5 |
 | Convergence not running | Steward is in standalone mode (no regtoken path) | Verify service is using `--regtoken` not `--config` |
@@ -769,7 +784,7 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 | save=deploy auto-distribution not wired | [#1525](https://github.com/cfg-is/cfgms/issues/1525) | Phase 6 |
 | apply/monitor mode toggle not implemented | [#1524](https://github.com/cfg-is/cfgms/issues/1524) | Phase 8 |
 | `modules.Monitor()` not implemented by any module | [#1590](https://github.com/cfg-is/cfgms/issues/1590) | Phase 8 |
-| Multi-controller / failover not supported | [#1517](https://github.com/cfg-is/cfgms/issues/1517) | Phase 4 |
+| Multi-controller / failover not supported | (backlog) | Phase 4 |
 
 ---
 

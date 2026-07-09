@@ -7,8 +7,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
-	crand "crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +35,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/registration/identity"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/spf13/cobra"
@@ -42,9 +49,185 @@ import (
 
 // ControllerURL is the controller address baked in at build time via ldflags.
 // Set during build: go build -ldflags "-X main.ControllerURL=https://ctrl.example.com"
-// No runtime override is supported — the signed binary is a trust assertion about
-// which controller it connects to.
+// For deployments where the binary is not rebuilt per controller, pass
+// --controller-url at install time (ADR-013 §3, Issue #1517).
 var ControllerURL string
+
+// TrustSource identifies the enrollment channel that established the trust anchor.
+// Higher values denote stronger assurance. A steward never silently accepts a
+// weaker source than it was built or enrolled for (ADR-013 §3, Issue #1517).
+type TrustSource int
+
+const (
+	trustSourceTOFU          TrustSource = 1 // first-registration CA pin
+	trustSourceInstallPinned TrustSource = 2 // --controller-ca at install time
+	trustSourceCompileBaked  TrustSource = 3 // URL baked via ldflags
+)
+
+// connectFuncT is the signature of the controller connect function, injectable
+// for testing so tests can simulate a controller-unreachable condition without
+// touching the network. Production code always uses registerAndConnect. (Issue #2034)
+type connectFuncT func(
+	ctx context.Context,
+	token, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM string,
+	ks *identity.FileKeyStore,
+	logger logging.Logger,
+) (*client.TransportClient, error)
+
+// subsystemState tracks which named subsystems are ready. The heartbeat loop
+// reads this to report "degraded" while subsystems are still pending and
+// "healthy" once they all attach. Thread-safe. (Issue #2034)
+type subsystemState struct {
+	mu       sync.Mutex
+	degraded map[string]struct{}
+}
+
+func newSubsystemState() *subsystemState {
+	return &subsystemState{degraded: make(map[string]struct{})}
+}
+
+func (s *subsystemState) markDegraded(subsystem string) {
+	s.mu.Lock()
+	s.degraded[subsystem] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *subsystemState) markHealthy(subsystem string) {
+	s.mu.Lock()
+	delete(s.degraded, subsystem)
+	s.mu.Unlock()
+}
+
+// isTrustDowngrade returns true when err is a trust-source downgrade rejection
+// from checkTrustDowngrade or tryReconnectWithStoredIdentity. These are
+// integrity decisions that must not be silently retried. (Issue #2034)
+func isTrustDowngrade(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "trust downgrade rejected")
+}
+
+// status returns "degraded" when any tracked subsystem is not yet ready,
+// "healthy" when all subsystems have attached. Called by the heartbeat loop.
+func (s *subsystemState) status() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.degraded) > 0 {
+		return string(steward.StatusDegraded)
+	}
+	return string(steward.StatusHealthy)
+}
+
+func trustModeString(ts TrustSource) string {
+	switch ts {
+	case trustSourceCompileBaked:
+		return "compile-baked"
+	case trustSourceInstallPinned:
+		return "install-pinned"
+	case trustSourceTOFU:
+		return "tofu"
+	default:
+		return "unknown"
+	}
+}
+
+func trustSourceFromMode(mode string) TrustSource {
+	switch mode {
+	case "compile-baked":
+		return trustSourceCompileBaked
+	case "install-pinned":
+		return trustSourceInstallPinned
+	case "tofu":
+		return trustSourceTOFU
+	default:
+		return 0
+	}
+}
+
+// computeCAPEMFingerprint returns the SHA-256 hex fingerprint of the DER bytes
+// of the first certificate block in caPEM.
+func computeCAPEMFingerprint(caPEM string) (string, error) {
+	block, _ := pem.Decode([]byte(caPEM))
+	if block == nil {
+		return "", fmt.Errorf("no PEM block found in CA PEM")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", fmt.Errorf("invalid CA certificate: %w", err)
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// resolveTrustSource determines the effective trust level and controller URL.
+//
+// Rules (ADR-013 §3):
+//   - compile-baked: no installURL supplied — use compiledURL
+//   - install-pinned: installURL and installCA both non-empty
+//   - tofu: installURL non-empty, installCA empty
+func resolveTrustSource(compiledURL, installURL, installCA string) (TrustSource, string, error) {
+	if installURL == "" {
+		if compiledURL == "" {
+			return 0, "", fmt.Errorf("controller URL not set: binary must be built with " +
+				"-ldflags \"-X main.ControllerURL=https://your-controller.example.com\". " +
+				"See docs/deployment/ for build instructions")
+		}
+		return trustSourceCompileBaked, compiledURL, nil
+	}
+	if installCA != "" {
+		return trustSourceInstallPinned, installURL, nil
+	}
+	return trustSourceTOFU, installURL, nil
+}
+
+// checkTrustDowngrade rejects an enroll attempt that would weaken the trust
+// anchor recorded in id. Also rejects a same-level re-enroll with a different CA.
+func checkTrustDowngrade(current TrustSource, currentCAPEM string, id *StewardIdentity) error {
+	stored := trustSourceFromMode(id.TrustMode)
+	if stored == 0 {
+		return nil
+	}
+	if current < stored {
+		return fmt.Errorf("trust downgrade rejected: enrolled with %s (level %d); "+
+			"cannot re-enroll with %s (level %d) — wipe identity to change trust anchor",
+			id.TrustMode, stored, trustModeString(current), current)
+	}
+	if current >= trustSourceInstallPinned && id.CAPinFingerprint != "" && currentCAPEM != "" {
+		fp, err := computeCAPEMFingerprint(currentCAPEM)
+		if err != nil {
+			return fmt.Errorf("compute CA fingerprint for downgrade check: %w", err)
+		}
+		if fp != id.CAPinFingerprint {
+			return fmt.Errorf("already enrolled; re-pin requires wipe + re-enroll")
+		}
+	}
+	return nil
+}
+
+// pinTOFUCA pins the controller CA on first TOFU enrollment. On first call it
+// records the fingerprint in id and writes the CA to caPath at 0444 (public,
+// immutable). On subsequent calls it verifies the CA matches the pinned value.
+func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
+	fp, err := computeCAPEMFingerprint(caPEM)
+	if err != nil {
+		return fmt.Errorf("compute TOFU CA fingerprint: %w", err)
+	}
+	if id.CAPinFingerprint != "" {
+		if fp != id.CAPinFingerprint {
+			return fmt.Errorf("already enrolled; re-pin requires wipe + re-enroll")
+		}
+		return nil
+	}
+	id.CAPinFingerprint = fp
+	if caPath != "" {
+		if err := os.MkdirAll(filepath.Dir(caPath), 0755); err != nil {
+			return fmt.Errorf("create TOFU CA cert directory: %w", err)
+		}
+		if err := os.WriteFile(caPath, []byte(caPEM), 0444); err != nil { //#nosec G306 -- 0444 intentional: CA is public material, immutable after TOFU pin
+			return fmt.Errorf("write TOFU CA cert: %w", err)
+		}
+	}
+	return nil
+}
 
 func main() {
 	// On Windows: detect if launched by the Service Control Manager and run as
@@ -62,13 +245,15 @@ func main() {
 // buildRootCommand constructs the cobra command tree for cfgms-steward.
 func buildRootCommand() *cobra.Command {
 	var (
-		configPath string
-		regToken   string
+		configPath    string
+		regToken      string
+		controllerURL string
 	)
 
 	root := &cobra.Command{
-		Use:   "cfgms-steward",
-		Short: "CFGMS Steward — endpoint configuration management agent",
+		Use:     "cfgms-steward",
+		Version: version.Short(),
+		Short:   "CFGMS Steward — endpoint configuration management agent",
 		Long: fmt.Sprintf(`CFGMS Steward %s
 
 Manages the local endpoint configuration on behalf of a CFGMS controller.
@@ -81,13 +266,14 @@ Entry paths:
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, configPath)
+			return runRootCommand(cmd, regToken, controllerURL, configPath)
 		},
 	}
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
 	root.Flags().StringVar(&regToken, "regtoken", "", "Registration token for controller registration")
+	root.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (overrides compile-time URL; set at install time via service definition)")
 
 	// Subcommands.
 	root.AddCommand(
@@ -101,7 +287,7 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, configPath string) error {
+func runRootCommand(cmd *cobra.Command, regToken, controllerURL, configPath string) error {
 	// Interactive mode: no flags set and no subcommand selected.
 	noFlags := regToken == "" && configPath == ""
 	if noFlags {
@@ -118,19 +304,37 @@ func runRootCommand(cmd *cobra.Command, regToken, configPath string) error {
 		cancel()
 	}()
 
-	return runSteward(ctx, regToken, configPath)
+	return runSteward(ctx, regToken, controllerURL, configPath)
 }
 
 // runSteward starts the steward with the given configuration and blocks until
 // ctx is cancelled. It is called from both the root cobra command and the
 // Windows service handler.
-func runSteward(ctx context.Context, regToken, configPath string) error {
-	// Initialize global logging provider. File is the only supported provider
-	// for the steward binary. Log level is read from CFGMS_LOG_LEVEL (default INFO).
+func runSteward(ctx context.Context, regToken, controllerURL, configPath string) error {
+	return runStewardInternal(ctx, regToken, controllerURL, configPath, nil)
+}
+
+// runStewardInternal is the testable core of runSteward. cf is the connect
+// function; when nil, registerAndConnect is used. Tests inject a failing stub
+// to simulate controller-unreachable conditions without network I/O. (Issue #2034)
+func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath string, cf connectFuncT) error {
+	if cf == nil {
+		cf = registerAndConnect
+	}
+
+	// ── Early stderr logger ───────────────────────────────────────────────────
+	// Active BEFORE the file logging provider is initialised so that boot-time
+	// failures are never silent (no more 0-byte log files on fast-exit). (Issue #2034)
+	earlyLog := log.New(os.Stderr, "[cfgms-steward] ", log.Ltime|log.Lmsgprefix)
+	earlyLog.Printf("starting (pid %d)", os.Getpid())
+
+	// ── File logging provider ─────────────────────────────────────────────────
+	// Best-effort: if the file provider fails, fall back to a stdout logger so
+	// the process continues instead of dying with a 0-byte log file. (Issue #2034)
 	logDir := os.Getenv("CFGMS_LOG_DIR")
 	if logDir == "" {
 		logDir = "/tmp/cfgms"
-		log.Printf("WARNING: Using /tmp/cfgms for logs — set CFGMS_LOG_DIR for production deployments")
+		earlyLog.Printf("WARNING: CFGMS_LOG_DIR not set; using /tmp/cfgms — set for production deployments")
 	}
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
@@ -149,15 +353,27 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		},
 	}
 
+	var logger logging.Logger
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
-		return fmt.Errorf("failed to initialize global logging: %w", err)
+		// File provider unavailable (e.g. /tmp not writable at early boot).
+		// Log to stderr and continue with a stdout fallback — process liveness
+		// must not depend on the log subsystem being ready. (Issue #2034)
+		earlyLog.Printf("WARNING: file logging unavailable (%v); using stdout fallback", err)
+		logger = logging.NewLogger(logLevelFromEnv())
+	} else {
+		// Flush and close the logger when runStewardInternal returns so that
+		// buffered entries (AsyncWrites=true) reach disk before os.Exit fires.
+		defer func() {
+			if mgr := logging.GetGlobalLoggingManager(); mgr != nil {
+				_ = mgr.Close()
+			}
+		}()
+		(&logging.TelemetryBridge{}).Initialize()
+		logging.InitializeGlobalLoggerFactory("steward", "main")
+		logger = logging.ForComponent("steward")
 	}
-	(&logging.TelemetryBridge{}).Initialize()
 
-	logging.InitializeGlobalLoggerFactory("steward", "main")
-	logger := logging.ForComponent("steward")
-
-	// gRPC transport registration flow.
+	// ── gRPC transport registration flow ─────────────────────────────────────
 	if regToken != "" {
 		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
 			"operation", "registration_init",
@@ -171,10 +387,109 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		runCtx, runCancel := context.WithCancel(ctx)
 		defer runCancel()
 
-		transportCl, err := registerAndConnect(runCtx, regToken, logger)
-		if err != nil {
-			return fmt.Errorf("failed to register with controller: %w", err)
+		// ── Subsystem state tracker ───────────────────────────────────────────
+		// Tracks which subsystems are ready so the heartbeat can report the real
+		// health state instead of a hardcoded "healthy". (Issue #2034)
+		subsysState := newSubsystemState()
+		subsysState.markDegraded("controller") // degraded until first connect succeeds
+		subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
+
+		// Initialise device identity key store before registration so the refresh
+		// handshake path (Issue #2094) has a stable key available. Failure here is
+		// non-fatal: initial registration still works; only the refresh path is disabled.
+		ks, ksErr := identity.NewFileKeyStore(defaultCertStoreDir())
+		if ksErr != nil {
+			logger.Warn("Failed to create device identity key store; registration-refresh disabled", "error", ksErr)
+		} else if _, _, loadErr := ks.GenerateOrLoad(runCtx); loadErr != nil {
+			logger.Warn("Failed to load/generate device identity key; registration-refresh disabled", "error", loadErr)
+			ks = nil
 		}
+
+		// Resolve trust source using the compile-baked URL, install-time URL,
+		// and the CA cert on disk (written by the installer for install-pinned mode).
+		installCACertPath := resolveRegistrationCACertPath(logger)
+		var installCAPEM string
+		if installCACertPath != "" {
+			if caData, caErr := os.ReadFile(installCACertPath); caErr == nil { //#nosec G304 -- path from resolveRegistrationCACertPath
+				installCAPEM = string(caData)
+			}
+		}
+		trustSrc, resolvedURL, trustErr := resolveTrustSource(ControllerURL, controllerURL, installCAPEM)
+		if trustErr != nil {
+			return trustErr
+		}
+
+		// ── Non-fatal controller connect with exponential backoff ─────────────
+		// A connect failure at boot (network not up, controller not reachable) is
+		// a not-ready condition. The steward marks itself degraded and retries in
+		// the background instead of exiting. Process liveness is never gated on
+		// controller availability. (Issue #2034)
+		connectedCh := make(chan *client.TransportClient, 1)
+		go func() {
+			backoff := 5 * time.Second
+			const maxBackoff = 5 * time.Minute
+			for {
+				if runCtx.Err() != nil {
+					return
+				}
+				tc, connErr := cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, logger)
+				if connErr == nil {
+					subsysState.markHealthy("controller")
+					connectedCh <- tc
+					return
+				}
+				if runCtx.Err() != nil {
+					return
+				}
+				// Terminal security decisions must not be silently retried —
+				// they are integrity failures, not transient not-ready conditions.
+				// Log loudly and stop the retry loop; the operator must take action.
+				if errors.Is(connErr, registration.ErrRefreshRejected) {
+					logger.Error("Registration refresh rejected by controller; steward must be manually re-admitted",
+						"operation", "connect_terminal",
+						"error", connErr)
+					return
+				}
+				if isTrustDowngrade(connErr) {
+					logger.Error("Trust-anchor downgrade rejected; wipe identity to change trust source",
+						"operation", "connect_terminal",
+						"error", connErr)
+					return
+				}
+				logger.Warn("Controller connection failed; running in degraded mode, will retry",
+					"operation", "connect_retry",
+					"error", connErr,
+					"backoff", backoff)
+				select {
+				case <-runCtx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+			}
+		}()
+
+		// Block until connected or shutdown signal — the launcher startup window
+		// (#2033) handles known-good gating; this just ensures we stay alive.
+		var transportCl *client.TransportClient
+		select {
+		case transportCl = <-connectedCh:
+		case <-runCtx.Done():
+			logger.Info("Shutdown before controller connection established",
+				"operation", "steward_shutdown")
+			return nil
+		}
+
+		// Wire real health state into the periodic heartbeat so the controller
+		// can distinguish "started but subsystems pending" from "fully healthy".
+		// Must be called before loops start so the first periodic heartbeat uses
+		// the correct status. (Issue #2034)
+		transportCl.SetStatusFunc(subsysState.status)
 
 		// Wire the graceful-shutdown trigger used after a successful
 		// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer
@@ -200,8 +515,10 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		// Failures are non-fatal — the steward stays usable for config
 		// convergence even if DNA publication is briefly unavailable; the
 		// controller will pick up DNA on the next convergence-driven publish
-		// in publishConfigStatus.
+		// in publishConfigStatus. On success the DNA subsystem is marked healthy
+		// so the heartbeat transitions from degraded to healthy. (Issue #2034)
 		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(runCtx); dnaErr == nil && currentDNA != nil {
+			subsysState.markHealthy("dna")
 			if pubErr := transportCl.PublishDNAUpdate(runCtx, currentDNA.Attributes, "", ""); pubErr != nil {
 				logger.Warn("Initial DNA publish failed; controller selectors may not find this steward until next config apply",
 					"error", pubErr)
@@ -210,8 +527,12 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 					"attribute_count", len(currentDNA.Attributes))
 			}
 		} else if dnaErr != nil {
+			// DNA subsystem stays degraded; the refresh loop retries on each tick.
 			logger.Warn("DNA collection failed at startup; controller selectors may match no stewards until DNA is collected later",
 				"error", dnaErr)
+		} else {
+			// nil error with nil DNA (empty collector result) — treat as healthy.
+			subsysState.markHealthy("dna")
 		}
 
 		// Check for launcher-written upgrade flag files and emit lifecycle events.
@@ -225,6 +546,11 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 		// sync_config commands from the controller also trigger immediate
 		// convergence as an out-of-band optimization on top of the schedule.
 		transportCl.StartConvergenceLoop(runCtx)
+
+		// Start periodic DNA refresh loop. Re-collects system attributes on
+		// the configured interval and publishes delta updates so the controller
+		// fleet view stays current without requiring a full reconnect. (Issue #1915)
+		transportCl.StartDNARefreshLoop(runCtx)
 
 		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
 		// graceful self-exit request via SetShutdownFunc → runCancel).
@@ -285,10 +611,7 @@ func runSteward(ctx context.Context, regToken, configPath string) error {
 
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
-	var regToken, caCertPath, fingerprint string
-	var hyperv bool
-	var winrmUser string
-	var winrmPassStdin bool
+	var regToken, controllerURL, caCertPath, fingerprint string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -304,28 +627,31 @@ Platforms:
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
 Install is idempotent: running it again updates the binary and restarts the service.
 
-For controllers with a private CA, pass --ca-cert and --fingerprint to perform
-fingerprint-verified trust-on-first-use (TOFU) of the controller CA certificate.
-The fingerprint is printed by the controller during --init.
+Compile-baked URL (default — binary built with -ldflags):
 
-Hyper-V host install (Windows only):
-  Use --hyperv to configure WinRM HTTPS, firewall rules, and a service account.
-  The WinRM password is read from stdin (--winrm-pass-stdin) or auto-generated.
-  The --winrm-pass flag does NOT exist — plaintext argv passwords are prohibited.`,
+  cfgms-steward install --regtoken TOKEN
+
+Install-pinned (private CA, self-hosted deployments — ADR-013 §3):
+
+  cfgms-steward install --regtoken TOKEN \
+    --controller-url https://ctrl.example.com \
+    --controller-ca /path/to/ca.crt \
+    --fingerprint HEXFP
+
+TOFU — trust-on-first-use (lab environments):
+
+  cfgms-steward install --regtoken TOKEN \
+    --controller-url https://ctrl.example.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, caCertPath, fingerprint, hyperv, winrmUser, winrmPassStdin)
+			return runInstall(regToken, controllerURL, caCertPath, fingerprint)
 		},
 	}
 
 	cmd.Flags().StringVar(&regToken, "regtoken", "", "Registration token (required)")
 	_ = cmd.MarkFlagRequired("regtoken")
-	cmd.Flags().StringVar(&caCertPath, "ca-cert", "", "Path to controller CA certificate PEM file (private-CA deployments)")
+	cmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (install-pinned and TOFU modes; omit to use compile-time URL)")
+	cmd.Flags().StringVar(&caCertPath, "controller-ca", "", "Path to controller CA certificate PEM file (install-pinned mode)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
-	cmd.Flags().BoolVar(&hyperv, "hyperv", false, "Configure Hyper-V host: generate WinRM TLS cert, bind listener to loopback, create service account (Windows only)")
-	cmd.Flags().StringVar(&winrmUser, "winrm-user", "cfgms-hyperv", "Local account name for WinRM access (used only with --hyperv)")
-	cmd.Flags().BoolVar(&winrmPassStdin, "winrm-pass-stdin", false, "Read WinRM password from stdin; if not set, a 32-char password is auto-generated (used only with --hyperv)")
-	// --winrm-pass (plaintext argv) is intentionally NOT registered — F2 constraint:
-	// passwords must never appear in argv (visible to process-list tools and event logs).
 
 	return cmd
 }
@@ -364,7 +690,7 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, caCertPath, fingerprint string, hyperv bool, winrmUser string, winrmPassStdin bool) error {
+func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -372,7 +698,7 @@ func runInstall(regToken, caCertPath, fingerprint string, hyperv bool, winrmUser
 
 	var caCertPEM string
 	if caCertPath != "" {
-		data, readErr := os.ReadFile(caCertPath)
+		data, readErr := os.ReadFile(caCertPath) //#nosec G304 -- path from --controller-ca flag, admin-controlled
 		if readErr != nil {
 			return fmt.Errorf("failed to read CA cert file %s: %w", caCertPath, readErr)
 		}
@@ -387,82 +713,7 @@ func runInstall(regToken, caCertPath, fingerprint string, hyperv bool, winrmUser
 			"  Linux/macOS: re-run with sudo")
 	}
 
-	if !hyperv {
-		return mgr.Install(regToken, caCertPEM, fingerprint)
-	}
-
-	// Hyper-V install path: type-assert to HyperVInstaller.
-	hi, ok := mgr.(service.HyperVInstaller)
-	if !ok {
-		return fmt.Errorf("--hyperv is not supported on this platform (requires Windows with Hyper-V role installed)")
-	}
-
-	winrmPass, autoGenerated, err := resolveWinRMPassword(winrmPassStdin)
-	if err != nil {
-		return err
-	}
-
-	if err := hi.InstallHyperV(regToken, caCertPEM, fingerprint, winrmUser, winrmPass); err != nil {
-		return err
-	}
-
-	if autoGenerated {
-		fmt.Println()
-		fmt.Print(autoGeneratedPasswordNotice())
-	}
-
-	return nil
-}
-
-// autoGeneratedPasswordNotice returns the operator-facing notice printed after
-// install when the WinRM password was auto-generated. The notice MUST NOT
-// contain the password value itself — per CodeQL go/clear-text-logging
-// (CWE-312/532) and the story's "must not appear in stdout, stderr, event
-// log, or transcript" constraint, the password value is only ever placed in
-// the secret store, never written to a stream the operator could pipe into a
-// log or transcript. Operators retrieve the value from the secret store.
-func autoGeneratedPasswordNotice() string {
-	return "A WinRM password was auto-generated and stored in the secret store under key 'hyperv/winrm_pass'.\n" +
-		"Retrieve it from the secret store if needed — the value is intentionally not printed.\n"
-}
-
-// resolveWinRMPassword reads the WinRM password from stdin or auto-generates one.
-// Returns the password, whether it was auto-generated, and any error.
-func resolveWinRMPassword(fromStdin bool) (password string, autoGenerated bool, err error) {
-	if fromStdin {
-		scanner := bufio.NewScanner(os.Stdin)
-		if scanner.Scan() {
-			pass := scanner.Text()
-			if pass == "" {
-				return "", false, fmt.Errorf("--winrm-pass-stdin: password cannot be empty")
-			}
-			return pass, false, nil
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			return "", false, fmt.Errorf("failed to read password from stdin: %w", scanErr)
-		}
-		return "", false, fmt.Errorf("--winrm-pass-stdin: stdin is empty")
-	}
-
-	pass, genErr := generateRandomPassword(32)
-	if genErr != nil {
-		return "", false, fmt.Errorf("failed to generate WinRM password: %w", genErr)
-	}
-	return pass, true, nil
-}
-
-// generateRandomPassword generates a cryptographically random alphanumeric password.
-// Uses crypto/rand for secure entropy.
-func generateRandomPassword(length int) (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, length)
-	if _, err := crand.Read(b); err != nil {
-		return "", err
-	}
-	for i := range b {
-		b[i] = chars[int(b[i])%len(chars)]
-	}
-	return string(b), nil
+	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
 }
 
 // runUninstall performs the uninstall operation for the current platform.
@@ -566,7 +817,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "", false, "", false)
+		return runInstall(token, "", "", "")
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -579,7 +830,7 @@ func runInteractive() error {
 		}()
 
 		fmt.Println("Running in foreground. Press Ctrl+C to stop.")
-		return runSteward(ctx, token, "")
+		return runSteward(ctx, token, "", "")
 	case "3", "":
 		fmt.Println("Exiting.")
 		return nil
@@ -602,10 +853,28 @@ func logLevelFromEnv() string {
 
 // buildHTTPConfig constructs an HTTPConfig from environment variables and the provided arguments.
 func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging.Logger) *registration.HTTPConfig {
+	return buildHTTPConfigWithPlatformPath(controllerURL, timeout, defaultPlatformCACertPath(), logger)
+}
+
+// buildHTTPConfigWithPlatformPath is the testable core of buildHTTPConfig.
+// platformPath is injected so tests can exercise all CA-resolution cases without
+// depending on whether /etc/cfgms/controller-ca.crt exists on the host (e.g. self-hosted CI runners).
+func buildHTTPConfigWithPlatformPath(controllerURL string, timeout time.Duration, platformPath string, logger logging.Logger) *registration.HTTPConfig {
 	return &registration.HTTPConfig{
 		ControllerURL: controllerURL,
 		Timeout:       timeout,
-		CACertPath:    resolveRegistrationCACertPath(logger),
+		CACertPath:    doResolveRegistrationCACertPath(logger, platformPath),
+		Logger:        logger,
+	}
+}
+
+// buildHTTPConfigForInstallPinned returns an HTTPConfig that pins the TLS CA
+// exclusively to installCAPEM with no web-PKI fallback (ADR-013 §3, Issue #1517).
+func buildHTTPConfigForInstallPinned(controllerURL string, timeout time.Duration, installCAPEM string, logger logging.Logger) *registration.HTTPConfig {
+	return &registration.HTTPConfig{
+		ControllerURL: controllerURL,
+		Timeout:       timeout,
+		CAPEM:         installCAPEM,
 		Logger:        logger,
 	}
 }
@@ -654,105 +923,362 @@ func defaultPlatformCACertPath() string {
 	}
 }
 
+// approvedRegistration holds the fields returned by the controller after a successful
+// registration — either an immediate HTTP 200 or a manual-review poll approval.
+// This allows connectWithApprovedRegistration to serve both paths without duplication.
+type approvedRegistration struct {
+	StewardID        string
+	TenantID         string
+	Group            string
+	TransportAddress string
+	ClientCert       string
+	ClientKey        string
+	CACert           string
+	ServerCert       string
+	SigningCert      string
+	DeviceID         string // stable device identity ID (Issue #2094)
+	IdentityKeyPub   string // base64-encoded Ed25519 public key (Issue #2094)
+}
+
 // registerAndConnect registers the steward using HTTP REST API
 // and then establishes gRPC-over-QUIC connections for ongoing communication.
 // Both control plane and data plane use the transport_address from the registration response.
 //
 // On restart with a valid stored cert and identity, HTTP registration is skipped
 // and the steward reconnects directly using the persisted credentials (Issue #1719).
-func registerAndConnect(ctx context.Context, token string, logger logging.Logger) (*client.TransportClient, error) {
+//
+// When the steward's mTLS cert is expired but a stored identity and device identity key
+// exist, registerAndConnect tries the registration-refresh handshake (Issue #2094) before
+// falling through to full HTTP re-registration.
+//
+// When the controller uses registration.workflow: manual (Issue #1899), the steward
+// persists the pending_id locally and polls GET /api/v1/registration/status/{pending_id}
+// with exponential backoff (5s → 60s max) until approved, denied, or timed out.
+// On restart, the persisted pending_id is resumed rather than creating a new pending record.
+//
+// trustSrc and installCAPEM implement the ADR-013 §3 trust anchoring model (Issue #1517).
+// installCAPEM is non-empty only for install-pinned mode; TOFU and compile-baked pass "".
+func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
 	certStoreDir := defaultCertStoreDir()
 
+	// Downgrade guard: reject if stored enrollment had stronger trust assurance.
+	if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
+		if dgErr := checkTrustDowngrade(trustSrc, installCAPEM, storedID); dgErr != nil {
+			return nil, dgErr
+		}
+	}
+
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
-	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, logger); tc != nil {
+	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, logger); tc != nil {
 		return tc, nil
 	} else if reconnErr != nil {
-		logger.Warn("Stored-identity reconnect failed; falling back to HTTP registration", "error", reconnErr)
+		logger.Warn("Stored-identity reconnect failed; checking for expired-cert refresh path", "error", reconnErr)
+	}
+
+	// Expired-cert refresh path (Issue #2094): when a stored identity exists and all
+	// client certs are expired, attempt the registration-refresh handshake before
+	// falling through to full HTTP re-registration.
+	if ks != nil && ks.DeviceID() != "" {
+		if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
+			certMgr, certMgrErr := cert.NewManager(&cert.ManagerConfig{
+				StoragePath:    certStoreDir,
+				LoadExistingCA: true,
+			})
+			if certMgrErr == nil {
+				if certs, listErr := certMgr.ListCertificates(); listErr == nil && hasExpiredClientCert(certs) {
+					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, controllerURL, logger)
+					if refreshErr == nil {
+						return tc, nil
+					}
+					if errors.Is(refreshErr, registration.ErrRefreshPending) {
+						logger.Warn("Registration refresh pending operator approval; retry later",
+							"device_id", logging.SanitizeLogValue(ks.DeviceID()))
+						return nil, refreshErr
+					}
+					if errors.Is(refreshErr, registration.ErrRefreshRejected) {
+						logger.Error("Registration refresh rejected; steward must be manually re-admitted",
+							"device_id", logging.SanitizeLogValue(ks.DeviceID()))
+						return nil, refreshErr
+					}
+					logger.Warn("Registration refresh failed; falling back to HTTP re-registration", "error", refreshErr)
+				}
+			}
+		}
 	}
 
 	logger.Info("Registering steward via HTTP API")
 
-	controllerURL := ControllerURL
-	if controllerURL == "" {
-		return nil, fmt.Errorf("controller URL not set: binary must be built with " +
-			"-ldflags \"-X main.ControllerURL=https://your-controller.example.com\". " +
-			"See docs/deployment/ for build instructions")
+	var httpCfg *registration.HTTPConfig
+	if trustSrc == trustSourceInstallPinned {
+		httpCfg = buildHTTPConfigForInstallPinned(controllerURL, 30*time.Second, installCAPEM, logger)
+	} else {
+		httpCfg = buildHTTPConfig(controllerURL, 30*time.Second, logger)
 	}
-
-	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
+	httpClient, err := registration.NewHTTPClient(httpCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
+	}
+
+	// Load the approval poll timeout from optional local config (default: 24h).
+	pollTimeout := 24 * time.Hour
+	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil && cfg.Steward.RegistrationPollTimeout > 0 {
+		pollTimeout = cfg.Steward.RegistrationPollTimeout
+	}
+
+	// Resume a pending registration from a previous run if one exists.
+	// This avoids creating a duplicate pending record on every steward restart (Issue #1899).
+	if pendingState, loadErr := loadPendingState(certStoreDir); loadErr != nil {
+		logger.Warn("Failed to load pending registration state; re-registering", "error", loadErr)
+	} else if pendingState != nil {
+		logger.Info("Resuming pending registration from previous run",
+			"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
+		approved, pollErr := pollForApproval(ctx, httpClient, pendingState.PendingID, token,
+			pollTimeout, 5*time.Second, 60*time.Second, logger)
+		if pollErr != nil {
+			_ = clearPendingState(certStoreDir)
+			return nil, pollErr
+		}
+		if approved != nil {
+			enrichApprovedWithDeviceIdentity(approved, ks)
+			_ = clearPendingState(certStoreDir)
+			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, logger)
+		}
+		// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
+		logger.Info("Persisted pending record expired on controller; performing fresh registration")
+		if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+			logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+		}
 	}
 
 	regCtx, regCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer regCancel()
 
-	regResp, pendingResp, err := httpClient.Register(regCtx, token)
+	regReq := registration.RegistrationRequest{Token: token}
+	if ks != nil && ks.DeviceID() != "" {
+		regReq.DeviceID = ks.DeviceID()
+		if pub := ks.PublicKey(); pub != nil {
+			regReq.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+		}
+	}
+
+	regResp, pendingResp, err := httpClient.Register(regCtx, regReq)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
 	}
 
-	// Issue #1693: quarantine returns 202 with no certificates. The steward cannot
-	// proceed to transport setup without certs. The poll loop is deferred to story 7;
-	// surface the pending state as a retriable error so the caller knows to retry.
 	if pendingResp != nil {
-		logger.Info("Registration is pending operator approval — no certificates issued",
-			"pending_id", pendingResp.PendingID,
-			"steward_id", pendingResp.StewardID,
-			"tenant_id", pendingResp.TenantID,
-			"status", pendingResp.Status)
-		return nil, fmt.Errorf("registration pending operator approval (pending_id=%s): administrator must run 'cfg registration approve %s'",
-			pendingResp.PendingID, pendingResp.PendingID)
+		// Controller returned HTTP 202: registration is pending operator approval.
+		// Persist the pending_id so restarts resume this record rather than creating
+		// a duplicate (Issue #1899).
+		logger.Info("Registration is pending operator approval — polling for approval",
+			"pending_id", logging.SanitizeLogValue(pendingResp.PendingID),
+			"steward_id", logging.SanitizeLogValue(pendingResp.StewardID),
+			"tenant_id", logging.SanitizeLogValue(pendingResp.TenantID))
+		if saveErr := savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID}); saveErr != nil {
+			logger.Warn("Failed to persist pending registration ID; restart will re-register", "error", saveErr)
+		}
+		approved, pollErr := pollForApproval(ctx, httpClient, pendingResp.PendingID, token,
+			pollTimeout, 5*time.Second, 60*time.Second, logger)
+		if pollErr != nil {
+			_ = clearPendingState(certStoreDir)
+			return nil, pollErr
+		}
+		if approved == nil {
+			// 410 immediately after registration — controller record vanished unexpectedly.
+			_ = clearPendingState(certStoreDir)
+			return nil, fmt.Errorf("registration approval timed out after %s; re-run with a fresh token if needed", pollTimeout)
+		}
+		enrichApprovedWithDeviceIdentity(approved, ks)
+		_ = clearPendingState(certStoreDir)
+		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, logger)
 	}
 
+	// Immediate approval (HTTP 200): proceed directly to transport setup.
 	logger.Info("Registration successful via HTTP",
 		"steward_id", regResp.StewardID,
 		"tenant_id", regResp.TenantID,
 		"group", regResp.Group,
 		"transport_address", regResp.TransportAddress)
 
-	// Persist the identity record immediately after registration so that a
-	// subsequent restart can reconnect without HTTP re-registration (Issue #1719).
-	identity := StewardIdentity{
+	bundle := approvedRegistration{
 		StewardID:        regResp.StewardID,
 		TenantID:         regResp.TenantID,
+		Group:            regResp.Group,
 		TransportAddress: regResp.TransportAddress,
-		CACertPEM:        regResp.CACert,
-		ServerCertPEM:    regResp.ServerCert,
-		SigningCertPEM:   regResp.SigningCert,
+		ClientCert:       regResp.ClientCert,
+		ClientKey:        regResp.ClientKey,
+		CACert:           regResp.CACert,
+		ServerCert:       regResp.ServerCert,
+		SigningCert:      regResp.SigningCert,
 	}
-	if saveErr := saveIdentity(certStoreDir, identity); saveErr != nil {
+	enrichApprovedWithDeviceIdentity(&bundle, ks)
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, logger)
+}
+
+// pollForApproval polls GET /api/v1/registration/status/{pendingID} with exponential
+// backoff until the controller approves, denies, or the timeout is reached.
+//
+// Intervals grow from initialInterval up to maxInterval. Pass initialInterval=0 to
+// skip all sleeps (useful in tests via the PollStatus(0,0) pass-through).
+//
+// Returns:
+//   - (*approvedRegistration, nil) when approved (status "claimed" with cert fields)
+//   - (nil, nil) when the pending record expired (HTTP 410) — caller should re-register
+//   - (nil, error) on denial, timeout, or context cancellation
+func pollForApproval(
+	ctx context.Context,
+	httpClient *registration.HTTPClient,
+	pendingID, regToken string,
+	pollTimeout, initialInterval, maxInterval time.Duration,
+	logger logging.Logger,
+) (*approvedRegistration, error) {
+	pollCtx, pollCancel := context.WithTimeout(ctx, pollTimeout)
+	defer pollCancel()
+
+	const pollJitter = 2 * time.Second
+	currentInterval := initialInterval
+
+	for {
+		jitter := pollJitter
+		if currentInterval == 0 {
+			jitter = 0
+		}
+
+		resp, err := httpClient.PollStatus(pollCtx, pendingID, regToken, currentInterval, jitter)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, fmt.Errorf("registration approval timed out after %s; re-run with a fresh token if needed", pollTimeout)
+			}
+			// Transient network error — log and retry with unchanged interval.
+			logger.Warn("Transient error polling registration status; will retry", "error", err)
+			continue
+		}
+
+		switch resp.Status {
+		case "claimed":
+			if resp.ClientCert == "" {
+				// HTTP 410: pending record expired or already claimed by another process.
+				logger.Info("Pending registration record expired or already claimed; will re-register")
+				return nil, nil
+			}
+			logger.Info("Registration approved by operator",
+				"steward_id", logging.SanitizeLogValue(resp.StewardID),
+				"tenant_id", logging.SanitizeLogValue(resp.TenantID))
+			return &approvedRegistration{
+				StewardID:        resp.StewardID,
+				TenantID:         resp.TenantID,
+				Group:            resp.Group,
+				TransportAddress: resp.TransportAddress,
+				ClientCert:       resp.ClientCert,
+				ClientKey:        resp.ClientKey,
+				CACert:           resp.CACert,
+				ServerCert:       resp.ServerCert,
+				SigningCert:      resp.SigningCert,
+			}, nil
+
+		case "denied":
+			return nil, fmt.Errorf("registration denied by operator")
+
+		default:
+			// "pending" or any other status — keep polling with backoff.
+			logger.Info("Registration still pending operator approval; polling",
+				"pending_id", logging.SanitizeLogValue(pendingID),
+				"status", logging.SanitizeLogValue(resp.Status))
+			if currentInterval > 0 && maxInterval > 0 {
+				currentInterval = min(currentInterval*2, maxInterval)
+			}
+		}
+	}
+}
+
+// connectWithApprovedRegistration persists the steward identity from an approved
+// registration (immediate or manual-review poll), then builds and connects the
+// transport client. Shared by the immediate-approval and poll-approval paths to
+// avoid duplication.
+//
+// trustSrc and installCAPEM implement ADR-013 §3 trust anchoring (Issue #1517).
+// For TOFU mode, the CA from reg.CACert is pinned to disk before the identity
+// is saved. For install-pinned, the fingerprint of installCAPEM is recorded.
+func connectWithApprovedRegistration(
+	ctx context.Context,
+	reg approvedRegistration,
+	certStoreDir, token string,
+	trustSrc TrustSource,
+	installCAPEM string,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
+	// Persist the identity record so that a subsequent restart can reconnect
+	// without HTTP re-registration (Issue #1719).
+	persistedID := StewardIdentity{
+		StewardID:        reg.StewardID,
+		TenantID:         reg.TenantID,
+		TransportAddress: reg.TransportAddress,
+		CACertPEM:        reg.CACert,
+		ServerCertPEM:    reg.ServerCert,
+		SigningCertPEM:   reg.SigningCert,
+		DeviceID:         reg.DeviceID,
+		IdentityKeyPub:   reg.IdentityKeyPub,
+		TrustMode:        trustModeString(trustSrc),
+	}
+
+	// Record the CA pin fingerprint for install-pinned and TOFU modes.
+	switch trustSrc {
+	case trustSourceTOFU:
+		if reg.CACert != "" {
+			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, &persistedID); err != nil {
+				return nil, fmt.Errorf("TOFU CA pin failed: %w", err)
+			}
+		}
+	case trustSourceInstallPinned:
+		if installCAPEM != "" {
+			fp, fpErr := computeCAPEMFingerprint(installCAPEM)
+			if fpErr == nil {
+				persistedID.CAPinFingerprint = fp
+			} else {
+				logger.Warn("Failed to compute install CA fingerprint; CAPinFingerprint not recorded", "error", fpErr)
+			}
+		}
+	}
+
+	if saveErr := saveIdentity(certStoreDir, persistedID); saveErr != nil {
 		logger.Warn("Failed to persist steward identity; next restart will re-register", "error", saveErr)
 	} else {
-		logger.Info("Steward identity persisted for restart reuse", "steward_id", identity.StewardID)
+		logger.Info("Steward identity persisted for restart reuse", "steward_id", persistedID.StewardID)
 	}
 
 	// Optionally load the local steward config to apply custom replay window,
-	// params-size limits, and upgrade policy. If no config file is found (the
-	// common case when the steward is purely controller-managed), defaults apply.
+	// params-size limits, upgrade policy, and DNA refresh interval.
+	// If no config file is found (the common case when the steward is purely
+	// controller-managed), defaults apply.
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var scriptSigning stewardconfig.ScriptSigningConfig
 	var upgradeAllowDowngrade bool
+	var dnaRefreshInterval time.Duration
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		scriptSigning = cfg.Steward.ScriptSigning
 		upgradeAllowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
+		dnaRefreshInterval = stewardconfig.GetDNARefreshInterval(cfg)
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
 	// offline queue encryption (Issue #920).
-	certMgr, secretStore := buildCertManagerAndSecretStore(regResp.ClientCert, regResp.ClientKey, logger)
+	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, logger)
+
+	// Build the composite DNA collector early so we can wire the executor into it
+	// after InitializeConfigExecutor creates it (Issue #2435).
+	dnaAdapter := newDNACollectorAdapter(logger, nil)
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
-		ControllerURL:               regResp.TransportAddress,
+		ControllerURL:               reg.TransportAddress,
 		RegistrationToken:           token,
-		CACertPEM:                   regResp.CACert,
-		ClientCertPEM:               regResp.ClientCert,
-		ServerCertPEM:               regResp.ServerCert,
+		CACertPEM:                   reg.CACert,
+		ClientCertPEM:               reg.ClientCert,
+		ServerCertPEM:               reg.ServerCert,
 		CertManager:                 certMgr,
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
@@ -761,6 +1287,8 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
+		DNARefreshInterval:          dnaRefreshInterval,
+		DNACollector:                dnaAdapter,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -779,25 +1307,32 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 		return nil, fmt.Errorf("failed to create transport client: %w", err)
 	}
 
-	transportClient.SetStewardID(regResp.StewardID)
-	transportClient.SetTenantID(regResp.TenantID)
+	transportClient.SetStewardID(reg.StewardID)
+	transportClient.SetTenantID(reg.TenantID)
 
 	if err := transportClient.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("failed to connect to controller: %w", err)
 	}
 
 	logger.Info("Connected to controller via gRPC transport",
-		"transport_address", regResp.TransportAddress)
+		"transport_address", reg.TransportAddress)
 
 	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
-	if err := transportClient.InitializeConfigExecutor(regResp.TenantID); err != nil {
+	if err := transportClient.InitializeConfigExecutor(reg.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
 	}
 
-	logger.Info("Configuration executor initialized", "tenant_id", regResp.TenantID)
+	logger.Info("Configuration executor initialized", "tenant_id", reg.TenantID)
+
+	// Wire the executor as the module DNA source now that it exists (Issue #2435).
+	// The DNA adapter was constructed with nil; setting the executor here means
+	// the first DNA refresh tick after config sync will include module attributes.
+	if executor := transportClient.GetConfigExecutor(); executor != nil {
+		dnaAdapter.setModuleDNASource(executor)
+	}
 
 	return transportClient, nil
 }
@@ -810,7 +1345,7 @@ func registerAndConnect(ctx context.Context, token string, logger logging.Logger
 // HTTP registration (first run or manually cleared identity).
 // Returns (nil, err) when a stored identity exists but reconnect fails — caller
 // should log the error and fall back to HTTP registration.
-func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, logger logging.Logger) (*client.TransportClient, error) {
+func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, trustSrc TrustSource, logger logging.Logger) (*client.TransportClient, error) {
 	id, err := loadIdentity(certStoreDir)
 	if err != nil {
 		// corrupt/unreadable identity: log and treat as absent so the caller falls through
@@ -819,6 +1354,17 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	}
 	if id == nil {
 		return nil, nil // first run; no stored identity
+	}
+
+	// Trust downgrade guard: reject reconnect if the current trust source would
+	// weaken the assurance level of the stored enrollment (ADR-013 §3, Issue #1517).
+	if id.TrustMode != "" {
+		stored := trustSourceFromMode(id.TrustMode)
+		if stored > 0 && trustSrc > 0 && trustSrc < stored {
+			return nil, fmt.Errorf("trust downgrade rejected: enrolled with %s (level %d); "+
+				"current source is %s (level %d) — wipe identity to change trust anchor",
+				id.TrustMode, stored, trustModeString(trustSrc), trustSrc)
+		}
 	}
 
 	// The reconnect path must be able to verify signed sync_config commands.
@@ -863,11 +1409,17 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	var commandReplayWindow time.Duration
 	var commandMaxParamsBytes int
 	var upgradeAllowDowngradeReconnect bool
+	var dnaRefreshIntervalReconnect time.Duration
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		upgradeAllowDowngradeReconnect = cfg.Steward.Upgrade.AllowDowngrade
+		dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(cfg)
 	}
+
+	// Build the composite DNA collector early so we can wire the executor into it
+	// after InitializeConfigExecutor creates it (Issue #2435).
+	dnaAdapterReconnect := newDNACollectorAdapter(logger, nil)
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               id.TransportAddress,
@@ -883,6 +1435,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
+		DNARefreshInterval:          dnaRefreshIntervalReconnect,
+		DNACollector:                dnaAdapterReconnect,
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -921,6 +1475,11 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	}
 
 	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
+
+	// Wire the executor as the module DNA source now that it exists (Issue #2435).
+	if executor := transportClient.GetConfigExecutor(); executor != nil {
+		dnaAdapterReconnect.setModuleDNASource(executor)
+	}
 
 	return transportClient, nil
 }
@@ -964,6 +1523,137 @@ func hasValidClientCert(certs []*cert.CertificateInfo) bool {
 		}
 	}
 	return false
+}
+
+// hasExpiredClientCert reports true only when certs contains at least one client certificate
+// AND every client certificate in the list is expired (IsValid == false).
+// Returns false when certs contains no client certificates at all.
+func hasExpiredClientCert(certs []*cert.CertificateInfo) bool {
+	found := false
+	for _, c := range certs {
+		if c.Type == cert.CertificateTypeClient {
+			found = true
+			if c.IsValid {
+				return false
+			}
+		}
+	}
+	return found
+}
+
+// enrichApprovedWithDeviceIdentity sets DeviceID and IdentityKeyPub on reg from ks when available,
+// so the identity file persists the device identity across restarts (Issue #2094).
+func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks *identity.FileKeyStore) {
+	if ks == nil || ks.DeviceID() == "" {
+		return
+	}
+	reg.DeviceID = ks.DeviceID()
+	if pub := ks.PublicKey(); pub != nil {
+		reg.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+	}
+}
+
+// refreshAndConnect performs the registration-refresh handshake (ADR-011, Issue #2094)
+// for a steward whose mTLS cert has expired. The handshake proves device identity via
+// an Ed25519 proof-of-possession signature over a server-issued nonce.
+//
+// Returns ErrRefreshPending when the controller queues the request for manual approval.
+// Returns ErrRefreshRejected when the controller refuses (revoked or dormant device).
+// On success, persists the new cert via saveIdentity and reconnects.
+func refreshAndConnect(
+	ctx context.Context,
+	id *StewardIdentity,
+	ks *identity.FileKeyStore,
+	certStoreDir, token, controllerURL string,
+	logger logging.Logger,
+) (*client.TransportClient, error) {
+	if controllerURL == "" {
+		return nil, fmt.Errorf("controller URL not set; cannot perform registration refresh")
+	}
+
+	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
+	if err != nil {
+		return nil, fmt.Errorf("create HTTP client for refresh: %w", err)
+	}
+
+	logger.Info("Attempting registration-refresh handshake",
+		"device_id", logging.SanitizeLogValue(ks.DeviceID()),
+		"steward_id", logging.SanitizeLogValue(id.StewardID))
+
+	challengeCtx, challengeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer challengeCancel()
+
+	challenge, err := httpClient.RefreshChallenge(challengeCtx, ks.DeviceID())
+	if err != nil {
+		return nil, fmt.Errorf("refresh challenge: %w", err)
+	}
+
+	// Decode the nonce from base64url.
+	nonceBytes, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode refresh nonce: %w", err)
+	}
+
+	// Compute the PoP digest: sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)
+	// per ADR-011 §4. This formula must match the controller's implementation exactly.
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], challenge.ServerTS)
+
+	digestInput := make([]byte, 0, len(nonceBytes)+len(ks.DeviceID())+8)
+	digestInput = append(digestInput, nonceBytes...)
+	digestInput = append(digestInput, []byte(ks.DeviceID())...)
+	digestInput = append(digestInput, tsBuf[:]...)
+	digest := sha256.Sum256(digestInput)
+
+	pop, err := ks.Sign(digest[:])
+	if err != nil {
+		return nil, fmt.Errorf("sign refresh digest: %w", err)
+	}
+
+	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer completeCancel()
+
+	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), id.TenantID, challenge.Nonce, int64(challenge.ServerTS), pop)
+	if err != nil {
+		return nil, err // ErrRefreshPending or ErrRefreshRejected propagated to caller
+	}
+
+	logger.Info("Registration refresh approved; storing new certificate",
+		"steward_id", logging.SanitizeLogValue(id.StewardID))
+
+	// Persist the refreshed identity with updated certs.
+	// The controller's refresh response does not include TransportAddress or ServerCert
+	// (the connection endpoint and signing cert do not change during cert refresh).
+	// Preserve the stored values as authoritative fallbacks so the reconnect succeeds
+	// even when the controller omits those optional fields.
+	updatedID := *id
+	updatedID.CACertPEM = completeResp.CACert
+	if completeResp.ServerCert != "" {
+		updatedID.ServerCertPEM = completeResp.ServerCert
+	}
+	if completeResp.TransportAddress != "" {
+		updatedID.TransportAddress = completeResp.TransportAddress
+	}
+	if saveErr := saveIdentity(certStoreDir, updatedID); saveErr != nil {
+		logger.Warn("Failed to persist refreshed identity; next restart may re-register", "error", saveErr)
+	}
+
+	bundle := approvedRegistration{
+		StewardID:        id.StewardID,
+		TenantID:         id.TenantID,
+		TransportAddress: updatedID.TransportAddress,
+		ClientCert:       completeResp.ClientCert,
+		ClientKey:        completeResp.ClientKey,
+		CACert:           completeResp.CACert,
+		ServerCert:       updatedID.ServerCertPEM,
+	}
+	enrichApprovedWithDeviceIdentity(&bundle, ks)
+	// Preserve the stored trust mode on refresh — the trust anchor is already established.
+	refreshTrustSrc := trustSourceFromMode(id.TrustMode)
+	if refreshTrustSrc == 0 {
+		refreshTrustSrc = trustSourceCompileBaked
+	}
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", logger)
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the
@@ -1120,4 +1810,69 @@ func publishUpgradeLifecycleEvent(ctx context.Context, tc upgradeEventPublisher,
 	logger.Info("Upgrade lifecycle event (no control plane publish)",
 		"event_type", eventType, "version", version)
 	return nil
+}
+
+// moduleDNASource is the narrow surface the composite DNA collector needs to
+// fold monitored-module state into the DNA attribute set (#2423). Satisfied by
+// (*steward.Steward).CollectModuleDNAAttributes; nil when the running mode has
+// no monitor-running steward engine (see newDNACollectorAdapter call sites).
+type moduleDNASource interface {
+	CollectModuleDNAAttributes(ctx context.Context) map[string]string
+}
+
+// dnaCollectorAdapter adapts dna.Collector to the client.DNACollector interface
+// by extracting the Attributes map from the proto DNA result (Issue #1915),
+// merged with a flattened, namespaced snapshot of monitored module resource
+// state when a moduleDNASource is wired (#2423 / #2435). Both attribute sets
+// ride the same PublishDNAUpdate delta-compression path — a change in only a
+// module attribute still triggers a publish.
+type dnaCollectorAdapter struct {
+	collector *dna.Collector
+	mu        sync.RWMutex
+	modules   moduleDNASource
+}
+
+// newDNACollectorAdapter builds the composite DNA collector. modules may be nil;
+// call setModuleDNASource after InitializeConfigExecutor to wire the real producer
+// (Issue #2435).
+func newDNACollectorAdapter(logger logging.Logger, modules moduleDNASource) *dnaCollectorAdapter {
+	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), modules: modules}
+}
+
+// setModuleDNASource wires the module DNA producer after construction. Thread-safe:
+// the DNA refresh loop may be reading modules concurrently. Called once, right after
+// InitializeConfigExecutor succeeds, at both registration and reconnect call sites
+// (Issue #2435).
+func (a *dnaCollectorAdapter) setModuleDNASource(src moduleDNASource) {
+	a.mu.Lock()
+	a.modules = src
+	a.mu.Unlock()
+}
+
+func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string]string, error) {
+	result, err := a.collector.Collect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.RLock()
+	moduleSrc := a.modules
+	a.mu.RUnlock()
+	if result == nil && moduleSrc == nil {
+		return nil, nil
+	}
+	// Union of hardware facts and module attributes. The two key spaces cannot
+	// collide: hardware-fact keys are bare identifiers (hostname, os, arch)
+	// while module keys are namespaced by resourceID ("<type>:<name>.<field>").
+	attrs := make(map[string]string)
+	if result != nil {
+		for k, v := range result.Attributes {
+			attrs[k] = v
+		}
+	}
+	if moduleSrc != nil {
+		for k, v := range moduleSrc.CollectModuleDNAAttributes(ctx) {
+			attrs[k] = v
+		}
+	}
+	return attrs, nil
 }

@@ -10,7 +10,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -26,6 +28,17 @@ type configSourceRouter interface {
 	cfgconfig.ConfigStore
 	// SnapshotSources resolves the config source for every tenant in tenantPath atomically.
 	SnapshotSources(ctx context.Context, tenantPath []string) (map[string]*ConfigSourceInfo, error)
+}
+
+// clusterMembership is the minimal interface InheritanceResolver requires to look up
+// which clusters a steward belongs to. Defined locally (same pattern as configSourceRouter)
+// to avoid importing features/controller/clusterregistry into pkg/config, which would
+// create a circular dependency. The concrete *clusterregistry.Registry in
+// features/controller/clusterregistry satisfies this interface by duck-typing.
+type clusterMembership interface {
+	// MemberClusters returns the sorted cluster names that stewardID belongs to.
+	// Returns nil when the steward has no cluster membership.
+	MemberClusters(stewardID string) []string
 }
 
 // cfgStoreAsRouter wraps a plain ConfigStore to satisfy configSourceRouter.
@@ -48,6 +61,30 @@ type InheritanceResolver struct {
 	configStore       configSourceRouter
 	clientTenantStore business.ClientTenantStore
 	tenantStore       business.TenantStore
+	clusterRegistry   clusterMembership // optional; nil means no cluster-policies cascade
+	logger            logging.Logger    // never nil after construction; see log()
+}
+
+// log returns the resolver's logger, defaulting to a NoopLogger when the resolver
+// was constructed without one (e.g. a zero-value struct in a test). This guarantees
+// the cluster cascade can always emit a warning without a nil-pointer panic.
+func (ir *InheritanceResolver) log() logging.Logger {
+	if ir.logger == nil {
+		return logging.NewNoopLogger()
+	}
+	return ir.logger
+}
+
+// WithLogger returns the resolver with logger installed as its warning/error sink.
+// Passing nil restores the default (a real stdout logger). Callers use this to route
+// inheritance diagnostics (e.g. corrupt cluster-policies documents) into their own
+// logging pipeline instead of the process default.
+func (ir *InheritanceResolver) WithLogger(logger logging.Logger) *InheritanceResolver {
+	if logger == nil {
+		logger = logging.NewLogger("info")
+	}
+	ir.logger = logger
+	return ir
 }
 
 // NewInheritanceResolver creates an InheritanceResolver backed by a ConfigSourceRouter.
@@ -58,6 +95,7 @@ func NewInheritanceResolver(configStore configSourceRouter, clientTenantStore bu
 		configStore:       configStore,
 		clientTenantStore: clientTenantStore,
 		tenantStore:       tenantStore,
+		logger:            logging.NewLogger("info"),
 	}
 }
 
@@ -70,6 +108,21 @@ func NewInheritanceResolverWithStorageManager(storageManager *interfaces.Storage
 		configStore:       &cfgStoreAsRouter{ConfigStore: storageManager.GetConfigStore()},
 		clientTenantStore: storageManager.GetClientTenantStore(),
 		tenantStore:       storageManager.GetTenantStore(),
+		logger:            logging.NewLogger("info"),
+	}
+}
+
+// NewInheritanceResolverWithClusters creates an InheritanceResolver with a cluster
+// membership provider wired in. When registry is non-nil, ResolveConfiguration applies
+// cluster-policies configs after the tenant hierarchy and before device-level config.
+// Pass nil for registry to get byte-identical behavior to NewInheritanceResolver.
+func NewInheritanceResolverWithClusters(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership) *InheritanceResolver {
+	return &InheritanceResolver{
+		configStore:       configStore,
+		clientTenantStore: clientTenantStore,
+		tenantStore:       tenantStore,
+		clusterRegistry:   registry,
+		logger:            logging.NewLogger("info"),
 	}
 }
 
@@ -133,6 +186,26 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 		source := sourcesSnapshot[currentTenantID]
 		if err := ir.applyConfigurationLevel(ctx, effective, currentTenantID, stewardID, level, source); err != nil {
 			return nil, fmt.Errorf("failed to apply configuration at level %d (tenant %s): %w", level, currentTenantID, err)
+		}
+	}
+
+	// Apply cluster-policies after tenant hierarchy and before device config.
+	// Cluster membership is a device-level concept: the config key uses tenantID
+	// (the device's own tenant), not any ancestor tenantID from the loop above.
+	// A registry hiccup must not fail resolution — log and treat as no membership.
+	if ir.clusterRegistry != nil {
+		clusterNames := ir.clusterRegistry.MemberClusters(stewardID)
+		for _, clusterName := range clusterNames {
+			if err := ir.applyClusterConfiguration(ctx, effective, tenantID, clusterName); err != nil {
+				// Non-fatal: parse failure for one cluster must not block others.
+				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
+				// so an error here signals a corrupt document that must be surfaced, not swallowed.
+				ir.log().WarnCtx(ctx, "skipping cluster-policies config for cluster; treating as no membership",
+					"steward_id", stewardID,
+					"tenant_id", tenantID,
+					"cluster", clusterName,
+					"error", err.Error())
+			}
 		}
 	}
 
@@ -208,6 +281,41 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	return nil
 }
 
+// applyClusterConfiguration looks up cluster-policies/<clusterName> for the given tenant
+// and merges it into effective. Missing cluster configs are non-fatal (same as missing
+// tenant-level configs in applyConfigurationLevel). The config key uses the device's own
+// tenantID so that cluster membership is scoped to the device's tenant, not any ancestor.
+func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, effective *EffectiveConfiguration, tenantID, clusterName string) error {
+	configKey := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "cluster-policies",
+		Name:      clusterName,
+	}
+
+	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
+	if err != nil {
+		// No cluster-policies document for this cluster is non-fatal.
+		return nil
+	}
+
+	var clusterConfig stewardconfig.StewardConfig
+	if err := yaml.Unmarshal(configEntry.Data, &clusterConfig); err != nil {
+		return fmt.Errorf("failed to parse cluster configuration for %q: %w", clusterName, err)
+	}
+
+	inheritSrc := &InheritanceSource{
+		Level:      int(LevelGroup) + 1, // between Group(2) and Device(3) in merge order
+		TenantID:   tenantID,
+		ConfigName: clusterName,
+		Version:    configEntry.Version,
+		UpdatedAt:  configEntry.UpdatedAt,
+		Source:     fmt.Sprintf("Cluster (cluster-policies/%s)", clusterName),
+	}
+
+	ir.applyConfigurationWithSource(effective, &clusterConfig, inheritSrc)
+	return nil
+}
+
 // applyDeviceConfiguration applies device-specific configuration
 func (ir *InheritanceResolver) applyDeviceConfiguration(ctx context.Context, effective *EffectiveConfiguration, tenantID, stewardID string) error {
 	configKey := &cfgconfig.ConfigKey{
@@ -254,22 +362,35 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		}
 	}
 
-	// Apply resources using declarative merging (named resources replace entirely)
-	resourceMap := make(map[string]stewardconfig.ResourceConfig)
-	for _, resource := range effective.Config.Resources {
-		resourceMap[resource.Name] = resource
+	// Apply resources using declarative merging (named resources replace
+	// entirely), PRESERVING declaration order. Inter-resource ordering is
+	// load-bearing for dependency chains: a vSwitch must be created before the
+	// VM that attaches to it, and on teardown the VM must be deleted before its
+	// vSwitch (Hyper-V refuses to remove a switch still in use by a running VM).
+	// The steward executor applies resources in slice order, so rebuilding the
+	// slice from a Go map here (whose iteration order is randomised) made those
+	// chains converge in a non-deterministic order and fail intermittently —
+	// e.g. a delete cycle attempting Remove-VMSwitch before the VM was removed.
+	// A child config that overrides a base resource keeps the base resource's
+	// position; genuinely new resources append in declaration order.
+	indexByName := make(map[string]int, len(effective.Config.Resources)+len(config.Resources))
+	merged := make([]stewardconfig.ResourceConfig, 0, len(effective.Config.Resources)+len(config.Resources))
+	upsert := func(resource stewardconfig.ResourceConfig) {
+		if i, ok := indexByName[resource.Name]; ok {
+			merged[i] = resource // override in place, preserving position
+			return
+		}
+		indexByName[resource.Name] = len(merged)
+		merged = append(merged, resource)
 	}
-
+	for _, resource := range effective.Config.Resources {
+		upsert(resource)
+	}
 	for _, resource := range config.Resources {
-		resourceMap[resource.Name] = resource
+		upsert(resource)
 		effective.Sources[fmt.Sprintf("resource.%s", resource.Name)] = source
 	}
-
-	// Convert map back to slice
-	effective.Config.Resources = make([]stewardconfig.ResourceConfig, 0, len(resourceMap))
-	for _, resource := range resourceMap {
-		effective.Config.Resources = append(effective.Config.Resources, resource)
-	}
+	effective.Config.Resources = merged
 
 	// Apply steward settings
 	if config.Steward.ID != "" {
@@ -300,6 +421,22 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 	if config.Steward.DriftMode != "" {
 		effective.Config.Steward.DriftMode = config.Steward.DriftMode
 		effective.Sources["steward.drift_mode"] = source
+	}
+
+	// Upgrade settings — carry desired_version and allow_downgrade through the
+	// tenant hierarchy so MSP-level upgrade policy propagates to child stewards.
+	if config.Steward.Upgrade.DesiredVersion != "" {
+		effective.Config.Steward.Upgrade.DesiredVersion = config.Steward.Upgrade.DesiredVersion
+		effective.Sources["steward.upgrade.desired_version"] = source
+	}
+	// allow_downgrade uses "more-permissive-wins" semantics (a child cannot
+	// revoke a parent-granted permission within a single inheritance pass).
+	// This matches the existing bool-inheritance pattern in this function and
+	// is intentional: MSPs opt tenants into downgrade by setting it true;
+	// steward-level override is not supported for this field.
+	if config.Steward.Upgrade.AllowDowngrade {
+		effective.Config.Steward.Upgrade.AllowDowngrade = true
+		effective.Sources["steward.upgrade.allow_downgrade"] = source
 	}
 
 	// Apply logging settings
@@ -449,6 +586,50 @@ type TraceElement struct {
 // getConfigValue extracts the value at a specific configuration path
 func (ir *InheritanceResolver) getConfigValue(config *stewardconfig.StewardConfig, path string) interface{} {
 	return nil
+}
+
+// ResolveRingVersion resolves the effective desired_version for a steward based on its
+// deployment_ring DNA attribute and the controller's ring configuration.
+//
+// The function reads dnaAttrs["deployment_ring"], validates it against the declared ring
+// set, and returns the matching ring's desired_version. When the attribute is absent or
+// names a ring not in the set, the configured fallback ring is used instead.
+//
+// Return values:
+//   - version: the resolved ring's desired_version (empty when the ring has no version set)
+//   - resolvedRing: the ring name that was matched or fell back to
+//   - didFallback: true when the original ring was absent or not found in the ring set
+//   - originalValue: the raw deployment_ring attribute from dnaAttrs (may be empty)
+//
+// This function augments (does not replace) the path-based desired_version from the
+// inheritance resolver: the caller should apply the returned version only when non-empty,
+// overriding any tenant-path desired_version per the precedence rule.
+func ResolveRingVersion(dnaAttrs map[string]string, rings controllerconfig.DeploymentRingConfig) (version, resolvedRing string, didFallback bool, originalValue string) {
+	originalValue = dnaAttrs["deployment_ring"]
+
+	byName := make(map[string]*controllerconfig.RingSpec, len(rings.Rings))
+	for i := range rings.Rings {
+		byName[rings.Rings[i].Name] = &rings.Rings[i]
+	}
+
+	fallbackName := rings.FallbackRing
+	if fallbackName == "" {
+		fallbackName = controllerconfig.DefaultFallbackRing
+	}
+
+	if originalValue != "" {
+		if ring, ok := byName[originalValue]; ok {
+			return ring.DesiredVersion, ring.Name, false, originalValue
+		}
+		didFallback = true
+	} else {
+		didFallback = true
+	}
+
+	if ring, ok := byName[fallbackName]; ok {
+		return ring.DesiredVersion, ring.Name, didFallback, originalValue
+	}
+	return "", fallbackName, didFallback, originalValue
 }
 
 // getPathDescription returns a human-readable description of a configuration path

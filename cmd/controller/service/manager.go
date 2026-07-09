@@ -52,6 +52,15 @@ type Manager interface {
 	// InstallPath returns the platform-standard path the binary will be
 	// copied to during Install.
 	InstallPath() string
+
+	// StageBinaryAndRestart copies newBinaryPath to the platform-standard
+	// install path, then signals the supervisor to restart the service
+	// in-place (e.g. systemctl restart cfgms-controller). This is an atomic
+	// binary swap followed by a supervisor-managed restart; the service
+	// reloads the same durable storage. The caller is responsible for backing
+	// up the previous binary before invoking this method.
+	// Requires elevated privileges on all platforms.
+	StageBinaryAndRestart(newBinaryPath, configPath string) error
 }
 
 // New returns the platform-specific Manager for the current OS.

@@ -31,3 +31,7 @@ func (m *stubManager) Uninstall(purge bool) error {
 func (m *stubManager) Status() (*ServiceStatus, error) {
 	return &ServiceStatus{}, fmt.Errorf("service status is not supported on %s", runtime.GOOS)
 }
+
+func (m *stubManager) StageBinaryAndRestart(newBinaryPath, configPath string) error {
+	return fmt.Errorf("StageBinaryAndRestart is not supported on %s", runtime.GOOS)
+}

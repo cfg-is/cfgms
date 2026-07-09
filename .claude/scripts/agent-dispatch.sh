@@ -7,6 +7,332 @@ set -euo pipefail
 REPO_ROOT="${CFGMS_TEST_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 WORKTREE_BASE="${CFGMS_TEST_WORKTREE_BASE:-$(cd "$REPO_ROOT/.." && pwd)/worktrees}"
 
+# Base directory for per-agent API key tmpfs files.
+# Override CFGMS_TEST_CRED_BASE in hermetic tests.
+AGENT_CRED_BASE="${CFGMS_TEST_CRED_BASE:-/run/cfgms/agent-cred}"
+
+# ---------------------------------------------------------------------------
+# Resource-based admission gate (replaces the hand-tuned container count).
+# A new agent container is admitted only if launching one keeps the host within
+# its ceilings: RAM and disk under 90% utilization (reservation-based — a
+# container holds its memory/disk for its whole life), and the measured 1-min
+# CPU load average under 75% of cores (utilization-based — agents are bursty, so
+# a static per-core reservation caps the host far below real capacity). Per-host
+# and self-tuning — a big box runs more, a laptop fewer, and it adapts to
+# whatever else is already running. A coarse 2×ncpu count ceiling is a
+# runaway-loop backstop, not the primary limit.
+#
+# All thresholds are env-overridable; the per-agent RAM/disk figures default to
+# the docker run reservations (--memory=4g, plus a disk allowance covering the
+# clone + go build/mod cache growth). The CPU gate uses CFGMS_AGENT_CPU_LOAD
+# (expected sustained cores per agent, ~1.5) against live load, not the
+# container's --cpus limit.
+# ---------------------------------------------------------------------------
+_capacity_compute() {
+  # _capacity_compute <line|json>
+  # Prints CAPACITY_OK:slots=<n> / CAPACITY_FULL:<reason>:slots=0 (line mode) or a
+  # JSON object (json mode). Returns 0 when at least one slot is free, else 1.
+  local mode="${1:-line}" running docker_root
+  running=$(docker ps --filter "label=cfg-agent=true" -q 2>/dev/null | wc -l | tr -d ' ')
+  docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+  CAP_MODE="$mode" CAP_RUNNING="${running:-0}" CAP_DOCKER_ROOT="$docker_root" \
+  CAP_WORKTREE="$WORKTREE_BASE" python3 - <<'PY'
+import os
+def f(k, d):
+    try: return float(os.environ[k])
+    except Exception: return d
+per_mem  = f("CFGMS_AGENT_MEM_MB", 4096) * 1024 * 1024
+per_cpu  = f("CFGMS_AGENT_CPUS", 4)
+per_disk = f("CFGMS_AGENT_DISK_GB", 8) * 1024**3
+mem_ceil  = f("CFGMS_AGENT_MEM_CEIL", 0.90)
+disk_ceil = f("CFGMS_AGENT_DISK_CEIL", 0.90)
+cpu_ceil  = f("CFGMS_AGENT_CPU_CEIL", 0.75)
+running = int(float(os.environ.get("CAP_RUNNING", "0") or 0))
+ncpu = os.cpu_count() or 1
+
+# Memory (skip the gate where /proc/meminfo is absent, e.g. a non-Linux host —
+# those don't launch containers anyway).
+mt = ma = 0
+try:
+    for ln in open("/proc/meminfo"):
+        if ln.startswith("MemTotal:"):     mt = int(ln.split()[1]) * 1024
+        elif ln.startswith("MemAvailable:"): ma = int(ln.split()[1]) * 1024
+except Exception:
+    pass
+
+def slots_for(budget, used, per):
+    # how many more `per`-sized units fit under `budget` given current `used`
+    if per <= 0: return 999
+    return int((budget - used) // per)
+
+slots = {}
+# RAM: bind on the worse of live utilisation and agent reservation (the latter
+# guards a from-idle thundering herd where current usage hasn't ballooned yet).
+if mt > 0:
+    used_mem = max(mt - ma, running * per_mem)
+    slots["mem"] = max(0, slots_for(mem_ceil * mt, used_mem, per_mem))
+# Disk: worst filesystem among the clone dir and the docker data root.
+disk_slot = 999
+for p in {os.environ.get("CAP_WORKTREE", ""), os.environ.get("CAP_DOCKER_ROOT", "")}:
+    if not p: continue
+    try:
+        s = os.statvfs(p)
+        tot = s.f_blocks * s.f_frsize
+        used = tot - s.f_bavail * s.f_frsize
+        disk_slot = min(disk_slot, max(0, slots_for(disk_ceil * tot, used, per_disk)))
+    except Exception:
+        pass
+slots["disk"] = disk_slot
+# CPU: utilization-based, NOT a static per-agent core reservation. Agent
+# containers are bursty (short build/test spikes) and mostly I/O- and
+# network-bound (git clone, waiting on CI), so reserving a full `--cpus=4`
+# slice each caps the host far below real capacity — a 16-core box that ran
+# 5-7 agents fine would refuse a 4th. Instead gate on the measured 1-min load
+# average (actual run-queue depth). `per_cpu_load` is the expected *sustained*
+# load one agent contributes (bursty, ~1.5 cores), and blending with
+# `running * per_cpu_load` guards the same-cycle thundering herd: load average
+# lags fresh launches by ~1 min, so the estimate keeps a burst of dispatches in
+# one cron cycle from all reading the same stale-low load. Falls back to the
+# reservation estimate where getloadavg is unavailable (non-Linux).
+per_cpu_load = f("CFGMS_AGENT_CPU_LOAD", 1.5)
+try:
+    load1 = os.getloadavg()[0]
+except Exception:
+    load1 = running * per_cpu_load
+used_cpu = max(load1, running * per_cpu_load)
+slots["cpu"] = max(0, slots_for(cpu_ceil * ncpu, used_cpu, per_cpu_load))
+# Runaway backstop: never more than 2×ncpu agents regardless of headroom.
+slots["count"] = max(0, int(2 * ncpu) - running)
+
+free = min(slots.values()) if slots else 0
+reason = min(slots, key=slots.get) if slots else "unknown"
+if os.environ.get("CAP_MODE") == "json":
+    import json
+    print(json.dumps({"can_launch": free >= 1, "free_slots": free,
+                      "binding": reason, "running": running, "per_slot": slots}))
+else:
+    if free >= 1:
+        print(f"CAPACITY_OK:slots={free}")
+    else:
+        print(f"CAPACITY_FULL:{reason}:slots=0")
+raise SystemExit(0 if free >= 1 else 1)
+PY
+}
+
+# _capacity_gate <skip_label> <emit_prefix>
+#   Admission gate for a launch path. On capacity, returns 0 silently. When full,
+#   prints "<emit_prefix>:<label>:resources (<reason>)" and returns 1 — the caller
+#   should exit cleanly (defer to a later cycle/host). Bypass with
+#   CFGMS_AGENT_CAPACITY_GATE=off (e.g. tests).
+_capacity_gate() {
+  local label="$1" prefix="$2" out
+  [[ "${CFGMS_AGENT_CAPACITY_GATE:-on}" == "off" ]] && return 0
+  out=$(_capacity_compute line 2>/dev/null) || {
+    echo "${prefix}:${label}:resources (${out:-capacity full})"
+    return 1
+  }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Tier 1 credential lifecycle helpers (Issue #2124)
+# ---------------------------------------------------------------------------
+
+# _tier1_curl <method> <path> [curl-args...]
+# Authenticated curl call to the Tier 1 controller REST API.
+# Auth: uses CFGMS_TIER1_ADMIN_KEY (Bearer token) when set, otherwise extracts
+# mTLS cert+key from CFGMS_ADMIN_BUNDLE and uses --cert/--key.
+# Returns: curl output on stdout; curl exit code propagated.
+#
+# Test hook: set CFGMS_TEST_MOCK_TIER1_DIR to a directory containing mock
+# response files named <METHOD>_<sanitized-path> (e.g. POST__api_v1_tenants).
+# Non-alphanumeric chars in path are replaced with underscores. If a matching
+# file exists, its content is echoed and the function returns 0 — no real HTTP.
+_tier1_curl() {
+  local method="$1"; shift
+  local path="$1"; shift
+  local tier1_url="${CFGMS_TIER1_URL:-}"
+
+  # Test hook: file-based mock responses avoid bash variable-name constraints.
+  if [[ -n "${CFGMS_TEST_MOCK_TIER1_DIR:-}" && -d "${CFGMS_TEST_MOCK_TIER1_DIR}" ]]; then
+    local safe_path
+    safe_path=$(echo "$path" | tr -c 'a-zA-Z0-9' '_')
+    local mock_file="${CFGMS_TEST_MOCK_TIER1_DIR}/${method}_${safe_path}"
+    if [[ -f "$mock_file" ]]; then
+      cat "$mock_file"
+      return 0
+    fi
+    # No matching mock file → simulate connection error (controller unreachable).
+    echo "mock:no_response_for:${method}:${path}" >&2
+    return 1
+  fi
+
+  if [[ -z "$tier1_url" ]]; then
+    echo "CFGMS_TIER1_URL not set" >&2
+    return 1
+  fi
+
+  local curl_auth=()
+  local admin_key="${CFGMS_TIER1_ADMIN_KEY:-}"
+  if [[ -n "$admin_key" ]]; then
+    curl_auth=(-H "Authorization: Bearer ${admin_key}")
+  elif [[ -n "${CFGMS_ADMIN_BUNDLE:-}" ]] && [[ -f "${CFGMS_ADMIN_BUNDLE}" ]]; then
+    # Extract cert, key, CA from the bundle YAML into temp files.
+    local tmp_cert tmp_key tmp_ca
+    tmp_cert=$(mktemp /tmp/cfgms-dispatch-cert-XXXXXX.pem)
+    tmp_key=$(mktemp /tmp/cfgms-dispatch-key-XXXXXX.pem)
+    tmp_ca=$(mktemp /tmp/cfgms-dispatch-ca-XXXXXX.pem)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_cert' '$tmp_key' '$tmp_ca'" RETURN
+    python3 - "${CFGMS_ADMIN_BUNDLE}" "$tmp_cert" "$tmp_key" "$tmp_ca" <<'PY'
+import sys, re
+bundle_path, cert_out, key_out, ca_out = sys.argv[1:]
+text = open(bundle_path).read()
+def extract(name):
+    m = re.search(r'(?m)^' + name + r':\s*\|\s*\n((?:  .+\n?)*)', text)
+    if not m:
+        raise SystemExit(f"field {name} not found in bundle")
+    return re.sub(r'(?m)^  ', '', m.group(1))
+open(cert_out, 'w').write(extract('cert_pem'))
+open(key_out, 'w').write(extract('key_pem'))
+open(ca_out, 'w').write(extract('ca_pem'))
+PY
+    curl_auth=(--cert "$tmp_cert" --key "$tmp_key" --cacert "$tmp_ca")
+  else
+    echo "no auth available — set CFGMS_TIER1_ADMIN_KEY or CFGMS_ADMIN_BUNDLE" >&2
+    return 1
+  fi
+
+  curl -sf -X "$method" \
+    "${tier1_url}${path}" \
+    -H "Content-Type: application/json" \
+    "${curl_auth[@]}" \
+    "$@"
+}
+
+# mint_agent_creds <num>
+# Creates agent-test/<num> sub-tenant (idempotent) and issues an agent.dev-scoped
+# API key. Writes key value to ${AGENT_CRED_BASE}/<num>/api.key (0600) and the
+# key ID to ${AGENT_CRED_BASE}/<num>/api.key.id (0600).
+# On failure: emits CRED_MINT_FAILED:<reason> and returns non-zero.
+mint_agent_creds() {
+  local num="$1"
+  local cred_dir="${AGENT_CRED_BASE}/${num}"
+  local tenant_id="agent-test/${num}"
+
+  # Create and secure the per-agent cred dir.
+  mkdir -p "$cred_dir"
+  chmod 700 "$cred_dir"
+
+  # 1. Create agent-test sub-tenant (idempotent — 409 is success).
+  local create_resp http_code
+  create_resp=$(_tier1_curl POST /api/v1/tenants \
+    -d "{\"id\":\"${num}\",\"name\":\"Agent Test ${num}\",\"parent_id\":\"agent-test\"}" 2>&1) || {
+    # Check if it was a 409 conflict — tenant already exists, continue.
+    if echo "$create_resp" | grep -q "TENANT_EXISTS\|409\|already exists"; then
+      : # idempotent
+    else
+      rm -rf "$cred_dir"
+      echo "CRED_MINT_FAILED:tenant_create:${create_resp}"
+      return 1
+    fi
+  }
+
+  # 2. Issue agent.dev-scoped API key bound to agent-test/<num>.
+  local key_resp key_value key_id
+  key_resp=$(_tier1_curl POST /api/v1/api-keys \
+    -d "{\"name\":\"agent-${num}\",\"role_id\":\"agent.dev\",\"tenant_id\":\"${tenant_id}\"}" 2>&1) || {
+    rm -rf "$cred_dir"
+    echo "CRED_MINT_FAILED:apikey_create:${key_resp}"
+    return 1
+  }
+
+  # Extract key value and ID from the response envelope.
+  key_value=$(echo "$key_resp" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('data', {}).get('key', '') or d.get('key', ''))
+" 2>/dev/null || true)
+  key_id=$(echo "$key_resp" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('data', {}).get('id', '') or d.get('id', ''))
+" 2>/dev/null || true)
+
+  if [[ -z "$key_value" || -z "$key_id" ]]; then
+    rm -rf "$cred_dir"
+    local missing_fields=""
+    [[ -z "$key_value" ]] && missing_fields+="key,"
+    [[ -z "$key_id" ]] && missing_fields+="id,"
+    echo "CRED_MINT_FAILED:apikey_parse:missing=${missing_fields%,}"
+    return 1
+  fi
+
+  # 3. Write credential files (600 — no world or group read).
+  printf '%s' "$key_value" > "${cred_dir}/api.key"
+  chmod 600 "${cred_dir}/api.key"
+  printf '%s' "$key_id" > "${cred_dir}/api.key.id"
+  chmod 600 "${cred_dir}/api.key.id"
+
+  echo "CRED_MINTED:${num}:${key_id}"
+}
+
+# revoke_agent_creds <num>
+# Deletes the API key and suspends the agent-test/<num> sub-tenant.
+# Idempotent: missing cred dir emits INFO:no_cred_to_revoke:<num> and returns 0.
+# Controller-unreachable: records failure to revoke-failed.txt (0600); never blocks cleanup.
+revoke_agent_creds() {
+  local num="$1"
+  local cred_dir="${AGENT_CRED_BASE}/${num}"
+  local tenant_id="agent-test/${num}"
+
+  if [[ ! -d "$cred_dir" ]]; then
+    echo "INFO:no_cred_to_revoke:${num}"
+    return 0
+  fi
+
+  local key_id_file="${cred_dir}/api.key.id"
+  local revoke_failed_file="${cred_dir}/revoke-failed.txt"
+  local errors=()
+
+  # 1. Delete the API key (key lookup miss → immediate 401, no cache flush needed).
+  if [[ -f "$key_id_file" ]]; then
+    local key_id
+    key_id=$(cat "$key_id_file")
+    local del_resp
+    del_resp=$(_tier1_curl DELETE "/api/v1/api-keys/${key_id}" 2>&1) || {
+      local ts
+      ts=$(date -u +%s 2>/dev/null || echo "unknown")
+      errors+=("${key_id} ${ts} apikey_delete:${del_resp}")
+    }
+    if [[ ${#errors[@]} -eq 0 ]]; then
+      echo "CRED_REVOKED:apikey:${key_id}"
+    fi
+  else
+    echo "INFO:no_key_id_file:${num}"
+  fi
+
+  # 2. Suspend the agent sub-tenant.
+  local susp_resp
+  susp_resp=$(_tier1_curl POST "/api/v1/tenants/${tenant_id}/suspend" 2>&1) || {
+    local ts
+    ts=$(date -u +%s 2>/dev/null || echo "unknown")
+    errors+=("${tenant_id} ${ts} tenant_suspend:${susp_resp}")
+  }
+  if [[ ${#errors[@]} -eq 0 || ( ${#errors[@]} -eq 1 && "${errors[0]}" != *"tenant_suspend"* ) ]]; then
+    echo "CRED_REVOKED:tenant:${tenant_id}"
+  fi
+
+  # Record any revocation failures for manual follow-up (never block cleanup).
+  if [[ ${#errors[@]} -gt 0 ]]; then
+    printf '%s\n' "${errors[@]}" >> "$revoke_failed_file"
+    chmod 600 "$revoke_failed_file"
+    for err in "${errors[@]}"; do
+      echo "WARN:revoke_failed:${num}:${err}"
+    done
+  fi
+}
+
 # Ensure clone is based on latest remote develop, not stale local state.
 # Called inside fresh clones after setting the remote URL.
 sync_to_remote_develop() {
@@ -122,6 +448,90 @@ refresh_creds_from_host() {
     || echo "WARN: Failed to refresh credentials from host"
 }
 
+# ---------------------------------------------------------------------------
+# External-author trust gate helpers (Issue #1786)
+# ---------------------------------------------------------------------------
+
+# _check_author_permission <login> [<pr_num>] [<pr_labels_newline_separated>]
+# Classifies a PR author as "internal" or "external:<reason>".
+# Trusts only push/maintain/admin collaborators (fail-closed on any API error).
+# When external and the release marker human-reviewed:ok is present (and was
+# applied by a push+ actor), returns "internal" (PR has been released).
+#
+# Test hooks (all env vars, only active when set):
+#   CFGMS_TEST_COLLAB_PERM   — override the author's permission lookup
+#   CFGMS_TEST_ACTOR_LOGIN   — override the GraphQL actor-login lookup (set to
+#                              empty to simulate "no actor found"; use +x check)
+#   CFGMS_TEST_ACTOR_PERM    — override the label-actor's permission lookup;
+#                              falls back to CFGMS_TEST_COLLAB_PERM if unset
+_check_author_permission() {
+  local login="$1"
+  local pr_num="${2:-}"
+  local pr_labels_str="${3:-}"
+
+  if [[ -z "$login" ]]; then
+    echo "external:null_author"
+    return 0
+  fi
+
+  local perm
+  if [[ -n "${CFGMS_TEST_COLLAB_PERM:-}" ]]; then
+    perm="$CFGMS_TEST_COLLAB_PERM"
+  else
+    perm=$(gh api "repos/cfg-is/cfgms/collaborators/${login}/permission" \
+      --jq '.permission // ""' 2>/dev/null || echo "")
+  fi
+
+  if [[ "$perm" == "push" || "$perm" == "maintain" || "$perm" == "admin" ]]; then
+    echo "internal"
+    return 0
+  fi
+
+  # External author — check for a valid human-reviewed:ok release marker (AC5).
+  # Only the label presence is checked here; actor affiliation is verified below.
+  if [[ -n "$pr_num" ]] && echo "$pr_labels_str" | grep -qx "human-reviewed:ok" 2>/dev/null; then
+    local actor_login
+    if [[ -n "${CFGMS_TEST_ACTOR_LOGIN+x}" ]]; then
+      actor_login="${CFGMS_TEST_ACTOR_LOGIN}"
+    else
+      local tl_gql
+      tl_gql="query { repository(owner: \"cfg-is\", name: \"cfgms\") { pullRequest(number: ${pr_num}) { timelineItems(itemTypes: [LABELED_EVENT], first: 50) { nodes { ... on LabeledEvent { label { name } actor { login } } } } } } }"
+      actor_login=$(gh api graphql -f "query=${tl_gql}" \
+        --jq '[.data.repository.pullRequest.timelineItems.nodes[] | select(.label.name == "human-reviewed:ok") | .actor.login] | last // ""' \
+        2>/dev/null || echo "")
+    fi
+    if [[ -n "$actor_login" ]]; then
+      local actor_perm
+      if [[ -n "${CFGMS_TEST_ACTOR_PERM+x}" ]]; then
+        actor_perm="${CFGMS_TEST_ACTOR_PERM}"
+      elif [[ -n "${CFGMS_TEST_COLLAB_PERM:-}" ]]; then
+        actor_perm="$CFGMS_TEST_COLLAB_PERM"
+      else
+        actor_perm=$(gh api "repos/cfg-is/cfgms/collaborators/${actor_login}/permission" \
+          --jq '.permission // ""' 2>/dev/null || echo "")
+      fi
+      if [[ "$actor_perm" == "push" || "$actor_perm" == "maintain" || "$actor_perm" == "admin" ]]; then
+        echo "internal"  # Released by push+ collaborator (AC5)
+        return 0
+      fi
+    fi
+  fi
+
+  echo "external:${perm:-api_error}"
+  return 0
+}
+
+# _post_quarantine_comment <pr_num> <author_login>
+# Posts a best-effort quarantine notice on the PR. Idempotent (duplicate comments
+# are harmless). Uses || true so a failed comment never aborts the caller.
+_post_quarantine_comment() {
+  local pr_num="$1"
+  local author_login="${2:-unknown}"
+  gh pr comment "$pr_num" --repo cfg-is/cfgms \
+    --body "**External-author PR quarantined.** Author \`${author_login}\` is not a trusted (\`push\`/\`maintain\`/\`admin\`) repository collaborator. The autonomous pipeline will not fetch, review, rebase, fix, or merge this PR until a maintainer applies the \`human-reviewed:ok\` label (verified to push+ actor). See \`docs/development/external-contributors.md\` for the contributor triage and release process." \
+    2>/dev/null || true
+}
+
 # Gate on credential validity before launching any agent container.
 # Threshold: 30 minutes (raised from 15; a 401 was observed at 27 min remaining).
 # Sets CFGMS_TEST_CREDS_STATUS to inject a synthetic result in hermetic tests.
@@ -184,11 +594,16 @@ Commands:
   cleanup-container <NAME>                  Remove container and associated clone by name
   cleanup-stale                             Remove containers/clones for closed, blocked, or failed stories
   list-running                              List running agent containers
+  capacity [--json]                         Resource admission gate: CAPACITY_OK:slots=<n> (rc0) / CAPACITY_FULL:<binding>:slots=0 (rc1)
   list-exited                               List exited agent containers
   inspect-exit    <NUM>                     Print exit code of container
   inspect-detail  <NUM>                     Print stats + last 30 log lines
   inspect-container <NAME>                  Print stats + last 30 log lines for named container
-  health-check                              Check image age, Claude version, creds staleness
+  smoke-test      <N>                       Run cfg config list against Tier 1 as agent-test/<N>
+                                            Emits SMOKE_OK:<N> (exit 0) or SMOKE_FAILED:<N>:<error> (non-zero)
+                                            Requires CFGMS_TIER1_URL and a credential (CFGMS_API_KEY_FILE,
+                                            CFGMS_API_KEY, or the per-agent cred at AGENT_CRED_BASE/<N>/api.key)
+  health-check                              Check image age, Claude version, creds staleness, Tier 1 reachability
 EOF
   exit 1
 }
@@ -364,19 +779,46 @@ case "$cmd" in
     ;;
 
   create-clone-pr)
+    # Optional --dest-prefix <PREFIX> flag (default: "pr-fix-") lets callers
+    # land the clone in a distinct namespace (e.g. "resolve-conflict-" for the
+    # resolve-conflict agent so it never collides with a simultaneous fix-pr
+    # container on the same PR).
+    dest_prefix="pr-fix-"
+    while [[ $# -gt 0 && "$1" == --* ]]; do
+      case "$1" in
+        --dest-prefix) dest_prefix="${2:?--dest-prefix requires a value}"; shift 2 ;;
+        *) echo "Unknown flag for create-clone-pr: $1"; exit 1 ;;
+      esac
+    done
     [[ $# -eq 1 ]] || { echo "create-clone-pr requires exactly one PR number"; exit 1; }
     pr_num="$1"
-    dest="${WORKTREE_BASE}/pr-fix-${pr_num}"
+    dest="${WORKTREE_BASE}/${dest_prefix}${pr_num}"
     github_url=$(git -C "$REPO_ROOT" remote get-url origin)
 
-    # Get branch from PR
-    pr_branch=$(gh pr view "$pr_num" --json headRefName -q '.headRefName' 2>/dev/null) || {
-      echo "ERROR: Failed to get branch for PR #${pr_num}"
+    # Fetch all PR metadata in one call (author gate + branch + body).
+    pr_meta_fix=$(gh pr view "$pr_num" --json headRefName,body,labels,author 2>/dev/null) || {
+      echo "ERROR: Failed to get metadata for PR #${pr_num}"
       exit 1
     }
+    pr_branch=$(echo "$pr_meta_fix" | jq -r '.headRefName // empty')
+    pr_body=$(echo "$pr_meta_fix" | jq -r '.body // ""')
+    pr_labels_fix=$(echo "$pr_meta_fix" | jq -r '.labels[].name')
+    pr_author_login=$(echo "$pr_meta_fix" | jq -r '.author.login // empty')
 
-    # Extract issue number from PR body
-    pr_body=$(gh pr view "$pr_num" --json body -q '.body' 2>/dev/null || echo "")
+    if [[ -z "$pr_branch" ]]; then
+      echo "ERROR: Failed to get branch for PR #${pr_num}"
+      exit 1
+    fi
+
+    # External-author gate (Issue #1786): check trust BEFORE git clone/fetch of PR content.
+    author_trust=$(_check_author_permission "$pr_author_login" "$pr_num" "$pr_labels_fix")
+    if [[ "$author_trust" != "internal" ]]; then
+      _post_quarantine_comment "$pr_num" "$pr_author_login"
+      echo "FIX_REFUSED:${pr_num}:external_author_${pr_author_login}:${author_trust}"
+      exit 3
+    fi
+
+    # Extract issue number from body or branch name.
     issue_num=$(echo "$pr_body" | grep -oP 'Fixes #\K[0-9]+' | head -1 || true)
     if [[ -z "$issue_num" ]] && [[ "$pr_branch" =~ story-([0-9]+) ]]; then
       issue_num="${BASH_REMATCH[1]}"
@@ -392,16 +834,31 @@ case "$cmd" in
     git checkout "$pr_branch"
     trap - ERR
 
-    echo "CLONE_OK:pr-fix-${pr_num}:${pr_branch}:issue=${issue_num:-none}"
+    echo "CLONE_OK:${dest_prefix}${pr_num}:${pr_branch}:issue=${issue_num:-none}"
     ;;
 
   launch)
     [[ $# -eq 1 ]] || { echo "launch requires exactly one issue number"; exit 1; }
     num="$1"
+    [[ "$num" =~ ^[0-9]+$ ]] || { echo "launch requires a numeric issue number"; exit 1; }
     gate_credentials_for_launch
     clone_path="${WORKTREE_BASE}/story-${num}"
     real_path=$(realpath "$clone_path")
     gh_token=$(gh auth token)
+
+    # Mint sub-tenant + scoped API key; write to per-agent tmpfs dir (Issue #2124).
+    # On mint failure: emit CRED_MINT_FAILED, clean up, exit non-zero — never start the container.
+    cred_dir="${AGENT_CRED_BASE}/${num}"
+    if ! mint_out=$(mint_agent_creds "$num" 2>&1); then
+      echo "$mint_out"
+      rm -rf "$clone_path"
+      echo "CLEANED:clone:${clone_path}"
+      exit 1
+    fi
+    echo "$mint_out"
+
+    tier1_url="${CFGMS_TIER1_URL:-}"
+
     if container_id=$(docker run -d \
       --name "cfg-agent-${num}" \
       --label "cfg-agent=true" \
@@ -414,14 +871,22 @@ case "$cmd" in
       -v "claude-creds:/persist" \
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
+      -v "${cred_dir}:/run/cfgms/agent-cred:ro" \
       -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AUTONOMOUS=true" \
+      -e "CFGMS_API_KEY_FILE=/run/cfgms/agent-cred/api.key" \
+      -e "CFGMS_TENANT=agent-test/${num}" \
+      -e "CFGMS_TIER1_URL=${tier1_url}" \
+      -e "CFGMS_ADMIN_BUNDLE=" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${num}" 2>&1); then
       echo "LAUNCHED:${num}:${container_id}"
     else
-      # Launch failed — clean up orphaned clone to prevent blocking future dispatches
+      # Launch failed — revoke creds and clean up to prevent orphaned resources.
       echo "LAUNCH_FAILED:${num}:${container_id}"
+      revoke_agent_creds "$num" || true
+      rm -rf "${cred_dir}" 2>/dev/null || true
       rm -rf "$clone_path"
       echo "CLEANED:clone:${clone_path}"
       exit 1
@@ -438,15 +903,24 @@ case "$cmd" in
     real_path=$(realpath "$clone_dir")
     gh_token=$(gh auth token)
 
+    # Forward the distributed lease key (set by po-act dispatch-fix/resolve-conflict)
+    # so the container's entrypoint releases the pr-<N> lease on exit. Empty when
+    # launch-generic is used outside the cron (e.g. branch mode) — then no lease.
+    lease_env=()
+    if [[ -n "${CFGMS_LEASE_KEY:-}" ]]; then
+      lease_env=(-e "CFGMS_LEASE_KEY=${CFGMS_LEASE_KEY}")
+    fi
+
     # Derive mode and metadata labels from entrypoint args
     mode_label="branch"
     fix_pr_num=""
     extra_labels=()
     for i in "${!entrypoint_args[@]}"; do
       case "${entrypoint_args[$i]}" in
-        --fix-pr) mode_label="fix-pr"; fix_pr_num="${entrypoint_args[$((i+1))]}"; extra_labels+=(--label "pr=${entrypoint_args[$((i+1))]}") ;;
-        --branch) extra_labels+=(--label "branch=${entrypoint_args[$((i+1))]}") ;;
-        --issue)  extra_labels+=(--label "issue=${entrypoint_args[$((i+1))]}") ;;
+        --fix-pr)          mode_label="fix-pr";          fix_pr_num="${entrypoint_args[$((i+1))]}"; extra_labels+=(--label "pr=${entrypoint_args[$((i+1))]}") ;;
+        --resolve-conflict) mode_label="resolve-conflict";                                           extra_labels+=(--label "pr=${entrypoint_args[$((i+1))]}") ;;
+        --branch)          extra_labels+=(--label "branch=${entrypoint_args[$((i+1))]}") ;;
+        --issue)           extra_labels+=(--label "issue=${entrypoint_args[$((i+1))]}") ;;
       esac
     done
 
@@ -463,6 +937,8 @@ case "$cmd" in
       -v "cfgms-go-build-cache:/home/agent/.cache/go-build" \
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
+      -e "CFGMS_AUTONOMOUS=true" \
+      "${lease_env[@]}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${entrypoint_args[@]}" 2>&1); then
@@ -631,28 +1107,68 @@ case "$cmd" in
     # Remove stale container with the same name (only one PO live at a time)
     docker rm -f "$container_name" 2>/dev/null || true
 
+    # Fresh /po sessions (i.e. NOT --resume/--continue) always start on a clean,
+    # up-to-date develop so a stale branch left by a prior session can't leak in.
+    # Any uncommitted work is stashed, not discarded (committed work is already
+    # safe on its own branch). This runs only after the old container is gone,
+    # so we never mutate the shared clone underneath a live session.
+    if [[ "${1:-}" != "--resume" && "${1:-}" != "--continue" ]]; then
+      echo "Refreshing po-live workspace to a clean, up-to-date develop..."
+      git -C "$clone_dir" fetch --quiet origin develop \
+        || echo "  ! warning: fetch of origin/develop failed; refreshing against last-known origin/develop" >&2
+      if [[ -n "$(git -C "$clone_dir" status --porcelain 2>/dev/null)" ]]; then
+        stash_label="po-live-autobackup-$(date -u +%Y%m%dT%H%M%SZ)"
+        if git -C "$clone_dir" stash push -u -m "$stash_label" >/dev/null 2>&1; then
+          echo "  ! Stashed uncommitted changes as '${stash_label}'"
+          echo "    (recover with: git -C '${clone_dir}' stash list)"
+        else
+          echo "ERROR: could not stash uncommitted changes in ${clone_dir}; refusing to refresh to develop." >&2
+          echo "       Resolve manually (commit/stash/clean the clone), then relaunch." >&2
+          exit 1
+        fi
+      fi
+      git -C "$clone_dir" checkout -q -B develop origin/develop
+    fi
+
     # Build the initial prompt without trailing space when args are empty.
     # Trailing space leaves Claude's input box mid-word and shows the slash-
     # command autocomplete dropdown instead of submitting on Enter.
-    if [[ -n "$args" ]]; then
-      po_prompt="/po ${args}"
-      po_name="PO: ${args}"
+    # Resume mode: reattach to an existing Claude session in the same /workspace
+    # clone instead of seeding a fresh /po. These forward Claude's own flags:
+    #   --continue          -> claude --continue  (most recent session)
+    #   --resume            -> claude --continue  (bare: convenience alias)
+    #   --resume <session-id> -> claude --resume <session-id>  (that exact one)
+    # The session transcript persists on the host-mounted ~/.claude.
+    if [[ "${1:-}" == "--continue" ]]; then
+      claude_args=( --continue )
+      session_desc="continue last session"
+    elif [[ "${1:-}" == "--resume" ]]; then
+      if [[ -n "${2:-}" ]]; then
+        claude_args=( --resume "$2" )
+        session_desc="resume session ${2}"
+      else
+        claude_args=( --continue )
+        session_desc="resume last session"
+      fi
+    elif [[ -n "$args" ]]; then
+      claude_args=( --name "PO: ${args}" "/po ${args}" )
+      session_desc="/po ${args}"
     else
-      po_prompt="/po"
-      po_name="PO"
+      claude_args=( --name "PO" "/po" )
+      session_desc="/po"
     fi
 
     echo "================================================"
     echo " CFGMS PO Live Session"
-    echo " Initial prompt: ${po_prompt}"
+    echo " Session:        ${session_desc}"
     echo " Clone:          ${real_path}"
     echo "================================================"
 
     host_claude_dir="$HOME/.claude"
     host_claude_json="$HOME/.claude.json"
 
-    # Pass $1 (display name) and $2 (initial prompt) via bash -c positional
-    # args to avoid shell-quote escaping pain when args contain special chars.
+    # Pass the resolved claude args via bash -c positional args ("$@") to avoid
+    # shell-quote escaping pain when args contain special characters.
     exec docker run -it --rm \
       --name "$container_name" \
       --label "cfg-agent=true" \
@@ -671,10 +1187,9 @@ case "$cmd" in
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
-      -c 'setup-env.sh && exec claude --dangerously-skip-permissions --name "$1" "$2"' \
-      cfg-agent-live-po \
-      "$po_name" \
-      "$po_prompt"
+      -c 'setup-env.sh && exec claude --dangerously-skip-permissions "$@"' \
+      _ \
+      "${claude_args[@]}"
     ;;
 
   launch-interactive)
@@ -718,6 +1233,7 @@ case "$cmd" in
       -v "cfgms-go-mod-cache:/home/agent/go/pkg/mod" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_AUTONOMOUS=true" \
       --cap-add NET_ADMIN \
       --entrypoint /bin/bash \
       cfg-agent:latest \
@@ -780,7 +1296,9 @@ else:
     [[ $# -eq 1 ]] || { echo "cleanup-issue requires exactly one issue number or item_id"; exit 1; }
     num="$1"
     if [[ "$num" =~ ^[0-9]+$ ]]; then
-      # Issue mode (numeric): existing behavior
+      # Issue mode (numeric): revoke API key + suspend tenant, then remove container + clone.
+      revoke_agent_creds "$num" || true
+      rm -rf "${AGENT_CRED_BASE}/${num}" 2>/dev/null || true
       docker cp "cfg-agent-${num}:/tmp/agent-result.json" "/tmp/agent-result-${num}.json" 2>/dev/null || true
       if docker rm -f "cfg-agent-${num}" >/dev/null 2>&1; then
         echo "CLEANED:container:cfg-agent-${num}"
@@ -829,6 +1347,8 @@ else:
     clone_dir=""
     if [[ "$container_name" =~ ^cfg-agent-pr-fix-(.+)$ ]]; then
       clone_dir="${WORKTREE_BASE}/pr-fix-${BASH_REMATCH[1]}"
+    elif [[ "$container_name" =~ ^cfg-agent-resolve-conflict-(.+)$ ]]; then
+      clone_dir="${WORKTREE_BASE}/resolve-conflict-${BASH_REMATCH[1]}"
     elif [[ "$container_name" =~ ^cfg-agent-branch-(.+)$ ]]; then
       clone_dir="${WORKTREE_BASE}/${BASH_REMATCH[1]}"
     elif [[ "$container_name" =~ ^cfg-agent-interactive-(.+)$ ]]; then
@@ -846,6 +1366,18 @@ else:
   list-running)
     docker ps --filter "label=cfg-agent=true" \
       --format "{{.Names}}\t{{.Status}}\t{{.Label \"issue\"}}\t{{.Label \"mode\"}}\t{{.Label \"branch\"}}\t{{.Label \"pr\"}}" 2>/dev/null || true
+    ;;
+
+  capacity)
+    # Resource admission gate. `capacity` → CAPACITY_OK:slots=<n> (rc0) or
+    # CAPACITY_FULL:<binding>:slots=0 (rc1). `capacity --json` → full detail for
+    # the preflight. Used by every launch path to bound host resource use without
+    # a hand-tuned container count (RAM/disk 90%, CPU 75%, 2×ncpu backstop).
+    if [[ "${1:-}" == "--json" ]]; then
+      _capacity_compute json
+    else
+      _capacity_compute line
+    fi
     ;;
 
   list-exited)
@@ -872,6 +1404,67 @@ else:
     docker stats --no-stream "$1" 2>/dev/null || echo "(container not running)"
     echo "=== Last 30 log lines ==="
     docker logs --tail 30 "$1" 2>/dev/null || echo "(no logs available)"
+    ;;
+
+  smoke-test)
+    [[ $# -eq 1 ]] || { echo "smoke-test requires exactly one issue number"; exit 1; }
+    num="$1"
+    [[ "$num" =~ ^[0-9]+$ ]] || { echo "SMOKE_FAILED:${num}:invalid_issue_num"; exit 1; }
+
+    tier1_url="${CFGMS_TIER1_URL:-}"
+    if [[ -z "$tier1_url" ]]; then
+      echo "SMOKE_FAILED:${num}:no_tier1_url"
+      exit 1
+    fi
+
+    # Determine credential source before launching — missing cred exits without starting a container.
+    # Priority: CFGMS_API_KEY_FILE env → per-agent tmpfs cred → CFGMS_API_KEY env.
+    api_key_file="${CFGMS_API_KEY_FILE:-}"
+    api_key_env="${CFGMS_API_KEY:-}"
+    agent_cred_file="${AGENT_CRED_BASE}/${num}/api.key"
+
+    use_cred_file=""
+    use_cred_env=""
+
+    if [[ -n "$api_key_file" && -f "$api_key_file" ]]; then
+      use_cred_file="$api_key_file"
+    elif [[ -f "$agent_cred_file" ]]; then
+      use_cred_file="$agent_cred_file"
+    elif [[ -n "$api_key_env" ]]; then
+      use_cred_env="$api_key_env"
+    else
+      echo "SMOKE_FAILED:${num}:no_cred"
+      exit 1
+    fi
+
+    # Build docker env args for credential injection.
+    smoke_docker_env=("-e" "CFGMS_TIER1_URL=${tier1_url}")
+    if [[ -n "$use_cred_file" ]]; then
+      smoke_docker_env+=("-v" "${use_cred_file}:/run/cfgms/smoke.key:ro"
+                         "-e" "CFGMS_API_KEY_FILE=/run/cfgms/smoke.key")
+    else
+      smoke_docker_env+=("-e" "CFGMS_API_KEY=${use_cred_env}")
+    fi
+
+    # Run smoke test. --rm ensures the container is always removed on exit.
+    # Test hook: CFGMS_TEST_SMOKE_RUN_CMD replaces docker run for hermetic tests.
+    smoke_exit=0
+    if [[ -n "${CFGMS_TEST_SMOKE_RUN_CMD:-}" ]]; then
+      smoke_out=$(bash -c "${CFGMS_TEST_SMOKE_RUN_CMD}" 2>&1) || smoke_exit=$?
+    else
+      smoke_out=$(docker run --rm \
+        "${smoke_docker_env[@]}" \
+        cfg-agent:latest \
+        cfg config list --tenant="agent-test/${num}" --no-bundle 2>&1) || smoke_exit=$?
+    fi
+
+    if [[ $smoke_exit -eq 0 ]]; then
+      echo "SMOKE_OK:${num}"
+    else
+      err_msg=$(echo "$smoke_out" | head -1)
+      echo "SMOKE_FAILED:${num}:${err_msg}"
+      exit 1
+    fi
     ;;
 
   health-check)
@@ -902,12 +1495,37 @@ else:
       warnings=$((warnings + 1))
     fi
 
+    # cfg CLI version check
+    cfg_version=$(docker run --rm --entrypoint cfg cfg-agent:latest version 2>/dev/null \
+      | grep -oP '(?<=Version: )\S+(?=,)' || echo "unknown")
+    echo "INFO:cfg_version:${cfg_version}"
+    if [[ "$cfg_version" == "unknown" ]]; then
+      echo "WARN:cfg_version:cfg binary missing or version check failed — run /agent-setup rebuild"
+      warnings=$((warnings + 1))
+    fi
+
     # Credentials check
     if docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest -f /persist/.credentials.json 2>/dev/null; then
       echo "INFO:creds:Credentials present in claude-creds volume"
     else
       echo "WARN:creds:No credentials found — run /agent-setup creds"
       warnings=$((warnings + 1))
+    fi
+
+    # Tier 1 reachability probe
+    tier1_url="${CFGMS_TIER1_URL:-}"
+    if [[ -z "$tier1_url" ]]; then
+      echo "WARN:tier1_url_not_set"
+      warnings=$((warnings + 1))
+    else
+      http_code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
+        "${tier1_url}/api/v1/health" 2>/dev/null || echo "000")
+      if [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
+        echo "INFO:tier1_reachable:true"
+      else
+        echo "WARN:tier1_unreachable:${http_code}"
+        warnings=$((warnings + 1))
+      fi
     fi
 
     echo "HEALTH_DONE:warnings=${warnings}"
@@ -929,7 +1547,7 @@ else:
 
     # Validate PR + auto-detect story number.
     pr_meta=$(gh pr view "$pr_num" --repo cfg-is/cfgms \
-      --json state,headRefName,body,labels,headRepositoryOwner 2>/dev/null) || {
+      --json state,headRefName,body,labels,headRepositoryOwner,author 2>/dev/null) || {
       echo "REVIEW_REFUSED:${pr_num}:pr_not_found"
       exit 3
     }
@@ -938,6 +1556,7 @@ else:
     fork_owner=$(echo "$pr_meta" | jq -r '.headRepositoryOwner.login // empty')
     pr_body=$(echo "$pr_meta" | jq -r '.body // ""')
     pr_labels=$(echo "$pr_meta" | jq -r '.labels[].name')
+    pr_author_login=$(echo "$pr_meta" | jq -r '.author.login // empty')
 
     if [[ "$state" != "OPEN" ]]; then
       echo "REVIEW_REFUSED:${pr_num}:pr_state_${state}"
@@ -947,6 +1566,16 @@ else:
       echo "REVIEW_REFUSED:${pr_num}:fork_branch_${fork_owner}"
       exit 3
     fi
+
+    # External-author gate (Issue #1786): check trust BEFORE any git fetch/checkout.
+    # Fail-closed: null/empty author or any API error → external.
+    author_trust=$(_check_author_permission "$pr_author_login" "$pr_num" "$pr_labels")
+    if [[ "$author_trust" != "internal" ]]; then
+      _post_quarantine_comment "$pr_num" "$pr_author_login"
+      echo "REVIEW_REFUSED:${pr_num}:external_author_${pr_author_login}:${author_trust}"
+      exit 3
+    fi
+
     validate_branch "$pr_branch"
 
     # Resolve story/item from the branch (authoritative) or, for legacy
@@ -974,6 +1603,7 @@ else:
     clone_dir="${WORKTREE_BASE}/review-pr-${pr_num}"
 
     # Container conflict gate: refuse if the review container already exists.
+    # (Same-host fast path; the cross-host interlock is the pr-<N> lease below.)
     if docker ps -a --filter "name=^/${container_name}$" --format "{{.Names}}" 2>/dev/null | grep -qx "$container_name"; then
       echo "REVIEW_REFUSED:${pr_num}:container_exists"
       exit 3
@@ -1041,6 +1671,30 @@ for i in items:
         exit 3
       fi
     fi
+
+    # Resource admission gate before claiming the lease / cloning.
+    if ! _capacity_gate "${pr_num}" "REVIEW_REFUSED"; then
+      exit 3
+    fi
+
+    # Cross-host PR lease — pr-<N> is shared by review/fix/resolve (mutually
+    # exclusive ops on one PR). Acquired only now that this is a confirmed,
+    # story-linked, reviewable PR (after the no_story_link / no_project_item
+    # refusals above, before any clone/launch). Another host already
+    # reviewing/fixing this PR holds it, and its local docker check above is
+    # invisible to us. The review container's review-entrypoint.sh releases the
+    # lease on exit; until then a pre-launch failure must release it, so we arm an
+    # EXIT trap and disarm it only after a successful detached launch (then the
+    # container owns release).
+    PIPELINE_HELPER="${CFGMS_TEST_PIPELINE_HELPER:-${REPO_ROOT}/scripts/pipeline-helper.sh}"
+    review_lease_out=$(bash "$PIPELINE_HELPER" lease-acquire "pr-${pr_num}" "${CFGMS_LEASE_TTL_PR:-3600}" 2>/dev/null || true)
+    case "$review_lease_out" in
+      ACQUIRED:*|RECLAIMED:*) ;;
+      HELD:*) echo "REVIEW_REFUSED:${pr_num}:lease_held"; exit 3 ;;
+      *)      echo "REVIEW_REFUSED:${pr_num}:lease_error"; exit 3 ;;
+    esac
+    REVIEW_LEASE_RELEASE_ON_EXIT="pr-${pr_num}"
+    trap '[ -n "${REVIEW_LEASE_RELEASE_ON_EXIT:-}" ] && bash "$PIPELINE_HELPER" lease-release "$REVIEW_LEASE_RELEASE_ON_EXIT" >/dev/null 2>&1; true' EXIT
 
     # Stale clone cleanup (previous run crashed before docker rm got the dir).
     rm -rf "$clone_dir" 2>/dev/null || true
@@ -1142,14 +1796,19 @@ PROMPT_EOF
       -v "${REPO_ROOT}/.devcontainer/scripts/review-entrypoint.sh:/usr/local/bin/review-entrypoint.sh:ro" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
+      -e "CFGMS_LEASE_KEY=pr-${pr_num}" \
       --cap-add NET_ADMIN \
       --entrypoint /usr/local/bin/review-entrypoint.sh \
       cfg-agent:latest 2>&1); then
+      # Launch succeeded — the container now owns the pr-<N> lease and releases it
+      # on exit. Disarm the host-side release trap.
+      unset REVIEW_LEASE_RELEASE_ON_EXIT
       echo "REVIEW_DISPATCHED:${pr_num}:${review_story_label}:${container_id}"
       # Best-effort PR dashboard label via REST API (see launch-generic note above).
       gh api --method POST "repos/cfg-is/cfgms/issues/${pr_num}/labels" \
         -f "labels[]=review-agent" >/dev/null 2>&1 || true
     else
+      # Launch failed — the EXIT trap releases the lease.
       echo "LAUNCH_FAILED:${container_name}:${container_id}"
       rm -rf "$clone_dir"
       echo "CLEANED:clone:${clone_dir}"
@@ -1187,6 +1846,13 @@ PROMPT_EOF
       fi
 
       echo "STALE:${container_name}:finished=${finished_iso}:pr=${pr_num:-unknown}"
+
+      # Revoke any agent.dev API key associated with this review agent (Issue #2124).
+      # Review agents use the same cred dir layout as issue agents when pr_num is known.
+      if [[ -n "$pr_num" ]]; then
+        revoke_agent_creds "review-pr-${pr_num}" || true
+        rm -rf "${AGENT_CRED_BASE}/review-pr-${pr_num}" 2>/dev/null || true
+      fi
 
       # Archive the result JSON for forensics.
       docker cp "${container_name}:/tmp/agent-result.json" "/tmp/agent-result-review-${pr_num:-${container_name}}.json" 2>/dev/null || true
@@ -1270,7 +1936,9 @@ PROMPT_EOF
 
       if $should_clean; then
         echo "STALE:${num}:${reason}"
-        # Reuse cleanup-issue logic
+        # Revoke API key + suspend tenant before removing container/clone (Issue #2124).
+        revoke_agent_creds "$num" || true
+        rm -rf "${AGENT_CRED_BASE}/${num}" 2>/dev/null || true
         docker cp "cfg-agent-${num}:/tmp/agent-result.json" "/tmp/agent-result-${num}.json" 2>/dev/null || true
         if docker rm -f "cfg-agent-${num}" >/dev/null 2>&1; then
           echo "CLEANED:container:cfg-agent-${num}"
@@ -1302,7 +1970,46 @@ PROMPT_EOF
       done
     done
 
+    # --- Expired distributed-lease GC (multi-host cron coordination) ---
+    # Reap lease refs whose holder died past TTL. acquire-time reclaim already
+    # frees a key when it is re-acquired directly; this collects the rest (e.g. a
+    # crashed dev whose story was picked up by stalled-dispatch recovery under a
+    # different code path). Idempotent; best-effort.
+    bash "${REPO_ROOT}/scripts/pipeline-helper.sh" lease-gc 2>/dev/null || true
+
     echo "CLEANUP_STALE_DONE:cleaned=${cleaned}"
+    ;;
+
+  check-pr-author)
+    # Public API used by po-act.sh (Issue #1786).
+    # check-pr-author <PR_NUM>
+    # Exits 0 (internal) or 3 (external/quarantined).
+    [[ $# -eq 1 ]] || { echo "check-pr-author requires exactly one PR number"; exit 1; }
+    _cpa_pr="$1"
+    _cpa_meta=$(gh pr view "$_cpa_pr" --json author,labels 2>/dev/null) || {
+      echo "AUTHOR_CHECK_ERROR:${_cpa_pr}:api_error"
+      exit 3
+    }
+    _cpa_login=$(echo "$_cpa_meta" | jq -r '.author.login // empty')
+    _cpa_labels=$(echo "$_cpa_meta" | jq -r '.labels[].name')
+    _cpa_trust=$(_check_author_permission "$_cpa_login" "$_cpa_pr" "$_cpa_labels")
+    if [[ "$_cpa_trust" == "internal" ]]; then
+      echo "AUTHOR_TRUSTED:${_cpa_pr}:${_cpa_login}"
+      exit 0
+    else
+      _post_quarantine_comment "$_cpa_pr" "$_cpa_login"
+      echo "AUTHOR_EXTERNAL:${_cpa_pr}:${_cpa_login}:${_cpa_trust}"
+      exit 3
+    fi
+    ;;
+
+  _test-check-author)
+    # Hidden test hook for review_pr_detection.test.sh (Issue #1786).
+    # _test-check-author <login> [<pr_num>] [<pr_labels_newline_separated>]
+    # Calls _check_author_permission with the supplied args and prints result.
+    # Test hooks: CFGMS_TEST_COLLAB_PERM, CFGMS_TEST_ACTOR_LOGIN, CFGMS_TEST_ACTOR_PERM.
+    [[ $# -ge 1 ]] || { echo "_test-check-author requires <login> [<pr_num>] [<pr_labels>]"; exit 1; }
+    _check_author_permission "${1}" "${2:-}" "${3:-}"
     ;;
 
   _test-resolve-pr)
@@ -1311,6 +2018,22 @@ PROMPT_EOF
     # branch + body and prints its result. Safe (no docker, no gh, no writes).
     [[ $# -eq 2 ]] || { echo "_test-resolve-pr requires <branch> <body>"; exit 1; }
     resolve_pr_story_or_item "$1" "$2"
+    ;;
+
+  _test-mint-creds)
+    # Hidden test hook for agent-apikey-injection.test.sh (Issue #2124).
+    # Calls mint_agent_creds with the supplied issue number.
+    # Env overrides: CFGMS_TEST_CRED_BASE, CFGMS_TEST_MOCK_TIER1_DIR, CFGMS_TIER1_URL.
+    [[ $# -eq 1 ]] || { echo "_test-mint-creds requires exactly one issue number"; exit 1; }
+    mint_agent_creds "$1"
+    ;;
+
+  _test-revoke-creds)
+    # Hidden test hook for agent-apikey-injection.test.sh (Issue #2124).
+    # Calls revoke_agent_creds with the supplied issue number.
+    # Env overrides: CFGMS_TEST_CRED_BASE, CFGMS_TEST_MOCK_TIER1_DIR, CFGMS_TIER1_URL.
+    [[ $# -eq 1 ]] || { echo "_test-revoke-creds requires exactly one issue number"; exit 1; }
+    revoke_agent_creds "$1"
     ;;
 
   *)

@@ -32,11 +32,15 @@ type Manager interface {
 	// binary replaced, and the service restarted.
 	// Requires elevated privileges (root on Linux/macOS, Administrator on Windows).
 	//
+	// When controllerURL is non-empty, it is embedded in the service definition
+	// (ExecStart/launchd args/CreateService args) as --controller-url so the
+	// steward connects to the specified URL on startup (ADR-013 §3, Issue #1517).
+	//
 	// When caCertPEM is non-empty, Install writes the CA cert to the platform-standard
 	// path before registering the service. When expectedFingerprint is also non-empty,
 	// the cert's SHA-256 fingerprint is verified first and Install returns an error
 	// without writing the cert or registering the service if it does not match.
-	Install(token, caCertPEM, expectedFingerprint string) error
+	Install(token, controllerURL, caCertPEM, expectedFingerprint string) error
 
 	// Uninstall stops and removes the OS service definition.
 	// If purge is true the installed binary is also deleted.
@@ -50,18 +54,6 @@ type Manager interface {
 	// IsElevated returns true if the current process has the privileges
 	// required to install or uninstall the service.
 	IsElevated() bool
-}
-
-// HyperVInstaller is satisfied by platform-specific Manager implementations that
-// support WinRM + Hyper-V service-account provisioning. On platforms that do not
-// support this (Linux, macOS) the Manager returned by New() will not satisfy this
-// interface — callers type-assert and return a clear "not supported" error.
-type HyperVInstaller interface {
-	// InstallHyperV extends the base install with WinRM HTTPS listener binding,
-	// loopback firewall rules, local service account creation, and credential
-	// pre-population. winrmPass must never be empty; callers are responsible for
-	// generating or reading it from stdin before calling this method.
-	InstallHyperV(token, caCertPEM, expectedFingerprint, winrmUser, winrmPass string) error
 }
 
 // New returns the platform-specific Manager for the current OS.

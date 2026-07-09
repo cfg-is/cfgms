@@ -18,14 +18,38 @@ resources:
         minimum: 1
       vhd_path:
         type: string
-        description: Absolute Windows path to the VHD/VHDX file (e.g. C:\\VMs\\disk.vhdx)
+        description: >
+          Absolute Windows path to the VHD/VHDX file (e.g.
+          C:\\VMs\\disk.vhdx). The containing directory is the VM's storage
+          HOME (#2411): configuration files, checkpoints, smart-paging files,
+          and all attached disks belong there. Creation places everything at
+          the home; changing the directory on an existing VM converges via a
+          live, non-destructive Move-VMStorage migration (async, tracked on a
+          durable move record; the VM is never stopped or recreated).
+          Directory-level only — changing just the file name does not converge
+          (Move-VMStorage ignores renames).
       switch_name:
-        type: string
-        description: Virtual switch name to connect the VM's network adapter
+        description: >
+          The VM's FULL desired network, declared on the VM. Accepts either a
+          single virtual switch name (string — the common case, back-compat) or
+          a list of switch names (multi-NIC). On convergence the module
+          reconciles the VM's network adapters so that exactly one adapter is
+          connected to each switch in the set: a switch added to the set
+          connects a new adapter; a switch removed from the set removes the
+          adapter on it. Idempotent — when the connected set already equals the
+          desired set, no change is made. This is the declarative replacement
+          for the removed standalone vmattach resource (#1903, #2021).
+        oneOf:
+          - type: string
+            pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
+          - type: array
+            items:
+              type: string
+              pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
       generation:
         type: integer
-        description: VM generation (must be 2 or omitted for default)
-        enum: [2]
+        description: VM generation (1 or 2; omit for default Generation 2)
+        enum: [1, 2]
         default: 2
       state:
         type: string
@@ -35,33 +59,79 @@ resources:
           - stopped
           - absent
         default: running
-
-  snapshot:
-    description: Hyper-V checkpoint (snapshot) for a virtual machine
-    required:
-      - vm_name
-      - name
-    properties:
-      vm_name:
-        type: string
-        description: Name of the virtual machine that owns this checkpoint
-        pattern: "^[a-zA-Z0-9_\\-]{1,64}$"
-      name:
-        type: string
-        description: Checkpoint name (spaces allowed per Hyper-V convention; no __)
-        pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
-      state:
-        type: string
+      source:
+        type: object
         description: >
-          Desired state for the checkpoint.
-          "present" creates the checkpoint if absent.
-          "restored" restores the VM to this checkpoint (write-only: Get returns "present" after restore).
-          "absent" deletes the checkpoint.
-        enum:
-          - present
-          - restored
-          - absent
-        default: present
+          ISO boot-provisioning parameters. When present, the module activates
+          the provisioning state machine (absent → creating → installing →
+          finalizing → ready) one step per convergence cycle. Absent source:
+          block leaves the VM managed by the existing lifecycle only.
+        required:
+          - iso
+          - os_family
+        properties:
+          iso:
+            type: string
+            description: Absolute Windows path to the installation ISO (e.g. C:\ISO\server.iso)
+          os_family:
+            type: string
+            description: Installer type
+            enum:
+              - linux
+              - windows
+          unattend:
+            type: string
+            description: >
+              Optional reference to an unattended-install profile expressed as a
+              profile:// URI (e.g. profile://windows/server2022).
+          completion:
+            type: object
+            description: Specifies how the module detects that provisioning succeeded.
+            properties:
+              mode:
+                type: string
+                description: Detection strategy; steward-registration is the only supported value in v1.
+                enum:
+                  - steward-registration
+              timeout:
+                type: string
+                description: >
+                  Go duration string bounding the provisioning wait
+                  (e.g. "60m"). Omit to use the module default.
+          on_existing:
+            type: string
+            description: >
+              Behaviour when the VM already exists. never (default) leaves it
+              untouched; recreate destroys and re-provisions.
+            enum:
+              - never
+              - recreate
+            default: never
+      ha_role:
+        type: object
+        description: >
+          Convergent cluster-role membership — the single surface for VM HA
+          state (#2372). Present: the VM is registered as a clustered HA role
+          on the named failover cluster, on every path (plain create, an
+          already-existing VM on the next converge, a source-provisioned VM at
+          provisioning finalize). REMOVING this block from a previously-HA vm
+          resource DEMOTES the VM on the next converge: the clustered role is
+          removed (the VM itself is never touched) with no separate opt-in
+          flag. Both directions reuse the cluster CNO ownership gate and
+          existence-based idempotency. Promote/demote drift detection requires
+          the module-level cluster_name scope cap. When the primary vhd_path is
+          on a Cluster Shared Volume (C:\ClusterStorage\...), the module-level
+          seed_dir must be set and host-local (not under CSV) or the resource
+          is rejected at validate time.
+        required:
+          - cluster_name
+        properties:
+          cluster_name:
+            type: string
+            description: Target failover cluster (must equal the module's declared cluster_name).
+          resource_group_name:
+            type: string
+            description: Optional cluster resource-group name (defaults to the VM name).
 
   vswitch:
     description: Hyper-V virtual switch (external, internal, or private)
@@ -99,29 +169,74 @@ resources:
           - absent
         default: present
 
-  vmattach:
-    description: Hyper-V VM network adapter attachment to a virtual switch
+  cluster:
+    description: >
+      Hyper-V failover-cluster role property management (cluster-scoped only).
+      Reconciles placement/scheduling properties of existing clustered VM
+      roles. VM cluster-role membership (promote/demote) is a hyperv.vm
+      setting (ha_role) — the single surface for VM-scoped settings; this
+      resource never creates or removes roles. Mutation is CNO-owner-gated and
+      idempotent. Cluster formation is out of scope.
     required:
-      - vm_name
-      - switch_name
+      - name
     properties:
-      vm_name:
+      name:
         type: string
-        description: Name of the virtual machine
-        pattern: "^[a-zA-Z0-9_\\-]{1,64}$"
-      switch_name:
-        type: string
-        description: Name of the virtual switch to attach to
-        pattern: "^[a-zA-Z0-9_\\- ]{1,64}$"
-      adapter_name:
-        type: string
+        description: Failover cluster (CNO) name; must equal the module's declared cluster_name.
+      role_names:
+        type: array
         description: >
-          Optional name for the network adapter. When empty, Hyper-V assigns a
-          default adapter name and -Name is omitted from the PowerShell command.
+          Bounded set of existing clustered VM role names whose properties this
+          resource reconciles. Roles are never created or removed here — VM
+          cluster-role membership is the hyperv.vm ha_role setting.
+        items:
+          type: string
+      allow_destructive:
+        type: boolean
+        description: >
+          Retained for the internal destructive gate; the operator-facing role
+          teardown surface is removed — state absent is refused regardless
+          (demote via removing ha_role on the hyperv.vm resource).
+        default: false
       state:
         type: string
-        description: Desired lifecycle state
+        description: >
+          Desired lifecycle. absent is refused (role membership is managed via
+          hyperv.vm ha_role); cluster formation/teardown is out of scope.
         enum:
           - present
           - absent
         default: present
+      roles:
+        type: object
+        description: >
+          Per-role declarative placement/scheduling properties, keyed by role
+          (VM) name. Reconciled on the CNO-owner node after the role exists;
+          absent keys leave properties at cluster defaults.
+        additionalProperties:
+          type: object
+          properties:
+            preferred_owners:
+              type: array
+              description: Ordered preferred failover nodes for the role group (Set-ClusterOwnerNode -Group).
+              items:
+                type: string
+            possible_owners:
+              type: array
+              description: Nodes permitted to own the role's VM resource (Set-ClusterOwnerNode -Resource).
+              items:
+                type: string
+            priority:
+              type: integer
+              description: Cluster group priority.
+              enum:
+                - 0
+                - 1000
+                - 2000
+                - 3000
+            auto_start:
+              type: boolean
+              description: Whether the cluster starts the group at node startup.
+            anti_affinity_class:
+              type: string
+              description: Anti-affinity token used to separate sibling roles across nodes.

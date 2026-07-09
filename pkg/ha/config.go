@@ -62,20 +62,31 @@ func DefaultConfig() *Config {
 	}
 }
 
+// ModeFromString parses a deployment mode string into a DeploymentMode.
+// Valid values (case-insensitive): "single", "blue-green", "cluster".
+// Returns SingleServerMode and an error for unrecognised values.
+func ModeFromString(s string) (DeploymentMode, error) {
+	switch strings.ToLower(s) {
+	case "single":
+		return SingleServerMode, nil
+	case "blue-green":
+		return BlueGreenMode, nil
+	case "cluster":
+		return ClusterMode, nil
+	default:
+		return SingleServerMode, fmt.Errorf("invalid HA mode: %s", s)
+	}
+}
+
 // LoadFromEnvironment loads HA configuration from environment variables
 func (c *Config) LoadFromEnvironment() error {
 	// Load deployment mode
 	if mode := os.Getenv("CFGMS_HA_MODE"); mode != "" {
-		switch strings.ToLower(mode) {
-		case "single":
-			c.Mode = SingleServerMode
-		case "blue-green":
-			c.Mode = BlueGreenMode
-		case "cluster":
-			c.Mode = ClusterMode
-		default:
-			return fmt.Errorf("invalid HA mode: %s", mode)
+		m, err := ModeFromString(mode)
+		if err != nil {
+			return err
 		}
+		c.Mode = m
 	}
 
 	// Load CA certificate path for TLS verification between HA nodes
@@ -281,6 +292,23 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// FastElectionConfig returns a ClusterConfig with test-scale election timings.
+// Use in place of DefaultConfig().Cluster in tests to prevent election storms
+// under CPU contention: elections converge in milliseconds, not seconds.
+// ElectionTick = ElectionTimeout / HeartbeatInterval = 200ms / 40ms = 5,
+// satisfying the ≥5 invariant enforced by NewRaftConsensus.
+func FastElectionConfig() ClusterConfig {
+	return ClusterConfig{
+		ExpectedSize:      3,
+		MinQuorum:         2,
+		ElectionTimeout:   200 * time.Millisecond,
+		HeartbeatInterval: 40 * time.Millisecond,
+		Discovery: &DiscoveryConfig{
+			Config: make(map[string]interface{}),
+		},
+	}
 }
 
 // GetModeString returns the deployment mode as a string

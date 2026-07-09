@@ -60,7 +60,16 @@ param(
     # When provided, signtool.exe signs the MSI using SHA-256 with a timestamp.
     # When omitted, the MSI is built unsigned with a warning.
     [Parameter(Mandatory = $false)]
-    [string]$SigningCertThumbprint = ""
+    [string]$SigningCertThumbprint = "",
+
+    # Base64-encoded Ed25519 public key for the CFGMS module publisher.
+    # When non-empty, baked into the binary via ldflags so the steward verifies
+    # module/upgrade bundles against this key. When omitted, the binary keeps the
+    # compiled-in all-zero placeholder from pkg/modules/trust/identity.go — a
+    # placeholder-key build cannot verify genuine signed upgrades (fail-closed dev
+    # behavior). The real key is supplied by the code-signing pipeline (ADR-013 §5).
+    [Parameter(Mandatory = $false)]
+    [string]$PublisherKey = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,6 +88,7 @@ Write-Host "=== CFGMS Steward MSI Build ===" -ForegroundColor Cyan
 Write-Host "Version:        $Version"
 Write-Host "MSI Version:    $MsiVersion"
 Write-Host "ControllerURL:  $(if ($ControllerURL -ne '') { $ControllerURL } else { '(not set — generic build)' })"
+Write-Host "PublisherKey:   $(if ($PublisherKey -ne '') { '(set)' } else { '(not set — placeholder key)' })"
 Write-Host "Arch:           $Arch"
 
 # ── Step 1: Build the binary (when not pre-supplied) ─────────────────────────
@@ -104,6 +114,9 @@ if ($BinaryPath -eq "") {
         "-s -w -X main.ControllerURL=$ControllerURL $VersionFlag"
     } else {
         "-s -w $VersionFlag"
+    }
+    if ($PublisherKey -ne "") {
+        $LdFlags += " -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PublisherKey"
     }
     $BuildArgs = @(
         "build",
@@ -174,6 +187,43 @@ try {
     Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
 }
 
+# ── Step 1c: Build the steward launcher binary ──────────────────────────────
+# The launcher is bundled in the MSI payload next to cfgms-steward.exe;
+# windowsManager.Install() registers it as the service binary and requires it
+# in the bundle (launcher-managed install — what makes the steward
+# push-upgradeable). Never fetched post-install.
+
+Write-Host ""
+Write-Host "Building cfgms-steward-launcher binary for windows/$Arch..." -ForegroundColor Yellow
+
+$LauncherPath = Join-Path $RepoRoot "bin" "cfgms-steward-launcher-windows-$Arch.exe"
+
+$env:GOOS        = "windows"
+$env:GOARCH      = $Arch
+$env:CGO_ENABLED = "0"
+
+Push-Location $RepoRoot
+try {
+    $LauncherArgs = @(
+        "build",
+        "-trimpath",
+        "-ldflags", "-s -w -X github.com/cfgis/cfgms/pkg/version.Version=$Version",
+        "-o", $LauncherPath,
+        "./cmd/cfgms-steward-launcher"
+    )
+    & go @LauncherArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "go build failed for cfgms-steward-launcher (exit $LASTEXITCODE)"
+    }
+} finally {
+    Pop-Location
+    Remove-Item Env:GOOS        -ErrorAction SilentlyContinue
+    Remove-Item Env:GOARCH      -ErrorAction SilentlyContinue
+    Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+}
+
+Write-Host "  Launcher: $LauncherPath" -ForegroundColor Green
+
 # ── Step 2: Ensure WiX 4 toolset is installed ────────────────────────────────
 
 Write-Host ""
@@ -219,6 +269,7 @@ $WixArgs = @(
     $WxsFile,
     "-d", "ProductVersion=$MsiVersion",
     "-d", "BinaryPath=$BinaryPath",
+    "-d", "LauncherPath=$LauncherPath",
     "-d", "ModulesDir=$ModulesDir",
     "-out", $OutputMsi
 )
