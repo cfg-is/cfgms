@@ -9,6 +9,13 @@
 *.sh        text eol=lf
 *.bash      text eol=lf
 
+# Workflow + tooling scripts executed cross-platform. The Workflow tool loads
+# .claude/workflows/*.js verbatim and its permission layer rejects CR control
+# characters, so a CRLF checkout breaks named-workflow invocation on Windows
+# hosts (#2451). Python shebangs break on Linux the same way shell shebangs do.
+*.js        text eol=lf
+*.py        text eol=lf
+
 # Dockerfile + compose — used by docker, expects LF
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
