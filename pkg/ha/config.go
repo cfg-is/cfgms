@@ -294,6 +294,23 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// FastElectionConfig returns a ClusterConfig with test-scale election timings.
+// Use in place of DefaultConfig().Cluster in tests to prevent election storms
+// under CPU contention: elections converge in milliseconds, not seconds.
+// ElectionTick = ElectionTimeout / HeartbeatInterval = 200ms / 40ms = 5,
+// satisfying the ≥5 invariant enforced by NewRaftConsensus.
+func FastElectionConfig() ClusterConfig {
+	return ClusterConfig{
+		ExpectedSize:      3,
+		MinQuorum:         2,
+		ElectionTimeout:   200 * time.Millisecond,
+		HeartbeatInterval: 40 * time.Millisecond,
+		Discovery: &DiscoveryConfig{
+			Config: make(map[string]interface{}),
+		},
+	}
+}
+
 // GetModeString returns the deployment mode as a string
 func (c *Config) GetModeString() string {
 	return c.Mode.String()

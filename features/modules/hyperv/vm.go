@@ -954,6 +954,40 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		return nil
 	}
 
+	// CNO-owner creation gate (#2421): the role does not exist ANYWHERE in the
+	// cluster yet (locally absent AND no clustered role registered — the #2420
+	// probe reports cluster-wide membership on the absent path), so exactly one
+	// node must perform the first-ever create. Reuse the cluster module's
+	// coordination primitive: only the CNO-owner steward proceeds to
+	// create/provision (the gate sits BEFORE the source/plain dispatch, so
+	// expensive provisioning is owner-gated too); every other member records an
+	// audit skip and returns nil — coordination, not authorization, mirroring
+	// reconcileRoleMembership's non-owner shape. Non-owners converge once the
+	// owner creates: their next getVM sees the registered role and the #2420
+	// gate above takes over. A transient "CNO has no current owner" cycle
+	// returns (false, nil, nil) — no node creates that cycle, which is safe
+	// (creation is delayed one cycle, never duplicated). A helper error is
+	// fail-safe: it fails the Set rather than being swallowed into a skip.
+	if !vmExists && cfg.HARole != nil && current.HARole == nil {
+		ownsCNO, _, ownErr := m.clusterOwnershipHelper(ctx, cfg.HARole.ClusterName)
+		if ownErr != nil {
+			return fmt.Errorf("hyperv: set VM %q: CNO ownership for first-ever ha_role create: %w", vmName, ownErr)
+		}
+		if !ownsCNO {
+			cnoOwner := m.readCNOOwner(ctx, cfg.HARole.ClusterName)
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"vm-set-skip-not-cno-owner", "vm:"+vmName, nil,
+				map[string]interface{}{
+					"owns_cno":     false,
+					"cno_owner":    cnoOwner,
+					"skipped":      true,
+					"cluster_name": cfg.HARole.ClusterName,
+					"locally":      "absent",
+				}, nil)
+			return nil
+		}
+	}
+
 	// Existence-gating safety invariant (ADR-009 §2): source provisioning is
 	// existence-gated, never health-gated. When a source block is declared, the
 	// create/destroy decision is made HERE — before any plain-lifecycle apply —

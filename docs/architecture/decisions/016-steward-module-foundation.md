@@ -1,9 +1,9 @@
 # ADR-016: Steward Module Foundation — stdlib set, repository layout, and DNA-fragment contract
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
 **Issue:** (to be assigned at decomposition)
-**Epic:** (module-foundation epic — to be filed)
+**Epic:** [#2460](https://github.com/cfg-is/cfgms/issues/2460)
 
 ---
 
