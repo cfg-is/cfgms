@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -28,19 +29,34 @@ import (
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
-// newClusterModeHAManager creates a commercial ha.Manager in ClusterMode with the given CA cert path.
+// newClusterModeHAManager creates an ha.Manager in ClusterMode with the given CA cert path.
+// It uses FastElectionConfig so raft elections converge in milliseconds (not seconds),
+// preventing election storms under CI CPU contention.
+//
+// Cleanup ordering (LIFO): manager.Stop → sm.Close → goleak.VerifyNone.
+// goleak.IgnoreCurrent snapshots goroutines before the manager is constructed so only
+// goroutines introduced by this helper are checked for leaks.
 func newClusterModeHAManager(t *testing.T, caCertPath string) *ha.Manager {
 	t.Helper()
+
+	// Snapshot pre-existing goroutines; goleak.VerifyNone (registered below, runs last)
+	// will only flag goroutines that are NEW relative to this snapshot.
+	existingGoroutines := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, existingGoroutines) })
+
 	sm, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, sm.Close()) })
 
 	cfg := ha.DefaultConfig()
 	cfg.Mode = ha.ClusterMode
 	cfg.CACertPath = caCertPath
 	cfg.Node.ID = fmt.Sprintf("test-node-%d", time.Now().UnixNano())
+	cfg.Cluster = ha.FastElectionConfig()
 
 	manager, err := ha.NewManager(cfg, logging.GetLogger(), sm)
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 	return manager
 }
 
