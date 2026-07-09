@@ -12,6 +12,7 @@ import (
 
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -27,6 +28,17 @@ type configSourceRouter interface {
 	cfgconfig.ConfigStore
 	// SnapshotSources resolves the config source for every tenant in tenantPath atomically.
 	SnapshotSources(ctx context.Context, tenantPath []string) (map[string]*ConfigSourceInfo, error)
+}
+
+// clusterMembership is the minimal interface InheritanceResolver requires to look up
+// which clusters a steward belongs to. Defined locally (same pattern as configSourceRouter)
+// to avoid importing features/controller/clusterregistry into pkg/config, which would
+// create a circular dependency. The concrete *clusterregistry.Registry in
+// features/controller/clusterregistry satisfies this interface by duck-typing.
+type clusterMembership interface {
+	// MemberClusters returns the sorted cluster names that stewardID belongs to.
+	// Returns nil when the steward has no cluster membership.
+	MemberClusters(stewardID string) []string
 }
 
 // cfgStoreAsRouter wraps a plain ConfigStore to satisfy configSourceRouter.
@@ -49,6 +61,30 @@ type InheritanceResolver struct {
 	configStore       configSourceRouter
 	clientTenantStore business.ClientTenantStore
 	tenantStore       business.TenantStore
+	clusterRegistry   clusterMembership // optional; nil means no cluster-policies cascade
+	logger            logging.Logger    // never nil after construction; see log()
+}
+
+// log returns the resolver's logger, defaulting to a NoopLogger when the resolver
+// was constructed without one (e.g. a zero-value struct in a test). This guarantees
+// the cluster cascade can always emit a warning without a nil-pointer panic.
+func (ir *InheritanceResolver) log() logging.Logger {
+	if ir.logger == nil {
+		return logging.NewNoopLogger()
+	}
+	return ir.logger
+}
+
+// WithLogger returns the resolver with logger installed as its warning/error sink.
+// Passing nil restores the default (a real stdout logger). Callers use this to route
+// inheritance diagnostics (e.g. corrupt cluster-policies documents) into their own
+// logging pipeline instead of the process default.
+func (ir *InheritanceResolver) WithLogger(logger logging.Logger) *InheritanceResolver {
+	if logger == nil {
+		logger = logging.NewLogger("info")
+	}
+	ir.logger = logger
+	return ir
 }
 
 // NewInheritanceResolver creates an InheritanceResolver backed by a ConfigSourceRouter.
@@ -59,6 +95,7 @@ func NewInheritanceResolver(configStore configSourceRouter, clientTenantStore bu
 		configStore:       configStore,
 		clientTenantStore: clientTenantStore,
 		tenantStore:       tenantStore,
+		logger:            logging.NewLogger("info"),
 	}
 }
 
@@ -71,6 +108,21 @@ func NewInheritanceResolverWithStorageManager(storageManager *interfaces.Storage
 		configStore:       &cfgStoreAsRouter{ConfigStore: storageManager.GetConfigStore()},
 		clientTenantStore: storageManager.GetClientTenantStore(),
 		tenantStore:       storageManager.GetTenantStore(),
+		logger:            logging.NewLogger("info"),
+	}
+}
+
+// NewInheritanceResolverWithClusters creates an InheritanceResolver with a cluster
+// membership provider wired in. When registry is non-nil, ResolveConfiguration applies
+// cluster-policies configs after the tenant hierarchy and before device-level config.
+// Pass nil for registry to get byte-identical behavior to NewInheritanceResolver.
+func NewInheritanceResolverWithClusters(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership) *InheritanceResolver {
+	return &InheritanceResolver{
+		configStore:       configStore,
+		clientTenantStore: clientTenantStore,
+		tenantStore:       tenantStore,
+		clusterRegistry:   registry,
+		logger:            logging.NewLogger("info"),
 	}
 }
 
@@ -134,6 +186,26 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 		source := sourcesSnapshot[currentTenantID]
 		if err := ir.applyConfigurationLevel(ctx, effective, currentTenantID, stewardID, level, source); err != nil {
 			return nil, fmt.Errorf("failed to apply configuration at level %d (tenant %s): %w", level, currentTenantID, err)
+		}
+	}
+
+	// Apply cluster-policies after tenant hierarchy and before device config.
+	// Cluster membership is a device-level concept: the config key uses tenantID
+	// (the device's own tenant), not any ancestor tenantID from the loop above.
+	// A registry hiccup must not fail resolution — log and treat as no membership.
+	if ir.clusterRegistry != nil {
+		clusterNames := ir.clusterRegistry.MemberClusters(stewardID)
+		for _, clusterName := range clusterNames {
+			if err := ir.applyClusterConfiguration(ctx, effective, tenantID, clusterName); err != nil {
+				// Non-fatal: parse failure for one cluster must not block others.
+				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
+				// so an error here signals a corrupt document that must be surfaced, not swallowed.
+				ir.log().WarnCtx(ctx, "skipping cluster-policies config for cluster; treating as no membership",
+					"steward_id", stewardID,
+					"tenant_id", tenantID,
+					"cluster", clusterName,
+					"error", err.Error())
+			}
 		}
 	}
 
@@ -206,6 +278,41 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	// Apply configuration using declarative merging (named resources replace entirely)
 	ir.applyConfigurationWithSource(effective, &levelConfig, inheritSrc)
 
+	return nil
+}
+
+// applyClusterConfiguration looks up cluster-policies/<clusterName> for the given tenant
+// and merges it into effective. Missing cluster configs are non-fatal (same as missing
+// tenant-level configs in applyConfigurationLevel). The config key uses the device's own
+// tenantID so that cluster membership is scoped to the device's tenant, not any ancestor.
+func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, effective *EffectiveConfiguration, tenantID, clusterName string) error {
+	configKey := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "cluster-policies",
+		Name:      clusterName,
+	}
+
+	configEntry, err := ir.configStore.GetConfig(ctx, configKey)
+	if err != nil {
+		// No cluster-policies document for this cluster is non-fatal.
+		return nil
+	}
+
+	var clusterConfig stewardconfig.StewardConfig
+	if err := yaml.Unmarshal(configEntry.Data, &clusterConfig); err != nil {
+		return fmt.Errorf("failed to parse cluster configuration for %q: %w", clusterName, err)
+	}
+
+	inheritSrc := &InheritanceSource{
+		Level:      int(LevelGroup) + 1, // between Group(2) and Device(3) in merge order
+		TenantID:   tenantID,
+		ConfigName: clusterName,
+		Version:    configEntry.Version,
+		UpdatedAt:  configEntry.UpdatedAt,
+		Source:     fmt.Sprintf("Cluster (cluster-policies/%s)", clusterName),
+	}
+
+	ir.applyConfigurationWithSource(effective, &clusterConfig, inheritSrc)
 	return nil
 }
 

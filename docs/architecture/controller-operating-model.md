@@ -165,11 +165,34 @@ The controller decides which steward gets which cfg based on:
 - **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
 - **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
 - **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth ✓ implemented (`InheritanceResolver.ResolveConfiguration()`)
+- **Cluster membership** — a steward that belongs to one or more clusters (Hyper-V, SQL, etc.) receives an additional `cluster-policies/<clusterName>` config layer inserted after Group-level and before Device-level in the merge order ✓ implemented (`InheritanceResolver` cluster-policies cascade, Issue #2425)
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
 - **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression — tags exist on steward records (fleet query supports tag filtering for device lists), but tag-based cfg distribution fanout is not yet implemented; the current fanout sends to all active stewards
 - **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) — desired state; not currently implemented in cfg distribution
 
 **Deployment rings:** see the Deployment Rings section below for the v1 mechanism. Operator-tagged phased rollouts using separate cfgs are still supported alongside rings.
+
+### Cluster-Policies Cascade
+
+Stewards that are members of a named cluster (Hyper-V failover cluster, SQL AG, etc.) receive an additional configuration layer sourced from `cluster-policies/<clusterName>`. This layer is applied by `InheritanceResolver.ResolveConfiguration()` after the tenant hierarchy and before device-level config.
+
+**Merge priority order (lowest → highest):**
+
+| Level | ConfigKey namespace | Source |
+|-------|--------------------|-----------------------|
+| MSP | `msp-policies/global` | Tenant hierarchy root |
+| Client | `client-policies/<tenantID>` | Tenant hierarchy |
+| Group | `group-policies/<tenantID>-groups` | Tenant hierarchy |
+| **Cluster** | **`cluster-policies/<clusterName>`** | **Cluster membership (DNA attributes)** |
+| Device | `stewards/<stewardID>` | Device-level override |
+
+A device-level resource of the same name always wins over a cluster-policy resource. A cluster-policy resource overrides group-level defaults for the same name.
+
+**Sourcing cluster membership:** the cluster registry is derived from steward DNA attributes published by the steward's `DNARefreshLoop` ticker (default 30 min). A steward that carries `cluster:<clusterName>.*` DNA attributes is recorded as a member of that cluster. Membership is **eventually consistent**: a steward joining or leaving a cluster can take up to one refresh interval before `ResolveConfiguration` reflects the change.
+
+**Authoring cluster-policies configs:** use the existing config-push path (`cfg config upload`) to store a `ConfigKey{Namespace: "cluster-policies", Name: "<clusterName>"}` document for the cluster's tenant. The resolver looks up this document automatically for every member steward.
+
+**No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
 
 ## Deployment Rings
 
