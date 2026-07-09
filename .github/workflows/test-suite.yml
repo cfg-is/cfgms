@@ -30,7 +30,7 @@ on:
         - full
 
 env:
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.26.5'
 
 jobs:
   # Fast unit tests - runs on every push/PR
@@ -59,7 +59,7 @@ jobs:
     # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
     # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
     # golang image lacks but hosted runners ship (jq for the script tests).
-    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.4-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
+    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.5-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -170,7 +170,7 @@ jobs:
     # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
     # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
     # golang image lacks but hosted runners ship (jq for the script tests).
-    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.4-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
+    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.5-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 25
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: unit-tests
