@@ -24,6 +24,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.12.3
 	github.com/masterzen/winrm v0.0.0-20260407182533-5570be7f80cf
+	github.com/mattn/go-isatty v0.0.21
 	github.com/openbao/openbao/api/v2 v2.5.1
 	github.com/quic-go/quic-go v0.59.1
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -119,7 +120,6 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/masterzen/simplexml v0.0.0-20190410153822-31eea3082786 // indirect
-	github.com/mattn/go-isatty v0.0.21 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
