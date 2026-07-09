@@ -366,12 +366,16 @@ Steps run only on the self-hosted path (same fork-gate as the job); fork PRs and
    gh run download <run-id> --name resource-samples-unit-tests
    ```
 
-**Real-world readings (from Story #2485 PR):**
+**Real-world readings (from Story #2485 PR — runs `28987905900` / `28987905945`):**
 
-Once this PR's self-hosted CI runs complete, the actual `RESOURCE_PROFILE` lines and
-GitHub Actions run IDs will be recorded here. The Linux `unit-tests` run and Windows
-`Native Build` run on this PR are the first instrumented runs with the hardened sampler
-(Story #2485).
+First instrumented runs with the hardened sampler (Story #2485):
+
+| Platform | Job | Run ID | Job ID | `RESOURCE_PROFILE` line |
+|----------|-----|--------|--------|-------------------------|
+| Linux | `unit-tests` | [28987905900](https://github.com/cfg-is/cfgms/actions/runs/28987905900) | `86021051708` | `RESOURCE_PROFILE: os=linux cpu_peak_pct=95 mem_peak_mb=2219/5930 vm=6vCPU/5GB` |
+| Windows | `Native Build` | [28987905945](https://github.com/cfg-is/cfgms/actions/runs/28987905945) | `86021051568` | `RESOURCE_PROFILE: os=windows cpu_peak_pct=99 mem_peak_mb=3534/8191 vm=4vCPU/8GB` |
+
+Both readings are non-zero, non-placeholder, contain no `${`, and show no `pwsh: command not found` error. The Windows reading matches the 4 vCPU / 8 GB provisioning target from §6. The Linux reading shows 6 vCPU and 5 GB measured RAM (see RAM discrepancy note below).
 
 **Note on Linux VM RAM discrepancy:** §6 documents the Linux runner as provisioned with
 8 GB RAM, but the `vm=` field in the `RESOURCE_PROFILE` line will reflect the actual
