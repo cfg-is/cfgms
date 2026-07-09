@@ -1,0 +1,687 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package patch
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+)
+
+// Helper function to create Config from YAML string
+func createConfigFromYAML(yamlStr string) *Config {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(yamlStr), &cfg); err != nil {
+		// Test helper - should not fail in practice
+		panic(err)
+	}
+	return &cfg
+}
+
+func TestPatchModule(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceID   string
+		config       *Config
+		setupFunc    func(*testing.T, modules.Module, *InMemoryPatchManager)
+		validateFunc func(*testing.T, modules.Module, *InMemoryPatchManager)
+		wantErr      bool
+		errType      error
+	}{
+		{
+			name:       "Install security patches (test mode)",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+auto_reboot: false
+test_mode: true
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				// Check that security patches were processed in test mode
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				stateMap := state.AsMap()
+				assert.Equal(t, "security", stateMap["patch_type"])
+			},
+		},
+		{
+			name:       "Install all patches with auto-reboot",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: all
+auto_reboot: true
+test_mode: false
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				stateMap := state.AsMap()
+				assert.Equal(t, "security", stateMap["patch_type"]) // Get returns current state, not desired
+			},
+		},
+		{
+			name:       "Test mode - dry run",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+auto_reboot: false
+test_mode: true
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				// In test mode, no actual changes should be made
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				assert.NotNil(t, state)
+			},
+		},
+		{
+			name:       "Include specific patches",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+include_patches:
+  - SEC-2024-001
+auto_reboot: false
+test_mode: false
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				assert.NotNil(t, state)
+			},
+		},
+		{
+			name:       "Exclude specific patches",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: all
+exclude_patches:
+  - KER-2024-001
+auto_reboot: false
+test_mode: false
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				assert.NotNil(t, state)
+			},
+		},
+		{
+			name:       "Invalid patch type",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: invalid
+auto_reboot: false
+test_mode: false
+`),
+			wantErr: true,
+			errType: ErrInvalidPatchType,
+		},
+		{
+			name:       "Invalid max downtime",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+max_downtime: invalid_duration
+auto_reboot: false
+test_mode: false
+`),
+			wantErr: true,
+			errType: ErrInvalidMaxDowntime,
+		},
+		{
+			name:       "Conflicting patch lists",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+include_patches:
+  - SEC-2024-001
+exclude_patches:
+  - SEC-2024-001
+auto_reboot: false
+test_mode: false
+`),
+			wantErr: true,
+			errType: ErrConflictingPatchLists,
+		},
+		{
+			name:       "Reboot required error",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+auto_reboot: false
+test_mode: false
+`),
+			wantErr: true,
+			errType: ErrRebootRequired,
+		},
+		{
+			name:       "Valid maintenance window",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+auto_reboot: false
+test_mode: true
+maintenance:
+  window: sunday_3am
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				assert.NotNil(t, state)
+			},
+		},
+		{
+			name:       "Platform-specific options",
+			resourceID: "system",
+			config: createConfigFromYAML(`
+patch_type: security
+auto_reboot: false
+test_mode: true
+platform:
+  use_apt: true
+  update_kernel: false
+`),
+			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
+				state, err := m.Get(context.Background(), "system")
+				assert.NoError(t, err)
+				assert.NotNil(t, state)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create in-memory patch manager
+			patchManager := NewInMemoryPatchManager()
+
+			// Create patch module with the in-memory manager
+			m, err := NewPatchModule(patchManager)
+			require.NoError(t, err)
+
+			if tt.setupFunc != nil {
+				tt.setupFunc(t, m, patchManager)
+			}
+
+			err = m.Set(context.Background(), tt.resourceID, tt.config)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errType != nil {
+					assert.ErrorIs(t, err, tt.errType)
+				}
+				return
+			}
+
+			assert.NoError(t, err)
+
+			if tt.validateFunc != nil {
+				tt.validateFunc(t, m, patchManager)
+			}
+		})
+	}
+}
+
+func TestPatchModule_PatchTypes(t *testing.T) {
+	tests := []struct {
+		name      string
+		patchType string
+		wantErr   bool
+	}{
+		{"Valid security", "security", false},
+		{"Valid all", "all", false},
+		{"Valid kernel", "kernel", false},
+		{"Valid critical", "critical", false},
+		{"Invalid empty", "", true},
+		{"Invalid unknown", "unknown", true},
+		{"Invalid spaces", "security patches", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patchManager := NewInMemoryPatchManager()
+			m, err := NewPatchModule(patchManager)
+			require.NoError(t, err)
+
+			config := &Config{
+				PatchType:  tt.patchType,
+				AutoReboot: false,
+				TestMode:   true, // Use test mode to avoid actual patching
+			}
+
+			err = m.Set(context.Background(), "system", config)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestPatchModule_ErrorHandling(t *testing.T) {
+	tests := []struct {
+		name        string
+		resourceID  string
+		config      *Config
+		setupFunc   func(*InMemoryPatchManager)
+		expectedErr error
+	}{
+		{
+			name:       "Network error",
+			resourceID: "system",
+			config: &Config{
+				PatchType:  "security",
+				AutoReboot: false,
+				TestMode:   false,
+			},
+			setupFunc: func(manager *InMemoryPatchManager) {
+				manager.SetRepositoryReachable(false)
+			},
+			expectedErr: ErrNetworkError,
+		},
+		{
+			name:       "Permission error",
+			resourceID: "system",
+			config: &Config{
+				PatchType:  "security",
+				AutoReboot: false,
+				TestMode:   false,
+			},
+			setupFunc: func(manager *InMemoryPatchManager) {
+				manager.SetInstallPrivilege(false)
+			},
+			expectedErr: ErrPermissionDenied,
+		},
+		{
+			name:        "Invalid resource ID",
+			resourceID:  "",
+			config:      &Config{PatchType: "security"},
+			expectedErr: ErrInvalidResourceID,
+		},
+		{
+			name:        "Nil config",
+			resourceID:  "system",
+			config:      nil,
+			expectedErr: ErrInvalidConfig,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patchManager := NewInMemoryPatchManager()
+
+			if tt.setupFunc != nil {
+				tt.setupFunc(patchManager)
+			}
+
+			m, err := NewPatchModule(patchManager)
+			require.NoError(t, err)
+
+			err = m.Set(context.Background(), tt.resourceID, tt.config)
+			assert.Error(t, err)
+			assert.ErrorIs(t, err, tt.expectedErr)
+		})
+	}
+}
+
+func TestPatchModule_Get(t *testing.T) {
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	// Test getting current patch status
+	state, err := m.Get(context.Background(), "system")
+	assert.NoError(t, err)
+	assert.NotNil(t, state)
+
+	stateMap := state.AsMap()
+	assert.Equal(t, "security", stateMap["patch_type"])
+	assert.Equal(t, false, stateMap["auto_reboot"])
+	assert.Equal(t, false, stateMap["test_mode"])
+}
+
+func TestPatchModule_GetPatchStatus(t *testing.T) {
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	status, err := m.GetPatchStatus(context.Background())
+	assert.NoError(t, err)
+	assert.NotNil(t, status)
+
+	// Check that status contains expected fields
+	assert.NotZero(t, status.LastPatchDate)
+	assert.NotNil(t, status.AvailablePatches)
+	assert.NotNil(t, status.InstalledPatches)
+	assert.GreaterOrEqual(t, len(status.AvailablePatches), 0)
+	assert.GreaterOrEqual(t, len(status.InstalledPatches), 0)
+}
+
+func TestConfig_ConfigStateInterface(t *testing.T) {
+	config := &Config{
+		PatchType:       "security",
+		AutoReboot:      true,
+		TestMode:        false,
+		IncludePatches:  []string{"SEC-2024-001"},
+		ExcludePatches:  []string{"KER-2024-001"},
+		MaxDowntime:     "1h",
+		PrePatchScript:  "echo 'starting patch'",
+		PostPatchScript: "echo 'patch complete'",
+	}
+
+	// Test AsMap
+	configMap := config.AsMap()
+	assert.Equal(t, "security", configMap["patch_type"])
+	assert.Equal(t, true, configMap["auto_reboot"])
+	assert.Equal(t, false, configMap["test_mode"])
+	assert.Equal(t, []string{"SEC-2024-001"}, configMap["include_patches"])
+	assert.Equal(t, []string{"KER-2024-001"}, configMap["exclude_patches"])
+	assert.Equal(t, "1h", configMap["max_downtime"])
+
+	// Test ToYAML
+	yamlData, err := config.ToYAML()
+	assert.NoError(t, err)
+	assert.Contains(t, string(yamlData), "patch_type: security")
+	assert.Contains(t, string(yamlData), "auto_reboot: true")
+
+	// Test FromYAML
+	newConfig := &Config{}
+	err = newConfig.FromYAML(yamlData)
+	assert.NoError(t, err)
+	assert.Equal(t, config.PatchType, newConfig.PatchType)
+	assert.Equal(t, config.AutoReboot, newConfig.AutoReboot)
+	assert.Equal(t, config.TestMode, newConfig.TestMode)
+
+	// Test Validate
+	err = config.Validate()
+	assert.NoError(t, err)
+
+	// Test GetManagedFields
+	fields := config.GetManagedFields()
+	assert.Contains(t, fields, "patch_type")
+	assert.Contains(t, fields, "auto_reboot")
+	assert.Contains(t, fields, "test_mode")
+	assert.Contains(t, fields, "include_patches")
+	assert.Contains(t, fields, "exclude_patches")
+	assert.Contains(t, fields, "max_downtime")
+}
+
+func TestConfig_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr bool
+		errType error
+	}{
+		{
+			name: "Valid security config",
+			config: &Config{
+				PatchType:  "security",
+				AutoReboot: false,
+				TestMode:   false,
+			},
+			wantErr: false,
+		},
+		{
+			name: "Valid config with maintenance window",
+			config: &Config{
+				PatchType:  "all",
+				AutoReboot: true,
+				TestMode:   false,
+				Maintenance: struct {
+					Window   string        `yaml:"window"`
+					Schedule string        `yaml:"schedule"`
+					Duration time.Duration `yaml:"duration"`
+					Timezone string        `yaml:"timezone"`
+				}{
+					Window: "sunday_3am",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Invalid patch type",
+			config: &Config{
+				PatchType: "invalid",
+			},
+			wantErr: true,
+			errType: ErrInvalidPatchType,
+		},
+		{
+			name: "Invalid max downtime",
+			config: &Config{
+				PatchType:   "security",
+				MaxDowntime: "invalid",
+			},
+			wantErr: true,
+			errType: ErrInvalidMaxDowntime,
+		},
+		{
+			name: "Conflicting patch lists",
+			config: &Config{
+				PatchType:      "security",
+				IncludePatches: []string{"PATCH-001"},
+				ExcludePatches: []string{"PATCH-001"},
+			},
+			wantErr: true,
+			errType: ErrConflictingPatchLists,
+		},
+		{
+			name: "Conflicting platform options",
+			config: &Config{
+				PatchType: "security",
+				Platform: struct {
+					UseYum          bool   `yaml:"use_yum"`
+					UseApt          bool   `yaml:"use_apt"`
+					UpdateKernel    bool   `yaml:"update_kernel"`
+					UseWSUS         bool   `yaml:"use_wsus"`
+					WSUSServer      string `yaml:"wsus_server"`
+					IncludeAppStore bool   `yaml:"include_app_store"`
+				}{
+					UseYum: true,
+					UseApt: true,
+				},
+			},
+			wantErr: true,
+			errType: ErrConflictingPlatformOptions,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errType != nil {
+					assert.ErrorIs(t, err, tt.errType)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestInMemoryPatchManager(t *testing.T) {
+	manager := NewInMemoryPatchManager()
+
+	// Test ListAvailablePatches
+	patches, err := manager.ListAvailablePatches(context.Background(), "security")
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, len(patches), 1)
+
+	// Test ListInstalledPatches
+	installed, err := manager.ListInstalledPatches(context.Background())
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, len(installed), 1)
+
+	// Test InstallPatches
+	config := &Config{
+		PatchType:  "security",
+		AutoReboot: false,
+		TestMode:   false,
+	}
+	beforeInstall := time.Now()
+	err = manager.InstallPatches(context.Background(), config)
+	assert.NoError(t, err)
+
+	// Test CheckRebootRequired (should be true after installing kernel patches)
+	rebootRequired, err := manager.CheckRebootRequired(context.Background())
+	assert.NoError(t, err)
+	assert.True(t, rebootRequired) // Should be true after kernel patch installation
+
+	// Test GetLastPatchDate
+	lastPatch, err := manager.GetLastPatchDate(context.Background())
+	assert.NoError(t, err)
+	// Verify lastPatchDate was set during InstallPatches. Use beforeInstall as the lower
+	// bound and allow 1s future tolerance for Windows low-resolution clock and VM drift
+	// where two rapid time.Now() calls can appear out-of-order.
+	assert.False(t, lastPatch.Before(beforeInstall),
+		"Last patch date should be on or after when install started")
+	assert.False(t, lastPatch.After(time.Now().Add(time.Second)),
+		"Last patch date should not be in the future")
+
+	// Test Name
+	name := manager.Name()
+	assert.NotEmpty(t, name)
+
+	// Test IsValidPatchType
+	assert.True(t, manager.IsValidPatchType("security"))
+	assert.False(t, manager.IsValidPatchType("invalid"))
+}
+
+func TestPatchModule_executeScript_logsScript(t *testing.T) {
+	dir := t.TempDir()
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "patch-hook.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\nexit 0\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "patch-hook.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755))
+	}
+
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, m.SetLogger(mock))
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.NoError(t, err)
+
+	logs := mock.GetLogs("debug")
+	require.NotEmpty(t, logs, "expected debug log from executeScript")
+	assert.Equal(t, "executing script", logs[0].Message)
+}
+
+func TestExecuteScript_RunsRealCommand(t *testing.T) {
+	dir := t.TempDir()
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "echo-test.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\necho hello-from-script\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "echo-test.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho hello-from-script\n"), 0755))
+	}
+
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, m.SetLogger(mock))
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.NoError(t, err)
+
+	// Find the "script completed" log and verify stdout was captured
+	logs := mock.GetLogs("debug")
+	var completedLog *pkgtesting.LogEntry
+	for i := range logs {
+		if logs[i].Message == "script completed" {
+			completedLog = &logs[i]
+			break
+		}
+	}
+	require.NotNil(t, completedLog, "expected 'script completed' log entry")
+
+	// stdout is in Data as key-value pairs: ["script", path, "stdout", output]
+	dataStr := fmt.Sprintf("%v", completedLog.Data)
+	assert.Contains(t, dataStr, "hello-from-script", "stdout should contain the echoed string")
+}
+
+func TestExecuteScript_RejectsRelativePath(t *testing.T) {
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), "relative/path/script.sh")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute")
+}
+
+func TestExecuteScript_RejectsEmptyPath(t *testing.T) {
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty")
+}
+
+func TestExecuteScript_FailedScript(t *testing.T) {
+	dir := t.TempDir()
+	var scriptPath string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "fail-script.bat")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("@echo off\r\nexit 1\r\n"), 0755))
+	} else {
+		scriptPath = filepath.Join(dir, "fail-script.sh")
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1\n"), 0755))
+	}
+
+	patchManager := NewInMemoryPatchManager()
+	m, err := NewPatchModule(patchManager)
+	require.NoError(t, err)
+
+	err = m.executeScript(context.Background(), scriptPath)
+	require.Error(t, err, "script with exit code 1 should return error")
+}
+
+func TestPatchModule_DefaultLoggingSupport_embed(t *testing.T) {
+	m := New()
+
+	// PatchModule must implement LoggingInjectable via the DefaultLoggingSupport embed
+	injectable, ok := m.(modules.LoggingInjectable)
+	require.True(t, ok, "PatchModule must implement modules.LoggingInjectable")
+
+	// Before injection, GetLogger returns nil, false
+	logger, injected := injectable.GetLogger()
+	assert.Nil(t, logger)
+	assert.False(t, injected)
+
+	// After SetLogger, GetLogger returns the injected logger
+	mock := pkgtesting.NewMockLogger(true)
+	require.NoError(t, injectable.SetLogger(mock))
+
+	logger, injected = injectable.GetLogger()
+	assert.Equal(t, mock, logger)
+	assert.True(t, injected)
+}

@@ -41,7 +41,7 @@ import (
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	hypervcompletion "github.com/cfgis/cfgms/features/modules/hyperv/completion"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"

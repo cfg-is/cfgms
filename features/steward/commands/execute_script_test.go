@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )

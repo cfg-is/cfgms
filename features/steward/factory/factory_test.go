@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/features/modules/file"
+	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/pkg/logging"

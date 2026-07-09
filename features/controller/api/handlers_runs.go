@@ -17,7 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
@@ -45,7 +45,7 @@ var bannedPatterns = []struct {
 // allowedShells is the set of shells accepted by POST /api/v1/runs/command.
 // Any value outside this set is rejected with UNSUPPORTED_SHELL.
 // The set is kept in lockstep with the steward executor's accepted shells
-// (features/modules/script/executor.go). Valid taxonomy per platform:
+// (features/modules/stdlib/script/executor.go). Valid taxonomy per platform:
 //   - Unix:    bash, sh
 //   - Windows: powershell (Windows PowerShell 5.1), pwsh (PowerShell Core), cmd
 //   - pwsh is also valid on Unix (PowerShell Core is cross-platform).

@@ -63,7 +63,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
 
 // Type aliases — re-export from stewardtypes so existing callers compile unchanged.

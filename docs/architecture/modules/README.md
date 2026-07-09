@@ -13,15 +13,26 @@ CFGMS uses a module-based architecture where all resource management tasks are p
 
 ```
 modules/
-├── file/
-│   ├── module.yaml          # Module metadata (covers file, directory, symlink types)
-│   └── implementation.go
-├── firewall/
-│   ├── module.yaml
-│   └── module.go
-└── script/
-    ├── module.yaml
-    └── implementation.go
+├── stdlib/                  # Baseline modules deployed to nearly every managed machine
+│   ├── file/
+│   │   ├── module.yaml      # Module metadata (covers file, directory, symlink types)
+│   │   └── implementation.go
+│   ├── firewall/
+│   │   ├── module.yaml
+│   │   └── module.go
+│   ├── package/
+│   ├── patch/
+│   ├── script/
+│   │   ├── module.yaml
+│   │   └── implementation.go
+│   └── service/
+├── extended/                # On-demand modules pulled per ADR-006
+│   ├── acme/
+│   ├── activedirectory/
+│   ├── github_runner/
+│   └── network_activedirectory/
+├── adapter/                 # gRPC adapter (unaffected by stdlib/extended split)
+└── hyperv/                  # Under active development (epic #2418; not split)
 ```
 
 **Required Files:**
