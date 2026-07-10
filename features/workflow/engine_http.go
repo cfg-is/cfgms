@@ -130,11 +130,21 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 		"duration", step.Delay.Duration,
 		"message", message)
 
-	// Wait for the specified duration or context cancellation
+	// Wait for the specified duration or context cancellation.
+	//
+	// Use an explicit timer (stopped on return) rather than time.After: time.After
+	// leaks its underlying timer and goroutine until the full duration elapses even
+	// when the context is cancelled first. For long delays cancelled early (e.g. a
+	// cancelled or abandoned execution) that leak keeps a goroutine parked in this
+	// select for the whole duration, which surfaces as "stuck in executeDelayStep"
+	// goroutines in dumps. Stopping the timer releases it immediately on cancellation.
+	timer := time.NewTimer(step.Delay.Duration)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(step.Delay.Duration):
+	case <-timer.C:
 		// Delay completed successfully
 	}
 

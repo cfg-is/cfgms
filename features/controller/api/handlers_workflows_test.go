@@ -589,7 +589,14 @@ func newTestWorkflowHandlerAndEngine(t *testing.T) (*WorkflowHandler, cfgconfig.
 
 // createAndExecuteWorkflow is a test helper that creates a workflow then executes it,
 // returning the execution ID. Uses the provided router and tenant ID.
-func createAndExecuteWorkflow(t *testing.T, router *mux.Router, wfName, tenantID string, longRunning bool) string {
+//
+// For long-running (delay-step) workflows the async execution goroutine would
+// otherwise remain parked in the engine's delay step for the full delay duration
+// after the test returns, because the httptest request context is never cancelled.
+// A t.Cleanup cancels the execution so its goroutine unwinds promptly at test end
+// instead of leaking (which previously showed up as goroutines stuck in
+// executeDelayStep and added scheduler pressure to the rest of the package).
+func createAndExecuteWorkflow(t *testing.T, router *mux.Router, eng *workflow.Engine, wfName, tenantID string, longRunning bool) string {
 	t.Helper()
 
 	// Create workflow
@@ -628,6 +635,13 @@ func createAndExecuteWorkflow(t *testing.T, router *mux.Router, wfName, tenantID
 	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
 	execID, ok := execResp["execution_id"].(string)
 	require.True(t, ok && execID != "", "execution_id must be non-empty")
+
+	// Ensure the async execution goroutine is torn down when the test ends so a
+	// long delay step cannot outlive the test. Cancelling an already-terminal
+	// execution is a no-op.
+	if eng != nil {
+		t.Cleanup(func() { _ = eng.CancelExecution(execID) })
+	}
 	return execID
 }
 
@@ -649,11 +663,11 @@ func TestWorkflowHandler_CancelExecution_UnknownExecID_Returns404(t *testing.T) 
 }
 
 func TestWorkflowHandler_CancelExecution_RunningExecution_Returns200(t *testing.T) {
-	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
 	router := newWorkflowRouter(h)
 
 	// Use a long-running delay step so the execution stays non-terminal.
-	execID := createAndExecuteWorkflow(t, router, "long-wf", "test-tenant", true)
+	execID := createAndExecuteWorkflow(t, router, engine, "long-wf", "test-tenant", true)
 
 	req := httptest.NewRequest("POST", "/workflows/long-wf/executions/"+execID+"/cancel", nil)
 	req = withTenantContext(req, "test-tenant")
@@ -695,7 +709,7 @@ func TestWorkflowHandler_CancelExecution_TerminalExecution_Returns409(t *testing
 	router := newWorkflowRouter(h)
 
 	// Task step with no module name fails immediately → terminal state reached quickly.
-	execID := createAndExecuteWorkflow(t, router, "quick-wf", "test-tenant", false)
+	execID := createAndExecuteWorkflow(t, router, engine, "quick-wf", "test-tenant", false)
 	waitForTerminalState(t, engine, execID)
 
 	req := httptest.NewRequest("POST", "/workflows/quick-wf/executions/"+execID+"/cancel", nil)
@@ -710,11 +724,11 @@ func TestWorkflowHandler_CancelExecution_TerminalExecution_Returns409(t *testing
 }
 
 func TestWorkflowHandler_CancelExecution_CrossTenant_Returns403(t *testing.T) {
-	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
 	router := newWorkflowRouter(h)
 
 	// Create and execute the workflow in tenant A with a long delay so it stays non-terminal.
-	execID := createAndExecuteWorkflow(t, router, "xsec-cancel-wf", "tenant-a", true)
+	execID := createAndExecuteWorkflow(t, router, engine, "xsec-cancel-wf", "tenant-a", true)
 
 	// Tenant B tries to cancel tenant A's execution. tenant-b has no workflow
 	// named "xsec-cancel-wf" in its config namespace → 403.
@@ -729,10 +743,10 @@ func TestWorkflowHandler_CancelExecution_CrossTenant_Returns403(t *testing.T) {
 // --- get execution ------------------------------------------------------------
 
 func TestWorkflowHandler_GetExecution_CorrectRecord_Returns200(t *testing.T) {
-	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
 	router := newWorkflowRouter(h)
 
-	execID := createAndExecuteWorkflow(t, router, "get-exec-wf", "test-tenant", true)
+	execID := createAndExecuteWorkflow(t, router, engine, "get-exec-wf", "test-tenant", true)
 
 	req := httptest.NewRequest("GET", "/workflows/get-exec-wf/executions/"+execID, nil)
 	req = withTenantContext(req, "test-tenant")
@@ -748,11 +762,11 @@ func TestWorkflowHandler_GetExecution_CorrectRecord_Returns200(t *testing.T) {
 }
 
 func TestWorkflowHandler_GetExecution_CrossTenant_Returns403(t *testing.T) {
-	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
 	router := newWorkflowRouter(h)
 
 	// Create and execute the workflow in tenant A.
-	execID := createAndExecuteWorkflow(t, router, "xsec-wf", "tenant-a", true)
+	execID := createAndExecuteWorkflow(t, router, engine, "xsec-wf", "tenant-a", true)
 
 	// Tenant B tries to access tenant A's execution.
 	// tenant-b has no workflow named "xsec-wf" → 403.
