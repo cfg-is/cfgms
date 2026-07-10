@@ -143,6 +143,64 @@ a stolen API key cannot mint or reset web credentials. A compromised admin
 session's account changes are fully audited. Hash-only storage bounds the value
 of a stolen secret store to offline argon2id cracking of individual passwords.
 
+### Web Session Transport (Issue #2492, ADR-018 §1,2)
+
+The controller authenticates browser clients via a `cfgms_session` HttpOnly cookie,
+using a **second, web-specific session manager** distinct from the `cfg`-CLI manager:
+
+**Cookie flags (ADR-018 §1):**
+
+```
+Set-Cookie: cfgms_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/
+```
+
+- **HttpOnly** — token is unreadable from JavaScript; XSS cannot exfiltrate the session.
+- **Secure** — transmitted only over HTTPS.
+- **SameSite=Strict** — the primary CSRF defense; the cookie is never sent on cross-site requests.
+- **Path=/** — one origin serves both SPA and REST API.
+
+**Lifetimes (ADR-018 §2):**
+
+| Bound | `cfg` CLI (ADR-014) | Web console (ADR-018) |
+|-------|---------------------|------------------------|
+| Idle timeout | 15 min | 60 min |
+| Absolute cap | 8 h | 12 h |
+| Grace window | 30 s | 30 s |
+
+Web console tunables are intentionally longer than the `cfg` CLI defaults for operator
+comfort during long console sessions. Expiry is server-side and authoritative; the cookie
+carries no `Max-Age`. Server-side revocation takes effect immediately.
+
+**Implementation:**
+
+- A **second `session.Manager` instance** (`webSessionManager`) is wired with explicit
+  web `session.Config{IdleTimeout: 60m, AbsoluteTimeout: 12h, GraceWindow: 30s}`. The
+  first manager (`sessionManager`) retains `DefaultConfig()` (15m/8h/30s) for `cfg` CLI
+  use; neither config touches the other.
+- Rolling renewal: every authenticated cookie request refreshes `LastActivity` and emits
+  a new `Set-Cookie` header with the rotated token. The SPA never sees or handles the
+  token value.
+- Expired or revoked cookie sessions → `401`; the SPA transitions to the "session expired"
+  login screen. No `302` redirects from `/api` paths.
+
+**Credential precedence (security B5.2):**
+
+Any header credential (`Authorization: Bearer`, `X-API-Key`) or admin mTLS identity
+**always wins** over the cookie. When a header credential is present, the `cfgms_session`
+cookie is ignored entirely — not validated, not renewed, no `Set-Cookie` emitted. This
+ensures existing Bearer/API-key/mTLS clients are byte-identical before and after the
+cookie branch.
+
+**Visibility note (security A5.7):** the `webSessionManager` sessions are not listed or
+revocable via `GET /api/v1/sessions` or `DELETE /api/v1/sessions/{id}` at this merge
+point (#2492). Those endpoints operate on the `sessionManager` (cfg-CLI sessions). The
+`GET /api/v1/sessions` semantics for web sessions are deferred to #2493/#2494 when
+login/logout endpoints are added.
+
+**CORS note (security A5.8):** the `corsMiddleware` never sets
+`Access-Control-Allow-Credentials: true`. Web session cookies are same-origin only;
+credentialed cross-origin requests are not supported and must never be enabled.
+
 ### Role-Based Access Control (RBAC)
 
 - Fine-grained permission system

@@ -123,6 +123,7 @@ type Server struct {
 	stewardEventLoggingManager     *logging.LoggingManager               // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
 	sessionManager                 session.Manager                       // Issue #2232: admin session token issuance/revocation
 	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
+	webSessionManager              session.Manager                       // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
 	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
 	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
 	batchJobStore                  business.BatchJobStore                // Issue #2296: durable batch-job persistence
@@ -1132,6 +1133,17 @@ func (s *Server) SetSessionManager(mgr session.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessionManager = mgr
+}
+
+// SetWebSessionManager wires the web session Manager used to authenticate browser
+// clients via the cfgms_session HttpOnly cookie (Issue #2492, ADR-018 §1,2).
+// Uses explicit Config (idle 60m / absolute 12h / grace 30s) — distinct from the
+// cfg-CLI sessionManager (idle 15m / absolute 8h). When nil (default), the cookie
+// branch in authenticationMiddleware is bypassed. Call after New() but before Start().
+func (s *Server) SetWebSessionManager(mgr session.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.webSessionManager = mgr
 }
 
 // SetMembershipStore wires the cluster MembershipStore used by the drain endpoint

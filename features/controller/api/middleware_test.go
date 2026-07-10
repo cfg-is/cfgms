@@ -32,6 +32,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -1023,4 +1024,348 @@ func TestLeastPrivilege_AgentDevKey(t *testing.T) {
 				"agent.dev key must be allowed %s:%s", op.resourceType, op.action)
 		})
 	}
+}
+
+// --- Web session cookie path tests (Issue #2492, ADR-018 §1,2) ---
+
+// webSessionTestClock is a simple controllable clock for expiry tests.
+type webSessionTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newWebSessionTestClock() *webSessionTestClock {
+	return &webSessionTestClock{now: time.Now()}
+}
+
+func (c *webSessionTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *webSessionTestClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// setupTestServerWithWebSession creates a server wired with a second session.Manager
+// configured for web sessions (ADR-018 §2: idle 60m / absolute 12h / grace 30s).
+// The clockFn parameter allows clock injection for expiry tests.
+func setupTestServerWithWebSession(t *testing.T, clockFn func() time.Time) (*Server, session.Manager, *session.MemStore) {
+	t.Helper()
+	srv := setupTestServer(t)
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	store := session.NewMemStore(webCfg, clockFn)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(webCfg, store, clockFn)
+	srv.SetWebSessionManager(mgr)
+	return srv, mgr, store
+}
+
+// issueWebSession is a test helper that mints a web session and returns the cookie.
+func issueWebSession(t *testing.T, mgr session.Manager, principalID, tenantID string) *http.Cookie {
+	t.Helper()
+	_, tok, err := mgr.Issue(context.Background(), principalID, "web-login", tenantID)
+	require.NoError(t, err)
+	return &http.Cookie{Name: "cfgms_session", Value: tok}
+}
+
+// TestWebSessionCookie_ValidCookie_BuildsPrincipal verifies that a request carrying a
+// valid cfgms_session cookie is authenticated and resolves the correct Principal.
+func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "valid cookie must yield 200")
+	require.NotNil(t, capturedPrincipal, "Principal must be set in context")
+	assert.Equal(t, "alice", capturedPrincipal.ID)
+	assert.Equal(t, "tenant-a", capturedPrincipal.TenantID)
+	assert.True(t, capturedPrincipal.IsAdmin, "web session principal must have IsAdmin == true")
+	assert.Equal(t, "web-session:alice", capturedPrincipal.Name)
+}
+
+// TestWebSessionCookie_RenewalCookieFlags verifies that the refreshed Set-Cookie header
+// carries exactly HttpOnly; Secure; SameSite=Strict; Path=/ (ADR-018 §1).
+func TestWebSessionCookie_RenewalCookieFlags(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	setCookie := rec.Header().Get("Set-Cookie")
+	require.NotEmpty(t, setCookie, "a valid cookie request must produce a refreshed Set-Cookie")
+
+	assert.Contains(t, setCookie, "cfgms_session=", "Set-Cookie must use name cfgms_session")
+	assert.Contains(t, setCookie, "HttpOnly", "cookie must be HttpOnly")
+	assert.Contains(t, setCookie, "Secure", "cookie must be Secure")
+	assert.Contains(t, setCookie, "SameSite=Strict", "cookie must be SameSite=Strict")
+	assert.Contains(t, setCookie, "Path=/", "cookie must have Path=/")
+
+	// Verify no Max-Age is present: server-side expiry is authoritative (ADR-018 §2).
+	assert.NotContains(t, setCookie, "Max-Age", "cookie must NOT carry Max-Age — server-side expiry is authoritative")
+}
+
+// TestWebSessionCookie_IdleExpiry_Returns401 verifies that after the idle timeout
+// elapses, subsequent cookie requests receive 401 SESSION_EXPIRED.
+func TestWebSessionCookie_IdleExpiry_Returns401(t *testing.T) {
+	clk := newWebSessionTestClock()
+	srv, mgr, _ := setupTestServerWithWebSession(t, clk.Now)
+
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	// Advance past web session idle timeout (60m).
+	clk.Advance(61 * time.Minute)
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "idle-expired cookie must return 401")
+	assert.Contains(t, rec.Body.String(), "SESSION_EXPIRED")
+	assert.Empty(t, rec.Header().Get("Set-Cookie"), "no Set-Cookie must be emitted for an expired session")
+}
+
+// TestWebSessionCookie_AbsoluteExpiry_Returns401 verifies that after the absolute timeout
+// elapses (even with recent activity), cookie requests receive 401 SESSION_EXPIRED.
+func TestWebSessionCookie_AbsoluteExpiry_Returns401(t *testing.T) {
+	clk := newWebSessionTestClock()
+	srv, mgr, _ := setupTestServerWithWebSession(t, clk.Now)
+
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	// Advance past web session absolute timeout (12h).
+	clk.Advance(13 * time.Hour)
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "absolute-expired cookie must return 401")
+	assert.Contains(t, rec.Body.String(), "SESSION_EXPIRED")
+	assert.Empty(t, rec.Header().Get("Set-Cookie"), "no Set-Cookie must be emitted for an absolute-expired session")
+}
+
+// TestWebSessionCookie_Revoked_Returns401 verifies that a revoked web session cookie
+// returns 401 SESSION_REVOKED (drives the SPA "session expired" state).
+func TestWebSessionCookie_Revoked_Returns401(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	// Validate once to obtain the session ID, then revoke.
+	sess, err := mgr.Validate(context.Background(), cookie.Value)
+	require.NoError(t, err)
+	require.NoError(t, mgr.Revoke(context.Background(), sess.ID))
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "revoked cookie must return 401")
+	assert.Contains(t, rec.Body.String(), "SESSION_REVOKED")
+}
+
+// TestWebSessionCookie_CoexistenceMatrix verifies the credential-precedence rule:
+// when a header credential (Bearer or API key) or admin mTLS is present alongside a
+// valid cfgms_session cookie, the header/mTLS credential wins and the cookie is
+// ignored entirely — not validated, not renewed, no Set-Cookie emitted.
+func TestWebSessionCookie_CoexistenceMatrix(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	webCookie := issueWebSession(t, mgr, "alice", "tenant-a")
+	apiKeyStr := NewTestKey(t, srv, []string{"steward:read"})
+
+	// Issue a Bearer session token via the cfg sessionManager (ADR-014 path).
+	bearerCfg := session.DefaultConfig()
+	bearerStore := session.NewMemStore(bearerCfg, time.Now)
+	t.Cleanup(bearerStore.Close)
+	bearerMgr := session.NewManager(bearerCfg, bearerStore, time.Now)
+	srv.SetSessionManager(bearerMgr)
+	_, bearerToken, err := bearerMgr.Issue(context.Background(), "admin", "cfg-cli", "")
+	require.NoError(t, err)
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, _ := r.Context().Value(principalContextKey).(*Principal)
+		if p != nil {
+			w.Header().Set("X-Test-Auth-Method", p.Name)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Run("cookie+Bearer → Bearer wins, no Set-Cookie", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.AddCookie(webCookie)
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		// Bearer session path identifies itself as "session:<principalID>", NOT "web-session:..."
+		assert.Contains(t, rec.Header().Get("X-Test-Auth-Method"), "session:",
+			"Bearer session must win over cookie")
+		assert.NotContains(t, rec.Header().Get("X-Test-Auth-Method"), "web-session:")
+		assert.Empty(t, rec.Header().Get("Set-Cookie"), "no Set-Cookie when Bearer credential wins")
+	})
+
+	t.Run("cookie+API-key → API-key wins, no Set-Cookie", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.AddCookie(webCookie)
+		req.Header.Set("X-API-Key", apiKeyStr)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		// API-key principal must win: auth-method must be non-empty and must NOT be "web-session:".
+		authMethod := rec.Header().Get("X-Test-Auth-Method")
+		assert.NotEmpty(t, authMethod, "API-key path must produce a principal")
+		assert.NotContains(t, authMethod, "web-session:", "web session must NOT win when API-key is present")
+		assert.Empty(t, rec.Header().Get("Set-Cookie"), "no Set-Cookie when API-key credential wins")
+	})
+
+	t.Run("cookie+mTLS → mTLS wins, no Set-Cookie", func(t *testing.T) {
+		adminCert := makeSelfSignedAdminCert(t)
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
+		req.AddCookie(webCookie)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		// mTLS path sets Name = "mtls-admin:<cn>"
+		assert.Contains(t, rec.Header().Get("X-Test-Auth-Method"), "mtls-admin:",
+			"mTLS must win over cookie")
+		assert.Empty(t, rec.Header().Get("Set-Cookie"), "no Set-Cookie when mTLS credential wins")
+	})
+
+	t.Run("cookie only → web session wins", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.AddCookie(webCookie)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Header().Get("X-Test-Auth-Method"), "web-session:",
+			"only cookie present → web session path must fire")
+		assert.NotEmpty(t, rec.Header().Get("Set-Cookie"), "renewal cookie must be set after web-session auth")
+	})
+}
+
+// TestWebSessionCookie_BearerPathUnchanged_Regression verifies that the ADR-014 Bearer
+// session path (X-Session-Token renewal, not Set-Cookie) is byte-identical after the
+// web session cookie branch was added.
+func TestWebSessionCookie_BearerPathUnchanged_Regression(t *testing.T) {
+	srv, _, _ := setupTestServerWithWebSession(t, time.Now)
+
+	// Wire the cfg-CLI session manager (ADR-014 defaults: idle 15m / absolute 8h).
+	bearerCfg := session.DefaultConfig()
+	bearerStore := session.NewMemStore(bearerCfg, time.Now)
+	t.Cleanup(bearerStore.Close)
+	bearerMgr := session.NewManager(bearerCfg, bearerStore, time.Now)
+	srv.SetSessionManager(bearerMgr)
+
+	_, bearerToken, err := bearerMgr.Issue(context.Background(), "admin", "cfg-cli", "")
+	require.NoError(t, err)
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "Bearer session path must still work")
+	// ADR-014: renewal is expressed as X-Session-Token header, NOT Set-Cookie.
+	assert.NotEmpty(t, rec.Header().Get("X-Session-Token"),
+		"Bearer path must renew via X-Session-Token header (ADR-014)")
+	assert.Empty(t, rec.Header().Get("Set-Cookie"),
+		"Bearer path must NOT emit Set-Cookie (cookie transport is web-session only)")
+}
+
+// TestWebSessionManager_Issue_UniqueTokensPerCall verifies the session-fixation posture
+// (ADR-018 §1, founder condition 4): webSessionManager.Issue mints a fresh 32-byte
+// cryptographically random token on every call — no token reuse across invocations.
+// The login endpoint (#2493) calls Issue on every successful authentication.
+func TestWebSessionManager_Issue_UniqueTokensPerCall(t *testing.T) {
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	store := session.NewMemStore(webCfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(webCfg, store, time.Now)
+
+	seen := make(map[string]bool, 20)
+	for i := 0; i < 20; i++ {
+		_, tok, err := mgr.Issue(context.Background(), "admin", "web-login", "default")
+		require.NoError(t, err)
+		require.NotEmpty(t, tok)
+		require.False(t, seen[tok],
+			"Issue must mint a unique token on each call (session-fixation posture); duplicate at iteration %d", i)
+		seen[tok] = true
+		// 43 chars = base64url of 32 bytes without padding.
+		assert.Len(t, tok, 43, "web session token must be 43 characters (32 bytes base64url)")
+	}
+}
+
+// TestWebSessionCookie_InvalidToken_Returns401 verifies that a cfgms_session cookie
+// carrying an unrecognised token (not in manager's store) returns 401.
+func TestWebSessionCookie_InvalidToken_Returns401(t *testing.T) {
+	srv, _, _ := setupTestServerWithWebSession(t, time.Now)
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	// Use a well-formed 43-char base64url string that was never issued.
+	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: strings.Repeat("a", 43)})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "unknown cookie token must return 401")
+	assert.Contains(t, rec.Body.String(), "INVALID_SESSION_TOKEN")
 }
