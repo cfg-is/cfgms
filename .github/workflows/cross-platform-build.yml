@@ -94,6 +94,8 @@ jobs:
 
     - name: Mark workspace safe for git (needed on self-hosted after service-account changes; idempotent on hosted)
       shell: bash
+      env:
+        GIT_CONFIG_GLOBAL: ${{ runner.temp }}/.gitconfig
       run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
     - name: Set up Go
