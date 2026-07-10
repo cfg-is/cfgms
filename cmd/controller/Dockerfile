@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build stage
 FROM golang:1.26.5-alpine3.23 AS builder
 
@@ -11,13 +12,16 @@ WORKDIR /src
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source code
 COPY . .
 
-# Build controller
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o controller ./cmd/controller
+# Build controller (GOCACHE + module cache mounts warm across builds; CGO_ENABLED=0
+# already yields a static binary, so -a/-installsuffix are unneeded and only force
+# cold recompiles)
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build -o controller ./cmd/controller
 
 # Final stage - pinned to Alpine 3.23 (latest stable as of 2025-12)
 FROM alpine:3.23

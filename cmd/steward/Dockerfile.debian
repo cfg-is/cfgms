@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build stage
 FROM golang:1.26.4-alpine3.23 AS builder
 
@@ -11,19 +12,23 @@ WORKDIR /src
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source code
 COPY . .
 
-# Build steward with compile-time controller URL
+# Build steward with compile-time controller URL (GOCACHE + module cache mounts warm
+# across builds; CGO_ENABLED=0 already yields a static binary, so -a/-installsuffix
+# are unneeded and only force cold recompiles)
 ARG STEWARD_CONTROLLER_URL=https://localhost:9080
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X main.ControllerURL=${STEWARD_CONTROLLER_URL}" \
     -o steward ./cmd/steward
 
 # Build the steward launcher (Issue #1948: required for upgrade swap in fleet E2E tests)
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w" \
     -o cfgms-launcher ./cmd/cfgms-steward-launcher
 

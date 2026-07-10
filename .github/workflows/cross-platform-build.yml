@@ -63,22 +63,13 @@ jobs:
         echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
         echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
 
-  # Native build tests on each platform
+  # Native build tests on each platform — all on GitHub-hosted runners.
   #
-  # Windows routing (#2337, #2503, epic #565): only merge_group (merge-gating)
-  # builds run natively on the CFGMS-managed self-hosted Windows runner. ALL
-  # pull_request events (fork or not) and workflow_dispatch use GitHub-hosted
-  # windows-latest — PR Windows builds are advisory (the merge queue re-runs
-  # everything self-hosted at merge time), so routing them to hosted removes
-  # roughly half the self-hosted Windows load without touching the merge-critical
-  # path. Linux and macOS stay hosted unconditionally. The whole include list is
-  # selected via fromJSON because individual matrix entries cannot carry
-  # conditions.
-  #
-  # SECURITY: routing pull_request to hosted is convenience/load management, NOT
-  # the security boundary — fork PRs run the fork's workflow copy regardless. The
-  # enforcing control is the repository Actions setting "Require approval for ALL
-  # external contributors"; do not weaken it while self-hosted runners are attached.
+  # Windows CI runs on hosted windows-latest (#2559, epic #565): the self-hosted
+  # Windows runner was measurably ~2x slower than hosted and, sharing hardware with
+  # a Linux runner, starved Linux CI — so Windows was routed off it. Hosted runners
+  # have effectively unlimited concurrency, so no self-hosted/hosted picker is
+  # needed. Linux and macOS were already hosted.
   native-builds:
     name: Native Build (${{ matrix.platform }})
     permissions:
@@ -86,7 +77,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":"windows-latest","platform":"Windows"}]' || '[{"os":"ubuntu-latest","platform":"Linux"},{"os":"macos-latest","platform":"macOS"},{"os":["self-hosted","Windows","cfgms"],"platform":"Windows"}]') }}
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+          - os: macos-latest
+            platform: macOS
+          - os: windows-latest
+            platform: Windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -109,12 +106,6 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Start Windows resource sampler (self-hosted Windows only, best-effort)
-      if: matrix.platform == 'Windows' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
-      continue-on-error: true
-      shell: powershell
-      run: .github\scripts\resource-sampler.ps1 -Mode Start -StateDir "$env:RUNNER_TEMP\resource-sampler"
-
     - name: Build All Binaries
       shell: bash
       run: make build
@@ -123,11 +114,9 @@ jobs:
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"  # Disable integration tests (no Docker infrastructure in cross-platform CI)
-      # The Go race detector (ThreadSanitizer) reserves a large shadow-memory
-      # region the self-hosted Windows runner cannot allocate (Windows error
-      # 1455 / ERROR_COMMITMENT_LIMIT). Race coverage is fully exercised on the
-      # Linux unit-tests + integration-tests jobs; the Windows native build
-      # validates compile + test-pass without -race.
+      # Windows runs -short WITHOUT -race to keep this compile-validation job fast;
+      # race coverage is fully exercised on the Linux unit-tests + integration-tests
+      # jobs. Linux/macOS run with -race here.
       run: |
         if [ "${{ matrix.platform }}" = "Windows" ]; then
           go test -short -timeout=5m ./pkg/... ./features/...
@@ -141,21 +130,6 @@ jobs:
         name: binaries-${{ matrix.platform }}
         path: bin/
         retention-days: 5
-
-    - name: Report Windows resource profile (self-hosted Windows only, best-effort)
-      if: always() && matrix.platform == 'Windows' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
-      continue-on-error: true
-      shell: powershell
-      run: .github\scripts\resource-sampler.ps1 -Mode Report -StateDir "$env:RUNNER_TEMP\resource-sampler" -ArtifactOut "resource-samples-native-windows.txt"
-
-    - name: Upload resource samples (self-hosted Windows only)
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-      if: always() && matrix.platform == 'Windows' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
-      continue-on-error: true
-      with:
-        name: resource-samples-native-windows
-        path: resource-samples-native-windows.txt
-        retention-days: 30
 
   # Integration tests with Docker infrastructure (Linux only)
   integration-tests:
