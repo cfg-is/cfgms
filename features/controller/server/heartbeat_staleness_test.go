@@ -93,7 +93,7 @@ func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 	svc, err := heartbeat.New(&heartbeat.Config{
 		ControlPlane:          cp,
 		OnStatusChange:        makeHeartbeatStatusChangeCallback(st, logger),
-		StewardOfflineTimeout: 50 * time.Millisecond,
+		StewardOfflineTimeout: 500 * time.Millisecond,
 		CheckInterval:         10 * time.Millisecond,
 		Logger:                logger,
 	})
