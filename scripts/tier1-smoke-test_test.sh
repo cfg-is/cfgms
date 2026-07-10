@@ -4,7 +4,7 @@
 # Starts a stub HTTPS server (Python ssl) with generated test certs to cover
 # both the all-pass path and several failure modes without a real controller.
 #
-# Dependencies: bash >=4, openssl, python3, curl
+# Dependencies: bash >=4, openssl, python3, go (to build cfg for the health check)
 #
 # Exit codes: 0 = all tests passed, 1 = any test failed
 
@@ -12,6 +12,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE="$SCRIPT_DIR/tier1-smoke-test.sh"
+
+# Build the cfg client the smoke test uses for its health check (#2458 RC2).
+# cfg does mTLS via crypto/tls (PEM, cross-platform) — the whole point is to
+# avoid curl+Schannel on Windows. `go build -o <dir>/` names the binary per-OS
+# (cfg / cfg.exe). The smoke test picks it up via CFGMS_CFG_BIN.
+CFG_BUILD_DIR="$(mktemp -d)"
+CFG_BUILD_ERR=""
+if command -v go >/dev/null 2>&1; then
+  # Capture the build error rather than discarding it, so a real compile failure
+  # (go present but build broken) is surfaced below instead of the misleading
+  # "no go/cfg on PATH" message.
+  CFG_BUILD_ERR=$( cd "$SCRIPT_DIR/.." && go build -o "$CFG_BUILD_DIR/" ./cmd/cfg 2>&1 ) || true
+fi
+if [[ -x "$CFG_BUILD_DIR/cfg" ]]; then
+  export CFGMS_CFG_BIN="$CFG_BUILD_DIR/cfg"
+elif [[ -x "$CFG_BUILD_DIR/cfg.exe" ]]; then
+  export CFGMS_CFG_BIN="$CFG_BUILD_DIR/cfg.exe"
+elif command -v cfg >/dev/null 2>&1; then
+  export CFGMS_CFG_BIN="cfg"
+else
+  echo "ERROR: could not build or find the cfg client (need 'go' or 'cfg' on PATH)" >&2
+  [[ -n "$CFG_BUILD_ERR" ]] && echo "go build error was:" >&2 && echo "$CFG_BUILD_ERR" >&2
+  exit 1
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -35,23 +59,48 @@ _fail() {
 # ---------------------------------------------------------------------------
 _setup_certs() {
   local d="$1"
+
+  # On Git-Bash/MSYS the runtime auto-converts POSIX-looking arguments to Windows
+  # paths before handing them to the native openssl.exe. That corrupts the leading
+  # '/' of openssl's -subj value ("/CN=Test CA" becomes
+  # "C:/Program Files/Git/CN=Test CA" -> "subject name is expected to be in the
+  # format /type0=value0/..."). Excluding only /CN= arguments keeps the -subj DN
+  # intact while still letting real path arguments (keys, certs, extfiles) convert
+  # normally. The variable is ignored on Linux/macOS, so setting it here is safe on
+  # every host.
+  local MSYS2_ARG_CONV_EXCL="/CN="
+  export MSYS2_ARG_CONV_EXCL
+
+  # Extension files are written to the scratch dir instead of process substitution
+  # (-extfile <(printf ...)), which resolves to /proc/<pid>/fd/NN — unavailable in
+  # the MSYS shell ("Can't open /proc/<pid>/fd/63 for reading").
+  printf "subjectAltName=IP:127.0.0.1,DNS:localhost\n" > "$d/server.ext"
+  printf "extendedKeyUsage=clientAuth\n" > "$d/client.ext"
+
   # CA
+  # The CA cert MUST carry basicConstraints CA:TRUE + keyUsage keyCertSign, or a
+  # strict verifier (Python's ssl on OpenSSL 3.x, used by the tenant check) rejects
+  # the chain with "CA cert does not include key usage extension". Go's crypto/tls
+  # (the cfg health check) and old curl accept a plain self-signed cert leniently,
+  # but the test CA must be a real CA for every client. (#2458)
   openssl req -x509 -newkey rsa:2048 -keyout "$d/ca.key" -out "$d/ca.crt" \
-    -days 1 -nodes -subj "/CN=Test CA" 2>/dev/null
+    -days 1 -nodes -subj "/CN=Test CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
 
   # Server cert with Subject Alternative Name so curl trusts 127.0.0.1
   openssl req -newkey rsa:2048 -keyout "$d/server.key" -out "$d/server.csr" \
     -nodes -subj "/CN=127.0.0.1" 2>/dev/null
   openssl x509 -req -in "$d/server.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" \
     -CAcreateserial -out "$d/server.crt" -days 1 \
-    -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost\n") 2>/dev/null
+    -extfile "$d/server.ext" 2>/dev/null
 
   # Client cert (mTLS)
   openssl req -newkey rsa:2048 -keyout "$d/client.key" -out "$d/client.csr" \
     -nodes -subj "/CN=admin" 2>/dev/null
   openssl x509 -req -in "$d/client.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" \
     -CAcreateserial -out "$d/client.crt" -days 1 \
-    -extfile <(printf "extendedKeyUsage=clientAuth\n") 2>/dev/null
+    -extfile "$d/client.ext" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -141,7 +190,9 @@ present = TENANTS.get(MODE, TENANTS['all-pass'])
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         try:
-            if self.path == '/api/v1/health':
+            if self.path in ('/api/v1/health', '/api/v1/health/detailed'):
+                # /health/detailed is what `cfg controller status` requests; both
+                # paths mirror the same healthy/unhealthy behavior.
                 if MODE == 'health-fail':
                     self.send_response(503)
                     self.end_headers()
@@ -480,7 +531,7 @@ if [[ ! -f "$SMOKE" ]]; then
 fi
 
 TMPDIR_ROOT=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_ROOT"; _stop_server' EXIT
+trap 'rm -rf "$TMPDIR_ROOT" "$CFG_BUILD_DIR"; _stop_server' EXIT
 
 echo "tier1-smoke-test fixture tests"
 echo "=============================="
