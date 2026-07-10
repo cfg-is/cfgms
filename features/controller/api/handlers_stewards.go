@@ -23,6 +23,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
+	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -540,6 +541,26 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		s.logger.Info("Received configuration in JSON format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
 	}
 
+	// Validate resource names at the handler boundary before any storage-side
+	// effect. An invalid name (e.g. containing a dot like "docker.io") is a
+	// client input error, not a storage fault: reject it with 400
+	// VALIDATION_ERROR here rather than letting it reach SetConfiguration and
+	// surface as a generic 500 STORAGE_ERROR. The offending name is
+	// config-derived and therefore safe to echo back to the caller so the
+	// client can self-diagnose without server logs. (Issue #2482)
+	for i, resource := range config.Resources {
+		if !identifierRegex.MatchString(resource.Name) {
+			s.logger.Warn("Invalid resource name in config upload",
+				"steward_id", stewardIDForLog,
+				"resource_index", i,
+				"resource_name", logging.SanitizeLogValue(resource.Name))
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("Invalid resource name %q: must contain only alphanumeric characters, hyphens, and underscores", resource.Name),
+				"VALIDATION_ERROR")
+			return
+		}
+	}
+
 	// Resolve the tenant the config is stored under. This endpoint targets a
 	// specific steward, so the config must be stored under THAT steward's
 	// tenant — not the caller's. An admin in tenant "default" may push config
@@ -595,6 +616,15 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	// Store configuration using V2 durable config service
 	if err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, &config); err != nil {
+		var ve *service.ValidationFailedError
+		if errors.As(err, &ve) {
+			s.logger.Warn("Configuration validation failed",
+				"steward_id", stewardIDForLog,
+				"tenant_id", tenantIDForLog,
+				"error_count", len(ve.Errors))
+			s.writeErrorResponse(w, http.StatusBadRequest, ve.Error(), "VALIDATION_ERROR")
+			return
+		}
 		s.logger.Error("Failed to store configuration",
 			"steward_id", stewardIDForLog,
 			"tenant_id", tenantIDForLog,
