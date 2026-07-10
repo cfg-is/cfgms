@@ -355,18 +355,19 @@ func runStewardDecommission(_ *cobra.Command, args []string) error {
 	return overallErr
 }
 
-// stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
+// stewardLogsCmd pulls recent log entries from one or more stewards via the controller REST API.
 var stewardLogsCmd = &cobra.Command{
-	Use:   "logs <id>",
-	Short: "Pull recent log entries from a steward",
-	Long: `Pull recent log entries from the controller's log-pull endpoint for a steward.
+	Use:   "logs <selector>",
+	Short: "Pull recent log entries from stewards matching a selector",
+	Long: `Pull recent log entries from the controller's log-pull endpoint for every steward the selector matches.
 
 Note: Log pull is not yet available. Collect logs directly from the steward host.
 
 Examples:
   cfg steward logs <steward-id>
   cfg steward logs <steward-id> --tail 50 --level WARN
-  cfg steward logs <steward-id> --since 1h --module file`,
+  cfg steward logs <steward-id> --since 1h --module file
+  cfg steward logs os:linux --tail 20`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardLogs,
 }
@@ -496,12 +497,23 @@ func runStewardMove(_ *cobra.Command, args []string) error {
 	return overallErr
 }
 
+// logsNotImplementedPayload is the sentinel returned by the fan-out action when a
+// steward reports 501 (log pull not yet available). It lets the output phase
+// distinguish "not implemented" from a genuine read failure without forcing a
+// non-zero exit — matching the pre-selector single-ID behaviour.
+var logsNotImplementedPayload = json.RawMessage(`{"status":"not_implemented"}`)
+
 func runStewardLogs(_ *cobra.Command, args []string) error {
-	stewardID := args[0]
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
 	}
 
 	v := url.Values{}
@@ -515,58 +527,97 @@ func runStewardLogs(_ *cobra.Command, args []string) error {
 	if stewardLogsModule != "" {
 		v.Set("module", stewardLogsModule)
 	}
-	path := "/api/v1/stewards/" + stewardID + "/logs?" + v.Encode()
+	queryStr := v.Encode()
 
-	resp, err := client.Get(context.Background(), path)
-	if err != nil {
-		return fmt.Errorf("failed to fetch logs: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			path := "/api/v1/stewards/" + s.ID + "/logs?" + queryStr
+			resp, err := client.Get(ctx, path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch logs: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("steward %s not found", stewardID)
-	}
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			}
+			if resp.StatusCode == http.StatusNotImplemented {
+				return logsNotImplementedPayload, nil
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
 
-	if resp.StatusCode == http.StatusNotImplemented {
-		fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
-		return nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
 
 	if stewardLogsJSON {
-		_, err := os.Stdout.Write(body)
-		return err
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	var apiResp struct {
-		Lines []struct {
-			Timestamp string `json:"timestamp"`
-			Level     string `json:"level"`
-			Module    string `json:"module"`
-			Message   string `json:"message"`
-		} `json:"lines"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
+
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
+
+		var statusCheck struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(r.Payload, &statusCheck) == nil && statusCheck.Status == "not_implemented" {
+			fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
+			continue
+		}
+
+		var apiResp struct {
+			Lines []struct {
+				Timestamp string `json:"timestamp"`
+				Level     string `json:"level"`
+				Module    string `json:"module"`
+				Message   string `json:"message"`
+			} `json:"lines"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse response: %v\n", key, err)
+			continue
+		}
+
+		for _, line := range apiResp.Lines {
+			fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+		}
 	}
 
-	for _, line := range apiResp.Lines {
-		fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
 	}
-	return nil
+	return overallErr
 }
 
 func init() {
@@ -775,14 +826,15 @@ type stewardEntry struct {
 	} `json:"dna,omitempty"`
 }
 
-// stewardStatusCmd shows detailed status for a single steward.
+// stewardStatusCmd shows detailed status for every steward a selector matches.
 var stewardStatusCmd = &cobra.Command{
-	Use:   "status <id>",
-	Short: "Show detailed status for a steward",
-	Long: `Display full details for a single steward registered with the controller.
+	Use:   "status <selector>",
+	Short: "Show detailed status for stewards matching a selector",
+	Long: `Display full details for every steward the selector matches.
 
 Prints labelled fields including id, status, last_seen, version, hostname, OS,
-connection state, and other available metadata.
+connection state, and other available metadata. With --json, emits a
+keyed-by-steward JSON array (one entry per matched steward).
 
 Examples:
   # Show status using admin bundle (mTLS auto-discovery)
@@ -792,15 +844,18 @@ Examples:
   cfg steward status <steward-id> --url=https://controller.example.com
 
   # Show status as JSON
-  cfg steward status <steward-id> --json`,
+  cfg steward status <steward-id> --json
+
+  # Fan out to all linux stewards
+  cfg steward status os:linux`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardStatus,
 }
 
-// stewardDNACmd shows the DNA snapshot for a single steward.
+// stewardDNACmd shows the DNA snapshot for every steward a selector matches.
 var stewardDNACmd = &cobra.Command{
-	Use:   "dna <id>",
-	Short: "Show DNA snapshot for a steward",
+	Use:   "dna <selector>",
+	Short: "Show DNA snapshot for stewards matching a selector",
 	Long: `Display the most recent DNA snapshot for a steward registered with the controller.
 
 Use --attribute to retrieve a single dotted-path attribute value for scripted probes.
@@ -828,94 +883,137 @@ type stewardDNAInfo struct {
 	Attributes   map[string]string `json:"attributes,omitempty"`
 }
 
-func runStewardDNA(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+func runStewardDNA(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	path := "/api/v1/stewards/" + stewardID + "/dna"
-	if stewardDNAAttribute != "" {
-		path += "?attribute=" + url.QueryEscape(stewardDNAAttribute)
-	}
-
-	resp, err := client.Get(context.Background(), path)
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to fetch steward DNA: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusNotFound {
-		if stewardDNAAttribute != "" {
-			return fmt.Errorf("attribute %q not found for steward %s", stewardDNAAttribute, stewardID)
-		}
-		return fmt.Errorf("steward %s not found or has no DNA snapshot", stewardID)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Single attribute: the handler returns {"value":"<val>"} directly (no data wrapper).
-	if stewardDNAAttribute != "" {
-		var attrResp struct {
-			Value string `json:"value"`
-		}
-		if err := json.Unmarshal(body, &attrResp); err != nil {
-			return fmt.Errorf("failed to parse attribute response: %w", err)
-		}
-		fmt.Println(attrResp.Value)
-		return nil
-	}
-
-	if stewardDNAJSONOutput {
-		_, err := os.Stdout.Write(body)
 		return err
 	}
 
-	var apiResp struct {
-		Data stewardDNAInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			path := "/api/v1/stewards/" + s.ID + "/dna"
+			if stewardDNAAttribute != "" {
+				path += "?attribute=" + url.QueryEscape(stewardDNAAttribute)
+			}
+
+			resp, err := client.Get(ctx, path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch steward DNA: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
+
+			if resp.StatusCode == http.StatusNotFound {
+				if stewardDNAAttribute != "" {
+					return nil, fmt.Errorf("attribute %q not found for steward %s", stewardDNAAttribute, s.ID)
+				}
+				return nil, fmt.Errorf("steward %s not found or has no DNA snapshot", s.ID)
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
+
+	if stewardDNAJSONOutput {
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	d := apiResp.Data
-	fmt.Printf("Hostname:      %s\n", d.Hostname)
-	fmt.Printf("OS:            %s\n", d.OS)
-	if d.Architecture != "" {
-		fmt.Printf("Architecture:  %s\n", d.Architecture)
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
+
+		// --attribute: print "<key>: <value>" per steward in multi-match,
+		// just "<value>" in single-match (backward compatible).
+		if stewardDNAAttribute != "" {
+			var attrResp struct {
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(r.Payload, &attrResp); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %s: failed to parse attribute response: %v\n", key, err)
+				continue
+			}
+			if len(matches) > 1 {
+				fmt.Printf("%s: %s\n", key, attrResp.Value)
+			} else {
+				fmt.Println(attrResp.Value)
+			}
+			continue
+		}
+
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
+
+		var apiResp struct {
+			Data stewardDNAInfo `json:"data"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse response: %v\n", key, err)
+			continue
+		}
+
+		d := apiResp.Data
+		fmt.Printf("Hostname:      %s\n", d.Hostname)
+		fmt.Printf("OS:            %s\n", d.OS)
+		if d.Architecture != "" {
+			fmt.Printf("Architecture:  %s\n", d.Architecture)
+		}
+		if d.CollectedAt != "" {
+			fmt.Printf("CollectedAt:   %s\n", d.CollectedAt)
+		}
+		for k, v := range d.Attributes {
+			fmt.Printf("%s=%s\n", k, v)
+		}
 	}
-	if d.CollectedAt != "" {
-		fmt.Printf("CollectedAt:   %s\n", d.CollectedAt)
+
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
 	}
-	for k, v := range d.Attributes {
-		fmt.Printf("%s=%s\n", k, v)
-	}
-	return nil
+	return overallErr
 }
 
-// stewardModulesCmd lists modules currently loaded by a named steward.
+// stewardModulesCmd lists modules currently loaded by every steward a selector matches.
 var stewardModulesCmd = &cobra.Command{
-	Use:   "modules <id>",
-	Short: "List modules loaded by a steward",
-	Long: `Display the modules currently loaded by a named steward.
+	Use:   "modules <selector>",
+	Short: "List modules loaded by stewards matching a selector",
+	Long: `Display the modules currently loaded by every steward the selector matches.
 
-Retrieves module data from the steward's DNA attributes reported to the controller.
-When the steward does not report module data, a 501 response is returned and the
-command exits 0 with an informational message.
+Retrieves module data from each steward's DNA attributes reported to the controller.
+When a steward does not report module data, a 501 response is returned and the
+entry exits 0 with an informational message.
 
 Examples:
   # List modules using admin bundle (mTLS auto-discovery)
@@ -925,7 +1023,10 @@ Examples:
   cfg steward modules <steward-id> --url=https://controller.example.com
 
   # Output raw JSON
-  cfg steward modules <steward-id> --json`,
+  cfg steward modules <steward-id> --json
+
+  # Fan out to all linux stewards
+  cfg steward modules os:linux`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardModules,
 }
@@ -948,148 +1049,237 @@ type stewardStatusInfo struct {
 	} `json:"dna,omitempty"`
 }
 
-func runStewardStatus(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+func runStewardStatus(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID)
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to fetch steward: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("steward %s not found", stewardID)
+		return err
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			resp, err := client.Get(ctx, "/api/v1/stewards/"+s.ID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch steward: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
 
 	if stewardStatusJSONOutput {
-		_, err := os.Stdout.Write(body)
-		return err
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	var apiResp struct {
-		Data stewardStatusInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
-	}
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
 
-	s := apiResp.Data
-	fmt.Printf("ID:               %s\n", s.ID)
-	fmt.Printf("Status:           %s\n", s.Status)
-	fmt.Printf("Connection:       %s\n", s.ConnectionState)
-	lastSeen := ""
-	if !s.LastSeen.IsZero() {
-		lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-	}
-	fmt.Printf("Last Seen:        %s\n", lastSeen)
-	fmt.Printf("Version:          %s\n", s.Version)
-	if s.DNA != nil {
-		fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
-		fmt.Printf("OS:               %s\n", s.DNA.OS)
-		if s.DNA.Architecture != "" {
-			fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
+
+		var apiResp struct {
+			Data stewardStatusInfo `json:"data"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse result: %v\n", key, err)
+			continue
+		}
+
+		s := apiResp.Data
+		fmt.Printf("ID:               %s\n", s.ID)
+		fmt.Printf("Status:           %s\n", s.Status)
+		fmt.Printf("Connection:       %s\n", s.ConnectionState)
+		lastSeen := ""
+		if !s.LastSeen.IsZero() {
+			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+		}
+		fmt.Printf("Last Seen:        %s\n", lastSeen)
+		fmt.Printf("Version:          %s\n", s.Version)
+		if s.DNA != nil {
+			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
+			fmt.Printf("OS:               %s\n", s.DNA.OS)
+			if s.DNA.Architecture != "" {
+				fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
+			}
+		}
+		if s.TenantID != "" {
+			fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+		}
+		if s.Group != "" {
+			fmt.Printf("Group:            %s\n", s.Group)
 		}
 	}
-	if s.TenantID != "" {
-		fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
 	}
-	if s.Group != "" {
-		fmt.Printf("Group:            %s\n", s.Group)
-	}
-	return nil
+	return overallErr
 }
 
-func runStewardModules(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+// modulesNotImplementedPayload is the sentinel returned by the fan-out action
+// when a steward reports 501 (module list not yet available). Mirrors the
+// logsNotImplementedPayload pattern so the output phase can distinguish
+// "not implemented" from a genuine read failure without forcing a non-zero exit.
+var modulesNotImplementedPayload = json.RawMessage(`{"status":"not_implemented"}`)
+
+func runStewardModules(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID+"/modules")
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to fetch steward modules: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("steward %s not found", stewardID)
+		return err
 	}
 
-	if resp.StatusCode == http.StatusNotImplemented {
-		fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
-		return nil
-	}
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			resp, err := client.Get(ctx, "/api/v1/stewards/"+s.ID+"/modules")
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch steward modules: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			}
+			if resp.StatusCode == http.StatusNotImplemented {
+				return modulesNotImplementedPayload, nil
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
 
 	if stewardModulesJSON {
-		_, err := os.Stdout.Write(body)
-		return err
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	var apiResp struct {
-		Data struct {
-			Modules []struct {
-				Name    string `json:"name"`
-				Version string `json:"version,omitempty"`
-			} `json:"modules"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
-	}
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
 
-	if len(apiResp.Data.Modules) == 0 {
-		fmt.Println("No modules loaded.")
-		return nil
-	}
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "NAME\tVERSION"); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w, "----\t-------"); err != nil {
-		return err
-	}
-	for _, m := range apiResp.Data.Modules {
-		if _, err := fmt.Fprintf(w, "%s\t%s\n", m.Name, m.Version); err != nil {
+		var statusCheck struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(r.Payload, &statusCheck) == nil && statusCheck.Status == "not_implemented" {
+			fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
+			continue
+		}
+
+		var apiResp struct {
+			Data struct {
+				Modules []struct {
+					Name    string `json:"name"`
+					Version string `json:"version,omitempty"`
+				} `json:"modules"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse response: %v\n", key, err)
+			continue
+		}
+
+		if len(apiResp.Data.Modules) == 0 {
+			fmt.Println("No modules loaded.")
+			continue
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(w, "NAME\tVERSION"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "----\t-------"); err != nil {
+			return err
+		}
+		for _, mod := range apiResp.Data.Modules {
+			if _, err := fmt.Fprintf(w, "%s\t%s\n", mod.Name, mod.Version); err != nil {
+				return err
+			}
+		}
+		if err := w.Flush(); err != nil {
 			return err
 		}
 	}
-	return w.Flush()
+
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
+	}
+	return overallErr
 }
 
 func runStewardList(cmd *cobra.Command, args []string) error {
