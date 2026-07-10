@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -78,6 +79,11 @@ type runnerModule struct {
 
 	executor  runnerServiceExecutor
 	installer agentInstaller
+
+	// mu protects workDir, which is populated by Configure and read by Get.
+	// Configure, Get, and Set can be called from different goroutines.
+	mu      sync.RWMutex
+	workDir string
 }
 
 // New creates a github_runner module wired with the platform service executor
@@ -94,8 +100,9 @@ func newModule(exec runnerServiceExecutor, inst agentInstaller) *runnerModule {
 }
 
 // Configure implements modules.Configurable. It validates the desired runner
-// configuration before any Get/Set so a malformed config is rejected without
-// touching the host. No secrets are read — the module is token-free.
+// configuration and stores the work_dir so Get() uses the correct absolute path
+// regardless of the resource name passed by the executor. No secrets are read —
+// the module is token-free.
 func (m *runnerModule) Configure(config modules.ConfigState) error {
 	if config == nil {
 		return fmt.Errorf("%w: config must not be nil", modules.ErrInvalidInput)
@@ -104,20 +111,37 @@ func (m *runnerModule) Configure(config modules.ConfigState) error {
 	if err != nil {
 		return err
 	}
-	return rc.Validate()
+	if err := rc.Validate(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.workDir = rc.WorkDir
+	m.mu.Unlock()
+	return nil
 }
 
-// Get returns the current observed state of the runner identified by resourceID
-// (the resourceID is the runner's work directory, the stable host-side identity).
-// It is network-free: version and labels come from the module's on-disk state
-// marker, service state from the OS service manager.
+// Get returns the current observed state of the runner. The install path and
+// state marker location are determined by work_dir from Configure (the desired
+// config), not by resourceID. This is necessary because controller resource-name
+// validation forbids "/" and "." in resource names, so resourceID is opaque and
+// cannot encode an absolute path. Configure must be called before Get (the
+// executor always does this); if it was not called, resourceID is used as a
+// fallback so existing test paths that call Get directly continue to work.
 func (m *runnerModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if resourceID == "" {
 		return nil, modules.ErrInvalidResourceID
 	}
+
+	m.mu.RLock()
+	workDir := m.workDir
+	m.mu.RUnlock()
+	if workDir == "" {
+		workDir = resourceID
+	}
+
 	logger := m.GetEffectiveLogger(logging.ForModule("github_runner"))
 
-	st, err := readState(resourceID)
+	st, err := readState(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("read runner state: %w", err)
 	}
@@ -125,7 +149,7 @@ func (m *runnerModule) Get(ctx context.Context, resourceID string) (modules.Conf
 	cur := &RunnerConfig{
 		Version:   st.Version,
 		Labels:    st.Labels,
-		WorkDir:   resourceID,
+		WorkDir:   workDir,
 		Installed: st.Version != "",
 	}
 
@@ -209,7 +233,7 @@ func (m *runnerModule) Set(ctx context.Context, resourceID string, config module
 	}
 	logger := m.GetEffectiveLogger(logging.ForModule("github_runner"))
 
-	st, err := readState(resourceID)
+	st, err := readState(desired.WorkDir)
 	if err != nil {
 		return fmt.Errorf("read runner state: %w", err)
 	}
@@ -224,7 +248,7 @@ func (m *runnerModule) Set(ctx context.Context, resourceID string, config module
 			URL:     desired.AgentURL,
 			SHA256:  desired.AgentSHA256,
 			Version: desired.Version,
-			WorkDir: resourceID,
+			WorkDir: desired.WorkDir,
 			Format:  archiveFormatForOS(),
 		}); ierr != nil {
 			return fmt.Errorf("install runner agent: %w", ierr)
@@ -236,7 +260,7 @@ func (m *runnerModule) Set(ctx context.Context, resourceID string, config module
 	st.Labels = append([]string(nil), desired.Labels...)
 	sort.Strings(st.Labels)
 	st.ServiceName = desired.ServiceName
-	if werr := writeState(resourceID, st); werr != nil {
+	if werr := writeState(desired.WorkDir, st); werr != nil {
 		return fmt.Errorf("write runner state: %w", werr)
 	}
 
