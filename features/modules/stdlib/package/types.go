@@ -179,8 +179,9 @@ func validatePackageName(name string) error {
 	if name == "" {
 		return ErrInvalidResourceID
 	}
-	// Package names should not contain slashes or spaces
-	if strings.ContainsAny(name, "/ ") {
+	// Reject slashes, spaces, and leading dashes. Leading dashes would be
+	// interpreted as options by root-run package managers (CWE-88).
+	if strings.ContainsAny(name, "/ ") || strings.HasPrefix(name, "-") {
 		return ErrInvalidPackageName
 	}
 	return nil
@@ -204,6 +205,8 @@ func validateVersion(version string) bool {
 type PackageModule struct {
 	mu             sync.RWMutex
 	packageManager PackageManager
+	// resolvedName is set by Configure from config.Name; Get falls back to resourceID when empty.
+	resolvedName string
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
 }
