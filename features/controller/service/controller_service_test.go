@@ -1151,9 +1151,9 @@ func TestSetPostDNASyncHook_NilHookIsNoop(t *testing.T) {
 	require.NoError(t, svc.RegisterSteward("steward-nil-hook", "tenant-1", "", "active"))
 
 	dna := &commonpb.DNA{Id: "steward-nil-hook", Attributes: map[string]string{"os": "windows"}}
-	assert.NotPanics(t, func() {
-		_, _ = svc.SyncDNA(ctx, dna)
-	}, "nil postDNASyncHook must not cause a panic")
+	status, err := svc.SyncDNA(ctx, dna)
+	require.NoError(t, err, "nil postDNASyncHook must not cause a panic")
+	assert.Equal(t, commonpb.Status_OK, status.Code)
 }
 
 // TestSetPostDNASyncHook_HookReceivesDNACopy verifies that the hook receives
