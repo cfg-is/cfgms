@@ -512,25 +512,31 @@ func TestModuleMetadata_ToYAML(t *testing.T) {
 }
 
 func TestModuleMetadata_FromYAML(t *testing.T) {
-	yamlData := []byte(`name: from-yaml-test
+	t.Run("valid yaml", func(t *testing.T) {
+		yamlData := []byte(`name: from-yaml-test
 version: 1.0.0
 module_dependencies:
   - name: dep1
     version: "^1.0.0"`)
 
-	var metadata ModuleMetadata
-	err := metadata.FromYAML(yamlData)
-	if err != nil {
-		t.Fatalf("failed to parse YAML: %v", err)
-	}
+		var metadata ModuleMetadata
+		if err := metadata.FromYAML(yamlData); err != nil {
+			t.Fatalf("failed to parse YAML: %v", err)
+		}
+		if metadata.Name != "from-yaml-test" {
+			t.Errorf("Name = %v, expected from-yaml-test", metadata.Name)
+		}
+		if len(metadata.ModuleDependencies) != 1 {
+			t.Errorf("ModuleDependencies length = %v, expected 1", len(metadata.ModuleDependencies))
+		}
+	})
 
-	if metadata.Name != "from-yaml-test" {
-		t.Errorf("Name = %v, expected from-yaml-test", metadata.Name)
-	}
-
-	if len(metadata.ModuleDependencies) != 1 {
-		t.Errorf("ModuleDependencies length = %v, expected 1", len(metadata.ModuleDependencies))
-	}
+	t.Run("malformed yaml returns error", func(t *testing.T) {
+		var metadata ModuleMetadata
+		if err := metadata.FromYAML([]byte("name: [unclosed")); err == nil {
+			t.Error("expected error for malformed YAML, got nil")
+		}
+	})
 }
 
 func TestModuleMetadata_Validate(t *testing.T) {
@@ -999,7 +1005,9 @@ interfaces:
   - Get
   - Set`
 
-	_ = os.WriteFile(metadataFile, []byte(yamlContent), 0644) // Ignore error in benchmark setup
+	if err := os.WriteFile(metadataFile, []byte(yamlContent), 0644); err != nil {
+		b.Fatalf("setup: write benchmark file: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

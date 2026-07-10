@@ -105,12 +105,11 @@ func LoadModuleMetadata(filePath string) (*ModuleMetadata, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open module metadata file %s: %v", filePath, err)
 	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			// Log error but don't override original error - best effort cleanup
-			_ = err
-		}
-	}()
+	// The file is opened read-only and fully consumed by ParseModuleMetadata
+	// before this defer runs, so a Close error cannot affect the returned
+	// metadata or signal data loss (no writes were buffered). The error is
+	// intentionally discarded rather than surfaced or logged.
+	defer func() { _ = file.Close() }()
 
 	return ParseModuleMetadata(file)
 }
