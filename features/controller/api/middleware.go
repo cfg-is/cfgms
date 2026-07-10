@@ -39,9 +39,10 @@ const (
 	targetTenantContextKey contextKey = "target_tenant"
 )
 
-// Principal represents an authenticated entity — either an mTLS admin cert or an API key.
-// Admin principals (IsAdmin == true) are set exclusively by the cert-auth path after
-// admin-extension verification. API-key principals are converted from APIKey structs.
+// Principal represents an authenticated entity — either an mTLS admin cert, an API key,
+// a cfg-CLI Bearer session (ADR-014), or a web session cookie (ADR-018).
+// IsAdmin == true is set by three paths: mTLS admin cert, cfg-CLI Bearer session, and
+// web session cookie. API-key principals always have IsAdmin == false.
 type Principal struct {
 	ID          string
 	Name        string
@@ -314,6 +315,61 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
+			}
+		}
+
+		// Web session cookie path (Issue #2492, ADR-018 §1,2): authenticate browser clients
+		// via the cfgms_session HttpOnly+Secure+SameSite=Strict cookie. Credential precedence
+		// (security B5.2): any header credential (Bearer or API key) or admin mTLS ALWAYS wins
+		// — when a header credential is present the cookie is ignored entirely (not validated,
+		// not renewed, no Set-Cookie emitted). This branch only fires when no header credential
+		// is present, ensuring existing Bearer/API-key/mTLS clients are byte-identical.
+		if s.webSessionManager != nil && !hasHeaderCredentials(r) {
+			if cookie, cookieErr := r.Cookie("cfgms_session"); cookieErr == nil {
+				webSess, webErr := s.webSessionManager.Validate(r.Context(), cookie.Value)
+				if webErr != nil {
+					switch {
+					case errors.Is(webErr, session.ErrSessionRevoked):
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+					case errors.Is(webErr, session.ErrSessionExpired):
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
+					default:
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+					}
+					return
+				}
+				// Rolling renewal: refresh the cookie so the idle TTL resets on every
+				// authenticated response (ADR-018 §1). When the session is already in the
+				// grace window (prior token), Renew returns newToken == "" — do not
+				// overwrite a Set-Cookie the client already received.
+				// renewErr is intentionally soft-ignored for ALL error variants (including
+				// ErrSessionRevoked) — the same pattern as the Bearer path above (line ~298).
+				// If revocation races Validate→Renew within nanoseconds, the request still
+				// proceeds; the next request will be rejected by Validate. If stricter
+				// atomicity is needed, merge Validate and Renew into a single operation.
+				_, newToken, renewErr := s.webSessionManager.Renew(r.Context(), cookie.Value)
+				if renewErr == nil && newToken != "" {
+					http.SetCookie(w, &http.Cookie{
+						Name:     "cfgms_session",
+						Value:    newToken,
+						HttpOnly: true,
+						Secure:   true,
+						SameSite: http.SameSiteStrictMode,
+						Path:     "/",
+					})
+				}
+				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
+				webPrincipal := &Principal{
+					ID:       webSess.PrincipalID,
+					Name:     "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+					IsAdmin:  true,
+					TenantID: webSess.TenantID,
+				}
+				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
+				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
+				ctx = context.WithValue(ctx, ctxkeys.TenantID, webSess.TenantID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
 			}
 		}
 
