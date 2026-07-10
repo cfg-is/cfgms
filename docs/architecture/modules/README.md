@@ -143,6 +143,18 @@ Two carve-outs:
 
 Everything else — however useful — is an `extended` module, built as a standalone bundle and pulled on demand (see [distribution.md](distribution.md) and [ADR-006](../decisions/006-module-packaging-and-distribution.md)). Changing the stdlib set is an ADR-level decision. **[ADR-016](../decisions/016-steward-module-foundation.md) is authoritative** for the criterion, the current members, and the `stdlib/` ↔ `extended/` repository split.
 
+### Stdlib membership is enforced by the build
+
+Adding or removing a module from stdlib requires **five coordinated changes**, each enforced by `make check-stdlib-payload-boundary` (wired into `make test-commit`):
+
+1. `features/modules/stdlib/<name>/` — the module directory
+2. `Makefile` `STDLIB_MODULES` variable — drives compilation
+3. `build/windows/cfgms-steward.wxs` — Windows MSI installer `<Component>` block (alphabetical insertion order)
+4. `build/linux/install.sh` `STDLIB_MODULES` array — Linux install-script payload (one name per line, alphabetical)
+5. `build/darwin/build-pkg.sh` `STDLIB_MODULES` array — macOS `.pkg` payload (one name per line, alphabetical)
+
+The build fails if any of the five disagree. New entries in `.wxs`, `install.sh`, and `build-pkg.sh` must be inserted in alphabetical order by module name (not appended at the end).
+
 ### Current stdlib members
 
 Shipped in the steward installer, all `executors: [steward]` (closed set — see ADR-016):
