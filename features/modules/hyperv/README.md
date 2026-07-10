@@ -326,6 +326,39 @@ matches the **correlation identity** baked into the rendered answer file. The
 provisioning record carries this correlation value; the controller also flips the
 record to `failed` when `completion.timeout` elapses with no matching registration.
 
+### Cluster-visible provisioning record for `ha_role` VMs (#2447, ADR-009 A1.4 Option A)
+
+For a standalone VM the provisioning record is **host-local** — it lives only on
+the node doing the install. For an `ha_role` VM whose primary VHD is on a Cluster
+Shared Volume, the record is instead **cluster-visible**: it is persisted as JSON
+beside the VM's VHD at
+
+```
+<dir(vhd_path)>\.cfgms-provision\<vm_name>.json
+```
+
+Because the CSV is mounted on **every** member node, this record is readable
+across the cluster. That closes a mid-provision failover window: if the CNO owner
+fails over **while an install is in flight**, the new owner's convergence reads
+the non-terminal record (`creating`/`installing`/`finalizing`) on the shared CSV,
+recognises the role as an in-progress attempt owned elsewhere, and
+**surfaces-and-waits** — it issues no `New-VM` and audits the skip as
+`vm-provision-skip-in-progress-elsewhere`. Without the shared record the new owner
+would see an absent VM with no local record and create a **duplicate** — exactly
+the failure Option A prevents. There is **no auto-resume** of another node's
+attempt; surface-and-wait is the only behavior on an unattributable in-progress
+record.
+
+Routing is automatic and scoped: only `ha_role`+CSV VMs use the CSV store; every
+other VM keeps the configured host-local store, unchanged. The record is written
+crash-safely (temp file + atomic rename) so a failover reading it mid-write never
+observes a truncated record. Reads of the **cluster-visible** record are
+**fail-loud** — if it cannot be read, creation does not proceed while the cluster
+record state is unknown; host-local record reads keep their historical
+swallow-on-error behavior. (Cluster-visible ≠ controller-visible: the
+controller-side completion reconciler still reads its own store — that wiring is a
+separate, pre-existing concern.)
+
 ### How the answer file is delivered (host-native seed VHDX)
 
 The unattended answer file is delivered on a **secondary VHDX seed disk** attached

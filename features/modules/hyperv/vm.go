@@ -803,9 +803,12 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 
 	if state == "absent" {
 		// Snapshot current state for the audit before-capture (best-effort: nil is
-		// acceptable if the VM is already absent or the host is unreachable).
+		// acceptable if the VM is already absent or the host is unreachable). cur
+		// also carries the removed VM's HARole + VHDPath, used below to route the
+		// provisioning-record delete to the same store it was written to.
 		var deleteBefore map[string]interface{}
-		if cur, gErr := m.getVM(ctx, vmName); gErr == nil && cur != nil && cur.State != "absent" {
+		cur, gErr := m.getVM(ctx, vmName)
+		if gErr == nil && cur != nil && cur.State != "absent" {
 			deleteBefore = map[string]interface{}{
 				"cpu":       cur.CPUCount,
 				"memory_mb": cur.MemoryMB,
@@ -817,11 +820,11 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		}
 		// Delete the provisioning record so a subsequent source: declaration
 		// provisions cleanly without hitting the surface-and-wait wedge.
-		// Mirrors the on_existing: recreate path in applySourceGated.
-		if m.provisionStore != nil {
-			if err := m.provisionStore.DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
-				return err
-			}
+		// Mirrors the on_existing: recreate path in applySourceGated. Route via
+		// storeFor(cur) so an ha_role+CSV VM's record is deleted from the CSV
+		// store it was written to; cur may be nil (already absent) → host-local.
+		if err := m.storeFor(cur).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
+			return err
 		}
 		// Delete any storage-move record (#2411) so a later same-named VM
 		// starts clean rather than inheriting an in-flight/failed move.
@@ -1106,11 +1109,26 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		// (surface-and-wait, ADR-009 §2): the install may simply be mid-flight
 		// and a half-built VM transiently absent from Get-VM. We do NOT re-issue
 		// New-VM — that is what protects against thrashing an in-progress build.
-		if m.isOwnIncompleteAttempt(ctx, vmName) {
+		own, ownErr := m.isOwnIncompleteAttempt(ctx, cfg)
+		if ownErr != nil {
+			// CSV (cluster-visible) record was unreadable → fail loud. Creation
+			// must NOT proceed while the cluster record state is unknown, or a
+			// mid-provision CNO failover could produce the duplicate Option A
+			// exists to prevent. (Host-local reads never reach here — they swallow.)
+			return fmt.Errorf("hyperv: cannot determine provisioning state for VM %q: %w", vmName, ownErr)
+		}
+		if own {
+			// An in-progress record exists. On this node it may be our own mid-flight
+			// build; on a NEW CNO owner after a failover it is another node's in-flight
+			// attempt visible via the CSV record. Both surface-and-wait (no auto-retry,
+			// no New-VM) — the record on the CSV is what lets the new owner see it.
 			if logger, ok := m.GetLogger(); ok {
 				logger.Warn("hyperv: in-progress provisioning attempt; surface-and-wait (no auto-retry)",
 					"vm_name", logging.SanitizeLogValue(vmName))
 			}
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"vm-provision-skip-in-progress-elsewhere", "vm:"+vmName, nil,
+				map[string]interface{}{"reason": "provision in progress"}, nil)
 			return nil
 		}
 		// No in-progress record → normal create-from-source path.
@@ -1148,10 +1166,10 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		if err := m.removeVM(ctx, vmName, recreateBefore); err != nil {
 			return err
 		}
-		if m.provisionStore != nil {
-			if err := m.provisionStore.DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
-				return err
-			}
+		// Route via storeFor(cfg): an ha_role+CSV recreate must reset the
+		// cluster-visible record, not a stale host-local one.
+		if err := m.storeFor(cfg).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
+			return err
 		}
 		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
 			return err
@@ -1172,11 +1190,11 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		// Existing-but-broken VM → surface as degraded (ADR-009 §2). Never
 		// delete-and-rebuild. The record records the observed state so the
 		// operator (and the controller-side reconciler) can see it.
-		record, err := m.loadOrInitProvision(ctx, vmName)
+		record, err := m.loadOrInitProvision(ctx, cfg, vmName)
 		if err != nil {
 			return err
 		}
-		return m.degradeProvision(ctx, vmName, record, currentVM.State)
+		return m.degradeProvision(ctx, cfg, vmName, record, currentVM.State)
 	}
 
 	// Existing healthy VM → source is inert. Log the inert decision, then drive

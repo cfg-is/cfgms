@@ -80,6 +80,14 @@ type hypervModule struct {
 	// WithProvisionStore.
 	provisionStore ProvisionStore
 
+	// csvProvisionStore, when non-nil, overrides the CSV-backed store that
+	// storeFor constructs for an ha_role+CSV VM (ADR-009 A1.4 Option A, #2447).
+	// In production it is nil and storeFor builds one rooted at the VM's CSV home
+	// per convergence; tests inject a fake here to assert routing and drive the
+	// surface-and-wait behavior without a real CSV mount (mirrors the
+	// provisionStore/WithProvisionStore seam).
+	csvProvisionStore ProvisionStore
+
 	// fallbackMoveStore backs the storage-location move records (#2411) when
 	// provisionStore does not implement MoveStore (both in-repo stores do; this
 	// exists so a custom ProvisionStore cannot panic the move path). Lazily
@@ -166,6 +174,18 @@ func WithProvisionStore(s ProvisionStore) HypervOption {
 	return func(m *hypervModule) {
 		if s != nil {
 			m.provisionStore = s
+		}
+	}
+}
+
+// WithCSVProvisionStore overrides the CSV-backed ProvisionStore that storeFor
+// otherwise constructs per-VM for an ha_role+CSV VM (#2447). Tests inject a fake
+// to assert store routing and drive the mid-provision-failover surface-and-wait
+// path without a real Cluster Shared Volume. A nil store is ignored.
+func WithCSVProvisionStore(s ProvisionStore) HypervOption {
+	return func(m *hypervModule) {
+		if s != nil {
+			m.csvProvisionStore = s
 		}
 	}
 }
