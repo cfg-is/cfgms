@@ -30,6 +30,11 @@ type ControllerService struct {
 
 	ringMu     sync.RWMutex
 	ringConfig controllerconfig.DeploymentRingConfig
+
+	// postDNASyncHook is called at the end of SyncDNA after durable storage
+	// write.  Set via SetPostDNASyncHook following the late-wiring idiom used
+	// by signingRotationSvc.SetPublisher and heartbeat.Service.SetOnDNAHashMismatch.
+	postDNASyncHook func(stewardID string, dna *common.DNA)
 }
 
 // StewardInfo holds connection/heartbeat state for a registered steward.
@@ -317,6 +322,12 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 
 	// Persist full DNA snapshot to durable storage
 	s.storeDNA(ctx, dna.Id, steward.TenantID, dna, steward.Status)
+
+	// Fire post-sync hook (Issue #2524).  Called unconditionally — storeDNA
+	// logs its own errors and never returns one to callers.
+	if s.postDNASyncHook != nil {
+		s.postDNASyncHook(dna.Id, dna)
+	}
 
 	s.logger.Debug("DNA synchronized successfully", "steward_id", logging.SanitizeLogValue(dna.Id))
 
@@ -751,6 +762,17 @@ func (s *ControllerService) UpdateStewardTenant(stewardID, newTenantID string) e
 	}
 	steward.TenantID = newTenantID
 	return nil
+}
+
+// SetPostDNASyncHook registers a hook invoked at the end of each SyncDNA call,
+// after the full DNA snapshot has been written to durable storage.  Follows the
+// same late-wiring pattern as heartbeat.Service.SetOnDNAHashMismatch — the hook
+// receiver (heartbeat.Service) is constructed after ControllerService, so the
+// hook cannot be supplied at construction time without creating an init cycle.
+func (s *ControllerService) SetPostDNASyncHook(fn func(stewardID string, dna *common.DNA)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.postDNASyncHook = fn
 }
 
 // GetAllStewards returns a list of all registered stewards. Each entry is a

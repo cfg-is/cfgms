@@ -254,3 +254,104 @@ func TestSetExpectedDNAHash_UnknownSteward(t *testing.T) {
 	assert.Equal(t, "expected-hash", status.expectedDNAHash,
 		"the expected hash must be persisted for a newly created entry")
 }
+
+// TestHeartbeatService_SetOnDNAHashMismatch_WorksAfterConstruction verifies that
+// SetOnDNAHashMismatch can be called after construction (late-wiring) and that
+// the registered callback fires on subsequent hash mismatches (Issue #2524).
+func TestHeartbeatService_SetOnDNAHashMismatch_WorksAfterConstruction(t *testing.T) {
+	// Create service WITHOUT a mismatch callback in the Config.
+	svc, cp := newTestService(t)
+	ctx := context.Background()
+
+	// Register the late-wired callback.
+	var called []string
+	svc.SetOnDNAHashMismatch(func(stewardID string) {
+		called = append(called, stewardID)
+	})
+
+	// Prime the expected hash so mismatch detection is active.
+	svc.SetExpectedDNAHash("steward-latewire", "hash-expected")
+
+	// Heartbeat with matching hash — no trigger.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-latewire",
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+		DNAHash:   "hash-expected",
+	}))
+	assert.Empty(t, called, "late-wired callback must not fire on matching hash")
+
+	// Heartbeat with different hash — must trigger the late-wired callback.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-latewire",
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+		DNAHash:   "hash-diverged",
+	}))
+	require.Len(t, called, 1, "late-wired callback must fire exactly once on mismatch")
+	assert.Equal(t, "steward-latewire", called[0], "callback must receive the correct steward ID")
+}
+
+// TestHeartbeatService_SetOnDNAHashMismatch_ExactlyOnce is the REQUIRED TEST:
+// a heartbeat carrying a DNA hash that differs from the expected hash triggers
+// exactly one callback invocation for that steward ID; a heartbeat with a
+// matching hash triggers none (Issue #2524).
+func TestHeartbeatService_SetOnDNAHashMismatch_ExactlyOnce(t *testing.T) {
+	var callCount int
+	var lastStewardID string
+
+	svc, cp := newTestService(t)
+	svc.SetOnDNAHashMismatch(func(stewardID string) {
+		callCount++
+		lastStewardID = stewardID
+	})
+	ctx := context.Background()
+
+	svc.SetExpectedDNAHash("steward-exact", "good-hash")
+
+	// Matching heartbeat — zero callbacks.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-exact",
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+		DNAHash:   "good-hash",
+	}))
+	assert.Equal(t, 0, callCount, "matching hash must not trigger callback")
+
+	// Mismatching heartbeat — exactly one callback with the right steward ID.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-exact",
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+		DNAHash:   "diverged-hash",
+	}))
+	assert.Equal(t, 1, callCount, "mismatching hash must trigger exactly one callback")
+	assert.Equal(t, "steward-exact", lastStewardID, "callback must receive the correct steward ID")
+}
+
+// TestHeartbeatService_SetOnDNAHashMismatch_ReplacesConfigCallback verifies that
+// SetOnDNAHashMismatch replaces (not appends to) any callback set at Config time,
+// so server.go can override the default-nil with the real publisher callback.
+func TestHeartbeatService_SetOnDNAHashMismatch_ReplacesConfigCallback(t *testing.T) {
+	configCalls := 0
+	laterCalls := 0
+
+	svc, cp := newTestService(t, func(cfg *Config) {
+		cfg.OnDNAHashMismatch = func(_ string) { configCalls++ }
+	})
+	ctx := context.Background()
+
+	// Replace the Config-time callback with a different one.
+	svc.SetOnDNAHashMismatch(func(_ string) { laterCalls++ })
+
+	svc.SetExpectedDNAHash("steward-replace", "hash-A")
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-replace",
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+		DNAHash:   "hash-B", // mismatch
+	}))
+
+	assert.Equal(t, 0, configCalls, "Config-time callback must be replaced, not appended")
+	assert.Equal(t, 1, laterCalls, "late-wired callback must fire on mismatch")
+}

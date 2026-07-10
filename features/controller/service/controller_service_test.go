@@ -1090,3 +1090,88 @@ func TestUpdateStewardTenant_PreservesOtherFields(t *testing.T) {
 	assert.Equal(t, "active", info.Status, "Status must not change on tenant update")
 	assert.Equal(t, "s-preserve", info.ID, "ID must not change on tenant update")
 }
+
+// ---------------------------------------------------------------------------
+// SetPostDNASyncHook tests (Issue #2524)
+// ---------------------------------------------------------------------------
+
+// TestSetPostDNASyncHook_FiresAfterSyncDNA verifies that a hook registered via
+// SetPostDNASyncHook is invoked after a successful SyncDNA call, receiving the
+// correct steward ID and DNA proto (Issue #2524).
+func TestSetPostDNASyncHook_FiresAfterSyncDNA(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ctx := context.Background()
+
+	require.NoError(t, svc.RegisterSteward("steward-hook", "tenant-1", "", "active"))
+
+	type hookCall struct {
+		stewardID string
+		dna       *commonpb.DNA
+	}
+	var calls []hookCall
+	svc.SetPostDNASyncHook(func(stewardID string, dna *commonpb.DNA) {
+		calls = append(calls, hookCall{stewardID: stewardID, dna: dna})
+	})
+
+	dna := &commonpb.DNA{
+		Id:         "steward-hook",
+		Attributes: map[string]string{"os": "linux", "arch": "amd64"},
+	}
+	status, err := svc.SyncDNA(ctx, dna)
+	require.NoError(t, err)
+	require.Equal(t, commonpb.Status_OK, status.Code)
+
+	require.Len(t, calls, 1, "hook must be called exactly once after SyncDNA")
+	assert.Equal(t, "steward-hook", calls[0].stewardID)
+	assert.Equal(t, dna.Attributes, calls[0].dna.Attributes)
+}
+
+// TestSetPostDNASyncHook_NotFiredForUnknownSteward verifies that the hook does
+// NOT fire when SyncDNA is called for an unregistered steward (Issue #2524).
+func TestSetPostDNASyncHook_NotFiredForUnknownSteward(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ctx := context.Background()
+
+	hookCalled := false
+	svc.SetPostDNASyncHook(func(_ string, _ *commonpb.DNA) { hookCalled = true })
+
+	dna := &commonpb.DNA{Id: "unknown-steward", Attributes: map[string]string{"os": "linux"}}
+	status, err := svc.SyncDNA(ctx, dna)
+	require.NoError(t, err)
+	assert.Equal(t, commonpb.Status_NOT_FOUND, status.Code)
+	assert.False(t, hookCalled, "hook must not fire for an unknown steward")
+}
+
+// TestSetPostDNASyncHook_NilHookIsNoop verifies that a nil hook (default) does
+// not cause a panic when SyncDNA is called (Issue #2524).
+func TestSetPostDNASyncHook_NilHookIsNoop(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ctx := context.Background()
+
+	require.NoError(t, svc.RegisterSteward("steward-nil-hook", "tenant-1", "", "active"))
+
+	dna := &commonpb.DNA{Id: "steward-nil-hook", Attributes: map[string]string{"os": "windows"}}
+	assert.NotPanics(t, func() {
+		_, _ = svc.SyncDNA(ctx, dna)
+	}, "nil postDNASyncHook must not cause a panic")
+}
+
+// TestSetPostDNASyncHook_HookReceivesDNACopy verifies that the hook receives
+// the same DNA instance passed to SyncDNA (no accidental nil or empty DNA).
+func TestSetPostDNASyncHook_HookReceivesDNACopy(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ctx := context.Background()
+
+	require.NoError(t, svc.RegisterSteward("steward-dnacopy", "tenant-1", "", "active"))
+
+	var hookDNA *commonpb.DNA
+	svc.SetPostDNASyncHook(func(_ string, dna *commonpb.DNA) { hookDNA = dna })
+
+	attrs := map[string]string{"version": "2.0", "platform": "linux"}
+	dna := &commonpb.DNA{Id: "steward-dnacopy", Attributes: attrs}
+	_, err := svc.SyncDNA(ctx, dna)
+	require.NoError(t, err)
+
+	require.NotNil(t, hookDNA, "hook must receive non-nil DNA")
+	assert.Equal(t, attrs, hookDNA.Attributes, "hook DNA attributes must match the synced DNA")
+}

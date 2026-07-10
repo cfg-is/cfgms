@@ -447,3 +447,14 @@ func (s *Service) GetUnhealthyStewards() []string {
 
 	return unhealthy
 }
+
+// SetOnDNAHashMismatch registers the callback that fires when a heartbeat carries
+// a DNA hash that differs from the expected hash.  This setter allows late-wiring
+// after construction — the same pattern used by signingRotationSvc.SetPublisher
+// in server.go — so commandPublisher can be registered once available, breaking
+// the init cycle between heartbeat.Service and commands.Publisher.
+func (s *Service) SetOnDNAHashMismatch(cb DNAHashMismatchCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onDNAHashMismatch = cb
+}
