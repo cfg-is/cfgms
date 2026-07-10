@@ -6,6 +6,28 @@ This directory contains automated CI/CD workflows for CFGMS. All workflows are n
 
 ### Build & Test Workflows
 
+#### `frontend-ci.yml`
+**Purpose**: Frontend lint, typecheck, tests, security audit, and production build
+
+**Triggers**: Pull Requests, Merge Group, Manual dispatch
+
+**What it does**:
+- Detects whether `web/**` changed against the PR merge base (always runs)
+- **No `web/` changes**: exits green immediately — Go-only and docs-only PRs are never blocked
+- **`web/` changes**: runs the full frontend check suite in order:
+  - `npm ci` — reproducible install from `package-lock.json`
+  - `npm run lint` — ESLint flat config with security rules at error severity
+  - `npm run typecheck` — TypeScript strict-mode check, no emit
+  - `npm run test` — Vitest (jsdom + Testing Library)
+  - `npm run build` — typecheck + production Vite build
+  - `npm audit --audit-level=high` — blocks on high/critical advisories (gate, not mutator)
+
+**Node toolchain**: version read from `web/.nvmrc`; zero Go steps
+
+**Runtime**: ~1 minute (stub exit for non-web PRs) / ~5-8 minutes (full suite)
+
+---
+
 #### `cross-platform-build.yml`
 **Purpose**: Cross-platform compilation and native build validation
 
@@ -177,6 +199,7 @@ make test-integration-setup && make generate-test-certificates
 
 | Workflow | Push (main/develop) | Pull Request | Schedule | Manual |
 |----------|---------------------|--------------|----------|--------|
+| frontend-ci.yml | ❌ | ✅ | ❌ | ✅ |
 | cross-platform-build.yml | ✅ | ✅ | ❌ | ✅ |
 | test-suite.yml | ✅ | ✅ | ❌ | ❌ |
 | production-gates.yml | ✅ | ✅ | ❌ | ✅ |

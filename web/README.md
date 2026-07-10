@@ -9,7 +9,10 @@ lintable, testable app with a minimal placeholder screen. The login screen
 (#2495) and app shell (#2496) land in later stories.
 
 The JS/TS toolchain is fully contained in `web/` and does not participate in
-any Go build or test gate.
+any Go build or test gate. CI runs the same scripts (`lint`, `typecheck`,
+`test`, `build`, and `npm audit --audit-level=high`) via the dedicated
+[`frontend-ci.yml`](../.github/workflows/frontend-ci.yml) lane, which gates
+merges to `develop` for PRs that touch `web/**`.
 
 ## Prerequisites
 

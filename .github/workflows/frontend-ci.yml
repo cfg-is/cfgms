@@ -1,0 +1,89 @@
+name: Frontend CI
+
+# Always-running job with internal change detection.
+#
+# DO NOT add workflow-level paths:/paths-ignore: filtering here. A required
+# check that never creates a check run blocks the merge queue indefinitely.
+# Instead, the single job below detects whether web/** changed against the
+# PR merge base and exits green immediately when there is nothing to check.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-checks:
+    name: frontend-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect web/ changes against develop merge base
+        id: changes
+        run: |
+          MERGE_BASE=$(git merge-base HEAD origin/develop 2>/dev/null || true)
+          if [ -z "$MERGE_BASE" ]; then
+            echo "No merge base found — assuming web/ changes exist (safe fallback)"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$MERGE_BASE" HEAD -- web/ 2>/dev/null; then
+            echo "No web/ changes against merge base — exiting green"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "web/ changes detected — running frontend checks"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: web/.nvmrc
+
+      - name: Cache npm
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install dependencies
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: web
+        run: npm ci
+
+      - name: Lint
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: web
+        run: npm run lint
+
+      - name: Typecheck
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: web
+        run: npm run typecheck
+
+      - name: Test
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: web
+        run: npm run test
+
+      - name: Build (production)
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: web
+        run: npm run build
+
+      - name: Security audit
+        if: steps.changes.outputs.has_changes == 'true'
+        working-directory: web
+        run: npm audit --audit-level=high
