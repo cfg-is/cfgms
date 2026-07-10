@@ -191,15 +191,90 @@ cookie is ignored entirely — not validated, not renewed, no `Set-Cookie` emitt
 ensures existing Bearer/API-key/mTLS clients are byte-identical before and after the
 cookie branch.
 
-**Visibility note (security A5.7):** the `webSessionManager` sessions are not listed or
-revocable via `GET /api/v1/sessions` or `DELETE /api/v1/sessions/{id}` at this merge
-point (#2492). Those endpoints operate on the `sessionManager` (cfg-CLI sessions). The
-`GET /api/v1/sessions` semantics for web sessions are deferred to #2493/#2494 when
-login/logout endpoints are added.
+**Visibility note (security A5.7):** web session tokens are not listed via
+`GET /api/v1/sessions` or revocable via `DELETE /api/v1/sessions/{id}` — those
+endpoints operate on the `cfg`-CLI `sessionManager` only. Web sessions are revoked
+server-side via `POST /api/v1/web/logout`.
 
 **CORS note (security A5.8):** the `corsMiddleware` never sets
 `Access-Control-Allow-Credentials: true`. Web session cookies are same-origin only;
 credentialed cross-origin requests are not supported and must never be enabled.
+
+### Web Login / CSRF / Lockout / Logout (Issue #2493, ADR-018 §3,4)
+
+#### Login flow
+
+```
+GET  /api/v1/web/csrf   → Set-Cookie: cfgms_csrf_pre=<token>; Secure; SameSite=Strict; Max-Age=600
+POST /api/v1/web/login  (X-CSRF-Token: <token>)
+     → Set-Cookie: cfgms_session=...; HttpOnly; Secure; SameSite=Strict; Path=/
+     → Set-Cookie: cfgms_csrf=...; Secure; SameSite=Strict; Path=/   (non-HttpOnly)
+```
+
+1. **Pre-session CSRF gate (ADR-018 §3):** `GET /api/v1/web/csrf` issues a 32-byte
+   `crypto/rand` token in `cfgms_csrf_pre` (Secure; SameSite=Strict; Max-Age=600s).
+   The browser echoes it as `X-CSRF-Token` on the login POST. The server compares
+   cookie value to header value with `subtle.ConstantTimeCompare`. Mismatch or
+   absence → 403 before any credential work.
+
+2. **Session fixation defence:** any valid `cfgms_session` cookie presented with the
+   login request is revoked server-side before the new session is issued.
+
+3. **Per-account lockout (ADR-018 §3 / #2490):** 5 consecutive verification failures
+   lock the account for 15 minutes. Locked accounts receive the identical uniform 401
+   as wrong-password (timing-equalized via dummy argon2id hash). The counter resets on
+   a successful login.
+
+4. **Credential verification:** `VerifyWebCredential` — bad user, bad password, and
+   malformed input all return the same `ErrInvalidWebCredential` with equivalent latency.
+
+5. **Fresh session:** `webSessionManager.Issue` mints a new token (32 random bytes,
+   base64url). The raw token is set in `cfgms_session` (HttpOnly) and never logged.
+
+6. **Session-bound CSRF token:** a second 32-byte `crypto/rand` value is generated,
+   stored server-side keyed by session ID, and written to `cfgms_csrf` (non-HttpOnly
+   so the SPA can read it and set `X-CSRF-Token` on subsequent mutations).
+
+7. **Response body:** always `{"ok": true}` — no token is ever included (security A5.5).
+
+#### Session-bound CSRF middleware
+
+All **unsafe cookie-authenticated** requests (POST/PUT/PATCH/DELETE on the api subrouter)
+pass through `csrfMiddleware` (applied after `authenticationMiddleware`):
+
+- Safe methods (GET, HEAD) are exempt.
+- Bearer-token, API-key, and mTLS requests are **never** CSRF-checked — only
+  cookie-authenticated requests are in scope.
+- The `X-CSRF-Token` header is compared to the server-side session-bound token
+  (`subtle.ConstantTimeCompare`). Mismatch or absence → 403.
+- Invariant: at any merge point no unsafe cookie-authenticated method is reachable
+  without this protection.
+
+The three endpoints on the **base router** (`/api/v1/web/csrf`, `/api/v1/web/login`,
+`/api/v1/web/logout`) are explicitly wrapped in `s.authDefense.Middleware` because the
+api subrouter middleware chain does not apply to base-router routes (security A5.4).
+
+#### Logout
+
+`POST /api/v1/web/logout` is CSRF-checked (session-bound token required). On success:
+- Revokes the server-side session (subsequent cookie use → 401).
+- Removes the server-side CSRF token for the session.
+- Expires both `cfgms_session` and `cfgms_csrf` cookies (`Max-Age=0`).
+
+#### Audit events
+
+Every login attempt and logout emits a structured `AuditEventAuthentication` event:
+
+| Event | Action | Result |
+|-------|--------|--------|
+| Login success | `web.login.success` | `success` |
+| Login failure (bad credentials) | `web.login.failure` | `failure` |
+| Login blocked (account locked) | `web.login.lockout` | `denied` |
+| Logout | `web.logout` | `success` |
+
+Audit payloads carry sanitized username, tenant, outcome. Credential material
+(passwords, tokens, hashes) is never included. All log lines use
+`logging.SanitizeLogValue` for any request-derived field.
 
 ### Role-Based Access Control (RBAC)
 
