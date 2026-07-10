@@ -11,7 +11,7 @@ A role config recipe defines the *desired state* for a server role: packages, fi
 firewall rules, scheduled tasks, etc. You push it to a steward from the controller:
 
 ```bash
-cfg config upload --steward <STEWARD_ID> --config role-config.cfg
+cfg config upload role-config.cfg --steward <STEWARD_ID>
 ```
 
 The steward then converges the endpoint to that desired state on its next run.

@@ -12,8 +12,8 @@ configuration stays local and is never committed to this repository.
 
 | File | Purpose |
 |------|---------|
-| `linux-runner.cfg.yaml` | Steward cfg pushed to a Linux runner VM |
-| `windows-runner.cfg.yaml` | Steward cfg pushed to a Windows runner VM |
+| `linux-runner.cfg` | Steward cfg pushed to a Linux runner VM |
+| `windows-runner.cfg` | Steward cfg pushed to a Windows runner VM |
 | `github-app-secrets.example.yaml` | Documents the three secret key names loaded into the secrets provider |
 
 ---
@@ -52,10 +52,10 @@ Upload the appropriate cfg to the enrolled steward:
 
 ```bash
 # Linux runner
-cfg config upload --steward ci-runner-linux-01 --config linux-runner.cfg.yaml
+cfg config upload linux-runner.cfg --steward ci-runner-linux-01
 
 # Windows runner
-cfg config upload --steward ci-runner-windows-01 --config windows-runner.cfg.yaml
+cfg config upload windows-runner.cfg --steward ci-runner-windows-01
 ```
 
 The `github_runner` module fetches the agent archive, verifies the SHA-256,
