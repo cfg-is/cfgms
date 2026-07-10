@@ -18,8 +18,12 @@ SMOKE="$SCRIPT_DIR/tier1-smoke-test.sh"
 # avoid curl+Schannel on Windows. `go build -o <dir>/` names the binary per-OS
 # (cfg / cfg.exe). The smoke test picks it up via CFGMS_CFG_BIN.
 CFG_BUILD_DIR="$(mktemp -d)"
+CFG_BUILD_ERR=""
 if command -v go >/dev/null 2>&1; then
-  ( cd "$SCRIPT_DIR/.." && go build -o "$CFG_BUILD_DIR/" ./cmd/cfg ) 2>/dev/null || true
+  # Capture the build error rather than discarding it, so a real compile failure
+  # (go present but build broken) is surfaced below instead of the misleading
+  # "no go/cfg on PATH" message.
+  CFG_BUILD_ERR=$( cd "$SCRIPT_DIR/.." && go build -o "$CFG_BUILD_DIR/" ./cmd/cfg 2>&1 ) || true
 fi
 if [[ -x "$CFG_BUILD_DIR/cfg" ]]; then
   export CFGMS_CFG_BIN="$CFG_BUILD_DIR/cfg"
@@ -29,6 +33,7 @@ elif command -v cfg >/dev/null 2>&1; then
   export CFGMS_CFG_BIN="cfg"
 else
   echo "ERROR: could not build or find the cfg client (need 'go' or 'cfg' on PATH)" >&2
+  [[ -n "$CFG_BUILD_ERR" ]] && echo "go build error was:" >&2 && echo "$CFG_BUILD_ERR" >&2
   exit 1
 fi
 

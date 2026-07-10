@@ -5,7 +5,9 @@
 # expected health response, and presence of three required tenants on a live
 # Tier 1 controller after a bootstrap run.
 #
-# Dependencies (runtime): bash >=4, curl, python3 (standard on Debian/Ubuntu)
+# Dependencies (runtime): bash >=4, cfg (on PATH or via CFGMS_CFG_BIN), python3
+#                         (curl is no longer used — mTLS goes through cfg/python3
+#                         with crypto/tls/OpenSSL PEM, never curl+Schannel; #2458)
 #
 # NOTE: Story #1848 (cfg tenant create + GET /api/v1/tenants/{id}) must be
 #       merged and run before the tenant-existence checks here can pass on a
@@ -280,25 +282,32 @@ _check_tenant() {
   # This keeps the check cross-platform without any MSYS path conversion.
   code=$(CT_URL="${CONTROLLER_URL}/api/v1/tenants/${tenant_id}" \
     CT_CERT_PEM="$(cat "$CERT_FILE")" CT_KEY_PEM="$(cat "$KEY_FILE")" CT_CA_PEM="$(cat "$CA_FILE")" \
-    python3 - <<'PYTHON' 2>/dev/null
-import os, ssl, tempfile, urllib.request, urllib.error
-d = tempfile.mkdtemp()
-paths = {}
-for name, env in (('cert', 'CT_CERT_PEM'), ('key', 'CT_KEY_PEM'), ('ca', 'CT_CA_PEM')):
-    p = os.path.join(d, name + '.pem')
-    with open(p, 'w') as fh:
-        fh.write(os.environ[env])
-    paths[name] = p
-ctx = ssl.create_default_context(cafile=paths['ca'])
-ctx.load_cert_chain(certfile=paths['cert'], keyfile=paths['key'])
-req = urllib.request.Request(os.environ['CT_URL'], method='GET')
-try:
-    with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
-        print(r.status)
-except urllib.error.HTTPError as e:
-    print(e.code)
-except Exception:
-    print('000')
+    python3 - <<'PYTHON'
+import os, ssl, sys, tempfile, urllib.request, urllib.error
+# TemporaryDirectory removes the written cert/key/CA (including the admin's
+# private key) when the block exits — never leave key material on disk, matching
+# the outer script's trap. The request runs inside the block while the files
+# exist; load_cert_chain has already read them into the context.
+with tempfile.TemporaryDirectory() as d:
+    paths = {}
+    for name, env in (('cert', 'CT_CERT_PEM'), ('key', 'CT_KEY_PEM'), ('ca', 'CT_CA_PEM')):
+        p = os.path.join(d, name + '.pem')
+        with open(p, 'w') as fh:
+            fh.write(os.environ[env])
+        paths[name] = p
+    ctx = ssl.create_default_context(cafile=paths['ca'])
+    ctx.load_cert_chain(certfile=paths['cert'], keyfile=paths['key'])
+    req = urllib.request.Request(os.environ['CT_URL'], method='GET')
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+            print(r.status)
+    except urllib.error.HTTPError as e:
+        print(e.code)
+    except Exception as e:
+        # Non-HTTP failure (TLS handshake, connect, timeout): report 000 on
+        # stdout and surface the reason on stderr for diagnosability.
+        print('000')
+        print(f'tenant-check error: {type(e).__name__}: {e}', file=sys.stderr)
 PYTHON
 )
   [[ -z "$code" ]] && code="000"
