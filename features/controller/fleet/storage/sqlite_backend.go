@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -532,4 +533,245 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// pruneCandidate holds the minimal data needed to evaluate one version for pruning.
+type pruneCandidate struct {
+	version     int64
+	contentHash string
+	storedAt    time.Time
+	inHistory   bool // true = row lives in dna_history; false = reference-only (dna_references)
+}
+
+// PruneDevice removes dna_history and dna_references rows for deviceID that exceed
+// the given retention bounds.
+//
+// maxCount > 0 keeps the newest N versions (by version number); 0 disables the cap.
+// Non-zero cutoff prunes any row whose timestamp is before that instant; zero disables.
+//
+// Implements the dedup-safe algorithm: a dna_history row is never deleted while any
+// live dna_references row (from any device) still points at its content_hash.
+// The write mutex is held for the entire check-and-delete cycle so no concurrent
+// Store/StoreReference call can interleave between the reference count check and
+// the delete.
+//
+// Returns the count of rows actually deleted.
+func (b *SQLiteBackend) PruneDevice(ctx context.Context, deviceID string, maxCount int, cutoff time.Time) (int64, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin prune transaction for %s: %w", deviceID, err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after successful Commit
+
+	deleted, err := pruneDeviceInTx(ctx, tx, deviceID, maxCount, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit prune transaction for %s: %w", deviceID, err)
+	}
+	return deleted, nil
+}
+
+// PruneAllDevices applies retention bounds to every device in the store.
+// Errors for individual devices are logged and skipped so a single bad row does not
+// abort the full fleet sweep.
+func (b *SQLiteBackend) PruneAllDevices(ctx context.Context, maxCount int, cutoff time.Time) (int64, error) {
+	// Collect device IDs under a short read lock so we do not hold a write lock
+	// across the full fleet sweep.
+	b.mutex.RLock()
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT DISTINCT device_id FROM dna_history
+		UNION
+		SELECT DISTINCT device_id FROM dna_references
+	`)
+	if err != nil {
+		b.mutex.RUnlock()
+		return 0, fmt.Errorf("failed to enumerate devices for global retention sweep: %w", err)
+	}
+	var deviceIDs []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			_ = rows.Close()
+			b.mutex.RUnlock()
+			return 0, fmt.Errorf("failed to scan device ID during global sweep: %w", scanErr)
+		}
+		deviceIDs = append(deviceIDs, id)
+	}
+	_ = rows.Close()
+	b.mutex.RUnlock()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("device enumeration row error: %w", err)
+	}
+
+	var total int64
+	for _, id := range deviceIDs {
+		n, pruneErr := b.PruneDevice(ctx, id, maxCount, cutoff)
+		if pruneErr != nil {
+			b.logger.Error("Failed to prune device during global retention sweep",
+				"device_id", logging.SanitizeLogValue(id), "error", pruneErr)
+			continue // do not abort the full sweep on a single device failure
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// pruneDeviceInTx is the inner implementation of the dedup-safe pruning algorithm,
+// running inside an already-open transaction. Caller must hold b.mutex (write lock).
+//
+// Algorithm (per story spec):
+//  1. Collect all (version, content_hash, storedAt) for the device from both tables.
+//  2. Identify candidates: versions exceeding maxCount cap OR older than cutoff.
+//  3. Split candidates into reference-only (dna_references) and history-owning (dna_history).
+//  4. Delete reference-only candidates from dna_references first — this ensures the
+//     subsequent live-reference count for history candidates only sees truly live rows.
+//  5. For each history candidate, count remaining dna_references WHERE content_hash matches.
+//     If count > 0 another device still needs this content — skip the dna_history delete.
+//     If count == 0 no live reference remains — delete the dna_history row.
+func pruneDeviceInTx(ctx context.Context, tx *sql.Tx, deviceID string, maxCount int, cutoff time.Time) (int64, error) {
+	// Collect history rows for this device.
+	hRows, err := tx.QueryContext(ctx,
+		`SELECT version, content_hash, timestamp FROM dna_history WHERE device_id = ?`,
+		deviceID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query dna_history for %s: %w", deviceID, err)
+	}
+	histByVersion := make(map[int64]pruneCandidate)
+	for hRows.Next() {
+		var c pruneCandidate
+		c.inHistory = true
+		if err := hRows.Scan(&c.version, &c.contentHash, &c.storedAt); err != nil {
+			_ = hRows.Close()
+			return 0, fmt.Errorf("failed to scan dna_history row for %s: %w", deviceID, err)
+		}
+		histByVersion[c.version] = c
+	}
+	if err := hRows.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close dna_history rows for %s: %w", deviceID, err)
+	}
+
+	// Collect reference rows for this device.
+	rRows, err := tx.QueryContext(ctx,
+		`SELECT version, content_hash, timestamp FROM dna_references WHERE device_id = ?`,
+		deviceID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query dna_references for %s: %w", deviceID, err)
+	}
+	refByVersion := make(map[int64]pruneCandidate)
+	for rRows.Next() {
+		var c pruneCandidate
+		c.inHistory = false
+		if err := rRows.Scan(&c.version, &c.contentHash, &c.storedAt); err != nil {
+			_ = rRows.Close()
+			return 0, fmt.Errorf("failed to scan dna_references row for %s: %w", deviceID, err)
+		}
+		refByVersion[c.version] = c
+	}
+	if err := rRows.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close dna_references rows for %s: %w", deviceID, err)
+	}
+
+	// Build sorted (descending) list of all versions across both tables.
+	allVersions := make([]int64, 0, len(histByVersion)+len(refByVersion))
+	for v := range histByVersion {
+		allVersions = append(allVersions, v)
+	}
+	for v := range refByVersion {
+		if _, alreadyInHist := histByVersion[v]; !alreadyInHist {
+			allVersions = append(allVersions, v)
+		}
+	}
+	sort.Slice(allVersions, func(i, j int) bool { return allVersions[i] > allVersions[j] })
+
+	// keepByCount: versions within the count cap (newest N). Only populated when maxCount > 0.
+	keepByCount := make(map[int64]bool)
+	if maxCount > 0 {
+		for i, v := range allVersions {
+			if i < maxCount {
+				keepByCount[v] = true
+			}
+		}
+	}
+
+	// Classify candidates.
+	var histCandidates []pruneCandidate
+	var refCandidates []pruneCandidate
+	for _, v := range allVersions {
+		var c pruneCandidate
+		if h, ok := histByVersion[v]; ok {
+			c = h
+		} else {
+			c = refByVersion[v]
+		}
+
+		prunable := false
+		if maxCount > 0 && !keepByCount[v] {
+			prunable = true // exceeds count cap
+		}
+		if !cutoff.IsZero() && c.storedAt.Before(cutoff) {
+			prunable = true // older than retention period
+		}
+		if !prunable {
+			continue
+		}
+		if c.inHistory {
+			histCandidates = append(histCandidates, c)
+		} else {
+			refCandidates = append(refCandidates, c)
+		}
+	}
+
+	if len(histCandidates) == 0 && len(refCandidates) == 0 {
+		return 0, nil
+	}
+
+	// Step 4: delete reference-only candidates first.
+	// After this point, any remaining dna_references row is a truly live reference —
+	// not a row that was also a candidate in this same prune pass.
+	var deleted int64
+	for _, c := range refCandidates {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM dna_references WHERE device_id = ? AND version = ?`,
+			deviceID, c.version)
+		if err != nil {
+			return deleted, fmt.Errorf("failed to delete dna_references row (device=%s, version=%d): %w",
+				deviceID, c.version, err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+	}
+
+	// Step 5: for each history candidate, check whether any live dna_references row
+	// still points at its content_hash. The ref candidates for this device and pass
+	// were already deleted in step 4, so only truly live references remain.
+	for _, c := range histCandidates {
+		var liveRefCount int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM dna_references WHERE content_hash = ?`,
+			c.contentHash).Scan(&liveRefCount); err != nil {
+			return deleted, fmt.Errorf("failed to count live refs for content_hash (device=%s, version=%d): %w",
+				deviceID, c.version, err)
+		}
+		if liveRefCount > 0 {
+			// Another device (or a non-pruned version of this device) still references
+			// this content — the dna_history row has become shared canonical storage.
+			continue
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM dna_history WHERE device_id = ? AND version = ?`,
+			deviceID, c.version)
+		if err != nil {
+			return deleted, fmt.Errorf("failed to delete dna_history row (device=%s, version=%d): %w",
+				deviceID, c.version, err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+	}
+
+	return deleted, nil
 }
