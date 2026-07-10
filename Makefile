@@ -147,7 +147,7 @@ STDLIB_MODULES := \
 # See scripts/check-stdlib-payload-boundary.sh and ADR-016 clause 3.
 .PHONY: check-stdlib-payload-boundary
 check-stdlib-payload-boundary:
-	@./scripts/check-stdlib-payload-boundary.sh
+	@bash ./scripts/check-stdlib-payload-boundary.sh
 
 .PHONY: build-stdlib-modules
 build-stdlib-modules: check-stdlib-payload-boundary
