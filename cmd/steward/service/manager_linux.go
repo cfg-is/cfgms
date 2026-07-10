@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cfgis/cfgms/pkg/version"
@@ -33,6 +35,12 @@ const (
 	linuxSystemdUnit = "/etc/systemd/system/cfgms-steward.service"
 	linuxServiceName = "cfgms-steward"
 	linuxCACertPath  = "/etc/cfgms/controller-ca.crt"
+	// linuxLogDir is the platform-conventional log directory for the CFGMS steward.
+	// CFGMS_INSTALL_PREFIX is respected for test isolation (see platformLogDir).
+	linuxLogDir = "/var/log/cfgms"
+	// linuxServiceUser is the OS user that owns the log directory, matching the
+	// user created by tier1-bootstrap.sh.
+	linuxServiceUser = "cfgms"
 )
 
 // platformCACertPath returns the path where the CA cert is written, respecting
@@ -42,6 +50,48 @@ func platformCACertPath() string {
 		return filepath.Join(prefix, linuxCACertPath)
 	}
 	return linuxCACertPath
+}
+
+// platformLogDir returns the steward log directory, respecting CFGMS_INSTALL_PREFIX
+// for test isolation.
+func platformLogDir() string {
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		return filepath.Join(prefix, linuxLogDir)
+	}
+	return linuxLogDir
+}
+
+// serviceUserIDs looks up the OS user by name and returns its uid and gid.
+func serviceUserIDs(name string) (uid, gid int, err error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, fmt.Errorf("service user %q not found: %w", name, err)
+	}
+	uid64, err := strconv.ParseInt(u.Uid, 10, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid uid %q for user %q: %w", u.Uid, name, err)
+	}
+	gid64, err := strconv.ParseInt(u.Gid, 10, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid gid %q for user %q: %w", u.Gid, name, err)
+	}
+	return int(uid64), int(gid64), nil
+}
+
+// createLogDir creates dir with mode 0750 and ownership uid:gid. Idempotent:
+// if the directory already exists the mode and ownership are still applied.
+func createLogDir(dir string, uid, gid int) error {
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("failed to create log directory %s: %w", dir, err)
+	}
+	// Chmod explicitly to enforce 0750 regardless of process umask.
+	if err := os.Chmod(dir, 0750); err != nil {
+		return fmt.Errorf("failed to set permissions on log directory %s: %w", dir, err)
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		return fmt.Errorf("failed to set ownership of log directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 func newManager(binaryPath string) Manager {
@@ -110,6 +160,19 @@ func (m *linuxManager) Install(token, controllerURL, caCertPEM, expectedFingerpr
 	fmt.Printf("Staging steward %s under %s...\n", ver, linuxLauncherRoot)
 	if out, err := exec.Command(linuxLauncherPath, "swap", "--root", linuxLauncherRoot, ver, m.binaryPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to stage steward binary via launcher: %w\n%s", err, out)
+	}
+
+	// Create the log directory before registering the service. The systemd unit
+	// sets CFGMS_LOG_DIR=/var/log/cfgms; the directory must exist when the service
+	// starts or the steward falls back to the ephemeral /tmp/cfgms path (Issue #2483).
+	uid, gid, err := serviceUserIDs(linuxServiceUser)
+	if err != nil {
+		return fmt.Errorf("service user lookup: %w — create the %q OS user before running install", err, linuxServiceUser)
+	}
+	logDir := platformLogDir()
+	fmt.Printf("Creating log directory %s...\n", logDir)
+	if err := createLogDir(logDir, uid, gid); err != nil {
+		return fmt.Errorf("failed to prepare log directory: %w", err)
 	}
 
 	// Write CA cert before registering the service so the service finds it on first start.
