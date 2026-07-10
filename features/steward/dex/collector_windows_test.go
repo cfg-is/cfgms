@@ -9,12 +9,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 )
 
 // TestParseGUID verifies that parseGUID correctly parses the canonical GUID
@@ -133,10 +135,16 @@ func TestProcessTimesNs(t *testing.T) {
 // failing with a confusing syscall error.
 func TestCollectorRunShort(t *testing.T) {
 	// Probe ETW privilege by attempting a transient trace session.
-	// startNamedTrace returns a non-nil error if privilege is absent.
+	// Only skip on privilege-related errors; other errors indicate a bug in
+	// startNamedTrace itself and must fail rather than silently skip.
 	probeHandle, probeErr := startNamedTrace("cfgms-dex-priv-probe", eventTraceRealTimeMode)
 	if probeErr != nil {
-		t.Skipf("ETW session requires admin privilege (StartTrace: %v) — skipping", probeErr)
+		var errno windows.Errno
+		if errors.As(probeErr, &errno) &&
+			(errno == windows.ERROR_ACCESS_DENIED || errno == 1314 /* ERROR_PRIVILEGE_NOT_HELD */) {
+			t.Skipf("ETW session requires admin privilege (StartTrace: %v) — skipping", probeErr)
+		}
+		t.Fatalf("startNamedTrace probe failed with unexpected error (not a privilege issue): %v", probeErr)
 	}
 	// Clean up probe session before proceeding.
 	require.NoError(t, stopNamedTrace(probeHandle, "cfgms-dex-priv-probe"), "cleanup probe ETW session")
