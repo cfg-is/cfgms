@@ -6,16 +6,22 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 // TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode
@@ -34,8 +40,9 @@ import (
 //     exhausts rollback budget and the launcher process exits.
 //
 // Expected Win32_Service state after terminal failure:
-//   ExitCode:        ERROR_SERVICE_SPECIFIC_ERROR (1066)
-//   ServiceExitCode: the launcher's own exit code (1 for supervise error)
+//
+//	ExitCode:        ERROR_SERVICE_SPECIFIC_ERROR (1066)
+//	ServiceExitCode: the launcher's own exit code (1 for supervise error)
 func TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode(t *testing.T) {
 	// Empty root with no current version: Supervise returns an error immediately.
 	root := t.TempDir()
@@ -51,11 +58,11 @@ func TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode(t 
 	svcSpecific, exitCode := h.Execute(nil, r, status)
 
 	if !svcSpecific {
-		t.Errorf("Execute returned svcSpecificEC=false on terminal failure; want true so SCM "+
+		t.Errorf("Execute returned svcSpecificEC=false on terminal failure; want true so SCM " +
 			"records ERROR_SERVICE_SPECIFIC_ERROR and applies recovery actions (AC5)")
 	}
 	if exitCode == 0 {
-		t.Errorf("Execute returned exitCode=0 on terminal failure; want non-zero so "+
+		t.Errorf("Execute returned exitCode=0 on terminal failure; want non-zero so " +
 			"Win32_Service.ExitCode is non-zero and SCM recovery fires (AC5)")
 	}
 }
@@ -122,7 +129,7 @@ sendStop:
 	select {
 	case res := <-resultCh:
 		if res.svcSpecific {
-			t.Errorf("Execute returned svcSpecificEC=true on admin Stop; "+
+			t.Errorf("Execute returned svcSpecificEC=true on admin Stop; " +
 				"must be false (clean stop, no SCM recovery) (AC5)")
 		}
 	case <-time.After(15 * time.Second):
@@ -269,4 +276,86 @@ func runOuterLauncher() {
 	// while the supervised steward is still running. The Job Object's
 	// kill-on-close limit is the only thing that can cull the child.
 	os.Exit(2)
+}
+
+// TestSupervise_RepairsMissingServiceRegistration (REQUIRED, #2465): the
+// dedicated repair ticker the supervise loop launches (runServiceRegistrationRepair)
+// re-creates a service registration that is deleted mid-flight, within one check
+// interval, and logs a greppable self-repair event.
+//
+// It drives runServiceRegistrationRepair directly with the real per-tick action
+// (repairServiceIfMissing) bound to a UNIQUE throwaway service — not via a full
+// Supervise() run, which would need a live steward child, and not against the
+// real CFGMSSteward name, which would delete the host's running steward. This is
+// the exact goroutine + per-tick function Supervise wires in production.
+func TestSupervise_RepairsMissingServiceRegistration(t *testing.T) {
+	scm := requireSCM(t)
+	name := uniqueTestServiceName(t)
+
+	// Create the service, then delete it out from under us — the incident's
+	// "AV remediation deleted the registration" failure mode.
+	s, err := scm.CreateService(name, testRepairExePath, mgr.Config{StartType: mgr.StartAutomatic})
+	require.NoError(t, err)
+	s.Close()
+	existing, err := scm.OpenService(name)
+	require.NoError(t, err)
+	require.NoError(t, existing.Delete())
+	existing.Close()
+
+	ok, err := serviceRegistrationOK(name)
+	require.NoError(t, err)
+	require.False(t, ok, "precondition: registration deleted")
+
+	// Run the repair ticker on a short interval, targeting the test service.
+	// buf is mutex-guarded because the ticker goroutine writes to it concurrently
+	// with the assertion read below; repaired signals once the per-tick action has
+	// both re-created the registration AND written its event, establishing a
+	// happens-before edge so the read after <-repaired sees the completed write.
+	buf := &syncBuffer{}
+	sup := &Supervisor{Stderr: buf}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repaired := make(chan struct{}, 1)
+	go sup.runServiceRegistrationRepair(ctx, 100*time.Millisecond, func(w io.Writer) {
+		repairServiceIfMissing(w, name, testRepairExePath, nil)
+		if ok, err := serviceRegistrationOK(name); err == nil && ok {
+			select {
+			case repaired <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	select {
+	case <-repaired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the supervise repair ticker did not re-create the deleted registration within 3s")
+	}
+	cancel()
+
+	ok, err = serviceRegistrationOK(name)
+	require.NoError(t, err)
+	require.True(t, ok, "registration must exist after the repair ticker ran")
+	assert.Contains(t, buf.String(), "event=service_registration_repaired",
+		"the repair must emit a greppable structured event")
+}
+
+// syncBuffer is a minimal mutex-guarded io.Writer for tests that read a buffer
+// written by a background goroutine — avoids the data race a bare bytes.Buffer
+// would incur under `go test -race`.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
