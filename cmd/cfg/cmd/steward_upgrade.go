@@ -36,15 +36,30 @@ var stewardUpgradeCmd = &cobra.Command{
 The selector identifies which stewards receive the upgrade command. The upgrade
 is dispatched asynchronously by default; use --wait to block until completion.
 
+A selector that matches more than one steward requires --yes (or interactive
+confirmation) before the upgrade is dispatched.
+
 Examples:
-  # Upgrade a specific steward
-  cfg steward upgrade id:steward-abc123 --version v0.5.12
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward upgrade web-01 --version v0.5.12
 
-  # Upgrade all stewards in a group with --wait
-  cfg steward upgrade group:production --version v0.5.12 --wait
+  # Hostname glob — all hosts starting with 'web-' (must quote; requires --yes)
+  cfg steward upgrade 'web-*' --version v0.5.12 --yes
 
-  # Upgrade with explicit platform
-  cfg steward upgrade id:steward-abc123 --version v0.5.12 --platform linux --arch amd64`,
+  # Exact hostname in a child tenant
+  cfg steward upgrade acme-corp/web-01 --version v0.5.12
+
+  # All stewards in a child tenant (must quote for /all; requires --yes)
+  cfg steward upgrade 'acme-corp/os:linux' --version v0.5.12 --yes
+
+  # Attribute filter with --wait
+  cfg steward upgrade 'tag:prod' --version v0.5.12 --wait --yes
+
+  # Explicit steward ID with platform override
+  cfg steward upgrade id:steward-abc123 --version v0.5.12 --platform linux --arch amd64
+
+  # JSON output keyed by hostname#steward-id
+  cfg steward upgrade 'os:linux' --version v0.5.12 --yes --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardUpgrade,
 }
@@ -59,10 +74,16 @@ Pass a selector positional argument to query the most recent upgrade status for
 each matching steward, or use --upgrade-id to query a specific upgrade record.
 
 Examples:
-  # Show status for a specific upgrade
+  # Show status for a specific upgrade record
   cfg steward upgrade status --upgrade-id abc123-upgrade-id
 
-  # Show most recent upgrade status for matching stewards
+  # Exact hostname (bare token) — most recent upgrade status for that host
+  cfg steward upgrade status web-01
+
+  # Hostname glob — status for all matching hosts (must quote)
+  cfg steward upgrade status 'web-*'
+
+  # Explicit steward ID
   cfg steward upgrade status id:steward-abc123`,
 	RunE: runStewardUpgradeStatus,
 }

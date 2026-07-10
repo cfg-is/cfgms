@@ -60,7 +60,19 @@ var stewardYes bool
 var stewardCmd = &cobra.Command{
 	Use:   "steward",
 	Short: "Manage registered stewards",
-	Long:  `Commands for inspecting and managing stewards registered with the controller.`,
+	Long: `Commands for inspecting and managing stewards registered with the controller.
+
+Every subcommand accepts the same selector grammar. See docs/administration/cli-selectors.md
+for the full grammar reference, per-shell quoting rules, and worked examples.
+
+Quick reference:
+  web-01              exact hostname match (case-insensitive)
+  'web-*'             hostname glob (must quote to prevent shell expansion)
+  acme-corp/web-01    host in a child tenant (/ or \ separator, both accepted)
+  os:linux            attribute filter (os, platform, arch, tag, dna.<key>)
+  'os:linux tag:prod' AND composition (space-separated terms, must quote)
+  id:steward-abc123   exact steward ID
+  all                 every steward in the caller's authorized subtree`,
 }
 
 // stewardListCmd lists stewards registered with the controller.
@@ -77,13 +89,34 @@ With a selector, resolves matching stewards via POST /api/v1/fleet/resolve
 and prints only those that match. A selector that matches no stewards is an
 error; use "all" to match every steward in the caller's authorized subtree.
 
+Use this command as the dry-run before any mutating verb — it is read-only.
+
 Examples:
   # List all stewards
   cfg steward list
 
-  # Preview which stewards match a selector
+  # Exact hostname match (no quotes needed for a bare hostname)
+  cfg steward list web-01
+
+  # Hostname glob (must quote so the shell does not expand *)
+  cfg steward list 'web-*'
+
+  # Exact hostname in a child tenant
+  cfg steward list acme-corp/web-01
+
+  # Glob in a child tenant (must quote: contains both / and *)
+  cfg steward list 'acme-corp/web-*'
+
+  # Attribute filters
   cfg steward list os:linux
-  cfg steward list "group:prod os:linux"
+  cfg steward list 'os:linux arch:amd64'
+  cfg steward list 'os:linux tag:prod'
+  cfg steward list 'dna.role:db'
+
+  # All stewards in a child tenant
+  cfg steward list acme-corp/all
+
+  # Whole fleet
   cfg steward list all`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runStewardList,
@@ -135,8 +168,20 @@ var stewardRunScriptCmd = &cobra.Command{
 Exits immediately (async) by default. Use --wait to block until completion.
 
 Examples:
+  # Exact hostname target (bare token, no quotes needed)
+  cfg steward run-script --target web-01 --script my-script
+
+  # Hostname glob — all hosts starting with 'web-' (must quote)
+  cfg steward run-script --target 'web-*' --script my-script --yes
+
+  # Child-tenant scope (forward slash, no quotes needed for exact name)
+  cfg steward run-script --target acme-corp/web-01 --script my-script
+
+  # Attribute filter
   cfg steward run-script --target os:linux --script my-script
-  cfg steward run-script --script my-script --version v2 --wait --wait-timeout 10m`,
+
+  # Wait for completion with a custom timeout
+  cfg steward run-script --target 'os:linux tag:prod' --script my-script --version v2 --wait --wait-timeout 10m`,
 	RunE: runRunScript,
 }
 
@@ -152,8 +197,17 @@ the operator's mTLS bundle key before transmission.
 Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
 
 Examples:
-  cfg steward run-command --shell bash "echo hello"
-  cfg steward run-command --shell bash ./scripts/deploy.sh --target os:linux`,
+  # Inline command to a single host by bare hostname
+  cfg steward run-command --shell bash --target web-01 "echo hello"
+
+  # Inline command to a hostname glob (must quote glob; requires --yes)
+  cfg steward run-command --shell bash --target 'web-*' "echo hello" --yes
+
+  # Script file to a child-tenant host (forward slash, no quotes needed)
+  cfg steward run-command --shell bash --target acme-corp/web-01 ./scripts/deploy.sh
+
+  # Attribute filter
+  cfg steward run-command --shell bash --target os:linux ./scripts/deploy.sh --yes`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunCommand,
 }
@@ -176,17 +230,26 @@ Output is capped at 64 KB per steward in the CLI display. If the output for a
 steward exceeds the cap a truncation warning is printed to stderr.
 
 Examples:
-  # Run a command on a steward by bare hostname
-  cfg steward exec host-abc123 --command "hostname" --shell bash
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward exec web-01 --command "hostname" --shell bash
 
-  # Run a command on a steward by explicit id: selector
-  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 30s
+  # Hostname glob — fan out to all hosts starting with 'web-' (must quote; requires --yes)
+  cfg steward exec 'web-*' --command "uptime" --shell bash --yes
 
-  # Run against all Linux stewards (requires --yes or interactive confirmation)
+  # Exact hostname in a child tenant
+  cfg steward exec acme-corp/web-01 --command "uname -r" --shell bash
+
+  # Glob in a child tenant with tenant-path scoping (must quote)
+  cfg steward exec 'acme-corp/web-*' --command "df -h" --shell bash --yes
+
+  # Attribute filter: all Linux stewards (requires --yes)
   cfg steward exec os:linux --command "uname -r" --shell bash --yes
 
-  # Output as JSON keyed by steward
-  cfg steward exec host-abc123 --command "uptime" --shell bash --json`,
+  # Explicit steward ID
+  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 30s
+
+  # JSON output keyed by hostname#steward-id
+  cfg steward exec web-01 --command "uptime" --shell bash --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunCommandSingle,
 }
@@ -245,13 +308,19 @@ trust context changes immediately to the destination tenant.
 Requires an admin bundle with mTLS access (Tier-3 endpoint).
 
 Examples:
-  # Move a single steward by ID
-  cfg steward move steward-abc123 --to-tenant dest-tenant
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward move web-01 --to-tenant dest-tenant
 
-  # Move all stewards in a group
-  cfg steward move group:prod --to-tenant dest-tenant --yes
+  # Exact hostname in a child tenant
+  cfg steward move acme-corp/web-01 --to-tenant acme-corp/us-east
 
-  # Move and emit keyed JSON results
+  # Hostname glob — all hosts starting with 'web-' (must quote; requires --yes)
+  cfg steward move 'acme-corp/web-*' --to-tenant acme-corp/us-east --yes
+
+  # All stewards in a child tenant (requires --yes)
+  cfg steward move acme-corp/all --to-tenant acme-corp/us-east --yes
+
+  # Attribute filter with JSON output
   cfg steward move os:linux --to-tenant dest-tenant --yes --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardMove,
@@ -271,9 +340,20 @@ Requires an admin mTLS certificate. Records are retained in durable storage
 for audit but no longer appear in cfg steward list. Any active connections are dropped.
 
 Examples:
-  cfg steward decommission steward-abc123
-  cfg steward decommission group:decommissioned --yes
-  cfg steward decommission os:linux --yes --json`,
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward decommission web-01
+
+  # Exact hostname in a child tenant
+  cfg steward decommission acme-corp/web-01
+
+  # Hostname glob — all hosts starting with 'decom-' (must quote; requires --yes)
+  cfg steward decommission 'decom-*' --yes
+
+  # Tag filter — all stewards carrying the 'decom' tag (requires --yes)
+  cfg steward decommission 'tag:decom' --yes
+
+  # All stewards in a child tenant with JSON output (requires --yes)
+  cfg steward decommission acme-corp/all --yes --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardDecommission,
 }
@@ -364,10 +444,20 @@ var stewardLogsCmd = &cobra.Command{
 Note: Log pull is not yet available. Collect logs directly from the steward host.
 
 Examples:
-  cfg steward logs <steward-id>
-  cfg steward logs <steward-id> --tail 50 --level WARN
-  cfg steward logs <steward-id> --since 1h --module file
-  cfg steward logs os:linux --tail 20`,
+  # Exact hostname (bare token, no quotes needed)
+  cfg steward logs web-01
+
+  # Exact hostname in a child tenant
+  cfg steward logs acme-corp/web-01
+
+  # Hostname glob — all hosts starting with 'web-' (must quote)
+  cfg steward logs 'web-*' --tail 20
+
+  # Attribute filter with options
+  cfg steward logs os:linux --tail 50 --level WARN
+
+  # Single host with time filter
+  cfg steward logs web-01 --since 1h --module file`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardLogs,
 }
@@ -837,17 +927,29 @@ connection state, and other available metadata. With --json, emits a
 keyed-by-steward JSON array (one entry per matched steward).
 
 Examples:
-  # Show status using admin bundle (mTLS auto-discovery)
-  cfg steward status <steward-id>
+  # Exact hostname match (bare token, no quotes needed)
+  cfg steward status web-01
 
-  # Show status with explicit URL
-  cfg steward status <steward-id> --url=https://controller.example.com
+  # Exact hostname in a child tenant
+  cfg steward status acme-corp/web-01
 
-  # Show status as JSON
-  cfg steward status <steward-id> --json
+  # Hostname glob — all hosts starting with 'web-' (must quote)
+  cfg steward status 'web-*'
 
-  # Fan out to all linux stewards
-  cfg steward status os:linux`,
+  # Glob in a child tenant (must quote)
+  cfg steward status 'acme-corp/web-*'
+
+  # Attribute filter: all Linux stewards
+  cfg steward status os:linux
+
+  # Exact steward ID
+  cfg steward status id:steward-abc123
+
+  # JSON output keyed by hostname#steward-id
+  cfg steward status 'os:linux tag:prod' --json
+
+  # With explicit controller URL
+  cfg steward status web-01 --url=https://controller.example.com`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardStatus,
 }
@@ -862,14 +964,23 @@ Use --attribute to retrieve a single dotted-path attribute value for scripted pr
 Use --json to write the raw API response body to stdout.
 
 Examples:
-  # Show full DNA in human-readable form
-  cfg steward dna <steward-id>
+  # Exact hostname (bare token, no quotes needed)
+  cfg steward dna web-01
 
-  # Show DNA as raw JSON
-  cfg steward dna <steward-id> --json
+  # Exact hostname in a child tenant
+  cfg steward dna acme-corp/web-01
+
+  # Hostname glob — all hosts starting with 'db-' (must quote)
+  cfg steward dna 'db-*'
+
+  # All Linux stewards in a child tenant
+  cfg steward dna 'acme-corp/os:linux'
+
+  # Show full DNA as raw JSON
+  cfg steward dna web-01 --json
 
   # Retrieve a single attribute value (exits non-zero if not present)
-  cfg steward dna <steward-id> --attribute os`,
+  cfg steward dna web-01 --attribute os`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardDNA,
 }
@@ -1016,17 +1127,23 @@ When a steward does not report module data, a 501 response is returned and the
 entry exits 0 with an informational message.
 
 Examples:
-  # List modules using admin bundle (mTLS auto-discovery)
-  cfg steward modules <steward-id>
+  # Exact hostname (bare token, no quotes needed)
+  cfg steward modules web-01
 
-  # List modules with explicit URL
-  cfg steward modules <steward-id> --url=https://controller.example.com
+  # Exact hostname in a child tenant
+  cfg steward modules acme-corp/web-01
 
-  # Output raw JSON
-  cfg steward modules <steward-id> --json
+  # Hostname glob — all hosts starting with 'db-' (must quote)
+  cfg steward modules 'db-*'
 
-  # Fan out to all linux stewards
-  cfg steward modules os:linux`,
+  # All Linux stewards
+  cfg steward modules os:linux
+
+  # All stewards in a child tenant, JSON output
+  cfg steward modules 'acme-corp/os:linux' --json
+
+  # With explicit controller URL
+  cfg steward modules web-01 --url=https://controller.example.com`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardModules,
 }
