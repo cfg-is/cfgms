@@ -74,8 +74,9 @@ func (p *hbTestControlPlane) sendHeartbeat(ctx context.Context, hb *controlplane
 // closure wired in server.go (Issue #2463) persists StewardStatusLost to the
 // durable StewardStore when a steward times out, and StewardStatusActive when it
 // recovers. Uses a real heartbeat.Service and a real flatfile StewardStore (no
-// mocks, per CLAUDE.md). Staleness is triggered by a very short
-// StewardOfflineTimeout so the test finishes in under 1 second.
+// mocks, per CLAUDE.md). Staleness is triggered by a short StewardOfflineTimeout.
+// Recovery is asserted synchronously after stopping the service (eliminates the
+// race where the monitor goroutine re-fires after the recovery heartbeat).
 func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 	ctx := context.Background()
 
@@ -93,7 +94,7 @@ func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 	svc, err := heartbeat.New(&heartbeat.Config{
 		ControlPlane:          cp,
 		OnStatusChange:        makeHeartbeatStatusChangeCallback(st, logger),
-		StewardOfflineTimeout: 50 * time.Millisecond,
+		StewardOfflineTimeout: 100 * time.Millisecond,
 		CheckInterval:         10 * time.Millisecond,
 		Logger:                logger,
 	})
@@ -116,6 +117,14 @@ func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 	}, 2*time.Second, 25*time.Millisecond,
 		"durable store must reach StewardStatusLost after heartbeat timeout")
 
+	// Stop the service to shut down the staleness-monitor goroutine before
+	// the recovery phase. Without this, the monitor can re-fire after another
+	// StewardOfflineTimeout and overwrite StewardStatusActive with Lost before
+	// the assertion observes it (structural race; option b from review finding).
+	// handleHeartbeatFromProvider remains callable after Stop because the
+	// control plane's SubscribeHeartbeats registration persists.
+	require.NoError(t, svc.Stop(ctx))
+
 	// Recovery: a fresh heartbeat fires OnStatusChange(healthy=true) which
 	// must flip the status to StewardStatusActive.
 	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
@@ -124,10 +133,11 @@ func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 		Timestamp: time.Now(),
 	}))
 
-	require.Eventually(t, func() bool {
-		rec, err := st.GetSteward(ctx, stewardID)
-		return err == nil && rec.Status == business.StewardStatusActive
-	}, 2*time.Second, 25*time.Millisecond,
+	// The recovery path is synchronous: handleHeartbeatFromProvider →
+	// onStatusChange → UpdateStewardStatus. Assert directly without polling.
+	rec, recErr := st.GetSteward(ctx, stewardID)
+	require.NoError(t, recErr)
+	assert.Equal(t, business.StewardStatusActive, rec.Status,
 		"durable store must reach StewardStatusActive on heartbeat recovery")
 }
 

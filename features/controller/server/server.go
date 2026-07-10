@@ -49,6 +49,7 @@ import (
 	reportsexporters "github.com/cfgis/cfgms/features/reports/exporters"
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
+	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/workflow"
 	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
@@ -828,6 +829,50 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if signingRotationSvc != nil {
 			signingRotationSvc.SetPublisher(commandPublisher)
 			logger.Info("Signing rotation service wired (refresh-on-connect enabled)")
+		}
+
+		// Issue #2524: Wire DNA hash mismatch detection so that a heartbeat
+		// carrying an unexpected DNA hash automatically triggers a full sync.
+		// Guard on both non-nil: transport can be disabled at runtime, so
+		// commandPublisher may be nil in degraded configurations.
+		if heartbeatService != nil && commandPublisher != nil {
+			heartbeatService.SetOnDNAHashMismatch(func(stewardID string) {
+				if _, err := commandPublisher.TriggerDNASync(context.Background(), stewardID); err != nil {
+					logger.Warn("Failed to trigger DNA sync after hash mismatch",
+						"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+				}
+			})
+			logger.Info("DNA hash mismatch detection wired (Issue #2524)")
+		}
+
+		// Issue #2524: Wire post-DNA-sync hook so each successful full sync
+		// updates the expected hash in the heartbeat service, suppressing
+		// repeated mismatch triggers once the steward's DNA is in sync.
+		if controllerService != nil && heartbeatService != nil {
+			controllerService.SetPostDNASyncHook(func(stewardID string, dna *common.DNA) {
+				heartbeatService.SetExpectedDNAHash(stewardID, stewarddna.ComputeHash(dna.Attributes))
+			})
+			logger.Info("Post-DNA-sync hook wired (Issue #2524)")
+		}
+
+		// Issue #2524: Warm expectedDNAHash for every previously-known steward
+		// from durable storage.  Without this, a controller restart silently
+		// disables mismatch detection for all known stewards until each runs a
+		// fresh full sync — even though their DNA is already durably stored and
+		// loaded by LoadFromStorage (ControllerService.LoadFromStorage comment
+		// calls out the identical startup-gap pattern this mirrors).
+		if controllerService != nil && heartbeatService != nil {
+			warmed := 0
+			for _, steward := range controllerService.GetAllStewards() {
+				if steward.DNA != nil {
+					hash := stewarddna.ComputeHash(steward.DNA.Attributes)
+					if hash != "" {
+						heartbeatService.SetExpectedDNAHash(steward.ID, hash)
+						warmed++
+					}
+				}
+			}
+			logger.Info("Expected DNA hashes warmed from durable storage (Issue #2524)", "warmed", warmed)
 		}
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
