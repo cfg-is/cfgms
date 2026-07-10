@@ -11,6 +11,30 @@ This is acquisition + measurement only (throwaway `SpikeReport`). No persistence
 no schema, no production DEX/cfg/control-plane surface — the DEX collection track
 stays gated on the storage-shape ADR + ADR-017 Amendment 1.
 
+## ⚠️ What these numbers do and do NOT prove
+
+This spike proves the provider **enablement** path only. It does **not** prove we
+can consume the event stream, and the overhead figure is **not** a collection cost:
+
+- **The harness has no event consumer.** `runETWConsumer` is a no-op
+  (`<-ctx.Done()` — it waits out the window). The `ProcessTrace` consumer that
+  #2517 originally had was **removed** because the native ETW→Go callback on a
+  locked OS thread corrupts the Go runtime (`acquireSudog` / `cgocallbackg` per-P
+  state; atomic-only callback bodies do not prevent it). See the collector comment.
+- **"Reachable: YES" means "we can enable the provider"** (`StartTrace` +
+  `EnableTraceEx2` succeed under privilege) — **not** "we can read its events."
+- **`total_events: 0` is by construction**, not a measurement of low activity —
+  nothing consumes the buffers.
+- **The ~0.00–0.05% CPU figure is the cost of *enabling* providers with the
+  buffers undrained** — it is **NOT** the cost of consume + decode + attribute at
+  volume. Do not read "PASS" as "DEX fits the 1% budget"; the real collection
+  overhead is unmeasured.
+
+Whether an in-steward Go agent can actually consume + decode + attribute the
+stream (and at what real overhead) is the subject of the follow-up feasibility
+spikes: **#2571** (Windows) and **#2572** (Linux). This document is the
+enablement + reachability baseline they build on.
+
 ## Run context (proof of real run)
 
 The spike was executed **in the steward's own service context** — the faithful
@@ -67,9 +91,13 @@ budget**):
 | 10 s | non-elevated (ETW enable denied) | 0.312 % | PASS |
 
 The representative 30-second steward-context windows measure **≈0.00–0.05% CPU** —
-**far under the 1.0% budget** for enabling all six providers. The 5 s window is
+**far under the 1.0% budget** for *enabling* all six providers. The 5 s window is
 higher only because the one-time `StartTrace`/`EnableTraceEx2`/teardown cost is
 amortized over a shorter window; it still passes.
+
+**This is enablement overhead, not collection overhead** (no consumer runs — see
+the callout at the top). The cost of actually consuming + decoding + attributing
+events at volume is unmeasured here and is the point of #2571/#2572.
 
 ## Events captured — 0 (genuine result, with follow-up)
 
@@ -84,15 +112,15 @@ collection window. This is a real finding, not a measurement error:
    **not observable** — a load-bearing result for the DEX design: app-hang/UX
    telemetry cannot be sourced from the steward's own service session and would
    need a different acquisition path (per-session agent).
-2. **Consumer delivery gap in the PoC.** Even the non-UI providers
-   (`Kernel-Disk`, `Kernel-PerfInfo`, `DNS-Client`) delivered 0 events to the
-   `runETWConsumer` real-time consumer during a window with deliberate disk+DNS
-   activity. So the #2517 PoC proves *enablement* + *overhead*, but its real-time
-   event-delivery path does not yet surface events under the SYSTEM/session-0
-   context. Wiring and validating actual event delivery (ProcessTrace consumer
-   callback throughput) is the first follow-up for the DEX collection track — it is
-   **out of scope for this measurement spike**, which was scoped to reachability +
-   overhead only.
+2. **There is no consumer — it was removed.** `runETWConsumer` is a no-op
+   (`<-ctx.Done()`). The #2517 `ProcessTrace` consumer was removed because the
+   native ETW→Go callback corrupts the Go runtime (`acquireSudog` / `cgocallbackg`;
+   atomic-only callbacks do not fix it). So 0 events is **by construction**, on
+   every run including one with deliberate disk+DNS activity — nothing drains the
+   buffers. This is the load-bearing open question: **can an in-steward Go process
+   consume a high-rate ETW stream at all, and at what real overhead?** That is
+   exactly what #2571 (Windows) exists to answer; it was **out of scope for this
+   measurement spike**, scoped to reachability + enablement overhead only.
 
 ## Bottom line
 
@@ -100,10 +128,15 @@ collection window. This is a real finding, not a measurement error:
   SYSTEM context; the two WMI providers resolve but need query/hardware follow-up.
 - **Overhead:** enabling the full provider set costs **≈0.00–0.05% CPU** over a
   30 s window — **comfortably within the 1.0% budget** (`WithinBudget = true`).
-- **Two de-risking findings for the collection track:** (a) UI/app-hang signals do
-  not emit in the steward's service session (session 0) — need a per-session path;
-  (b) the PoC's real-time event *delivery* needs wiring before it captures events,
-  independent of reachability.
+- **Consumption is UNPROVEN.** The harness has no consumer (removed — the
+  in-process Go `ProcessTrace` callback corrupts the Go runtime). So we have **not**
+  shown we can read the stream, and the overhead above is enablement-only.
+  Resolving this — and measuring real overhead-at-volume — is the follow-up
+  feasibility spike **#2571** (Windows) / **#2572** (Linux).
+- **Two further de-risking findings:** (a) UI/app-hang signals do not emit in the
+  steward's service session (session 0) — need a per-session path; (b) the two WMI
+  providers resolve but their sample-count query needs fixing (`smart`) / the
+  hardware does not expose the zone (`thermal`).
 
 ## Reproduction
 
