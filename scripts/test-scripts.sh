@@ -1790,7 +1790,7 @@ MOCKEOF
     chmod +x "$mock_pq"
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     # Use importlib.util to load the hyphen-named file (matching existing test pattern).
     cat > "$tmp_py" << PYEOF
 import sys, os, importlib.util
@@ -1863,7 +1863,7 @@ MOCKEOF
     # auto_close_merged_items now batches PR state checks via GraphQL (Issue
     # #1581) so we stub gh_graphql_pr_states instead of mocking `gh pr view`.
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     cat > "$tmp_py" << PYEOF
 import sys, os, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
@@ -1917,7 +1917,7 @@ MOCKEOF2
     chmod +x "$fail_pq"
 
     local tmp_py2
-    tmp_py2=$(mktemp --suffix=.py)
+    tmp_py2=$(mktemp)
     cat > "$tmp_py2" << PYEOF2
 import sys, os, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${fail_pq}'
@@ -2045,7 +2045,7 @@ MOCKEOF
     # Run preflight via importlib, counting how many times the gh() / tolerant
     # wrappers were entered. The two wrappers share the _GH_CALL_COUNT global.
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     cat > "$tmp_py" << PYEOF
 import os, sys, importlib.util
 os.environ['CFGMS_TEST_PROJECT_QUEUE'] = '${mock_pq}'
@@ -2126,7 +2126,7 @@ test_preflight_forged_acceptance_review() {
     fi
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     trap 'rm -f "$tmp_py"' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
@@ -2777,7 +2777,7 @@ test_preflight_acceptance_review_comment_match() {
     fi
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     trap 'rm -f "$tmp_py"' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
@@ -2891,7 +2891,7 @@ test_preflight_review_verdict_routing() {
     fi
 
     local tmp_py
-    tmp_py=$(mktemp --suffix=.py)
+    tmp_py=$(mktemp)
     trap 'rm -f "$tmp_py"' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
@@ -3225,7 +3225,11 @@ EOF
     fi
 
     # vm= must not contain 0vCPU/0GB on a real Linux system (nproc should return ≥1).
-    if echo "$profile_line" | grep -qE 'vm=[1-9][0-9]*vCPU/[0-9]+GB'; then
+    # The sampler probes nproc + /proc/meminfo, which only exist on Linux — skip the
+    # host-derived assertion elsewhere (fixture-based assertions above still run).
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        log_pass "resource-sampler.sh: vm= spec check skipped (host-derived, Linux-only)"
+    elif echo "$profile_line" | grep -qE 'vm=[1-9][0-9]*vCPU/[0-9]+GB'; then
         log_pass "resource-sampler.sh: vm= spec contains a non-zero vCPU count"
     else
         log_fail "resource-sampler.sh: vm= spec has zero vCPU count (got: '$profile_line')"
