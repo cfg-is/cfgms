@@ -12,6 +12,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// OwnershipDeclaration records a single object-identity namespace that a module
+// authoritatively owns, per ADR-016 clause 5. When a module declares ownership
+// of a kind, it owns every object of that kind it manages — the entire DNA
+// fragment for that object, with no sub-property co-authorship.
+type OwnershipDeclaration struct {
+	// Kind is the object-identity namespace (e.g. "service", "file", "package").
+	Kind string `yaml:"kind" json:"kind"`
+}
+
 // ModuleMetadata represents the complete metadata for a module
 // This extends the existing module.yaml format with dependency management
 type ModuleMetadata struct {
@@ -51,6 +60,12 @@ type ModuleMetadata struct {
 
 	// BehavioralEnvelope documents what the module does at runtime
 	BehavioralEnvelope *BehavioralEnvelope `yaml:"behavioral_envelope,omitempty" json:"behavioral_envelope,omitempty"`
+
+	// Owns declares the object-identity namespaces this module authoritatively
+	// manages, per ADR-016 clause 5. Optional; zero value (nil/empty) means
+	// this module declares no ownership — backward-compatible with all existing
+	// module.yaml files that predate this field.
+	Owns []OwnershipDeclaration `yaml:"owns,omitempty" json:"owns,omitempty"`
 }
 
 // BehavioralEnvelope documents the runtime behavior of a module for security auditing
@@ -410,6 +425,12 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 			clone.BehavioralEnvelope.NetworkEgress = make([]string, len(m.BehavioralEnvelope.NetworkEgress))
 			copy(clone.BehavioralEnvelope.NetworkEgress, m.BehavioralEnvelope.NetworkEgress)
 		}
+	}
+
+	// Deep copy ownership declarations (OwnershipDeclaration contains only strings)
+	if m.Owns != nil {
+		clone.Owns = make([]OwnershipDeclaration, len(m.Owns))
+		copy(clone.Owns, m.Owns)
 	}
 
 	return clone

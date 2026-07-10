@@ -74,6 +74,60 @@ The `executors` field must contain exactly one element. `kind` is computed at pa
 | `network_egress` | list | External hosts/ports the module connects to |
 | `lolbin_usage_justification` | string | Why a living-off-the-land binary is needed |
 
+### `owns:` declaration (ADR-016 clause 5)
+
+The optional `owns:` list declares the object-identity namespaces this module
+authoritatively manages. Omitting `owns:` is valid and backward-compatible with
+all existing `module.yaml` files — it means the module declares no ownership.
+
+```yaml
+# module.yaml — DNA ownership declaration example
+owns:
+  - kind: service   # authority over service:* objects this module manages
+```
+
+**Semantics:** Authority is atomic at the object level. When a module owns an
+object kind, it owns every property of every object of that kind it manages —
+no sub-property co-authorship. At DNA assembly the steward excludes any object
+claimed by an active module from other DNA sources; on module uninstall,
+authority reverts. The resolver is defined in ADR-017; this field provides the
+declaration that makes resolution possible.
+
+**Adding `owns:` to a module:** Each module's own story adds its specific
+`owns:` entries (e.g. `patch` in issue #2472). The `owns:` parsing support is
+provided by this story (#2471) and is ready to use.
+
+### `Get` canonical fragment contract (ADR-016 clause 4)
+
+Every module's `Get` implementation must return a **canonical,
+deterministically-serialisable DNA fragment**. In terms of the Go code:
+
+- `ConfigState.AsMap()` must return byte-for-byte identical output on every
+  call against the same unchanged resource state.
+- Only stable desired-comparable fields are included. **Omit all ephemeral
+  runtime values**: live PIDs, current CPU/memory statistics, timestamps,
+  uptime counters, or any value that changes under the OS without a
+  cfg-driven configuration change.
+
+**Verification:** Use the helpers in `features/modules/conformance` in a
+module's own `_test.go` file:
+
+```go
+import "github.com/cfgis/cfgms/features/modules/conformance"
+
+// AssertDeterministicGet calls Get twice and asserts byte-for-byte equality
+// of the canonical JSON-encoded AsMap() output.
+conformance.AssertDeterministicGet(t, m, resourceID)
+
+// AssertNoEphemeralFields checks AsMap() keys against the banned list.
+state, _ := m.Get(ctx, resourceID)
+conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
+```
+
+See `features/modules/conformance/fragment_test_helper.go` for godoc and
+`features/modules/conformance/fragment_test_helper_test.go` for a worked
+example using `stdlib/file`.
+
 ## Available Modules
 
 ### What belongs in stdlib
