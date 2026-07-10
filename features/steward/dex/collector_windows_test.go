@@ -108,13 +108,24 @@ func TestClassForGUIDUnknown(t *testing.T) {
 // TestProcessTimesNs verifies that processTimesNs returns a positive value and
 // that two calls taken close together return a non-decreasing value.
 func TestProcessTimesNs(t *testing.T) {
+	// Burn enough CPU before the first sample to guarantee that
+	// GetProcessTimes reports a positive value. Windows tracks process
+	// times at ~15 ms granularity, so 50 M iterations (≫15 ms on any CI
+	// runner) are needed to cross the first clock tick when the test
+	// binary is freshly started.
+	warm := 0
+	for i := 0; i < 50_000_000; i++ {
+		warm += i
+	}
+	_ = warm
+
 	t1, err := processTimesNs()
 	require.NoError(t, err)
 	assert.Greater(t, t1, uint64(0), "processTimesNs must return a positive value")
 
-	// Do some work to consume measurable CPU.
+	// Do more work to consume additional measurable CPU.
 	sum := 0
-	for i := 0; i < 1_000_000; i++ {
+	for i := 0; i < 50_000_000; i++ {
 		sum += i
 	}
 	_ = sum
