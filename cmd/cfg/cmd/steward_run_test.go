@@ -692,7 +692,7 @@ func TestStewardRunResult_FlagsRegistered(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRunCommandSingle_SubmitsCommandAndDisplaysOutput verifies that:
-//   - POST /api/v1/runs/command is called with target: id:<id>
+//   - POST /api/v1/runs/command is called with the raw selector (no id: prepend)
 //   - The job output is printed after the run reaches terminal state.
 func TestRunCommandSingle_SubmitsCommandAndDisplaysOutput(t *testing.T) {
 	dir := t.TempDir()
@@ -701,6 +701,10 @@ func TestRunCommandSingle_SubmitsCommandAndDisplaysOutput(t *testing.T) {
 	var capturedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeRunAPIResponse(w, []map[string]interface{}{
+				{"id": "target-steward-id", "status": "online"},
+			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/command":
 			capturedBody, _ = io.ReadAll(r.Body)
 			writeRunAPIResponse(w, map[string]string{"run_id": "exec-run-id"})
@@ -743,10 +747,10 @@ func TestRunCommandSingle_SubmitsCommandAndDisplaysOutput(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	// Verify request body has target: id:<steward-id>
+	// target must be the raw selector — no id: prepend (regression: issue #2257).
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal(capturedBody, &body))
-	assert.Equal(t, "id:target-steward-id", body["target"], "target must be id:<steward-id>")
+	assert.Equal(t, "target-steward-id", body["target"], "target must be the raw selector, not id:<steward-id>")
 
 	// Verify output is displayed
 	assert.Contains(t, output, "exec-run-id")
@@ -761,10 +765,14 @@ func TestRunCommandSingle_TimeoutError(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeRunAPIResponse(w, []map[string]interface{}{
+				{"id": "some-steward-id", "status": "online"},
+			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/command":
 			writeRunAPIResponse(w, map[string]string{"run_id": "timeout-exec-run"})
 		default:
-			// Always return running
+			// Always return running status for the wait-poll loop.
 			writeRunAPIResponse(w, map[string]interface{}{
 				"run_id":         "timeout-exec-run",
 				"status":         "running",
