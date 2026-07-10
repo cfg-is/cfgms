@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	dna "github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
@@ -533,6 +534,145 @@ func TestDNARefreshLoop_CollectorErrorSkipsTick(t *testing.T) {
 
 	assert.Equal(t, 1, q.Len(),
 		"loop must continue after a collection error and publish when a change is detected")
+}
+
+// ---------------------------------------------------------------------------
+// RefreshCurrentDNA — Issue #2521
+// ---------------------------------------------------------------------------
+
+// TestRefreshCurrentDNA_PopulatesHashAfterReconnect asserts the required AC:
+// a freshly-created TransportClient (zero currentDNAHash, nil lastPublishedDNA)
+// reports a correct, non-empty DNAHash on its first heartbeat once
+// RefreshCurrentDNA is called — matching what dna.ComputeHash would produce
+// over the same freshly-collected attribute set.
+func TestRefreshCurrentDNA_PopulatesHashAfterReconnect(t *testing.T) {
+	c := newMinimalClient(t)
+
+	rawAttrs := map[string]string{"hostname": "machine-1", "os": "linux", "arch": "amd64"}
+	stub := &stubDNACollector{attrs: rawAttrs}
+	c.mu.Lock()
+	c.dnaCollector = stub
+	c.mu.Unlock()
+
+	// Pre-condition: no hash before the collect.
+	c.dnaMu.RLock()
+	assert.Empty(t, c.currentDNAHash, "currentDNAHash must be empty on a fresh client")
+	c.dnaMu.RUnlock()
+
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+
+	// Compute the expected hash the same way RefreshCurrentDNA should — enrich
+	// with steward.version then feed to dna.ComputeHash.
+	enriched := make(map[string]string, len(rawAttrs)+1)
+	for k, v := range rawAttrs {
+		enriched[k] = v
+	}
+	enriched["steward.version"] = version.Short()
+	wantHash := dna.ComputeHash(enriched)
+
+	c.dnaMu.RLock()
+	gotHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+
+	require.NotEmpty(t, gotHash, "currentDNAHash must be non-empty after RefreshCurrentDNA")
+	assert.Equal(t, wantHash, gotHash,
+		"currentDNAHash must equal dna.ComputeHash of the collected+enriched attributes")
+}
+
+// TestCurrentDNAHash_StableWhenUnchangedChangesOnDrift asserts the required AC:
+// the reported hash is stable across heartbeats when machine state is unchanged,
+// and changes when a collected attribute changes — consistent with
+// dna.ComputeHash determinism.
+func TestCurrentDNAHash_StableWhenUnchangedChangesOnDrift(t *testing.T) {
+	c := newMinimalClient(t)
+
+	attrs := map[string]string{"hostname": "box-1", "os": "linux"}
+	stub := &stubDNACollector{attrs: attrs}
+	c.mu.Lock()
+	c.dnaCollector = stub
+	c.mu.Unlock()
+
+	// Collect N times with unchanged state — hash must be identical each time.
+	const rounds = 3
+	var hashes [rounds]string
+	for i := 0; i < rounds; i++ {
+		require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+		c.dnaMu.RLock()
+		hashes[i] = c.currentDNAHash
+		c.dnaMu.RUnlock()
+	}
+	require.NotEmpty(t, hashes[0], "hash must be non-empty after first collect")
+	for i := 1; i < rounds; i++ {
+		assert.Equal(t, hashes[0], hashes[i],
+			"hash must be stable across repeated collects when attributes are unchanged")
+	}
+
+	// Mutate an attribute — hash must change on the next collect.
+	stub.setAttrs(map[string]string{"hostname": "box-2", "os": "linux"})
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	changedHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+
+	assert.NotEqual(t, hashes[0], changedHash,
+		"hash must change when a collected attribute value changes")
+}
+
+// TestRefreshCurrentDNA_CollectorErrorPropagates asserts that when the collector
+// returns an error, RefreshCurrentDNA wraps it as "DNA collection failed: %w" and
+// leaves currentDNAHash untouched (no partial state is written on the error path).
+func TestRefreshCurrentDNA_CollectorErrorPropagates(t *testing.T) {
+	c := newMinimalClient(t)
+
+	collectErr := errors.New("transient")
+	stub := &stubDNACollector{err: collectErr}
+	c.mu.Lock()
+	c.dnaCollector = stub
+	c.mu.Unlock()
+
+	err := c.RefreshCurrentDNA(context.Background())
+
+	require.Error(t, err, "RefreshCurrentDNA must return the collection error")
+	assert.ErrorIs(t, err, collectErr, "returned error must wrap the underlying collector error")
+	assert.Contains(t, err.Error(), "DNA collection failed",
+		"returned error must carry the DNA collection failure context")
+
+	c.dnaMu.RLock()
+	gotHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+	assert.Empty(t, gotHash, "currentDNAHash must not be mutated when collection fails")
+}
+
+// TestRefreshCurrentDNA_EmptyAttrsLeavesHashUnchanged asserts that when the
+// collector returns an empty attribute map, RefreshCurrentDNA returns nil without
+// mutating currentDNAHash — so a transient empty collect cannot clobber a known
+// good hash.
+func TestRefreshCurrentDNA_EmptyAttrsLeavesHashUnchanged(t *testing.T) {
+	c := newMinimalClient(t)
+
+	stub := &stubDNACollector{attrs: map[string]string{"hostname": "box-1", "os": "linux"}}
+	c.mu.Lock()
+	c.dnaCollector = stub
+	c.mu.Unlock()
+
+	// Establish a known-good hash from a non-empty collect.
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+	c.dnaMu.RLock()
+	seededHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+	require.NotEmpty(t, seededHash, "hash must be seeded by the initial non-empty collect")
+
+	// Now return an empty map — RefreshCurrentDNA must no-op the hash.
+	stub.setAttrs(map[string]string{})
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()),
+		"an empty collect must not be treated as an error")
+
+	c.dnaMu.RLock()
+	afterHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+	assert.Equal(t, seededHash, afterHash,
+		"currentDNAHash must be unchanged when the collector returns an empty map")
 }
 
 // TestStartDNARefreshLoop_NilCollectorWarns verifies that StartDNARefreshLoop
