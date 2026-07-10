@@ -223,11 +223,23 @@ type LinuxCollector struct {
 
 	mu           sync.Mutex
 	sourcesActive []string
+
+	// started is closed by Run once all collection goroutines have been
+	// launched, giving callers a deterministic startup signal instead of an
+	// arbitrary sleep. Consumed via Started().
+	started chan struct{}
 }
 
 // NewLinuxCollector returns a LinuxCollector configured with cfg.
 func NewLinuxCollector(cfg LinuxSpikeConfig, sink *Sink) *LinuxCollector {
-	return &LinuxCollector{cfg: cfg, sink: sink}
+	return &LinuxCollector{cfg: cfg, sink: sink, started: make(chan struct{})}
+}
+
+// Started returns a channel that Run closes once every collection goroutine has
+// been launched. Callers (e.g. cancellation tests) wait on it to synchronize
+// with Run's steady state without relying on wall-clock sleeps.
+func (c *LinuxCollector) Started() <-chan struct{} {
+	return c.started
 }
 
 // Run executes the full Linux spike: probes all sources, collects events for
@@ -318,6 +330,10 @@ func (c *LinuxCollector) Run(ctx context.Context) (LinuxSpikeReport, error) {
 			}
 		}
 	}()
+
+	// All collection goroutines are launched — signal startup completion so
+	// callers can synchronize deterministically (e.g. before cancelling ctx).
+	close(c.started)
 
 	wg.Wait()
 
@@ -581,9 +597,14 @@ func (c *LinuxCollector) runProcConnector(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Set 100ms receive timeout via setsockopt SO_RCVTIMEO.
+		// Set a 100ms receive timeout via SO_RCVTIMEO so Recvfrom returns
+		// promptly and the loop can observe ctx cancellation. If this fails,
+		// Recvfrom would block indefinitely and defeat context cancellation, so
+		// treat the failure as fatal for this goroutine rather than swallowing it.
 		tv := unix.Timeval{Sec: 0, Usec: 100_000}
-		_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+		if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			return
+		}
 
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {

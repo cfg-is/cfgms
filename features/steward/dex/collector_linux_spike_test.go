@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -118,10 +119,11 @@ func TestLinuxAttributePIDSelf(t *testing.T) {
 func TestLinuxAttributePIDExePath(t *testing.T) {
 	pid := os.Getpid()
 	attr := attributePID(pid)
-	// The Go test binary should resolve its exe symlink.
-	// (May be "" on some hardened systems with ptrace restrictions, so just
-	// assert no panic — exe is best-effort.)
-	_ = attr.Exe
+	// The Go test binary should resolve its exe symlink. Exe is best-effort:
+	// it may be "" on hardened systems with ptrace restrictions, but when
+	// present it must be an absolute path (/proc/<pid>/exe resolves a symlink).
+	assert.True(t, attr.Exe == "" || filepath.IsAbs(attr.Exe),
+		"Exe must be empty or an absolute path, got %q", attr.Exe)
 }
 
 func TestLinuxAttributePIDMissing(t *testing.T) {
@@ -134,8 +136,11 @@ func TestLinuxAttributePIDMissing(t *testing.T) {
 func TestLinuxAttributePIDPID1(t *testing.T) {
 	// PID 1 should be readable on a non-hardened container host.
 	attr := attributePID(1)
-	// Just verify no panic; comm may or may not be readable depending on namespace.
-	_ = attr.Comm
+	// Comm may or may not be readable depending on namespace/hardening, but the
+	// accessor must never return a non-empty value that is malformed: /proc comm
+	// is a single trimmed line with no embedded newlines.
+	assert.True(t, attr.Comm == "" || !strings.ContainsRune(attr.Comm, '\n'),
+		"Comm must be empty or a single trimmed line, got %q", attr.Comm)
 }
 
 // ─── Unit: container ID extraction ────────────────────────────────────────────
@@ -347,8 +352,14 @@ func TestLinuxCollectorRunContextCancel(t *testing.T) {
 		close(done)
 	}()
 
-	// Cancel after 500ms — well within the 60s window.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for Run to launch all collection goroutines, then cancel — well
+	// within the 60s window. Using the startup signal instead of a sleep makes
+	// the cancellation test deterministic under CI load.
+	select {
+	case <-col.Started():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() did not signal startup within 5s")
+	}
 	cancel()
 	select {
 	case <-done:
