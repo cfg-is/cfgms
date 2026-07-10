@@ -688,14 +688,30 @@ func TestStewardDNA_JSONOutput(t *testing.T) {
 	assert.Equal(t, rawBody, output)
 }
 
-// ---- cfg steward move tests (Issue #2342) ----
+// ---- cfg steward move tests (Issue #2342, updated for selector in #2444) ----
+
+// newSingleStewardMoveServer creates a test server serving fleet/resolve (returning
+// singleID as the only match) and the move endpoint via the given moveHandler.
+func newSingleStewardMoveServer(t *testing.T, singleID string, moveHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve" {
+			_ = json.NewEncoder(w).Encode(struct {
+				Data []StewardInfo `json:"data"`
+			}{Data: []StewardInfo{{ID: singleID}}})
+			return
+		}
+		moveHandler(w, r)
+	}))
+}
 
 func TestStewardMove_Success(t *testing.T) {
 	var requestPath string
 	var requestMethod string
 	var requestBody map[string]string
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardMoveServer(t, "steward-abc", func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
 		requestMethod = r.Method
 		_ = json.NewDecoder(r.Body).Decode(&requestBody)
@@ -709,7 +725,7 @@ func TestStewardMove_Success(t *testing.T) {
 				"status":          "moved",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -738,7 +754,7 @@ func TestStewardMove_Success(t *testing.T) {
 }
 
 func TestStewardMove_NoChange(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardMoveServer(t, "steward-abc", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -749,7 +765,7 @@ func TestStewardMove_NoChange(t *testing.T) {
 				"status":          "no_change",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -774,7 +790,7 @@ func TestStewardMove_NoChange(t *testing.T) {
 }
 
 func TestStewardMove_Forbidden_ReturnsClearError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardMoveServer(t, "steward-abc", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -783,7 +799,7 @@ func TestStewardMove_Forbidden_ReturnsClearError(t *testing.T) {
 				"message": "Insufficient scope to move steward between these tenants",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -806,7 +822,7 @@ func TestStewardMove_Forbidden_ReturnsClearError(t *testing.T) {
 }
 
 func TestStewardMove_StewardNotFound_Returns404Error(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardMoveServer(t, "unknown-steward", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -815,7 +831,7 @@ func TestStewardMove_StewardNotFound_Returns404Error(t *testing.T) {
 				"message": "Steward not found",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -842,6 +858,25 @@ func TestStewardMove_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("to-tenant"), "--to-tenant flag must be registered")
+	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("json"), "--json flag must be registered")
+}
+
+// ---- cfg steward decommission tests (Issue #2408, updated for selector in #2444) ----
+
+// newSingleStewardDecommissionServer creates a test server serving fleet/resolve (returning
+// singleID as the only match) and DELETE /api/v1/stewards/{id} via decommHandler.
+func newSingleStewardDecommissionServer(t *testing.T, singleID string, decommHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve" {
+			_ = json.NewEncoder(w).Encode(struct {
+				Data []StewardInfo `json:"data"`
+			}{Data: []StewardInfo{{ID: singleID}}})
+			return
+		}
+		decommHandler(w, r)
+	}))
 }
 
 // TestStewardDecommission_CallsDeleteEndpoint verifies that decommission issues an
@@ -850,7 +885,7 @@ func TestStewardDecommission_CallsDeleteEndpoint(t *testing.T) {
 	var requestPath string
 	var requestMethod string
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardDecommissionServer(t, "steward-abc123", func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
 		requestMethod = r.Method
 		w.Header().Set("Content-Type", "application/json")
@@ -861,7 +896,7 @@ func TestStewardDecommission_CallsDeleteEndpoint(t *testing.T) {
 				"status": "deregistered",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -887,7 +922,7 @@ func TestStewardDecommission_CallsDeleteEndpoint(t *testing.T) {
 
 // TestStewardDecommission_NotFound_ReturnsError verifies a 404 surfaces a clear error.
 func TestStewardDecommission_NotFound_ReturnsError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardDecommissionServer(t, "unknown-steward", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -896,7 +931,7 @@ func TestStewardDecommission_NotFound_ReturnsError(t *testing.T) {
 				"message": "Steward not found",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -918,7 +953,7 @@ func TestStewardDecommission_NotFound_ReturnsError(t *testing.T) {
 // TestStewardDecommission_Forbidden_ReturnsMTLSError verifies that a 403 (API-key caller
 // rejected at the Tier-3 gate) surfaces an mTLS-specific error.
 func TestStewardDecommission_Forbidden_ReturnsMTLSError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardDecommissionServer(t, "steward-abc123", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -927,7 +962,7 @@ func TestStewardDecommission_Forbidden_ReturnsMTLSError(t *testing.T) {
 				"message": "mTLS admin certificate required for this endpoint",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -948,7 +983,7 @@ func TestStewardDecommission_Forbidden_ReturnsMTLSError(t *testing.T) {
 // TestStewardDecommission_ServiceUnavailable_ReturnsRetryError verifies that a 503
 // (fleet store unavailable) surfaces a retry-later error.
 func TestStewardDecommission_ServiceUnavailable_ReturnsRetryError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardDecommissionServer(t, "steward-abc123", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -957,7 +992,7 @@ func TestStewardDecommission_ServiceUnavailable_ReturnsRetryError(t *testing.T) 
 				"message": "Fleet store unavailable",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -978,10 +1013,10 @@ func TestStewardDecommission_ServiceUnavailable_ReturnsRetryError(t *testing.T) 
 // TestStewardDecommission_OtherHTTPError_ReturnsStatusAndBody verifies that an unexpected
 // status returns the status and response body.
 func TestStewardDecommission_OtherHTTPError_ReturnsStatusAndBody(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newSingleStewardDecommissionServer(t, "steward-abc123", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal server error"))
-	}))
+	})
 	defer server.Close()
 
 	origURL := stewardURL
@@ -1004,4 +1039,5 @@ func TestStewardDecommission_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
+	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("json"), "--json flag must be registered")
 }
