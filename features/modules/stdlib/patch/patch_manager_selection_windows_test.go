@@ -16,14 +16,17 @@ import (
 )
 
 // TestPatch_Windows_New_SelectsWindowsManager verifies that patch.New() on Windows
-// constructs a module backed by the real WindowsUpdateManager (not the
-// unsupported-platform fallback). This is exercised on the self-hosted Windows runner.
+// selects a Windows-specific manager — either WindowsUpdateManager when COM is available
+// or windowsManagerInitFailure when it is not (e.g. GitHub-hosted CI runners that lack
+// Windows Update Agent COM access). The non-Windows unsupported-platform fallback
+// (unsupportedPlatformPatchManager) must never be returned on Windows.
 func TestPatch_Windows_New_SelectsWindowsManager(t *testing.T) {
 	m := New().(*PatchModule)
 
-	_, isWindows := m.patchManager.(*WindowsUpdateManager)
-	assert.True(t, isWindows,
-		"patch.New() on Windows must select WindowsUpdateManager, got %T", m.patchManager)
+	_, isWindowsMgr := m.patchManager.(*WindowsUpdateManager)
+	_, isInitFailure := m.patchManager.(*windowsManagerInitFailure)
+	assert.True(t, isWindowsMgr || isInitFailure,
+		"patch.New() on Windows must select a Windows-specific manager (WindowsUpdateManager or windowsManagerInitFailure), got %T", m.patchManager)
 }
 
 // TestPatch_Windows_InitFailure_PropagatesError verifies that windowsManagerInitFailure
