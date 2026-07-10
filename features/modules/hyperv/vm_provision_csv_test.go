@@ -176,6 +176,36 @@ func TestProvision_NonHARole_UsesConfiguredStore(t *testing.T) {
 	assert.False(t, own, "a swallowed host-local error reports no in-progress attempt → create proceeds")
 }
 
+// TestProvisionRecordsForSweep_IncludesCSVRecords (#2447): the stale-seed-media
+// TTL sweep must see ha_role+CSV records too — they live in the CSV store, not the
+// host-local one, so a host-local-only list would silently stop TTL-sweeping
+// join-token-bearing seed media for exactly the ha_role class this story targets.
+func TestProvisionRecordsForSweep_IncludesCSVRecords(t *testing.T) {
+	ctx := context.Background()
+
+	host := NewMemProvisionStore()
+	require.NoError(t, host.SetProvision(ctx, ccsRecord("plain-vm", ProvisionStateInstalling)))
+
+	csv := NewMemProvisionStore()
+	require.NoError(t, csv.SetProvision(ctx, ccsRecord("ha-vm", ProvisionStateInstalling)))
+
+	m := &hypervModule{
+		provisionStore:    host,
+		csvProvisionStore: csv,
+		vms:               make(map[string]VMConfig),
+	}
+	// The ha_role+CSV VM is in the module's converge cache, so the sweep must
+	// consult its CSV store.
+	m.vms["ha-vm"] = VMConfig{Name: "ha-vm", VHDPath: csvVHDPath, HARole: &HARoleConfig{ClusterName: "lab-hv"}}
+
+	names := map[string]bool{}
+	for _, r := range m.provisionRecordsForSweep(ctx) {
+		names[r.VMName] = true
+	}
+	assert.True(t, names["plain-vm"], "host-local records must be swept")
+	assert.True(t, names["ha-vm"], "ha_role+CSV records must be swept (regression: #2447)")
+}
+
 // TestSetVM_FailoverMidProvision_CSVRecordDir confirms the production path (no
 // injected store) computes the CSV record directory from the VM's CSV home via
 // vmHomeDir — dir(vhd_path)/.cfgms-provision — not filepath.Dir (Issue #2044).

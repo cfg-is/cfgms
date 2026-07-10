@@ -799,13 +799,10 @@ func (m *hypervModule) vmIsRunning(ctx context.Context, vmName string) (bool, er
 // the VM's VHD path is known from the module cache, the path fails validation
 // and that file is silently skipped.
 func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
-	if m.provisionStore == nil || m.transport == nil {
+	if m.transport == nil {
 		return
 	}
-	records, err := m.provisionStore.ListProvisions(ctx)
-	if err != nil {
-		return
-	}
+	records := m.provisionRecordsForSweep(ctx)
 	for _, rec := range records {
 		if rec.State == ProvisionStateAbsent {
 			continue
@@ -841,4 +838,57 @@ func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// provisionRecordsForSweep returns the union of provision records this module may
+// hold stale HOST-LOCAL seed media for: the configured host-local store, PLUS the
+// cluster-visible CSV store of every ha_role+CSV VM in the module's cache — those
+// records live on the CSV, not the host-local store, so a host-local-only list
+// would silently stop TTL-sweeping seed media (which can carry a join token) for
+// exactly the ha_role class #2447 targets. Deduplicated by VM name (host-local
+// wins). CSV homes are listed once each; store IO happens after the cache lock is
+// released.
+func (m *hypervModule) provisionRecordsForSweep(ctx context.Context) []*ProvisionRecord {
+	seen := map[string]bool{}
+	var out []*ProvisionRecord
+	add := func(recs []*ProvisionRecord) {
+		for _, r := range recs {
+			if r == nil || seen[r.VMName] {
+				continue
+			}
+			seen[r.VMName] = true
+			out = append(out, r)
+		}
+	}
+
+	if m.provisionStore != nil {
+		if recs, err := m.provisionStore.ListProvisions(ctx); err == nil {
+			add(recs)
+		}
+	}
+
+	// Snapshot the ha_role+CSV configs under the cache lock, then list each
+	// distinct CSV home OUTSIDE the lock (ListProvisions does disk IO).
+	m.vmsMu.RLock()
+	var csvCfgs []VMConfig
+	for _, cfg := range m.vms {
+		c := cfg
+		if m.usesCSVStore(&c) {
+			csvCfgs = append(csvCfgs, c)
+		}
+	}
+	m.vmsMu.RUnlock()
+
+	listedHome := map[string]bool{}
+	for i := range csvCfgs {
+		home := vmHomeDir(csvCfgs[i].VHDPath)
+		if listedHome[home] {
+			continue
+		}
+		listedHome[home] = true
+		if recs, err := m.storeFor(&csvCfgs[i]).ListProvisions(ctx); err == nil {
+			add(recs)
+		}
+	}
+	return out
 }

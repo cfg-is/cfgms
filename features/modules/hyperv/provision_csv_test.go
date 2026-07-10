@@ -143,7 +143,13 @@ func TestCSVProvisionStore_AtomicWrite(t *testing.T) {
 // drive, never a network share — the ErrInvalidSeedPath precedent).
 func TestCSVProvisionStore_InvalidHomeDir(t *testing.T) {
 	ctx := context.Background()
-	for _, home := range []string{"", `\\server\share\vm`, `//server/share/vm`} {
+	for _, home := range []string{
+		"",
+		`\\server\share\vm`,                    // UNC (backslash)
+		`//server/share/vm`,                    // UNC (forward slash)
+		`C:\ClusterStorage\Vol1\..\..\Windows`, // .. traversal escaping the CSV
+		`C:\ClusterStorage\Vol1\..`,            // .. segment
+	} {
 		s := newCSVProvisionStore(home)
 		_, gErr := s.GetProvision(ctx, "vm")
 		assert.ErrorIs(t, gErr, ErrInvalidSeedPath, "home=%q Get", home)

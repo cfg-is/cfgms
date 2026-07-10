@@ -42,10 +42,21 @@ func newCSVProvisionStore(homeDir string) *csvProvisionStore {
 
 // recordDir returns <homeDir>/.cfgms-provision, rejecting an empty or UNC home
 // dir (the record must live on a local/CSV drive next to the VHD, never on an
-// arbitrary network share — same invariant as ErrInvalidSeedPath).
+// arbitrary network share — same invariant as ErrInvalidSeedPath) AND any homeDir
+// containing a ".." segment. The ".." guard is load-bearing, not cosmetic:
+// vmHomeDir does not Clean the path and vhdPathPattern permits "..", so a
+// vhd_path like C:\ClusterStorage\Vol1\..\..\Windows\x.vhdx passes isUnderCSV
+// (raw prefix match) yet filepath.Join would Clean it to an off-CSV location —
+// silently defeating the cluster-visibility invariant this store exists to
+// provide (the record would land host-local, invisible to a post-failover owner).
 func (s *csvProvisionStore) recordDir() (string, error) {
 	if s.homeDir == "" || strings.HasPrefix(s.homeDir, `\\`) || strings.HasPrefix(s.homeDir, `//`) {
 		return "", ErrInvalidSeedPath
+	}
+	for _, seg := range strings.FieldsFunc(s.homeDir, func(r rune) bool { return r == '\\' || r == '/' }) {
+		if seg == ".." {
+			return "", ErrInvalidSeedPath
+		}
 	}
 	return filepath.Join(s.homeDir, csvProvisionSubdir), nil
 }
@@ -97,7 +108,7 @@ func (s *csvProvisionStore) SetProvision(_ context.Context, record *ProvisionRec
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("hyperv: create provision dir: %w", err)
 	}
 	data, err := json.MarshalIndent(record, "", "  ")
