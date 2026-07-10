@@ -124,6 +124,7 @@ type Server struct {
 	sessionManager                 session.Manager                       // Issue #2232: admin session token issuance/revocation
 	sessionCfg                     session.Config                        // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
 	webSessionManager              session.Manager                       // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
+	csrfTokens                     sync.Map                              // Issue #2493: sessionID → session-bound CSRF token; populated on login, deleted on logout/revoke
 	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
 	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
 	batchJobStore                  business.BatchJobStore                // Issue #2296: durable batch-job persistence
@@ -415,7 +416,8 @@ func (s *Server) setupRouter() {
 	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
 	api.Use(s.requireTier(TierAny))     // Issue #1419: explicit Tier-1 default for the api subrouter
 	api.Use(s.validationMiddleware)
-	s.apiRouter = api // saved so Set* methods can lazy-register routes after construction
+	api.Use(s.csrfMiddleware) // Issue #2493: session-bound CSRF for unsafe cookie-auth methods
+	s.apiRouter = api         // saved so Set* methods can lazy-register routes after construction
 
 	// --- Tier 0 (TierPublic) — no authentication required ---
 	//   GET  /api/v1/health
@@ -669,6 +671,17 @@ func (s *Server) setupRouter() {
 		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleUpgradeStatus))).Methods("GET")
 	stewardUpgrade.Handle("/{upgrade_id}/rollback",
 		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleUpgradeRollback))).Methods("POST")
+
+	// Web login / CSRF / logout endpoints (Issue #2493, ADR-018 §3,4).
+	// Registered on the BASE router (TierPublic pattern) and explicitly wrapped in
+	// authDefense.Middleware. The api subrouter chain at line ~414 does NOT cover
+	// base-router routes (security A5.4), so wrapping is mandatory here.
+	s.router.Handle("/api/v1/web/csrf",
+		s.authDefense.Middleware(http.HandlerFunc(s.handleGetWebCSRF))).Methods("GET")
+	s.router.Handle("/api/v1/web/login",
+		s.authDefense.Middleware(http.HandlerFunc(s.handleWebLogin))).Methods("POST")
+	s.router.Handle("/api/v1/web/logout",
+		s.authDefense.Middleware(http.HandlerFunc(s.handleWebLogout))).Methods("POST")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
