@@ -6,7 +6,7 @@
 
 **Deciders:** Founder, Architecture
 
-**Related:** Epic #2344 (Web UI Foundation — this ADR is the prerequisite that pins web-session semantics before auth stories are decomposed). [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — the server-side session model this ADR reuses for the browser). `pkg/session` (the existing idle/absolute session manager). Auth-tier policy epic #1419 (session principals must stay consistent with its tiers).
+**Related:** Epic #2344 (Web UI Foundation — this ADR is the prerequisite that pins web-session semantics before auth stories are decomposed). [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — the server-side session model this ADR reuses for the browser). `pkg/session` (the existing idle/absolute session manager). Auth-tier policy epic #1419 (session principals must stay consistent with its tiers). Issue #2490 (credential backend — see Addendum 1).
 
 ---
 
@@ -144,3 +144,45 @@ method (POST/PUT/PATCH/DELETE)** additionally requires a valid CSRF token:
 - **JWT sessions** — self-contained tokens complicate immediate revocation and
   add client-side custody. Rejected for v1; server-side opaque sessions match
   ADR-014.
+
+---
+
+## Addendum 1 (2026-07-08): Credential backend — local web-admin accounts
+
+**Status:** Accepted (founder decision). **Implements:** Issue #2490.
+
+The original decision pinned transport, lifetime, and CSRF and left the
+credential backend — what "a valid credential login" verifies against — open.
+This addendum closes it:
+
+- **Local web-admin account store on the controller.** A web-admin account is a
+  username + password credential holding the same principal fields the session
+  path builds (principal ID, tenant scope, permission strings). Web accounts
+  are **RBAC-equivalent to API-key principals** (ADR-014 §7 parity), NOT
+  implicit global admins: verification grants exactly the stored permission
+  set, validated against the same permission allow-list API keys use.
+- **argon2id password hashing, PHC-encoded.** Only argon2id PHC hash strings
+  are ever stored — in memory and at rest — never the cleartext password.
+  Cost parameters (19 MiB memory, 2 iterations, 1 lane) are encoded in each
+  stored hash, so defaults can be raised later without breaking existing
+  hashes: verification derives with the parameters parsed from the hash.
+- **Durable persistence through the central `pkg/secrets` seam** — the same
+  seam API-key records use (`SecretStore.StoreSecret` via
+  `pkg/secrets/interfaces`, distinct `secret_type: web_account`), with the
+  in-memory map as cache only. Accounts survive controller restart.
+- **Tier-3 provisioning only.** `POST /api/v1/web/accounts` (create, and reset
+  via upsert) and `DELETE /api/v1/web/accounts/{username}` require an admin
+  mTLS certificate (`requireTier(TierMTLSOnly)`); API-key and session-token
+  callers are rejected. Create/reset/delete emit sanitized audit events; the
+  password value never appears in any log or error response.
+- **No enumeration, uniform failure.** Unknown-user and wrong-password produce
+  the identical error; unknown-user verification runs against a dummy argon2id
+  hash so both paths perform the same key-derivation work.
+- **Lockout state:** 5 consecutive verification failures lock the account for
+  15 minutes; success resets the counter. The state lives in the account store
+  (in-memory, resets on controller restart, consistent with §2's in-memory
+  session store); enforcement happens at the login endpoint (#2493).
+- **Out of scope, reaffirmed:** TOTP/second factor is out of scope for this
+  epic (candidate follow-on); the login mockup's WebAuthn/passkey `mfa` state
+  is a designed seam, built later. Reset is admin-driven via the same Tier-3
+  endpoint — no self-service reset.

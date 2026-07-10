@@ -110,6 +110,39 @@ For detailed information about our security decisions, see:
 - Rate limiting
 - Audit logging
 
+### Web-Admin Credentials (Browser Login)
+
+The controller holds a local web-admin account store that backs the browser
+credential login (ADR-018, Addendum 1):
+
+- **Storage:** accounts hold only argon2id PHC hash strings — never the
+  cleartext password — persisted through the central `pkg/secrets` provider
+  (encrypted at rest, distinct `secret_type: web_account`), with an in-memory
+  map as cache only. Accounts survive controller restart. argon2id cost
+  parameters are encoded in each stored hash so they can be raised without
+  invalidating existing credentials.
+- **Provisioning:** Tier-3 only. `POST /api/v1/web/accounts` (create, and
+  admin-driven password reset via upsert) and
+  `DELETE /api/v1/web/accounts/{username}` require an admin mTLS certificate;
+  API-key and session-token callers receive `403 MTLS_REQUIRED`. Every
+  create/reset/delete emits an audit event with the sanitized username and the
+  acting admin principal; the password value never appears in logs or error
+  responses.
+- **Scope:** web accounts carry a tenant scope and an allow-listed permission
+  set — RBAC-equivalent to API-key principals, never implicit global admins.
+- **Verification hardening:** unknown-user and wrong-password failures are
+  indistinguishable (uniform error; unknown-user verification runs against a
+  dummy argon2id hash for timing uniformity). Passwords are bounded to 8–128
+  bytes before hashing; usernames are length- and charset-validated so they
+  stay path- and log-safe. Per-account lockout state: 5 consecutive
+  verification failures lock the account for 15 minutes (reset on success);
+  lockout is enforced at the login endpoint.
+
+**Threat notes:** provisioning is bound to the admin mTLS credential bundle, so
+a stolen API key cannot mint or reset web credentials. A compromised admin
+session's account changes are fully audited. Hash-only storage bounds the value
+of a stolen secret store to offline argon2id cracking of individual passwords.
+
 ### Role-Based Access Control (RBAC)
 
 - Fine-grained permission system
@@ -150,6 +183,8 @@ The controller REST API assigns every endpoint to one of four authentication tie
 | `tenant:create` | `POST /api/v1/tenants` |
 | `refresh:approve` | `POST /api/v1/stewards/refresh/{pending_id}/approve` |
 | `refresh:set-policy` | `PUT /api/v1/tenants/{tenant_path}/refresh-policy` |
+| `web-account:create` | `POST /api/v1/web/accounts` |
+| `web-account:delete` | `DELETE /api/v1/web/accounts/{username}` |
 
 The canonical source of truth for this list is `tier3Permissions` in `features/controller/api/auth_tiers.go`. The `TestTier3Enforcement_RouteSetMatchesCanonicalSet` test in `features/controller/api/tier_enforcement_test.go` asserts at test time that the wired route set exactly equals this map — any drift is a test failure.
 

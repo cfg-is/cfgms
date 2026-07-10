@@ -74,6 +74,8 @@ type Server struct {
 	haManager                      *ha.Manager
 	apiKeys                        map[string]*APIKey                    // In-memory cache for fast lookup
 	secretStore                    secretsif.SecretStore                 // M-AUTH-1: Central secrets provider for API keys
+	webAccounts                    map[string]*webAccount                // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
+	webAccountLockouts             map[string]*webAccountLockout         // Issue #2490: per-account lockout state (lazy-init, guarded by mu; in-memory only)
 	registrationTokenStore         registration.Store                    // Registration token store for steward registration
 	corsConfig                     *CORSConfig                           // CORS configuration
 	signerCertSerial               string                                // Story #378: Serial of cert used for config signing
@@ -618,6 +620,12 @@ func (s *Server) setupRouter() {
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleSuspendTenant))).Methods("POST")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+
+	// Web-admin account provisioning endpoints (Issue #2490). Tier-3 (admin mTLS
+	// only), mirroring the tenants-create registration above.
+	webAccounts := api.PathPrefix("/web/accounts").Subrouter()
+	webAccounts.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount)))).Methods("POST")
+	webAccounts.Handle("/{username}", s.requireTier(TierMTLSOnly)(s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount)))).Methods("DELETE")
 
 	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
 	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
