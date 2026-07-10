@@ -35,6 +35,8 @@ func saveStewardUpgradeGlobals(t *testing.T) {
 	origNoBundle := noBundle
 	origUserConfigDir := userConfigDirFn
 	origSystemBundle := systemBundlePathFn
+	origYes := stewardYes
+	origJSONOutput := stewardUpgradeJSONOutput
 	t.Cleanup(func() {
 		stewardURL = origURL
 		stewardAPIKey = origAPIKey
@@ -52,6 +54,8 @@ func saveStewardUpgradeGlobals(t *testing.T) {
 		noBundle = origNoBundle
 		userConfigDirFn = origUserConfigDir
 		systemBundlePathFn = origSystemBundle
+		stewardYes = origYes
+		stewardUpgradeJSONOutput = origJSONOutput
 	})
 }
 
@@ -74,6 +78,15 @@ func writeUpgradeDispatchResponse(w http.ResponseWriter, upgradeID string, stewa
 		UpgradeID:    upgradeID,
 		StewardCount: stewardCount,
 		Status:       "accepted",
+	})
+}
+
+// writeUpgradeResolveResponse writes a canned fleet/resolve 200 response
+// containing a list of StewardInfo entries.
+func writeUpgradeResolveResponse(w http.ResponseWriter, stewards []StewardInfo) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"data": stewards,
 	})
 }
 
@@ -123,6 +136,8 @@ func TestRunStewardUpgrade_Wait(t *testing.T) {
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+				writeUpgradeResolveResponse(w, []StewardInfo{{ID: "steward-abc"}})
 			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/stewards/upgrade":
 				writeUpgradeDispatchResponse(w, "upgrade-wait-id", 2)
 			case r.Method == http.MethodGet:
@@ -164,6 +179,8 @@ func TestRunStewardUpgrade_Wait(t *testing.T) {
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+				writeUpgradeResolveResponse(w, []StewardInfo{{ID: "steward-abc"}})
 			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/stewards/upgrade":
 				writeUpgradeDispatchResponse(w, "upgrade-auth-id", 1)
 			case r.Method == http.MethodGet:
@@ -201,6 +218,8 @@ func TestRunStewardUpgrade_Wait(t *testing.T) {
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+				writeUpgradeResolveResponse(w, []StewardInfo{{ID: "steward-abc"}})
 			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/stewards/upgrade":
 				writeUpgradeDispatchResponse(w, "upgrade-forbidden-id", 1)
 			case r.Method == http.MethodGet:
@@ -241,10 +260,15 @@ func TestRunStewardUpgrade_AsyncSuccess(t *testing.T) {
 	var requestBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestPath = r.URL.Path
-		requestMethod = r.Method
-		requestBody, _ = io.ReadAll(r.Body)
-		writeUpgradeDispatchResponse(w, "upgrade-async-id", 3)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeUpgradeResolveResponse(w, []StewardInfo{{ID: "steward-abc"}})
+		default:
+			requestPath = r.URL.Path
+			requestMethod = r.Method
+			requestBody, _ = io.ReadAll(r.Body)
+			writeUpgradeDispatchResponse(w, "upgrade-async-id", 3)
+		}
 	}))
 	defer server.Close()
 
@@ -274,8 +298,13 @@ func TestRunStewardUpgrade_PlatformArchIncludedInBody(t *testing.T) {
 	var requestBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestBody, _ = io.ReadAll(r.Body)
-		writeUpgradeDispatchResponse(w, "upgrade-plat-id", 1)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeUpgradeResolveResponse(w, []StewardInfo{{ID: "s1"}})
+		default:
+			requestBody, _ = io.ReadAll(r.Body)
+			writeUpgradeDispatchResponse(w, "upgrade-plat-id", 1)
+		}
 	}))
 	defer server.Close()
 
@@ -297,10 +326,16 @@ func TestRunStewardUpgrade_PlatformArchIncludedInBody(t *testing.T) {
 }
 
 func TestRunStewardUpgrade_NonAcceptedStatusReturnsError(t *testing.T) {
+	// Resolve succeeds (1 match), but DispatchUpgrade returns 400.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid selector"})
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeUpgradeResolveResponse(w, []StewardInfo{{ID: "s1"}})
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid selector"})
+		}
 	}))
 	defer server.Close()
 
@@ -316,8 +351,10 @@ func TestRunStewardUpgrade_NonAcceptedStatusReturnsError(t *testing.T) {
 
 func TestRunStewardUpgrade_WaitExitsNonZeroOnFailedSteward(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeUpgradeResolveResponse(w, []StewardInfo{{ID: "steward-abc"}})
+		case r.Method == http.MethodPost:
 			writeUpgradeDispatchResponse(w, "upgrade-fail-id", 2)
 		default:
 			stewards := []APIUpgradeStewardStatus{
@@ -349,8 +386,10 @@ func TestRunStewardUpgrade_WaitExitsNonZeroOnFailedSteward(t *testing.T) {
 
 func TestRunStewardUpgrade_WaitTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeUpgradeResolveResponse(w, []StewardInfo{{ID: "steward-abc"}})
+		case r.Method == http.MethodPost:
 			writeUpgradeDispatchResponse(w, "upgrade-timeout-id", 1)
 		default:
 			// Always return dispatched (non-terminal)
@@ -619,7 +658,7 @@ func TestStewardUpgradeCommandsRegistered(t *testing.T) {
 }
 
 func TestStewardUpgradeFlagsRegistered(t *testing.T) {
-	for _, flag := range []string{"url", "api-key", "tls-ca-cert", "version", "platform", "arch", "wait", "wait-timeout"} {
+	for _, flag := range []string{"url", "api-key", "tls-ca-cert", "version", "platform", "arch", "wait", "wait-timeout", "json"} {
 		assert.NotNil(t, stewardUpgradeCmd.Flags().Lookup(flag), "upgrade must have --%s flag", flag)
 	}
 	// --tls-insecure must NOT be registered on the upgrade command
@@ -638,4 +677,108 @@ func TestStewardUpgradeRollbackFlagsRegistered(t *testing.T) {
 		assert.NotNil(t, stewardUpgradeRollbackCmd.Flags().Lookup(flag), "upgrade rollback must have --%s flag", flag)
 	}
 	assert.Nil(t, stewardUpgradeRollbackCmd.Flags().Lookup("tls-insecure"), "upgrade rollback must NOT have --tls-insecure flag")
+}
+
+// ---------------------------------------------------------------------------
+// [REQUIRED TEST] confirm-gate wiring — upgrade
+// ---------------------------------------------------------------------------
+
+// newUpgradeResolveDispatchServer builds a minimal test server that stubs
+// both POST /api/v1/fleet/resolve and POST /api/v1/stewards/upgrade.
+func newUpgradeResolveDispatchServer(t *testing.T, resolveMatches []StewardInfo, upgradeID string, stewardCount int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeUpgradeResolveResponse(w, resolveMatches)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/stewards/upgrade":
+			writeUpgradeDispatchResponse(w, upgradeID, stewardCount)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// TestRunStewardUpgrade_ConfirmGate_SingleMatchNoPrompt verifies that a
+// selector resolving to one steward proceeds without --yes.
+func TestRunStewardUpgrade_ConfirmGate_SingleMatchNoPrompt(t *testing.T) {
+	srv := newUpgradeResolveDispatchServer(t,
+		[]StewardInfo{{ID: "steward-abc"}},
+		"upgrade-single-id", 1,
+	)
+	defer srv.Close()
+
+	saveStewardUpgradeGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardUpgradeVersion = "v0.5.12"
+	stewardYes = false // single match → no prompt required
+
+	_ = captureStdout(t, func() {
+		err := runStewardUpgrade(stewardUpgradeCmd, []string{"id:steward-abc"})
+		require.NoError(t, err)
+	})
+}
+
+// TestRunStewardUpgrade_ConfirmGate_MultiMatchNonTTYRequiresYes verifies that
+// a multi-match selector is blocked without --yes in a non-interactive context.
+func TestRunStewardUpgrade_ConfirmGate_MultiMatchNonTTYRequiresYes(t *testing.T) {
+	srv := newUpgradeResolveDispatchServer(t,
+		[]StewardInfo{{ID: "s1"}, {ID: "s2"}},
+		"upgrade-multi-id", 2,
+	)
+	defer srv.Close()
+
+	saveStewardUpgradeGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardUpgradeVersion = "v0.5.12"
+	stewardYes = false
+
+	err := runStewardUpgrade(stewardUpgradeCmd, []string{"group:production"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "yes")
+}
+
+// TestRunStewardUpgrade_JSONOutput_KeyedBySteward verifies that --json emits a
+// keyed-by-steward array with upgrade_id and steward_count in each payload.
+func TestRunStewardUpgrade_JSONOutput_KeyedBySteward(t *testing.T) {
+	srv := newUpgradeResolveDispatchServer(t,
+		[]StewardInfo{
+			{ID: "s1", DNA: &StewardInfoDNA{Hostname: "host-one"}},
+			{ID: "s2", DNA: &StewardInfoDNA{Hostname: "host-two"}},
+		},
+		"upgrade-json-id", 2,
+	)
+	defer srv.Close()
+
+	saveStewardUpgradeGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardUpgradeVersion = "v0.5.12"
+	stewardYes = true
+	stewardUpgradeJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runStewardUpgrade(stewardUpgradeCmd, []string{"group:production"})
+		require.NoError(t, err)
+	})
+
+	var entries []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(output), &entries), "output must be valid JSON")
+	require.Len(t, entries, 2, "must have one entry per resolved steward")
+
+	keys := make(map[string]bool)
+	for _, e := range entries {
+		key, ok := e["key"].(string)
+		require.True(t, ok, "each entry must have a string 'key' field")
+		keys[key] = true
+		assert.True(t, e["success"].(bool), "each entry must be success=true")
+		payload, ok := e["payload"].(map[string]interface{})
+		require.True(t, ok, "each entry must have a payload object")
+		assert.Equal(t, "upgrade-json-id", payload["upgrade_id"], "payload must contain upgrade_id")
+		assert.InDelta(t, float64(2), payload["steward_count"], 0, "payload must contain steward_count")
+	}
+	assert.True(t, keys["host-one#s1"], "output must contain key 'host-one#s1'")
+	assert.True(t, keys["host-two#s2"], "output must contain key 'host-two#s2'")
 }
