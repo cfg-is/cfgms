@@ -27,6 +27,10 @@ set -uo pipefail
 
 BUNDLE_PATH="${CFGMS_ADMIN_BUNDLE:-/etc/cfgms/admin.bundle.yaml}"
 CONTROLLER_URL=""
+# CFG_BIN is the cfg client used for the health check (mTLS via crypto/tls/PEM,
+# never curl+Schannel — see #2458). Override with CFGMS_CFG_BIN when the binary is
+# not on PATH (e.g. the test harness points at a freshly-built ./bin/cfg).
+CFG_BIN="${CFGMS_CFG_BIN:-cfg}"
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -250,27 +254,54 @@ _record_fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
 }
 
-# --- Check 1: health endpoint returns 200 ---
-_health_code="000"
-_health_code=$(curl \
-  --cert "$CERT_FILE" --key "$KEY_FILE" --cacert "$CA_FILE" \
-  -s -o /dev/null -w "%{http_code}" \
-  "${CONTROLLER_URL}/api/v1/health" 2>/dev/null) || _health_code="000"
-
-if [[ "$_health_code" == "200" ]]; then
-  _record_pass "health: GET /api/v1/health"
+# --- Check 1: controller health via the cfg client ---
+# cfg builds mTLS from the admin bundle through pkg/cert / crypto/tls (PEM,
+# cross-platform) and hits GET /api/v1/health/detailed, returning non-zero when
+# the controller is unreachable or not healthy. This dogfoods the exact client
+# operators use and never touches curl/Schannel (#2458 RC2).
+if _health_out=$("$CFG_BIN" controller status --bundle "$BUNDLE_PATH" --url "$CONTROLLER_URL" 2>&1); then
+  _record_pass "health: cfg controller status"
 else
-  _record_fail "health: GET /api/v1/health" "expected HTTP 200, got ${_health_code}"
+  _record_fail "health: cfg controller status" \
+    "controller unhealthy/unreachable: $(printf '%s' "$_health_out" | tr '\n' ' ' | cut -c1-200)"
 fi
 
 # --- Checks 2-4: required tenant existence ---
 _check_tenant() {
   local tenant_id="$1"
-  local code="000"
-  code=$(curl \
-    --cert "$CERT_FILE" --key "$KEY_FILE" --cacert "$CA_FILE" \
-    -s -o /dev/null -w "%{http_code}" \
-    "${CONTROLLER_URL}/api/v1/tenants/${tenant_id}" 2>/dev/null) || code="000"
+  local code
+  # mTLS GET via python3's ssl module (OpenSSL-backed PEM on every OS — no
+  # curl/Schannel). cfg has no `tenant get` subcommand today (only the
+  # GetTenantViaAPI client method is wired), so per #2458's AC this check uses the
+  # permitted python3 stdlib fallback "where cfg can't express the check".
+  # Pass the PEM material as CONTENT (not file paths): a native (non-MSYS) python3
+  # on Windows cannot open an MSYS-style /tmp/... path passed via env var, so
+  # python writes the certs to its own temp files (native paths) and loads those.
+  # This keeps the check cross-platform without any MSYS path conversion.
+  code=$(CT_URL="${CONTROLLER_URL}/api/v1/tenants/${tenant_id}" \
+    CT_CERT_PEM="$(cat "$CERT_FILE")" CT_KEY_PEM="$(cat "$KEY_FILE")" CT_CA_PEM="$(cat "$CA_FILE")" \
+    python3 - <<'PYTHON' 2>/dev/null
+import os, ssl, tempfile, urllib.request, urllib.error
+d = tempfile.mkdtemp()
+paths = {}
+for name, env in (('cert', 'CT_CERT_PEM'), ('key', 'CT_KEY_PEM'), ('ca', 'CT_CA_PEM')):
+    p = os.path.join(d, name + '.pem')
+    with open(p, 'w') as fh:
+        fh.write(os.environ[env])
+    paths[name] = p
+ctx = ssl.create_default_context(cafile=paths['ca'])
+ctx.load_cert_chain(certfile=paths['cert'], keyfile=paths['key'])
+req = urllib.request.Request(os.environ['CT_URL'], method='GET')
+try:
+    with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+        print(r.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print('000')
+PYTHON
+)
+  [[ -z "$code" ]] && code="000"
 
   if [[ "$code" == "200" ]]; then
     _record_pass "tenant-exists: ${tenant_id}"
