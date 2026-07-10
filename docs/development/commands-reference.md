@@ -208,6 +208,19 @@ make lint
 # Equivalent to: golangci-lint run
 ```
 
+### Invariant Checks
+
+```bash
+# Check central provider architecture compliance (no duplicate cross-cutting concerns)
+make check-architecture
+
+# Check stdlib payload boundary: all five sources of stdlib module names must agree
+# (features/modules/stdlib/ dir, Makefile, .wxs, install.sh, build-pkg.sh)
+make check-stdlib-payload-boundary
+```
+
+Both checks run automatically as part of `make test-commit`.
+
 ## Protocol Buffers
 
 ### Proto Generation

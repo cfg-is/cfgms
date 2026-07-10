@@ -158,7 +158,14 @@ chmod 755 "$PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 echo "  Launcher payload: $PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 
 # Install stdlib module binaries into the payload tree.
-STDLIB_MODULES=(cfgms-module-file cfgms-module-service cfgms-module-package cfgms-module-script cfgms-module-firewall cfgms-module-patch)
+STDLIB_MODULES=(
+    cfgms-module-file
+    cfgms-module-firewall
+    cfgms-module-package
+    cfgms-module-patch
+    cfgms-module-script
+    cfgms-module-service
+)
 MODULES_PAYLOAD_DIR="$PAYLOAD_DIR/usr/local/lib/cfgms/modules"
 mkdir -p "$MODULES_PAYLOAD_DIR"
 for module_bin in "${STDLIB_MODULES[@]}"; do

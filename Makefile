@@ -143,8 +143,14 @@ STDLIB_MODULES := \
 	script \
 	service
 
+# Stdlib payload boundary check: all five sources of stdlib module names must agree.
+# See scripts/check-stdlib-payload-boundary.sh and ADR-016 clause 3.
+.PHONY: check-stdlib-payload-boundary
+check-stdlib-payload-boundary:
+	@./scripts/check-stdlib-payload-boundary.sh
+
 .PHONY: build-stdlib-modules
-build-stdlib-modules:
+build-stdlib-modules: check-stdlib-payload-boundary
 	@echo "Building stdlib module binaries..."
 	@for module in $(STDLIB_MODULES); do \
 		echo "  Building cfgms-module-$$module..."; \
@@ -706,7 +712,7 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
-test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture security-scan
+test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-payload-boundary security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
@@ -715,6 +721,7 @@ test-commit: test lint lint-log-injection check-license-headers security-precomm
 	@echo "- ✅ License headers validated"
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
+	@echo "- ✅ Stdlib payload boundary validated (all five sources agree)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"

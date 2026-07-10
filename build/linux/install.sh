@@ -143,7 +143,14 @@ fi
 
 # ── Install stdlib module binaries ────────────────────────────────────────────
 
-STDLIB_MODULES=(cfgms-module-file cfgms-module-service cfgms-module-package cfgms-module-script cfgms-module-firewall cfgms-module-patch)
+STDLIB_MODULES=(
+    cfgms-module-file
+    cfgms-module-firewall
+    cfgms-module-package
+    cfgms-module-patch
+    cfgms-module-script
+    cfgms-module-service
+)
 MODULES_INSTALL_DIR="${INSTALL_PREFIX}/usr/local/lib/cfgms/modules"
 
 install -d "$MODULES_INSTALL_DIR"
