@@ -1,0 +1,36 @@
+name: patch
+version: 0.1.0
+description: >
+  Manages OS patch compliance and update installation on the system.
+  Provides idempotent Get/Set management of patch state via the native
+  update mechanism (Windows Update COM API on Windows; Linux and macOS
+  backends are planned but not yet implemented).
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local patch management on steward systems
+
+requirements:
+  os: [windows]
+  arch: [amd64, arm64]
+  min_memory: "128MB"
+  min_disk: "500MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: patch  # authority over patch:* objects this module manages
+
+security:
+  requires_root: true  # installing patches requires elevated privileges
+  capabilities: []
+  ports: []
+
+documentation:
+  api: "README.md"
+  examples: "tests/"

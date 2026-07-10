@@ -5,6 +5,12 @@ package patch
 import "errors"
 
 var (
+	// errPatchNotAvailable is returned on platforms where no patch manager is implemented.
+	// It is a patch-local sentinel and does not wrap modules.ErrUnsupportedPlatform or
+	// modules.ErrNotImplemented — those are distinct module-layer contracts; this error
+	// is returned by the PatchManager backend, not by the Module interface itself.
+	errPatchNotAvailable = errors.New("patch management not available on this platform")
+
 	// ErrInvalidPatchType is returned when the patch type is not valid
 	ErrInvalidPatchType = errors.New("invalid patch type (must be 'security', 'all', 'kernel', 'critical', or 'feature-update')")
 
