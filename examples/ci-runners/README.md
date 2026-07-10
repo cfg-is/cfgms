@@ -70,7 +70,7 @@ Before uploading, edit the cfg to set:
   Verify with `sha256sum` (Linux) or `Get-FileHash` (Windows).
 
 Module field names come from
-[`features/modules/github_runner/config.go`](../../features/modules/github_runner/config.go).
+[`features/modules/extended/github_runner/config.go`](../../features/modules/extended/github_runner/config.go).
 
 ### Step 4 — Load the GitHub App secrets (one-time)
 

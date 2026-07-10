@@ -22,10 +22,10 @@ While our test suite covers core functionality well, there are significant gaps 
 
 ```
 ✅ Core Modules (75-83% coverage)
-  - features/modules/firewall     75.8%
-  - features/modules/file         72.4% 
+  - features/modules/stdlib/firewall     75.8%
+  - features/modules/stdlib/file         72.4% 
   - features/modules/directory    73.6%
-  - features/modules/patch        75.2%
+  - features/modules/stdlib/patch        75.2%
   - features/modules             82.9%
 
 ✅ Configuration Management (78-87% coverage)

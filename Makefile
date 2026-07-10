@@ -135,14 +135,20 @@ build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 # Stdlib module binaries (out-of-process gRPC binaries bundled in the steward installer)
-STDLIB_MODULES := file service package script firewall patch
+STDLIB_MODULES := \
+	file \
+	firewall \
+	package \
+	patch \
+	script \
+	service
 
 .PHONY: build-stdlib-modules
 build-stdlib-modules:
 	@echo "Building stdlib module binaries..."
 	@for module in $(STDLIB_MODULES); do \
 		echo "  Building cfgms-module-$$module..."; \
-		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/$$module/cmd || exit 1; \
+		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/stdlib/$$module/cmd || exit 1; \
 	done
 
 # Cross-platform build targets
@@ -440,10 +446,10 @@ test-watch:
 # SMART TESTING SYSTEM
 
 # Core modules for smoke testing (always tested)
-CORE_MODULES := file script
+CORE_MODULES := stdlib/file stdlib/script
 
 # All modules for change detection
-ALL_MODULES := file script firewall package patch m365 activedirectory network_activedirectory
+ALL_MODULES := stdlib/file stdlib/script stdlib/firewall stdlib/package stdlib/patch m365 extended/activedirectory extended/network_activedirectory
 
 # Detect changed modules using git diff
 CHANGED_MODULES = $(shell \

@@ -19,10 +19,10 @@ endpoints.
 
 ## Implementation References
 
-- Schema: [`features/modules/firewall/module.yaml`](../../features/modules/firewall/module.yaml)
-- Implementation: [`features/modules/firewall/module.go`](../../features/modules/firewall/module.go)
-- Linux executor: [`features/modules/firewall/executor_linux.go`](../../features/modules/firewall/executor_linux.go)
-- Non-Linux stub: [`features/modules/firewall/executor_stub.go`](../../features/modules/firewall/executor_stub.go)
+- Schema: [`features/modules/stdlib/firewall/module.yaml`](../../features/modules/stdlib/firewall/module.yaml)
+- Implementation: [`features/modules/stdlib/firewall/module.go`](../../features/modules/stdlib/firewall/module.go)
+- Linux executor: [`features/modules/stdlib/firewall/executor_linux.go`](../../features/modules/stdlib/firewall/executor_linux.go)
+- Non-Linux stub: [`features/modules/stdlib/firewall/executor_stub.go`](../../features/modules/stdlib/firewall/executor_stub.go)
 
 ## Platform Support
 

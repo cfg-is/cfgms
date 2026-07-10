@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
 
 // SynthesizeScriptRun resolves matching devices from the fleet and creates a

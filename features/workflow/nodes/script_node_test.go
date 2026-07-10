@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"

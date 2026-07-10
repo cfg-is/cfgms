@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	_ "modernc.org/sqlite"
 )
 

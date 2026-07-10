@@ -14,7 +14,7 @@ import (
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/modules/adapter"
-	"github.com/cfgis/cfgms/features/modules/file"
+	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 )
 
 // stubServer satisfies the GracefulStop interface used by Shutdown.

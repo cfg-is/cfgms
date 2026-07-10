@@ -16,7 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	"github.com/cfgis/cfgms/pkg/audit"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"

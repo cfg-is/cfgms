@@ -653,7 +653,7 @@ Create `.github/ISSUE_TEMPLATE/agent-story.yml` — the structured issue templat
   - **Title** (text, required): One-line implementation goal
   - **Task Description** (textarea, required): What to implement and why
   - **Scope** (dropdown, required): Which area of the codebase (pkg/, features/, cmd/, test/, docs/)
-  - **Reference Implementation** (textarea, optional but strongly recommended): Path to existing file that follows the same pattern (e.g., `features/modules/file/resource.go`). Stories with reference implementations have significantly higher agent success rates. When unavailable, provide more detailed implementation guidance in the Task Description.
+  - **Reference Implementation** (textarea, optional but strongly recommended): Path to existing file that follows the same pattern (e.g., `features/modules/stdlib/file/resource.go`). Stories with reference implementations have significantly higher agent success rates. When unavailable, provide more detailed implementation guidance in the Task Description.
   - **Key Files** (textarea, optional): Files the agent should read before starting. One path per line.
   - **Acceptance Criteria** (textarea, required): Checkbox list of requirements. Must be specific and testable — agents cannot ask clarifying questions.
   - **Scope Constraints** (textarea, optional): Files or directories the agent should NOT modify

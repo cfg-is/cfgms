@@ -26,5 +26,5 @@
 // Command injection prevention for values interpolated into shell or PowerShell
 // commands (e.g. Active Directory object IDs) is the responsibility of the
 // feature's own allowlist regex applied before interpolation. See
-// features/modules/activedirectory for an example.
+// features/modules/extended/activedirectory for an example.
 package security
