@@ -198,6 +198,28 @@ type KeyedOutputEntry struct {
 	Error   string          `json:"error,omitempty"`
 }
 
+// emitKeyedDispatchOutput writes a keyed-by-steward JSON array to stdout
+// where every matched steward receives the same payload. Used by run-script,
+// run-command, and upgrade --json, where the server fans out to all matches
+// under a single run/upgrade ID rather than issuing per-steward REST calls.
+func emitKeyedDispatchOutput(matches []StewardInfo, payload map[string]interface{}) error {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+	perStewardResult := make(map[string]fanOutResult, len(matches))
+	for _, m := range matches {
+		perStewardResult[stewardKey(m)] = fanOutResult{
+			Success: true,
+			Payload: payloadJSON,
+		}
+	}
+	entries := keyedOutput(matches, perStewardResult)
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(entries)
+}
+
 // keyedOutput builds the keyed-by-steward output slice consumed by --json
 // and the human host-prefix output. Entries are in the same order as matches
 // for deterministic output. Each entry carries an explicit success/failure

@@ -24,6 +24,7 @@ var (
 	stewardUpgradeWaitTimeout time.Duration
 	stewardUpgradeID          string
 	stewardUpgradeToVersion   string
+	stewardUpgradeJSONOutput  bool
 )
 
 // stewardUpgradeCmd dispatches a steward binary upgrade to matching stewards.
@@ -100,6 +101,14 @@ func runStewardUpgrade(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
+	}
+	if err := confirmMultiHost(matches, stewardYes); err != nil {
+		return err
+	}
+
 	req := &APIDispatchUpgradeRequest{
 		Selector: selector,
 		Version:  stewardUpgradeVersion,
@@ -110,6 +119,13 @@ func runStewardUpgrade(cmd *cobra.Command, args []string) error {
 	result, err := client.DispatchUpgrade(context.Background(), req)
 	if err != nil {
 		return err
+	}
+
+	if stewardUpgradeJSONOutput {
+		return emitKeyedDispatchOutput(matches, map[string]interface{}{
+			"upgrade_id":    result.UpgradeID,
+			"steward_count": result.StewardCount,
+		})
 	}
 
 	fmt.Printf("Upgrade id: %s\n", result.UpgradeID)

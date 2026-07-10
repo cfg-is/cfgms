@@ -109,6 +109,11 @@ var (
 	stewardExecJSONOutput bool
 )
 
+var (
+	stewardRunScriptJSONOutput  bool
+	stewardRunCommandJSONOutput bool
+)
+
 // runWaitPollInterval is the delay between status polls in the --wait loop.
 // Overridable in tests to avoid real sleeps.
 var runWaitPollInterval = 5 * time.Second
@@ -467,6 +472,7 @@ func init() {
 	stewardRunScriptCmd.Flags().BoolVar(&stewardRunWait, "wait", false, "Block until all jobs reach terminal state")
 	stewardRunScriptCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
 	stewardRunScriptCmd.Flags().DurationVar(&stewardRunWaitTimeout, "wait-timeout", 5*time.Minute, "Maximum time to wait when --wait is set")
+	stewardRunScriptCmd.Flags().BoolVar(&stewardRunScriptJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results (requires --target)")
 
 	// run-command flags
 	stewardRunCommandCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
@@ -479,6 +485,7 @@ func init() {
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunWait, "wait", false, "Block until all jobs reach terminal state")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
 	stewardRunCommandCmd.Flags().DurationVar(&stewardRunWaitTimeout, "wait-timeout", 5*time.Minute, "Maximum time to wait when --wait is set")
+	stewardRunCommandCmd.Flags().BoolVar(&stewardRunCommandJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results (requires --target)")
 
 	// exec flags (single-steward ad-hoc run)
 	stewardExecCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
@@ -572,6 +579,7 @@ func init() {
 	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeArch, "arch", "", "Target architecture (e.g. amd64, arm64; auto-detected if omitted)")
 	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeWait, "wait", false, "Block until all stewards reach a terminal state")
 	stewardUpgradeCmd.Flags().DurationVar(&stewardUpgradeWaitTimeout, "wait-timeout", 2*time.Minute, "Maximum time to wait when --wait is set")
+	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results")
 
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
@@ -1081,6 +1089,22 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	var matches []StewardInfo
+	if stewardRunTarget != "" {
+		matches, err = resolveOrFailFast(context.Background(), client, stewardRunTarget)
+		if err != nil {
+			return err
+		}
+		if err := confirmMultiHost(matches, stewardYes); err != nil {
+			return err
+		}
+	}
+
 	reqBody := map[string]interface{}{
 		"target":         stewardRunTarget,
 		"script_id":      stewardRunScript,
@@ -1092,11 +1116,6 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	client, err := getStewardClient()
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/script", bytes.NewReader(bodyJSON))
@@ -1120,6 +1139,10 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 	}
 
 	runID := apiResp.Data.RunID
+
+	if stewardRunScriptJSONOutput && len(matches) > 0 {
+		return emitKeyedDispatchOutput(matches, map[string]interface{}{"run_id": runID})
+	}
 
 	if stewardRunWait {
 		fmt.Printf("Run ID: %s\n", runID)
@@ -1150,6 +1173,22 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	var matches []StewardInfo
+	if stewardRunTarget != "" {
+		matches, err = resolveOrFailFast(context.Background(), client, stewardRunTarget)
+		if err != nil {
+			return err
+		}
+		if err := confirmMultiHost(matches, stewardYes); err != nil {
+			return err
+		}
+	}
+
 	reqBody := map[string]interface{}{
 		"target":       stewardRunTarget,
 		"content":      base64.StdEncoding.EncodeToString(content),
@@ -1162,11 +1201,6 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	client, err := getStewardClient()
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))
@@ -1190,6 +1224,10 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 	}
 
 	runID := apiResp.Data.RunID
+
+	if stewardRunCommandJSONOutput && len(matches) > 0 {
+		return emitKeyedDispatchOutput(matches, map[string]interface{}{"run_id": runID})
+	}
 
 	if stewardRunWait {
 		fmt.Printf("Run ID: %s\n", runID)

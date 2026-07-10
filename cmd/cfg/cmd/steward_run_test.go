@@ -92,6 +92,10 @@ func saveStewardRunGlobals(t *testing.T) {
 	origExecShell := stewardExecShell
 	origExecTimeout := stewardExecTimeout
 	origExecJSON := stewardExecJSONOutput
+	// confirm gate and JSON output vars
+	origYes := stewardYes
+	origScriptJSON := stewardRunScriptJSONOutput
+	origCommandJSON := stewardRunCommandJSONOutput
 	t.Cleanup(func() {
 		stewardURL = origURL
 		stewardTLSInsecure = origInsecure
@@ -113,6 +117,9 @@ func saveStewardRunGlobals(t *testing.T) {
 		stewardExecShell = origExecShell
 		stewardExecTimeout = origExecTimeout
 		stewardExecJSONOutput = origExecJSON
+		stewardYes = origYes
+		stewardRunScriptJSONOutput = origScriptJSON
+		stewardRunCommandJSONOutput = origCommandJSON
 	})
 }
 
@@ -124,10 +131,16 @@ func TestStewardRunScript_AsyncReturnsRunID(t *testing.T) {
 	var requestPath, requestMethod string
 	var requestBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestPath = r.URL.Path
-		requestMethod = r.Method
-		requestBody, _ = io.ReadAll(r.Body)
-		writeRunAPIResponse(w, map[string]string{"run_id": "run-abc123"})
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			// Single match — confirm gate is a no-op.
+			writeRunAPIResponse(w, []map[string]interface{}{{"id": "s1", "status": "online"}})
+		default:
+			requestPath = r.URL.Path
+			requestMethod = r.Method
+			requestBody, _ = io.ReadAll(r.Body)
+			writeRunAPIResponse(w, map[string]string{"run_id": "run-abc123"})
+		}
 	}))
 	defer server.Close()
 
@@ -243,9 +256,15 @@ func TestStewardRunCommand_SignsAndBase64Encodes(t *testing.T) {
 	var capturedBody []byte
 	var capturedPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedPath = r.URL.Path
-		capturedBody, _ = io.ReadAll(r.Body)
-		writeRunAPIResponse(w, map[string]string{"run_id": "cmd-run-id"})
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			// Single match — confirm gate is a no-op.
+			writeRunAPIResponse(w, []map[string]interface{}{{"id": "s1", "status": "online"}})
+		default:
+			capturedPath = r.URL.Path
+			capturedBody, _ = io.ReadAll(r.Body)
+			writeRunAPIResponse(w, map[string]string{"run_id": "cmd-run-id"})
+		}
 	}))
 	defer server.Close()
 
@@ -672,13 +691,13 @@ func TestStewardRunCommandsRegistered(t *testing.T) {
 }
 
 func TestStewardRunScript_FlagsRegistered(t *testing.T) {
-	for _, flag := range []string{"target", "script", "version", "param", "wait", "skip-offline", "wait-timeout"} {
+	for _, flag := range []string{"target", "script", "version", "param", "wait", "skip-offline", "wait-timeout", "json"} {
 		assert.NotNil(t, stewardRunScriptCmd.Flags().Lookup(flag), "run-script must have --%s flag", flag)
 	}
 }
 
 func TestStewardRunCommand_FlagsRegistered(t *testing.T) {
-	for _, flag := range []string{"target", "shell", "param", "wait", "skip-offline", "wait-timeout"} {
+	for _, flag := range []string{"target", "shell", "param", "wait", "skip-offline", "wait-timeout", "json"} {
 		assert.NotNil(t, stewardRunCommandCmd.Flags().Lookup(flag), "run-command must have --%s flag", flag)
 	}
 }
@@ -812,4 +831,235 @@ func TestStewardExecFlagsRegistered(t *testing.T) {
 	for _, flag := range []string{"command", "shell", "timeout", "json"} {
 		assert.NotNil(t, stewardExecCmd.Flags().Lookup(flag), "exec must have --%s flag", flag)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// [REQUIRED TEST] confirm-gate wiring — run-script
+// ---------------------------------------------------------------------------
+
+// newRunScriptResolveServer creates a minimal test server that handles
+// POST /api/v1/fleet/resolve → resolveMatches and POST /api/v1/runs/script →
+// {"run_id": runID}. Requests to other paths return 404.
+func newRunScriptResolveServer(t *testing.T, runID string, resolveMatches []map[string]interface{}) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeRunAPIResponse(w, resolveMatches)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/script":
+			writeRunAPIResponse(w, map[string]string{"run_id": runID})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// TestRunScript_ConfirmGate_SingleMatchNoPrompt verifies that a selector
+// resolving to exactly one steward proceeds without requiring --yes.
+func TestRunScript_ConfirmGate_SingleMatchNoPrompt(t *testing.T) {
+	srv := newRunScriptResolveServer(t, "run-single",
+		[]map[string]interface{}{{"id": "s1", "status": "online"}},
+	)
+	defer srv.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardRunScript = "my-script"
+	stewardRunTarget = "id:s1"
+	stewardYes = false // single match → no prompt required
+
+	_ = captureStdout(t, func() {
+		err := runRunScript(stewardRunScriptCmd, []string{})
+		require.NoError(t, err)
+	})
+}
+
+// TestRunScript_ConfirmGate_MultiMatchNonTTYRequiresYes verifies that a selector
+// resolving to more than one steward is blocked when --yes is not set and stdin
+// is not an interactive TTY (which is always true in test environments).
+func TestRunScript_ConfirmGate_MultiMatchNonTTYRequiresYes(t *testing.T) {
+	srv := newRunScriptResolveServer(t, "run-multi",
+		[]map[string]interface{}{
+			{"id": "s1", "status": "online"},
+			{"id": "s2", "status": "online"},
+		},
+	)
+	defer srv.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardRunScript = "my-script"
+	stewardRunTarget = "os:linux"
+	stewardYes = false
+
+	err := runRunScript(stewardRunScriptCmd, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "yes")
+}
+
+// TestRunScript_JSONOutput_KeyedBySteward verifies that --json produces a
+// keyed-by-steward array (story 4 schema) with the run_id in each payload.
+func TestRunScript_JSONOutput_KeyedBySteward(t *testing.T) {
+	srv := newRunScriptResolveServer(t, "run-json-id",
+		[]map[string]interface{}{
+			{"id": "s1", "dna": map[string]interface{}{"hostname": "host-one"}},
+			{"id": "s2", "dna": map[string]interface{}{"hostname": "host-two"}},
+		},
+	)
+	defer srv.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	stewardRunScript = "my-script"
+	stewardRunTarget = "os:linux"
+	stewardYes = true
+	stewardRunScriptJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runRunScript(stewardRunScriptCmd, []string{})
+		require.NoError(t, err)
+	})
+
+	var entries []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(output), &entries), "output must be valid JSON")
+	require.Len(t, entries, 2, "must have one entry per resolved steward")
+
+	keys := make(map[string]bool)
+	for _, e := range entries {
+		key, ok := e["key"].(string)
+		require.True(t, ok, "each entry must have a string 'key' field")
+		keys[key] = true
+		assert.True(t, e["success"].(bool), "each entry must be success=true")
+		payload, ok := e["payload"].(map[string]interface{})
+		require.True(t, ok, "each entry must have a payload object")
+		assert.Equal(t, "run-json-id", payload["run_id"], "payload must contain run_id")
+	}
+	assert.True(t, keys["host-one#s1"], "output must contain key 'host-one#s1'")
+	assert.True(t, keys["host-two#s2"], "output must contain key 'host-two#s2'")
+}
+
+// ---------------------------------------------------------------------------
+// [REQUIRED TEST] confirm-gate wiring — run-command
+// ---------------------------------------------------------------------------
+
+// newRunCommandResolveServer creates a minimal test server for run-command confirm-gate tests.
+func newRunCommandResolveServer(t *testing.T, runID string, resolveMatches []map[string]interface{}, capturedBody *[]byte) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			writeRunAPIResponse(w, resolveMatches)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/command":
+			if capturedBody != nil {
+				*capturedBody, _ = io.ReadAll(r.Body)
+			}
+			writeRunAPIResponse(w, map[string]string{"run_id": runID})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// TestRunCommand_ConfirmGate_SingleMatchNoPrompt verifies that a single-match
+// target proceeds without --yes.
+func TestRunCommand_ConfirmGate_SingleMatchNoPrompt(t *testing.T) {
+	dir := t.TempDir()
+	bundleFile := generateTestBundleWithRSA(t, dir)
+
+	srv := newRunCommandResolveServer(t, "cmd-single",
+		[]map[string]interface{}{{"id": "s1", "status": "online"}},
+		nil,
+	)
+	defer srv.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	bundlePath = bundleFile
+	stewardRunShell = "bash"
+	stewardRunTarget = "id:s1"
+	stewardYes = false
+
+	_ = captureStdout(t, func() {
+		err := runRunCommand(stewardRunCommandCmd, []string{"echo hello"})
+		require.NoError(t, err)
+	})
+}
+
+// TestRunCommand_ConfirmGate_MultiMatchNonTTYRequiresYes verifies that a multi-
+// match target is blocked without --yes in a non-interactive context.
+func TestRunCommand_ConfirmGate_MultiMatchNonTTYRequiresYes(t *testing.T) {
+	dir := t.TempDir()
+	bundleFile := generateTestBundleWithRSA(t, dir)
+
+	srv := newRunCommandResolveServer(t, "cmd-multi",
+		[]map[string]interface{}{
+			{"id": "s1", "status": "online"},
+			{"id": "s2", "status": "online"},
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	bundlePath = bundleFile
+	stewardRunShell = "bash"
+	stewardRunTarget = "os:linux"
+	stewardYes = false
+
+	err := runRunCommand(stewardRunCommandCmd, []string{"echo hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "yes")
+}
+
+// TestRunCommand_JSONOutput_KeyedBySteward verifies that --json output from
+// run-command is a keyed-by-steward array with the run_id in each payload.
+func TestRunCommand_JSONOutput_KeyedBySteward(t *testing.T) {
+	dir := t.TempDir()
+	bundleFile := generateTestBundleWithRSA(t, dir)
+
+	srv := newRunCommandResolveServer(t, "cmd-json-id",
+		[]map[string]interface{}{
+			{"id": "s1", "dna": map[string]interface{}{"hostname": "host-one"}},
+			{"id": "s2", "dna": map[string]interface{}{"hostname": "host-two"}},
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	saveStewardRunGlobals(t)
+	stewardURL = srv.URL
+	stewardTLSInsecure = true
+	bundlePath = bundleFile
+	stewardRunShell = "bash"
+	stewardRunTarget = "os:linux"
+	stewardYes = true
+	stewardRunCommandJSONOutput = true
+
+	output := captureStdout(t, func() {
+		err := runRunCommand(stewardRunCommandCmd, []string{"echo hello"})
+		require.NoError(t, err)
+	})
+
+	var entries []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(output), &entries), "output must be valid JSON")
+	require.Len(t, entries, 2, "must have one entry per resolved steward")
+
+	keys := make(map[string]bool)
+	for _, e := range entries {
+		key, ok := e["key"].(string)
+		require.True(t, ok, "each entry must have a string 'key' field")
+		keys[key] = true
+		assert.True(t, e["success"].(bool), "each entry must be success=true")
+		payload, ok := e["payload"].(map[string]interface{})
+		require.True(t, ok, "each entry must have a payload object")
+		assert.Equal(t, "cmd-json-id", payload["run_id"], "payload must contain run_id")
+	}
+	assert.True(t, keys["host-one#s1"], "output must contain key 'host-one#s1'")
+	assert.True(t, keys["host-two#s2"], "output must contain key 'host-two#s2'")
 }
