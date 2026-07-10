@@ -6,7 +6,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,7 +16,47 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/pkg/logging"
+	storageifaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// storeWriteFailingConfigStore is a real ConfigStore whose StoreConfig always
+// fails, simulating a durable-storage write error without touching read paths.
+// All other operations delegate to the embedded real store.
+type storeWriteFailingConfigStore struct {
+	cfgconfig.ConfigStore
+}
+
+func (f *storeWriteFailingConfigStore) StoreConfig(context.Context, *cfgconfig.ConfigEntry) error {
+	return errors.New("storage backend unavailable")
+}
+
+// useStorageWriteFailingConfigService replaces the server's config service with one
+// backed by a store that fails only on StoreConfig writes. This lets tests exercise
+// the 500 STORAGE_ERROR branch in handleUpdateStewardConfig without mocking.
+func useStorageWriteFailingConfigService(t *testing.T, server *Server) {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	composite := storageifaces.NewStorageManagerFromStores(
+		&storeWriteFailingConfigStore{ConfigStore: sm.GetConfigStore()},
+		sm.GetAuditStore(),
+		sm.GetRBACStore(),
+		sm.GetTenantStore(),
+		sm.GetClientTenantStore(),
+		sm.GetRegistrationTokenStore(),
+		sm.GetSessionStore(),
+		sm.GetStewardStore(),
+		sm.GetCommandStore(),
+		sm.GetTriggerStore(),
+		sm.GetPushStore(),
+	)
+	logger := logging.NewNoopLogger()
+	server.configService = service.NewConfigurationServiceV2(logger, composite, service.NewControllerService(logger))
+}
 
 // TestHandleUpdateStewardConfig_InvalidResourceName_Returns400 verifies that a config
 // upload with an invalid resource name (dot in name, e.g. "docker.io") returns HTTP 400
@@ -62,6 +104,61 @@ resources:
 		"message must name the invalid resource so the client can diagnose without server logs")
 }
 
+// TestHandleUpdateStewardConfig_ServiceValidationFailure_Returns400 verifies the
+// errors.As(err, &ve) routing branch: a config whose resource names all pass the
+// handler-level identifierRegex but which fails a service-layer validator (two
+// resources sharing the same name -> DUPLICATE_RESOURCE_NAME) makes SetConfiguration
+// itself return a *service.ValidationFailedError. The handler must translate that
+// into HTTP 400 VALIDATION_ERROR, not 500 STORAGE_ERROR (Issue #2482).
+func TestHandleUpdateStewardConfig_ServiceValidationFailure_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
+
+	// Both resource names are individually valid (pass the handler regex) but
+	// collide, which only the service-layer validator detects.
+	body := []byte(`
+steward:
+  id: test-steward-dup-rsrc
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: duplicated-name
+    module: file
+    config:
+      path: /tmp/a
+      content: a
+  - name: duplicated-name
+    module: file
+    config:
+      path: /tmp/b
+      content: b
+`)
+
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-dup-rsrc/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/yaml")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"service-layer validation failure must return 400, not 5xx; body: %s", rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "VALIDATION_ERROR", resp.Error.Code,
+		"code must be VALIDATION_ERROR, not STORAGE_ERROR")
+	assert.Contains(t, resp.Error.Message, "validation failed",
+		"message must carry the service-layer validation summary")
+}
+
 // TestHandleUpdateStewardConfig_ValidConfig_Returns200 verifies that a well-formed
 // config upload succeeds (Issue #2482 — regression guard that the fix does not
 // accidentally block valid uploads).
@@ -98,4 +195,51 @@ resources:
 
 	require.Equal(t, http.StatusOK, rec.Code,
 		"valid config must be accepted; body: %s", rec.Body.String())
+}
+
+// TestHandleUpdateStewardConfig_StorageError_Returns500 verifies that a genuine
+// storage-layer failure (not a validation failure) still returns HTTP 500 with
+// code STORAGE_ERROR after the Issue #2482 fix — i.e. the fix does not convert
+// real storage errors into 400s (AC1 regression guard, [REQUIRED TEST]).
+func TestHandleUpdateStewardConfig_StorageError_Returns500(t *testing.T) {
+	server := setupTestServer(t)
+	useStorageWriteFailingConfigService(t, server)
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
+
+	// Submit a config that passes all validation (valid resource name, valid YAML,
+	// required fields present) so the only failure is the underlying StoreConfig call.
+	body := []byte(`
+steward:
+  id: test-steward-storage-err
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: valid-resource
+    module: file
+    config:
+      path: /tmp/test
+      content: hello
+`)
+
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-storage-err/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/yaml")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"storage failure must return 500, not 400; body: %s", rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "STORAGE_ERROR", resp.Error.Code,
+		"storage failure must report STORAGE_ERROR, not VALIDATION_ERROR")
 }
