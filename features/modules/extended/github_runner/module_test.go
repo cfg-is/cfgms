@@ -82,7 +82,8 @@ func validConfig(workDir, serviceName string) *RunnerConfig {
 }
 
 func TestRunnerConfig_Validate(t *testing.T) {
-	base := validConfig("/opt/runner", "actions.runner.acme-repo.host1.service")
+	workDir := t.TempDir()
+	base := validConfig(workDir, "actions.runner.acme-repo.host1.service")
 	if err := base.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestRunnerConfig_Validate(t *testing.T) {
 		"bad label":         func(c *RunnerConfig) { c.Labels = []string{"ok", "has space"} },
 	}
 	for name, mutate := range cases {
-		c := validConfig("/opt/runner", "actions.runner.acme-repo.host1.service")
+		c := validConfig(workDir, "actions.runner.acme-repo.host1.service")
 		mutate(c)
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: expected validation error, got nil", name)
@@ -149,11 +150,12 @@ func TestSchema_NoRegistrationTokenField(t *testing.T) {
 }
 
 func TestConfigure_RejectsInvalid(t *testing.T) {
+	workDir := t.TempDir()
 	m := newModule(&testServiceExecutor{}, newHTTPInstaller())
-	if err := m.Configure(validConfig("/opt/runner", "svc")); err != nil {
+	if err := m.Configure(validConfig(workDir, "svc")); err != nil {
 		t.Fatalf("Configure rejected a valid config: %v", err)
 	}
-	bad := validConfig("/opt/runner", "svc")
+	bad := validConfig(workDir, "svc")
 	bad.AgentSHA256 = "nope"
 	if err := m.Configure(bad); err == nil {
 		t.Fatal("Configure accepted an invalid config")
