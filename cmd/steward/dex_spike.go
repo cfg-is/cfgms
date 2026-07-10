@@ -62,7 +62,7 @@ func buildDexSpikeCommand() *cobra.Command {
 			report, err := collector.Run(ctx)
 			if err != nil {
 				if errors.Is(err, dex.ErrPlatformNotSupported) {
-				if _, ferr := fmt.Fprintln(cmd.OutOrStdout(),
+					if _, ferr := fmt.Fprintln(cmd.OutOrStdout(),
 						"dex-spike: platform not supported — ETW/WMI acquisition requires Windows."); ferr != nil {
 						return fmt.Errorf("dex-spike write output: %w", ferr)
 					}
