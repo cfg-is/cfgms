@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.26.5'
 
 permissions: {}
 
@@ -118,7 +118,17 @@ jobs:
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"  # Disable integration tests (no Docker infrastructure in cross-platform CI)
-      run: go test -race -short -timeout=5m ./pkg/... ./features/...
+      # The Go race detector (ThreadSanitizer) reserves a large shadow-memory
+      # region the self-hosted Windows runner cannot allocate (Windows error
+      # 1455 / ERROR_COMMITMENT_LIMIT). Race coverage is fully exercised on the
+      # Linux unit-tests + integration-tests jobs; the Windows native build
+      # validates compile + test-pass without -race.
+      run: |
+        if [ "${{ matrix.platform }}" = "Windows" ]; then
+          go test -short -timeout=5m ./pkg/... ./features/...
+        else
+          go test -race -short -timeout=5m ./pkg/... ./features/...
+        fi
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
