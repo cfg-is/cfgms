@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -295,6 +296,10 @@ func TestQueryFleet_NonSQLiteBackendReturnsError(t *testing.T) {
 	err = mgr.Ping(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Ping requires SQLite or database backend")
+
+	_, _, err = mgr.GetHistoryByDeviceID(context.Background(), "dev-1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GetHistoryByDeviceID requires SQLite backend")
 }
 
 // noopBackend is a minimal Backend implementation used to exercise error paths.
@@ -348,4 +353,43 @@ func TestStore_WithNilOptions(t *testing.T) {
 	ids, err := mgr.ListAllDeviceIDs(ctx)
 	require.NoError(t, err)
 	assert.Contains(t, ids, "dev-y")
+}
+
+func TestGetHistoryByDeviceID(t *testing.T) {
+	mgr := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	const deviceID = "hist-device"
+
+	// Store 3 versions.
+	for i := 1; i <= 3; i++ {
+		dna := makeTestDNA(deviceID, map[string]string{"os": "linux", "v": fmt.Sprintf("%d", i)})
+		require.NoError(t, mgr.Store(ctx, deviceID, dna, nil))
+	}
+
+	t.Run("returns all records in version-descending order", func(t *testing.T) {
+		records, total, err := mgr.GetHistoryByDeviceID(ctx, deviceID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		assert.Len(t, records, 3)
+		// Verify newest-first ordering.
+		for i := 0; i+1 < len(records); i++ {
+			assert.Greater(t, records[i].Version, records[i+1].Version,
+				"records should be version-descending")
+		}
+	})
+
+	t.Run("respects Limit and Offset", func(t *testing.T) {
+		records, total, err := mgr.GetHistoryByDeviceID(ctx, deviceID, &QueryOptions{Limit: 2, Offset: 1})
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total, "TotalCount must reflect all matching rows, not just the page")
+		assert.Len(t, records, 2)
+	})
+
+	t.Run("unknown device returns empty with zero total", func(t *testing.T) {
+		records, total, err := mgr.GetHistoryByDeviceID(ctx, "no-such-device", nil)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, records)
+	})
 }
