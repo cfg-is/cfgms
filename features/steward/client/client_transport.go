@@ -170,6 +170,12 @@ type TransportClient struct {
 	// dnaCollector is the DNA collection implementation used by the refresh loop.
 	// Injectable for testing; production code uses dna.NewCollector.
 	dnaCollector DNACollector
+	// dnaRefreshTick, when non-nil, receives one value after each fully-processed
+	// refresh-loop tick (collection + optional publish). It is a deterministic
+	// synchronization seam for tests: it is nil in production (the notify helper
+	// early-returns), so it adds no overhead and never blocks the loop. Tests use
+	// it to observe real ticks without wall-clock sleeps.
+	dnaRefreshTick chan struct{}
 
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
@@ -802,13 +808,32 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("data plane session not available for DNA sync")
 		}
 
-		// Read the current DNA snapshot accumulated by PublishDNAUpdate calls.
+		// Read the current DNA snapshot maintained by #2521 — the same source
+		// used for heartbeat DNA hashes, ensuring sync_dna ⇄ heartbeat hash
+		// consistency. Unlike lastPublishedDNA, currentDNAAttrs is populated
+		// by RefreshCurrentDNA before the first heartbeat, so this path never
+		// fails due to an empty publish cache.
 		c.dnaMu.RLock()
-		currentDNA := copyStringMap(c.lastPublishedDNA)
+		currentDNA := copyStringMap(c.currentDNAAttrs)
 		c.dnaMu.RUnlock()
 
+		// If no snapshot exists yet (e.g. first run before any refresh),
+		// collect one now so the handler streams a real snapshot. A full DNA
+		// sync must never send an empty attribute set: doing so would tell the
+		// controller the steward has no DNA and clobber its record. If we cannot
+		// produce a snapshot (refresh error, or collector yields nothing), fail
+		// the command so the controller can retry rather than corrupt its state.
 		if len(currentDNA) == 0 {
-			return fmt.Errorf("no DNA state available for full sync — call PublishDNAUpdate first")
+			if refreshErr := c.RefreshCurrentDNA(ctx); refreshErr != nil {
+				return fmt.Errorf("no DNA snapshot available and refresh failed for full sync: %w", refreshErr)
+			}
+			c.dnaMu.RLock()
+			currentDNA = copyStringMap(c.currentDNAAttrs)
+			c.dnaMu.RUnlock()
+
+			if len(currentDNA) == 0 {
+				return fmt.Errorf("no DNA state available for full sync")
+			}
 		}
 
 		// Serialize attributes as JSON for the DNATransfer payload.
@@ -1531,19 +1556,29 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 // warning. The loop exits cleanly when ctx is cancelled or Disconnect is called.
 // The existing 15-second graceful disconnect window applies — the loop does not
 // block shutdown. (Issue #1915)
-func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) {
+//
+// It returns a channel that is closed when the loop goroutine has fully exited.
+// When no collector is configured the returned channel is already closed (no
+// goroutine is spawned). Production callers may ignore the return value; tests
+// use it to confirm loop shutdown deterministically instead of sleeping.
+func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) <-chan struct{} {
 	c.mu.RLock()
 	interval := c.dnaRefreshInterval
 	collector := c.dnaCollector
+	tick := c.dnaRefreshTick
 	c.mu.RUnlock()
+
+	done := make(chan struct{})
 
 	if collector == nil {
 		c.logger.Warn("DNA refresh loop started without a collector; DNA will not be refreshed periodically")
-		return
+		close(done)
+		return done
 	}
 
 	c.logger.Info("Starting DNA refresh loop", "interval", interval)
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -1558,26 +1593,51 @@ func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) {
 				c.mu.RLock()
 				currentCollector := c.dnaCollector
 				c.mu.RUnlock()
-				if currentCollector == nil {
-					continue
+				if currentCollector != nil {
+					c.runDNARefreshTick(ctx, currentCollector)
 				}
-				attrs, err := currentCollector.CollectAttributes(ctx)
-				if err != nil {
-					c.logger.Warn("DNA refresh collection failed", "error", err)
-					continue
-				}
-				if len(attrs) == 0 {
-					continue
-				}
-				// Always refresh the current snapshot so heartbeats carry a
-				// truthful hash even when no delta is published. (Issue #2521)
-				c.setCurrentDNAFromAttrs(attrs)
-				if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
-					c.logger.Warn("DNA refresh publish failed", "error", err)
-				}
+				// Signal that this tick has been fully processed so tests can
+				// synchronize without wall-clock sleeps. No-op in production.
+				c.notifyDNARefreshTick(ctx, tick)
 			}
 		}
 	}()
+	return done
+}
+
+// runDNARefreshTick performs a single collect-and-publish cycle for the DNA
+// refresh loop. Collection or publish errors are logged and swallowed so a
+// transient failure never terminates the loop.
+func (c *TransportClient) runDNARefreshTick(ctx context.Context, collector DNACollector) {
+	attrs, err := collector.CollectAttributes(ctx)
+	if err != nil {
+		c.logger.Warn("DNA refresh collection failed", "error", err)
+		return
+	}
+	if len(attrs) == 0 {
+		return
+	}
+	// Always refresh the current snapshot so heartbeats carry a truthful hash
+	// even when no delta is published. (Issue #2521)
+	c.setCurrentDNAFromAttrs(attrs)
+	if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
+		c.logger.Warn("DNA refresh publish failed", "error", err)
+	}
+}
+
+// notifyDNARefreshTick delivers a per-tick completion signal on the optional
+// dnaRefreshTick channel. The send is guarded by ctx.Done and dnaRefreshStop so
+// the loop never deadlocks at shutdown even if no receiver is waiting. When the
+// channel is nil (production) it returns immediately.
+func (c *TransportClient) notifyDNARefreshTick(ctx context.Context, tick chan struct{}) {
+	if tick == nil {
+		return
+	}
+	select {
+	case tick <- struct{}{}:
+	case <-ctx.Done():
+	case <-c.dnaRefreshStop:
+	}
 }
 
 // SetShutdownFunc wires the graceful-shutdown trigger used after a successful

@@ -25,20 +25,33 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Stub DNACollector for refresh-loop tests (Issue #1915)
+// In-memory DNACollector for refresh-loop tests (Issue #1915)
 // ---------------------------------------------------------------------------
 
-// stubDNACollector satisfies DNACollector and returns the configured snapshot.
-// Use setAttrs to safely change what CollectAttributes returns on the next tick;
-// the mutex prevents data races when the loop goroutine and the test body
-// access attrs concurrently.
-type stubDNACollector struct {
+// inMemoryDNACollector is a real, thread-safe implementation of the
+// client-owned DNACollector interface backed by an in-memory attribute map. It
+// is not a mock: there is no expectation recording, no call verification, and
+// no framework — CollectAttributes returns a genuine defensive copy of the
+// configured attributes, exactly as the production dnaCollectorAdapter returns
+// a copy of the collected attribute set.
+//
+// The real dna.Collector (features/steward/dna) is deliberately NOT used here
+// because it is non-deterministic by design: it stamps a fresh "timestamp"
+// attribute on every Collect call and merges asynchronously-collected
+// software/security attributes as its background goroutine completes. That
+// makes the delta-detection logic under test (no-delta-skips-publish,
+// single-attribute-change-publishes-one) impossible to assert against. This
+// collector provides the deterministic attribute stream those assertions
+// require while exercising the exact CollectAttributes contract the loop calls.
+// Use setAttrs to change what the next tick observes; the mutex prevents data
+// races between the loop goroutine and the test body.
+type inMemoryDNACollector struct {
 	mu    sync.RWMutex
 	attrs map[string]string
 	err   error
 }
 
-func (s *stubDNACollector) CollectAttributes(_ context.Context) (map[string]string, error) {
+func (s *inMemoryDNACollector) CollectAttributes(_ context.Context) (map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.err != nil {
@@ -51,7 +64,7 @@ func (s *stubDNACollector) CollectAttributes(_ context.Context) (map[string]stri
 	return out, nil
 }
 
-func (s *stubDNACollector) setAttrs(attrs map[string]string) {
+func (s *inMemoryDNACollector) setAttrs(attrs map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attrs = attrs
@@ -74,16 +87,34 @@ func newClientWithOfflineQueue(t *testing.T) (*TransportClient, *OfflineQueue) {
 		dnaRefreshInterval: 10 * time.Millisecond,
 		offlineQueue:       q,
 		logger:             logger,
+		// dnaRefreshTick lets refresh-loop tests observe each fully-processed
+		// tick deterministically (one value per completed collect+publish cycle),
+		// replacing wall-clock sleeps. Unbuffered so a receive proves a tick
+		// finished. StartDNARefreshLoop's notify send is guarded by ctx.Done and
+		// dnaRefreshStop, so an un-drained channel never deadlocks the loop.
+		dnaRefreshTick: make(chan struct{}),
 	}
 	return c, q
 }
 
 // ---------------------------------------------------------------------------
-// Minimal DataPlaneSession for sync_dna handler tests
+// In-process DataPlaneSession for sync_dna handler tests
 // ---------------------------------------------------------------------------
 
-// testDataPlaneSession satisfies dataplaneInterfaces.DataPlaneSession.
-// It records the most recent SendDNA call and signals dnaSent when it fires.
+// testDataPlaneSession is a real in-process implementation of
+// dataplaneInterfaces.DataPlaneSession — not a mock. It follows the same
+// convention as configTransferSession (client_transport_signature_test.go) and
+// configTransferSessionDegraded (client_transport_degraded_test.go): every
+// method is implemented explicitly with no expectation recording or framework.
+//
+// SendDNA delivers the DNATransfer over an in-process buffered channel that the
+// test drains via <-dnaSent — the receiving half of the session. This exercises
+// the exact SendDNA contract the sync_dna handler calls (serialization of the
+// DNATransfer, metadata population) without standing up a QUIC/mTLS transport,
+// which the grpc provider's Connect/AcceptConnection would require and which the
+// handler-logic-under-test does not touch. The controller-side DNA handler tests
+// (features/controller/transport/dna_handler_test.go) use the same in-process
+// approach via testDNAStream rather than a live session.
 type testDataPlaneSession struct {
 	dnaSent chan *dpTypes.DNATransfer
 }
@@ -308,10 +339,12 @@ func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
 	c.stewardID = "steward-1"
 	c.tenantID = "tenant-1"
 
-	// Seed the last-published DNA that the handler will serialize and send.
+	// Seed currentDNAAttrs (maintained by #2521) — the handler sources from
+	// this snapshot, not lastPublishedDNA.
 	dnaAttrs := map[string]string{"os": "linux", "version": "1.2.3"}
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = copyStringMap(dnaAttrs)
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = dna.ComputeHash(dnaAttrs)
 	c.dnaMu.Unlock()
 
 	// Install a test data-plane session that records what SendDNA receives.
@@ -350,6 +383,248 @@ func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
 	}
 }
 
+// TestSyncDNAHandler_EmptyPublishCache_UsesCurrentAttrs verifies that the
+// sync_dna handler streams the full currentDNAAttrs snapshot even when
+// lastPublishedDNA is empty (i.e. no delta has been published yet).
+// This is the required "empty-cache" case from Issue #2522.
+func TestSyncDNAHandler_EmptyPublishCache_UsesCurrentAttrs(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-2"
+	c.tenantID = "tenant-2"
+
+	// Populate currentDNAAttrs but leave lastPublishedDNA nil, simulating a
+	// steward that has collected DNA (#2521) but has not yet published a delta.
+	dnaAttrs := map[string]string{
+		"hostname":        "host-a",
+		"os":              "linux",
+		"steward.version": version.Short(),
+	}
+	expectedHash := dna.ComputeHash(dnaAttrs)
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = expectedHash
+	// lastPublishedDNA deliberately left nil
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-2")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-sync-dna-empty-cache",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-2",
+		TenantID:  "tenant-2",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer)
+		assert.NotEmpty(t, transfer.Attributes,
+			"handler must stream non-empty snapshot even with empty publish cache")
+		assert.Equal(t, expectedHash, transfer.Metadata["dna_hash"],
+			"streamed dna_hash must match the hash of the current snapshot")
+		assert.Equal(t, "3", transfer.Metadata["attr_count"],
+			"attr_count must reflect the full currentDNAAttrs snapshot")
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for sync_dna handler to call SendDNA with empty publish cache")
+	}
+}
+
+// TestSyncDNAHandler_DNAHashMatchesHeartbeat asserts that the dna_hash field
+// in the DNATransfer equals the hash the steward reports in heartbeats for the
+// same collection, as required by Issue #2522.
+func TestSyncDNAHandler_DNAHashMatchesHeartbeat(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-3"
+	c.tenantID = "tenant-3"
+
+	// Simulate what setCurrentDNAFromAttrs (#2521) produces.
+	dnaAttrs := map[string]string{
+		"hostname":        "my-host",
+		"os":              "linux",
+		"arch":            "amd64",
+		"steward.version": version.Short(),
+	}
+	heartbeatHash := dna.ComputeHash(dnaAttrs)
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = heartbeatHash
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-3")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-hash-consistency",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-3",
+		TenantID:  "tenant-3",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		assert.Equal(t, heartbeatHash, transfer.Metadata["dna_hash"],
+			"dna_hash in DNATransfer must equal the hash reported in heartbeats for the same collection")
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for sync_dna handler")
+	}
+}
+
+// TestSyncDNAHandler_EmptyCurrentAttrs_CollectorSucceeds covers the fallback
+// branch of the sync_dna handler (client_transport.go) sub-path A:
+// currentDNAAttrs is empty AND RefreshCurrentDNA succeeds — the handler must
+// stream the freshly collected snapshot, not an empty transfer.
+func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorSucceeds(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-refresh-ok"
+	c.tenantID = "tenant-refresh-ok"
+
+	// currentDNAAttrs is nil (zero-value), lastPublishedDNA is nil — no prior state.
+	// Install a collector so RefreshCurrentDNA can populate currentDNAAttrs.
+	rawAttrs := map[string]string{"hostname": "box-ok", "os": "linux"}
+	collector := &inMemoryDNACollector{attrs: rawAttrs}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-refresh-ok")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-refresh-ok",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-refresh-ok",
+		TenantID:  "tenant-refresh-ok",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer)
+		// The handler must have called RefreshCurrentDNA which enriches rawAttrs
+		// with steward.version — so attr_count must be at least 3.
+		require.NotEmpty(t, transfer.Attributes,
+			"handler must send a non-empty snapshot when RefreshCurrentDNA succeeds")
+		attrCount := transfer.Metadata["attr_count"]
+		require.NotEqual(t, "0", attrCount,
+			"attr_count must be > 0 after a successful refresh")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for sync_dna handler to call SendDNA after fallback refresh")
+	}
+}
+
+// TestSyncDNAHandler_EmptyCurrentAttrs_CollectorFails covers the fallback
+// branch of the sync_dna handler (client_transport.go) sub-path B:
+// currentDNAAttrs is empty AND RefreshCurrentDNA fails — no snapshot can be
+// produced. A full DNA sync must never send an empty attribute set (that would
+// tell the controller the steward has no DNA and clobber its record), so the
+// handler must fail the command and MUST NOT call SendDNA.
+func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorFails(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-refresh-fail"
+	c.tenantID = "tenant-refresh-fail"
+
+	// currentDNAAttrs is nil. Install a collector that always errors.
+	collector := &inMemoryDNACollector{err: errors.New("collector unavailable")}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-refresh-fail")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-refresh-fail",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-refresh-fail",
+		TenantID:  "tenant-refresh-fail",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	// The handler must return an error before reaching SendDNA. Assert no
+	// DNATransfer is emitted within a window generous enough for the dispatch
+	// goroutine to run collect-then-return.
+	select {
+	case transfer := <-sess.dnaSent:
+		t.Fatalf("handler must not send DNA when no snapshot can be produced; got transfer %+v", transfer)
+	case <-time.After(250 * time.Millisecond):
+		// Expected: the handler failed the command and sent nothing.
+	}
+}
+
+// TestSyncDNAHandler_EmptyCurrentAttrs_CollectorReturnsEmpty covers the fallback
+// branch sub-path where RefreshCurrentDNA returns nil (no error) but the
+// collector yields an empty attribute set, so currentDNAAttrs stays empty. The
+// handler must still refuse to stream an empty full-DNA snapshot and fail the
+// command instead.
+func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorReturnsEmpty(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-refresh-empty"
+	c.tenantID = "tenant-refresh-empty"
+
+	// Collector returns an empty map: RefreshCurrentDNA returns nil but does not
+	// populate currentDNAAttrs (a transient empty collect must not clobber state).
+	collector := &inMemoryDNACollector{attrs: map[string]string{}}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-refresh-empty")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-refresh-empty",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-refresh-empty",
+		TenantID:  "tenant-refresh-empty",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		t.Fatalf("handler must not send an empty full-DNA snapshot; got transfer %+v", transfer)
+	case <-time.After(250 * time.Millisecond):
+		// Expected: the handler failed the command and sent nothing.
+	}
+}
+
 // ---------------------------------------------------------------------------
 // StartDNARefreshLoop (Issue #1915)
 // ---------------------------------------------------------------------------
@@ -368,22 +643,26 @@ func TestDNARefreshLoop_NoDeltaSkipsPublish(t *testing.T) {
 	c.lastPublishedDNA = copyStringMap(attrs)
 	c.dnaMu.Unlock()
 
-	stub := &stubDNACollector{attrs: attrs}
+	collector := &inMemoryDNACollector{attrs: attrs}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c.StartDNARefreshLoop(ctx)
+	done := c.StartDNARefreshLoop(ctx)
 
-	// Allow multiple ticks to fire; none should enqueue an event.
-	time.Sleep(80 * time.Millisecond)
-	cancel()
-
+	// Wait for three fully-processed ticks; each is a no-delta skip, so none
+	// enqueues an event. Receiving proves the tick ran — no timing guess.
+	for i := 0; i < 3; i++ {
+		<-c.dnaRefreshTick
+	}
 	assert.Equal(t, 0, q.Len(),
 		"no event must be queued when the DNA delta is empty")
+
+	cancel()
+	<-done // confirm the loop goroutine has exited
 }
 
 // TestDNARefreshLoop_ChangedAttributePublishesOne verifies that when the collector
@@ -398,22 +677,21 @@ func TestDNARefreshLoop_ChangedAttributePublishesOne(t *testing.T) {
 	c.lastPublishedDNA = map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
 	c.dnaMu.Unlock()
 
-	stub := &stubDNACollector{attrs: map[string]string{"hostname": "host-b", "os": "linux"}}
+	collector := &inMemoryDNACollector{attrs: map[string]string{"hostname": "host-b", "os": "linux"}}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c.StartDNARefreshLoop(ctx)
+	done := c.StartDNARefreshLoop(ctx)
 
-	// Wait for at least one tick to fire and enqueue the event.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && q.Len() == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
+	// One fully-processed tick collects the changed attribute and enqueues the
+	// event before signalling; waiting on the tick is deterministic.
+	<-c.dnaRefreshTick
 	cancel()
+	<-done // confirm the loop goroutine has exited before inspecting the queue
 
 	require.Equal(t, 1, q.Len(), "exactly one DNA event must be queued after a single attribute change")
 
@@ -444,26 +722,27 @@ func TestDNARefreshLoop_StopsOnContextCancel(t *testing.T) {
 	c.lastPublishedDNA = copyStringMap(initial)
 	c.dnaMu.Unlock()
 
-	stub := &stubDNACollector{attrs: copyStringMap(initial)}
+	collector := &inMemoryDNACollector{attrs: copyStringMap(initial)}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Allow a few ticks to confirm the loop is running (no events = stable).
-	c.StartDNARefreshLoop(ctx)
-	time.Sleep(40 * time.Millisecond)
+	// Two fully-processed ticks confirm the loop is running; both are stable
+	// (no delta), so the queue stays empty.
+	done := c.StartDNARefreshLoop(ctx)
+	<-c.dnaRefreshTick
+	<-c.dnaRefreshTick
 	assert.Equal(t, 0, q.Len(), "no events expected while DNA is unchanged")
 
-	// Cancel and verify the loop has stopped: inject a change and confirm the
-	// event is NOT published after cancellation.
+	// Cancel and wait for the goroutine to actually exit. Only then inject a
+	// change: because the loop has provably stopped, no tick can observe it.
 	cancel()
-	time.Sleep(20 * time.Millisecond) // let goroutine observe ctx.Done
+	<-done
 
-	stub.setAttrs(map[string]string{"os": "linux", "hostname": "new"})
+	collector.setAttrs(map[string]string{"os": "linux", "hostname": "new"})
 
-	time.Sleep(40 * time.Millisecond) // extra ticks after cancel
 	assert.Equal(t, 0, q.Len(), "no events must be published after context cancellation")
 }
 
@@ -479,23 +758,27 @@ func TestDNARefreshLoop_StopsOnDNARefreshStop(t *testing.T) {
 	c.lastPublishedDNA = copyStringMap(initial)
 	c.dnaMu.Unlock()
 
-	stub := &stubDNACollector{attrs: copyStringMap(initial)}
+	collector := &inMemoryDNACollector{attrs: copyStringMap(initial)}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	ctx := context.Background()
-	c.StartDNARefreshLoop(ctx)
-	time.Sleep(40 * time.Millisecond)
+	done := c.StartDNARefreshLoop(ctx)
+
+	// Two fully-processed stable ticks confirm the loop is running.
+	<-c.dnaRefreshTick
+	<-c.dnaRefreshTick
 	assert.Equal(t, 0, q.Len(), "no events expected while DNA is unchanged")
 
-	// Close the stop channel (mimics Disconnect) and verify the loop stops.
+	// Close the stop channel (mimics Disconnect) and wait for the goroutine to
+	// exit. Only then inject a change: the loop has provably stopped, so no tick
+	// can observe it.
 	close(c.dnaRefreshStop)
-	time.Sleep(20 * time.Millisecond) // let goroutine observe channel close
+	<-done
 
-	stub.setAttrs(map[string]string{"os": "linux", "hostname": "new"})
+	collector.setAttrs(map[string]string{"os": "linux", "hostname": "new"})
 
-	time.Sleep(40 * time.Millisecond) // extra ticks after stop
 	assert.Equal(t, 0, q.Len(), "no events must be published after dnaRefreshStop is closed")
 }
 
@@ -505,7 +788,7 @@ func TestDNARefreshLoop_CollectorErrorSkipsTick(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
 	// Start with an error-producing collector.
-	errCollector := &stubDNACollector{err: errors.New("transient")}
+	errCollector := &inMemoryDNACollector{err: errors.New("transient")}
 	c.mu.Lock()
 	c.dnaCollector = errCollector
 	c.mu.Unlock()
@@ -513,24 +796,29 @@ func TestDNARefreshLoop_CollectorErrorSkipsTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c.StartDNARefreshLoop(ctx)
+	done := c.StartDNARefreshLoop(ctx)
 
-	// Give the loop several ticks to fail at collection; queue must stay empty.
-	time.Sleep(60 * time.Millisecond)
+	// Three fully-processed ticks all fail collection; the queue must stay empty
+	// and the loop must not terminate.
+	for i := 0; i < 3; i++ {
+		<-c.dnaRefreshTick
+	}
 	assert.Equal(t, 0, q.Len(), "collection errors must not enqueue events")
 
 	// Now swap to a collector that produces a real change (no prior snapshot).
-	goodCollector := &stubDNACollector{attrs: map[string]string{"os": "linux"}}
+	goodCollector := &inMemoryDNACollector{attrs: map[string]string{"os": "linux"}}
 	c.mu.Lock()
 	c.dnaCollector = goodCollector
 	c.mu.Unlock()
 
-	// Wait for the event to arrive — confirms the loop kept running after errors.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && q.Len() == 0 {
-		time.Sleep(5 * time.Millisecond)
+	// Drain ticks until the recovered collector publishes — proves the loop kept
+	// running after the errors. Each iteration consumes exactly one processed
+	// tick, so the wait ends deterministically once the event is enqueued.
+	for q.Len() == 0 {
+		<-c.dnaRefreshTick
 	}
 	cancel()
+	<-done
 
 	assert.Equal(t, 1, q.Len(),
 		"loop must continue after a collection error and publish when a change is detected")
@@ -549,9 +837,9 @@ func TestRefreshCurrentDNA_PopulatesHashAfterReconnect(t *testing.T) {
 	c := newMinimalClient(t)
 
 	rawAttrs := map[string]string{"hostname": "machine-1", "os": "linux", "arch": "amd64"}
-	stub := &stubDNACollector{attrs: rawAttrs}
+	collector := &inMemoryDNACollector{attrs: rawAttrs}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	// Pre-condition: no hash before the collect.
@@ -587,9 +875,9 @@ func TestCurrentDNAHash_StableWhenUnchangedChangesOnDrift(t *testing.T) {
 	c := newMinimalClient(t)
 
 	attrs := map[string]string{"hostname": "box-1", "os": "linux"}
-	stub := &stubDNACollector{attrs: attrs}
+	collector := &inMemoryDNACollector{attrs: attrs}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	// Collect N times with unchanged state — hash must be identical each time.
@@ -608,7 +896,7 @@ func TestCurrentDNAHash_StableWhenUnchangedChangesOnDrift(t *testing.T) {
 	}
 
 	// Mutate an attribute — hash must change on the next collect.
-	stub.setAttrs(map[string]string{"hostname": "box-2", "os": "linux"})
+	collector.setAttrs(map[string]string{"hostname": "box-2", "os": "linux"})
 	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
 
 	c.dnaMu.RLock()
@@ -626,9 +914,9 @@ func TestRefreshCurrentDNA_CollectorErrorPropagates(t *testing.T) {
 	c := newMinimalClient(t)
 
 	collectErr := errors.New("transient")
-	stub := &stubDNACollector{err: collectErr}
+	collector := &inMemoryDNACollector{err: collectErr}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	err := c.RefreshCurrentDNA(context.Background())
@@ -651,9 +939,9 @@ func TestRefreshCurrentDNA_CollectorErrorPropagates(t *testing.T) {
 func TestRefreshCurrentDNA_EmptyAttrsLeavesHashUnchanged(t *testing.T) {
 	c := newMinimalClient(t)
 
-	stub := &stubDNACollector{attrs: map[string]string{"hostname": "box-1", "os": "linux"}}
+	collector := &inMemoryDNACollector{attrs: map[string]string{"hostname": "box-1", "os": "linux"}}
 	c.mu.Lock()
-	c.dnaCollector = stub
+	c.dnaCollector = collector
 	c.mu.Unlock()
 
 	// Establish a known-good hash from a non-empty collect.
@@ -664,7 +952,7 @@ func TestRefreshCurrentDNA_EmptyAttrsLeavesHashUnchanged(t *testing.T) {
 	require.NotEmpty(t, seededHash, "hash must be seeded by the initial non-empty collect")
 
 	// Now return an empty map — RefreshCurrentDNA must no-op the hash.
-	stub.setAttrs(map[string]string{})
+	collector.setAttrs(map[string]string{})
 	require.NoError(t, c.RefreshCurrentDNA(context.Background()),
 		"an empty collect must not be treated as an error")
 
@@ -692,10 +980,11 @@ func TestStartDNARefreshLoop_NilCollectorWarns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c.StartDNARefreshLoop(ctx)
-
-	// No goroutine is spawned; give the scheduler a moment to settle.
-	time.Sleep(30 * time.Millisecond)
+	// With no collector, StartDNARefreshLoop returns synchronously (before any
+	// goroutine is spawned) and its done channel is already closed. Receiving
+	// from it is the deterministic proof that no loop was started — no sleep.
+	done := c.StartDNARefreshLoop(ctx)
+	<-done
 
 	found := false
 	for _, e := range capLog.allEntries() {
