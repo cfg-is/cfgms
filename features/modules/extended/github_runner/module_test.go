@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -87,12 +88,13 @@ func TestRunnerConfig_Validate(t *testing.T) {
 	}
 
 	cases := map[string]func(*RunnerConfig){
-		"missing version":  func(c *RunnerConfig) { c.Version = "" },
-		"non-http url":     func(c *RunnerConfig) { c.AgentURL = "ftp://x/y" },
-		"short sha":        func(c *RunnerConfig) { c.AgentSHA256 = "abc" },
-		"missing work_dir": func(c *RunnerConfig) { c.WorkDir = "" },
-		"bad service_name": func(c *RunnerConfig) { c.ServiceName = "-bad name" },
-		"bad label":        func(c *RunnerConfig) { c.Labels = []string{"ok", "has space"} },
+		"missing version":   func(c *RunnerConfig) { c.Version = "" },
+		"non-http url":      func(c *RunnerConfig) { c.AgentURL = "ftp://x/y" },
+		"short sha":         func(c *RunnerConfig) { c.AgentSHA256 = "abc" },
+		"missing work_dir":  func(c *RunnerConfig) { c.WorkDir = "" },
+		"relative work_dir": func(c *RunnerConfig) { c.WorkDir = "relative/path" },
+		"bad service_name":  func(c *RunnerConfig) { c.ServiceName = "-bad name" },
+		"bad label":         func(c *RunnerConfig) { c.Labels = []string{"ok", "has space"} },
 	}
 	for name, mutate := range cases {
 		c := validConfig("/opt/runner", "actions.runner.acme-repo.host1.service")
@@ -404,5 +406,91 @@ func TestModule_Get_InvalidResourceID(t *testing.T) {
 	m := newModule(&testServiceExecutor{}, newHTTPInstaller())
 	if _, err := m.Get(context.Background(), ""); err == nil {
 		t.Fatal("Get accepted an empty resource ID")
+	}
+}
+
+// TestModule_StoredConfig_ConvergesViaWorkDir verifies that a charset-safe
+// resource name (no "/" or ".") paired with an absolute work_dir in the config
+// causes the module to install and read state from work_dir — not from a
+// relative path derived from the resource name. This is the production shape:
+// controllers reject resource names containing "/" or ".", but work_dir is an
+// absolute path. Both acceptance criteria are verified here:
+//
+//  1. Set installs to work_dir and writes the state marker there.
+//  2. A pre-existing agent + marker at work_dir is recognised as installed
+//     (no reinstall on the second Set).
+func TestModule_StoredConfig_ConvergesViaWorkDir(t *testing.T) {
+	srv, url, sha := agentServer(t)
+	defer srv.Close()
+
+	workDir := t.TempDir()
+	exec := &testServiceExecutor{installed: true, makeRunOnSet: true}
+	m, inst := moduleFor(exec, srv)
+
+	// charset-safe opaque resource name — no "/" or "." allowed by controller
+	const resourceID = "github-runner"
+	// Guard against a stale artifact from a pre-fix run (where the module used
+	// resourceID as the path) leaking into this assertion.
+	t.Cleanup(func() {
+		if err := os.RemoveAll(resourceID); err != nil {
+			t.Logf("warning: cleanup of stale test artifact %q: %v", resourceID, err)
+		}
+	})
+
+	cfg := validConfig(workDir, "actions.runner.acme-repo.host1.service")
+	cfg.AgentURL = url
+	cfg.AgentSHA256 = sha
+
+	ctx := context.Background()
+
+	// Executor calls Configure before Get; replicate that here.
+	if err := m.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	// Set with the opaque resource name — must install to work_dir, not "github-runner/".
+	if err := m.Set(ctx, resourceID, cfg); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if inst.calls != 1 {
+		t.Fatalf("installer called %d times, want 1", inst.calls)
+	}
+
+	// State marker must be written under work_dir, not under the resource-name directory.
+	if _, err := os.Stat(filepath.Join(workDir, stateFileName)); err != nil {
+		t.Fatalf("state marker not written to work_dir %q: %v", workDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(resourceID, stateFileName)); err == nil {
+		t.Fatalf("state marker incorrectly written to relative resource-name path %q", filepath.Join(resourceID, stateFileName))
+	}
+
+	// Get must read from work_dir (wired via Configure) and report installed.
+	state, err := m.Get(ctx, resourceID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	rc := state.(*RunnerConfig)
+	if !rc.Installed {
+		t.Error("Get: agent at work_dir not recognised as installed")
+	}
+	if rc.WorkDir != workDir {
+		t.Errorf("Get: WorkDir = %q, want %q", rc.WorkDir, workDir)
+	}
+
+	// Test must confirm no drift.
+	ok, err := m.Test(ctx, resourceID, cfg)
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if !ok {
+		t.Fatal("Test reported drift after converging via work_dir")
+	}
+
+	// Pre-existing agent: second Set must not re-download.
+	if err := m.Set(ctx, resourceID, cfg); err != nil {
+		t.Fatalf("second Set: %v", err)
+	}
+	if inst.calls != 1 {
+		t.Fatalf("second Set re-downloaded agent (installer calls=%d, want 1)", inst.calls)
 	}
 }
