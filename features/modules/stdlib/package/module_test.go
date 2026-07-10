@@ -566,6 +566,15 @@ func TestPackageModule_ErrorPaths(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidConfig)
 	})
 
+	t.Run("Configure_NilConfig", func(t *testing.T) {
+		m, err := NewPackageModule(newTestPackageManager())
+		require.NoError(t, err)
+		// Pass nil modules.ConfigState to trigger the config == nil guard in
+		// Configure() at module.go:59.
+		err = m.Configure(nil)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
 	t.Run("ConfigNameDiffersFromResourceID", func(t *testing.T) {
 		// config.name different from resourceID is now valid: Set installs config.name
 		m, err := NewPackageModule(newTestPackageManager())
