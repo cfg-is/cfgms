@@ -15,7 +15,6 @@ on:
   push:
     branches:
       - main
-      - develop
     # Same paths filter on push
     paths:
       - 'docs/**'
