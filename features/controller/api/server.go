@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -52,6 +53,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	"github.com/cfgis/cfgms/web"
 )
 
 // Server represents the REST API server component of the controller
@@ -741,6 +743,16 @@ func (s *Server) setupRouter() {
 	//   }
 	//   terminalHandler, err := terminal.NewWebSocketHandler(sessionManager, s.logger, terminalOrigins)
 	//   // then register: api.Handle("/terminal/ws/{steward_id}", ...).Methods("GET")
+
+	// SPA catch-all: lowest-precedence handler for the embedded web UI (Issue #2494).
+	// All /api/* and /raft/* routes registered above take precedence via gorilla/mux
+	// ordering; unmatched paths in those namespaces are refused by spaHandler itself.
+	distFS, subErr := fs.Sub(web.Assets, "dist")
+	if subErr != nil {
+		s.logger.Error("Failed to initialise embedded SPA assets; web UI will be unavailable", "error", subErr)
+	} else {
+		s.router.PathPrefix("/").Handler(newSPAHandler(distFS))
+	}
 }
 
 // Start starts the HTTP server

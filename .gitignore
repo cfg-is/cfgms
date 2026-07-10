@@ -59,6 +59,9 @@ Thumbs.db
 
 # Build artifacts
 dist/
+# Allow the committed SPA placeholder so go:embed can embed it on a clean checkout.
+# The web/.gitignore handles what is tracked inside web/dist/.
+!web/dist/
 
 # Security scan results (auto-generated)
 sarif-results/

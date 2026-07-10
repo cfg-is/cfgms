@@ -14,6 +14,26 @@ any Go build or test gate. CI runs the same scripts (`lint`, `typecheck`,
 [`frontend-ci.yml`](../.github/workflows/frontend-ci.yml) lane, which gates
 merges to `develop` for PRs that touch `web/**`.
 
+## How the SPA is embedded in the controller binary
+
+The `web/embed.go` file uses `//go:embed all:dist` to embed the entire `dist/`
+directory into the controller binary at build time. Go reads `dist/` from the
+filesystem at `go build` time — it does not care about git status.
+
+- **Go-only build (no Node):** the committed placeholder `dist/index.html` is
+  embedded. The binary serves "Web UI not built" at `/`. This is intentional:
+  `go build ./...` must always succeed on a clean checkout without Node.
+- **Release build:** run `npm run build` inside `web/` first, then `go build`.
+  Vite writes the full SPA into `dist/`, which `go:embed` picks up. The real SPA
+  replaces the placeholder — same binary format, no extra tooling at runtime.
+
+`dist/*` is git-ignored except for the committed placeholder (`dist/index.html`).
+Real Vite output is never committed — committed compiled JS bypasses source review
+(security A6.3) and risks stale-SPA patch-lag bugs. If `dist/` is out of date when
+`go build` runs, the binary silently embeds whatever is on disk; a stale `dist/`
+with an old SPA version is a deployment error, not a build error. Releases should
+validate the `dist/` mtime as part of their packaging pipeline.
+
 ## Prerequisites
 
 - Node 26 — pinned in [`.nvmrc`](.nvmrc) and enforced via `package.json`

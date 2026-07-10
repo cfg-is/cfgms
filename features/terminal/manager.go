@@ -51,6 +51,9 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 	// Initialize recorder if recording is enabled
 	if config.RecordSessions {
 		recorderConfig := DefaultRecorderConfig()
+		if config.RecordingStoragePath != "" {
+			recorderConfig.StoragePath = config.RecordingStoragePath
+		}
 		recorder, err := NewSessionRecorder(recorderConfig, logger)
 		if err != nil {
 			logger.Warn("Failed to initialize session recorder, continuing without recording", "error", err)

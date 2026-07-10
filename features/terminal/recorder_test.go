@@ -17,6 +17,7 @@ import (
 
 func TestSessionRecorderCreation(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
+	tmpDir := t.TempDir()
 
 	tests := []struct {
 		name    string
@@ -26,7 +27,7 @@ func TestSessionRecorderCreation(t *testing.T) {
 		{
 			name: "valid config",
 			config: &RecorderConfig{
-				StoragePath:    "/tmp/cfgms-recordings",
+				StoragePath:    tmpDir,
 				MaxRecordingMB: 100,
 				Compression:    true,
 			},
@@ -65,7 +66,7 @@ func TestSessionRecorderCreation(t *testing.T) {
 func TestDataRecording(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -115,7 +116,7 @@ func TestDataRecording(t *testing.T) {
 func TestRecordingMetadata(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -184,7 +185,7 @@ func TestRecordingCompression(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := &RecorderConfig{
-				StoragePath:    "/tmp/cfgms-recordings",
+				StoragePath:    t.TempDir(),
 				MaxRecordingMB: 100,
 				Compression:    tt.compression,
 			}
@@ -235,7 +236,7 @@ func TestRecordingCompression(t *testing.T) {
 func TestRecordingSizeLimit(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 1, // Very small limit for testing
 		Compression:    false,
 	}
@@ -273,7 +274,7 @@ func TestRecordingSizeLimit(t *testing.T) {
 func TestConcurrentRecording(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -328,7 +329,7 @@ func TestConcurrentRecording(t *testing.T) {
 func TestRecordingPersistence(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -365,7 +366,7 @@ func TestRecordingPersistence(t *testing.T) {
 func TestRecordingCleanup(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
