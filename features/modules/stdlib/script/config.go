@@ -25,14 +25,26 @@ type ScriptConfig struct {
 	ExecutionContext ExecutionContext       `yaml:"execution_context,omitempty"` // How the script runs (system or logged_in_user)
 	Description      string                 `yaml:"description,omitempty"`       // Script description
 	Metadata         map[string]interface{} `yaml:"metadata,omitempty"`          // Additional metadata
+	// rawTimeout preserves the original string form (e.g. "5m") from operator YAML
+	// so AsMap() can echo it back without Go Duration.String() normalisation
+	// (which would turn "5m" into "5m0s", causing a false comparator mismatch).
+	rawTimeout string `yaml:"-"`
 }
 
-// AsMap returns the configuration as a map for efficient field-by-field comparison
+// AsMap returns the configuration as a map for efficient field-by-field comparison.
+//
+// timeout is echoed as the original operator string (e.g. "5m") when available so
+// the comparator does not see a false mismatch from Go's Duration.String()
+// normalisation (which turns "5m" → "5m0s").
 func (c *ScriptConfig) AsMap() map[string]interface{} {
+	timeoutStr := c.rawTimeout
+	if timeoutStr == "" {
+		timeoutStr = c.Timeout.String()
+	}
 	result := map[string]interface{}{
 		"content":           c.Content,
 		"shell":             string(c.Shell),
-		"timeout":           c.Timeout.String(),
+		"timeout":           timeoutStr,
 		"signing_policy":    string(c.SigningPolicy),
 		"execution_context": string(c.ExecutionContext),
 	}
@@ -110,6 +122,10 @@ func scriptConfigFromMap(m map[string]interface{}) (*ScriptConfig, error) {
 				return nil, fmt.Errorf("invalid timeout %q: %w", t, err)
 			}
 			c.Timeout = d
+			// Preserve the original string so AsMap() echoes it back verbatim,
+			// avoiding Duration.String() normalisation ("5m" → "5m0s") that
+			// would cause the comparator to report a false mismatch (Issue #2479).
+			c.rawTimeout = t
 		}
 	case time.Duration:
 		c.Timeout = t
