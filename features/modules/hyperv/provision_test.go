@@ -262,10 +262,15 @@ func TestProvisionRecord_LastError(t *testing.T) {
 func TestIsOwnIncompleteAttempt(t *testing.T) {
 	ctx := context.Background()
 	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+	// Non-ha_role / non-CSV cfg → storeFor resolves the host-local store, so
+	// every read here exercises the preserved swallow-on-error semantics: err is
+	// always nil (a NotFound is (false, nil), not an error).
+	cfg := &VMConfig{Name: "vm-x"}
 
-	// No record → false.
-	assert.False(t, m.isOwnIncompleteAttempt(ctx, "vm-x"),
-		"no provisioning record must report not-in-progress")
+	// No record → (false, nil).
+	own, err := m.isOwnIncompleteAttempt(ctx, cfg)
+	require.NoError(t, err)
+	assert.False(t, own, "no provisioning record must report not-in-progress")
 
 	cases := []struct {
 		state ProvisionState
@@ -283,8 +288,9 @@ func TestIsOwnIncompleteAttempt(t *testing.T) {
 		require.NoError(t, m.provisionStore.SetProvision(ctx, &ProvisionRecord{
 			VMName: "vm-x", State: tc.state, CorrelationID: "vm-x",
 		}))
-		assert.Equal(t, tc.want, m.isOwnIncompleteAttempt(ctx, "vm-x"),
-			"isOwnIncompleteAttempt for state %q", tc.state)
+		got, gerr := m.isOwnIncompleteAttempt(ctx, cfg)
+		require.NoError(t, gerr, "host-local reads never fail loud")
+		assert.Equal(t, tc.want, got, "isOwnIncompleteAttempt for state %q", tc.state)
 	}
 }
 

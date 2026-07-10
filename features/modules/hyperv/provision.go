@@ -110,17 +110,48 @@ func (s *memProvisionStore) DeleteProvision(_ context.Context, vmName string) er
 	return nil
 }
 
+// usesCSVStore reports whether cfg's provisioning record is cluster-visible
+// (CSV-backed): an ha_role VM whose primary VHD is on a Cluster Shared Volume.
+// This is the single routing predicate — storeFor and the isOwnIncompleteAttempt
+// fail-loud scope must agree on it. An ha_role VM with a non-CSV vhd_path (rare,
+// and ErrInvalidHARoleSeedDir already constrains the common case) keeps the
+// host-local store.
+func (m *hypervModule) usesCSVStore(cfg *VMConfig) bool {
+	return cfg != nil && cfg.HARole != nil && isUnderCSV(cfg.VHDPath)
+}
+
+// storeFor selects the ProvisionStore for cfg. An ha_role+CSV VM routes to the
+// cluster-visible CSV store (records persisted beside the VM's VHD, readable from
+// any member node's CSV mount) so a mid-provision CNO failover reads the
+// in-progress record and surfaces-and-waits instead of creating a duplicate VM
+// (ADR-009 Amendment 1 A1.4, Option A). Every other VM keeps the configured
+// host-local store. Test seam: an injected m.csvProvisionStore wins for the CSV
+// branch (mirrors the m.provisionStore injection seam), so routing is assertable
+// against a fake without touching the filesystem.
+//
+// The CSV home dir is computed with vmHomeDir (NOT filepath.Dir, which mangles an
+// always-Windows vhd_path on the Linux CI host — Issue #2044).
+func (m *hypervModule) storeFor(cfg *VMConfig) ProvisionStore {
+	if m.usesCSVStore(cfg) {
+		if m.csvProvisionStore != nil {
+			return m.csvProvisionStore
+		}
+		return newCSVProvisionStore(vmHomeDir(cfg.VHDPath))
+	}
+	if m.provisionStore == nil {
+		m.provisionStore = NewMemProvisionStore()
+	}
+	return m.provisionStore
+}
+
 // loadOrInitProvision returns the existing provisioning record for vmName, or
 // initialises a fresh one at absent when none exists. A freshly initialised
 // record carries StartedAt and the correlation identity baked from the VM name
 // (the expected enrollment label per ADR-009 §8) so the controller-side
 // reconciler (#2050) can match a registered steward to this VM. It is NOT
 // persisted until advanceProvision writes a state.
-func (m *hypervModule) loadOrInitProvision(ctx context.Context, vmName string) (*ProvisionRecord, error) {
-	if m.provisionStore == nil {
-		m.provisionStore = NewMemProvisionStore()
-	}
-	record, err := m.provisionStore.GetProvision(ctx, vmName)
+func (m *hypervModule) loadOrInitProvision(ctx context.Context, cfg *VMConfig, vmName string) (*ProvisionRecord, error) {
+	record, err := m.storeFor(cfg).GetProvision(ctx, vmName)
 	if err == nil {
 		return record, nil
 	}
@@ -140,15 +171,12 @@ func (m *hypervModule) loadOrInitProvision(ctx context.Context, vmName string) (
 // advanceProvision sets the record to newState, stamps UpdatedAt, persists it,
 // and emits a structured log event. It mutates the passed record in place so
 // the caller's subsequent state checks see the new state.
-func (m *hypervModule) advanceProvision(ctx context.Context, vmName string, record *ProvisionRecord, newState ProvisionState) error {
-	if m.provisionStore == nil {
-		m.provisionStore = NewMemProvisionStore()
-	}
+func (m *hypervModule) advanceProvision(ctx context.Context, cfg *VMConfig, vmName string, record *ProvisionRecord, newState ProvisionState) error {
 	prev := record.State
 	record.State = newState
 	record.UpdatedAt = time.Now().UTC()
 	record.LastError = ""
-	if err := m.provisionStore.SetProvision(ctx, record); err != nil {
+	if err := m.storeFor(cfg).SetProvision(ctx, record); err != nil {
 		return err
 	}
 	if logger, ok := m.GetLogger(); ok {
@@ -165,17 +193,14 @@ func (m *hypervModule) advanceProvision(ctx context.Context, vmName string, reco
 // LastError set), persists it, emits a structured log event, and returns the
 // original error so the caller can propagate it. The error message is not
 // exposed via the log at error-detail level beyond the sanitized value.
-func (m *hypervModule) failProvision(ctx context.Context, vmName string, record *ProvisionRecord, cause error) error {
-	if m.provisionStore == nil {
-		m.provisionStore = NewMemProvisionStore()
-	}
+func (m *hypervModule) failProvision(ctx context.Context, cfg *VMConfig, vmName string, record *ProvisionRecord, cause error) error {
 	record.State = ProvisionStateFailed
 	record.UpdatedAt = time.Now().UTC()
 	if cause != nil {
 		record.LastError = cause.Error()
 	}
 	// Persist best-effort; the original cause is the error we surface.
-	_ = m.provisionStore.SetProvision(ctx, record)
+	_ = m.storeFor(cfg).SetProvision(ctx, record)
 	if logger, ok := m.GetLogger(); ok {
 		logger.Warn("hyperv: provisioning failed",
 			"vm_name", logging.SanitizeLogValue(vmName),
@@ -193,21 +218,35 @@ func (m *hypervModule) failProvision(ctx context.Context, vmName string, record 
 // waited-on (never auto-destroyed), while a real existing VM is left untouched.
 //
 // A missing record, or a record in a terminal state (absent/ready/failed/
-// degraded), returns false. A store read error is treated as "no in-progress
-// attempt" (false) — the caller's downstream gating is conservative regardless.
-func (m *hypervModule) isOwnIncompleteAttempt(ctx context.Context, vmName string) bool {
-	if m.provisionStore == nil {
-		return false
+// degraded), returns (false, nil).
+//
+// Read-error handling is ASYMMETRIC by store, and this asymmetry is deliberate
+// (#2447): for the cluster-visible CSV store the record is LOAD-BEARING for
+// cluster duplicate-prevention — an unreadable record must fail LOUD (return the
+// error) so createVM never fires while the cluster record state is unknown (the
+// exact duplicate a mid-provision CNO failover would otherwise cause). For the
+// host-local store the record is not load-bearing, so the historical
+// swallow-on-error semantics are preserved byte-for-byte: a read error is treated
+// as "no in-progress attempt" (false, nil) and the create path proceeds.
+func (m *hypervModule) isOwnIncompleteAttempt(ctx context.Context, cfg *VMConfig) (bool, error) {
+	record, err := m.storeFor(cfg).GetProvision(ctx, cfg.Name)
+	if errors.Is(err, ErrProvisionNotFound) {
+		return false, nil
 	}
-	record, err := m.provisionStore.GetProvision(ctx, vmName)
-	if err != nil || record == nil {
-		return false
+	if err != nil {
+		if m.usesCSVStore(cfg) {
+			return false, err // CSV record load-bearing → fail loud
+		}
+		return false, nil // host-local → preserve swallow-on-error
+	}
+	if record == nil {
+		return false, nil
 	}
 	switch record.State {
 	case ProvisionStateCreating, ProvisionStateInstalling, ProvisionStateFinalizing:
-		return true
+		return true, nil
 	default:
-		return false
+		return false, nil
 	}
 }
 
@@ -219,15 +258,12 @@ func (m *hypervModule) isOwnIncompleteAttempt(ctx context.Context, vmName string
 // delete-and-rebuilds — degradation is observed and reported, not remediated.
 // observedState is the raw VM power/health state string and is sanitised before
 // it reaches any log field.
-func (m *hypervModule) degradeProvision(ctx context.Context, vmName string, record *ProvisionRecord, observedState string) error {
-	if m.provisionStore == nil {
-		m.provisionStore = NewMemProvisionStore()
-	}
+func (m *hypervModule) degradeProvision(ctx context.Context, cfg *VMConfig, vmName string, record *ProvisionRecord, observedState string) error {
 	prev := record.State
 	record.State = ProvisionStateDegraded
 	record.UpdatedAt = time.Now().UTC()
 	record.LastError = "hyperv: VM in broken state: " + observedState
-	if err := m.provisionStore.SetProvision(ctx, record); err != nil {
+	if err := m.storeFor(cfg).SetProvision(ctx, record); err != nil {
 		return err
 	}
 	if logger, ok := m.GetLogger(); ok {
