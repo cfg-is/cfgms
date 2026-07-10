@@ -512,25 +512,31 @@ func TestModuleMetadata_ToYAML(t *testing.T) {
 }
 
 func TestModuleMetadata_FromYAML(t *testing.T) {
-	yamlData := []byte(`name: from-yaml-test
+	t.Run("valid yaml", func(t *testing.T) {
+		yamlData := []byte(`name: from-yaml-test
 version: 1.0.0
 module_dependencies:
   - name: dep1
     version: "^1.0.0"`)
 
-	var metadata ModuleMetadata
-	err := metadata.FromYAML(yamlData)
-	if err != nil {
-		t.Fatalf("failed to parse YAML: %v", err)
-	}
+		var metadata ModuleMetadata
+		if err := metadata.FromYAML(yamlData); err != nil {
+			t.Fatalf("failed to parse YAML: %v", err)
+		}
+		if metadata.Name != "from-yaml-test" {
+			t.Errorf("Name = %v, expected from-yaml-test", metadata.Name)
+		}
+		if len(metadata.ModuleDependencies) != 1 {
+			t.Errorf("ModuleDependencies length = %v, expected 1", len(metadata.ModuleDependencies))
+		}
+	})
 
-	if metadata.Name != "from-yaml-test" {
-		t.Errorf("Name = %v, expected from-yaml-test", metadata.Name)
-	}
-
-	if len(metadata.ModuleDependencies) != 1 {
-		t.Errorf("ModuleDependencies length = %v, expected 1", len(metadata.ModuleDependencies))
-	}
+	t.Run("malformed yaml returns error", func(t *testing.T) {
+		var metadata ModuleMetadata
+		if err := metadata.FromYAML([]byte("name: [unclosed")); err == nil {
+			t.Error("expected error for malformed YAML, got nil")
+		}
+	})
 }
 
 func TestModuleMetadata_Validate(t *testing.T) {
@@ -878,6 +884,103 @@ func TestModuleMetadata_Clone(t *testing.T) {
 	}
 }
 
+func TestParseModuleMetadata_Owns(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantOwns  []OwnershipDeclaration
+		wantCount int
+	}{
+		{
+			name: "no owns field — zero value, backward compatible",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward`,
+			wantOwns:  nil,
+			wantCount: 0,
+		},
+		{
+			name: "single owns entry",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service`,
+			wantOwns:  []OwnershipDeclaration{{Kind: "service"}},
+			wantCount: 1,
+		},
+		{
+			name: "multiple owns entries",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: file
+  - kind: directory`,
+			wantOwns:  []OwnershipDeclaration{{Kind: "file"}, {Kind: "directory"}},
+			wantCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := strings.NewReader(tt.yaml)
+			metadata, err := ParseModuleMetadata(reader)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+
+			if len(metadata.Owns) != tt.wantCount {
+				t.Errorf("Owns length = %d, want %d", len(metadata.Owns), tt.wantCount)
+			}
+
+			for i, want := range tt.wantOwns {
+				if i >= len(metadata.Owns) {
+					t.Errorf("Owns[%d] missing, want kind=%q", i, want.Kind)
+					continue
+				}
+				if metadata.Owns[i].Kind != want.Kind {
+					t.Errorf("Owns[%d].Kind = %q, want %q", i, metadata.Owns[i].Kind, want.Kind)
+				}
+			}
+		})
+	}
+}
+
+func TestModuleMetadata_Clone_Owns(t *testing.T) {
+	original := &ModuleMetadata{
+		Name:      "test",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
+		Kind:      "steward",
+		Owns:      []OwnershipDeclaration{{Kind: "service"}, {Kind: "file"}},
+	}
+
+	clone := original.Clone()
+
+	if len(clone.Owns) != len(original.Owns) {
+		t.Fatalf("Clone Owns length = %d, want %d", len(clone.Owns), len(original.Owns))
+	}
+	for i, want := range original.Owns {
+		if clone.Owns[i].Kind != want.Kind {
+			t.Errorf("Clone Owns[%d].Kind = %q, want %q", i, clone.Owns[i].Kind, want.Kind)
+		}
+	}
+
+	// Verify deep copy — mutating clone must not affect original
+	clone.Owns[0].Kind = "mutated"
+	if original.Owns[0].Kind == "mutated" {
+		t.Error("Mutating clone Owns[0] affected original")
+	}
+}
+
 // Benchmark tests
 func BenchmarkLoadModuleMetadata(b *testing.B) {
 	// Create temporary metadata file
@@ -902,7 +1005,9 @@ interfaces:
   - Get
   - Set`
 
-	_ = os.WriteFile(metadataFile, []byte(yamlContent), 0644) // Ignore error in benchmark setup
+	if err := os.WriteFile(metadataFile, []byte(yamlContent), 0644); err != nil {
+		b.Fatalf("setup: write benchmark file: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
