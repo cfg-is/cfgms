@@ -88,7 +88,7 @@ go test -tags e2e -v -run TestClusterCascade -timeout 30m ./test/e2e/hyperv/... 
 |------|--------|-------------------|
 | `TestClusterCascade_SingleVMCreatedByOwner` | moves the **CNO** (`Cluster Group`) to the local node | the CNO owner's convergence **creates** the VM, registers the clustered role, and **exactly one** VM instance exists cluster-wide; the owner records no surface-and-wait skip |
 | `TestClusterCascade_NonOwnersConverged` | creates the role on local, then moves the **role** to another node | the local (now non-hosting) member converges to a **no-op**, audits a `vm-set-skip-hosted-elsewhere`, creates **no** local duplicate, and the single instance stays on its real owner |
-| `TestClusterCascade_FailoverHandoff` | runs a **live** convergence loop while moving the role **to** then **away from** local | the **new owner** converges the role with zero operator action; the **previous owner** goes quiet (audited owner-gate skip, no lifecycle writes); a background cross-node poller proves **never 2** (no duplicate) and **never 0** (no gap) instances throughout the failover window |
+| `TestClusterCascade_FailoverHandoff` | hands the role to `other` (local starts a non-owner), then runs a **live** convergence loop while moving the role **to** then **away from** local | the **new owner** converges the role with zero operator action; the **previous owner** goes quiet (audited owner-gate skip, no lifecycle writes); a background cross-node poller proves **never two distinct VMIds** (no independent duplicate — a live-migration transient of the *same* VMId is allowed) and **never zero instances** (no gap) throughout the failover window |
 
 Each test cleans up its VM + clustered role (`t.Cleanup` → `ccCleanupRole`).
 

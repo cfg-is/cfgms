@@ -268,20 +268,57 @@ func ccRolePresent(t *testing.T, cluster, role string) bool {
 	return strings.TrimSpace(out) == "yes"
 }
 
-// ccVMInstanceOwners returns the set of nodes whose local Get-VM reports the named
-// VM. The epic's core safety property is that this set has size ≤ 1 at every
-// instant: a clustered VM object lives only on its current owner. Size 2 is a
-// duplicate (the failure this epic prevents); size 0 during a move is a gap.
-func ccVMInstanceOwners(t *testing.T, env ccEnv) []string {
+// ccVMInstances snapshots, per cluster node, whether the named VM is present and
+// its Hyper-V VMId. Two truths matter for the epic's safety property, and they
+// are DIFFERENT:
+//
+//   - distinctIDs — the number of INDEPENDENT VMs (distinct VMIds) across the
+//     cluster. This is the duplicate metric: the failure this epic prevents is
+//     two nodes each independently creating a VM, which shows two distinct VMIds.
+//     A live-migration transient shows the SAME VMId on two nodes briefly — that
+//     is NOT a duplicate, so it must not be counted as one.
+//   - present — the nodes whose Get-VM reports the VM at all. This is the liveness
+//     metric: the VM must never vanish (present ≥ 1) during a failover.
+//
+// A peer-node query failure is returned as an error rather than swallowed: a
+// silently-unreachable peer would read as "VM absent there" and could MASK a real
+// duplicate.
+func ccVMInstances(t *testing.T, env ccEnv) (present []string, distinctIDs int, err error) {
 	t.Helper()
-	var owners []string
+	ids := map[string]struct{}{}
 	for _, node := range env.nodes {
-		out, _ := ccPS(t, `try { if (Get-VM -ComputerName '`+node+`' -Name '`+env.vmName+`' -ErrorAction Stop) { "yes" } } catch { "" }`)
-		if strings.TrimSpace(out) == "yes" {
-			owners = append(owners, node)
+		out, e := ccPS(t, `try { (Get-VM -ComputerName '`+node+`' -Name '`+env.vmName+`' -ErrorAction Stop).Id.Guid } catch { "" }`)
+		if e != nil {
+			return nil, 0, e
+		}
+		if id := strings.TrimSpace(out); id != "" {
+			present = append(present, node)
+			ids[id] = struct{}{}
 		}
 	}
-	return owners
+	return present, len(ids), nil
+}
+
+// ccWaitSingleInstanceOn polls until exactly one node — `node` — reports the VM
+// and there is exactly one distinct VMId cluster-wide, tolerating a brief
+// migration transient. Fails the test on a peer-query error or on timeout.
+func ccWaitSingleInstanceOn(t *testing.T, env ccEnv, node string) {
+	t.Helper()
+	deadline := time.Now().Add(ccSettleTimeout)
+	var present []string
+	var distinct int
+	for time.Now().Before(deadline) {
+		var err error
+		present, distinct, err = ccVMInstances(t, env)
+		require.NoError(t, err, "cross-node Get-VM must succeed on every peer (an unreachable peer could mask a duplicate)")
+		require.LessOrEqual(t, distinct, 1, "a duplicate VM (distinct VMIds) must never exist (present on %v)", present)
+		if len(present) == 1 && distinct == 1 && strings.EqualFold(present[0], node) {
+			return
+		}
+		time.Sleep(ccPollInterval)
+	}
+	require.Failf(t, "VM never settled to a single instance",
+		"expected exactly one instance on %q, last present=%v distinctIDs=%d", node, present, distinct)
 }
 
 // ccWaitGroupOwner polls until the group's owner equals want (case-insensitive)
@@ -331,6 +368,14 @@ func ccBuildModule(t *testing.T, env ccEnv) (modules.Module, *audit.Manager, *cc
 
 	m := hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(hyperv.NewMemProvisionStore()))
 
+	// Configure() rejects with errSecretStoreRequired before reading any config
+	// key unless a SecretStore has been injected (module.go:268). A plain ha_role
+	// VM references no secrets, so an empty in-memory store satisfies the contract
+	// — same injection the provision_*_test.go references perform.
+	injectable, ok := m.(modules.SecretStoreInjectable)
+	require.True(t, ok, "hyperv module must accept an injected secret store")
+	require.NoError(t, injectable.SetSecretStore(&e2eSecretStore{secrets: map[string]string{}}))
+
 	configurable, ok := m.(modules.Configurable)
 	require.True(t, ok, "hyperv module must be Configurable")
 	require.NoError(t, configurable.Configure(e2eConfigState{
@@ -378,7 +423,8 @@ func ccEnsureRoleOnOwner(t *testing.T, ctx context.Context, m modules.Module, en
 
 	deadline := time.Now().Add(ccSettleTimeout)
 	for time.Now().Before(deadline) {
-		if ccRolePresent(t, env.cluster, env.vmName) && len(ccVMInstanceOwners(t, env)) == 1 {
+		present, distinct, err := ccVMInstances(t, env)
+		if err == nil && ccRolePresent(t, env.cluster, env.vmName) && len(present) == 1 && distinct == 1 {
 			return
 		}
 		_ = ccConverge(ctx, m, env, "stopped")
@@ -435,10 +481,9 @@ func TestClusterCascade_SingleVMCreatedByOwner(t *testing.T) {
 	assert.Equal(t, env.localNode, ccGroupOwner(t, env.cluster, env.vmName),
 		"the role is owned by the CNO-owner node that created it")
 
-	// The safety keystone: exactly one VM instance across the whole cluster.
-	owners := ccVMInstanceOwners(t, env)
-	require.Len(t, owners, 1, "exactly one VM instance must exist cluster-wide (got %v)", owners)
-	assert.Equal(t, env.localNode, owners[0], "the single instance lives on the creating owner")
+	// The safety keystone: exactly one VM instance across the whole cluster,
+	// living on the creating owner.
+	ccWaitSingleInstanceOn(t, env, env.localNode)
 
 	// The owner path must NOT have recorded a surface-and-wait skip.
 	assert.Empty(t, store.actionsSince("vm-set-skip-not-cno-owner", start),
@@ -467,8 +512,8 @@ func TestClusterCascade_NonOwnersConverged(t *testing.T) {
 	ccMoveGroup(t, env.cluster, env.vmName, other)
 	require.Equal(t, other, ccGroupOwner(t, env.cluster, env.vmName))
 
-	before := ccVMInstanceOwners(t, env)
-	require.Len(t, before, 1, "precondition: exactly one instance before the non-owner converge")
+	// Precondition: exactly one instance, now on `other`.
+	ccWaitSingleInstanceOn(t, env, other)
 
 	start := time.Now()
 	require.NoError(t, ccConverge(ctx, m, env, "stopped"),
@@ -477,10 +522,14 @@ func TestClusterCascade_NonOwnersConverged(t *testing.T) {
 	// The non-owner produced a hosted-elsewhere skip and created nothing locally.
 	assert.NotEmpty(t, store.actionsSince("vm-set-skip-hosted-elsewhere", start),
 		"a non-hosting member must audit a hosted-elsewhere skip")
-	owners := ccVMInstanceOwners(t, env)
-	require.Len(t, owners, 1, "a non-owner converge must not create a duplicate (got %v)", owners)
-	assert.Equal(t, other, owners[0], "the single instance stays on its real owner")
-	assert.NotContains(t, owners, env.localNode, "the non-owner must not materialize a local copy")
+
+	// Still exactly one instance, still on the real owner — no local duplicate.
+	present, distinct, err := ccVMInstances(t, env)
+	require.NoError(t, err)
+	require.Equal(t, 1, distinct, "a non-owner converge must not create an independent duplicate (present on %v)", present)
+	require.Len(t, present, 1, "the single instance stays on its real owner (got %v)", present)
+	assert.Equal(t, other, present[0], "the single instance stays on its real owner")
+	assert.NotContains(t, present, env.localNode, "the non-owner must not materialize a local copy")
 }
 
 // TestClusterCascade_FailoverHandoff (REQUIRED, #2418 AC/#2422 — the epic's
@@ -504,10 +553,22 @@ func TestClusterCascade_FailoverHandoff(t *testing.T) {
 	other := ccOtherNode(env, env.localNode)
 	require.NotEmpty(t, other, "failover needs a second node")
 
-	// Continuous cross-node safety poller: records worst-case instance counts seen
-	// anywhere across the whole failover window (not just before/after snapshots).
+	// Baseline for a REAL ownership GAIN in Handoff 1: hand the role to `other`
+	// first so the local node starts as a NON-owner. Without this, Handoff 1's
+	// move-to-local would be a same-node no-op and never exercise a gain.
+	ccMoveGroup(t, env.cluster, env.vmName, other)
+	require.Equal(t, other, ccGroupOwner(t, env.cluster, env.vmName),
+		"precondition: role hosted on `other` so the local loop starts as a non-owner")
+
+	// Continuous cross-node safety poller across the whole failover window (not just
+	// before/after snapshots). Tracks the worst-case DISTINCT-VMId count (the
+	// duplicate metric — a live-migration transient of the same VMId is not a
+	// duplicate) and the worst-case PRESENCE count (the liveness/gap metric), plus
+	// the first peer-query error (a masked peer could hide a real duplicate).
 	var pollMu sync.Mutex
-	maxSeen, minSeen := 1, 1
+	maxDistinct := 1 // ≤1 always: never two independent VMs
+	minPresent := 1  // ≥1 always: never zero instances
+	var pollErr error
 	var pollWG sync.WaitGroup
 	pollWG.Add(1)
 	go func() {
@@ -518,13 +579,19 @@ func TestClusterCascade_FailoverHandoff(t *testing.T) {
 				return
 			default:
 			}
-			n := len(ccVMInstanceOwners(t, env))
+			present, distinct, err := ccVMInstances(t, env)
 			pollMu.Lock()
-			if n > maxSeen {
-				maxSeen = n
-			}
-			if n < minSeen {
-				minSeen = n
+			if err != nil {
+				if pollErr == nil {
+					pollErr = err
+				}
+			} else {
+				if distinct > maxDistinct {
+					maxDistinct = distinct
+				}
+				if len(present) < minPresent {
+					minPresent = len(present)
+				}
 			}
 			pollMu.Unlock()
 			time.Sleep(ccPollInterval)
@@ -543,28 +610,38 @@ func TestClusterCascade_FailoverHandoff(t *testing.T) {
 				return
 			default:
 			}
-			_ = ccConverge(ctx, m, env, "running")
+			_ = ccConverge(ctx, m, env, "running") // errors are transient; state is asserted via the cluster
 			time.Sleep(ccPollInterval)
 		}
 	}()
 
-	// ── Handoff 1: role moves TO the local node — the new owner must converge it.
+	// GUARANTEED teardown of the goroutines, registered AFTER ccCleanupRole so it
+	// runs BEFORE it (t.Cleanup is LIFO): even if a require below aborts the test,
+	// the loop + poller are cancelled and joined before the VM/role is torn down,
+	// so no live convergence races the cleanup. Idempotent with the inline join.
+	t.Cleanup(func() {
+		cancel()
+		loopWG.Wait()
+		pollWG.Wait()
+	})
+
+	// ── Handoff 1: role moves TO the local node — the new owner's live loop must
+	// converge it with zero operator action.
 	ccMoveGroup(t, env.cluster, env.vmName, env.localNode)
-	gainStart := time.Now()
-	// Give the live loop cycles to converge the newly-owned role to running.
 	deadline := time.Now().Add(ccSettleTimeout)
 	converged := false
 	for time.Now().Before(deadline) {
-		owners := ccVMInstanceOwners(t, env)
+		present, distinct, err := ccVMInstances(t, env)
+		require.NoError(t, err)
+		require.LessOrEqual(t, distinct, 1, "no duplicate during the gain handoff (present on %v)", present)
 		state := ccGroupOwner(t, env.cluster, env.vmName)
-		if len(owners) == 1 && strings.EqualFold(owners[0], env.localNode) && strings.EqualFold(state, env.localNode) {
+		if len(present) == 1 && distinct == 1 && strings.EqualFold(present[0], env.localNode) && strings.EqualFold(state, env.localNode) {
 			converged = true
 			break
 		}
 		time.Sleep(ccPollInterval)
 	}
 	require.True(t, converged, "the new owner's live loop must converge the role with no operator action")
-	_ = gainStart
 
 	// ── Handoff 2: role moves AWAY to `other` — the previous owner (local) must go
 	// quiet: its very next convergence cycles take zero lifecycle action.
@@ -592,13 +669,12 @@ func TestClusterCascade_FailoverHandoff(t *testing.T) {
 	pollWG.Wait()
 
 	pollMu.Lock()
-	gotMax, gotMin := maxSeen, minSeen
+	gotMaxDistinct, gotMinPresent, gotErr := maxDistinct, minPresent, pollErr
 	pollMu.Unlock()
-	assert.LessOrEqual(t, gotMax, 1, "a duplicate VM (2 instances) must NEVER appear during failover")
-	assert.GreaterOrEqual(t, gotMin, 1, "the VM must NEVER vanish (0 instances) during failover")
+	require.NoError(t, gotErr, "a cross-node peer query failed during the poll window — count could be masking a duplicate")
+	assert.LessOrEqual(t, gotMaxDistinct, 1, "a duplicate VM (2 distinct VMIds) must NEVER appear during failover")
+	assert.GreaterOrEqual(t, gotMinPresent, 1, "the VM must NEVER vanish (0 instances) during failover")
 
 	// Final state: exactly one instance, now on the new owner.
-	final := ccVMInstanceOwners(t, env)
-	require.Len(t, final, 1, "exactly one instance after failover settles (got %v)", final)
-	assert.Equal(t, other, final[0], "the new owner holds the single instance")
+	ccWaitSingleInstanceOn(t, env, other)
 }
