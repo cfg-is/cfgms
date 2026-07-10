@@ -105,8 +105,10 @@ func TestClassForGUIDUnknown(t *testing.T) {
 	assert.Empty(t, string(classForGUID(guid)))
 }
 
-// TestProcessTimesNs verifies that processTimesNs returns a positive value and
-// that two calls taken close together return a non-decreasing value.
+// TestProcessTimesNs verifies that processTimesNs returns a non-decreasing
+// value and a positive value after measurable CPU work has been done.
+// The initial reading may legitimately be zero on a freshly-started process
+// before any measurable kernel/user time has been charged (100-ns resolution).
 func TestProcessTimesNs(t *testing.T) {
 	// Burn enough CPU before the first sample to guarantee that
 	// GetProcessTimes reports a positive value. Windows tracks process
@@ -121,7 +123,6 @@ func TestProcessTimesNs(t *testing.T) {
 
 	t1, err := processTimesNs()
 	require.NoError(t, err)
-	assert.Greater(t, t1, uint64(0), "processTimesNs must return a positive value")
 
 	// Do more work to consume additional measurable CPU.
 	sum := 0
@@ -133,6 +134,7 @@ func TestProcessTimesNs(t *testing.T) {
 	t2, err := processTimesNs()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, t2, t1, "processTimesNs must be non-decreasing")
+	assert.Greater(t, t2, uint64(0), "processTimesNs must return a positive value after CPU work")
 }
 
 // TestCollectorRunShort exercises the full Run() path with a 2-second overhead
