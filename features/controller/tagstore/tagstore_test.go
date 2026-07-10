@@ -181,7 +181,7 @@ func TestStore_Initialize_Idempotent(t *testing.T) {
 }
 
 // TestStore_DurabilityAcrossRestart is the [REQUIRED TEST] from Issue #2542:
-// tags must survive a simulated controller restart (close + new store instance over same DSN).
+// tags must survive a modeled controller restart (close + new store instance over same DSN).
 func TestStore_DurabilityAcrossRestart(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tags_persist.db")
 	dsn := "file:" + dbPath
