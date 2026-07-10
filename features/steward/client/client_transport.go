@@ -668,10 +668,13 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	// Runs in a background goroutine so Connect() returns promptly. A non-nil
 	// error (e.g. no config stored yet) is logged at Info level and ignored —
 	// the absence of config is a valid first-connect state.
+	// No outer deadline here: the executor's per-call ModuleCallTimeoutSec budget
+	// (ADR-012 §7) already bounds each individual module.Get/Set/verifyChanges
+	// invocation. An additional outer cap would silently truncate long-running but
+	// legitimate Set calls (e.g. large installer downloads) to 30s even when the
+	// module's declared budget is 120s (Issue #2480).
 	go func() {
-		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := c.syncConfigNow(syncCtx, "on-connect", nil); err != nil {
+		if err := c.syncConfigNow(context.Background(), "on-connect", nil); err != nil {
 			c.logger.Info("On-connect config sync skipped", "error", err)
 		}
 	}()
