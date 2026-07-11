@@ -40,6 +40,15 @@ on:
       - 'go.sum'
       - '.github/codeql/**'
       - '.github/workflows/codeql-analysis.yml'
+  # Merge queue. merge_group events ignore `paths` filters, so CodeQL runs on
+  # EVERY merge group regardless of what changed. This is REQUIRED, not
+  # optional: with `CodeQL` a required check, the merge-group evaluation must
+  # run the REAL analysis — a stub on merge_group would false-green a Go PR's
+  # findings straight through the queue. codeql-stub.yml therefore never runs
+  # on merge_group. Cost: ~5 min of CodeQL per merge, in parallel with the
+  # other merge-group checks (near-zero added wall-clock).
+  merge_group:
+    branches: [ main, develop ]
   schedule:
     # Run weekly security scan on Wednesdays at 3 AM UTC
     - cron: '0 3 * * 3'
