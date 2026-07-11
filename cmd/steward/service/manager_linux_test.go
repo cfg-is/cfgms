@@ -7,8 +7,10 @@ package service
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -176,4 +178,80 @@ func TestGenerateSystemdUnitSetsLogDir(t *testing.T) {
 	unit := generateSystemdUnit("tok_test", "")
 	assert.Contains(t, unit, "Environment=CFGMS_LOG_DIR=/var/log/cfgms",
 		"systemd unit must set the platform-conventional log directory")
+}
+
+// TestLinuxInstallCreatesLogDir is the required acceptance test for Issue #2483:
+// cfgms-steward install must create /var/log/cfgms (mode 0750, owned by the service
+// user) before writing and starting the systemd unit. createLogDir is exercised
+// directly here because the full Install path requires root and a launcher binary;
+// the directory-creation logic is self-contained and this is the pattern used by
+// the analogous TestLinuxInstallCACertWritten.
+func TestLinuxInstallCreatesLogDir(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "var", "log", "cfgms")
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+
+	require.NoError(t, createLogDir(logDir, uid, gid))
+
+	info, err := os.Stat(logDir)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir(), "log path must be a directory")
+	assert.Equal(t, os.FileMode(0750), info.Mode().Perm(),
+		"log directory must have mode 0750 (owner rwx, group rx, no world access)")
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok, "expected *syscall.Stat_t from FileInfo.Sys()")
+	assert.Equal(t, uint32(uid), stat.Uid, "log directory must be owned by the service user uid")
+	assert.Equal(t, uint32(gid), stat.Gid, "log directory must be owned by the service group gid")
+}
+
+// TestLinuxInstallCreatesLogDirIdempotent verifies that createLogDir corrects the
+// directory mode even when the directory already exists with wrong permissions.
+func TestLinuxInstallCreatesLogDirIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "var", "log", "cfgms")
+	require.NoError(t, os.MkdirAll(logDir, 0777))
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+	require.NoError(t, createLogDir(logDir, uid, gid))
+
+	info, err := os.Stat(logDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0750), info.Mode().Perm(),
+		"createLogDir must enforce mode 0750 even when directory already exists")
+}
+
+// TestPlatformLogDirPrefix verifies that platformLogDir respects CFGMS_INSTALL_PREFIX
+// for test isolation, mirroring the platformCACertPath pattern.
+func TestPlatformLogDirPrefix(t *testing.T) {
+	prefix := t.TempDir()
+	t.Setenv("CFGMS_INSTALL_PREFIX", prefix)
+	assert.Equal(t, filepath.Join(prefix, linuxLogDir), platformLogDir())
+}
+
+func TestPlatformLogDirNoPrefix(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", "")
+	assert.Equal(t, linuxLogDir, platformLogDir())
+}
+
+// TestServiceUserIDs verifies that serviceUserIDs returns the correct uid/gid.
+// Uses the current process user (always exists) rather than the cfgms service user
+// which may not be present in test environments.
+func TestServiceUserIDs(t *testing.T) {
+	cur, err := user.Current()
+	require.NoError(t, err)
+
+	uid, gid, err := serviceUserIDs(cur.Username)
+	require.NoError(t, err)
+	assert.Equal(t, os.Getuid(), uid)
+	assert.Equal(t, os.Getgid(), gid)
+}
+
+func TestServiceUserIDsNotFound(t *testing.T) {
+	_, _, err := serviceUserIDs("cfgms-nonexistent-test-user-xyzzy")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
 }

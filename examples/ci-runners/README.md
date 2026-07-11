@@ -58,8 +58,63 @@ cfg config upload linux-runner.cfg --steward ci-runner-linux-01
 cfg config upload windows-runner.cfg --steward ci-runner-windows-01
 ```
 
-The `github_runner` module fetches the agent archive, verifies the SHA-256,
-installs it under `work_dir`, and manages the runner service.
+#### Host dependencies (Linux)
+
+`linux-runner.cfg` carries a host-deps layer that provisions the bare-host
+requirements the golang container jobs need. Without it, runner VMs boot
+under-provisioned and jobs fail at Docker launch or tool resolution — the
+root cause of the cfgms-ci-lin-02/03 incident (2026-07-08).
+
+The host-deps resources and the workflow contract they satisfy:
+
+| Resource | Module | What it provides | Workflow contract line |
+|---|---|---|---|
+| `host-build-deps` | `script` (interim¹) | `docker.io git make gcc` via apt | container runtime |
+| `docker-service` | `service` | Docker daemon enabled + running | container launch |
+| `runner-docker-group` | `script` (interim²) | runner OS user → docker group | `--user 1000:1000` |
+| `ci-tools-dir` | `script` (interim¹) | `/opt/ci-tools/jq` static binary | `-v /opt/ci-tools:/opt/ci-tools:ro` |
+
+**Why the docker group step matters:** each job container is launched with
+`--user 1000:1000` and `/etc/group` bind-mounted read-only from the host
+(`.github/workflows/test-suite.yml:62,141`). For the container to reach the
+Docker socket, UID 1000 must be a member of the `docker` group **on the
+host** — not just inside the container. Without it, the runner fails with
+`usermod: group 'docker' does not exist` at enrollment (story #2479).
+
+> ¹ `host-build-deps` and `ci-tools-dir` are script-shaped pending the
+> package module apt-backend fix (story #2478). Replace with `package` +
+> `file` resources once #2478 is merged.
+>
+> ² `runner-docker-group` is script-shaped due to the script module
+> exit-semantics bug with idempotent commands (story #2479); the `|| true`
+> guard works around it until #2479 is fixed.
+
+#### Workflow contract
+
+Jobs in this repository run inside a `golang:1.26.5-bookworm` container on
+the self-hosted runner host. The full container spec, as declared in
+`.github/workflows/test-suite.yml:62,141`:
+
+```
+image:   golang:1.26.5-bookworm
+options: --user 1000:1000
+         -v /etc/passwd:/etc/passwd:ro
+         -v /etc/group:/etc/group:ro
+         -v /opt/ci-tools:/opt/ci-tools:ro
+```
+
+The `runs-on` selector that routes jobs to this runner
+(`.github/workflows/test-suite.yml:51,131`):
+
+```
+["self-hosted", "Linux", "cfgms"]
+```
+
+The runner label set in `linux-runner.cfg` must match these exactly.
+`Linux` and `cfgms` are routing labels — lowercase `linux` or a missing
+`cfgms` label causes jobs to fall through to GitHub-hosted runners.
+
+#### Runner cfg placeholders
 
 Before uploading, edit the cfg to set:
 
@@ -68,6 +123,10 @@ Before uploading, edit the cfg to set:
 - `config.agent_url` — the download URL matching the version and OS/arch.
 - `config.agent_sha256` — the SHA-256 of the archive (lowercase hex, 64 chars).
   Verify with `sha256sum` (Linux) or `Get-FileHash` (Windows).
+- `runner-docker-group` script — replace `<RUNNER_USER>` with the OS user
+  the runner agent runs as.
+- `ci-tools-dir` script — replace `<JQ_VERSION>` and `<JQ_SHA256_64HEX>`
+  with the pinned jq version and its SHA-256.
 
 Module field names come from
 [`features/modules/extended/github_runner/config.go`](../../features/modules/extended/github_runner/config.go).

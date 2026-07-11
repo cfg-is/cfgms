@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -811,4 +813,181 @@ func TestExecuteResource_HungVerifyModule_ProducesTimeoutOutcomeEvent(t *testing
 		"verifyChanges timeout must emit did-not-finish(timeout)")
 	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
 		"detection and verify-timeout outcome must share correlation_id")
+}
+
+// SlowSetModule is a real module implementation that reports drift on the first
+// Get() call, then waits for the given delay in Set() before succeeding. After a
+// successful Set(), subsequent Get() calls report the applied desired state so
+// the post-Set verification step sees no remaining drift.
+// Used to verify that a slow-but-within-budget Set completes when no outer
+// deadline shorter than ModuleCallTimeoutSec is imposed.
+type SlowSetModule struct {
+	delay   time.Duration
+	mu      sync.Mutex
+	applied bool
+}
+
+func (s *SlowSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applied {
+		// Post-Set: return the applied desired state so verification finds no drift.
+		return &mapConfigState{data: map[string]interface{}{"state": "desired"}}, nil
+	}
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (s *SlowSetModule) Set(ctx context.Context, _ string, _ modules.ConfigState) error {
+	select {
+	case <-time.After(s.delay):
+		s.mu.Lock()
+		s.applied = true
+		s.mu.Unlock()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+var _ modules.Module = (*SlowSetModule)(nil)
+
+// warnCapturingLogger captures Warn-level log entries for log-accuracy assertions.
+// It satisfies logging.Logger via embedding NoopLogger.
+type warnCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []warnLogEntry
+}
+
+type warnLogEntry struct {
+	msg string
+	kvs []interface{}
+}
+
+func (l *warnCapturingLogger) Warn(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kvcopy := make([]interface{}, len(kvs))
+	copy(kvcopy, kvs)
+	l.entries = append(l.entries, warnLogEntry{msg: msg, kvs: kvcopy})
+}
+
+func (l *warnCapturingLogger) warnEntries() []warnLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]warnLogEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
+func findKV(kvs []interface{}, key string) (interface{}, bool) {
+	for i := 0; i+1 < len(kvs); i += 2 {
+		if k, ok := kvs[i].(string); ok && k == key {
+			return kvs[i+1], true
+		}
+	}
+	return nil, false
+}
+
+// TestExecuteResource_SlowSet_CompletesWithNoOuterDeadline verifies that a
+// module whose Set() takes longer than the old 30s on-connect-sync ceiling
+// completes successfully when the executor is called with context.Background()
+// (no outer deadline). This is the behavioral regression test for the bug where
+// client_transport.go wrapped syncConfigNow in a 30s context, silently cutting
+// off module.Set calls that should have had the full per-call ModuleCallTimeoutSec.
+func TestExecuteResource_SlowSet_CompletesWithNoOuterDeadline(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	// SlowSetModule takes 200ms — longer than the old 30s simulated here by a 100ms
+	// outer ctx, but well within the 2s per-call module timeout.
+	f.RegisterModule("slow-set", &SlowSetModule{delay: 200 * time.Millisecond})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               logging.ForModule("executor_test"),
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 2, // 2s per-call budget; well above the 200ms Set delay
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "slow-set-resource",
+		Module: "slow-set",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	// context.Background() — no outer deadline — mirrors the fixed client_transport.go
+	// on-connect sync path that now passes context.Background() to syncConfigNow.
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusSuccess, result.Status,
+		"a Set that completes within ModuleCallTimeoutSec must succeed when no outer deadline is imposed")
+	assert.True(t, result.ChangesApplied,
+		"module.Set must be counted as applied on success")
+}
+
+// TestExecuteResource_TimeoutWarn_LogsActualEnforcedBudget verifies that when
+// the ambient context carries a deadline shorter than ModuleCallTimeoutSec, the
+// timeout WARN log records the ACTUAL enforced budget (the outer ctx deadline)
+// rather than the hardcoded e.moduleCallTimeout value. This guards against the
+// mislabeled 120000ms timeout_ms field while a 30s outer context actually fired.
+func TestExecuteResource_TimeoutWarn_LogsActualEnforcedBudget(t *testing.T) {
+	capLog := &warnCapturingLogger{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, capLog)
+	f.RegisterModule("hung-set", &HungSetModule{})
+
+	// Configure a generous per-call module timeout (10s) so only the outer ctx (200ms)
+	// can fire. The log must report ≤1000ms, not 10000ms.
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:               capLog,
+		Factory:              f,
+		ErrorHandling:        errCfg,
+		ModuleCallTimeoutSec: 10, // 10s configured; outer ctx is much shorter
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "hung-set-budget-check",
+		Module: "hung-set",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	// Outer ctx has a 200ms deadline — shorter than the 10s module timeout.
+	// This simulates the old bug where the on-connect sync imposed a 30s ceiling.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	result := executor.ExecuteResource(ctx, resource)
+
+	assert.Equal(t, execution.StatusTimeout, result.Status,
+		"outer ctx deadline must cancel the hung Set and produce StatusTimeout")
+
+	warns := capLog.warnEntries()
+	var setTimeoutEntry *warnLogEntry
+	for i := range warns {
+		if warns[i].msg == "module.Set timeout" {
+			setTimeoutEntry = &warns[i]
+			break
+		}
+	}
+	require.NotNil(t, setTimeoutEntry, "a 'module.Set timeout' WARN entry must be emitted")
+
+	timeoutMSVal, ok := findKV(setTimeoutEntry.kvs, "timeout_ms")
+	require.True(t, ok, "timeout WARN must carry a timeout_ms field")
+	timeoutMS, ok := timeoutMSVal.(int64)
+	require.True(t, ok, "timeout_ms must be int64")
+
+	// The outer ctx budget was 200ms; the configured module timeout is 10000ms.
+	// The logged timeout_ms must reflect the outer ctx (≤1000ms), not the config (10000ms).
+	assert.LessOrEqual(t, timeoutMS, int64(1000),
+		"timeout_ms must reflect the actual enforced budget (~200ms outer ctx), not the configured 10000ms module timeout")
 }

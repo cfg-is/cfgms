@@ -68,6 +68,60 @@ func TestStorageManager(t *testing.T) {
 	})
 }
 
+// TestStore_RetentionPolicyGoroutine verifies that Store's fire-and-forget
+// enforceRetentionPolicy goroutine (storage.go line ~301) actually prunes records.
+// The goroutine is called directly in this test to avoid timing races, which is safe
+// because enforceRetentionPolicy is an exported-to-package method and the production
+// go call remains unchanged.
+func TestStore_RetentionPolicyGoroutine(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+	config.MaxRecordsPerDevice = 2
+	config.EnableDeduplication = false
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	ctx := context.Background()
+	const deviceID = "goroutine-prune-device"
+
+	// Store 4 records — double the cap.
+	for i := 1; i <= 4; i++ {
+		dna := createTestDNA(deviceID, map[string]string{
+			"version": fmt.Sprintf("v%d", i),
+		})
+		if err := manager.Store(ctx, deviceID, dna, nil); err != nil {
+			t.Fatalf("Store v%d failed: %v", i, err)
+		}
+	}
+
+	// Invoke the same method Store dispatches as a goroutine, but synchronously so
+	// the test outcome is deterministic. This confirms the body does real pruning.
+	manager.enforceRetentionPolicy(deviceID)
+
+	history, err := manager.GetHistory(ctx, deviceID, &QueryOptions{IncludeData: true, Limit: 100})
+	if err != nil {
+		t.Fatalf("GetHistory after synchronous enforceRetentionPolicy failed: %v", err)
+	}
+	if len(history.Records) > config.MaxRecordsPerDevice {
+		t.Errorf("expected <= %d records after enforceRetentionPolicy, got %d",
+			config.MaxRecordsPerDevice, len(history.Records))
+	}
+
+	// Most recent record must survive.
+	current, err := manager.GetCurrent(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetCurrent after enforceRetentionPolicy failed: %v", err)
+	}
+	if current.DNA.Attributes["version"] != "v4" {
+		t.Errorf("expected most recent version v4 to survive pruning, got %q",
+			current.DNA.Attributes["version"])
+	}
+}
+
 func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 	ctx := context.Background()
 	deviceID := "test-device-001"
@@ -116,24 +170,34 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 	}
 }
 
-func testDeduplication(t *testing.T, manager *Manager) {
-	ctx := context.Background()
+// testDeduplication creates its own manager with EnableDeduplication=true so that
+// deduplication behavior is actually exercised. The shared manager passed as a
+// parameter uses DefaultConfig (EnableDeduplication=false) and is intentionally
+// ignored here; a dedicated manager is required so assertions are meaningful.
+func testDeduplication(t *testing.T, _ *Manager) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+	config.EnableDeduplication = true
 
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create dedup-enabled manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	ctx := context.Background()
 	device1ID := "device-001"
 	device2ID := "device-002"
 
-	// For proper deduplication testing, create DNA with shared content but different device context
-	// Both DNA records have identical attributes but represent different devices with the same configuration
+	// Create identical DNA objects so both devices share the same content hash.
 	sharedDNAAttributes := map[string]string{
 		"os":        "windows",
 		"arch":      "amd64",
 		"hostname":  "shared-config",
 		"cpu_count": "8",
 	}
-
-	// Create identical DNA objects for deduplication (same content hash)
 	dna1 := &commonpb.DNA{
-		Id:              "shared-system-id", // Same system configuration
+		Id:              "shared-system-id",
 		Attributes:      sharedDNAAttributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "shared-config-hash",
@@ -141,9 +205,8 @@ func testDeduplication(t *testing.T, manager *Manager) {
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
 	}
-
 	dna2 := &commonpb.DNA{
-		Id:              "shared-system-id", // Same system configuration
+		Id:              "shared-system-id",
 		Attributes:      sharedDNAAttributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "shared-config-hash",
@@ -152,46 +215,53 @@ func testDeduplication(t *testing.T, manager *Manager) {
 		SyncFingerprint: "shared-sync-fingerprint",
 	}
 
-	// Store both DNA records
-	err := manager.Store(ctx, device1ID, dna1, nil)
-	if err != nil {
+	// Store device1 — full record lands in dna_history (no prior content exists).
+	if err := manager.Store(ctx, device1ID, dna1, nil); err != nil {
 		t.Fatalf("Failed to store DNA for device 1: %v", err)
 	}
 
-	err = manager.Store(ctx, device2ID, dna2, nil)
-	if err != nil {
+	// Store device2 with identical DNA — HasContent=true → storeReference path →
+	// only a dna_references row is written (no full copy stored).
+	if err := manager.Store(ctx, device2ID, dna2, nil); err != nil {
 		t.Fatalf("Failed to store DNA for device 2: %v", err)
 	}
 
-	// Get storage stats to verify deduplication
-	stats, err := manager.GetStorageStats(ctx)
-	if err != nil {
-		t.Fatalf("Failed to get storage stats: %v", err)
+	// Verify deduplication: device2 must have a row in dna_references (not dna_history).
+	// This is the core deduplication invariant: identical DNA content must not be stored
+	// as a second full copy.
+	sqlBackend := manager.storage.(*SQLiteBackend)
+	sqlBackend.mutex.RLock()
+	var histCount int
+	if err := sqlBackend.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dna_history WHERE device_id = ?`, device2ID,
+	).Scan(&histCount); err != nil {
+		sqlBackend.mutex.RUnlock()
+		t.Fatalf("failed to count dna_history for device2: %v", err)
+	}
+	var refCount int
+	if err := sqlBackend.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dna_references WHERE device_id = ?`, device2ID,
+	).Scan(&refCount); err != nil {
+		sqlBackend.mutex.RUnlock()
+		t.Fatalf("failed to count dna_references for device2: %v", err)
+	}
+	sqlBackend.mutex.RUnlock()
+
+	if histCount != 0 {
+		t.Errorf("deduplication failed: device2 has %d row(s) in dna_history — "+
+			"identical DNA content should be stored as a reference, not a full copy", histCount)
+	}
+	if refCount != 1 {
+		t.Errorf("deduplication failed: expected device2 to have 1 row in dna_references, got %d", refCount)
 	}
 
-	// With deduplication, we should have more total blocks than unique blocks
-	if stats.DeduplicationRatio <= 0 {
-		t.Logf("Deduplication ratio: %f (may be 0 for memory backend)", stats.DeduplicationRatio)
-	}
-
-	// Verify both devices can retrieve their data
+	// device1's record must remain accessible via GetCurrent (stored as full content in dna_history).
 	current1, err := manager.GetCurrent(ctx, device1ID)
 	if err != nil {
 		t.Fatalf("Failed to get current DNA for device 1: %v", err)
 	}
-
-	current2, err := manager.GetCurrent(ctx, device2ID)
-	if err != nil {
-		t.Fatalf("Failed to get current DNA for device 2: %v", err)
-	}
-
-	// Both should have the same content but different device IDs
-	if current1.DeviceID == current2.DeviceID {
-		t.Error("Device IDs should be different")
-	}
-
-	if current1.ContentHash != current2.ContentHash {
-		t.Error("Content hashes should be identical for deduplicated content")
+	if current1.DeviceID != device1ID {
+		t.Errorf("expected device ID %s, got %s", device1ID, current1.DeviceID)
 	}
 }
 

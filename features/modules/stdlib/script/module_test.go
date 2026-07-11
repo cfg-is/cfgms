@@ -7,7 +7,42 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
+	"gopkg.in/yaml.v3"
 )
+
+// testConfigState mirrors the executor's unexported genericConfigState so tests
+// can exercise CompareStates against the real comparator without importing the
+// unexported type.
+type testConfigState struct {
+	data map[string]interface{}
+}
+
+func (t *testConfigState) AsMap() map[string]interface{} { return t.data }
+func (t *testConfigState) ToYAML() ([]byte, error)       { return yaml.Marshal(t.data) }
+func (t *testConfigState) FromYAML(data []byte) error    { return yaml.Unmarshal(data, &t.data) }
+func (t *testConfigState) Validate() error               { return nil }
+func (t *testConfigState) GetManagedFields() []string {
+	excluded := map[string]bool{"path": true, "name": true, "transport": true, "tenant_id": true}
+	fields := make([]string, 0, len(t.data))
+	for k := range t.data {
+		if !excluded[k] {
+			fields = append(fields, k)
+		}
+	}
+	return fields
+}
+
+// getFailingScript returns a script that exits non-zero on the current platform.
+func getFailingScript() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "exit /B 1"
+	default:
+		return "exit 1"
+	}
+}
 
 // getTestShell returns an appropriate shell for the current platform
 func getTestShell() ShellType {
@@ -373,5 +408,90 @@ func TestScriptModule_InvalidConfig(t *testing.T) {
 	}
 }
 
-// Test helper for module discovery integration
-// This will be automatically discovered by the discovery_test.go
+// TestScriptModule_FailedRunNotMarkedConverged verifies that a script exiting
+// non-zero is NOT marked converged: after Set() the module must return a current
+// state that the real comparator sees as drifted from desired so that the
+// executor re-invokes Set() on the next converge cycle (Issue #2479 symptom 1).
+func TestScriptModule_FailedRunNotMarkedConverged(t *testing.T) {
+	module := NewModule()
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
+	resourceID := "test-fail-no-converge"
+
+	// desired is a map-backed ConfigState, the same form the executor delivers.
+	desired := &testConfigState{data: map[string]interface{}{
+		"content":           getFailingScript(),
+		"shell":             string(getTestShell()),
+		"timeout":           "30s",
+		"signing_policy":    string(SigningPolicyNone),
+		"execution_context": string(ExecutionContextSystem),
+	}}
+
+	// Set() runs the script which exits non-zero; the module stores StatusFailed.
+	if err := module.Set(ctx, resourceID, desired); err != nil {
+		t.Fatalf("Set() returned unexpected error: %v", err)
+	}
+
+	state, ok := module.GetExecutionState(resourceID)
+	if !ok {
+		t.Fatal("expected execution state to be stored after Set()")
+	}
+	if state.Status != StatusFailed {
+		t.Fatalf("expected StatusFailed after non-zero exit, got %s", state.Status)
+	}
+
+	current, err := module.Get(ctx, resourceID)
+	if err != nil {
+		t.Fatalf("Get() after failed execution returned error: %v", err)
+	}
+
+	// The real comparator must detect drift so the executor re-invokes Set().
+	comparator := stewardtesting.NewStateComparator()
+	driftDetected, diff := comparator.CompareStates(current, desired)
+	if !driftDetected {
+		t.Errorf("expected drift to be detected after failed script (resource would be wrongly skipped); diff: %s", diff.GetDetailedDiff())
+	}
+}
+
+// TestScriptModule_SuccessRunNoDriftWithNonSecondTimeout verifies that a script
+// exiting 0 is reported as compliant with no verification failure, including when
+// timeout is expressed in non-second units (e.g. "5m") that Go's Duration.String()
+// would otherwise normalise to "5m0s" and cause a false mismatch (Issue #2479 symptom 2).
+func TestScriptModule_SuccessRunNoDriftWithNonSecondTimeout(t *testing.T) {
+	module := NewModule()
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
+	resourceID := "test-success-no-drift"
+
+	// Use a non-second timeout to exercise the normalisation fix.
+	desired := &testConfigState{data: map[string]interface{}{
+		"content":           getTestScript(),
+		"shell":             string(getTestShell()),
+		"timeout":           "5m",
+		"signing_policy":    string(SigningPolicyNone),
+		"execution_context": string(ExecutionContextSystem),
+	}}
+
+	if err := module.Set(ctx, resourceID, desired); err != nil {
+		t.Fatalf("Set() returned unexpected error: %v", err)
+	}
+
+	state, ok := module.GetExecutionState(resourceID)
+	if !ok {
+		t.Fatal("expected execution state to be stored after Set()")
+	}
+	if state.Status != StatusCompleted {
+		t.Fatalf("expected StatusCompleted after exit-0 script, got %s", state.Status)
+	}
+
+	current, err := module.Get(ctx, resourceID)
+	if err != nil {
+		t.Fatalf("Get() after successful execution returned error: %v", err)
+	}
+
+	// The real comparator must find NO drift; any drift here causes the executor
+	// to report "verification failed: changes not fully applied".
+	comparator := stewardtesting.NewStateComparator()
+	driftDetected, diff := comparator.CompareStates(current, desired)
+	if driftDetected {
+		t.Errorf("unexpected drift detected after successful execution (would cause false verification failure); diff: %s", diff.GetDetailedDiff())
+	}
+}

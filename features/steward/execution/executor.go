@@ -317,19 +317,26 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// module.Get with per-call deadline so a hung module cannot wedge the
 	// convergence loop (ADR-012 §7). The deadline is derived from the ambient ctx
 	// so outer cancellation still propagates.
+	getCallStart := time.Now()
 	getCtx, getCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
 	defer getCancel()
+	// effectiveBudget is the actual enforced duration — min(ctx.Deadline(), e.moduleCallTimeout).
+	// Logging this instead of the hardcoded e.moduleCallTimeout ensures the WARN is
+	// truthful when a caller supplies a tighter ambient deadline.
+	getEffectiveDl, _ := getCtx.Deadline()
+	getEffectiveBudget := getEffectiveDl.Sub(getCallStart)
 	currentState, err := module.Get(getCtx, resourceID)
 	if err != nil {
 		result.ExecutionTime = time.Since(startTime)
 		if errors.Is(err, context.DeadlineExceeded) {
 			result.Status = StatusTimeout
-			result.Error = fmt.Sprintf("module.Get did not finish within %s", e.moduleCallTimeout)
-			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			result.Error = fmt.Sprintf("module.Get did not finish within %s", getEffectiveBudget)
+			e.enqueueTimeoutOutcome(correlationID, getEffectiveBudget, result.ExecutionTime)
 			e.logger.Warn("module.Get timeout",
 				"resource", resource.Name,
 				"module", resource.Module,
-				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+				"timeout_ms", getEffectiveBudget.Milliseconds(),
+				"elapsed_ms", result.ExecutionTime.Milliseconds())
 			return result
 		}
 		result.Error = fmt.Sprintf("failed to get current state: %v", err)
@@ -386,18 +393,22 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	}
 
 	// module.Set with per-call deadline (ADR-012 §7).
+	setCallStart := time.Now()
 	setCtx, setCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
 	defer setCancel()
+	setEffectiveDl, _ := setCtx.Deadline()
+	setEffectiveBudget := setEffectiveDl.Sub(setCallStart)
 	if err := module.Set(setCtx, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
 		if errors.Is(err, context.DeadlineExceeded) {
 			result.Status = StatusTimeout
-			result.Error = fmt.Sprintf("module.Set did not finish within %s", e.moduleCallTimeout)
-			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			result.Error = fmt.Sprintf("module.Set did not finish within %s", setEffectiveBudget)
+			e.enqueueTimeoutOutcome(correlationID, setEffectiveBudget, result.ExecutionTime)
 			e.logger.Warn("module.Set timeout",
 				"resource", resource.Name,
 				"module", resource.Module,
-				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+				"timeout_ms", setEffectiveBudget.Milliseconds(),
+				"elapsed_ms", result.ExecutionTime.Milliseconds())
 			return result
 		}
 		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
@@ -414,18 +425,22 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	// verifyChanges with per-call deadline (ADR-012 §7). The deadline applies to
 	// the module.Get call inside verifyChanges.
+	verifyCallStart := time.Now()
 	verifyCtx, verifyCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
 	defer verifyCancel()
+	verifyEffectiveDl, _ := verifyCtx.Deadline()
+	verifyEffectiveBudget := verifyEffectiveDl.Sub(verifyCallStart)
 	if err := e.verifyChanges(verifyCtx, module, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
 		if errors.Is(err, context.DeadlineExceeded) {
 			result.Status = StatusTimeout
-			result.Error = fmt.Sprintf("verifyChanges did not finish within %s", e.moduleCallTimeout)
-			e.enqueueTimeoutOutcome(correlationID, e.moduleCallTimeout, result.ExecutionTime)
+			result.Error = fmt.Sprintf("verifyChanges did not finish within %s", verifyEffectiveBudget)
+			e.enqueueTimeoutOutcome(correlationID, verifyEffectiveBudget, result.ExecutionTime)
 			e.logger.Warn("verifyChanges timeout",
 				"resource", resource.Name,
 				"module", resource.Module,
-				"timeout_ms", e.moduleCallTimeout.Milliseconds())
+				"timeout_ms", verifyEffectiveBudget.Milliseconds(),
+				"elapsed_ms", result.ExecutionTime.Milliseconds())
 			return result
 		}
 		result.Error = fmt.Sprintf("verification failed: %v", err)

@@ -280,6 +280,7 @@ Entry paths:
 		buildInstallCommand(),
 		buildUninstallCommand(),
 		buildStatusCommand(),
+		buildDexSpikeCommand(),
 	)
 
 	return root
