@@ -117,11 +117,19 @@ jobs:
       # Windows runs -short WITHOUT -race to keep this compile-validation job fast;
       # race coverage is fully exercised on the Linux unit-tests + integration-tests
       # jobs. Linux/macOS run with -race here.
+      #
+      # Timeout set to 8m (from 5m) — Issue #2591: features/controller/api grew to
+      # 89 files / ~25k LOC with CPU-intensive tests (argon2id credential hashing,
+      # TLS certificate rotation). Measured wall-clock on a 16-core Linux dev
+      # container: ~42s; 2–3 vCPU macOS/Windows hosted runners at ~7× overhead
+      # were hitting the 5m wall consistently. The argon2id TestMain override
+      # (Issue #2591) removes the largest hot path; 8m provides a safe margin for
+      # the remaining certificate-rotation tests and Windows file-I/O overhead.
       run: |
         if [ "${{ matrix.platform }}" = "Windows" ]; then
-          go test -short -timeout=5m ./pkg/... ./features/...
+          go test -short -timeout=8m ./pkg/... ./features/...
         else
-          go test -race -short -timeout=5m ./pkg/... ./features/...
+          go test -race -short -timeout=8m ./pkg/... ./features/...
         fi
 
     - name: Upload Build Artifacts
