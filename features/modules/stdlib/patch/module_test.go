@@ -710,18 +710,17 @@ func TestPatch_ConformanceNoEphemeralFields(t *testing.T) {
 	conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
 }
 
-// TestPatch_ErrPatchNotAvailable_Semantics confirms that errPatchNotAvailable is a
-// patch-local sentinel and does NOT wrap modules.ErrUnsupportedPlatform or
-// modules.ErrNotImplemented. Those are module-layer contracts; this error is returned
-// by the PatchManager backend layer and must remain independent to avoid false matches
-// in callers that check for the module-level sentinels.
+// TestPatch_ErrPatchNotAvailable_Semantics confirms that errPatchNotAvailable wraps
+// modules.ErrUnsupportedPlatform so generic steward/convergence code can recognise
+// patch as "not applicable on this platform" via errors.Is, matching the convention
+// used by service/firewall/hyperv. It must NOT wrap modules.ErrNotImplemented.
 func TestPatch_ErrPatchNotAvailable_Semantics(t *testing.T) {
 	// errPatchNotAvailable is the error returned by the unsupported-platform backend.
-	// Verify it is a standalone sentinel, not wrapping either module-layer error.
-	assert.False(t, errors.Is(errPatchNotAvailable, modules.ErrUnsupportedPlatform),
-		"errPatchNotAvailable must not wrap modules.ErrUnsupportedPlatform")
+	// Verify it is-a ErrUnsupportedPlatform (generic platform check) but not ErrNotImplemented.
+	assert.True(t, errors.Is(errPatchNotAvailable, modules.ErrUnsupportedPlatform),
+		"errPatchNotAvailable must wrap modules.ErrUnsupportedPlatform")
 	assert.False(t, errors.Is(errPatchNotAvailable, modules.ErrNotImplemented),
 		"errPatchNotAvailable must not wrap modules.ErrNotImplemented")
-	assert.EqualError(t, errPatchNotAvailable, "patch management not available on this platform",
+	assert.EqualError(t, errPatchNotAvailable, "patch management not available on this platform: unsupported platform",
 		"errPatchNotAvailable message must remain stable")
 }
