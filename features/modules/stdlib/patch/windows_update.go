@@ -19,7 +19,8 @@ import (
 
 // WindowsUpdateManager implements PatchManager for Windows systems using COM API
 type WindowsUpdateManager struct {
-	session *ole.IDispatch
+	session  *ole.IDispatch
+	comOwner bool // true only when this instance called CoInitializeEx and got S_OK
 }
 
 // NewWindowsUpdateManager creates a new Windows Update manager using COM API
@@ -28,27 +29,41 @@ func NewWindowsUpdateManager() (*WindowsUpdateManager, error) {
 		return nil, fmt.Errorf("Windows Update manager only available on Windows")
 	}
 
-	// Initialize COM
-	err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize COM: %w", err)
+	// CoInitializeEx returns S_OK (0) on success and S_FALSE (1) when COM is already
+	// initialized on the calling thread. go-ole v1.3.0 converts any non-zero HRESULT to
+	// an error, so S_FALSE surfaces as *ole.OleError with Code()==1 and message
+	// "Incorrect function." — this is a library quirk, not a real failure. Track COM
+	// ownership to avoid calling CoUninitialize() on a thread we did not initialize.
+	comOwner := false
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		if oleErr, ok := err.(*ole.OleError); !ok || oleErr.Code() != 1 {
+			return nil, fmt.Errorf("failed to initialize COM: %w", err)
+		}
+		// Code()==1 is S_FALSE: COM already initialized on this thread, not an error.
+	} else {
+		comOwner = true
 	}
 
 	// Create IUpdateSession
 	unknown, err := oleutil.CreateObject("Microsoft.Update.Session")
 	if err != nil {
-		ole.CoUninitialize()
+		if comOwner {
+			ole.CoUninitialize()
+		}
 		return nil, fmt.Errorf("failed to create update session: %w", err)
 	}
 
 	session, err := unknown.QueryInterface(ole.IID_IDispatch)
 	if err != nil {
-		ole.CoUninitialize()
+		if comOwner {
+			ole.CoUninitialize()
+		}
 		return nil, fmt.Errorf("failed to query dispatch interface: %w", err)
 	}
 
 	return &WindowsUpdateManager{
-		session: session,
+		session:  session,
+		comOwner: comOwner,
 	}, nil
 }
 
@@ -57,7 +72,9 @@ func (w *WindowsUpdateManager) Close() error {
 	if w.session != nil {
 		w.session.Release()
 	}
-	ole.CoUninitialize()
+	if w.comOwner {
+		ole.CoUninitialize()
+	}
 	return nil
 }
 

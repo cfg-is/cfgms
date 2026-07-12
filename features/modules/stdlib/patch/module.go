@@ -17,12 +17,15 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// New creates a new instance of the Patch module. On platforms without a real
-// patch implementation the module uses a stub manager that returns errors for
-// all operations, ensuring no fake data leaks into production binaries.
+// New creates a new instance of the Patch module using the platform-appropriate
+// PatchManager: WindowsUpdateManager on Windows, unsupported-platform fallback
+// on Linux and macOS (real non-Windows backends are out of scope per ADR-016 PM Notes).
+// This is a functional change from the previous always-stub behaviour: on a Windows
+// steward, New() now wires the real COM-backed manager so patch operations actually
+// call into the Windows Update API.
 func New() modules.Module {
 	return &PatchModule{
-		patchManager:  newStubPatchManager(),
+		patchManager:  newPlatformPatchManager(),
 		policyEngine:  NewPolicyEngine(DefaultPolicy()),
 		windowManager: nil,
 		deviceID:      "default",

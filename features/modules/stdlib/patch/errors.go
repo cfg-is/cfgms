@@ -2,9 +2,20 @@
 // Copyright 2026 Jordan Ritz
 package patch
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/cfgis/cfgms/features/modules"
+)
 
 var (
+	// errPatchNotAvailable is returned on platforms where no patch manager is implemented.
+	// It wraps modules.ErrUnsupportedPlatform so generic steward/convergence code using
+	// errors.Is(err, modules.ErrUnsupportedPlatform) correctly recognises patch as
+	// "not applicable on this platform", matching service/firewall/hyperv conventions.
+	errPatchNotAvailable = fmt.Errorf("patch management not available on this platform: %w", modules.ErrUnsupportedPlatform)
+
 	// ErrInvalidPatchType is returned when the patch type is not valid
 	ErrInvalidPatchType = errors.New("invalid patch type (must be 'security', 'all', 'kernel', 'critical', or 'feature-update')")
 
@@ -43,9 +54,6 @@ var (
 
 	// ErrPatchInstallationFailed is returned when patch installation fails
 	ErrPatchInstallationFailed = errors.New("patch installation failed")
-
-	// ErrUnsupportedPlatform is returned when the current platform is not supported
-	ErrUnsupportedPlatform = errors.New("patch management not supported on this platform")
 
 	// ErrPermissionDenied is returned when the operation requires elevated privileges
 	ErrPermissionDenied = errors.New("permission denied (requires root/administrator privileges)")

@@ -4,6 +4,7 @@ package patch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/modules/conformance"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -684,4 +686,41 @@ func TestPatchModule_DefaultLoggingSupport_embed(t *testing.T) {
 	logger, injected = injectable.GetLogger()
 	assert.Equal(t, mock, logger)
 	assert.True(t, injected)
+}
+
+// TestPatch_ConformanceDeterministicGet verifies ADR-016 clause 4: Get must be
+// deterministic — two consecutive calls on unchanged state produce identical output.
+// Uses NewPatchModule with InMemoryPatchManager so the test is platform-agnostic
+// and exercises the module's Get logic (not the platform backend).
+func TestPatch_ConformanceDeterministicGet(t *testing.T) {
+	m, err := NewPatchModule(NewInMemoryPatchManager())
+	require.NoError(t, err)
+	conformance.AssertDeterministicGet(t, m, "system")
+}
+
+// TestPatch_ConformanceNoEphemeralFields verifies ADR-016 clause 4: Get must not
+// expose ephemeral runtime values (PIDs, timestamps, CPU/memory statistics) in the
+// ConfigState map.
+func TestPatch_ConformanceNoEphemeralFields(t *testing.T) {
+	m, err := NewPatchModule(NewInMemoryPatchManager())
+	require.NoError(t, err)
+
+	state, err := m.Get(context.Background(), "system")
+	require.NoError(t, err)
+	conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
+}
+
+// TestPatch_ErrPatchNotAvailable_Semantics confirms that errPatchNotAvailable wraps
+// modules.ErrUnsupportedPlatform so generic steward/convergence code can recognise
+// patch as "not applicable on this platform" via errors.Is, matching the convention
+// used by service/firewall/hyperv. It must NOT wrap modules.ErrNotImplemented.
+func TestPatch_ErrPatchNotAvailable_Semantics(t *testing.T) {
+	// errPatchNotAvailable is the error returned by the unsupported-platform backend.
+	// Verify it is-a ErrUnsupportedPlatform (generic platform check) but not ErrNotImplemented.
+	assert.True(t, errors.Is(errPatchNotAvailable, modules.ErrUnsupportedPlatform),
+		"errPatchNotAvailable must wrap modules.ErrUnsupportedPlatform")
+	assert.False(t, errors.Is(errPatchNotAvailable, modules.ErrNotImplemented),
+		"errPatchNotAvailable must not wrap modules.ErrNotImplemented")
+	assert.EqualError(t, errPatchNotAvailable, "patch management not available on this platform: unsupported platform",
+		"errPatchNotAvailable message must remain stable")
 }
