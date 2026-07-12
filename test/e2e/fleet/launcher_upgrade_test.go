@@ -340,7 +340,20 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	// ── Step 4: Verify the launcher rolled back to the initial version ────────────
 	// After the broken binary exits within the startup window, the launcher
 	// auto-rolls back. state.json current must return to launcherInitialVersion.
-	require.True(t, waitForLauncherCurrentVersion(t, launcherTestContainer, launcherInitialVersion, 30*time.Second),
+	//
+	// The wait is measured from 'committed' (Step 3), which fires when the swap
+	// succeeds — BEFORE the launcher-managed rollback chain even begins: steward
+	// graceful self-exit → launcher re-exec of the broken binary → <1s crash →
+	// launcher re-exec of the previous version → state.json write. Those extra
+	// process transitions legitimately push past a 30s bound on a contended
+	// runner (the single-process steward-managed rollback in
+	// TestFleetStewardUpgradeBrokenBinaryRollback completes in ~2.7s by contrast).
+	// The rollback LOGIC is fast and correct — it is proven deterministically by
+	// cmd/cfgms-steward-launcher/lifecycle_test.go (TestSupervise_BrokenChild_*,
+	// TestSupervise_Probation_FastExitRollsBack); this window only sizes the E2E
+	// observation to the multi-process chain latency. Use launcherUpgradeWindow
+	// (90s), the same bound already trusted for the 'committed' wait. (Issue #2602)
+	require.True(t, waitForLauncherCurrentVersion(t, launcherTestContainer, launcherInitialVersion, launcherUpgradeWindow),
 		"launcher state.json must roll back to %s after broken binary exits within startup window",
 		launcherInitialVersion)
 	t.Logf("Launcher rolled back to %s", launcherInitialVersion)
