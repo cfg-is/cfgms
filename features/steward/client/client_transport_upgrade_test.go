@@ -897,6 +897,66 @@ func TestHandlePushStewardBinary_NilShutdownFuncIsSafe(t *testing.T) {
 	assert.False(t, scheduled, "with no shutdownFunc wired, nothing should be scheduled")
 }
 
+// TestHandlePushStewardBinary_DeferredSelfExitFiresWhenTriggerWired verifies the
+// #2602 race fix: a launcher-managed swap staged while shutdownFunc is still nil
+// — i.e. the pushed upgrade arrived in the window between command subscription
+// (Connect → SubscribeCommands) and the SetShutdownFunc wiring in main.go —
+// records a PENDING self-exit, and SetShutdownFunc fires the graceful shutdown as
+// soon as the trigger is wired. Without this, the staged (possibly broken) binary
+// would silently defer to an unbounded "next restart" and the launcher's
+// startup-window auto-rollback would never fire.
+func TestHandlePushStewardBinary_DeferredSelfExitFiresWhenTriggerWired(t *testing.T) {
+	content := []byte("binary staged before shutdown trigger wired")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex)
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	var (
+		shutdownCalled  bool
+		capturedTrigger func()
+	)
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = nil // trigger not wired yet — the race window
+	c.upgradeShutdownGraceDelay = 250 * time.Millisecond
+	c.shutdownScheduleFunc = func(_ time.Duration, trigger func()) { capturedTrigger = trigger }
+	c.mu.Unlock()
+
+	// Stage the upgrade while shutdownFunc is nil.
+	cmd := upgradeTestCmd("cmd-deferred", "v99.5.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd))
+
+	// Nothing is scheduled yet, but the intent to self-exit is recorded.
+	assert.Nil(t, capturedTrigger, "self-exit must not be scheduled while the trigger is unwired")
+	c.mu.RLock()
+	pending := c.pendingUpgradeSelfExit
+	c.mu.RUnlock()
+	assert.True(t, pending, "a launcher-managed swap staged with no shutdownFunc must record a pending self-exit")
+
+	// Wire the trigger — this must fire the deferred self-exit.
+	c.SetShutdownFunc(context.Background(), func() { shutdownCalled = true })
+
+	require.NotNil(t, capturedTrigger, "SetShutdownFunc must schedule the deferred self-exit")
+	c.mu.RLock()
+	pendingAfter := c.pendingUpgradeSelfExit
+	c.mu.RUnlock()
+	assert.False(t, pendingAfter, "pending flag must be cleared once the deferred self-exit is fired")
+
+	// Firing the scheduled trigger (as the real grace-delay timer would) invokes
+	// the now-wired shutdown func, ending the process so the launcher re-execs.
+	capturedTrigger()
+	assert.True(t, shutdownCalled, "deferred trigger must invoke the wired shutdown func")
+}
+
 // TestHandlePushStewardBinary_LauncherManagedGatesSelfExit verifies the #2003
 // gate: after a SUCCESSFUL launcher swap, the steward schedules its graceful
 // self-exit ONLY when launcher-managed. A bare/standalone steward stages the

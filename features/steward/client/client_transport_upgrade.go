@@ -334,9 +334,17 @@ func (c *TransportClient) scheduleGracefulShutdownAfterSwap() {
 	c.mu.RUnlock()
 
 	if shutdown == nil {
-		// No trigger wired (e.g. shutdown func not injected). The staged binary
-		// will load on the next restart; log so this is observable.
-		c.logger.Warn("Upgrade staged but no shutdown trigger configured; new binary will load on next restart")
+		// The shutdown trigger is not wired yet — the swap arrived in the window
+		// between command subscription (Connect → SubscribeCommands) and the
+		// SetShutdownFunc wiring in main.go. Record the intent so SetShutdownFunc
+		// fires the self-exit as soon as the trigger is available, instead of
+		// silently deferring the (possibly broken) staged binary to an unbounded
+		// "next restart" where the launcher's startup-window auto-rollback never
+		// fires. (Issue #2602)
+		c.mu.Lock()
+		c.pendingUpgradeSelfExit = true
+		c.mu.Unlock()
+		c.logger.Warn("Upgrade staged before shutdown trigger was wired; deferring launcher self-exit until it is available")
 		return
 	}
 	if delay <= 0 {

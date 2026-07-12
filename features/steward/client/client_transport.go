@@ -234,6 +234,16 @@ type TransportClient struct {
 	// Protected by mu. (Issue #2003)
 	shutdownCtx context.Context
 
+	// pendingUpgradeSelfExit records that a launcher-managed push_steward_binary
+	// swap was staged while shutdownFunc was still nil — the swap arrived in the
+	// window between command subscription (Connect → SubscribeCommands) and the
+	// SetShutdownFunc wiring in main.go. Without recovery the staged (possibly
+	// broken) binary would silently defer to an unbounded "next restart" with the
+	// launcher's startup-window auto-rollback never firing. When set, SetShutdownFunc
+	// fires the deferred graceful self-exit as soon as the trigger is wired.
+	// Protected by mu. (Issue #2602)
+	pendingUpgradeSelfExit bool
+
 	// launcherManaged reports whether this steward is supervised by a launcher
 	// that will re-exec the staged binary after a graceful exit. It is defaulted
 	// in NewTransportClient from os.Getenv(version.EnvStewardLauncherManaged)=="1"
@@ -1656,9 +1666,21 @@ func (c *TransportClient) notifyDNARefreshTick(ctx context.Context, tick chan st
 // suppress the self-exit. (Issue #2001, #2003)
 func (c *TransportClient) SetShutdownFunc(runCtx context.Context, fn func()) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.shutdownCtx = runCtx
 	c.shutdownFunc = fn
+	// A launcher-managed swap can be staged in the window between command
+	// subscription (Connect) and this wiring, where scheduleGracefulShutdownAfterSwap
+	// found shutdownFunc==nil and deferred the self-exit. Now that the trigger is
+	// wired, fire it so the launcher re-execs the staged binary (its startup-window
+	// auto-rollback still guards a broken binary). (Issue #2602)
+	pending := c.pendingUpgradeSelfExit && fn != nil
+	c.pendingUpgradeSelfExit = false
+	c.mu.Unlock()
+
+	if pending {
+		c.logger.Info("Firing deferred launcher self-exit for a swap staged before the shutdown trigger was wired")
+		c.scheduleGracefulShutdownAfterSwap()
+	}
 }
 
 // Disconnect closes all gRPC connections to the controller.
