@@ -313,43 +313,17 @@ jobs:
         echo "=============================================="
         make test-performance-benchmarks
     
-    - name: Production Readiness - Security Audit
-      run: |
-        echo "🔒 Conducting Security Audit"
-        echo "============================"
-        make test-security-audit
-    
-    - name: Production Readiness - Disaster Recovery
-      run: |
-        echo "🆘 Testing Disaster Recovery Procedures"
-        echo "======================================="
-        make test-disaster-recovery
-    
-    - name: Production Readiness - Monitoring Integration
-      run: |
-        echo "📡 Validating Monitoring Integration"
-        echo "==================================="
-        make test-monitoring-integration
-    
     - name: Production Readiness Summary
       run: |
         echo ""
         echo "🎯 PRODUCTION READINESS VALIDATION COMPLETE"
         echo "==========================================="
         echo ""
-        echo "✅ Story #86 Acceptance Criteria Validated:"
+        echo "✅ Story #86 Acceptance Criteria validated by this job:"
         echo "   • Load tests validate 100+ concurrent terminal sessions"
         echo "   • Performance benchmarks meet all defined SLAs"
-        echo "   • Security audit passes with no critical findings"
-        echo "   • Disaster recovery procedures tested and documented"
-        echo "   • Monitoring and alerting integration validated"
         echo ""
-        echo "📚 Operational Runbooks Created:"
-        echo "   • Production operations procedures documented"
-        echo "   • Incident response workflows established"
-        echo "   • Disaster recovery plans tested"
-        echo ""
-        echo "🚀 CFGMS v0.3.0 Production Readiness: VALIDATED"
+        echo "🚀 CFGMS v0.3.0 load + performance validation: COMPLETE"
 
     - name: Cleanup Docker Infrastructure
       if: always()

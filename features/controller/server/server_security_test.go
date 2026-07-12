@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -620,11 +621,12 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	const numConcurrent = 10
 
-	// Race detector adds 5-10x overhead, and full suite load adds further contention
-	// Each concurrent server creation involves: Git init, RBAC setup, storage init
+	// Race detector adds 5-10x overhead, and full suite load adds further contention.
+	// Windows NTFS + concurrent Git init is significantly slower than Linux tmpfs.
+	// Each concurrent server creation involves: Git init, RBAC setup, storage init.
 	timeout := 5 * time.Second
-	if raceDetectorEnabled() {
-		timeout = 45 * time.Second // Race + full suite resource contention
+	if raceDetectorEnabled() || runtime.GOOS == "windows" {
+		timeout = 45 * time.Second // Race detector overhead or Windows FS contention
 	}
 
 	// Test concurrent server creation (should be thread-safe)

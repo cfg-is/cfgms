@@ -107,9 +107,6 @@ make test-data-consistency         # < 15 min - Data consistency
 # Production readiness (chunked)
 make test-load-testing             # < 25 min - 100+ concurrent sessions
 make test-performance-benchmarks   # < 15 min - SLA validation
-make test-security-audit          # < 10 min - Security scanning
-make test-disaster-recovery        # < 15 min - DR procedures
-make test-monitoring-integration   # < 10 min - Monitoring validation
 make test-synthetic-monitoring     # < 20 min - Ongoing monitoring
 ```
 

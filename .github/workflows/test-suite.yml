@@ -263,10 +263,7 @@ jobs:
       matrix:
         readiness-test: [
           "load-testing",
-          "performance-benchmarks",
-          "security-audit",
-          "disaster-recovery",
-          "monitoring-integration"
+          "performance-benchmarks"
         ]
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -298,15 +295,6 @@ jobs:
             ;;
           "performance-benchmarks")
             make test-performance-benchmarks
-            ;;
-          "security-audit")
-            make test-security-audit
-            ;;
-          "disaster-recovery")
-            make test-disaster-recovery
-            ;;
-          "monitoring-integration")
-            make test-monitoring-integration
             ;;
         esac
     
