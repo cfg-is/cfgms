@@ -156,7 +156,16 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	// disconnected before proceeding. Without this, the connection registry still
 	// shows "connected" from the pre-stop gRPC session, causing a false positive
 	// in the "must NOT be connected" check below.
-	disconnectDeadline := time.Now().Add(45 * time.Second)
+	//
+	// The controller only considers a silent steward disconnected once the QUIC
+	// MaxIdleTimeout (90s, pkg/transport/quic/listener.go) elapses with no
+	// keepalive (KeepAlivePeriod 20s). On a contended CI runner the pre-revocation
+	// session can therefore linger well past a short window: a 45s bound sat below
+	// the 90s idle floor and let the stale "connected" state survive into the
+	// assertion below (Issue #2592). Wait 120s (90s idle floor + margin); the loop
+	// still returns as soon as disconnection is observed, so the happy path is
+	// unaffected.
+	disconnectDeadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(disconnectDeadline) {
 		state, _ := s.getStewardConnectionState(t, stewardID)
 		if state != "connected" {
@@ -172,9 +181,17 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	// AC: steward must log the rejection message. The docker-compose retry loop
 	// exits on ErrRefreshRejected so the steward process stops and the container
 	// restarts after 5s. Wait for the log entry across restarts.
-	if !s.waitForStewardLogEntry(t, container, "Registration refresh rejected", 60*time.Second) {
+	//
+	// On restart the steward first attempts a stored-identity reconnect, which must
+	// fail against the QUIC transport before it falls through to the refresh
+	// challenge that yields the 403. That reconnect failure is bounded by the same
+	// idle/handshake timeouts (90s idle / 30s handshake), so on a contended runner
+	// the rejection can be logged well after a 60s bound (observed 66s). Wait 120s
+	// with the same margin as the disconnection wait above (Issue #2592);
+	// waitForStewardLogEntry polls and returns as soon as the line appears.
+	if !s.waitForStewardLogEntry(t, container, "Registration refresh rejected", 120*time.Second) {
 		log, _ := s.readStewardLog(t, container)
-		t.Fatalf("Revoked: steward did not log 'Registration refresh rejected' within 60s\nlog tail:\n%s",
+		t.Fatalf("Revoked: steward did not log 'Registration refresh rejected' within 120s\nlog tail:\n%s",
 			lastLines(log, 40))
 	}
 	t.Log("Revoked: steward logged refresh rejection as expected")
