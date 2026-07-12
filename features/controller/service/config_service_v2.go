@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,26 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// ValidationFailedError is returned by SetConfiguration when the supplied
+// configuration fails pre-storage validation. The Errors slice contains only
+// config-derived validation failures (e.g. INVALID_RESOURCE_NAME) — infrastructure
+// errors such as TENANT_LOOKUP_ERROR are stripped before the error is constructed
+// and logged separately, so this type is safe to forward to the API caller.
+type ValidationFailedError struct {
+	Errors []config.ValidationError
+}
+
+func (e *ValidationFailedError) Error() string {
+	if len(e.Errors) == 0 {
+		return "configuration validation failed"
+	}
+	msgs := make([]string, len(e.Errors))
+	for i, ve := range e.Errors {
+		msgs[i] = fmt.Sprintf("%s: %s", ve.Field, ve.Message)
+	}
+	return "configuration validation failed: " + strings.Join(msgs, "; ")
+}
 
 // clusterRegistryAdapter adapts *ControllerService to the clusterMembership interface
 // expected by pkg/config.InheritanceResolver. It builds a fresh Registry snapshot on
@@ -314,11 +335,24 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	// Validate configuration before storing
 	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, config)
 	if !validationResult.Valid {
-		var errorMessages []string
-		for _, err := range validationResult.Errors {
-			errorMessages = append(errorMessages, fmt.Sprintf("%s: %s", err.Field, err.Message))
+		// Separate config-derived errors (safe to return) from infrastructure errors.
+		// TENANT_LOOKUP_ERROR wraps a raw storage backend message that must not be
+		// forwarded to the caller; it is logged here instead.
+		vfe := &ValidationFailedError{}
+		for _, e := range validationResult.Errors {
+			if e.Code == "TENANT_LOOKUP_ERROR" {
+				s.logger.Error("Infrastructure error during configuration validation",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"code", e.Code)
+				continue
+			}
+			vfe.Errors = append(vfe.Errors, e)
 		}
-		return fmt.Errorf("configuration validation failed: %v", errorMessages)
+		if len(vfe.Errors) > 0 {
+			return vfe
+		}
+		return fmt.Errorf("configuration validation failed: infrastructure error")
 	}
 
 	// Log validation warnings
