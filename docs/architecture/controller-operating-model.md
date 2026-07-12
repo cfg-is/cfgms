@@ -99,6 +99,7 @@ For production fleets, a steward runs alongside the controller on each node. The
 | CA and certificates | Controller | Generated during `--init`, managed in-memory |
 | RBAC and tenant data | Controller | Stored in durable storage backend |
 | Fleet registry | Controller | Steward registrations and heartbeats persisted in `StewardStore` — survives controller restarts (Issue #663) |
+| Steward tags | Controller | Operator-assigned tags persisted in `tagstore.Store` (SQLite-backed, `features/controller/tagstore`) — survives controller restarts and DNA refreshes (Issue #2542) |
 | Storage backend | Controller | Flatfile + SQLite (default) or PostgreSQL (production scale) operations |
 | Fleet orchestration | Controller | Config distribution, steward registration, workflows |
 
@@ -338,6 +339,26 @@ The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/st
 **Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
 
 **After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
+
+### Controller-Side Tag Store (Issue #2542)
+
+The tag store (`features/controller/tagstore`) provides a durable store of operator-assigned tags keyed by steward ID.
+
+**Why a separate store — not DNA attributes:**
+The controller replaces a steward's DNA wholesale on every `DNARefreshLoop` cycle (`SyncDNA` in `controller_service.go`). Any tag written into `DNA.Attributes` would be clobbered on the next refresh. The tag store is the clobber-proof source of truth for controller-owned metadata.
+
+**Invariant:** Admin sets tags here; DNA refresh never touches this store. Tags survive controller restarts and DNA refreshes.
+
+**Tag format:** `^[a-z0-9][a-z0-9-]{0,63}$` — lowercase alphanumeric start, hyphen-and-alphanumeric body, 1–64 characters. Enforced at write time. Keeps tags selector-safe without escaping.
+
+**Implementation:** SQLite-backed (`modernc.org/sqlite`, pure-Go, CGO-free). Wired into `ControllerService` via `SetTagStore()`; accessed by later stories via `controllerService.TagStore()`.
+
+**API:**
+- `Set(ctx, stewardID, []string) error` — replace the full tag list (validates format, rejects duplicates)
+- `Get(ctx, stewardID) ([]string, error)` — returns empty slice when no tags exist (not an error)
+- `Delete(ctx, stewardID) error` — remove the entry (idempotent)
+- `GetAll(ctx) (map[string][]string, error)` — all entries
+- `TagsFor(stewardID) []string` — convenience accessor with no error return; logs failures
 
 ### Steward Tracking
 

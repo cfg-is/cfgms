@@ -38,6 +38,7 @@ import (
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/controller/tagstore"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	hypervcompletion "github.com/cfgis/cfgms/features/modules/hyperv/completion"
@@ -123,6 +124,7 @@ type Server struct {
 	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
 	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
+	tagStore                *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
@@ -361,6 +363,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("invalid deployment_rings config: %w", err)
 	}
 	controllerService.SetRingConfig(cfg.EffectiveRings())
+
+	// Issue #2542: Wire durable SQLite-backed tag store. Nil when SQLite is not
+	// configured (tags API degrades gracefully; SetTagStore is a no-op on nil).
+	tagStoreInstance := initializeTagStore(context.Background(), cfg, logger)
+	if tagStoreInstance != nil {
+		controllerService.SetTagStore(tagStoreInstance)
+	}
 
 	// Create the configuration service (V2: durable storage via StorageManager)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -1148,6 +1157,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		alertManager:            healthAlertManager,
 		storageManager:          storageManager,
 		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
+		tagStore:                tagStoreInstance, // Issue #2542: closed in Stop() to release SQLite handle on Windows
 		executionQueue:          executionQueue,   // Issue #1672
 		jobDispatcher:           jobDispatcher,    // Issue #1672
 		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
@@ -1879,6 +1889,14 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Close tag store — releases the SQLite connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2542).
+	if s.tagStore != nil {
+		if err := s.tagStore.Close(); err != nil {
+			s.logger.Warn("Failed to close tag store", "error", err)
+		}
+	}
+
 	// Drain in-flight webhook-triggered syncs before closing storage (Issue #681).
 	// WaitForPendingSyncs must run before storageManager.Close() because webhook
 	// sync goroutines write to the config store.
@@ -2346,6 +2364,40 @@ func initializeUpgradeStore(
 	}
 
 	logger.Info("Upgrade store initialized with SQLite backend (Issue #2464)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
+}
+
+// initializeTagStore opens a SQLite-backed tag store at cfg.Storage.SQLitePath,
+// initializes its schema, and returns it. Returns nil (logging a warning) when
+// SQLitePath is empty or either open/Initialize fails — controller startup is
+// never blocked on tag store availability.
+func initializeTagStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) *tagstore.Store {
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Tag store: SQLite path not configured, tag persistence disabled")
+		return nil
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	store, err := tagstore.NewFromDSN(dsn, logger)
+	if err != nil {
+		logger.Warn("Tag store: failed to open SQLite, tag persistence disabled", "error", err)
+		return nil
+	}
+	if err := store.Initialize(ctx); err != nil {
+		logger.Warn("Tag store: failed to initialize schema, tag persistence disabled", "error", err)
+		_ = store.Close()
+		return nil
+	}
+
+	logger.Info("Tag store initialized with SQLite backend (Issue #2542)", "sqlite_path", cfg.Storage.SQLitePath)
 	return store
 }
 

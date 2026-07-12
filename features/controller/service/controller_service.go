@@ -15,6 +15,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/features/controller/tagstore"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -35,6 +36,11 @@ type ControllerService struct {
 	// write.  Set via SetPostDNASyncHook following the late-wiring idiom used
 	// by signingRotationSvc.SetPublisher and heartbeat.Service.SetOnDNAHashMismatch.
 	postDNASyncHook func(stewardID string, dna *common.DNA)
+
+	// tagStore is the durable controller-side tag store (Issue #2542).
+	// Tags are controller-owned and survive DNA refreshes.  Wired in via
+	// SetTagStore following the late-wiring idiom; nil until wired.
+	tagStore *tagstore.Store
 }
 
 // StewardInfo holds connection/heartbeat state for a registered steward.
@@ -773,6 +779,24 @@ func (s *ControllerService) SetPostDNASyncHook(fn func(stewardID string, dna *co
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.postDNASyncHook = fn
+}
+
+// SetTagStore wires the durable controller-side tag store into the service.
+// Follows the same late-wiring idiom as SetPostDNASyncHook — the store is
+// constructed during server startup and injected here so that the selector
+// engine (S1b) and role adapter (S4) can reach it via TagStore().
+func (s *ControllerService) SetTagStore(store *tagstore.Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tagStore = store
+}
+
+// TagStore returns the controller-side tag store, or nil when not yet wired.
+// Later stories (S1b selector merge, S4 role adapter) access tags via this accessor.
+func (s *ControllerService) TagStore() *tagstore.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tagStore
 }
 
 // GetAllStewards returns a list of all registered stewards. Each entry is a

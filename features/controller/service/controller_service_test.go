@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/features/controller/tagstore"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -1174,4 +1176,70 @@ func TestSetPostDNASyncHook_HookReceivesDNACopy(t *testing.T) {
 
 	require.NotNil(t, hookDNA, "hook must receive non-nil DNA")
 	assert.Equal(t, attrs, hookDNA.Attributes, "hook DNA attributes must match the synced DNA")
+}
+
+// ---------------------------------------------------------------------------
+// SetTagStore / TagStore tests (Issue #2542)
+// ---------------------------------------------------------------------------
+
+// newTagStoreForTest builds a real, initialized tagstore.Store backed by an
+// on-disk SQLite file under t.TempDir(). No mocks — CFGMS mandates real
+// components in tests.
+func newTagStoreForTest(t *testing.T) *tagstore.Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "tags_svc_test.db")
+	store, err := tagstore.NewFromDSN("file:"+dbPath, logging.NewNoopLogger())
+	require.NoError(t, err)
+	require.NoError(t, store.Initialize(context.Background()))
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// TestSetTagStore_ReturnsWiredStore verifies that after wiring a real
+// tagstore.Store via SetTagStore, TagStore() returns that exact instance.
+func TestSetTagStore_ReturnsWiredStore(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	store := newTagStoreForTest(t)
+
+	svc.SetTagStore(store)
+
+	require.Same(t, store, svc.TagStore(), "TagStore() must return the wired store instance")
+}
+
+// TestTagStore_NilBeforeWiring verifies that TagStore() returns nil before
+// SetTagStore has been called (the late-wiring default).
+func TestTagStore_NilBeforeWiring(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	assert.Nil(t, svc.TagStore(), "TagStore() must be nil before wiring")
+}
+
+// TestSetTagStore_ConcurrentAccess_NoRace verifies that concurrent SetTagStore
+// writes and TagStore() reads do not produce a data race, consistent with the
+// TestGetStewardInfo_ConcurrentSyncDNA_NoRace pattern. Run with -race.
+func TestSetTagStore_ConcurrentAccess_NoRace(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	store := newTagStoreForTest(t)
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			svc.SetTagStore(store)
+		}()
+	}
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_ = svc.TagStore()
+		}()
+	}
+
+	wg.Wait()
+
+	require.Same(t, store, svc.TagStore(), "final TagStore() must return the wired store")
 }
