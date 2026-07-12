@@ -2681,8 +2681,10 @@ else:
     print("FAIL_C: plain comment accepted as trusted — expected False")
     sys.exit(1)
 
-# Part D: compute_review_recommendations does NOT recommend spawn_acceptance_reviewer
-# for a PR whose comment matches the heading (PR #1589 regression test)
+# Part D: a review comment with NO parseable verdict (WAIT / sentinel-only) is
+# NOT a completed review — it must route back to spawn_acceptance_reviewer,
+# never enqueue_merge (Issue #2588). Supersedes the pre-#2588 expectation from
+# the PR #1589 scenario, where comment-presence alone counted as reviewed.
 pr_summary = {
     "pr": 1589,
     "story_number": 1570,
@@ -2702,10 +2704,27 @@ if not recs:
     print("FAIL_D: compute_review_recommendations returned empty list")
     sys.exit(1)
 action = recs[0].get("action", "")
-if action != "spawn_acceptance_reviewer":
-    print(f"PASS_D: PR #1589 with existing review comment gets action={action!r} (not spawn_acceptance_reviewer)")
+if action == "spawn_acceptance_reviewer":
+    print("PASS_D: PR #1589 with review comment but NO parseable verdict routes to spawn_acceptance_reviewer (Issue #2588)")
 else:
-    print("FAIL_D: PR #1589 recommended spawn_acceptance_reviewer despite existing review comment")
+    print(f"FAIL_D: PR #1589 with verdict-less review comment got action={action!r} — expected spawn_acceptance_reviewer (Issue #2588)")
+    sys.exit(1)
+
+# Part E: an explicit PASS verdict (comment predates no commits) still routes to
+# enqueue_merge — regression guard for the #2588 tightened condition
+# (verdict == "pass", not merely != "fail").
+pr_summary_pass = dict(pr_summary)
+pr_summary_pass["pr"] = 1590
+pr_summary_pass["latest_review_verdict"] = "pass"
+recs = mod.compute_review_recommendations([pr_summary_pass], set(), set())
+if not recs:
+    print("FAIL_E: compute_review_recommendations returned empty list")
+    sys.exit(1)
+action = recs[0].get("action", "")
+if action == "enqueue_merge":
+    print("PASS_E: PR #1590 with explicit PASS verdict still routes to enqueue_merge")
+else:
+    print(f"FAIL_E: PR #1590 with PASS verdict got action={action!r} — expected enqueue_merge")
     sys.exit(1)
 PYEOF
 
