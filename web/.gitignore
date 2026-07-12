@@ -1,8 +1,12 @@
 # Dependencies
 node_modules/
 
-# Build output
-dist/
+# Build output — real Vite output must never be committed (bypasses source review,
+# security A6.3). Only the placeholder dist/index.html is tracked. A release binary
+# requires npm run build before go build; the placeholder fails loudly if dist/ is
+# stale (stale-SPA = patch-lag bug).
+dist/*
+!dist/index.html
 
 # Test coverage output
 coverage/

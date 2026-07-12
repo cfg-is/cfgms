@@ -1716,3 +1716,138 @@ func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
 	assert.Nil(t, capLog.kvValue("overlapping_permissions"),
 		"scan must not emit an overlapping_permissions warning for a key with no Tier-3 permissions")
 }
+
+// ---- SPA handler tests (Issue #2494) ----
+
+func TestSPARootServe(t *testing.T) {
+	server := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Header().Get("Content-Type"), "text/html")
+	assert.Contains(t, rr.Body.String(), "<html")
+}
+
+func TestSPADeepLinkFallback(t *testing.T) {
+	server := setupTestServer(t)
+	// A path that does not exist as a file in the embedded FS should fall back to index.html.
+	req := httptest.NewRequest(http.MethodGet, "/app/dashboard/fleet", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Header().Get("Content-Type"), "text/html")
+	// The SPA fallback must serve the placeholder index.html, not a 404 page.
+	assert.Contains(t, rr.Body.String(), "<html")
+}
+
+func TestSPAAPIPathNonInterference(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Existing API route must continue to work unchanged.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	// A non-existent API path must return a non-200 status (API 404 must not be masked).
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/this-path-does-not-exist", nil)
+	rr2 := httptest.NewRecorder()
+	server.router.ServeHTTP(rr2, req2)
+	assert.NotEqual(t, http.StatusOK, rr2.Code,
+		"SPA fallback must not mask API 404s: /api/* path returned 200")
+	assert.NotContains(t, rr2.Body.String(), "<html",
+		"SPA index.html must not be served for unmatched /api/* paths")
+}
+
+func TestSPARaftPathNonInterference(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Non-existent /raft/* path must not be masked by SPA fallback.
+	req := httptest.NewRequest(http.MethodGet, "/raft/nonexistent", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	assert.NotEqual(t, http.StatusOK, rr.Code,
+		"SPA fallback must not mask /raft/* paths: returned 200")
+}
+
+func TestSPASecurityHeaders(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Security headers must be present on: root (index.html), fallback (unknown path).
+	paths := []string{"/", "/app/dashboard"}
+	for _, urlPath := range paths {
+		t.Run(urlPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			csp := rr.Header().Get("Content-Security-Policy")
+			assert.NotEmpty(t, csp, "CSP header missing on %s", urlPath)
+			assert.Contains(t, csp, "default-src 'self'", "CSP default-src wrong on %s", urlPath)
+			assert.Contains(t, csp, "frame-ancestors 'none'", "CSP frame-ancestors wrong on %s", urlPath)
+			assert.Contains(t, csp, "base-uri 'none'", "CSP base-uri wrong on %s", urlPath)
+			assert.Contains(t, csp, "form-action 'self'", "CSP form-action wrong on %s", urlPath)
+			assert.Contains(t, csp, "object-src 'none'", "CSP object-src wrong on %s", urlPath)
+
+			assert.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"),
+				"X-Content-Type-Options missing on %s", urlPath)
+			assert.NotEmpty(t, rr.Header().Get("Referrer-Policy"),
+				"Referrer-Policy missing on %s", urlPath)
+		})
+	}
+}
+
+func TestSPAIndexNoStore(t *testing.T) {
+	server := setupTestServer(t)
+
+	// index.html (root and fallback) must be served no-store so browsers always
+	// fetch the latest shell and pick up new hashed asset references.
+	for _, urlPath := range []string{"/", "/deep/link/path"} {
+		t.Run(urlPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+			assert.Equal(t, "no-store", rr.Header().Get("Cache-Control"),
+				"index.html must be no-store on path %s", urlPath)
+		})
+	}
+}
+
+func TestSPAPathTraversal(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Path traversal attempts must never leak file content from outside the embedded FS.
+	traversalPaths := []string{
+		"/../go.mod",
+		"/..%2f..%2f",
+		"/%2e%2e/go.mod",
+	}
+	for _, urlPath := range traversalPaths {
+		t.Run(urlPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			body := rr.Body.String()
+			assert.NotContains(t, body, "module github.com/cfgis/cfgms",
+				"path traversal leaked go.mod content for path: %s", urlPath)
+			assert.NotContains(t, body, "go 1.",
+				"path traversal leaked go.mod content for path: %s", urlPath)
+		})
+	}
+}
+
+func TestSPAHeadRequest(t *testing.T) {
+	server := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodHead, "/", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	// HEAD must return headers but no body.
+	assert.Empty(t, rr.Body.String())
+	assert.NotEmpty(t, rr.Header().Get("Content-Security-Policy"))
+}

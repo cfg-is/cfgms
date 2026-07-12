@@ -107,6 +107,11 @@ type Config struct {
 	SessionTimeout time.Duration `json:"session_timeout"`
 	MaxSessions    int           `json:"max_sessions"`
 	RecordSessions bool          `json:"record_sessions"`
+	// RecordingStoragePath overrides the recorder's on-disk storage directory.
+	// When empty, DefaultRecorderConfig's path is used. Callers that need
+	// isolated storage (per-tenant deployments, tests) set this explicitly so
+	// concurrent managers never share a single fixed directory.
+	RecordingStoragePath string `json:"recording_storage_path,omitempty"`
 }
 
 // RecorderConfig contains configuration for session recording

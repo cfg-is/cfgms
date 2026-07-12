@@ -701,6 +701,12 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
 		RecordSessions: true,
+		// Isolate recording I/O in a per-test directory. Without this the
+		// recorder writes every relayed byte to a single fixed path shared by
+		// every manager in the process, so concurrent test binaries contend on
+		// the same files and HandleOutput's synchronous record step stalls —
+		// masquerading as an output-channel block.
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, capLogger)
@@ -730,21 +736,26 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 	// A blocking implementation would deadlock here once outputCh is full.
 	// The non-blocking select/default must return for every call regardless of
 	// how fast the WebSocket consumer drains the buffer.
+	//
+	// The result is reported over a buffered channel and asserted on the test
+	// goroutine — never with t.Errorf/t.Fatal from inside the worker — so that a
+	// timeout cannot race the worker into calling t.* after the test returns.
 	ctx := context.Background()
-	done := make(chan struct{})
+	result := make(chan error, 1)
 	go func() {
-		defer close(done)
 		for i := 0; i < 1000; i++ {
 			if err := session.HandleOutput(ctx, []byte("x")); err != nil {
-				t.Errorf("HandleOutput returned unexpected error: %v", err)
+				result <- err
 				return
 			}
 		}
+		result <- nil
 	}()
 
 	select {
-	case <-done:
+	case err := <-result:
 		// All 1000 calls completed — non-blocking behaviour confirmed.
+		require.NoError(t, err, "HandleOutput returned unexpected error")
 	case <-time.After(10 * time.Second):
 		t.Fatal("HandleOutput blocked: 1000 iterations did not complete within 10 s; likely blocking on full output channel")
 	}

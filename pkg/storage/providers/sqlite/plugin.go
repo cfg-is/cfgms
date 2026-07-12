@@ -163,6 +163,23 @@ func openDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to open %s: %w", path, err)
 	}
+
+	// A named shared-cache in-memory database (":memory:" or "mode=memory")
+	// exists only while at least one connection to it remains open: SQLite frees
+	// the database the instant the connection pool drops to zero live handles.
+	// Under a parallel test suite the default multi-connection pool churns and
+	// closes idle connections under memory pressure, tearing the database down
+	// mid-run — after which the next query hits a freed handle and the driver
+	// nil-dereferences. Pin such databases to a single, never-expiring
+	// connection so the backing store lives for the pool's entire lifetime.
+	// File-backed databases keep the default pool (WAL gives real concurrency).
+	if path == ":memory:" || strings.Contains(dsn, "mode=memory") {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(0)
+		db.SetConnMaxIdleTime(0)
+	}
+
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: failed to ping %s: %w", path, err)
