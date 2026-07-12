@@ -523,15 +523,19 @@ func TestWebAccounts_VerifyRejectsMalformedInputsUniformly(t *testing.T) {
 	}
 }
 
-// TestWebAccounts_HashParametersEncodedInPHCString pins the argon2id cost parameters
-// into the stored PHC string so they can be raised later without breaking existing
-// hashes, and confirms verification honors the parameters parsed from the hash.
+// TestWebAccounts_HashParametersEncodedInPHCString pins the argon2id OWASP cost
+// parameters and verifies that encodeArgon2idHash embeds them into the PHC string.
+// Uses the *Default constants directly (not the active webArgon2* vars) so the test
+// remains independent of the minimal-cost TestMain override (Issue #2591).
 func TestWebAccounts_HashParametersEncodedInPHCString(t *testing.T) {
-	phc, err := hashWebPassword("parameter-check-password")
-	require.NoError(t, err)
+	// Derive with the production-default (OWASP) cost to verify the PHC prefix.
+	// encodeArgon2idHash takes an explicit salt so no crypto/rand import is needed.
+	phc := encodeArgon2idHash("parameter-check-password",
+		[]byte("cfgms-param-test"), // 16-byte deterministic test vector
+		webArgon2TimeDefault, webArgon2MemoryDefault, webArgon2ThreadsDefault)
 
 	assert.True(t, strings.HasPrefix(phc, "$argon2id$v=19$m=19456,t=2,p=1$"),
-		"PHC string must encode the OWASP-recommended argon2id parameters, got %q", phc)
+		"OWASP production parameters must encode correctly in the PHC string, got %q", phc)
 
 	ok, err := verifyWebPassword("parameter-check-password", phc)
 	require.NoError(t, err)

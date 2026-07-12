@@ -58,15 +58,27 @@ const (
 	webAccountMaxConsecutiveFailures = 5
 	webAccountLockoutDuration        = 15 * time.Minute
 
-	// argon2id cost parameters — current OWASP-recommended settings (19 MiB memory,
-	// 2 iterations, 1 lane). They are encoded into the stored PHC string, so they
-	// can be raised later without breaking existing hashes: verification always
-	// derives with the parameters parsed from the hash itself.
-	webArgon2Time    uint32 = 2
-	webArgon2Memory  uint32 = 19 * 1024 // KiB (19 MiB)
-	webArgon2Threads uint8  = 1
-	webArgon2SaltLen        = 16
-	webArgon2KeyLen  uint32 = 32
+	// argon2id production cost parameters — OWASP-recommended settings (19 MiB memory,
+	// 2 iterations, 1 lane). Named *Default so tests can reference the intended
+	// production values even when the active vars are overridden to minimal values
+	// for CI speed (Issue #2591). TestWebAccounts_HashParametersEncodedInPHCString
+	// pins these to the OWASP values.
+	webArgon2TimeDefault    uint32 = 2
+	webArgon2MemoryDefault  uint32 = 19 * 1024 // KiB (19 MiB)
+	webArgon2ThreadsDefault uint8  = 1
+	webArgon2SaltLen               = 16
+	webArgon2KeyLen         uint32 = 32
+)
+
+// webArgon2Time/Memory/Threads are the active cost parameters used by hashWebPassword
+// and dummyWebAccountHash. Initialized to the OWASP production defaults; the test
+// suite's TestMain substitutes minimal values (t=1, 64 KiB) to avoid timeout panics
+// on 2-3 vCPU hosted macOS/Windows runners where OWASP-cost argon2id ops are
+// disproportionately slow under -race instrumentation (Issue #2591).
+var (
+	webArgon2Time    = webArgon2TimeDefault
+	webArgon2Memory  = webArgon2MemoryDefault
+	webArgon2Threads = webArgon2ThreadsDefault
 )
 
 // webUsernameRegex keeps usernames log- and path-safe (security A4.1): usernames
