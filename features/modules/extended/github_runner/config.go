@@ -98,6 +98,9 @@ func (c *RunnerConfig) Validate() error {
 	if strings.TrimSpace(c.WorkDir) == "" {
 		return fmt.Errorf("%w: work_dir is required", modules.ErrInvalidInput)
 	}
+	if !filepath.IsAbs(c.WorkDir) {
+		return fmt.Errorf("%w: work_dir %q must be an absolute path", modules.ErrInvalidInput, c.WorkDir)
+	}
 	if !serviceNamePattern.MatchString(c.ServiceName) {
 		return fmt.Errorf("%w: service_name %q contains invalid characters", modules.ErrInvalidInput, c.ServiceName)
 	}

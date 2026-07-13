@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,13 @@ const (
 	// isolation check. Set by test helpers or upstream middleware; takes precedence
 	// over URL-derived tenant. Empty means same-tenant (no cross-tenant check).
 	targetTenantContextKey contextKey = "target_tenant"
+	// cookieAuthContextKey is set to true when authentication succeeds via the
+	// cfgms_session cookie (Issue #2493: CSRF middleware uses this to distinguish
+	// cookie-authenticated requests from Bearer/API-key/mTLS requests).
+	cookieAuthContextKey contextKey = "cookie_authenticated"
+	// webSessionIDContextKey carries the session ID of a cookie-authenticated
+	// web session. Set alongside cookieAuthContextKey (Issue #2493: CSRF token lookup).
+	webSessionIDContextKey contextKey = "web_session_id"
 )
 
 // Principal represents an authenticated entity — either an mTLS admin cert, an API key,
@@ -368,6 +376,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
 				ctx = context.WithValue(ctx, ctxkeys.TenantID, webSess.TenantID)
+				// Issue #2493: mark this request as cookie-authenticated so csrfMiddleware
+				// can enforce the session-bound CSRF check on unsafe methods.
+				ctx = context.WithValue(ctx, cookieAuthContextKey, true)
+				ctx = context.WithValue(ctx, webSessionIDContextKey, webSess.ID)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -819,6 +831,49 @@ func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 		}
 	}
 	return false
+}
+
+// csrfMiddleware enforces session-bound double-submit CSRF for unsafe HTTP methods on
+// cookie-authenticated requests (ADR-018 §3, security A5.3). Must run after
+// authenticationMiddleware so the cookie-auth context key is set.
+//
+//   - Safe methods (GET, HEAD) are always exempt.
+//   - Requests authenticated via Bearer token, API key, or mTLS are exempt (no cookie).
+//   - Cookie-authenticated requests for POST/PUT/PATCH/DELETE must supply X-CSRF-Token
+//     matching the server-side per-session token (constant-time compare).
+//
+// This is the only middleware that enforces CSRF for the api subrouter. The
+// login and logout endpoints on the base router enforce their own CSRF checks inline.
+func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Safe methods are always exempt.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Bearer/API-key/mTLS requests are never CSRF-checked (security A5.2).
+		if !isCookieAuthenticated(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Retrieve the session ID set by authenticationMiddleware on cookie-auth success.
+		sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
+		csrfHeader := r.Header.Get(headerCSRFToken)
+		stored, _ := s.csrfTokens.Load(sessID)
+		storedStr, _ := stored.(string)
+		if csrfHeader == "" || storedStr == "" || subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(storedStr)) != 1 {
+			s.writeErrorResponse(w, http.StatusForbidden, "CSRF token mismatch", "CSRF_MISMATCH")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isCookieAuthenticated reports whether this request was authenticated via the
+// cfgms_session HttpOnly cookie (set by authenticationMiddleware on cookie-auth success).
+func isCookieAuthenticated(r *http.Request) bool {
+	v, _ := r.Context().Value(cookieAuthContextKey).(bool)
+	return v
 }
 
 // extractTargetTenantFromRequest returns the tenant being targeted by this request,

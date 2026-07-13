@@ -26,6 +26,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"sync"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -46,6 +47,7 @@ type Manager struct {
 	storage    Backend
 	compressor Compressor
 	indexer    Indexer
+	pruneWg    sync.WaitGroup
 }
 
 // Config defines the configuration for DNA storage management.
@@ -297,8 +299,13 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA,
 		// Don't fail the store operation for index errors
 	}
 
-	// Trigger retention policy if needed
-	go m.enforceRetentionPolicy(deviceID)
+	// Trigger retention policy if needed; WaitGroup ensures Close() waits before
+	// the database connection is torn down.
+	m.pruneWg.Add(1)
+	go func() {
+		defer m.pruneWg.Done()
+		m.enforceRetentionPolicy(deviceID)
+	}()
 
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA stored successfully",
@@ -450,6 +457,10 @@ func (m *Manager) GetStorageStats(ctx context.Context) (*StorageStats, error) {
 // Close gracefully shuts down the storage manager and flushes pending operations.
 func (m *Manager) Close() error {
 	m.logger.Info("Shutting down DNA storage manager")
+
+	// Wait for any in-flight per-device prune goroutines so that all database
+	// transactions are committed before we tear down the connection pool.
+	m.pruneWg.Wait()
 
 	// Close components in order
 	if err := m.indexer.Close(); err != nil {
@@ -658,12 +669,50 @@ func (m *Manager) runMaintenance() {
 }
 
 func (m *Manager) enforceRetentionPolicy(deviceID string) {
-	// Device-specific retention policy enforcement
-	// This would remove old records based on configured policies
+	sqliteBackend, ok := m.storage.(*SQLiteBackend)
+	if !ok {
+		return
+	}
+
+	ctx := context.Background()
+
+	var cutoff time.Time
+	if m.config.RetentionPeriod > 0 {
+		cutoff = time.Now().Add(-m.config.RetentionPeriod)
+	}
+
+	deleted, err := sqliteBackend.PruneDevice(ctx, deviceID, m.config.MaxRecordsPerDevice, cutoff)
+	if err != nil {
+		m.logger.Error("Failed to enforce per-device retention policy",
+			"device_id", logging.SanitizeLogValue(deviceID), "error", err)
+		return
+	}
+	if deleted > 0 {
+		m.logger.Info("Pruned DNA records under per-device retention policy",
+			"device_id", logging.SanitizeLogValue(deviceID), "rows_deleted", deleted)
+	}
 }
 
 func (m *Manager) enforceGlobalRetentionPolicy() error {
-	// Global retention policy enforcement across all devices
+	sqliteBackend, ok := m.storage.(*SQLiteBackend)
+	if !ok {
+		return nil
+	}
+
+	ctx := context.Background()
+
+	var cutoff time.Time
+	if m.config.RetentionPeriod > 0 {
+		cutoff = time.Now().Add(-m.config.RetentionPeriod)
+	}
+
+	deleted, err := sqliteBackend.PruneAllDevices(ctx, m.config.MaxRecordsPerDevice, cutoff)
+	if err != nil {
+		return fmt.Errorf("global retention sweep failed: %w", err)
+	}
+	if deleted > 0 {
+		m.logger.Info("Global retention sweep pruned DNA records", "rows_deleted", deleted)
+	}
 	return nil
 }
 

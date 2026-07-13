@@ -68,7 +68,11 @@ func NewModuleWithConfig(stewardID string, maxAuditRecords int) *Module {
 	}
 }
 
-// Get returns the current state of a script resource
+// Get returns the current state of a script resource.
+//
+// When the last execution of this resource failed (non-zero exit), Get returns
+// a state that deliberately omits Content so the comparator detects drift and
+// the executor re-invokes Set() on the next converge cycle (Issue #2479).
 func (m *Module) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -78,6 +82,20 @@ func (m *Module) Get(ctx context.Context, resourceID string) (modules.ConfigStat
 		// Return empty configuration for non-existent resources
 		return &ScriptConfig{
 			SigningPolicy: SigningPolicyNone,
+		}, nil
+	}
+
+	// A failed run must NOT appear converged: return a state without Content so
+	// the comparator always sees drift and the executor re-runs Set() next cycle.
+	if execution.Status == StatusFailed {
+		return &ScriptConfig{
+			Shell:            execution.Config.Shell,
+			Timeout:          execution.Config.Timeout,
+			rawTimeout:       execution.Config.rawTimeout,
+			Environment:      execution.Config.Environment,
+			WorkingDir:       execution.Config.WorkingDir,
+			SigningPolicy:    execution.Config.SigningPolicy,
+			ExecutionContext: execution.Config.ExecutionContext,
 		}, nil
 	}
 
