@@ -82,11 +82,11 @@ func TestGetConfiguration_TaggedStewardReceivesRoleResource(t *testing.T) {
 
 	winDNA := &commonpb.DNA{
 		Id:         "steward-win",
-		Attributes: map[string]string{"os": "windows", "arch": "amd64"},
+		Attributes: map[string]string{"os": "windows", "hostname": "win-host", "arch": "amd64"},
 	}
 	linuxDNA := &commonpb.DNA{
 		Id:         "steward-linux",
-		Attributes: map[string]string{"os": "linux", "arch": "amd64"},
+		Attributes: map[string]string{"os": "linux", "hostname": "linux-host", "arch": "amd64"},
 	}
 
 	respWin, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{

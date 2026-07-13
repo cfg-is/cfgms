@@ -298,7 +298,7 @@ func TestStoreDNA_WriteOnSync(t *testing.T) {
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 
 	// Register a steward
-	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux", "hostname": "dev-1-host"})
 	svc.mu.Lock()
 	svc.stewards["dev-1"] = &StewardInfo{
 		ID:       "dev-1",
@@ -1117,7 +1117,7 @@ func TestSetPostDNASyncHook_FiresAfterSyncDNA(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id:         "steward-hook",
-		Attributes: map[string]string{"os": "linux", "arch": "amd64"},
+		Attributes: map[string]string{"os": "linux", "hostname": "hook-host", "arch": "amd64"},
 	}
 	status, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
@@ -1169,7 +1169,7 @@ func TestSetPostDNASyncHook_HookReceivesDNACopy(t *testing.T) {
 	var hookDNA *commonpb.DNA
 	svc.SetPostDNASyncHook(func(_ string, dna *commonpb.DNA) { hookDNA = dna })
 
-	attrs := map[string]string{"version": "2.0", "platform": "linux"}
+	attrs := map[string]string{"version": "2.0", "platform": "linux", "hostname": "dnacopy-host", "os": "linux"}
 	dna := &commonpb.DNA{Id: "steward-dnacopy", Attributes: attrs}
 	_, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
