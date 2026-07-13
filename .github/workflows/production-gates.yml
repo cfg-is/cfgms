@@ -66,11 +66,6 @@ jobs:
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
         sudo .github/scripts/install-trivy.sh 'v0.72.0' 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
 
-        # Install other security tools
-        make install-nancy
-        go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
-        go install honnef.co/go/tools/cmd/staticcheck@2026.1
-        
         echo "✅ Security tools installed"
     
     - name: Run Security Gate Analysis
@@ -107,16 +102,10 @@ jobs:
           echo "✅ No critical/high vulnerabilities detected"
         fi
         
-        echo ""
-        echo "🛡️ Running Additional Security Scans..."
-        
-        # Run gosec for security patterns (non-blocking but reported)
-        if ! make security-gosec >/dev/null 2>&1; then
-          echo "⚠️  gosec detected security patterns (non-blocking)"
-        else
-          echo "✅ gosec security pattern scan passed"
-        fi
-        
+        # Advisory scans (nancy, gosec, staticcheck) are non-required contexts
+        # that run in security-scan.yml. They are not executed here so this
+        # gate remains focused on the single blocking Trivy vulnerability scan.
+
         # Check for emergency override
         if [ "${{ github.event.inputs.emergency_override }}" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
           echo ""
