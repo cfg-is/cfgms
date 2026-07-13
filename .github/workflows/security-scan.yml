@@ -115,16 +115,14 @@ jobs:
       with:
         go-version: ${{ env.GO_VERSION }}
 
-    # Cache disabled due to parallel job conflicts causing tar extraction failures
-    # - name: Cache Go modules
-    #   uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-    #   with:
-    #     path: ~/go/pkg/mod
-    #     key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
-    #     restore-keys: |
-    #       ${{ runner.os }}-go-modules-
-    #       ${{ runner.os }}-nancy-
-    #   continue-on-error: true
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-nancy-
+      continue-on-error: true
 
     - name: Install Nancy
       run: make install-nancy
@@ -161,16 +159,14 @@ jobs:
       with:
         go-version: ${{ env.GO_VERSION }}
 
-    # Cache disabled due to parallel job conflicts causing tar extraction failures
-    # - name: Cache Go modules
-    #   uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-    #   with:
-    #     path: ~/go/pkg/mod
-    #     key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
-    #     restore-keys: |
-    #       ${{ runner.os }}-go-modules-
-    #       ${{ runner.os }}-gosec-
-    #   continue-on-error: true
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-gosec-
+      continue-on-error: true
 
     - name: Install gosec
       run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
@@ -240,16 +236,14 @@ jobs:
       with:
         go-version: ${{ env.GO_VERSION }}
 
-    # Cache disabled due to parallel job conflicts causing tar extraction failures
-    # - name: Cache Go modules
-    #   uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-    #   with:
-    #     path: ~/go/pkg/mod
-    #     key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
-    #     restore-keys: |
-    #       ${{ runner.os }}-go-modules-
-    #       ${{ runner.os }}-staticcheck-
-    #   continue-on-error: true
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-staticcheck-
+      continue-on-error: true
 
     - name: Install staticcheck
       run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
