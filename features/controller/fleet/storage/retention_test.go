@@ -88,8 +88,16 @@ func TestRetention_MaxRecordsPerDevice(t *testing.T) {
 func TestRetention_AgeBasedPruning(t *testing.T) {
 	logger := logging.NewLogger("error")
 	config := createTestConfig(t, BackendSQLite)
-	// Very short retention: anything older than 50ms is prunable.
-	config.RetentionPeriod = 50 * time.Millisecond
+	// Retention window of 30 minutes. The two "old" records are backdated 1h (well
+	// before the cutoff, so prunable); the "recent" record is stored at time.Now()
+	// (well after the cutoff, so retained). The 30-minute margin is intentional: the
+	// cutoff is computed as time.Now()-RetentionPeriod at prune time, which is a few
+	// microseconds-to-milliseconds after the recent record's stored-at timestamp. A
+	// tight window (e.g. 50ms) would let ordinary scheduling/DB-query latency between
+	// storing the recent record and computing the cutoff push the recent record's
+	// timestamp before the cutoff, pruning it too — a wall-clock race. The wide margin
+	// makes the old-vs-recent discrimination deterministic without altering behavior.
+	config.RetentionPeriod = 30 * time.Minute
 	config.MaxRecordsPerDevice = 0 // disable count cap — only age applies
 	config.EnableDeduplication = false
 
@@ -131,7 +139,7 @@ func TestRetention_AgeBasedPruning(t *testing.T) {
 	// Insert recent record directly via SQLiteBackend for the same reason the old records
 	// were inserted directly: manager.Store fires go m.enforceRetentionPolicy(deviceID)
 	// after every write, and that goroutine is immediately eligible to prune the two
-	// backdated records (stored at -1h, cutoff at -50ms) before the pre-prune count
+	// backdated records (stored at -1h, cutoff at -30m) before the pre-prune count
 	// assertion at line 145 runs. Bypassing manager.Store keeps the goroutine out of
 	// the picture entirely and makes the pre-prune count deterministic.
 	recentDNA := createTestDNA(deviceID, map[string]string{
@@ -162,7 +170,8 @@ func TestRetention_AgeBasedPruning(t *testing.T) {
 		t.Fatalf("expected 3 records before age pruning, got %d", len(history.Records))
 	}
 
-	// Run pruning. cutoff = now - 50ms, so old records (1h ago) are pruned.
+	// Run pruning. cutoff = now - 30m, so old records (1h ago) are pruned while the
+	// recent record (stored at now) is safely retained.
 	manager.enforceRetentionPolicy(deviceID)
 
 	// Old records must be gone; recent record must remain.
