@@ -144,6 +144,87 @@ func (m *noopModule) GetCallCount() int {
 	return m.getCalls
 }
 
+// observableModule is a real modules.Module (NOT a Monitor) whose Get returns a
+// fixed multi-field observed state that matches the desired `state` so no drift is
+// detected. It proves module DNA is captured from the convergence-loop Get alone —
+// no monitor engine, no change-events (#2520 mechanism 1 steady-state source).
+type observableModule struct{ state map[string]interface{} }
+
+func (m *observableModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return execution.NewConfigState(m.state), nil
+}
+func (m *observableModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+// TestExecuteConfiguration_CapturesModuleDNAAtSteadyState is the REQUIRED test for
+// #2520 mechanism 1: a STABLE managed resource — no drift, no monitor, no
+// change-event — still contributes module DNA, sourced from the convergence Get.
+func TestExecuteConfiguration_CapturesModuleDNAAtSteadyState(t *testing.T) {
+	e := newMonitorExecutor(t)
+	execution.ExecutorFactory(e).RegisterModule("obs", &observableModule{
+		state: map[string]interface{}{
+			"state": "present",
+			"owner": "n1",
+			"nodes": []string{"n1", "n2"},
+		},
+	})
+
+	// Full convergence pass — no StartMonitors, no change-events.
+	report := e.ExecuteConfiguration(context.Background(),
+		stewardconfig.StewardConfig{Resources: singleResourceCfg("res1", "obs")})
+	require.Equal(t, 1, report.SuccessfulCount)
+
+	attrs := e.CollectModuleDNAAttributes(context.Background())
+	assert.Equal(t, "present", attrs["res1.state"],
+		"a stable resource's observed state must reach module DNA via the convergence Get")
+	assert.Equal(t, "n1", attrs["res1.owner"])
+	assert.Equal(t, "n1,n2", attrs["res1.nodes"])
+}
+
+// TestModuleDNASnapshot_SurvivesExecutorReinit is the REQUIRED test for the
+// reconnect-survival fix (#2520): the module DNA snapshot is shared across Executor
+// instances, so DNA converged by one executor is still readable after the client
+// re-initializes the executor (as happens on every reconnect). A per-executor
+// snapshot would be lost, silently blanking module DNA on the controller.
+func TestModuleDNASnapshot_SurvivesExecutorReinit(t *testing.T) {
+	shared := execution.NewModuleDNASnapshot()
+	mod := &observableModule{state: map[string]interface{}{"state": "present", "owner": "n1"}}
+
+	// Executor #1 (pre-reconnect) converges and populates the SHARED store.
+	e1 := newMonitorExecutorWithDNAStore(t, shared)
+	execution.ExecutorFactory(e1).RegisterModule("obs", mod)
+	e1.ExecuteConfiguration(context.Background(),
+		stewardconfig.StewardConfig{Resources: singleResourceCfg("res1", "obs")})
+	require.Equal(t, "n1", e1.CollectModuleDNAAttributes(context.Background())["res1.owner"])
+
+	// Executor #2 (post-reconnect, fresh instance) shares the SAME store and must
+	// see the DNA #1 converged — without re-running any convergence.
+	e2 := newMonitorExecutorWithDNAStore(t, shared)
+	assert.Equal(t, "n1", e2.CollectModuleDNAAttributes(context.Background())["res1.owner"],
+		"a re-initialized executor sharing the store must still surface previously-converged module DNA")
+}
+
+// TestExecuteConfiguration_PrunesRemovedResourceFromDNA verifies a resource dropped
+// from the config disappears from module DNA on the next full convergence pass.
+func TestExecuteConfiguration_PrunesRemovedResourceFromDNA(t *testing.T) {
+	e := newMonitorExecutor(t)
+	execution.ExecutorFactory(e).RegisterModule("obs", &observableModule{
+		state: map[string]interface{}{"state": "present", "owner": "n1"},
+	})
+
+	// First pass includes res1 → captured.
+	e.ExecuteConfiguration(context.Background(),
+		stewardconfig.StewardConfig{Resources: singleResourceCfg("res1", "obs")})
+	require.Equal(t, "n1", e.CollectModuleDNAAttributes(context.Background())["res1.owner"])
+
+	// Second pass with NO resources → res1 pruned.
+	e.ExecuteConfiguration(context.Background(),
+		stewardconfig.StewardConfig{Resources: nil})
+	_, present := e.CollectModuleDNAAttributes(context.Background())["res1.owner"]
+	assert.False(t, present, "a resource removed from config must be pruned from module DNA")
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 // newMonitorExecutor creates a minimal Executor with an empty module factory.
@@ -158,6 +239,26 @@ func newMonitorExecutor(t *testing.T) *execution.Executor {
 	e, err := execution.NewExecutor(&execution.ExecutorConfig{
 		Logger:  logger,
 		Factory: f,
+	})
+	require.NoError(t, err)
+	return e
+}
+
+// newMonitorExecutorWithDNAStore builds an Executor wired to a caller-supplied
+// shared module-DNA snapshot, mirroring how the steward client injects one store
+// into every executor it builds (#2520).
+func newMonitorExecutorWithDNAStore(t *testing.T, store *execution.ModuleDNASnapshot) *execution.Executor {
+	t.Helper()
+	logger := logging.NewLogger("debug")
+	f := factory.New(nil, stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}, logger)
+	e, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:            logger,
+		Factory:           f,
+		ModuleDNASnapshot: store,
 	})
 	require.NoError(t, err)
 	return e
