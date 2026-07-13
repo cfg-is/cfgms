@@ -123,8 +123,12 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return status.Errorf(codes.InvalidArgument, "failed to reassemble DNA: %v", rErr)
 	}
 
-	if _, pErr := h.persister.SyncDNA(ctx, dna); pErr != nil {
+	persistStatus, pErr := h.persister.SyncDNA(ctx, dna)
+	if pErr != nil {
 		return fmt.Errorf("failed to persist synced DNA for %s: %w", peerID, pErr)
+	}
+	if persistStatus != nil && persistStatus.Code != common.Status_OK {
+		return status.Errorf(codes.Unavailable, "DNA persist rejected: %s", persistStatus.Message)
 	}
 
 	h.logger.Info("DNA sync persisted", "peer_id", peerID, "attributes", dna.GetAttributeCount())

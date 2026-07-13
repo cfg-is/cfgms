@@ -19,6 +19,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/features/controller/service"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -119,6 +120,50 @@ func TestDNAHandler_PersistError_FailsRPC(t *testing.T) {
 	err := h.HandleGRPC(stream)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to persist synced DNA")
+}
+
+// TestDNAHandler_PersistStatusNotFound_FailsRPC (#2641): when the real
+// ControllerService rejects a sync for an unregistered steward it returns
+// Status_NOT_FOUND with a nil Go error. HandleGRPC must surface that as a gRPC
+// error so the steward retries rather than believing the sync succeeded.
+//
+// The persister is a real *service.ControllerService with no steward registered
+// for "steward-not-found", so SyncDNA takes its genuine not-found path — no stub.
+func TestDNAHandler_PersistStatusNotFound_FailsRPC(t *testing.T) {
+	ca := newTestCA(t)
+	svc := service.NewControllerService(logging.NewNoopLogger())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+
+	ctx := peerContextWithCA(t, ca, "steward-not-found")
+	stream := newTestDNAStream(ctx, dnaChunksFor(t, "steward-not-found", map[string]string{"hostname": "h", "os": "linux"}, 1)...)
+
+	err := h.HandleGRPC(stream)
+	require.Error(t, err)
+	assert.Nil(t, stream.resp, "Accepted response must not be sent when persist was rejected")
+	assert.Equal(t, codes.Unavailable, status.Code(err))
+}
+
+// TestDNAHandler_PersistStatusOK_Accepted (#2641): when the real
+// ControllerService accepts the sync (Status_OK), behavior is unchanged — the
+// steward is told Accepted: true.
+//
+// The persister is a real *service.ControllerService with "steward-ok"
+// registered, so SyncDNA takes its genuine happy path (in-memory update).
+func TestDNAHandler_PersistStatusOK_Accepted(t *testing.T) {
+	ca := newTestCA(t)
+	svc := service.NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, svc.RegisterStewardWithAttributes(
+		"steward-ok", "t1", "", "active",
+		map[string]string{"hostname": "h", "os": "linux"},
+	))
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+
+	ctx := peerContextWithCA(t, ca, "steward-ok")
+	stream := newTestDNAStream(ctx, dnaChunksFor(t, "steward-ok", map[string]string{"hostname": "h", "os": "linux"}, 1)...)
+
+	require.NoError(t, h.HandleGRPC(stream))
+	require.NotNil(t, stream.resp)
+	assert.True(t, stream.resp.GetAccepted())
 }
 
 // ---------------------------------------------------------------------------
