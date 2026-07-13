@@ -31,4 +31,13 @@ var (
 	// specified on a platform that does not enforce them (Windows/NTFS). Windows targets
 	// use the windows_acl field instead. See docs/modules/file.md.
 	ErrPermissionsNotSupportedOnPlatform = errors.New("unix-style permissions are not supported on this platform (NTFS uses ACLs); use the windows_acl field instead")
+
+	// ErrSymlinkNotSupported is returned when type: symlink is requested. Symlink
+	// management is not yet implemented in this version of the file module;
+	// tracking issue planned for a future story.
+	ErrSymlinkNotSupported = errors.New("type: symlink is not supported in this version of the file module")
+
+	// ErrDirectoryDeletionNotSupported is returned when state: absent is requested
+	// for type: directory. Directory removal is not yet implemented.
+	ErrDirectoryDeletionNotSupported = errors.New("state: absent is not supported for type: directory in this version of the file module")
 )
