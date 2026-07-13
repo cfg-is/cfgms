@@ -840,6 +840,46 @@ func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
 	}
 }
 
+// deleteSeedMediaForVM synchronously removes any staged seed media (seed VHDX +
+// answer ISO) for vmName. Both deletes are idempotent — psDeleteSeedMedia uses
+// -ErrorAction SilentlyContinue, so an absent file is not an error and no
+// existence pre-check is needed. Failures are logged and swallowed (best-effort,
+// matching finalizeProvision's per-media handling).
+//
+// This is required on the on_existing: recreate and VM-deletion paths, which both
+// call DeleteProvision immediately after removeVM. Once the provision record is
+// gone, sweepStaleSeedMedia's TTL safety net can no longer see the VM, so orphaned
+// media left by those paths would never be collected. A leftover seed VHDX also
+// wedges the next recreate at New-VHD with "The file exists. (0x80070050)" — the
+// Cfgms-NewSeedVHD delete-if-exists guard covers the VHDX, but the answer ISO has
+// no such guard, so synchronous cleanup here is the primary collector for both.
+func (m *hypervModule) deleteSeedMediaForVM(ctx context.Context, vmName, vhdPath string) {
+	if m.transport == nil {
+		return
+	}
+	for _, mediaPath := range []string{
+		seedVHDPath(vmName, vhdPath, m.seedDir),
+		answerISOPath(vmName, vhdPath, m.seedDir),
+	} {
+		if validateSeedPath(mediaPath) != nil {
+			// Path not derivable (seedDir unset and VHD path unknown); skip.
+			continue
+		}
+		if _, psErr := m.transport.ExecutePS(ctx, psDeleteSeedMedia, map[string]string{
+			"Path": mediaPath,
+		}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-Item", "vm:"+vmName, nil, nil, psErr)
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: seed media delete failed on recreate/delete (record already gone; TTL sweep cannot retry)",
+					"vm_name", logging.SanitizeLogValue(vmName),
+					"path", logging.SanitizeLogValue(mediaPath))
+			}
+			continue
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Remove-Item", "vm:"+vmName, nil, nil, nil)
+	}
+}
+
 // provisionRecordsForSweep returns the union of provision records this module may
 // hold stale HOST-LOCAL seed media for: the configured host-local store, PLUS the
 // cluster-visible CSV store of every ha_role+CSV VM in the module's cache — those

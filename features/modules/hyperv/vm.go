@@ -846,6 +846,16 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		if err := m.moveStore().DeleteMove(ctx, vmName); err != nil && !errors.Is(err, ErrMoveNotFound) {
 			return err
 		}
+		// Remove any orphaned seed media (seed VHDX + answer ISO) for the deleted
+		// VM. DeleteProvision above removed the record, so sweepStaleSeedMedia's TTL
+		// safety net can no longer collect it; this synchronous delete is the only
+		// collector for a deleted VM's seed media. cur may be nil (VM already
+		// absent) → empty VHD path, which is fine when seedDir is configured.
+		vhdPath := ""
+		if cur != nil {
+			vhdPath = cur.VHDPath
+		}
+		m.deleteSeedMediaForVM(ctx, vmName, vhdPath)
 		return nil
 	}
 
@@ -1186,6 +1196,12 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		if err := m.storeFor(cfg).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
 			return err
 		}
+		// Clear any seed media (seed VHDX + answer ISO) left by a prior provision
+		// before re-provisioning: DeleteProvision above just removed the record, so
+		// the TTL sweep can no longer collect it, and a leftover seed VHDX would
+		// wedge the recreate at New-VHD (0x80070050). Best-effort; runs even when
+		// no media exists (idempotent).
+		m.deleteSeedMediaForVM(ctx, vmName, cfg.VHDPath)
 		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
 			return err
 		}
