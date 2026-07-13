@@ -25,6 +25,9 @@ interfaces:
 
 owns:
   - kind: service  # authority over service:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
 
 security:
   requires_root: true  # start/stop/enable/disable require elevated privileges

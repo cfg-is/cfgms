@@ -19,6 +19,13 @@ import (
 type OwnershipDeclaration struct {
 	// Kind is the object-identity namespace (e.g. "service", "file", "package").
 	Kind string `yaml:"kind" json:"kind"`
+	// RequiredFields lists DNA Attributes keys that must be present and non-empty
+	// for every DNA snapshot from an entity where this module is active, per
+	// ADR-020. The controller unions RequiredFields across all active modules at
+	// DNA write time; a field absent or empty in the snapshot fails the
+	// write-integrity guard. Omitting RequiredFields is valid (no additional
+	// constraint beyond module ownership).
+	RequiredFields []string `yaml:"required_fields,omitempty" json:"required_fields,omitempty"`
 }
 
 // ModuleMetadata represents the complete metadata for a module
@@ -426,10 +433,16 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 		}
 	}
 
-	// Deep copy ownership declarations (OwnershipDeclaration contains only strings)
+	// Deep copy ownership declarations (each entry may carry a RequiredFields slice)
 	if m.Owns != nil {
 		clone.Owns = make([]OwnershipDeclaration, len(m.Owns))
-		copy(clone.Owns, m.Owns)
+		for i, o := range m.Owns {
+			clone.Owns[i] = OwnershipDeclaration{Kind: o.Kind}
+			if o.RequiredFields != nil {
+				clone.Owns[i].RequiredFields = make([]string, len(o.RequiredFields))
+				copy(clone.Owns[i].RequiredFields, o.RequiredFields)
+			}
+		}
 	}
 
 	return clone

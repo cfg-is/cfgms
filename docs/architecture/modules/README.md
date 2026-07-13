@@ -118,12 +118,15 @@ the snapshot fails the write-integrity guard. Omitting `required_fields` from an
 required-field constraint. The full declaration contract and configuration-type
 resolution rules are defined in [ADR-020](../decisions/020-dna-required-field-declaration.md).
 
-**Current status (follow-on implementation pending):** Until the manifest-driven
-loader story lands, the operative required-field table is the hand-coded map in
-`features/controller/service/dna_integrity.go` (seeded by issue #2617 with
-`full-os-device → {hostname, os}`). Adding `required_fields` to a `module.yaml` today
-documents intent; it does not yet drive the guard. When the loader is built, the
-manifest entries become the authoritative source and the hand-coded table is retired.
+**Implementation (issue #2642):** The manifest-driven loader is now active. On
+controller startup the guard builds its required-field table by reading every
+`module.yaml` embedded in the controller binary
+(`features/modules.StdlibManifests`). All steward-kind modules' `required_fields`
+are unioned into the `full-os-device` configuration type (ADR-020 Path A).
+Adding `required_fields` to a stdlib `module.yaml` therefore changes what the
+guard enforces with no change to `dna_integrity.go`. The hand-coded Go literal
+from issue #2617 has been retired; the module manifests are now the authoritative
+source.
 
 ### `Get` canonical fragment contract (ADR-016 clause 4)
 

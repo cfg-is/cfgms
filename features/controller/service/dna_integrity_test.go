@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -412,4 +414,225 @@ func TestAcceptRegistration_RejectsNilInitialDNA(t *testing.T) {
 	info, ok := svc.GetStewardInfo(resp.StewardId)
 	require.True(t, ok)
 	assert.Nil(t, info.DNA)
+}
+
+// --- Manifest-driven required-field loader tests (ADR-020 / Issue #2642) ---
+
+// writeManifest creates a module.yaml in dir/moduleName/module.yaml with the
+// given YAML content and returns the path to the file.
+func writeManifest(t *testing.T, dir, moduleName, content string) string {
+	t.Helper()
+	modDir := filepath.Join(dir, moduleName)
+	require.NoError(t, os.MkdirAll(modDir, 0750))
+	path := filepath.Join(modDir, "module.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	return path
+}
+
+// TestBuildRequiredFields_FullOSDevice proves that buildRequiredFieldsFromManifests
+// reads required_fields from a steward module's owns: entries and maps them to
+// the full-os-device config type (ADR-020 Path A). This satisfies AC1: the
+// guard's required-set table is built from module.yaml declarations, not a
+// hardcoded Go literal.
+func TestBuildRequiredFields_FullOSDevice(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "identity", `
+name: identity
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: device
+    required_fields:
+      - hostname
+      - os
+`)
+
+	table, err := buildRequiredFieldsFromManifests(dir)
+	require.NoError(t, err)
+
+	fields, ok := table[configTypeFullOSDevice]
+	require.True(t, ok, "full-os-device must be present in the built table")
+	assert.Contains(t, fields, "hostname")
+	assert.Contains(t, fields, "os")
+
+	// Confirm the guard rejects a DNA missing hostname.
+	dnaNoHostname := &commonpb.DNA{
+		Id:         "dev-manifest-1",
+		Attributes: map[string]string{"os": "linux"},
+	}
+	result := checkDNAIntegrityWithTable(dnaNoHostname, configTypeFullOSDevice, table)
+	assert.False(t, result.valid)
+	assert.Contains(t, result.missingFields, "hostname")
+
+	// Confirm the guard accepts a DNA with both fields.
+	dnaFull := &commonpb.DNA{
+		Id:         "dev-manifest-2",
+		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+	}
+	result = checkDNAIntegrityWithTable(dnaFull, configTypeFullOSDevice, table)
+	assert.True(t, result.valid)
+	assert.Empty(t, result.missingFields)
+}
+
+// TestBuildRequiredFields_UnionAcrossModules proves that required_fields from
+// multiple steward modules are unioned into a single full-os-device contract.
+func TestBuildRequiredFields_UnionAcrossModules(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "mod-a", `
+name: mod-a
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: resource-a
+    required_fields:
+      - hostname
+      - os
+`)
+	writeManifest(t, dir, "mod-b", `
+name: mod-b
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: resource-b
+    required_fields:
+      - hostname
+      - region
+`)
+
+	table, err := buildRequiredFieldsFromManifests(dir)
+	require.NoError(t, err)
+
+	fields := table[configTypeFullOSDevice]
+	assert.Contains(t, fields, "hostname", "hostname should appear in union (declared by both modules)")
+	assert.Contains(t, fields, "os")
+	assert.Contains(t, fields, "region")
+
+	// hostname must appear only once (deduplication)
+	count := 0
+	for _, f := range fields {
+		if f == "hostname" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "hostname must appear exactly once after deduplication")
+}
+
+// TestBuildRequiredFields_NonStewardModulesSkipped proves that outpost and
+// workflow (controller) modules do not contribute to the full-os-device table.
+func TestBuildRequiredFields_NonStewardModulesSkipped(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "outpost-mod", `
+name: outpost-mod
+version: 0.1.0
+publisher: cfgms
+executors:
+  - outpost
+owns:
+  - kind: printer
+    required_fields:
+      - printer_ip
+`)
+
+	table, err := buildRequiredFieldsFromManifests(dir)
+	require.NoError(t, err)
+
+	fields := table[configTypeFullOSDevice]
+	assert.NotContains(t, fields, "printer_ip", "outpost module fields must not appear in full-os-device table")
+}
+
+// TestDNAIntegrityDrivenByManifestDeclaration proves that adding a required_fields
+// entry to an existing module.yaml changes what the guard rejects — zero changes
+// to dna_integrity.go's guard logic required. This satisfies AC2.
+func TestDNAIntegrityDrivenByManifestDeclaration(t *testing.T) {
+	dir := t.TempDir()
+
+	// Step 1: module declares hostname and os as required.
+	manifestPath := writeManifest(t, dir, "steward-mod", `
+name: steward-mod
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: resource
+    required_fields:
+      - hostname
+      - os
+`)
+
+	table, err := buildRequiredFieldsFromManifests(dir)
+	require.NoError(t, err)
+
+	dna := &commonpb.DNA{
+		Id:         "dev-ac2",
+		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+	}
+	result := checkDNAIntegrityWithTable(dna, configTypeFullOSDevice, table)
+	assert.True(t, result.valid, "DNA with hostname+os must pass before adding new required field")
+
+	// Step 2: add region to the manifest's required_fields — no change to guard logic.
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`
+name: steward-mod
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: resource
+    required_fields:
+      - hostname
+      - os
+      - region
+`), 0600))
+
+	tableAfter, err := buildRequiredFieldsFromManifests(dir)
+	require.NoError(t, err)
+
+	// Guard now rejects DNA that lacks region — no guard logic was changed.
+	resultAfter := checkDNAIntegrityWithTable(dna, configTypeFullOSDevice, tableAfter)
+	assert.False(t, resultAfter.valid, "guard must reject DNA missing region after manifest update")
+	assert.Contains(t, resultAfter.missingFields, "region")
+
+	// DNA with the new field passes.
+	dnaFull := &commonpb.DNA{
+		Id: "dev-ac2-full",
+		Attributes: map[string]string{
+			"hostname": "myhost",
+			"os":       "linux",
+			"region":   "us-east-1",
+		},
+	}
+	resultFull := checkDNAIntegrityWithTable(dnaFull, configTypeFullOSDevice, tableAfter)
+	assert.True(t, resultFull.valid)
+}
+
+// TestBuildRequiredFields_StdlibManifests proves that the real embedded stdlib
+// manifests yield the full-os-device → {hostname, os} contract that the
+// #2617 guard seeded, confirming the manifest declarations are consistent
+// with the guard's expected behavior (AC1 against the live manifests).
+func TestBuildRequiredFields_StdlibManifests(t *testing.T) {
+	// dnaRequiredFields is populated from StdlibManifests by the package init.
+	fields, ok := dnaRequiredFields[configTypeFullOSDevice]
+	require.True(t, ok, "full-os-device entry must exist in the stdlib-manifest-driven table")
+	assert.Contains(t, fields, "hostname")
+	assert.Contains(t, fields, "os")
+
+	// Guard behaves identically to the pre-manifest hardcoded seed.
+	validDNA := &commonpb.DNA{
+		Id:         "dev-stdlib-valid",
+		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+	}
+	assert.True(t, checkDNAIntegrity(validDNA, configTypeFullOSDevice).valid)
+
+	emptyDNA := &commonpb.DNA{Id: "dev-stdlib-empty", Attributes: map[string]string{}}
+	result := checkDNAIntegrity(emptyDNA, configTypeFullOSDevice)
+	assert.False(t, result.valid)
+	assert.Contains(t, result.missingFields, "hostname")
+	assert.Contains(t, result.missingFields, "os")
 }

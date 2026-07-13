@@ -960,7 +960,10 @@ func TestModuleMetadata_Clone_Owns(t *testing.T) {
 		Publisher: "cfgms",
 		Executors: []string{"steward"},
 		Kind:      "steward",
-		Owns:      []OwnershipDeclaration{{Kind: "service"}, {Kind: "file"}},
+		Owns: []OwnershipDeclaration{
+			{Kind: "service", RequiredFields: []string{"hostname", "os"}},
+			{Kind: "file"},
+		},
 	}
 
 	clone := original.Clone()
@@ -972,12 +975,104 @@ func TestModuleMetadata_Clone_Owns(t *testing.T) {
 		if clone.Owns[i].Kind != want.Kind {
 			t.Errorf("Clone Owns[%d].Kind = %q, want %q", i, clone.Owns[i].Kind, want.Kind)
 		}
+		if len(clone.Owns[i].RequiredFields) != len(want.RequiredFields) {
+			t.Errorf("Clone Owns[%d].RequiredFields length = %d, want %d", i, len(clone.Owns[i].RequiredFields), len(want.RequiredFields))
+		}
 	}
 
-	// Verify deep copy — mutating clone must not affect original
+	// Verify deep copy — mutating clone's Kind and RequiredFields must not affect original.
 	clone.Owns[0].Kind = "mutated"
 	if original.Owns[0].Kind == "mutated" {
-		t.Error("Mutating clone Owns[0] affected original")
+		t.Error("Mutating clone Owns[0].Kind affected original")
+	}
+	clone.Owns[0].RequiredFields[0] = "mutated-field"
+	if original.Owns[0].RequiredFields[0] == "mutated-field" {
+		t.Error("Mutating clone Owns[0].RequiredFields affected original")
+	}
+}
+
+// TestParseModuleMetadata_RequiredFields verifies that required_fields within
+// owns: entries is parsed correctly and that omitting it is backward-compatible.
+func TestParseModuleMetadata_RequiredFields(t *testing.T) {
+	tests := []struct {
+		name           string
+		yaml           string
+		wantOwns       []OwnershipDeclaration
+	}{
+		{
+			name: "owns with required_fields",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service
+    required_fields:
+      - hostname
+      - os`,
+			wantOwns: []OwnershipDeclaration{
+				{Kind: "service", RequiredFields: []string{"hostname", "os"}},
+			},
+		},
+		{
+			name: "owns without required_fields — backward compatible",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service`,
+			wantOwns: []OwnershipDeclaration{
+				{Kind: "service", RequiredFields: nil},
+			},
+		},
+		{
+			name: "mixed — one entry with required_fields, one without",
+			yaml: `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+owns:
+  - kind: service
+    required_fields:
+      - hostname
+  - kind: file`,
+			wantOwns: []OwnershipDeclaration{
+				{Kind: "service", RequiredFields: []string{"hostname"}},
+				{Kind: "file", RequiredFields: nil},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := strings.NewReader(tt.yaml)
+			metadata, err := ParseModuleMetadata(reader)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if len(metadata.Owns) != len(tt.wantOwns) {
+				t.Fatalf("Owns length = %d, want %d", len(metadata.Owns), len(tt.wantOwns))
+			}
+			for i, want := range tt.wantOwns {
+				got := metadata.Owns[i]
+				if got.Kind != want.Kind {
+					t.Errorf("Owns[%d].Kind = %q, want %q", i, got.Kind, want.Kind)
+				}
+				if len(got.RequiredFields) != len(want.RequiredFields) {
+					t.Errorf("Owns[%d].RequiredFields = %v, want %v", i, got.RequiredFields, want.RequiredFields)
+					continue
+				}
+				for j, wf := range want.RequiredFields {
+					if got.RequiredFields[j] != wf {
+						t.Errorf("Owns[%d].RequiredFields[%d] = %q, want %q", i, j, got.RequiredFields[j], wf)
+					}
+				}
+			}
+		})
 	}
 }
 
