@@ -43,9 +43,7 @@ func (e *darwinExecutor) getState(username string) (userState, error) {
 	// Resolve group names via id -Gn (all groups, space-separated).
 	groupOut, err := exec.Command("id", "-Gn", username).CombinedOutput() // #nosec G204 - username validated by caller
 	if err == nil {
-		for _, g := range strings.Fields(strings.TrimSpace(string(groupOut))) {
-			state.Groups = append(state.Groups, g)
-		}
+		state.Groups = append(state.Groups, strings.Fields(strings.TrimSpace(string(groupOut)))...)
 		sort.Strings(state.Groups)
 	}
 
