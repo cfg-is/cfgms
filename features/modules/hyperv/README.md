@@ -252,6 +252,25 @@ moves directory-wise). Cross-host migration (`Move-VM` between cluster nodes)
 and per-disk differential placement (multiple VHDs on different volumes) are
 out of scope; secondary disks follow the primary into the home directory.
 
+### Checkpoints and `vhd_path` (#2626)
+
+A VM **checkpoint** layers a differencing disk (`.avhdx`) as the VM's *active*
+disk; the configured base `.vhdx` becomes the read-only **root** of the parent
+chain. The VM is therefore still running on its configured disk — a checkpoint is
+a layer, not a replacement.
+
+`Get` reflects this: it resolves the active disk to the **root of its parent
+chain** (walking `Get-VHD.ParentPath`) and reports that as `vhd_path`. So a
+checkpointed VM whose chain root is the declared `.vhdx` reports **no
+`vhd_path` drift** — checkpoints do not make a VM non-compliant with its disk
+declaration. A VM whose chain root genuinely differs from the declared path still
+drifts (real drift preserved).
+
+Checkpoints are surfaced as **observed-only DNA**: `checkpoint_count` appears on
+the `Get`/DNA surface but is absent from the managed fields, so it is *visible*
+fleet-wide yet never counts as drift. Declaratively *managing* checkpoints
+(policy-driven merge-to-clean) is a separate, opt-in capability.
+
 ### Create an external virtual switch
 
 ```yaml
