@@ -163,6 +163,14 @@ type VMConfig struct {
 	// false drift.
 	ConfigLocation string `yaml:"configuration_location,omitempty"`
 
+	// CheckpointCount is the OBSERVED number of checkpoints (snapshots) on the
+	// VM, populated by getVM and exposed on the Get/DNA surface. A checkpoint
+	// layers a differencing disk (.avhdx) over the configured base .vhdx; getVM
+	// reports the chain ROOT as VHDPath so a checkpointed VM does not falsely
+	// drift on vhd_path (#2626). Like ConfigLocation it is never declared and is
+	// deliberately absent from GetManagedFields — visible as DNA, never drift.
+	CheckpointCount int `yaml:"checkpoint_count,omitempty"`
+
 	// seedDir is the module-level provisioning seed directory (m.seedDir),
 	// injected by setVM before Validate so the HA-role CSV seed-dir rule can be
 	// checked. It is NOT a per-VM YAML field (seed_dir is module-level config) —
@@ -481,9 +489,10 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		"generation":   c.Generation,
 		"state":        c.State,
 		"source":       nil,
-		// Observed-only (#2411): reported for the Get/DNA surface, absent from
-		// GetManagedFields so it never participates in drift comparison.
+		// Observed-only (#2411, #2626): reported for the Get/DNA surface, absent
+		// from GetManagedFields so they never participate in drift comparison.
 		"configuration_location": c.ConfigLocation,
+		"checkpoint_count":       c.CheckpointCount,
 	}
 	if c.Source != nil {
 		m["source"] = map[string]interface{}{
@@ -562,7 +571,7 @@ func (c *VMConfig) GetManagedFields() []string {
 // VMConfig.VHDPath stores the disk path; conflating it with the config
 // directory caused #1887 B1 verification to flag 2-changed drift on
 // every successful create.
-const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=if ($disk) { $disk.Path } else { "" }; ConfigurationLocation=[string]$vm.ConfigurationLocation; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress -Depth 4`
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $diskPath = if ($disk) { $disk.Path } else { "" }; $rootPath = $diskPath; if ($diskPath) { try { $v = Get-VHD -Path $diskPath -ErrorAction Stop; while ($v.ParentPath) { $rootPath = $v.ParentPath; $v = Get-VHD -Path $v.ParentPath -ErrorAction Stop } } catch { } }; $checkpointCount = @(Get-VMSnapshot -VMName $Name -ErrorAction SilentlyContinue).Count; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=$rootPath; ConfigurationLocation=[string]$vm.ConfigurationLocation; CheckpointCount=[int]$checkpointCount; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress -Depth 4`
 
 // psCreateVM is the script block passed to ExecutePS for VM creation.
 // All user-supplied values are transmitted via ArgumentList — none are
@@ -703,6 +712,12 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 	// Observed-only: the desired location is derived as dir(vhd_path).
 	if v, ok := parsed["ConfigurationLocation"].(string); ok {
 		cfg.ConfigLocation = v
+	}
+	// CheckpointCount is the observed number of checkpoints (#2626). Observed-only
+	// DNA; JSON numbers decode to float64. VHDPath above is already the chain root
+	// (Cfgms-GetVM/psGetVM resolve past any .avhdx differencing disks).
+	if v, ok := parsed["CheckpointCount"].(float64); ok {
+		cfg.CheckpointCount = int(v)
 	}
 	// Adapter-reported switch names are the exact names admins specified; the
 	// drift comparison is name vs name with no translation.
