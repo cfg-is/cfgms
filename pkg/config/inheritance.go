@@ -41,6 +41,27 @@ type clusterMembership interface {
 	MemberClusters(stewardID string) []string
 }
 
+// RoleFragment pairs a role's name with its StewardConfig fragment for merge ordering.
+// Returned by roleConfigProvider.MatchingRoleFragments, sorted alphabetically by Name
+// so that multiple matching roles produce a deterministic merge order.
+type RoleFragment struct {
+	Name   string
+	Config stewardconfig.StewardConfig
+}
+
+// roleConfigProvider is the minimal interface InheritanceResolver requires to fetch
+// role config fragments that match a steward's DNA + tags. Defined locally (same
+// pattern as clusterMembership) to avoid importing features/controller/fleet into
+// pkg/config, which would create a circular dependency. The concrete
+// *roleConfigAdapter in features/controller/service satisfies this by duck-typing.
+type roleConfigProvider interface {
+	// MatchingRoleFragments returns the role config fragments whose selectors match
+	// stewardID, sorted alphabetically by role name. Returns nil, nil when no roles
+	// match. A non-nil error is non-fatal to the caller — the resolver logs and
+	// skips the role layer entirely rather than failing resolution.
+	MatchingRoleFragments(ctx context.Context, stewardID string) ([]RoleFragment, error)
+}
+
 // cfgStoreAsRouter wraps a plain ConfigStore to satisfy configSourceRouter.
 // SnapshotSources always returns ConfigSourceTypeController for backward compatibility
 // (used by NewInheritanceResolverWithStorageManager which has no router available).
@@ -61,8 +82,9 @@ type InheritanceResolver struct {
 	configStore       configSourceRouter
 	clientTenantStore business.ClientTenantStore
 	tenantStore       business.TenantStore
-	clusterRegistry   clusterMembership // optional; nil means no cluster-policies cascade
-	logger            logging.Logger    // never nil after construction; see log()
+	clusterRegistry   clusterMembership  // optional; nil means no cluster-policies cascade
+	roleProvider      roleConfigProvider // optional; nil means no role-policies cascade
+	logger            logging.Logger     // never nil after construction; see log()
 }
 
 // log returns the resolver's logger, defaulting to a NoopLogger when the resolver
@@ -122,6 +144,21 @@ func NewInheritanceResolverWithClusters(configStore configSourceRouter, clientTe
 		clientTenantStore: clientTenantStore,
 		tenantStore:       tenantStore,
 		clusterRegistry:   registry,
+		logger:            logging.NewLogger("info"),
+	}
+}
+
+// NewInheritanceResolverWithRoles creates an InheritanceResolver with both a cluster
+// membership provider and a role config provider wired in. Pass nil for either to
+// disable that cascade layer. Role fragments are applied after cluster-policies and
+// before device-level config (precedence order: cluster < role < device).
+func NewInheritanceResolverWithRoles(configStore configSourceRouter, clientTenantStore business.ClientTenantStore, tenantStore business.TenantStore, registry clusterMembership, roles roleConfigProvider) *InheritanceResolver {
+	return &InheritanceResolver{
+		configStore:       configStore,
+		clientTenantStore: clientTenantStore,
+		tenantStore:       tenantStore,
+		clusterRegistry:   registry,
+		roleProvider:      roles,
 		logger:            logging.NewLogger("info"),
 	}
 }
@@ -205,6 +242,25 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 					"tenant_id", tenantID,
 					"cluster", clusterName,
 					"error", err.Error())
+			}
+		}
+	}
+
+	// Apply role-policies after cluster-policies and before device config.
+	// Each role whose selector matches this steward contributes a config fragment.
+	// Fragments are applied in alphabetical role-name order so multiple matching
+	// roles produce a deterministic merge (later name overrides earlier for the same
+	// resource). A provider hiccup must not fail resolution — log and treat as no roles.
+	if ir.roleProvider != nil {
+		fragments, err := ir.roleProvider.MatchingRoleFragments(ctx, stewardID)
+		if err != nil {
+			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
+				"steward_id", stewardID,
+				"tenant_id", tenantID,
+				"error", err.Error())
+		} else {
+			for _, frag := range fragments {
+				ir.applyRoleFragment(effective, tenantID, frag)
 			}
 		}
 	}
@@ -314,6 +370,19 @@ func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, ef
 
 	ir.applyConfigurationWithSource(effective, &clusterConfig, inheritSrc)
 	return nil
+}
+
+// applyRoleFragment merges a single role config fragment into effective. The
+// InheritanceSource level (LevelGroup+2) places role fragments between
+// cluster-policies (LevelGroup+1) and device-level (LevelDevice) in source metadata.
+func (ir *InheritanceResolver) applyRoleFragment(effective *EffectiveConfiguration, tenantID string, frag RoleFragment) {
+	inheritSrc := &InheritanceSource{
+		Level:      int(LevelGroup) + 2, // between cluster-policies and device in merge order
+		TenantID:   tenantID,
+		ConfigName: frag.Name,
+		Source:     fmt.Sprintf("Role (role-policies/%s)", frag.Name),
+	}
+	ir.applyConfigurationWithSource(effective, &frag.Config, inheritSrc)
 }
 
 // applyDeviceConfiguration applies device-specific configuration
