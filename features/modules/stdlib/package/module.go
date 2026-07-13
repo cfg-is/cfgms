@@ -4,8 +4,8 @@ package package_module
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/cfgis/cfgms/features/modules"
 )
@@ -53,33 +53,52 @@ func NewPackageModule(mgr PackageManager) (*PackageModule, error) {
 	}, nil
 }
 
-// Get returns the current state of a package
-func (m *PackageModule) Get(ctx context.Context, name string) (modules.ConfigState, error) {
-	if err := validatePackageName(name); err != nil {
+// Configure implements modules.Configurable. The executor calls this before Get
+// so the module learns the effective package name (config.Name) ahead of the state read.
+func (m *PackageModule) Configure(config modules.ConfigState) error {
+	if config == nil {
+		return ErrInvalidConfig
+	}
+	configMap := config.AsMap()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if nameVal, ok := configMap["name"].(string); ok {
+		m.resolvedName = nameVal
+	} else {
+		m.resolvedName = ""
+	}
+	return nil
+}
+
+// Get returns the current state of a package.
+// It queries by the name stored via Configure (config.Name), falling back to
+// resourceID when Configure has not been called or config.Name was empty.
+func (m *PackageModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
+	m.mu.RLock()
+	pkgName := m.resolvedName
+	m.mu.RUnlock()
+	if pkgName == "" {
+		pkgName = resourceID
+	}
+
+	if err := validatePackageName(pkgName); err != nil {
 		return nil, err
 	}
 
-	version, err := m.packageManager.GetInstalledVersion(ctx, name)
+	version, err := m.packageManager.GetInstalledVersion(ctx, pkgName)
 	if err != nil {
-		// If package is not installed, return absent state
-		if strings.Contains(err.Error(), "not installed") {
-			config := &Config{
-				Name:  name,
-				State: "absent",
-			}
-			return config, nil
+		if errors.Is(err, ErrPackageNotFound) {
+			return &Config{Name: pkgName, State: "absent"}, nil
 		}
 		return nil, fmt.Errorf("failed to get package version: %w", err)
 	}
 
-	// Include package manager information in the response
-	config := &Config{
-		Name:           name,
+	return &Config{
+		Name:           pkgName,
 		State:          "present",
 		Version:        version,
 		PackageManager: m.packageManager.Name(),
-	}
-	return config, nil
+	}, nil
 }
 
 // Set updates the state of a package
@@ -125,14 +144,14 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 		cfg.PackageManager = pkgMgr
 	}
 
+	// When config.Name is unset, fall back to resourceID so validate() can proceed.
+	if cfg.Name == "" {
+		cfg.Name = name
+	}
+
 	// Validate the configuration
 	if err := cfg.validate(); err != nil {
 		return err
-	}
-
-	// Validate that resource ID matches package name
-	if cfg.Name != name {
-		return ErrResourceIDMismatch
 	}
 
 	// Validate the requested package manager against the active one
@@ -142,8 +161,12 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 		}
 	}
 
+	// pkgName is the distribution package name (config.Name), which may differ
+	// from the resource identifier (name/resourceID) on apt systems.
+	pkgName := cfg.Name
+
 	if cfg.State == "absent" {
-		return m.packageManager.Remove(ctx, name)
+		return m.packageManager.Remove(ctx, pkgName)
 	}
 
 	// If update flag is set, use latest version
@@ -163,7 +186,7 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 		}
 
 		// Check for circular dependencies
-		if dep == name {
+		if dep == pkgName {
 			return ErrCircularDependency
 		}
 
@@ -174,5 +197,5 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 		}
 	}
 
-	return m.packageManager.Install(ctx, name, cfg.Version)
+	return m.packageManager.Install(ctx, pkgName, cfg.Version)
 }

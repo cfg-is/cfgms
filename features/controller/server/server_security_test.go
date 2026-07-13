@@ -623,10 +623,15 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 
 	// Race detector adds 5-10x overhead, and full suite load adds further contention.
 	// Windows NTFS + concurrent Git init is significantly slower than Linux tmpfs.
-	// Each concurrent server creation involves: Git init, RBAC setup, storage init.
+	// Each concurrent server creation involves: RBAC setup, flatfile+SQLite storage init.
 	timeout := 5 * time.Second
 	if raceDetectorEnabled() || runtime.GOOS == "windows" {
 		timeout = 45 * time.Second // Race detector overhead or Windows FS contention
+	}
+	if runtime.GOOS == "windows" {
+		// Windows filesystem ops (SQLite WAL, directory creation) are 5-10x slower
+		// than Linux for concurrent workloads on CI runners.
+		timeout = 60 * time.Second
 	}
 
 	// Test concurrent server creation (should be thread-safe)

@@ -9,6 +9,25 @@ import (
 	"strings"
 )
 
+// aptOutputIsNotFound reports whether dpkg-query output indicates the package
+// is absent from the system (as opposed to a genuine execution error).
+func aptOutputIsNotFound(output []byte) bool {
+	return strings.Contains(string(output), "no packages found matching")
+}
+
+// rpmOutputIsNotFound reports whether rpm -q output indicates the package is
+// not installed (as opposed to a genuine execution error).
+func rpmOutputIsNotFound(output []byte) bool {
+	return strings.Contains(string(output), "is not installed")
+}
+
+// pacmanOutputIsNotFound reports whether pacman -Q output indicates the
+// package was not found (as opposed to a genuine execution error).
+func pacmanOutputIsNotFound(output []byte) bool {
+	return strings.Contains(string(output), "was not found") ||
+		strings.Contains(string(output), "target not found")
+}
+
 // aptManager implements PackageManager for APT (Debian/Ubuntu)
 type aptManager struct{}
 
@@ -17,7 +36,7 @@ func newAptManager() PackageManager {
 }
 
 func (m *aptManager) Install(ctx context.Context, name, version string) error {
-	cmd := exec.CommandContext(ctx, "apt-get", "install", "-y", name)
+	cmd := exec.CommandContext(ctx, "apt-get", "install", "-y", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "="+version)
 	}
@@ -29,7 +48,7 @@ func (m *aptManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *aptManager) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "apt-get", "remove", "-y", name)
+	cmd := exec.CommandContext(ctx, "apt-get", "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -38,9 +57,12 @@ func (m *aptManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *aptManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Version}", name)
+	cmd := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Version}", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if aptOutputIsNotFound(output) {
+			return "", ErrPackageNotFound
+		}
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
 	}
 	return strings.TrimSpace(string(output)), nil
@@ -85,7 +107,7 @@ func newDnfManager() PackageManager {
 }
 
 func (m *dnfManager) Install(ctx context.Context, name, version string) error {
-	cmd := exec.CommandContext(ctx, "dnf", "install", "-y", name)
+	cmd := exec.CommandContext(ctx, "dnf", "install", "-y", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "-"+version)
 	}
@@ -97,7 +119,7 @@ func (m *dnfManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *dnfManager) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "dnf", "remove", "-y", name)
+	cmd := exec.CommandContext(ctx, "dnf", "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -106,9 +128,12 @@ func (m *dnfManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *dnfManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}", name)
+	cmd := exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if rpmOutputIsNotFound(output) {
+			return "", ErrPackageNotFound
+		}
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
 	}
 	return strings.TrimSpace(string(output)), nil
@@ -153,7 +178,7 @@ func newYumManager() PackageManager {
 }
 
 func (m *yumManager) Install(ctx context.Context, name, version string) error {
-	cmd := exec.CommandContext(ctx, "yum", "install", "-y", name)
+	cmd := exec.CommandContext(ctx, "yum", "install", "-y", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "-"+version)
 	}
@@ -165,7 +190,7 @@ func (m *yumManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *yumManager) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "yum", "remove", "-y", name)
+	cmd := exec.CommandContext(ctx, "yum", "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -174,9 +199,12 @@ func (m *yumManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *yumManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}", name)
+	cmd := exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if rpmOutputIsNotFound(output) {
+			return "", ErrPackageNotFound
+		}
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
 	}
 	return strings.TrimSpace(string(output)), nil
@@ -221,7 +249,7 @@ func newPacmanManager() PackageManager {
 }
 
 func (m *pacmanManager) Install(ctx context.Context, name, version string) error {
-	cmd := exec.CommandContext(ctx, "pacman", "-S", "--noconfirm", name)
+	cmd := exec.CommandContext(ctx, "pacman", "-S", "--noconfirm", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "="+version)
 	}
@@ -233,7 +261,7 @@ func (m *pacmanManager) Install(ctx context.Context, name, version string) error
 }
 
 func (m *pacmanManager) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "pacman", "-R", "--noconfirm", name)
+	cmd := exec.CommandContext(ctx, "pacman", "-R", "--noconfirm", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -242,9 +270,12 @@ func (m *pacmanManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *pacmanManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "pacman", "-Q", name)
+	cmd := exec.CommandContext(ctx, "pacman", "-Q", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if pacmanOutputIsNotFound(output) {
+			return "", ErrPackageNotFound
+		}
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
 	}
 

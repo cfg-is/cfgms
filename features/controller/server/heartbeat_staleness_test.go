@@ -117,16 +117,18 @@ func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 	}, 2*time.Second, 25*time.Millisecond,
 		"durable store must reach StewardStatusLost after heartbeat timeout")
 
-	// Stop the service to shut down the staleness-monitor goroutine before
-	// the recovery phase. Without this, the monitor can re-fire after another
-	// StewardOfflineTimeout and overwrite StewardStatusActive with Lost before
-	// the assertion observes it (structural race; option b from review finding).
-	// handleHeartbeatFromProvider remains callable after Stop because the
-	// control plane's SubscribeHeartbeats registration persists.
+	// Recovery. Stop the background staleness monitor first: with a 50ms
+	// StewardOfflineTimeout the monitor would re-expire the steward ~50ms after
+	// the recovery heartbeat refreshes receivedAt, so the recovery→Active state
+	// is only transiently true and racing it with a poll is inherently flaky.
+	// A real deployment never hits this because live stewards keep heartbeating
+	// within the (60s) timeout; the tiny test timeout is what makes Active
+	// transient. handleHeartbeatFromProvider fires OnStatusChange synchronously,
+	// so once the monitor is halted the recovery write is deterministic.
 	require.NoError(t, svc.Stop(ctx))
 
-	// Recovery: a fresh heartbeat fires OnStatusChange(healthy=true) which
-	// must flip the status to StewardStatusActive.
+	// A fresh heartbeat fires OnStatusChange(healthy=true) which must flip the
+	// durable status to StewardStatusActive — synchronously, inside sendHeartbeat.
 	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
 		StewardID: stewardID,
 		Status:    controlplaneTypes.StatusHealthy,
@@ -135,8 +137,8 @@ func TestHeartbeatOnStatusChange_PersistsLostStatus(t *testing.T) {
 
 	// The recovery path is synchronous: handleHeartbeatFromProvider →
 	// onStatusChange → UpdateStewardStatus. Assert directly without polling.
-	rec, recErr := st.GetSteward(ctx, stewardID)
-	require.NoError(t, recErr)
+	rec, err := st.GetSteward(ctx, stewardID)
+	require.NoError(t, err)
 	assert.Equal(t, business.StewardStatusActive, rec.Status,
 		"durable store must reach StewardStatusActive on heartbeat recovery")
 }

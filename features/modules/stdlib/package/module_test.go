@@ -432,6 +432,97 @@ version: "1 2 3"
 	}
 }
 
+// TestPackageModule_ConfigNameDiffersFromResourceID is the acceptance-criterion test
+// for Issue #2478: resource named docker-engine, config.name docker.io, fake apt
+// executor reporting not-installed → Set installs docker.io; second converge with
+// installed state reports compliant (no reinstall).
+func TestPackageModule_ConfigNameDiffersFromResourceID(t *testing.T) {
+	t.Run("apt not-installed then install uses config.name", func(t *testing.T) {
+		mgr := newTestPackageManager()
+		m, err := NewPackageModule(mgr)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		resourceID := "docker-engine"
+		cfg := createConfigFromYAML(`
+name: docker.io
+state: present
+version: latest
+`)
+
+		// Executor calls Configure before Get so the module knows the package name.
+		configurable, ok := modules.Module(m).(modules.Configurable)
+		require.True(t, ok, "PackageModule must implement modules.Configurable")
+		require.NoError(t, configurable.Configure(cfg))
+
+		// First converge: docker.io not installed → Get returns absent.
+		state, err := m.Get(ctx, resourceID)
+		require.NoError(t, err, "Get on not-installed package must return absent, not an error")
+		assert.Equal(t, "absent", state.AsMap()["state"])
+
+		// Set must install docker.io, not docker-engine.
+		require.NoError(t, m.Set(ctx, resourceID, cfg))
+		_, dockerIOInstalled := mgr.installed["docker.io"]
+		assert.True(t, dockerIOInstalled, "docker.io must be installed")
+		_, dockerEngineInstalled := mgr.installed["docker-engine"]
+		assert.False(t, dockerEngineInstalled, "docker-engine must NOT be installed")
+
+		// Second converge: Configure again, then Get → present (compliant, no reinstall).
+		require.NoError(t, configurable.Configure(cfg))
+		state, err = m.Get(ctx, resourceID)
+		require.NoError(t, err)
+		assert.Equal(t, "present", state.AsMap()["state"])
+		assert.Equal(t, 1, len(mgr.installed), "only docker.io should be installed; no duplicate")
+	})
+
+	t.Run("not-installed is absent state not error", func(t *testing.T) {
+		mgr := newTestPackageManager()
+		m, err := NewPackageModule(mgr)
+		require.NoError(t, err)
+
+		state, err := m.Get(context.Background(), "git")
+		require.NoError(t, err, "Get on uninstalled package must not return an error")
+		assert.Equal(t, "absent", state.AsMap()["state"])
+	})
+
+	t.Run("config.name same as resourceID still works", func(t *testing.T) {
+		mgr := newTestPackageManager()
+		m, err := NewPackageModule(mgr)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		cfg := createConfigFromYAML(`
+name: nginx
+state: present
+version: latest
+`)
+		configurable := modules.Module(m).(modules.Configurable)
+		require.NoError(t, configurable.Configure(cfg))
+
+		require.NoError(t, m.Set(ctx, "nginx", cfg))
+
+		state, err := m.Get(ctx, "nginx")
+		require.NoError(t, err)
+		assert.Equal(t, "present", state.AsMap()["state"])
+	})
+
+	t.Run("remove uses config.name not resourceID", func(t *testing.T) {
+		mgr := newTestPackageManager()
+		mgr.installed["docker.io"] = "latest"
+		m, err := NewPackageModule(mgr)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		cfg := createConfigFromYAML(`
+name: docker.io
+state: absent
+`)
+		require.NoError(t, m.Set(ctx, "docker-engine", cfg))
+		_, stillInstalled := mgr.installed["docker.io"]
+		assert.False(t, stillInstalled, "docker.io must be removed")
+	})
+}
+
 // TestErrPackageModule verifies that a module constructed from a failed init
 // returns the init error from both Get and Set rather than fake data.
 func TestErrPackageModule(t *testing.T) {
@@ -475,7 +566,17 @@ func TestPackageModule_ErrorPaths(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidConfig)
 	})
 
-	t.Run("ResourceIDMismatch", func(t *testing.T) {
+	t.Run("Configure_NilConfig", func(t *testing.T) {
+		m, err := NewPackageModule(newTestPackageManager())
+		require.NoError(t, err)
+		// Pass nil modules.ConfigState to trigger the config == nil guard in
+		// Configure() at module.go:59.
+		err = m.Configure(nil)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("ConfigNameDiffersFromResourceID", func(t *testing.T) {
+		// config.name different from resourceID is now valid: Set installs config.name
 		m, err := NewPackageModule(newTestPackageManager())
 		require.NoError(t, err)
 		cfg := createConfigFromYAML(`
@@ -484,7 +585,7 @@ state: present
 version: latest
 `)
 		err = m.Set(context.Background(), "nginx", cfg)
-		assert.ErrorIs(t, err, ErrResourceIDMismatch)
+		assert.NoError(t, err)
 	})
 
 	t.Run("InvalidPackageManager", func(t *testing.T) {
@@ -530,4 +631,79 @@ dependencies:
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "npm")
 	})
+}
+
+// TestLinux_NotFoundDetectionHelpers verifies the output-parsing helpers that
+// map OS package manager exit output to ErrPackageNotFound. These functions are
+// unit-testable without calling the real binaries.
+func TestLinux_NotFoundDetectionHelpers(t *testing.T) {
+	t.Run("aptOutputIsNotFound", func(t *testing.T) {
+		cases := []struct {
+			output string
+			want   bool
+		}{
+			{"dpkg-query: no packages found matching git\n", true},
+			{"dpkg-query: no packages found matching docker.io\n", true},
+			{"2.39.2\n", false},
+			{"", false},
+			{"error: something else\n", false},
+		}
+		for _, tc := range cases {
+			got := aptOutputIsNotFound([]byte(tc.output))
+			assert.Equal(t, tc.want, got, "aptOutputIsNotFound(%q)", tc.output)
+		}
+	})
+
+	t.Run("rpmOutputIsNotFound", func(t *testing.T) {
+		cases := []struct {
+			output string
+			want   bool
+		}{
+			{"package git is not installed\n", true},
+			{"package docker-ce is not installed\n", true},
+			{"2.39.2\n", false},
+			{"", false},
+			{"rpmdb: cannot open Packages\n", false},
+		}
+		for _, tc := range cases {
+			got := rpmOutputIsNotFound([]byte(tc.output))
+			assert.Equal(t, tc.want, got, "rpmOutputIsNotFound(%q)", tc.output)
+		}
+	})
+
+	t.Run("pacmanOutputIsNotFound", func(t *testing.T) {
+		cases := []struct {
+			output string
+			want   bool
+		}{
+			{"error: package 'git' was not found\n", true},
+			{"error: target not found: docker\n", true},
+			{"git 2.39.2-1\n", false},
+			{"", false},
+			{"error: failed to init transaction\n", false},
+		}
+		for _, tc := range cases {
+			got := pacmanOutputIsNotFound([]byte(tc.output))
+			assert.Equal(t, tc.want, got, "pacmanOutputIsNotFound(%q)", tc.output)
+		}
+	})
+}
+
+// TestValidatePackageName_RejectsLeadingDash verifies that names starting with
+// '-' are rejected to prevent argument injection into root-run package managers.
+func TestValidatePackageName_RejectsLeadingDash(t *testing.T) {
+	dangerous := []string{
+		"--allow-unauthenticated",
+		"-oAPT::Get::AllowUnauthenticated=true",
+		"--setopt=gpgcheck=0",
+		"-y",
+	}
+	for _, name := range dangerous {
+		err := validatePackageName(name)
+		assert.ErrorIs(t, err, ErrInvalidPackageName, "validatePackageName(%q) should reject leading dash", name)
+	}
+
+	// Valid package names with dots (e.g. docker.io) must still pass.
+	assert.NoError(t, validatePackageName("docker.io"))
+	assert.NoError(t, validatePackageName("python3-pip"))
 }

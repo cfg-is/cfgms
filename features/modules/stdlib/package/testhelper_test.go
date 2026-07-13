@@ -85,7 +85,7 @@ func (m *testPackageManager) GetInstalledVersion(ctx context.Context, name strin
 	if version, ok := m.installed[name]; ok {
 		return version, nil
 	}
-	return "", fmt.Errorf("package %s not installed", name)
+	return "", ErrPackageNotFound
 }
 
 func (m *testPackageManager) ListInstalled(ctx context.Context) (map[string]string, error) {

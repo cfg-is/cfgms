@@ -457,8 +457,15 @@ func (sm *SystemMonitor) GetMetrics() *SystemMetrics {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	// Return a copy to prevent external modification
+	// Return a copy to prevent external modification. The shallow struct copy
+	// shares the ComponentMetrics map with the live systemMetrics, so deep-copy
+	// it under the lock to avoid a data race with concurrent writes in
+	// collectMetrics (which runs on the metrics collection goroutine).
 	metrics := *sm.systemMetrics
+	metrics.ComponentMetrics = make(map[string]interface{}, len(sm.systemMetrics.ComponentMetrics))
+	for name, value := range sm.systemMetrics.ComponentMetrics {
+		metrics.ComponentMetrics[name] = value
+	}
 	return &metrics
 }
 
