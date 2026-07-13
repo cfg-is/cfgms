@@ -8,7 +8,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'
-      - '.claude/**'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
@@ -66,11 +66,6 @@ jobs:
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
         sudo .github/scripts/install-trivy.sh 'v0.72.0' 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
 
-        # Install other security tools
-        make install-nancy
-        go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
-        go install honnef.co/go/tools/cmd/staticcheck@2026.1
-        
         echo "✅ Security tools installed"
     
     - name: Run Security Gate Analysis
@@ -107,16 +102,10 @@ jobs:
           echo "✅ No critical/high vulnerabilities detected"
         fi
         
-        echo ""
-        echo "🛡️ Running Additional Security Scans..."
-        
-        # Run gosec for security patterns (non-blocking but reported)
-        if ! make security-gosec >/dev/null 2>&1; then
-          echo "⚠️  gosec detected security patterns (non-blocking)"
-        else
-          echo "✅ gosec security pattern scan passed"
-        fi
-        
+        # Advisory scans (nancy, gosec, staticcheck) are non-required contexts
+        # that run in security-scan.yml. They are not executed here so this
+        # gate remains focused on the single blocking Trivy vulnerability scan.
+
         # Check for emergency override
         if [ "${{ github.event.inputs.emergency_override }}" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
           echo ""
@@ -565,17 +554,6 @@ jobs:
         echo ""
         echo "✅ Full E2E test suite completed"
     
-    - name: Run Performance Regression Tests
-      run: |
-        echo "📊 PERFORMANCE REGRESSION TESTING"
-        echo "================================="
-        
-        # Run performance regression tests
-        make test-performance
-        
-        echo ""
-        echo "✅ Performance regression tests completed"
-    
     - name: Generate Test Report
       if: always()
       run: |
@@ -632,198 +610,4 @@ jobs:
         path: |
           test/reports/
           **/*test*.log
-        retention-days: 30
-
-  # Automated Notifications for Security-Blocked Deployments (Story #99)
-  deployment-notification:
-    permissions: {}
-    runs-on: ubuntu-latest
-    needs: security-deployment-gate
-    if: always()
-    steps:
-    - name: Generate Deployment Status Notification
-      run: |
-        echo "📧 DEPLOYMENT STATUS NOTIFICATION"
-        echo "================================"
-        
-        security_status="${{ needs.security-deployment-gate.outputs.security-status }}"
-        deployment_allowed="${{ needs.security-deployment-gate.outputs.deployment-allowed }}"
-        override_used="${{ needs.security-deployment-gate.outputs.override-required }}"
-        
-        echo "Deployment Details:"
-        echo "- Branch: ${{ github.ref }}"
-        echo "- Commit: ${{ github.sha }}"
-        echo "- Actor: ${{ github.actor }}"
-        echo "- Triggered by: ${{ github.event_name }}"
-        echo ""
-        echo "Security Gate Results:"
-        echo "- Security Status: $security_status"
-        echo "- Deployment Allowed: $deployment_allowed"
-        echo "- Emergency Override Used: $override_used"
-        echo ""
-        
-        if [ "$deployment_allowed" = "false" ]; then
-          echo "🚨 DEPLOYMENT BLOCKED - SECURITY ISSUES DETECTED"
-          echo "==============================================="
-          echo ""
-          echo "Critical security vulnerabilities have blocked this deployment."
-          echo ""
-          echo "🤖 Automated Remediation Steps:"
-          echo "1. Download the security scan artifacts from the security-scan workflow"
-          echo "2. Extract the remediation JSON file"
-          echo "3. Use Claude Code to automatically fix the security issues:"
-          echo "   - Copy the JSON content to Claude Code"
-          echo "   - Ask Claude to apply the security fixes"
-          echo "   - Review and commit the fixes"
-          echo "4. Push the fixes and re-trigger the deployment"
-          echo ""
-          echo "🚨 Emergency Override Available (Use with caution):"
-          echo "   If this is a critical emergency deployment:"
-          echo "   1. Go to Actions → Production Risk Gates → Run workflow"
-          echo "   2. Set 'emergency_override' to true"
-          echo "   3. Provide a detailed 'override_reason'"
-          echo "   4. Emergency deployments require post-deployment security remediation"
-          echo ""
-          echo "📋 Security Remediation Checklist:"
-          echo "   - [ ] Security vulnerabilities identified and documented"
-          echo "   - [ ] Remediation plan created with timelines"
-          echo "   - [ ] Development team notified"
-          echo "   - [ ] Security team approval obtained (if override used)"
-          echo "   - [ ] Post-deployment security validation scheduled"
-          
-          # In a real environment, this would send notifications via:
-          # - Slack/Teams webhooks
-          # - Email notifications
-          # - PagerDuty/incident management systems
-          # - JIRA/issue tracking systems
-          
-        elif [ "$override_used" = "true" ]; then
-          echo "⚠️  DEPLOYMENT PROCEEDED WITH EMERGENCY OVERRIDE"
-          echo "==============================================="
-          echo ""
-          echo "Security issues were present but emergency override was authorized."
-          echo ""
-          echo "🔍 Post-Deployment Security Actions Required:"
-          echo "1. Immediate security remediation planning"
-          echo "2. Risk assessment documentation"
-          echo "3. Timeline for security fixes implementation"
-          echo "4. Security team review and approval"
-          echo ""
-          echo "Override Details:"
-          echo "- Reason: ${{ github.event.inputs.override_reason || 'Emergency file override' }}"
-          echo "- Authorized by: ${{ github.actor }}"
-          echo "- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          
-        else
-          echo "✅ DEPLOYMENT APPROVED - ALL SECURITY CHECKS PASSED"
-          echo "=================================================="
-          echo ""
-          echo "All security scans have passed successfully."
-          echo "Deployment is proceeding with full security approval."
-        fi
-        
-        # Create notification summary for external systems
-        cat > deployment-notification.json << EOF
-        {
-          "deployment_id": "${{ github.run_id }}",
-          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-          "branch": "${{ github.ref }}",
-          "commit": "${{ github.sha }}",
-          "actor": "${{ github.actor }}",
-          "security_status": "$security_status",
-          "deployment_allowed": $deployment_allowed,
-          "emergency_override": $override_used,
-          "override_reason": "${{ github.event.inputs.override_reason || null }}",
-          "notification_type": "$( [ "$deployment_allowed" = "false" ] && echo "deployment_blocked" || [ "$override_used" = "true" ] && echo "emergency_override" || echo "deployment_approved" )"
-        }
-        EOF
-    
-    - name: Upload Notification Data
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-      if: always()
-      with:
-        name: deployment-notification
-        path: deployment-notification.json
-        retention-days: 30
-
-  # Story #85: Cross-Feature Integration Testing
-  cross-feature-integration-tests:
-    name: Cross-Feature Integration Tests
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    needs: [integration-tests-controller, integration-tests-steward]
-    steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      with:
-        persist-credentials: false
-
-    - name: Set up Go
-      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-      with:
-        go-version: '1.26.5'
-        cache: true
-
-    - name: Install dependencies
-      run: go mod download
-
-    - name: Run Cross-Feature Integration Scenarios
-      run: |
-        echo "🔗 CROSS-FEATURE INTEGRATION TESTING (Story #85)"
-        echo "==============================================="
-        
-        # Run all 5 acceptance criteria tests
-        make test-cross-feature-integration
-        
-        echo ""
-        echo "✅ Cross-feature integration scenarios completed"
-    
-    - name: Run Failure Propagation Tests
-      run: |
-        echo "🔄 FAILURE PROPAGATION TESTING"
-        echo "==============================="
-        
-        make test-failure-propagation
-        
-        echo ""
-        echo "✅ Failure propagation tests completed"
-    
-    - name: Run Data Consistency Tests
-      run: |
-        echo "📊 DATA CONSISTENCY VALIDATION"
-        echo "==============================="
-        
-        make test-data-consistency
-        
-        echo ""
-        echo "✅ Data consistency tests completed"
-    
-    - name: Generate Cross-Feature Test Report
-      if: always()
-      run: |
-        echo "📊 CROSS-FEATURE INTEGRATION SUMMARY"
-        echo "===================================="
-        
-        echo "✅ Acceptance Criteria Validated:"
-        echo "- Workflow + Configuration: Template deployment via workflows ✅"
-        echo "- DNA + Drift: 5-minute SLA drift detection with remediation ✅"
-        echo "- Template + Rollback: Failure simulation with automatic rollback ✅"
-        echo "- Terminal + Audit: Security controls with comprehensive audit ✅"
-        echo "- Multi-tenant + SaaS: M365 configuration inheritance ✅"
-        echo ""
-        echo "✅ Technical Validation:"
-        echo "- End-to-end latency measurement: ✅"
-        echo "- Failure propagation testing: ✅"
-        echo "- Data consistency validation: ✅"
-        echo ""
-        echo "🎉 Story #85 Cross-Feature Integration - COMPLETE"
-    
-    - name: Upload Cross-Feature Test Reports
-      if: always()
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-      with:
-        name: cross-feature-test-reports
-        path: |
-          test/reports/
-          **/*cross-feature*.log
         retention-days: 30

@@ -23,6 +23,9 @@ interfaces:
   - Set
   - Test
 
+owns:
+  - kind: service  # authority over service:* objects this module manages
+
 security:
   requires_root: true  # start/stop/enable/disable require elevated privileges
   capabilities: []

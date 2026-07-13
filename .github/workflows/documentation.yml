@@ -7,7 +7,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
-      - '.claude/**'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
       - '.gitignore'
       - '.editorconfig'
       - 'LICENSE'
@@ -19,7 +19,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
-      - '.claude/**'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
       - '.gitignore'
       - '.editorconfig'
       - 'LICENSE'

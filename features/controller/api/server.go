@@ -31,6 +31,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/controller/tagstore"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/monitoring"
 	"github.com/cfgis/cfgms/features/rbac"
@@ -137,6 +138,8 @@ type Server struct {
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
+	roleConfigStore                cfgconfig.ConfigStore                 // Issue #2543: role-config storage under role-policies namespace
+	tagStore                       *tagstore.Store                       // Issue #2545: steward tag store for tag: selector support
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -505,6 +508,18 @@ func (s *Server) setupRouter() {
 	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
 	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
 	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
+
+	// Steward tag management endpoints (Issue #2545)
+	stewards.Handle("/{id}/tags", s.requirePermission("steward", "tag:read")(http.HandlerFunc(s.handleListStewardTags))).Methods("GET")
+	stewards.Handle("/{id}/tags", s.requirePermission("steward", "tag:write")(http.HandlerFunc(s.handleAddStewardTags))).Methods("POST")
+	stewards.Handle("/{id}/tags", s.requirePermission("steward", "tag:write")(http.HandlerFunc(s.handleDeleteStewardTags))).Methods("DELETE")
+
+	// Role config endpoints (Issue #2543)
+	roles := api.PathPrefix("/roles").Subrouter()
+	roles.Handle("", s.requirePermission("role", "read")(http.HandlerFunc(s.handleListRoleConfigs))).Methods("GET")
+	roles.Handle("", s.requirePermission("role", "write")(http.HandlerFunc(s.handleCreateRoleConfig))).Methods("POST")
+	roles.Handle("/{name}", s.requirePermission("role", "read")(http.HandlerFunc(s.handleGetRoleConfig))).Methods("GET")
+	roles.Handle("/{name}", s.requirePermission("role", "write")(http.HandlerFunc(s.handleDeleteRoleConfig))).Methods("DELETE")
 
 	// Audit log readback endpoint (Issue #2190)
 	api.Handle("/audit/entries", s.requirePermission("audit", "list")(http.HandlerFunc(s.handleListAuditEntries))).Methods("GET")
@@ -1014,6 +1029,23 @@ func (s *Server) SetPrivilegeStore(cs cfgconfig.ConfigStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.privilegeStore = cs
+}
+
+// SetRoleConfigStore wires the config store used to persist role configs under
+// the role-policies namespace (Issue #2543).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetRoleConfigStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.roleConfigStore = cs
+}
+
+// SetTagStore wires the tag store for steward tag management (Issue #2545).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetTagStore(ts *tagstore.Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tagStore = ts
 }
 
 // SetRegistry wires the active-steward connection registry so that

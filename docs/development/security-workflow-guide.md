@@ -24,8 +24,8 @@ The CFGMS security workflow integrates four complementary security scanning tool
 
 - **Purpose**: Scans filesystem for known vulnerabilities in dependencies and infrastructure
 - **Scope**: Critical/High CVEs, secrets, misconfigurations
-- **Blocking**: Yes (Critical/High vulnerabilities block deployment)
-- **SARIF Support**: Yes (GitHub Security tab integration)
+- **Blocking**: Yes — two enforcement points: (1) `trivy-scan` is a required PR/merge-queue context that exits 1 on findings; (2) `security-deployment-gate` in `production-gates.yml` also runs Trivy with `--exit-code 1`
+- **SARIF Support**: Yes (GitHub Security tab integration; uploaded with `if: always()` so findings land in the Security tab even when the job fails)
 
 ### 2. Nancy - Go Dependency Scanning
 
@@ -162,17 +162,17 @@ make test-with-security  # Runs: test + security-scan + summary
 
 **Security Gate Features**:
 
-- Critical/High vulnerability blocking
+- Critical/High vulnerability blocking via Trivy (`--exit-code 1`)
 - Emergency override mechanism
 - Comprehensive audit trail
-- Automated notifications
 - Integration with existing release gates
+
+**Scope**: `security-deployment-gate` runs only the blocking Trivy scan. Advisory tools (nancy, gosec, staticcheck) run as non-required contexts in `security-scan.yml` and are not executed here.
 
 **Gate Flow**:
 
-1. `security-deployment-gate` - Primary security validation
+1. `security-deployment-gate` - Primary security validation (Trivy only)
 2. `production-risk-assessment` - Risk analysis (requires security approval)
-3. `deployment-notification` - Automated status notifications
 
 ## Production Deployment Gates
 
@@ -236,7 +236,6 @@ Every override creates comprehensive audit documentation:
 **Audit Artifacts**:
 
 - `security-deployment-audit` (90-day retention)
-- `deployment-notification` (30-day retention)
 
 ### Post-Override Requirements
 

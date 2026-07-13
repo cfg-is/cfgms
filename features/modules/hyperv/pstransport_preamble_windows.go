@@ -53,6 +53,21 @@ function Cfgms-GetVM {
     # boot/data disk we manage). $vm.Path on its own caused the #1887 B1
     # verification to find 2-changed drift on every successful create.
     $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    # A checkpoint layers a differencing disk (.avhdx) as the ACTIVE disk; the
+    # configured base .vhdx becomes the read-only root of the parent chain. Report
+    # the chain ROOT as the VHD path so a checkpointed VM — still on its configured
+    # disk — does not show false vhd_path drift (#2626). Degrade to the raw path if
+    # Get-VHD fails (non-VHD/inaccessible). CheckpointCount is observed-only DNA
+    # (not a managed field) so checkpoints are visible but never treated as drift.
+    $diskPath = if ($disk) { $disk.Path } else { '' }
+    $rootPath = $diskPath
+    if ($diskPath) {
+        try {
+            $v = Get-VHD -Path $diskPath -ErrorAction Stop
+            while ($v.ParentPath) { $rootPath = $v.ParentPath; $v = Get-VHD -Path $v.ParentPath -ErrorAction Stop }
+        } catch { Write-Warning "Get-VHD chain resolution failed for $diskPath: $($_.Exception.Message)" }
+    }
+    $checkpointCount = @(Get-VMSnapshot -VMName $Name -ErrorAction SilentlyContinue).Count
     # $vm.MemoryStartupBytes is empty on Server 2025's Hyper-V PowerShell
     # module — that property only populates via Get-VMMemory (the proper
     # accessor). Using $vm.<prop> directly returns nil on 2025 even though
@@ -67,11 +82,14 @@ function Cfgms-GetVM {
         MemoryStartupBytes = $startupBytes
         ProcessorCount     = [int]$vm.ProcessorCount
         Generation         = [int]$vm.Generation
-        Path               = if ($disk) { $disk.Path } else { '' }
+        Path               = $rootPath
         # The VM's configuration-file directory (#2411). Observed state for the
         # declarative storage-location convergence: the desired location is
         # always dir(vhd_path), so config files anywhere else are drift.
         ConfigurationLocation = [string]$vm.ConfigurationLocation
+        # Observed-only (#2626): number of checkpoints on the VM. Surfaced for
+        # visibility; absent from GetManagedFields so it never counts as drift.
+        CheckpointCount    = [int]$checkpointCount
         SwitchName         = if ($switchNames.Count -gt 0) { $switchNames[0] } else { '' }
         SwitchNames        = $switchNames
         State              = $vm.State.ToString()

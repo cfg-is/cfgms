@@ -17,6 +17,10 @@ interfaces:
   - Get
   - Set
   - Test
+
+owns:
+  - kind: firewall  # authority over firewall:* objects this module manages
+
 security:
   requires_root: true
   capabilities: []

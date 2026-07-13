@@ -173,7 +173,7 @@ func (m *fileModule) Set(ctx context.Context, resourceID string, config modules.
 
 	switch fileConfig.resolvedType() {
 	case "symlink":
-		return modules.ErrNotImplemented
+		return ErrSymlinkNotSupported
 	case "directory":
 		return m.setDirectory(ctx, resourceID, cleanPath, fileConfig)
 	default: // "file"
@@ -233,7 +233,7 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 
 	logger.InfoCtx(ctx, "Starting file configuration",
 		"operation", "file_set",
-		"resource_id", resourceID,
+		"resource_id", logging.SanitizeLogValue(resourceID),
 		"tenant_id", tenantID,
 		"resource_type", "file")
 
@@ -243,20 +243,20 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 			if os.IsNotExist(err) {
 				logger.InfoCtx(ctx, "File already absent",
 					"operation", "file_set",
-					"resource_id", resourceID,
+					"resource_id", logging.SanitizeLogValue(resourceID),
 					"status", "no_change")
 				return nil
 			}
 			logger.ErrorCtx(ctx, "Failed to remove file",
 				"operation", "file_set",
-				"resource_id", resourceID,
+				"resource_id", logging.SanitizeLogValue(resourceID),
 				"error_code", "FILE_REMOVAL_FAILED",
 				"error_details", err.Error())
 			return err
 		}
 		logger.InfoCtx(ctx, "File removed successfully",
 			"operation", "file_set",
-			"resource_id", resourceID,
+			"resource_id", logging.SanitizeLogValue(resourceID),
 			"status", "completed")
 		return nil
 	}
@@ -272,7 +272,7 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
 		logger.ErrorCtx(ctx, "unix-style permissions are not supported on this platform",
 			"operation", "file_set",
-			"resource_id", resourceID,
+			"resource_id", logging.SanitizeLogValue(resourceID),
 			"error_code", "PERMISSIONS_NOT_SUPPORTED")
 		return ErrPermissionsNotSupportedOnPlatform
 	}
@@ -284,7 +284,7 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 	if err := fileConfig.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "File configuration validation failed",
 			"operation", "file_set",
-			"resource_id", resourceID,
+			"resource_id", logging.SanitizeLogValue(resourceID),
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return err
@@ -301,7 +301,7 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 		if err := setFileACL(cleanPath, fileConfig.WindowsACL); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
 				"operation", "file_set",
-				"resource_id", resourceID,
+				"resource_id", logging.SanitizeLogValue(resourceID),
 				"error_code", "WINDOWS_ACL_FAILED",
 				"error_details", err.Error())
 			return err
@@ -310,7 +310,7 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 
 	logger.InfoCtx(ctx, "File configuration completed successfully",
 		"operation", "file_set",
-		"resource_id", resourceID,
+		"resource_id", logging.SanitizeLogValue(resourceID),
 		"file_size", len(fileConfig.Content),
 		"permissions", fmt.Sprintf("0%o", fileConfig.Permissions),
 		"status", "completed")
@@ -325,12 +325,12 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 
 	logger.InfoCtx(ctx, "Starting directory configuration",
 		"operation", "directory_set",
-		"resource_id", resourceID,
+		"resource_id", logging.SanitizeLogValue(resourceID),
 		"tenant_id", tenantID,
 		"resource_type", "directory")
 
 	if fileConfig.State == "absent" {
-		return fmt.Errorf("directory deletion is not supported: %w", modules.ErrNotImplemented)
+		return ErrDirectoryDeletionNotSupported
 	}
 
 	// Reject out-of-range values before any platform-specific handling.
@@ -343,7 +343,7 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 	if !platformSupportsPermissions() && fileConfig.Permissions != 0 {
 		logger.ErrorCtx(ctx, "unix-style permissions are not supported on this platform",
 			"operation", "directory_set",
-			"resource_id", resourceID,
+			"resource_id", logging.SanitizeLogValue(resourceID),
 			"error_code", "PERMISSIONS_NOT_SUPPORTED")
 		return ErrPermissionsNotSupportedOnPlatform
 	}
@@ -355,7 +355,7 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 	if err := fileConfig.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "Directory configuration validation failed",
 			"operation", "directory_set",
-			"resource_id", resourceID,
+			"resource_id", logging.SanitizeLogValue(resourceID),
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return err
@@ -401,7 +401,7 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 		if err := setFileACL(cleanPath, fileConfig.WindowsACL); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set Windows ACL",
 				"operation", "directory_set",
-				"resource_id", resourceID,
+				"resource_id", logging.SanitizeLogValue(resourceID),
 				"error_code", "WINDOWS_ACL_FAILED",
 				"error_details", err.Error())
 			return fmt.Errorf("setDirectoryACL: %w", err)
@@ -410,10 +410,10 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 
 	logger.InfoCtx(ctx, "Directory configuration completed successfully",
 		"operation", "directory_set",
-		"resource_id", resourceID,
+		"resource_id", logging.SanitizeLogValue(resourceID),
 		"tenant_id", tenantID,
 		"resource_type", "directory",
-		"path", cleanPath,
+		"path", logging.SanitizeLogValue(cleanPath),
 		"permissions", fmt.Sprintf("0%o", fileConfig.Permissions),
 		"status", "completed")
 
@@ -454,11 +454,11 @@ func setOwnership(ctx context.Context, cleanPath, owner, group string, logger lo
 		// #nosec G304 -- cleanPath validated by security.ValidateAndCleanPath before this call
 		if err := os.Chown(cleanPath, uid, gid); err != nil {
 			logger.ErrorCtx(ctx, "Failed to set ownership",
-				"resource_id", resourceID,
+				"resource_id", logging.SanitizeLogValue(resourceID),
 				"error_code", "OWNERSHIP_FAILED",
-				"path", cleanPath,
-				"owner", owner,
-				"group", group,
+				"path", logging.SanitizeLogValue(cleanPath),
+				"owner", logging.SanitizeLogValue(owner),
+				"group", logging.SanitizeLogValue(group),
 				"error_details", err.Error())
 			return fmt.Errorf("failed to set ownership: %w", err)
 		}
@@ -472,7 +472,7 @@ func setOwnership(ctx context.Context, cleanPath, owner, group string, logger lo
 
 	default:
 		logger.ErrorCtx(ctx, "Unsupported platform for ownership",
-			"resource_id", resourceID,
+			"resource_id", logging.SanitizeLogValue(resourceID),
 			"error_code", "UNSUPPORTED_PLATFORM",
 			"platform", runtime.GOOS)
 		return modules.ErrUnsupportedPlatform

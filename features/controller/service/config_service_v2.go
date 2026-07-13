@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/config"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -86,6 +88,143 @@ func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
 	return reg.MemberClusters(stewardID)
 }
 
+// storedRoleConfig is the JSON shape written by handlers_roles.go (features/controller/api).
+// Duplicated here without importing the api package to break the service→api→service cycle.
+type storedRoleConfig struct {
+	Name     string                     `json:"name"`
+	Selector string                     `json:"selector"`
+	Fragment stewardtypes.StewardConfig `json:"fragment"`
+}
+
+// singleStewardProvider is a fleet.StewardProvider wrapping exactly one StewardData.
+// Used by roleConfigAdapter to check filter matches via the canonical fleet.MemoryQuery
+// (which calls the unexported matchesFilter) — one matcher, two consumers (Issue #2546).
+type singleStewardProvider struct{ s fleet.StewardData }
+
+func (p *singleStewardProvider) GetAllStewards() []fleet.StewardData {
+	return []fleet.StewardData{p.s}
+}
+
+// roleConfigAdapter adapts the controller's config store and steward state to the
+// roleConfigProvider interface expected by pkg/config.InheritanceResolver.
+// It lists all role-policies for the steward's tenant, parses each selector, and
+// returns the fragments whose selector matches the steward's current DNA + tags.
+type roleConfigAdapter struct {
+	controllerSvc *ControllerService
+	configStore   cfgconfig.ConfigStore
+	logger        logging.Logger
+}
+
+// MatchingRoleFragments returns the role config fragments whose selectors match
+// stewardID's current DNA + controller-stored tags, sorted alphabetically by role name.
+// DNA currency: os/arch/runtime_os are eventually-consistent (steward-reported, refreshed
+// on DNARefreshLoop; default 30 min); tags are always-current (controller store, updated
+// on each tag admin call). Dynamic-attribute correctness is tracked by epic #2520 — do
+// not block on it.
+func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID string) ([]config.RoleFragment, error) {
+	info, exists := a.controllerSvc.GetStewardInfo(stewardID)
+	if !exists {
+		return nil, nil
+	}
+
+	// Build DNA attrs map; merge in controller-stored tags so tag: selector terms work.
+	attrs := make(map[string]string)
+	if info.DNA != nil {
+		for k, v := range info.DNA.Attributes {
+			attrs[k] = v
+		}
+	}
+	if ts := a.controllerSvc.TagStore(); ts != nil {
+		attrs = mergeTagsIntoAttrs(attrs, ts.TagsFor(stewardID))
+	}
+
+	entries, err := a.configStore.ListConfigs(ctx, &cfgconfig.ConfigFilter{
+		TenantID:  info.TenantID,
+		Namespace: "role-policies",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("role adapter: list role-policies for tenant %s: %w",
+			logging.SanitizeLogValue(info.TenantID), err)
+	}
+
+	stewardData := fleet.StewardData{
+		ID:            stewardID,
+		TenantID:      info.TenantID,
+		DNAAttributes: attrs,
+	}
+	q := fleet.NewMemoryQuery(&singleStewardProvider{s: stewardData})
+
+	var matched []config.RoleFragment
+	for _, entry := range entries {
+		var rc storedRoleConfig
+		if err := json.Unmarshal(entry.Data, &rc); err != nil {
+			a.logger.Warn("role adapter: skipping malformed role config entry",
+				"name", logging.SanitizeLogValue(entry.Key.Name),
+				"error", err)
+			continue
+		}
+		filter, _, err := selector.Parse(rc.Selector)
+		if err != nil {
+			a.logger.Warn("role adapter: skipping role config with unparseable selector",
+				"name", logging.SanitizeLogValue(rc.Name),
+				"error", err)
+			continue
+		}
+		count, _ := q.Count(ctx, filter)
+		if count > 0 {
+			matched = append(matched, config.RoleFragment{
+				Name:   rc.Name,
+				Config: rc.Fragment,
+			})
+		}
+	}
+
+	// Sort alphabetically by role name for deterministic merge order; later name
+	// overrides earlier for the same resource name (same upsert semantics as other layers).
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].Name < matched[j].Name
+	})
+
+	return matched, nil
+}
+
+// mergeTagsIntoAttrs returns a copy of attrs with ctrlTags merged into the "tags" key.
+// DNA-reported tags come first; controller-stored tags follow; duplicates are dropped.
+// Never mutates the input map — attrs may alias info.DNA.Attributes (shared, cached ref).
+func mergeTagsIntoAttrs(attrs map[string]string, ctrlTags []string) map[string]string {
+	if len(ctrlTags) == 0 {
+		return attrs
+	}
+	merged := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	seen := make(map[string]struct{})
+	var all []string
+	for _, t := range strings.Split(merged["tags"], ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	for _, t := range ctrlTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	merged["tags"] = strings.Join(all, ",")
+	return merged
+}
+
 // FanoutCallback is invoked inside SetConfiguration after a successful ConfigStore write.
 // tenantID matches the authenticated tenant that issued the write; cfgID is the steward
 // config identifier. The callback must not block — hand off expensive work to a goroutine.
@@ -121,11 +260,16 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 
 	var ir *config.InheritanceResolver
 	if controllerSvc != nil {
-		ir = config.NewInheritanceResolverWithClusters(
+		ir = config.NewInheritanceResolverWithRoles(
 			router,
 			storageManager.GetClientTenantStore(),
 			storageManager.GetTenantStore(),
 			&clusterRegistryAdapter{controllerSvc: controllerSvc},
+			&roleConfigAdapter{
+				controllerSvc: controllerSvc,
+				configStore:   storageManager.GetConfigStore(),
+				logger:        logger,
+			},
 		)
 	} else {
 		ir = config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore())

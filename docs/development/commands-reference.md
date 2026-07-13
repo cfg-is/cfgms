@@ -590,3 +590,169 @@ Cancelled execution exec_1782879897336049056_1
 | `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+
+---
+
+## cfg role — Role Config Management (Issue #2543)
+
+Role configs couple a selector expression with a `StewardConfig` fragment. Matching
+stewards receive the fragment merged into their effective config during resolution (S4).
+Role configs are stored under the `role-policies` ConfigStore namespace and are tenant-scoped.
+
+**Required permissions:** `role:read` (GET), `role:write` (POST, DELETE).
+
+### cfg role create
+
+Create a role config with a selector and a StewardConfig fragment.
+
+```bash
+cfg role create <name> --selector "<expr>" --config <fragment.yaml> --url=https://controller.example.com
+```
+
+The fragment file is a YAML file containing a partial `StewardConfig`. The steward ID
+field is not required — leave it empty for role config fragments.
+
+Example:
+
+```bash
+cfg role create github-runners \
+  --selector "os:windows tag:github-runner" \
+  --config runner-fragment.yaml \
+  --url=https://controller.example.com --api-key=mykey
+```
+
+Output on success:
+
+```
+Created role config "github-runners" (selector: os:windows tag:github-runner)
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--selector` | — | Fleet selector expression (required) |
+| `--config` | — | Path to StewardConfig fragment YAML file (required) |
+| `--url` | — | Controller API URL (env: CFGMS_API_URL) |
+| `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
+| `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
+
+### cfg role ls
+
+List all role configs for the authenticated tenant.
+
+```bash
+cfg role ls --url=https://controller.example.com
+```
+
+Example output:
+
+```
+NAME             SELECTOR                        CREATED BY
+----             --------                        ----------
+github-runners   os:windows tag:github-runner    ops-admin
+debug-nodes      tag:debug                       ops-admin
+```
+
+**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+
+### cfg role show
+
+Display a role config including its selector and fragment.
+
+```bash
+cfg role show <name> --url=https://controller.example.com
+```
+
+**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+
+### cfg role delete
+
+Delete a role config by name.
+
+```bash
+cfg role delete <name> --url=https://controller.example.com
+```
+
+Returns an error if the role config does not exist.
+
+Output on success:
+
+```
+Deleted role config "github-runners"
+```
+
+**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+
+## cfg steward tag — Steward Tag Management (Issue #2545)
+
+Tags are operator-assigned metadata on a steward used by `tag:` selectors in role configs
+and fleet commands. Tags are controller-owned: they survive controller restarts and are
+never overwritten by the steward's DNA report cycle.
+
+**Tag format:** lowercase alphanumeric, optionally separated by hyphens (1–64 chars).
+Examples: `prod`, `web-server`, `github-runner`.
+
+**Required permissions:** `steward:tag:read` (GET), `steward:tag:write` (POST, DELETE).
+
+### cfg steward tag add
+
+Add one or more tags to a steward. Adding a tag that already exists is a no-op (idempotent).
+
+```bash
+cfg steward tag add <steward-id> <tag> [tag...] --url=https://controller.example.com --api-key=mykey
+```
+
+Example:
+
+```bash
+cfg steward tag add steward-abc123 prod web-server \
+  --url https://controller.example.com --api-key mykey
+```
+
+Output on success:
+
+```
+Tags on steward-abc123: prod, web-server
+```
+
+### cfg steward tag rm
+
+Remove one or more tags from a steward. Removing a tag that does not exist is a no-op (idempotent).
+
+```bash
+cfg steward tag rm <steward-id> <tag> [tag...] --url=https://controller.example.com --api-key=mykey
+```
+
+Output on success:
+
+```
+Tags on steward-abc123: prod
+```
+
+### cfg steward tag ls
+
+List all operator-assigned tags on a steward.
+
+```bash
+cfg steward tag ls <steward-id> --url=https://controller.example.com --api-key=mykey
+```
+
+Example output:
+
+```
+TAG
+---
+prod
+web-server
+```
+
+**Flags (all sub-commands):**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--url` | — | Controller API URL (env: CFGMS_API_URL) |
+| `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
+| `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |

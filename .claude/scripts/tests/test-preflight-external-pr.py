@@ -29,7 +29,8 @@ def _load_preflight():
 
 def _make_raw_pr(number=999, head_ref="feature/story-999-agent", author_login="someuser",
                  is_draft=False, labels=None, timeline_items=None, comments=None,
-                 status_rollup=None, body="", mergeable="MERGEABLE", merge_state="CLEAN"):
+                 status_rollup=None, body="", mergeable="MERGEABLE", merge_state="CLEAN",
+                 latest_commit_date=None):
     """Build a minimal PR node as returned by gh_graphql_pipeline_overview (prs list)."""
     return {
         "number": number,
@@ -45,7 +46,7 @@ def _make_raw_pr(number=999, head_ref="feature/story-999-agent", author_login="s
         "timeline_items": timeline_items if timeline_items is not None else [],
         "comments": comments if comments is not None else [],
         "statusCheckRollup": status_rollup if status_rollup is not None else [],
-        "latest_commit_date": None,
+        "latest_commit_date": latest_commit_date,
     }
 
 
@@ -269,10 +270,11 @@ class TestComputeReviewRecommendationsExternalPR(unittest.TestCase):
     def _make_summary(self, pr_num=999, story_num=None, is_external=True,
                       is_released=False, is_draft=False, ci_overall="green",
                       has_review=False, wip_failed=False, merge_state="CLEAN",
-                      mergeable="MERGEABLE"):
+                      mergeable="MERGEABLE", author_login="external-user"):
         return {
             "pr": pr_num,
             "story_number": story_num,
+            "author_login": author_login,
             "is_external": is_external,
             "is_released": is_released,
             "is_draft": is_draft,
@@ -296,11 +298,14 @@ class TestComputeReviewRecommendationsExternalPR(unittest.TestCase):
 
     def test_external_unreleased_pr_is_skipped(self):
         """AC3: unreleased external PR → action=skip (quarantined, never reviewed/merged)."""
-        summaries = [self._make_summary(is_external=True, is_released=False)]
+        summaries = [self._make_summary(is_external=True, is_released=False,
+                                        author_login="external-user")]
         recs = self.pf.compute_review_recommendations(summaries, set())
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["action"], "skip")
         self.assertIn("external", recs[0]["reason"].lower())
+        # Verify the author login appears in the quarantine reason (not silently 'unknown').
+        self.assertIn("external-user", recs[0]["reason"])
 
     def test_external_released_pr_proceeds_to_review(self):
         """AC5: validly released external PR (human-reviewed:ok by push+) proceeds normally."""
@@ -494,6 +499,199 @@ class TestIsTrustedReviewComment(unittest.TestCase):
         ]
         verdict, _ = self.pf.latest_review(comments)
         self.assertEqual(verdict, "fail")
+
+
+class TestWaitVerdictReviewRecommendations(unittest.TestCase):
+    """Issue #2588: WAIT verdict (verdict=None) must route to spawn_acceptance_reviewer,
+    not enqueue_merge.
+
+    Covers the three required cases from the acceptance criteria:
+    (a) has_review=True, verdict=None, CI=green → spawn_acceptance_reviewer
+    (b) has_review=True, verdict="pass", CI=green → enqueue_merge (regression guard)
+    (c) has_review=True, verdict="fail" → skip/unchanged (regression guard)
+    """
+
+    def setUp(self):
+        self.pf = _load_preflight()
+
+    def _make_summary(self, pr_num=101, story_num=42, has_review=False,
+                      verdict=None, ci_overall="green", auto_merge=False,
+                      merge_state="CLEAN", mergeable="MERGEABLE"):
+        """Build a pr_summary dict for an internal, non-draft PR with controllable review state."""
+        pending_checks = ["unit-tests"] if ci_overall == "pending" else []
+        failed_checks = ["unit-tests"] if ci_overall == "red" else []
+        return {
+            "pr": pr_num,
+            "story_number": story_num,
+            "is_external": False,
+            "is_released": False,
+            "is_draft": False,
+            "wip_session_failed": False,
+            "has_acceptance_review_comment": has_review,
+            "latest_review_verdict": verdict,
+            "latest_review_comment_date": None,
+            "latest_commit_date": None,
+            "merge_state_status": merge_state,
+            "mergeable": mergeable,
+            "auto_merge_enabled": auto_merge,
+            "ci_summary": {
+                "overall": ci_overall,
+                "pass": 4 if ci_overall == "green" else 0,
+                "pending": 1 if ci_overall == "pending" else 0,
+                "fail": 1 if ci_overall == "red" else 0,
+                "skipped": 0,
+                "pending_checks": pending_checks,
+                "failed_checks": failed_checks,
+            },
+        }
+
+    # (a) The bug: WAIT verdict (verdict=None) must NOT enqueue
+    def test_wait_verdict_green_ci_spawns_reviewer(self):
+        """AC (a): has_review=True + verdict=None + CI=green → spawn_acceptance_reviewer, not enqueue_merge."""
+        summaries = [self._make_summary(has_review=True, verdict=None, ci_overall="green")]
+        recs = self.pf.compute_review_recommendations(summaries, set())
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["action"], "spawn_acceptance_reviewer",
+                         f"Expected spawn_acceptance_reviewer but got {recs[0]['action']!r}: {recs[0]['reason']!r}")
+
+    def test_wait_verdict_pending_ci_defers(self):
+        """WAIT verdict + pending CI → defer (not spawn; CI not green yet)."""
+        summaries = [self._make_summary(has_review=True, verdict=None, ci_overall="pending")]
+        recs = self.pf.compute_review_recommendations(summaries, set())
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["action"], "defer")
+
+    def test_wait_verdict_red_ci_skips(self):
+        """WAIT verdict + red CI → skip (fix cycle owns it)."""
+        summaries = [self._make_summary(has_review=True, verdict=None, ci_overall="red")]
+        recs = self.pf.compute_review_recommendations(summaries, set())
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["action"], "skip")
+
+    # (b) Regression guard: explicit PASS must still produce enqueue_merge
+    def test_pass_verdict_green_ci_enqueues(self):
+        """AC (b): has_review=True + verdict='pass' + CI=green → enqueue_merge (regression guard)."""
+        summaries = [self._make_summary(has_review=True, verdict="pass", ci_overall="green")]
+        recs = self.pf.compute_review_recommendations(summaries, set())
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["action"], "enqueue_merge",
+                         f"Expected enqueue_merge but got {recs[0]['action']!r}: {recs[0]['reason']!r}")
+
+    # (c) Regression guard: FAIL path unchanged
+    def test_fail_verdict_no_fix_commit_skips(self):
+        """AC (c): has_review=True + verdict='fail' + no fix commit landed → skip (regression guard)."""
+        summaries = [self._make_summary(has_review=True, verdict="fail", ci_overall="green")]
+        recs = self.pf.compute_review_recommendations(summaries, set())
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["action"], "skip")
+        self.assertIn("fail", recs[0]["reason"].lower())
+
+
+class TestMergeQueueStateRecommendations(unittest.TestCase):
+    """Issue #2589: preflight consumes merge-queue state — eviction escalation
+    (investigate_queue_failures) and one-shot CI rerun (rerun_failed_checks)."""
+
+    def setUp(self):
+        self.pf = _load_preflight()
+
+    def _make_summary(self, pr_num=101, story_num=42, ci_overall="green",
+                      eviction_count=0, failed_run_attempt=1, mergeable="MERGEABLE",
+                      merge_state="CLEAN"):
+        # A PASS-verdict, no-fix-landed PR shape — the block the #2589 branches
+        # live in. verdict='pass' + review comment present + latest_commit_date
+        # older than the (absent) review date so fix_landed_after_review is False.
+        return {
+            "pr": pr_num,
+            "story_number": story_num,
+            "author_login": "jrdnr",
+            "is_external": False,
+            "is_released": False,
+            "is_draft": False,
+            "wip_session_failed": False,
+            "has_acceptance_review_comment": True,
+            "latest_review_verdict": "pass",
+            "latest_review_comment_date": "2026-07-13T05:00:00Z",
+            "latest_commit_date": "2026-07-13T04:00:00Z",
+            "merge_state_status": merge_state,
+            "mergeable": mergeable,
+            "auto_merge_enabled": False,
+            "eviction_count": eviction_count,
+            "queue_state": None,
+            "failed_run_attempt": failed_run_attempt,
+            "ci_summary": {
+                "overall": ci_overall,
+                "pass": 4 if ci_overall == "green" else 0,
+                "pending": 0,
+                "fail": 1 if ci_overall == "red" else 0,
+                "skipped": 0,
+                "pending_checks": [],
+                "failed_checks": ["Cross-Platform Build Validation"] if ci_overall == "red" else [],
+            },
+        }
+
+    # --- count_merge_queue_evictions (pure timeline counting) ---
+    def test_eviction_count_after_commit_only(self):
+        tl = [
+            {"__typename": "RemovedFromMergeQueueEvent", "createdAt": "2026-07-13T05:00:00Z"},
+            {"__typename": "RemovedFromMergeQueueEvent", "createdAt": "2026-07-13T05:10:00Z"},
+            {"__typename": "RemovedFromMergeQueueEvent", "createdAt": "2026-07-12T00:00:00Z"},  # stale (pre-commit)
+            {"__typename": "AddedToMergeQueueEvent", "createdAt": "2026-07-13T05:05:00Z"},
+            {"__typename": "LabeledEvent", "createdAt": "2026-07-13T05:20:00Z", "label": {"name": "x"}},
+        ]
+        self.assertEqual(self.pf.count_merge_queue_evictions(tl, "2026-07-13T04:00:00Z"), 2)
+
+    def test_eviction_count_zero_without_commit_date(self):
+        tl = [{"__typename": "RemovedFromMergeQueueEvent", "createdAt": "2026-07-13T05:00:00Z"}]
+        self.assertEqual(self.pf.count_merge_queue_evictions(tl, None), 0)
+
+    def test_build_pr_summaries_populates_eviction_count(self):
+        raw = _make_raw_pr(
+            number=101, author_login="jrdnr",
+            latest_commit_date="2026-07-13T04:00:00Z",
+            timeline_items=[
+                {"__typename": "RemovedFromMergeQueueEvent", "createdAt": "2026-07-13T05:00:00Z"},
+                {"__typename": "RemovedFromMergeQueueEvent", "createdAt": "2026-07-13T05:10:00Z"},
+            ],
+        )
+        s = self.pf._build_pr_summaries([raw])[0]
+        self.assertEqual(s["eviction_count"], 2)
+        self.assertEqual(s["queue_state"], None)      # injected in main(), None by default
+        self.assertEqual(s["failed_run_attempt"], 1)  # default; main() overrides for red PRs
+
+    # --- eviction escalation (investigate_queue_failures) ---
+    def test_two_evictions_pass_not_in_queue_escalates(self):
+        recs = self.pf.compute_review_recommendations([self._make_summary(eviction_count=2)], set())
+        self.assertEqual(recs[0]["action"], "investigate_queue_failures")
+        self.assertIn("evicted", recs[0]["reason"].lower())
+
+    def test_one_eviction_green_still_enqueues(self):
+        """Regression: a single eviction is not enough to escalate — normal enqueue."""
+        recs = self.pf.compute_review_recommendations([self._make_summary(eviction_count=1)], set())
+        self.assertEqual(recs[0]["action"], "enqueue_merge")
+
+    def test_evicted_pr_currently_in_queue_not_escalated(self):
+        """A PR back in the queue (re-enqueued) must not be escalated — it's being processed."""
+        s = self._make_summary(eviction_count=3)
+        recs = self.pf.compute_review_recommendations([s], {s["pr"]})  # in queue
+        self.assertNotEqual(recs[0]["action"], "investigate_queue_failures")
+
+    # --- one-shot rerun (rerun_failed_checks) ---
+    def test_red_ci_attempt1_reruns(self):
+        recs = self.pf.compute_review_recommendations(
+            [self._make_summary(ci_overall="red", failed_run_attempt=1)], set())
+        self.assertEqual(recs[0]["action"], "rerun_failed_checks")
+
+    def test_red_ci_attempt2_investigates(self):
+        """After the one-shot rerun (attempt > 1) still red → not a flake, investigate (not skip)."""
+        recs = self.pf.compute_review_recommendations(
+            [self._make_summary(ci_overall="red", failed_run_attempt=2)], set())
+        self.assertEqual(recs[0]["action"], "investigate_queue_failures")
+
+    # --- zero-eviction green-path regression: recommendations unchanged ---
+    def test_zero_eviction_green_path_unchanged(self):
+        s = self._make_summary(eviction_count=0, ci_overall="green")
+        recs = self.pf.compute_review_recommendations([s], set())
+        self.assertEqual(recs[0]["action"], "enqueue_merge")
 
 
 if __name__ == "__main__":

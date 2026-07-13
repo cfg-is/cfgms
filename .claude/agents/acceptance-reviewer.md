@@ -107,16 +107,16 @@ All required CI checks must pass before reviewing code:
 
 - ALL PASSING → continue to Phase 2.1
 - ANY FAILING → verdict is FAIL, stop here. Report which checks failed.
-- ANY PENDING → verdict is WAIT, stop here. Report which checks are pending.
+- ANY PENDING → verdict is WAIT, stop here. Report which checks are pending. **Do NOT post the structured review comment** (the one containing `<!-- cfgms-acceptance-review -->` or the `## Acceptance Review` heading) — those markers signal a *completed* review and would cause the PO preflight to treat this PR as permanently reviewed once CI goes green, skipping re-spawn of the acceptance reviewer. Instead, either omit the comment entirely and report pending checks via your completion message, or post a plain comment using a heading like `## CI Status — Checks Pending` that does not contain `<!-- cfgms-acceptance-review -->` or the `## Acceptance Review` heading.
 
 ## Phase 2.1: GitHub Advanced Security Findings (BLOCKING)
 
 GitHub Advanced Security (GHAS) — CodeQL, zizmor, dependency scanning, and secret scanning — reports findings both via the code-scanning alerts database and as inline PR review comments from `github-advanced-security[bot]`. Neither source appears in the CI status rollup, so Phase 2's check is not sufficient on its own.
 
-**Use the hardened helper** — do NOT query the code-scanning API or read PR comments directly. Its single source is the **`github-advanced-security` check-run annotations** on the PR head commit, filtered to checks whose `conclusion == failure`. This is the one surface that is simultaneously:
-- **New-in-PR only** — inherited develop alerts are not annotated on the PR's checks. (Querying `code-scanning/alerts?ref=refs/pull/<N>/merge` instead returns the union of develop's ~70 open alerts + the PR's new ones and would FAIL every PR. Do not do this.)
-- **Dismissal-respecting** — a human-dismissed alert flips its check to `success` and drops out, which is what preserves the human-sign-off model (below). Reading inline bot comments does NOT respect dismissal — anchored comments persist and cause false FAILs.
-- **Injection-safe** — only GitHub-generated `path`/`line`/`title` fields are read, never human-authored comment bodies.
+**Use the hardened helper** — do NOT query the code-scanning API or read PR comments directly. The helper runs two passes and both stay **new-in-PR only**, **dismissal-respecting**, and **injection-safe**:
+- **Pass 1** — **`github-advanced-security` check-run annotations** on the PR head commit, filtered to `conclusion == failure` (fail-on findings: zizmor, secret scanning, dependency review). Inherited develop alerts are not annotated on the PR's checks; a human-dismissed alert flips its check to `success` and drops out.
+- **Pass 2 (Issue #2634)** — **open** code-scanning alerts (`state=open`, so a human dismissal drops them) intersected with the lines the PR **adds**. This is required because **CodeQL runs advisory** (no `fail-on`): it concludes `success` even with findings, so Pass 1 never sees them — a `go/log-injection` alert merged unclassified through #2623 this way. The added-line intersection keeps it new-in-PR, so inherited alerts on untouched lines don't FP (this is why the raw `code-scanning/alerts?ref=refs/pull/<N>/merge` query is still forbidden — it returns develop's ~70 inherited alerts and would FAIL every PR).
+- Only GitHub-generated `path`/`line`/`rule` fields are read, never human-authored comment bodies.
 
 It returns one finding per line, `path:line:rule-or-title` (no raw markdown body):
 
@@ -133,7 +133,7 @@ It returns one finding per line, `path:line:rule-or-title` (no raw markdown body
 1. A commit removes the underlying issue (GHAS re-scans on push and drops the alert), or
 2. A **human** dismisses the alert in GitHub with a documented reason.
 
-So a genuine bug → route to fix (block). A finding you judge a false positive → **still block**, post your `likely-false-positive` analysis, and escalate to the founder for a dismissal decision — do not merge on the strength of your own FP call. Never "dismiss out of hand." `CodeQL` is a required check on `develop`, so an open finding also hard-blocks the merge queue independently of this review.
+So a genuine bug → route to fix (block). A finding you judge a false positive → **still block**, post your `likely-false-positive` analysis, and escalate to the founder for a dismissal decision — do not merge on the strength of your own FP call. Never "dismiss out of hand." `CodeQL` is a required check on `develop`, but it runs **advisory** (no `fail-on`): it concludes `success` with findings, so an open CodeQL finding does **not** hard-block the merge queue — **this review (Pass 2 above) is the only gate that catches it.** That is exactly why passing a PR without running this helper is unsafe.
 
 ## Phase 2.5: Code-Reference Extraction (BLOCKING)
 

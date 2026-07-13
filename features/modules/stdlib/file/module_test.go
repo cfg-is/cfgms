@@ -266,7 +266,7 @@ func TestFileModule_EdgeCases(t *testing.T) {
 
 	err = module.Set(context.Background(), testFile, configState)
 	if err != nil {
-		t.Errorf("Set() failed: %v", err)
+		t.Fatalf("Set() failed: %v", err)
 	}
 
 	// Verify file exists and has correct content
@@ -283,7 +283,7 @@ func TestFileModule_EdgeCases(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(testFile)
 		if err != nil {
-			t.Errorf("Failed to stat file: %v", err)
+			t.Fatalf("Failed to stat file: %v", err)
 		}
 
 		expectedPerms := os.FileMode(0755)
@@ -642,7 +642,7 @@ func TestFileModule_TypeDirectory_Get_AbsentOmitsModeAlias(t *testing.T) {
 	}
 }
 
-// TestFileModule_TypeDirectory_StateAbsent verifies Set() with state: absent returns ErrNotImplemented.
+// TestFileModule_TypeDirectory_StateAbsent verifies Set() with state: absent returns ErrDirectoryDeletionNotSupported.
 func TestFileModule_TypeDirectory_StateAbsent(t *testing.T) {
 	base := t.TempDir()
 	targetPath := filepath.Join(base, "should-not-be-created")
@@ -653,8 +653,8 @@ func TestFileModule_TypeDirectory_StateAbsent(t *testing.T) {
 	if err == nil {
 		t.Fatal("Set() with state: absent must return a non-nil error")
 	}
-	if !errors.Is(err, modules.ErrNotImplemented) {
-		t.Errorf("Set() with state: absent error = %v, want errors.Is(err, modules.ErrNotImplemented) true", err)
+	if !errors.Is(err, ErrDirectoryDeletionNotSupported) {
+		t.Errorf("Set() with state: absent error = %v, want errors.Is(err, ErrDirectoryDeletionNotSupported) true", err)
 	}
 
 	if _, statErr := os.Stat(targetPath); !os.IsNotExist(statErr) {
@@ -802,9 +802,9 @@ func TestFileModule_TypeDirectory_InvalidGroup(t *testing.T) {
 	}
 }
 
-// TestFileModule_TypeSymlink_ReturnsNotImplemented verifies that type: symlink returns
-// ErrNotImplemented (v1 stub).
-func TestFileModule_TypeSymlink_ReturnsNotImplemented(t *testing.T) {
+// TestFileModule_TypeSymlink_ReturnsSymlinkNotSupported verifies that type: symlink
+// returns ErrSymlinkNotSupported (symlink management is planned for a future story).
+func TestFileModule_TypeSymlink_ReturnsSymlinkNotSupported(t *testing.T) {
 	base := t.TempDir()
 	targetPath := filepath.Join(base, "mylink")
 	m := New()
@@ -815,7 +815,7 @@ func TestFileModule_TypeSymlink_ReturnsNotImplemented(t *testing.T) {
 		AllowedBasePath: base,
 	}
 	err := m.Set(context.Background(), targetPath, cfg)
-	if !errors.Is(err, modules.ErrNotImplemented) {
-		t.Errorf("Set() with type: symlink = %v, want ErrNotImplemented", err)
+	if !errors.Is(err, ErrSymlinkNotSupported) {
+		t.Errorf("Set() with type: symlink = %v, want ErrSymlinkNotSupported", err)
 	}
 }

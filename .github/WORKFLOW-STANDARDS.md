@@ -386,7 +386,6 @@ jobs:
 ## Change History
 
 - **2026-01-12**: Initial standards documentation
-  - Removed problematic merge-gate workflow
   - Established direct required checks pattern
   - Documented stub job pattern for docs-only PRs
   - Defined path filtering standards

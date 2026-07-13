@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,6 +26,36 @@ type DefaultWebSocketHandler struct {
 	logger          logging.Logger
 	originAllowlist []string
 	pingInterval    time.Duration
+}
+
+// connWriter serializes all writes to a single WebSocket connection.
+// gorilla/websocket supports at most one concurrent writer; both the reader
+// goroutine (via sendError) and the writer goroutine (output relay and pings)
+// emit frames, so every write path must hold this mutex. Reads are performed on
+// a single goroutine and do not require the lock.
+type connWriter struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+// writeJSON serializes a JSON message frame under the write lock.
+func (w *connWriter) writeJSON(v interface{}) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		_ = err // Explicitly ignore deadline errors for resilience
+	}
+	return w.conn.WriteJSON(v)
+}
+
+// writePing serializes a ping control frame under the write lock.
+func (w *connWriter) writePing() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		_ = err // Explicitly ignore deadline errors for resilience
+	}
+	return w.conn.WriteMessage(websocket.PingMessage, nil)
 }
 
 // NewWebSocketHandler creates a new WebSocket handler. originAllowlist contains
@@ -103,12 +134,15 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 		}
 	}()
 
+	// Serialize all writes to this connection through a single writer.
+	cw := &connWriter{conn: conn}
+
 	// Create terminal session
 	ctx := r.Context()
 	session, err := h.sessionManager.CreateSession(ctx, sessionReq)
 	if err != nil {
 		h.logger.Error("Failed to create terminal session", "error", err, "remote_addr", r.RemoteAddr)
-		h.sendError(conn, fmt.Sprintf("Failed to create session: %v", err))
+		h.sendError(cw, fmt.Sprintf("Failed to create session: %v", err))
 		return
 	}
 
@@ -119,7 +153,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 		"remote_addr", r.RemoteAddr)
 
 	// Handle the WebSocket session
-	h.handleSession(ctx, conn, session)
+	h.handleSession(ctx, cw, session)
 
 	// Clean up session when WebSocket closes
 	if manager, ok := h.sessionManager.(*DefaultSessionManager); ok {
@@ -202,24 +236,25 @@ func (h *DefaultWebSocketHandler) parseSessionRequest(r *http.Request) (*Session
 }
 
 // handleSession manages the WebSocket session lifecycle
-func (h *DefaultWebSocketHandler) handleSession(ctx context.Context, conn *websocket.Conn, session *Session) {
+func (h *DefaultWebSocketHandler) handleSession(ctx context.Context, cw *connWriter, session *Session) {
 	// Set up channels for handling messages
 	done := make(chan struct{})
 
 	// Start reading messages from WebSocket
-	go h.readMessages(ctx, conn, session, done)
+	go h.readMessages(ctx, cw, session, done)
 
 	// Start sending messages to WebSocket (from steward)
-	go h.writeMessages(ctx, conn, session, done)
+	go h.writeMessages(ctx, cw, session, done)
 
 	// Wait for session to end
 	<-done
 }
 
 // readMessages reads messages from the WebSocket client
-func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websocket.Conn, session *Session, done chan struct{}) {
+func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, cw *connWriter, session *Session, done chan struct{}) {
 	defer close(done)
 
+	conn := cw.conn
 	conn.SetReadLimit(8192) // 8KB message limit
 	if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
 		// Log error but continue
@@ -249,14 +284,14 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, conn *websoc
 
 			if err := h.handleMessage(ctx, &msg, session); err != nil {
 				h.logger.Error("Failed to handle message", "session_id", logging.RedactedID(session.ID), "error", err)
-				h.sendError(conn, fmt.Sprintf("Message handling error: %v", err))
+				h.sendError(cw, fmt.Sprintf("Message handling error: %v", err))
 			}
 		}
 	}
 }
 
 // writeMessages writes messages to the WebSocket client
-func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *websocket.Conn, session *Session, done chan struct{}) {
+func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, cw *connWriter, session *Session, done chan struct{}) {
 	ticker := time.NewTicker(h.pingInterval)
 	defer ticker.Stop()
 
@@ -267,24 +302,17 @@ func (h *DefaultWebSocketHandler) writeMessages(ctx context.Context, conn *webso
 		case <-done:
 			return
 		case data := <-session.OutputChan():
-			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-				_ = err // Explicitly ignore deadline errors for resilience
-			}
 			msg := &TerminalMessage{
 				Type:      MessageTypeData,
 				Data:      data,
 				Timestamp: time.Now(),
 			}
-			if err := conn.WriteJSON(msg); err != nil {
+			if err := cw.writeJSON(msg); err != nil {
 				h.logger.Warn("Failed to send terminal output", "session_id", logging.RedactedID(session.ID), "error", err)
 				return
 			}
 		case <-ticker.C:
-			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-				// Log error but continue
-				_ = err // Explicitly ignore deadline errors for resilience
-			}
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := cw.writePing(); err != nil {
 				h.logger.Warn("Failed to send ping", "session_id", logging.RedactedID(session.ID), "error", err)
 				return
 			}
@@ -319,18 +347,14 @@ func (h *DefaultWebSocketHandler) handleMessage(ctx context.Context, msg *Termin
 }
 
 // sendError sends an error message to the WebSocket client
-func (h *DefaultWebSocketHandler) sendError(conn *websocket.Conn, errorMsg string) {
+func (h *DefaultWebSocketHandler) sendError(cw *connWriter, errorMsg string) {
 	msg := &TerminalMessage{
 		Type:      MessageTypeError,
 		Error:     errorMsg,
 		Timestamp: time.Now(),
 	}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		// Log error but continue
-		_ = err // Explicitly ignore deadline errors for resilience
-	}
-	if err := conn.WriteJSON(msg); err != nil {
+	if err := cw.writeJSON(msg); err != nil {
 		h.logger.Warn("Failed to send error message", "error", err)
 	}
 }

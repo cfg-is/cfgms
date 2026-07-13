@@ -213,14 +213,6 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 
 ---
 
-#### `merge-gate.yml` — Merge Gate
-
-**Triggers**: `workflow_run` completion of Test Suite, Cross-Platform Build, Security Scan, or CodeQL; Manual dispatch
-
-**What it does**: Aggregates all check statuses for a PR commit SHA and fails if any required check failed. Legacy gate — the develop branch ruleset's native required-status-checks configuration now enforces the same guarantee. Retained for observability.
-
----
-
 ## Workflow Trigger Matrix
 
 | Workflow | push main/develop | pull_request | merge_group | Schedule | Manual |
@@ -241,7 +233,6 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 | `label-decommission-gate.yml` | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `documentation.yml` | push main (paths) | ✅ (paths) | ✅ | ❌ | ✅ |
 | `develop-sanity.yml` | push develop only | ❌ | ❌ | ❌ | ❌ |
-| `merge-gate.yml` | ❌ | ❌ | ❌ | ❌ | ✅ (also workflow_run) |
 | `frontend-ci.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 
 ---

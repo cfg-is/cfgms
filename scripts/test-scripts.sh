@@ -795,6 +795,13 @@ for arg in "$@"; do
         exit 0
     fi
 done
+# Pass 2 (Issue #2634): python fetches these WITHOUT --jq (parses raw JSON).
+for arg in "$@"; do
+    if [[ "$arg" == *"/pulls/"*"/files"* ]]; then printf '%s' "${FILES_JSON:-[]}"; exit 0; fi
+done
+for arg in "$@"; do
+    if [[ "$arg" == *"/code-scanning/alerts"* ]]; then printf '%s' "${ALERTS_JSON:-[]}"; exit 0; fi
+done
 exit 0
 MOCKEOF
     chmod +x "$tmp_dir/gh"
@@ -844,6 +851,32 @@ MOCKEOF
         log_pass "pr-security-findings.sh: no findings → empty output (PASS path)"
     else
         log_fail "pr-security-findings.sh: expected empty output for no findings, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2634): advisory code-scanning alert on an ADDED line is
+    #     emitted; an OPEN alert on an unchanged line (inherited) is NOT ---
+    # Patch adds new-file lines 255-258 (line 254 is a context line).
+    local FILES_ADD='[{"filename":"pkg/config/inheritance.go","patch":"@@ -250,1 +254,5 @@\n context254\n+line255\n+line256\n+line257\n+line258"}]'
+    # Two OPEN alerts: one on added line 258 (new-in-PR), one on context line 254 (inherited).
+    local ALERTS_MIX='[{"most_recent_instance":{"location":{"path":"pkg/config/inheritance.go","start_line":258}},"rule":{"id":"go/log-injection"}},{"most_recent_instance":{"location":{"path":"pkg/config/inheritance.go","start_line":254}},"rule":{"id":"go/log-injection"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_ADD" ALERTS_JSON="$ALERTS_MIX" PATH="$tmp_dir:$PATH" bash "$script" 2623 2>/dev/null) || true
+    if echo "$output" | grep -q "pkg/config/inheritance.go:258:go/log-injection"; then
+        log_pass "pr-security-findings.sh: advisory CodeQL alert on an ADDED line is emitted (pass 2)"
+    else
+        log_fail "pr-security-findings.sh: expected added-line alert :258, got: '$output'"
+    fi
+    if echo "$output" | grep -q "pkg/config/inheritance.go:254"; then
+        log_fail "pr-security-findings.sh: inherited alert on unchanged line :254 must NOT be emitted, got: '$output'"
+    else
+        log_pass "pr-security-findings.sh: inherited alert on unchanged line NOT emitted (added-line intersection)"
+    fi
+
+    # --- Pass 2: with no alerts data, the extra passes stay silent (PASS) ---
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_ADD" PATH="$tmp_dir:$PATH" bash "$script" 2623 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: added lines but no open alerts → empty (PASS path)"
+    else
+        log_fail "pr-security-findings.sh: expected empty output when no open alerts, got: '$output'"
     fi
 
     # --- Test: check-runs API error → exits 0, empty (not propagated) ---
@@ -2681,8 +2714,10 @@ else:
     print("FAIL_C: plain comment accepted as trusted — expected False")
     sys.exit(1)
 
-# Part D: compute_review_recommendations does NOT recommend spawn_acceptance_reviewer
-# for a PR whose comment matches the heading (PR #1589 regression test)
+# Part D: a review comment with NO parseable verdict (WAIT / sentinel-only) is
+# NOT a completed review — it must route back to spawn_acceptance_reviewer,
+# never enqueue_merge (Issue #2588). Supersedes the pre-#2588 expectation from
+# the PR #1589 scenario, where comment-presence alone counted as reviewed.
 pr_summary = {
     "pr": 1589,
     "story_number": 1570,
@@ -2702,10 +2737,27 @@ if not recs:
     print("FAIL_D: compute_review_recommendations returned empty list")
     sys.exit(1)
 action = recs[0].get("action", "")
-if action != "spawn_acceptance_reviewer":
-    print(f"PASS_D: PR #1589 with existing review comment gets action={action!r} (not spawn_acceptance_reviewer)")
+if action == "spawn_acceptance_reviewer":
+    print("PASS_D: PR #1589 with review comment but NO parseable verdict routes to spawn_acceptance_reviewer (Issue #2588)")
 else:
-    print("FAIL_D: PR #1589 recommended spawn_acceptance_reviewer despite existing review comment")
+    print(f"FAIL_D: PR #1589 with verdict-less review comment got action={action!r} — expected spawn_acceptance_reviewer (Issue #2588)")
+    sys.exit(1)
+
+# Part E: an explicit PASS verdict (comment predates no commits) still routes to
+# enqueue_merge — regression guard for the #2588 tightened condition
+# (verdict == "pass", not merely != "fail").
+pr_summary_pass = dict(pr_summary)
+pr_summary_pass["pr"] = 1590
+pr_summary_pass["latest_review_verdict"] = "pass"
+recs = mod.compute_review_recommendations([pr_summary_pass], set(), set())
+if not recs:
+    print("FAIL_E: compute_review_recommendations returned empty list")
+    sys.exit(1)
+action = recs[0].get("action", "")
+if action == "enqueue_merge":
+    print("PASS_E: PR #1590 with explicit PASS verdict still routes to enqueue_merge")
+else:
+    print(f"FAIL_E: PR #1590 with PASS verdict got action={action!r} — expected enqueue_merge")
     sys.exit(1)
 PYEOF
 

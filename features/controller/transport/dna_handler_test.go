@@ -5,6 +5,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"testing"
@@ -16,11 +17,109 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	common "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
+	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
+
+// stubPersister captures the DNA handed to SyncDNA (for the #2616 black-hole tests).
+type stubPersister struct {
+	got *common.DNA
+	err error
+}
+
+func (s *stubPersister) SyncDNA(_ context.Context, dna *common.DNA) (*common.Status, error) {
+	s.got = dna
+	return &common.Status{Code: common.Status_OK}, s.err
+}
+
+// dnaChunksFor marshals attrs as a full-snapshot DNATransfer and splits the JSON
+// into `parts` contiguous DNAChunks — mirroring the steward send path.
+func dnaChunksFor(t *testing.T, stewardID string, attrs map[string]string, parts int) []*transportpb.DNAChunk {
+	t.Helper()
+	attrJSON, err := json.Marshal(attrs)
+	require.NoError(t, err)
+	payload, err := json.Marshal(&dptypes.DNATransfer{StewardID: stewardID, TenantID: "t1", Attributes: attrJSON})
+	require.NoError(t, err)
+	if parts < 1 {
+		parts = 1
+	}
+	size := (len(payload) + parts - 1) / parts
+	chunks := make([]*transportpb.DNAChunk, 0, parts)
+	for i := 0; i < parts; i++ {
+		start := i * size
+		end := start + size
+		if end > len(payload) {
+			end = len(payload)
+		}
+		if start > len(payload) {
+			start = len(payload)
+		}
+		chunks = append(chunks, &transportpb.DNAChunk{
+			StewardId: stewardID, TenantId: "t1",
+			Data: payload[start:end], ChunkIndex: int32(i), TotalChunks: int32(parts),
+		})
+	}
+	return chunks
+}
+
+// TestDNAHandler_PersistsReassembledDNA (REQUIRED, #2616): a full DNA snapshot
+// streamed as chunks is reassembled and handed to the persister with its
+// attributes intact — proving the receiver no longer discards the DNA.
+func TestDNAHandler_PersistsReassembledDNA(t *testing.T) {
+	ca := newTestCA(t)
+	persister := &stubPersister{}
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+
+	attrs := map[string]string{"hostname": "cfg-70-02", "os": "windows", "cpu_count": "8"}
+	ctx := peerContextWithCA(t, ca, "steward-persist")
+	stream := newTestDNAStream(ctx, dnaChunksFor(t, "steward-persist", attrs, 1)...)
+
+	require.NoError(t, h.HandleGRPC(stream))
+	require.NotNil(t, stream.resp)
+	assert.True(t, stream.resp.GetAccepted())
+
+	require.NotNil(t, persister.got, "the reassembled DNA must reach the persister, not be discarded")
+	assert.Equal(t, "steward-persist", persister.got.GetId())
+	assert.Equal(t, attrs, persister.got.GetAttributes())
+	assert.Equal(t, int32(len(attrs)), persister.got.GetAttributeCount())
+}
+
+// TestDNAHandler_MultiChunkReassembly (#2616): a snapshot split across multiple
+// chunks and delivered out of order reassembles correctly.
+func TestDNAHandler_MultiChunkReassembly(t *testing.T) {
+	ca := newTestCA(t)
+	persister := &stubPersister{}
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+
+	attrs := map[string]string{"hostname": "cfg-ab-02", "os": "windows", "primary_mac": "00:15:5d:ea:a3:35", "memory_bytes": "17179869184"}
+	chunks := dnaChunksFor(t, "steward-multi", attrs, 3)
+	// Deliver out of order — the handler must sort by ChunkIndex.
+	chunks[0], chunks[2] = chunks[2], chunks[0]
+
+	ctx := peerContextWithCA(t, ca, "steward-multi")
+	require.NoError(t, h.HandleGRPC(newTestDNAStream(ctx, chunks...)))
+	require.NotNil(t, persister.got)
+	assert.Equal(t, attrs, persister.got.GetAttributes())
+}
+
+// TestDNAHandler_PersistError_FailsRPC (#2616): a persist failure surfaces as an
+// RPC error (steward retries), not a silent success.
+func TestDNAHandler_PersistError_FailsRPC(t *testing.T) {
+	ca := newTestCA(t)
+	persister := &stubPersister{err: errors.New("store down")}
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+
+	ctx := peerContextWithCA(t, ca, "steward-err")
+	stream := newTestDNAStream(ctx, dnaChunksFor(t, "steward-err", map[string]string{"hostname": "h"}, 1)...)
+
+	err := h.HandleGRPC(stream)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to persist synced DNA")
+}
 
 // ---------------------------------------------------------------------------
 // Mock stream
@@ -151,7 +250,7 @@ func newRoundTripEnv(t *testing.T, stewardID string) *roundTripEnv {
 	)
 	queue := NewTenantQueue()
 	srv := &testTransportSrv{
-		dnaHandler:  NewDNAHandler(logging.NewNoopLogger(), queue),
+		dnaHandler:  NewDNAHandler(logging.NewNoopLogger(), queue, nil),
 		bulkHandler: NewBulkHandler(logging.NewNoopLogger(), queue),
 	}
 	transportpb.RegisterStewardTransportServer(grpcSrv, srv)
@@ -183,7 +282,7 @@ func newRoundTripEnv(t *testing.T, stewardID string) *roundTripEnv {
 // TestDNAHandler_MissingPeerCert verifies that a request with no mTLS peer
 // info in context is rejected with Unauthenticated.
 func TestDNAHandler_MissingPeerCert(t *testing.T) {
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
 	stream := newTestDNAStream(context.Background())
 
 	err := h.HandleGRPC(stream)
@@ -196,7 +295,7 @@ func TestDNAHandler_MissingPeerCert(t *testing.T) {
 // does not match the mTLS peer CN is rejected with PermissionDenied.
 func TestDNAHandler_StewardIDMismatch(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-alice")
 	stream := newTestDNAStream(ctx, &transportpb.DNAChunk{
@@ -222,7 +321,7 @@ func TestDNAHandler_StewardIDMismatch(t *testing.T) {
 // passes validation and the handler sends an accepted response.
 func TestDNAHandler_MatchingStewardIDAccepted(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-match")
 	stream := newTestDNAStream(ctx,
@@ -242,7 +341,7 @@ func TestDNAHandler_MatchingStewardIDAccepted(t *testing.T) {
 // accepted and returns a valid response.
 func TestDNAHandler_EmptyStream(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-empty")
 	stream := newTestDNAStream(ctx) // zero chunks
@@ -258,7 +357,7 @@ func TestDNAHandler_EmptyStream(t *testing.T) {
 // HandleGRPC to return a wrapped error with the expected message.
 func TestDNAHandler_RecvError(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue())
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-recv-err")
 	injectedErr := errors.New("simulated network failure")
@@ -276,7 +375,7 @@ func TestDNAHandler_RecvError(t *testing.T) {
 func TestDNAHandler_QueueFull_ReturnsResourceExhausted(t *testing.T) {
 	ca := newTestCA(t)
 	queue := NewTenantQueue()
-	h := NewDNAHandler(logging.NewNoopLogger(), queue)
+	h := NewDNAHandler(logging.NewNoopLogger(), queue, nil)
 
 	for i := 0; i < MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-full"))

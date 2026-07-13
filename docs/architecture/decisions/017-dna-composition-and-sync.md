@@ -179,6 +179,7 @@ Read everything — even managed objects — from osquery.
 ## References
 
 - [ADR-016](016-steward-module-foundation.md) — Steward Module Foundation (provides `Get`→fragment + `owns:` declarations)
+- [ADR-020](020-dna-required-field-declaration.md) — DNA Required-Field Declaration: defines the per-configuration-type required-field contract that rides this ADR's fragment model and authority resolver. Extends the `owns:` clause (ADR-016 clause 5) with a `required_fields` list; the resolver clause 2 defines here is the runtime that applies the union of required fields at DNA write time.
 - [ADR-006](006-module-packaging-and-distribution.md) — Module Packaging and Distribution
 - `features/steward/dna/dna.go` — current `Collector`, `ComputeHash` (redefined by this ADR)
 - `features/steward/dna/drift` — drift subsystem gated by the managed/observe-only class

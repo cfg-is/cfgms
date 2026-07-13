@@ -16,7 +16,7 @@ import (
 // The Type field selects the resource kind:
 //   - "file" (default) — regular file with content, permissions, and ownership
 //   - "directory" — directory with permissions and ownership
-//   - "symlink" — symbolic link (stub; returns ErrNotImplemented in v1)
+//   - "symlink" — symbolic link (returns ErrSymlinkNotSupported; planned for a future story)
 type FileConfig struct {
 	Type            string              `yaml:"type,omitempty"`        // "file" (default), "directory", "symlink"
 	State           string              `yaml:"state"`                 // "present" or "absent"
@@ -114,7 +114,7 @@ func (c *FileConfig) Validate() error {
 
 	switch c.resolvedType() {
 	case "symlink":
-		return modules.ErrNotImplemented
+		return ErrSymlinkNotSupported
 
 	case "directory":
 		return c.validateDirectory()

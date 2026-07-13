@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO-free)
@@ -36,6 +37,7 @@ var ErrInvalidTag = errors.New("invalid tag: must match ^[a-z0-9][a-z0-9-]{0,63}
 type Store struct {
 	db     *sql.DB
 	logger logging.Logger
+	mu     sync.Mutex // serialises read-modify-write updates; Get/Set remain lockless
 }
 
 // NewFromDSN opens a SQLite database at dsn and returns a Store.
@@ -116,6 +118,32 @@ func (s *Store) Get(ctx context.Context, stewardID string) ([]string, error) {
 		return nil, fmt.Errorf("tagstore: get tags for %s: %w", logging.SanitizeLogValue(stewardID), err)
 	}
 	return unmarshalTags(encoded)
+}
+
+// Update atomically reads the current tag list for stewardID, applies fn, and
+// writes the result back. The write is serialised against all other Update calls
+// on this Store so that concurrent POST/DELETE requests for the same steward
+// cannot silently overwrite each other's changes. fn receives the current tag list
+// (never nil) and returns the desired new list. If fn returns an error the store
+// is not modified. Returns the new tag list on success.
+func (s *Store) Update(ctx context.Context, stewardID string, fn func([]string) ([]string, error)) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, err := s.Get(ctx, stewardID)
+	if err != nil {
+		return nil, fmt.Errorf("tagstore: update read for %s: %w", logging.SanitizeLogValue(stewardID), err)
+	}
+
+	updated, err := fn(current)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.Set(ctx, stewardID, updated); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Delete removes the tag entry for stewardID.
