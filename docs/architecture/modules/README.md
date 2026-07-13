@@ -155,11 +155,26 @@ Adding or removing a module from stdlib requires **five coordinated changes**, e
 
 The build fails if any of the five disagree. New entries in `.wxs`, `install.sh`, and `build-pkg.sh` must be inserted in alphabetical order by module name (not appended at the end).
 
+### Stdlib completeness is enforced by the build (ADR-016 clause 6)
+
+In addition to the payload boundary, `make check-stdlib-completeness` (also wired into `make test-commit`, via `check-stdlib-payload-boundary` as a prerequisite) asserts that every module under `stdlib/` is fully compliant:
+
+| Check | What is verified |
+|-------|-----------------|
+| **check-2** | `module.yaml` exists and contains all required fields: `name`, `version`, `publisher`, `executors` |
+| **check-3** | `cmd/main.go` exists — the bundle entry point that builds the module as a standalone binary |
+| **check-4** | `module.yaml` declares at least one `owns:` entry (ADR-016 clause 5) |
+| **check-5** | No unresolved-work stubs: no file whose basename starts with `stub_`, no `panic("TODO")`, and no `ErrNotImplemented` in non-test Go source files |
+
+**check-5 distinction:** `ErrUnsupportedPlatform` in build-tag platform-fallback files (e.g. `executor_stub.go` with `//go:build !linux`) is intentional cross-platform boundary behaviour and is **not** flagged. Only `ErrNotImplemented` — the "we haven't built this yet" marker — causes the gate to fail. Use module-specific errors (e.g. `ErrSymlinkNotSupported`) for documented feature gaps that are out-of-scope for the current version, and `ErrUnsupportedPlatform` for genuine platform boundaries.
+
+**Adding a new stdlib module:** satisfy all five payload sources *and* all four completeness checks before the PR will merge.
+
 ### Current stdlib members
 
 Shipped in the steward installer, all `executors: [steward]` (closed set — see ADR-016):
 
-- `file` - File content, directory creation, and permissions (`type: file` / `type: directory` / `type: symlink`)
+- `file` - File content, directory creation, and permissions (`type: file` / `type: directory`; `type: symlink` planned for a future story)
 - `service` - OS service state management
 - `package` - Software package management
 - `script` - Cross-platform script execution (file-based, no inline eval) — *execution primitive*

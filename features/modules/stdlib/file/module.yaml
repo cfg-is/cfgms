@@ -4,8 +4,8 @@ description: >
   Manages file, directory, and symlink resources on the system.
   Supports reading, writing, and validating file contents (type: file),
   creating and managing directories with ownership and permissions
-  (type: directory), and stub support for symlinks (type: symlink,
-  returns ErrNotImplemented in v1).
+  (type: directory). Symlink management (type: symlink) is planned for a
+  future story and returns ErrSymlinkNotSupported in this version.
 
 publisher: cfgms
 
@@ -23,6 +23,9 @@ interfaces:
   - Get
   - Set
   - Test
+
+owns:
+  - kind: file  # authority over file:* objects this module manages
 
 security:
   requires_root: false

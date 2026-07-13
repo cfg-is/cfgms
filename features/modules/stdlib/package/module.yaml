@@ -19,6 +19,10 @@ interfaces:
   - Get
   - Set
   - Test
+
+owns:
+  - kind: package  # authority over package:* objects this module manages
+
 security:
   requires_root: true
   capabilities: []

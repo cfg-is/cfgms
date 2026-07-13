@@ -22,6 +22,9 @@ interfaces:
   - Set
   - Test
 
+owns:
+  - kind: script  # authority over script:* objects this module manages
+
 security:
   requires_root: false
   capabilities: []

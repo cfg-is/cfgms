@@ -149,6 +149,15 @@ STDLIB_MODULES := \
 check-stdlib-payload-boundary:
 	@bash ./scripts/check-stdlib-payload-boundary.sh
 
+# Stdlib completeness gate: every STDLIB_MODULES entry must satisfy ADR-016 clause 6
+# (valid module.yaml, cmd/main.go, owns: declaration, no unresolved stubs).
+# Depends on check-stdlib-payload-boundary so clause 1 (directory ↔ manifest
+# agreement) is also enforced.
+# See scripts/check-stdlib-completeness.sh and ADR-016 clause 6.
+.PHONY: check-stdlib-completeness
+check-stdlib-completeness: check-stdlib-payload-boundary
+	@bash ./scripts/check-stdlib-completeness.sh
+
 .PHONY: build-stdlib-modules
 build-stdlib-modules: check-stdlib-payload-boundary
 	@echo "Building stdlib module binaries..."
@@ -712,7 +721,7 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
-test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-payload-boundary security-scan
+test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
@@ -722,6 +731,7 @@ test-commit: test lint lint-log-injection check-license-headers security-precomm
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Stdlib payload boundary validated (all five sources agree)"
+	@echo "- ✅ Stdlib completeness validated (ADR-016 clause 6)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
