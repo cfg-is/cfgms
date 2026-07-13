@@ -248,6 +248,42 @@ func TestHypervMonitorCloseReleasesSubscription(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
+// TestHypervMonitorReArmsAfterClose pins the monitor-lifecycle contract the
+// executor's monitor engine depends on: StartMonitors stops the previous engine
+// (which calls module Close) and re-registers interest on EVERY config push,
+// reusing the SAME cached module instance. Close() is terminal for the
+// subscription, but a subsequent Monitor() must RE-ARM the subsystem — not
+// return "closed" — or every hyperv resource (VM and cluster) stops monitoring
+// after the first config re-push and stops emitting module/cluster DNA.
+//
+// Regression: live CFG-70-02 steward logged "Failed to start module monitor …
+// error=hyperv monitor: closed" for vm:* and cluster:* on the second config
+// push, so no cluster:* DNA ever flowed to the controller.
+func TestHypervMonitorReArmsAfterClose(t *testing.T) {
+	calls, teardowns := fakeEstablish(t)
+	m := newMonitorModule(t)
+
+	// First arm + stop, mirroring one StartMonitors→stopMonitorEngine cycle.
+	require.NoError(t, m.Monitor(context.Background(), "vm:x", nil))
+	require.NotZero(t, m.monSub, "subscription established on first arm")
+	require.NoError(t, m.Close())
+	require.True(t, m.monClosed, "Close marks the subsystem closed")
+	require.Equal(t, 1, *teardowns, "first subscription released on Close")
+
+	// Second config push: StartMonitors re-registers interest on the reused
+	// instance. This must succeed (re-arm), NOT return "hyperv monitor: closed".
+	require.NoError(t, m.Monitor(context.Background(), "vm:x", nil),
+		"Monitor must re-arm a closed subsystem, not error")
+	require.False(t, m.monClosed, "re-arm clears the closed flag")
+	require.NotNil(t, m.Changes(), "Changes() returns a fresh channel after re-arm")
+	require.Equal(t, 2, *calls, "re-arm re-establishes the host subscription")
+
+	// A cluster resource re-arms through the same path (routes to the cluster
+	// poller branch) without erroring.
+	require.NoError(t, m.Monitor(context.Background(), "cluster:cfg-lab", nil),
+		"cluster resource re-arms after Close on the same instance")
+}
+
 // changeTypeForEventID is the manifest-grounded core; assert the documented
 // mappings directly so a future edit that drops an ID is caught.
 func TestChangeTypeForEventID(t *testing.T) {
