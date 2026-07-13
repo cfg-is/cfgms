@@ -176,6 +176,12 @@ func (s *ControllerService) StorageReady(ctx context.Context) error {
 
 // AcceptRegistration handles steward registration requests
 func (s *ControllerService) AcceptRegistration(ctx context.Context, req *controller.RegisterRequest) (*controller.RegisterResponse, error) {
+	// Treat nil InitialDna as an empty snapshot so callers that omit it get a
+	// clean integrity-rejection path rather than a nil-dereference panic.
+	if req.InitialDna == nil {
+		req.InitialDna = &common.DNA{}
+	}
+
 	// Extract tenant information from gRPC metadata
 	tenantID := s.extractTenantID(ctx)
 
@@ -230,13 +236,29 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 		return nil, fmt.Errorf("registration failed: %w", err)
 	}
 
+	// Validate DNA integrity. A degenerate snapshot (empty or missing core
+	// identity fields) must not clobber good DNA, so we leave the DNA field nil
+	// on the StewardInfo and skip the durable write. The registration itself
+	// still succeeds structurally — the steward gets its ID and token.
+	dnaCheck := checkDNAIntegrity(req.InitialDna, configTypeFullOSDevice)
+	if !dnaCheck.valid {
+		s.logger.Warn("dna_integrity_rejected",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"missing_fields", dnaCheck.missingFields)
+	}
+
+	var registrationDNA *common.DNA
+	if dnaCheck.valid {
+		registrationDNA = req.InitialDna
+	}
+
 	// Store/update steward information
 	s.mu.Lock()
 	s.stewards[stewardID] = &StewardInfo{
 		ID:            stewardID,
 		TenantID:      tenantID,
 		Version:       req.Version,
-		DNA:           req.InitialDna,
+		DNA:           registrationDNA,
 		LastHeartbeat: time.Now(),
 		Status:        "registered",
 		Metrics:       make(map[string]string),
@@ -244,8 +266,10 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	}
 	s.mu.Unlock()
 
-	// Persist initial DNA to durable storage
-	s.storeDNA(ctx, stewardID, tenantID, req.InitialDna, "registered")
+	// Persist initial DNA to durable storage only when the snapshot is valid.
+	if dnaCheck.valid {
+		s.storeDNA(ctx, stewardID, tenantID, req.InitialDna, "registered")
+	}
 
 	s.logger.Info("Steward registration completed",
 		"steward_id", stewardID,
@@ -320,6 +344,20 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 		return &common.Status{
 			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
+		}, nil
+	}
+
+	// Validate DNA integrity before writing. A degenerate snapshot (empty or
+	// missing hostname/os) must not overwrite the prior last-known-good DNA;
+	// the snapshot is also not appended to history.
+	dnaCheck := checkDNAIntegrity(dna, configTypeFullOSDevice)
+	if !dnaCheck.valid {
+		s.logger.Warn("dna_integrity_rejected",
+			"steward_id", logging.SanitizeLogValue(dna.Id),
+			"missing_fields", dnaCheck.missingFields)
+		return &common.Status{
+			Code:    common.Status_OK,
+			Message: "DNA rejected: degenerate snapshot (missing core identity fields)",
 		}, nil
 	}
 
