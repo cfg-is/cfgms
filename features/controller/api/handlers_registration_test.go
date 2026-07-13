@@ -1235,12 +1235,14 @@ func TestHandleRegister_ApprovePath_TransportAddressError(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "transport address not configured")
 }
 
-// newHandleRegisterServerWithStewardStore creates a server wired with a testStewardStore
-// for device identity persistence tests.
-func newHandleRegisterServerWithStewardStore(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, *testStewardStore) {
+// newHandleRegisterServerWithStewardStore creates a server wired with a real
+// SQLite-backed StewardStore (from the OSS composite storage manager) for device
+// identity persistence tests. No fakes — CFGMS mandates real component testing.
+func newHandleRegisterServerWithStewardStore(t *testing.T, tokenStore registration.Store, certMgr *cert.Manager) (*Server, business.StewardStore) {
 	t.Helper()
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
-	ss := newTestStewardStore()
+	ss := pkgtesting.SetupTestStorage(t).GetStewardStore()
+	require.NotNil(t, ss, "test storage must provide a StewardStore")
 	server.SetStewardStore(ss)
 	return server, ss
 }
@@ -1574,4 +1576,76 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 		assert.Equal(t, "hv-vms", resp.Group,
 			"auto-admission response must include the token's fleet group")
 	})
+}
+
+// TestHandleRegister_HostnameSeededBeforeDNASync verifies that a hostname sent at
+// registration is visible in GetStewardInfo immediately after the registration
+// completes — before any SyncDNA call (Issue #2640, AC #1).
+func TestHandleRegister_HostnameSeededBeforeDNASync(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_hostname_seed",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	deviceID := "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3"
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_hostname_seed",
+		DeviceID:       deviceID,
+		IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+		Hostname:       "worker-node-42",
+		OS:             "linux",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "registration with hostname must succeed")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	// No SyncDNA has been called — hostname must be visible solely from registration.
+	info, ok := server.controllerService.GetStewardInfo(resp.StewardID)
+	require.True(t, ok, "registered steward must be present in controller service")
+	require.NotNil(t, info.DNA)
+	assert.Equal(t, "worker-node-42", info.DNA.Attributes["hostname"],
+		"hostname must be visible in DNA immediately after registration, before any SyncDNA")
+	assert.Equal(t, "linux", info.DNA.Attributes["os"],
+		"os must be visible in DNA immediately after registration, before any SyncDNA")
+}
+
+// TestHandleRegister_EmptyHostnameStillRegisters verifies that a registration with no
+// hostname field still succeeds (hostname is optional — Issue #2640, AC #2).
+func TestHandleRegister_EmptyHostnameStillRegisters(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_hostname",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_no_hostname")
+	assert.Equal(t, http.StatusOK, rec.Code, "registration without hostname must still succeed")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	info, ok := server.controllerService.GetStewardInfo(resp.StewardID)
+	require.True(t, ok)
+	require.NotNil(t, info.DNA)
+	assert.Empty(t, info.DNA.Attributes["hostname"],
+		"no hostname attribute should be set when none was sent at registration")
 }

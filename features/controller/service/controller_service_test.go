@@ -552,6 +552,36 @@ func TestRegisterSteward_FieldsPopulated(t *testing.T) {
 	assert.True(t, !info.LastHeartbeat.After(after))
 }
 
+// TestRegisterStewardWithAttributes_SetsInitialDNA verifies that hostname and OS
+// provided at registration are visible in GetStewardInfo immediately — before any
+// SyncDNA call — closing the identity-blind window (Issue #2640).
+func TestRegisterStewardWithAttributes_SetsInitialDNA(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	initialAttrs := map[string]string{"hostname": "worker-01", "os": "linux"}
+	require.NoError(t, svc.RegisterStewardWithAttributes("s-attrs", "tenant-a", "addr-1", "registered", initialAttrs))
+
+	info, ok := svc.GetStewardInfo("s-attrs")
+	require.True(t, ok)
+	require.NotNil(t, info.DNA)
+	assert.Equal(t, "worker-01", info.DNA.Attributes["hostname"], "hostname must be visible before SyncDNA")
+	assert.Equal(t, "linux", info.DNA.Attributes["os"], "os must be visible before SyncDNA")
+}
+
+// TestRegisterStewardWithAttributes_NilAttrsIsIdenticalToRegisterSteward proves the
+// existing callers are unaffected: nil initialAttrs yields the same result as the
+// original RegisterSteward (DNA with only the steward ID, no attributes).
+func TestRegisterStewardWithAttributes_NilAttrsIsIdenticalToRegisterSteward(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	require.NoError(t, svc.RegisterStewardWithAttributes("s-nil", "tenant-a", "addr-1", "registered", nil))
+
+	info, ok := svc.GetStewardInfo("s-nil")
+	require.True(t, ok)
+	require.NotNil(t, info.DNA)
+	assert.Empty(t, info.DNA.Attributes, "nil initialAttrs must not set any DNA attributes")
+}
+
 // --- Issue #2008: registry repopulation on cert-reuse reconnect / restart ---
 
 // TestEnsureSteward_AddsAbsentStewardWithDurableTenant proves the PRIMARY fix:

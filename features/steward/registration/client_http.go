@@ -25,6 +25,11 @@ type RegistrationRequest struct {
 	Token          string `json:"token"`
 	DeviceID       string `json:"device_id,omitempty"`        // 64-char hex SHA-256 of Ed25519 public key (Issue #2094)
 	IdentityKeyPub string `json:"identity_key_pub,omitempty"` // base64-encoded Ed25519 public key (Issue #2094)
+
+	// Best-effort identity hints seeded into initial DNA so the controller is not
+	// blind to connected stewards before their first DNA sync (Issue #2640).
+	Hostname string `json:"hostname,omitempty"`
+	OS       string `json:"os,omitempty"`
 }
 
 // RegistrationResponse represents the response from the controller for an approved registration.

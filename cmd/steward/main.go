@@ -1063,6 +1063,12 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			regReq.IdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
 		}
 	}
+	// Seed hostname and OS so the controller is not identity-blind before first DNA sync
+	// (Issue #2640). Mirrors features/steward/dna/dna.go:227 without importing that package.
+	if hostname, err := os.Hostname(); err == nil {
+		regReq.Hostname = hostname
+	}
+	regReq.OS = runtime.GOOS
 
 	regResp, pendingResp, err := httpClient.Register(regCtx, regReq)
 	if err != nil {

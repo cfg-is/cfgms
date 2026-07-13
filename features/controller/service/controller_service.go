@@ -748,7 +748,20 @@ func (s *ControllerService) lookupDurableTenant(stewardID string) (tenantID stri
 // device_count: 0). Persisting here lets the next startup warm-load the steward
 // before it reconnects, so GET /api/v1/stewards/{id} keeps returning it.
 func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, status string) error {
+	return s.RegisterStewardWithAttributes(stewardID, tenantID, transportAddr, status, nil)
+}
+
+// RegisterStewardWithAttributes is like RegisterSteward but seeds initial DNA attributes
+// (e.g. hostname, os) so the controller is not identity-blind before the first DNA sync
+// (Issue #2640). Pass nil initialAttrs to get identical behaviour to RegisterSteward.
+func (s *ControllerService) RegisterStewardWithAttributes(stewardID, tenantID, transportAddr, status string, initialAttrs map[string]string) error {
 	dna := &common.DNA{Id: stewardID}
+	if len(initialAttrs) > 0 {
+		dna.Attributes = make(map[string]string, len(initialAttrs))
+		for k, v := range initialAttrs {
+			dna.Attributes[k] = v
+		}
+	}
 
 	s.mu.Lock()
 	s.stewards[stewardID] = &StewardInfo{
