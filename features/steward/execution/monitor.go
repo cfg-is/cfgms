@@ -347,8 +347,93 @@ func (e *Executor) evictMonitorState(resourceIDs map[string]struct{}) {
 	e.monitorStateMu.Unlock()
 }
 
+// ModuleDNASnapshot is a process-stable store of each managed resource's last
+// observed state (AsMap), keyed by resourceID. It is shared across Executor
+// instances so module DNA survives executor re-initialization on reconnect
+// (#2520): InitializeConfigExecutor replaces the Executor on every connect, and a
+// per-Executor snapshot would be lost each time — the client owns ONE snapshot and
+// passes it into every Executor it builds. Safe for concurrent use.
+type ModuleDNASnapshot struct {
+	mu   sync.Mutex
+	snap map[string]map[string]interface{}
+}
+
+// NewModuleDNASnapshot returns an empty shared module-DNA store.
+func NewModuleDNASnapshot() *ModuleDNASnapshot {
+	return &ModuleDNASnapshot{snap: make(map[string]map[string]interface{})}
+}
+
+func (s *ModuleDNASnapshot) set(resourceID string, attrs map[string]interface{}) {
+	s.mu.Lock()
+	s.snap[resourceID] = attrs
+	s.mu.Unlock()
+}
+
+func (s *ModuleDNASnapshot) prune(keep map[string]struct{}) {
+	s.mu.Lock()
+	for id := range s.snap {
+		if _, ok := keep[id]; !ok {
+			delete(s.snap, id)
+		}
+	}
+	s.mu.Unlock()
+}
+
+// collect flattens every stored resource's fields into out under the DNA key
+// convention "<resourceID>.<field>".
+func (s *ModuleDNASnapshot) collect(out map[string]string) {
+	s.mu.Lock()
+	for resourceID, fields := range s.snap {
+		for field, v := range fields {
+			flattenDNAValue(resourceID+"."+field, v, out)
+		}
+	}
+	s.mu.Unlock()
+}
+
+// cacheModuleDNAState records a managed resource's observed state (AsMap) into the
+// shared module-DNA snapshot, keyed by resourceID. Called after each successful
+// convergence / targeted-reconcile Get (executor.ExecuteResource) so a STABLE
+// resource still contributes module DNA between change-events — the steady-state
+// source for #2520 mechanism 1. No extra module call: it reuses the Get the
+// Get→Compare→Set→Verify cycle already performs.
+func (e *Executor) cacheModuleDNAState(resourceID string, state modules.ConfigState) {
+	if resourceID == "" || state == nil || e.moduleDNA == nil {
+		return
+	}
+	snap := state.AsMap()
+	if snap == nil {
+		return
+	}
+	// Shallow-copy so a module mutating the map it returned cannot race the reader.
+	copied := make(map[string]interface{}, len(snap))
+	for k, v := range snap {
+		copied[k] = v
+	}
+	e.moduleDNA.set(resourceID, copied)
+}
+
+// pruneModuleDNAState drops shared-snapshot entries whose resourceID is not in
+// keep, so a resource removed from the config disappears from module DNA on the
+// next full convergence pass (ExecuteConfiguration). Targeted single-resource
+// reconciles never call this — only the full pass knows the complete resource set.
+func (e *Executor) pruneModuleDNAState(keep map[string]struct{}) {
+	if e.moduleDNA == nil {
+		return
+	}
+	e.moduleDNA.prune(keep)
+}
+
 // CollectModuleDNAAttributes returns a flattened, namespaced snapshot of every
-// actively-monitored module resource's latest observed state (Issue #2423).
+// managed module resource's latest observed state (Issue #2423, #2520).
+//
+// Two sources are unioned:
+//   - the shared moduleDNA snapshot: the convergence/targeted-reconcile Get result
+//     for every managed resource — the STEADY-STATE source, present even when
+//     nothing has changed and surviving executor re-init on reconnect.
+//   - monitorState: the monitor change-event cache — a fresher per-change overlay
+//     (e.g. cluster status carried on the event before the triggered reconcile's
+//     Get lands). On key collision the monitor value wins as the more recent.
 //
 // Key convention:
 //   - every key is "<resourceID>.<field>" with the resourceID verbatim
@@ -357,13 +442,18 @@ func (e *Executor) evictMonitorState(resourceIDs map[string]struct{}) {
 //   - any other value stringifies via fmt.Sprintf("%v", v)
 func (e *Executor) CollectModuleDNAAttributes(_ context.Context) map[string]string {
 	out := make(map[string]string)
+	// Steady-state snapshot first (covers all managed resources)...
+	if e.moduleDNA != nil {
+		e.moduleDNA.collect(out)
+	}
+	// ...then overlay fresher monitor change-event deltas.
 	e.monitorStateMu.Lock()
-	defer e.monitorStateMu.Unlock()
 	for resourceID, snap := range e.monitorState {
 		for field, v := range snap {
 			flattenDNAValue(resourceID+"."+field, v, out)
 		}
 	}
+	e.monitorStateMu.Unlock()
 	return out
 }
 

@@ -73,6 +73,13 @@ type ExecutorConfig struct {
 	// a finite deadline to prevent a hung module from wedging the convergence loop
 	// (ADR-012 §7).
 	ModuleCallTimeoutSec int
+
+	// ModuleDNASnapshot is an optional shared module-DNA store (#2520). When set,
+	// this executor records observed module state into it and reads from it in
+	// CollectModuleDNAAttributes. The steward client passes ONE store into every
+	// executor it builds so module DNA survives executor re-init on reconnect. Nil
+	// gives the executor a private store (standalone / tests).
+	ModuleDNASnapshot *ModuleDNASnapshot
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -102,6 +109,11 @@ type Executor struct {
 	// and verifyChanges. Derived from ModuleCallTimeoutSec at construction; defaults
 	// to 120 s when the config field is zero or negative (ADR-012 §7).
 	moduleCallTimeout time.Duration
+
+	// moduleDNA is the shared, process-stable module-DNA snapshot (#2520). Injected
+	// via ExecutorConfig.ModuleDNASnapshot so it survives executor re-init on
+	// reconnect; NewExecutor allocates a private one when none is supplied.
+	moduleDNA *ModuleDNASnapshot
 
 	// Monitor engine fields (Issue #2435). Protected by monitorMu except where noted.
 	monitorFields
@@ -145,6 +157,11 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		callTimeout = 120 * time.Second
 	}
 
+	moduleDNA := cfg.ModuleDNASnapshot
+	if moduleDNA == nil {
+		moduleDNA = NewModuleDNASnapshot()
+	}
+
 	return &Executor{
 		factory:           f,
 		comparator:        comp,
@@ -155,6 +172,7 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		driftMode:         cfg.DriftMode,
 		eventEmitter:      cfg.EventEmitter,
 		moduleCallTimeout: callTimeout,
+		moduleDNA:         moduleDNA,
 	}, nil
 }
 
@@ -209,6 +227,15 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 			}
 		}
 	}
+
+	// Drop DNA snapshot entries for resources no longer in the config so a removed
+	// resource disappears from module DNA (#2520). Only the full pass knows the
+	// complete managed set, so prune here rather than in ExecuteResource.
+	keep := make(map[string]struct{}, len(cfg.Resources))
+	for _, r := range cfg.Resources {
+		keep[e.GetResourceID(r)] = struct{}{}
+	}
+	e.pruneModuleDNAState(keep)
 
 	report.EndTime = time.Now()
 
@@ -346,6 +373,12 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		}
 		return result
 	}
+
+	// Capture the observed state for module DNA publication (#2520 mechanism 1).
+	// The periodic convergence loop AND monitor-triggered targeted reconciles both
+	// land here, so caching the Get result keeps module DNA live at steady state —
+	// not only when a change-event fires — with no extra module call.
+	e.cacheModuleDNAState(resourceID, currentState)
 
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
 	result.DriftDetected = driftDetected

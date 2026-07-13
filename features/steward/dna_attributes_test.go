@@ -116,10 +116,13 @@ func TestSteward_CollectModuleDNAAttributes_FlattensChangeEvent(t *testing.T) {
 		}),
 	})
 
+	// Wait for the specific change-event key, not merely len>0: the steward's
+	// convergence loop now also seeds steady-state module DNA for managed
+	// resources (#2520), so the map is non-empty before this ChangeEvent lands.
 	var attrs map[string]string
 	require.Eventually(t, func() bool {
 		attrs = s.CollectModuleDNAAttributes(context.Background())
-		return len(attrs) > 0
+		return attrs["cluster:cfg-lab.member_nodes"] != ""
 	}, 2*time.Second, 10*time.Millisecond, "cached module attributes must appear after the ChangeEvent")
 
 	assert.Equal(t, "CFG-70-02,CFG-AB-02,CFG-C3-02", attrs["cluster:cfg-lab.member_nodes"],
@@ -174,10 +177,19 @@ func TestSteward_CollectModuleDNAAttributes_LastWriteWins(t *testing.T) {
 }
 
 // TestSteward_CollectModuleDNAAttributes_EvictsOnMonitorStop is the REQUIRED
-// TEST for #2423 AC5: a resource whose Monitor stops (module closes its
-// Changes channel / steward shutdown) is evicted from the cache — its keys
-// stop appearing in subsequent CollectModuleDNAAttributes calls, which is what
-// makes the key disappear from the next PublishDNAUpdate delta.
+// TEST for #2423 AC5, updated for the #2520 steady-state model: a resource seen
+// ONLY via the monitor change-event stream (never converged as a managed config
+// resource) is evicted when its Monitor stops — its change-event keys stop
+// appearing in subsequent CollectModuleDNAAttributes calls, which is what makes
+// the key disappear from the next PublishDNAUpdate delta.
+//
+// Note the contract change: a MANAGED resource's steady-state DNA (sourced from
+// the convergence Get, #2520) is NOT evicted on monitor stop — a config re-push
+// stops+restarts monitors transiently and blanking DNA each time was the churn
+// #2520 fixed. Managed-resource eviction is on config-removal (ExecuteConfiguration
+// prune), covered by TestExecuteConfiguration_PrunesRemovedResourceFromDNA. Here
+// "cluster:cfg-lab" is a monitor-only resource (no matching config resource), so
+// its keys DO evict on monitor stop.
 func TestSteward_CollectModuleDNAAttributes_EvictsOnMonitorStop(t *testing.T) {
 	s, mon := startMonitoredSteward(t)
 
@@ -189,15 +201,19 @@ func TestSteward_CollectModuleDNAAttributes_EvictsOnMonitorStop(t *testing.T) {
 		}),
 	})
 	require.Eventually(t, func() bool {
-		return len(s.CollectModuleDNAAttributes(context.Background())) > 0
-	}, 2*time.Second, 10*time.Millisecond, "attribute must be cached before the eviction check")
+		return s.CollectModuleDNAAttributes(context.Background())["cluster:cfg-lab.cno_owner_node"] != ""
+	}, 2*time.Second, 10*time.Millisecond, "monitor-only attribute must be cached before the eviction check")
 
 	mon.CloseChanges()
 
+	// The monitor-only resource's change-event keys must disappear. The steady-
+	// state DNA of the managed config resource may remain — eviction of managed
+	// resources is on config-removal, not monitor stop.
 	require.Eventually(t, func() bool {
-		return len(s.CollectModuleDNAAttributes(context.Background())) == 0
+		_, present := s.CollectModuleDNAAttributes(context.Background())["cluster:cfg-lab.cno_owner_node"]
+		return !present
 	}, 2*time.Second, 10*time.Millisecond,
-		"a stopped Monitor's resource must be evicted — the map passed to CollectAttributes no longer carries the key")
+		"a stopped monitor-only resource must be evicted from the change-event cache")
 }
 
 // TestSteward_CollectModuleDNAAttributes_NilDetailsSafe: an event with nil

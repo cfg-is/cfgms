@@ -518,22 +518,17 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// controller will pick up DNA on the next convergence-driven publish
 		// in publishConfigStatus. On success the DNA subsystem is marked healthy
 		// so the heartbeat transitions from degraded to healthy. (Issue #2034)
-		if currentDNA, dnaErr := dna.NewCollector(logger).Collect(runCtx); dnaErr == nil && currentDNA != nil {
-			subsysState.markHealthy("dna")
-			if pubErr := transportCl.PublishDNAUpdate(runCtx, currentDNA.Attributes, "", ""); pubErr != nil {
-				logger.Warn("Initial DNA publish failed; controller selectors may not find this steward until next config apply",
-					"error", pubErr)
-			} else {
-				logger.Info("Initial DNA snapshot published",
-					"attribute_count", len(currentDNA.Attributes))
-			}
-		} else if dnaErr != nil {
+		// Publish the FULL composite DNA (hardware + module). Using the composite
+		// collector — not a raw host-only dna.Collector — is essential: a host-only
+		// publish here runs after config apply and would delta-clobber the module
+		// DNA (cluster:*, vm:*) the config-apply publish just sent (#2520).
+		if pubErr := transportCl.PublishCurrentDNA(runCtx); pubErr != nil {
 			// DNA subsystem stays degraded; the refresh loop retries on each tick.
-			logger.Warn("DNA collection failed at startup; controller selectors may match no stewards until DNA is collected later",
-				"error", dnaErr)
+			logger.Warn("Initial DNA publish failed; controller selectors may match no stewards until the next convergence-driven publish",
+				"error", pubErr)
 		} else {
-			// nil error with nil DNA (empty collector result) — treat as healthy.
 			subsysState.markHealthy("dna")
+			logger.Info("Initial DNA snapshot published")
 		}
 
 		// Check for launcher-written upgrade flag files and emit lifecycle events.
@@ -1334,12 +1329,11 @@ func connectWithApprovedRegistration(
 
 	logger.Info("Configuration executor initialized", "tenant_id", reg.TenantID)
 
-	// Wire the executor as the module DNA source now that it exists (Issue #2435).
-	// The DNA adapter was constructed with nil; setting the executor here means
-	// the first DNA refresh tick after config sync will include module attributes.
-	if executor := transportClient.GetConfigExecutor(); executor != nil {
-		dnaAdapter.setModuleDNASource(executor)
-	}
+	// Wire the CLIENT (not the executor instance) as the module DNA source. The
+	// client delegates to its CURRENT c.configExecutor, so module DNA keeps flowing
+	// even though InitializeConfigExecutor replaces the executor on each
+	// connect/reconnect — a captured *Executor reference would go stale (#2520/#2435).
+	dnaAdapter.setModuleDNASource(transportClient)
 
 	return transportClient, nil
 }
@@ -1491,10 +1485,10 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 
 	logger.Info("Configuration executor initialized after reconnect", "tenant_id", logging.SanitizeLogValue(id.TenantID))
 
-	// Wire the executor as the module DNA source now that it exists (Issue #2435).
-	if executor := transportClient.GetConfigExecutor(); executor != nil {
-		dnaAdapterReconnect.setModuleDNASource(executor)
-	}
+	// Wire the CLIENT (not the executor instance) as the module DNA source — see the
+	// registration-path rationale above: InitializeConfigExecutor swaps the executor,
+	// so the adapter must delegate through the stable client (#2520/#2435).
+	dnaAdapterReconnect.setModuleDNASource(transportClient)
 
 	return transportClient, nil
 }

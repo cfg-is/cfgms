@@ -100,6 +100,12 @@ type TransportClient struct {
 	// Configuration executor (unified engine — same as standalone mode)
 	configExecutor *execution.Executor
 
+	// moduleDNAStore is the process-stable module-DNA snapshot shared across every
+	// executor this client builds. InitializeConfigExecutor replaces configExecutor
+	// on each connect/reconnect; a per-executor snapshot would be lost, so the store
+	// lives on the (stable) client and is injected into each executor (#2520).
+	moduleDNAStore *execution.ModuleDNASnapshot
+
 	// eventEmitter sends convergence observation events to the controller via LogStream.
 	// Initialised once by InitializeConfigExecutor; nil until then.
 	eventEmitter *EventEmitter
@@ -503,12 +509,22 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 		}
 	}
 
+	// Ensure the shared module-DNA store exists so it survives executor re-init on
+	// reconnect (#2520). Created once, reused by every executor this client builds.
+	c.mu.Lock()
+	if c.moduleDNAStore == nil {
+		c.moduleDNAStore = execution.NewModuleDNASnapshot()
+	}
+	moduleDNAStore := c.moduleDNAStore
+	c.mu.Unlock()
+
 	execCfg := &execution.ExecutorConfig{
-		TenantID:     tenantID,
-		Logger:       c.logger,
-		SecretStore:  c.secretStore,
-		StewardID:    stewardID,
-		EventEmitter: emitter,
+		TenantID:          tenantID,
+		Logger:            c.logger,
+		SecretStore:       c.secretStore,
+		StewardID:         stewardID,
+		EventEmitter:      emitter,
+		ModuleDNASnapshot: moduleDNAStore,
 	}
 	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
@@ -1076,12 +1092,32 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 		"status", report.Status)
 
 	// Publish DNA update carrying the config hash so the controller can verify
-	// delivery via heartbeats (Issue #1316).
-	c.dnaMu.RLock()
-	currentDNA := copyStringMap(c.lastPublishedDNA)
-	c.dnaMu.RUnlock()
+	// delivery via heartbeats (Issue #1316). A config apply IS a convergence, so
+	// refresh the FULL composite DNA (hardware facts + freshly-observed module
+	// state that ExecuteConfiguration just captured) rather than replaying the
+	// stale last-published host-only snapshot — this is how module/cluster DNA
+	// reaches the controller promptly instead of only on the 30m refresh tick
+	// (#2520 mechanism 1). Falls back to the cached snapshot if the composite
+	// collect is unavailable or empty.
+	var currentDNA map[string]string
+	c.mu.RLock()
+	collector := c.dnaCollector
+	c.mu.RUnlock()
+	if collector != nil {
+		if attrs, err := collector.CollectAttributes(ctx); err == nil && len(attrs) > 0 {
+			c.setCurrentDNAFromAttrs(attrs)
+			currentDNA = attrs
+		} else if err != nil {
+			c.logger.Info("Composite DNA collect after config apply failed; using cached snapshot", "error", err)
+		}
+	}
 	if currentDNA == nil {
-		currentDNA = make(map[string]string)
+		c.dnaMu.RLock()
+		currentDNA = copyStringMap(c.lastPublishedDNA)
+		c.dnaMu.RUnlock()
+		if currentDNA == nil {
+			currentDNA = make(map[string]string)
+		}
 	}
 	currentDNA["config_hash"] = configHash
 	if pubErr := c.PublishDNAUpdate(ctx, currentDNA, configHash, ""); pubErr != nil {
@@ -1561,6 +1597,30 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 	return nil
 }
 
+// PublishCurrentDNA collects the FULL composite DNA (hardware facts + module
+// state) via the wired collector and publishes it. Every DNA publish must be
+// composite: PublishDNAUpdate delta-compresses against the last publish, so a
+// host-only publish would REMOVE previously-published module keys (cluster:*,
+// vm:*) — the clobber that made module DNA flicker in and out (#2520). Use this
+// for one-shot startup/selector publishes instead of a raw host-only collector.
+func (c *TransportClient) PublishCurrentDNA(ctx context.Context) error {
+	c.mu.RLock()
+	collector := c.dnaCollector
+	c.mu.RUnlock()
+	if collector == nil {
+		return nil
+	}
+	attrs, err := collector.CollectAttributes(ctx)
+	if err != nil {
+		return err
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	c.setCurrentDNAFromAttrs(attrs)
+	return c.PublishDNAUpdate(ctx, attrs, "", "")
+}
+
 // StartDNARefreshLoop starts a background goroutine that re-collects system DNA
 // attributes on the configured interval and publishes delta updates to the
 // controller when at least one attribute value has changed.
@@ -1773,6 +1833,22 @@ func (c *TransportClient) GetConfigExecutor() *execution.Executor {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.configExecutor
+}
+
+// CollectModuleDNAAttributes delegates to the CURRENT config executor's module DNA
+// snapshot. Wiring the DNA collector adapter to the client (not a captured executor
+// instance) is deliberate: InitializeConfigExecutor replaces c.configExecutor on
+// every connect/reconnect, so a captured *Executor reference goes stale and module
+// DNA silently stops flowing (#2520). Delegating through the stable client always
+// reads the live executor. Returns nil before the executor exists.
+func (c *TransportClient) CollectModuleDNAAttributes(ctx context.Context) map[string]string {
+	c.mu.RLock()
+	executor := c.configExecutor
+	c.mu.RUnlock()
+	if executor == nil {
+		return nil
+	}
+	return executor.CollectModuleDNAAttributes(ctx)
 }
 
 // SetTenantID sets the tenant ID (used after HTTP registration).
