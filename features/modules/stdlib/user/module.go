@@ -176,22 +176,11 @@ func (m *userModule) Set(ctx context.Context, resourceID string, config modules.
 		"tenant_id", tenantID,
 		"resource_type", "user")
 
-	configMap := config.AsMap()
-	userCfg := &UserConfig{}
-
-	if state, ok := configMap["state"].(string); ok {
-		userCfg.State = state
+	userCfg, ok := config.(*UserConfig)
+	if !ok {
+		return fmt.Errorf("%w: unsupported config type %T (expected *UserConfig)", modules.ErrInvalidInput, config)
 	}
-	if fullName, ok := configMap["full_name"].(string); ok {
-		userCfg.FullName = fullName
-	}
-	if groups, ok := configMap["groups"].([]string); ok {
-		userCfg.Groups = groups
-	}
-	if locked, ok := configMap["locked"].(bool); ok {
-		userCfg.Locked = locked
-	}
-	// password_set is intentionally not read from configMap — observed only.
+	// PasswordSet is not written to desired state — it is an observed-only field.
 
 	if err := userCfg.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "User configuration validation failed",

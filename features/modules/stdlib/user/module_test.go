@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/conformance"
+	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -236,6 +237,22 @@ func TestUserModule_Set_InvalidInputs(t *testing.T) {
 	}
 	if err := m.Set(ctx, "alice", nil); err == nil {
 		t.Error("Set() with nil config must return an error")
+	}
+}
+
+// TestUserModule_Set_RejectsNonUserConfig verifies Set returns ErrInvalidInput when
+// passed a real ConfigState from a different module (the file module's *FileConfig)
+// rather than a *UserConfig. Using a real CFGMS component here — not a stub — exercises
+// the type-assertion guard in Set the same way a genuine cross-module misconfiguration would.
+func TestUserModule_Set_RejectsNonUserConfig(t *testing.T) {
+	m := New()
+	foreignConfig := &file.FileConfig{State: "present", AllowedBasePath: t.TempDir()}
+	err := m.Set(context.Background(), "alice", foreignConfig)
+	if err == nil {
+		t.Fatal("Set() must return an error for non-*UserConfig ConfigState")
+	}
+	if !errors.Is(err, modules.ErrInvalidInput) {
+		t.Errorf("Set() error = %v; want errors.Is(err, modules.ErrInvalidInput)", err)
 	}
 }
 
