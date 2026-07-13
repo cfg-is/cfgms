@@ -3,8 +3,7 @@ name: Documentation Validation
 on:
   pull_request:
     branches: [ main, develop ]
-    # ONLY run when documentation or agent definitions change
-    # Does NOT run on code-only PRs
+    # Run when documentation, agent definitions, or workflow files change
     paths:
       - 'docs/**'
       - '*.md'
@@ -12,6 +11,7 @@ on:
       - '.gitignore'
       - '.editorconfig'
       - 'LICENSE'
+      - '.github/workflows/*.yml'
   push:
     branches:
       - main
@@ -23,6 +23,7 @@ on:
       - '.gitignore'
       - '.editorconfig'
       - 'LICENSE'
+      - '.github/workflows/*.yml'
   merge_group:
   workflow_dispatch:
 
@@ -35,7 +36,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -91,7 +92,9 @@ jobs:
               continue
             fi
 
-            if [ ! -f "$file" ] && [ ! -d "$file" ]; then
+            # Strip anchor fragment (#section) before checking file existence
+            file_path="${file%%#*}"
+            if [ ! -f "$file_path" ] && [ ! -d "$file_path" ]; then
               echo "❌ Broken link: $file" >> $GITHUB_STEP_SUMMARY
               broken_links=$((broken_links + 1))
             fi
@@ -111,7 +114,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -167,7 +170,7 @@ jobs:
           if [[ "${{ needs.validate-claude-md.result }}" == "success" ]]; then
             echo "✅ **CLAUDE.md Validation**: Passed" >> $GITHUB_STEP_SUMMARY
           elif [[ "${{ needs.validate-claude-md.result }}" == "skipped" ]]; then
-            echo "⏭️  **CLAUDE.md Validation**: Skipped (merge_group or workflow_dispatch)" >> $GITHUB_STEP_SUMMARY
+            echo "⏭️  **CLAUDE.md Validation**: Skipped (merge_group)" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **CLAUDE.md Validation**: Failed" >> $GITHUB_STEP_SUMMARY
           fi
@@ -175,7 +178,7 @@ jobs:
           if [[ "${{ needs.validate-roadmap.result }}" == "success" ]]; then
             echo "✅ **Roadmap Validation**: Passed" >> $GITHUB_STEP_SUMMARY
           elif [[ "${{ needs.validate-roadmap.result }}" == "skipped" ]]; then
-            echo "⏭️  **Roadmap Validation**: Skipped (merge_group or workflow_dispatch)" >> $GITHUB_STEP_SUMMARY
+            echo "⏭️  **Roadmap Validation**: Skipped (merge_group)" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Roadmap Validation**: Failed" >> $GITHUB_STEP_SUMMARY
           fi
