@@ -118,6 +118,11 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 		"winrm_host":        "127.0.0.1",
 		"winrm_user_secret": "secret/user",
 		"winrm_pass_secret": "secret/pass",
+		// Create-time / provisioning directives — never reported by a module's Get,
+		// so comparing them drifts every cycle on a provisioned resource.
+		"source":                   map[string]interface{}{"image": "x.raw"},
+		"enroll_launcher_path":     `C:\seed\launcher`,
+		"debug_ssh_authorized_key": "ssh-ed25519 AAAA...",
 		// Actual resource state — must remain.
 		"switch_type": "internal",
 		"state":       "present",
@@ -125,12 +130,12 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 
 	fields := state.GetManagedFields()
 
-	// The 7 module-operational keys + the 2 identifier keys must all be
-	// excluded.
+	// The module-operational + identifier + create-time keys must all be excluded.
 	for _, key := range []string{
 		"path", "name",
 		"transport", "tenant_id", "steward_id", "audit_manager",
 		"winrm_host", "winrm_user_secret", "winrm_pass_secret",
+		"source", "enroll_launcher_path", "debug_ssh_authorized_key",
 	} {
 		assert.NotContains(t, fields, key,
 			"%q is a module-operational/identifier key and must not appear in managed fields", key)
@@ -195,4 +200,45 @@ func TestCompareStates_DeleteConfig_ExistenceOnly(t *testing.T) {
 	require.True(t, drift, "a present resource must drift against a delete config so the delete runs")
 	_, stateChanged := diff.ChangedFields["state"]
 	assert.True(t, stateChanged, "state (running -> absent) must be the drift that triggers deletion")
+}
+
+// TestCompareStates_ProvisionedVM_NoFalseDrift reproduces the live failure where
+// a source-provisioned VM erroneously reported drift on every convergence cycle,
+// keeping the steward's config status at ERROR permanently.
+//
+// The desired config carries create-time provisioning directives — `source`,
+// `enroll_launcher_path`, `debug_ssh_authorized_key` — that a running VM cannot
+// report (getVM returns source:nil and never surfaces the enrollment/seed fields).
+// With those excluded from managed fields, a provisioned VM whose observable state
+// matches its declaration must converge cleanly (no drift). (Verified live on
+// cfg-lab: cfgms-ci-lin-01 drifted forever on exactly these three fields.)
+func TestCompareStates_ProvisionedVM_NoFalseDrift(t *testing.T) {
+	comparator := stewardtesting.NewStateComparator()
+
+	desired := &genericConfigState{data: map[string]interface{}{
+		"name":      "cfgms-ci-lin-01",
+		"state":     "running",
+		"vhd_path":  `C:\VMs\cfgms-ci-lin-01.vhdx`,
+		"cpu_count": 4,
+		"memory_mb": 6144,
+		// Create-time provisioning directives — unobservable on the running VM.
+		"source":                   map[string]interface{}{"image": `C:\iso\debian.raw`, "os_family": "linux", "on_existing": "never"},
+		"enroll_launcher_path":     `C:\ClusterStorage\CSV01\seed-assets\cfgms-steward-launcher-linux`,
+		"debug_ssh_authorized_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 cfgms-lab@cfg-lab",
+	}}
+
+	// What getVM reports for the same running VM: observable state matches, but
+	// source is nil and the enrollment/ssh fields are absent.
+	current := &genericConfigState{data: map[string]interface{}{
+		"name":      "cfgms-ci-lin-01",
+		"state":     "running",
+		"vhd_path":  `C:\VMs\cfgms-ci-lin-01.vhdx`,
+		"cpu_count": 4,
+		"memory_mb": 6144,
+		"source":    nil,
+	}}
+
+	drift, diff := comparator.CompareStates(current, desired)
+	assert.False(t, drift,
+		"a provisioned VM whose observable state matches must not drift on create-time fields; got %+v", diff)
 }
