@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: [ main, develop ]
   merge_group:
+  push:
+    branches: [ develop ]
+    paths: [ '.github/**' ]
   workflow_dispatch:
 
 permissions: {}
@@ -23,7 +26,6 @@ jobs:
 
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
-        continue-on-error: true
         with:
           upload: always
         env:

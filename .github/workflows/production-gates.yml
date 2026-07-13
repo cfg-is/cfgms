@@ -70,30 +70,33 @@ jobs:
     
     - name: Run Security Gate Analysis
       id: security-gate
+      env:
+        EMERGENCY_OVERRIDE: ${{ github.event.inputs.emergency_override }}
+        OVERRIDE_REASON: ${{ github.event.inputs.override_reason }}
       run: |
         echo "🚪 PRODUCTION SECURITY DEPLOYMENT GATE"
         echo "======================================"
         echo ""
-        
+
         # Initialize variables
         critical_vulns=0
         high_vulns=0
         security_issues_found=false
         deployment_blocked=false
         override_required=false
-        
+
         # Check for critical vulnerabilities with Trivy
         echo "🔍 Scanning for Critical/High Vulnerabilities..."
         trivy fs . --severity CRITICAL,HIGH --exit-code 1 --format table > /tmp/trivy-critical.txt 2>&1
         trivy_exit_code=$?
-        
+
         if [ $trivy_exit_code -ne 0 ]; then
           echo "❌ CRITICAL/HIGH vulnerabilities detected in dependencies"
           critical_vulns=$(trivy fs . --severity CRITICAL --format json --quiet | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' 2>/dev/null || echo "0")
           high_vulns=$(trivy fs . --severity HIGH --format json --quiet | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' 2>/dev/null || echo "0")
           security_issues_found=true
           deployment_blocked=true
-          
+
           echo "  Critical vulnerabilities: $critical_vulns"
           echo "  High vulnerabilities: $high_vulns"
           echo ""
@@ -101,19 +104,19 @@ jobs:
         else
           echo "✅ No critical/high vulnerabilities detected"
         fi
-        
+
         # Advisory scans (nancy, gosec, staticcheck) are non-required contexts
         # that run in security-scan.yml. They are not executed here so this
         # gate remains focused on the single blocking Trivy vulnerability scan.
 
         # Check for emergency override
-        if [ "${{ github.event.inputs.emergency_override }}" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
+        if [ "$EMERGENCY_OVERRIDE" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
           echo ""
           echo "🚨 EMERGENCY OVERRIDE DETECTED"
           echo "============================="
           if [ "$deployment_blocked" = "true" ]; then
             echo "⚠️  Security issues present but emergency override authorized"
-            echo "   Override reason: ${{ github.event.inputs.override_reason || 'Manual emergency file present' }}"
+            echo "   Override reason: ${OVERRIDE_REASON:-Manual emergency file present}"
             deployment_blocked=false
             override_required=true
           fi
@@ -153,45 +156,50 @@ jobs:
     
     - name: Generate Security Audit Trail
       if: always()
+      env:
+        SECURITY_STATUS: ${{ steps.security-gate.outputs.security-status }}
+        DEPLOYMENT_ALLOWED: ${{ steps.security-gate.outputs.deployment-allowed }}
+        OVERRIDE_REQUIRED: ${{ steps.security-gate.outputs.override-required }}
+        OVERRIDE_REASON: ${{ github.event.inputs.override_reason }}
       run: |
         echo "📝 SECURITY AUDIT TRAIL"
         echo "======================"
         echo ""
         echo "Deployment Details:"
         echo "- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "- Branch: ${{ github.ref }}"
-        echo "- Commit: ${{ github.sha }}"
-        echo "- Actor: ${{ github.actor }}"
-        echo "- Event: ${{ github.event_name }}"
+        echo "- Branch: $GITHUB_REF"
+        echo "- Commit: $GITHUB_SHA"
+        echo "- Actor: $GITHUB_ACTOR"
+        echo "- Event: $GITHUB_EVENT_NAME"
         echo ""
         echo "Security Gate Results:"
-        echo "- Security Status: ${{ steps.security-gate.outputs.security-status }}"
-        echo "- Deployment Allowed: ${{ steps.security-gate.outputs.deployment-allowed }}"
-        echo "- Override Used: ${{ steps.security-gate.outputs.override-required }}"
+        echo "- Security Status: $SECURITY_STATUS"
+        echo "- Deployment Allowed: $DEPLOYMENT_ALLOWED"
+        echo "- Override Used: $OVERRIDE_REQUIRED"
         echo ""
-        if [ "${{ steps.security-gate.outputs.override-required }}" = "true" ]; then
+        if [ "$OVERRIDE_REQUIRED" = "true" ]; then
           echo "Override Details:"
-          echo "- Reason: ${{ github.event.inputs.override_reason || 'Emergency file override' }}"
-          echo "- Authorized by: ${{ github.actor }}"
+          echo "- Reason: ${OVERRIDE_REASON:-Emergency file override}"
+          echo "- Authorized by: $GITHUB_ACTOR"
           echo "- Approval required: YES (manual review needed)"
         fi
-        
+
         # Save audit trail
         mkdir -p audit-logs
         cat > audit-logs/deployment-security-audit.json << EOF
         {
           "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
           "deployment": {
-            "branch": "${{ github.ref }}",
-            "commit": "${{ github.sha }}",
-            "actor": "${{ github.actor }}",
-            "event": "${{ github.event_name }}"
+            "branch": "$GITHUB_REF",
+            "commit": "$GITHUB_SHA",
+            "actor": "$GITHUB_ACTOR",
+            "event": "$GITHUB_EVENT_NAME"
           },
           "security_gate": {
-            "status": "${{ steps.security-gate.outputs.security-status }}",
-            "deployment_allowed": ${{ steps.security-gate.outputs.deployment-allowed }},
-            "override_used": ${{ steps.security-gate.outputs.override-required }},
-            "override_reason": "${{ github.event.inputs.override_reason || 'N/A' }}"
+            "status": "$SECURITY_STATUS",
+            "deployment_allowed": $DEPLOYMENT_ALLOWED,
+            "override_used": $OVERRIDE_REQUIRED,
+            "override_reason": "${OVERRIDE_REASON:-N/A}"
           }
         }
         EOF

@@ -156,7 +156,7 @@ runs:
         $cfgBin = Join-Path $env:RUNNER_TEMP 'cfg.exe'
         Write-Host "Downloading cfg from $url"
         Invoke-WebRequest -Uri $url -OutFile $cfgBin -UseBasicParsing
-        # zizmor: ignore[dangerous-environment-file]
+        # zizmor: ignore[github-env]
         # RUNNER_TEMP is a GitHub Actions runner-provided environment variable; it is
         # not influenced by repository content or pull-request authors. Writing it to
         # GITHUB_PATH adds the runner's temp directory to PATH so that the cfg binary
