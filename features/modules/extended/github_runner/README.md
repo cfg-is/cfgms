@@ -39,20 +39,78 @@ Schema (`runner` resource):
 | `agent_sha256` | yes | Operator-pinned expected SHA-256 (64-char hex). Verified directly — **no network hash lookup** |
 | `labels` | no | Desired runner label set |
 | `work_dir` | yes | Absolute install directory; also the resource ID |
-| `service_name` | yes | OS service name (systemd unit on Linux, SCM service on Windows) |
+| `owner` | conditional | GitHub organization or user owning the repository. Required when `service_name` is not set |
+| `repo` | conditional | GitHub repository name (without owner prefix). Required when `service_name` is not set |
+| `service_name` | no | OS service name (systemd unit on Linux, SCM service on Windows). When omitted, derived from `owner`, `repo`, and the host's hostname |
+
+### Optional service_name and automatic derivation
+
+`service_name` is optional. When omitted, `owner` and `repo` become required and
+the module derives the OS service name at convergence time as:
+
+```
+actions.runner.<owner>-<repo>.<hostname>
+```
+
+where `<hostname>` is the steward host's hostname obtained via `os.Hostname()`,
+and any characters not in `[a-zA-Z0-9._@-]` in the owner, repo, or hostname are
+replaced with `-` before composition. The derived name is validated against the
+service-name character pattern; if it exceeds the length limit (255 characters)
+`Set` returns a validation error.
+
+This derivation allows a **single shared role config** (with `owner` + `repo` but
+no `service_name`) to converge correctly on any number of runner hosts — each host
+produces its own host-unique service name without per-machine config overrides.
+
+### Registration-name coupling (load-bearing)
+
+The GitHub runner's `config.sh` / `config.cmd` register step creates the OS
+service as `actions.runner.<owner>-<repo>.<runner-name>`. The `<runner-name>` is
+the name given to the runner at registration time.
+
+**Contract:** the runner must be registered with its `<runner-name>` equal to the
+steward host's hostname (the value returned by `os.Hostname()`). The module
+derives the service name using the same hostname via `os.Hostname()`, so the
+derived name exactly matches the service name that registration produced.
+
+If the service name derived by this module does not match the name created at
+registration, `Get` will query a non-existent service and report
+`installed: false` indefinitely. Ensure the registration step uses the hostname
+as the runner name (the S6 live-proof workflow enforces this by registering the
+runner with `--name $(hostname)`).
 
 ## Usage examples
 
+### Explicit service_name (per-machine config)
+
 ```yaml
-# A Linux CI runner host (see examples/ci-runners for the full walkthrough)
+# A Linux CI runner host with an explicit service name
 resource: runner
-work_dir: /opt/actions-runner          # also the resource ID
+work_dir: /opt/actions-runner
 config:
   version: "2.319.1"
   agent_url: "https://github.com/actions/runner/releases/download/v2.319.1/actions-runner-linux-x64-2.319.1.tar.gz"
   agent_sha256: "<64-char hex pinned by the operator>"
   labels: ["self-hosted", "linux", "ci"]
   service_name: "actions.runner.acme-repo.host1.service"
+```
+
+### Shared role config with derived service_name
+
+```yaml
+# One role config that works on any number of runner hosts.
+# service_name is omitted; the module derives it from owner, repo, and hostname.
+# Registration must use the runner name equal to the host's hostname.
+resource: runner
+work_dir: /opt/actions-runner
+config:
+  version: "2.319.1"
+  agent_url: "https://github.com/actions/runner/releases/download/v2.319.1/actions-runner-linux-x64-2.319.1.tar.gz"
+  agent_sha256: "<64-char hex pinned by the operator>"
+  labels: ["self-hosted", "linux", "ci"]
+  owner: "acme-org"
+  repo: "myrepo"
+  # service_name is omitted; derived as actions.runner.acme-org-myrepo.<hostname>
 ```
 
 `Set` downloads the agent at the pinned `version`, verifies its SHA-256, unpacks
@@ -93,9 +151,11 @@ managers used to converge the already-registered runner service:
 - **Windows** — `sc.exe` against the runner SCM service
 
 Argument lists are fully static except `service_name`, which is validated against
-`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,254}$` before use. No command-string composition,
-no `iex` / `-Command` / `-EncodedCommand`. The vendor `config.cmd` / `config.sh`
-register tool is **not** invoked by this module.
+`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,254}$` before use (for explicit names) or
+derived via `sanitizeComponent` (which enforces the same character set) for
+auto-derived names. No command-string composition, no `iex` / `-Command` /
+`-EncodedCommand`. The vendor `config.cmd` / `config.sh` register tool is
+**not** invoked by this module.
 
 ## Platforms
 
@@ -108,7 +168,7 @@ compiles everywhere.
 | File | Role |
 |------|------|
 | `module.go` | `Module` (Get/Set), `Configurable`, and `Test`; convergence logic |
-| `config.go` | `RunnerConfig` (`ConfigState`) + the on-disk drift state marker |
+| `config.go` | `RunnerConfig` (`ConfigState`) + the on-disk drift state marker + service-name derivation |
 | `install.go` | download (net/http) + SHA-256 verify + stdlib unpack |
 | `service_linux.go` / `service_windows.go` / `service_stub.go` | platform service executors |
 | `module.yaml` / `schema.yaml` | signed manifest + resource schema |
