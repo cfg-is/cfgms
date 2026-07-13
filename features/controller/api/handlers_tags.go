@@ -46,7 +46,7 @@ func (s *Server) handleListStewardTags(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to get tags",
 			"steward_id", logging.SanitizeLogValue(stewardID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read tags", "INTERNAL_ERROR")
 		return
 	}
@@ -79,24 +79,18 @@ func (s *Server) handleAddStewardTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current, err := ts.Get(r.Context(), stewardID)
+	incoming := req.Tags
+	merged, err := ts.Update(r.Context(), stewardID, func(current []string) ([]string, error) {
+		return mergeTags(current, incoming), nil
+	})
 	if err != nil {
-		s.logger.Error("Failed to read current tags",
-			"steward_id", logging.SanitizeLogValue(stewardID),
-			"error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read tags", "INTERNAL_ERROR")
-		return
-	}
-
-	merged := mergeTags(current, req.Tags)
-	if err := ts.Set(r.Context(), stewardID, merged); err != nil {
 		if errors.Is(err, tagstore.ErrInvalidTag) {
 			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_TAG")
 			return
 		}
 		s.logger.Error("Failed to set tags",
 			"steward_id", logging.SanitizeLogValue(stewardID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to set tags", "INTERNAL_ERROR")
 		return
 	}
@@ -129,27 +123,21 @@ func (s *Server) handleDeleteStewardTags(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	current, err := ts.Get(r.Context(), stewardID)
+	toRemove := req.Tags
+	remaining, err := ts.Update(r.Context(), stewardID, func(current []string) ([]string, error) {
+		return removeTags(current, toRemove), nil
+	})
 	if err != nil {
-		s.logger.Error("Failed to read current tags",
-			"steward_id", logging.SanitizeLogValue(stewardID),
-			"error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read tags", "INTERNAL_ERROR")
-		return
-	}
-
-	remaining := removeTags(current, req.Tags)
-	if err := ts.Set(r.Context(), stewardID, remaining); err != nil {
 		s.logger.Error("Failed to set tags after removal",
 			"steward_id", logging.SanitizeLogValue(stewardID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to set tags", "INTERNAL_ERROR")
 		return
 	}
 
 	s.logger.Info("Tags removed",
 		"steward_id", logging.SanitizeLogValue(stewardID),
-		"removed", len(req.Tags),
+		"removed", len(toRemove),
 		"remaining", len(remaining))
 	s.writeSuccessResponse(w, tagsResponse{Tags: remaining})
 }

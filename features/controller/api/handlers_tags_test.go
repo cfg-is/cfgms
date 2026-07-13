@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -424,4 +425,37 @@ func TestRemoveTags_RemoveAll(t *testing.T) {
 func TestRemoveTags_EmptySource(t *testing.T) {
 	result := removeTags(nil, []string{"prod"})
 	assert.Empty(t, result)
+}
+
+// TestHandleAddStewardTags_Concurrent verifies that concurrent POST requests for the
+// same steward accumulate all tag additions — no update is silently overwritten.
+func TestHandleAddStewardTags_Concurrent(t *testing.T) {
+	server := setupTagServer(t)
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:write", "steward:tag:read"}, "test-tenant", 5*time.Minute)
+	addTagTestSteward(t, server, "s-concurrent", "test-tenant")
+
+	const goroutines = 10
+	tags := []string{"taga", "tagb", "tagc", "tagd", "tage", "tagf", "tagg", "tagh", "tagi", "tagj"}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		tag := tags[i]
+		go func() {
+			defer wg.Done()
+			rec := doTagRequest(server, http.MethodPost, "/api/v1/stewards/s-concurrent/tags", apiKey,
+				map[string]interface{}{"tags": []string{tag}})
+			assert.Equal(t, http.StatusOK, rec.Code, "tag %s: %s", tag, rec.Body.String())
+		}()
+	}
+	wg.Wait()
+
+	rec := doTagRequest(server, http.MethodGet, "/api/v1/stewards/s-concurrent/tags", apiKey, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	got, _ := data["tags"].([]interface{})
+	assert.Len(t, got, goroutines, "all %d concurrent tag additions must be preserved", goroutines)
 }
