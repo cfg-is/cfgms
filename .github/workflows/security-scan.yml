@@ -96,6 +96,12 @@ jobs:
         path: sarif-results/
         retention-days: 30
 
+    - name: Fail on security findings
+      if: steps.scan.outputs.issues-found == 'true'
+      run: |
+        echo "❌ Trivy scan found CRITICAL/HIGH vulnerabilities — see scan output above"
+        exit 1
+
   nancy-scan:
     permissions:
       contents: read
