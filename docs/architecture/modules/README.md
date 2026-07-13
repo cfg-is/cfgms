@@ -208,7 +208,7 @@ Shipped in the steward installer, all `executors: [steward]` (closed set — see
 - `script` - Cross-platform script execution (file-based, no inline eval) — *execution primitive*
 - `firewall` - Firewall rules and policies
 - `patch` - OS patch management (Windows Update COM API on Windows; `modules.ErrUnsupportedPlatform` fallback on Linux/macOS — real non-Windows backends are out of scope per ADR-016 PM Notes)
-- `user` - Local users & groups, membership, password/lock state — *planned (net-new)*
+- `user` - Local users & groups, membership, lock/disable state, password presence (observed only)
 - `cert_trust` - System trust store: install/trust CA & certs; keeps the CFGMS mTLS chain healthy — *planned (net-new)*
 - `time` - Timezone + NTP/time-sync — *planned (net-new)*
 - `hostname` - System/computer name & workgroup — *planned (net-new)*

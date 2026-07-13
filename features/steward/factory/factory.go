@@ -48,6 +48,7 @@ import (
 	package_module "github.com/cfgis/cfgms/features/modules/stdlib/package"
 	"github.com/cfgis/cfgms/features/modules/stdlib/patch"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	user_module "github.com/cfgis/cfgms/features/modules/stdlib/user"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -183,6 +184,7 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 	"package":       func() modules.Module { return package_module.New() },
 	"patch":         func() modules.Module { return patch.New() },
 	"script":        func() modules.Module { return script.New() },
+	"user":          func() modules.Module { return user_module.New() },
 }
 
 // loadBuiltinModule creates a new instance of a built-in module.

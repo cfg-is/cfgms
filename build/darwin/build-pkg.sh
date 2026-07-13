@@ -165,6 +165,7 @@ STDLIB_MODULES=(
     cfgms-module-patch
     cfgms-module-script
     cfgms-module-service
+    cfgms-module-user
 )
 MODULES_PAYLOAD_DIR="$PAYLOAD_DIR/usr/local/lib/cfgms/modules"
 mkdir -p "$MODULES_PAYLOAD_DIR"

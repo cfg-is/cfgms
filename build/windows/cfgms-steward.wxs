@@ -100,6 +100,9 @@
           <Component Id="ModulePatch" Guid="*">
             <File Id="ModulePatchExe" Source="$(var.ModulesDir)\cfgms-module-patch.exe" Name="cfgms-module-patch.exe" KeyPath="yes" />
           </Component>
+          <Component Id="ModuleUser" Guid="*">
+            <File Id="ModuleUserExe" Source="$(var.ModulesDir)\cfgms-module-user.exe" Name="cfgms-module-user.exe" KeyPath="yes" />
+          </Component>
         </Directory>
       </Directory>
     </StandardDirectory>
@@ -113,6 +116,7 @@
       <ComponentRef Id="ModuleScript" />
       <ComponentRef Id="ModuleFirewall" />
       <ComponentRef Id="ModulePatch" />
+      <ComponentRef Id="ModuleUser" />
     </Feature>
 
     <!--

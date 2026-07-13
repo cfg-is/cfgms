@@ -141,7 +141,8 @@ STDLIB_MODULES := \
 	package \
 	patch \
 	script \
-	service
+	service \
+	user
 
 # Stdlib payload boundary check: all five sources of stdlib module names must agree.
 # See scripts/check-stdlib-payload-boundary.sh and ADR-016 clause 3.

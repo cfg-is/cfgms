@@ -1,0 +1,50 @@
+name: user
+version: 0.1.0
+description: >
+  Manages local user accounts and group membership on the system.
+  Provides idempotent Get/Set management of account existence, group membership,
+  lock/disable state, and password presence (observed only) via native OS account
+  management tools (net.exe on Windows, useradd/usermod/userdel on Linux, dscl on macOS).
+  Password setting is intentionally out of scope — the module reports whether an
+  account has a password (password_set, Get-only) but never accepts, stores, or
+  transmits password material.
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local user account management on steward systems
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "64MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: user  # authority over user:* objects this module manages
+
+security:
+  requires_root: true  # creating/modifying/deleting accounts requires elevated privileges
+  capabilities: []
+  ports: []
+
+behavioral_envelope:
+  shells_out_to:
+    - net.exe    # Windows: net user (account management), net localgroup (group membership)
+    - useradd    # Linux: create local user accounts
+    - usermod    # Linux: modify local user accounts (full name, groups, lock state)
+    - userdel    # Linux: delete local user accounts
+    - dscl       # macOS: Directory Service command-line (user read/write)
+    - id         # macOS: resolve group names for a user
+    - pwpolicy   # macOS: query/set account policy (disabled state)
+    - dseditgroup  # macOS: group membership management
+
+documentation:
+  api: "docs/modules/user.md"
+  examples: "docs/modules/user.md"
