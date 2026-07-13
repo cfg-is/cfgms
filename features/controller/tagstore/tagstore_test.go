@@ -4,7 +4,9 @@ package tagstore_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -214,6 +216,104 @@ func TestStore_DurabilityAcrossRestart(t *testing.T) {
 
 	// TagsFor must also return durable results.
 	assert.Equal(t, []string{"env-prod", "region-eu"}, store2.TagsFor("steward-persist"))
+}
+
+// ---- Update tests -----------------------------------------------------------
+
+func TestStore_Update_Basic(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.Set(ctx, "s1", []string{"prod"}))
+
+	result, err := store.Update(ctx, "s1", func(current []string) ([]string, error) {
+		return append(current, "web"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prod", "web"}, result)
+
+	stored, err := store.Get(ctx, "s1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prod", "web"}, stored)
+}
+
+func TestStore_Update_EmptyBaseline(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	result, err := store.Update(ctx, "new-steward", func(current []string) ([]string, error) {
+		assert.Empty(t, current, "fn must receive empty slice for unknown steward")
+		return []string{"prod"}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prod"}, result)
+}
+
+func TestStore_Update_FnError_DoesNotWrite(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.Set(ctx, "s1", []string{"prod"}))
+
+	fnErr := errors.New("fn rejected update")
+	_, err := store.Update(ctx, "s1", func(_ []string) ([]string, error) {
+		return nil, fnErr
+	})
+	require.ErrorIs(t, err, fnErr)
+
+	// Original tags must be unchanged.
+	stored, err := store.Get(ctx, "s1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prod"}, stored)
+}
+
+func TestStore_Update_InvalidTagRejected(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.Set(ctx, "s1", []string{"prod"}))
+
+	_, err := store.Update(ctx, "s1", func(current []string) ([]string, error) {
+		return append(current, "INVALID-UPPERCASE"), nil
+	})
+	require.ErrorIs(t, err, tagstore.ErrInvalidTag)
+
+	stored, err := store.Get(ctx, "s1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prod"}, stored, "store must not be modified on invalid tag")
+}
+
+// TestStore_Update_Concurrent verifies that concurrent updates are serialised and
+// no tag writes are lost (the read-modify-write race is absent).
+func TestStore_Update_Concurrent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	// Each goroutine appends a unique tag. After all complete, all tags must be present.
+	for i := range goroutines {
+		tag := "tag" + string(rune('a'+i)) // tag-a … tag-t (20 tags)
+		go func() {
+			defer wg.Done()
+			_, err := store.Update(ctx, "concurrent-steward", func(current []string) ([]string, error) {
+				for _, t := range current {
+					if t == tag {
+						return current, nil // already present
+					}
+				}
+				return append(current, tag), nil
+			})
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	tags, err := store.Get(ctx, "concurrent-steward")
+	require.NoError(t, err)
+	assert.Len(t, tags, goroutines, "all %d concurrent updates must be preserved", goroutines)
 }
 
 // TestStore_MultiSteward verifies that Set/Get/Delete are correctly scoped to steward IDs.

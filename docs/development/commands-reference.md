@@ -684,3 +684,75 @@ Deleted role config "github-runners"
 ```
 
 **Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+
+## cfg steward tag — Steward Tag Management (Issue #2545)
+
+Tags are operator-assigned metadata on a steward used by `tag:` selectors in role configs
+and fleet commands. Tags are controller-owned: they survive controller restarts and are
+never overwritten by the steward's DNA report cycle.
+
+**Tag format:** lowercase alphanumeric, optionally separated by hyphens (1–64 chars).
+Examples: `prod`, `web-server`, `github-runner`.
+
+**Required permissions:** `steward:tag:read` (GET), `steward:tag:write` (POST, DELETE).
+
+### cfg steward tag add
+
+Add one or more tags to a steward. Adding a tag that already exists is a no-op (idempotent).
+
+```bash
+cfg steward tag add <steward-id> <tag> [tag...] --url=https://controller.example.com --api-key=mykey
+```
+
+Example:
+
+```bash
+cfg steward tag add steward-abc123 prod web-server \
+  --url https://controller.example.com --api-key mykey
+```
+
+Output on success:
+
+```
+Tags on steward-abc123: prod, web-server
+```
+
+### cfg steward tag rm
+
+Remove one or more tags from a steward. Removing a tag that does not exist is a no-op (idempotent).
+
+```bash
+cfg steward tag rm <steward-id> <tag> [tag...] --url=https://controller.example.com --api-key=mykey
+```
+
+Output on success:
+
+```
+Tags on steward-abc123: prod
+```
+
+### cfg steward tag ls
+
+List all operator-assigned tags on a steward.
+
+```bash
+cfg steward tag ls <steward-id> --url=https://controller.example.com --api-key=mykey
+```
+
+Example output:
+
+```
+TAG
+---
+prod
+web-server
+```
+
+**Flags (all sub-commands):**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--url` | — | Controller API URL (env: CFGMS_API_URL) |
+| `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
+| `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
+| `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
