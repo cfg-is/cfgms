@@ -150,7 +150,7 @@ func TestComposite_SyncDNA_NilHandler(t *testing.T) {
 func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
-	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue())
+	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue(), nil)
 	composite := newCompositeTransportServer(cp, dnaHandler, nil, nil, nil, nil)
 
 	// Empty stream with background context (no mTLS peer) → Unauthenticated from handler.
