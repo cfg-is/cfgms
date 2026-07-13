@@ -172,7 +172,6 @@ make test-with-security  # Runs: test + security-scan + summary
 
 1. `security-deployment-gate` - Primary security validation
 2. `production-risk-assessment` - Risk analysis (requires security approval)
-3. `deployment-notification` - Automated status notifications
 
 ## Production Deployment Gates
 
@@ -236,7 +235,6 @@ Every override creates comprehensive audit documentation:
 **Audit Artifacts**:
 
 - `security-deployment-audit` (90-day retention)
-- `deployment-notification` (30-day retention)
 
 ### Post-Override Requirements
 
