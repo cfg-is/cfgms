@@ -294,22 +294,31 @@ jobs:
 
     - name: Security Summary
       id: summary
+      env:
+        TRIVY_STATUS: ${{ needs.trivy-scan.outputs.status }}
+        NANCY_STATUS: ${{ needs.nancy-scan.outputs.status }}
+        GOSEC_STATUS: ${{ needs.gosec-scan.outputs.status }}
+        STATICCHECK_STATUS: ${{ needs.staticcheck-scan.outputs.status }}
+        TRIVY_ISSUES: ${{ needs.trivy-scan.outputs.issues-found }}
+        NANCY_ISSUES: ${{ needs.nancy-scan.outputs.issues-found }}
+        GOSEC_ISSUES: ${{ needs.gosec-scan.outputs.issues-found }}
+        STATICCHECK_ISSUES: ${{ needs.staticcheck-scan.outputs.issues-found }}
       run: |
         echo "📊 Parallel Security Scan Summary"
         echo "================================="
         echo ""
         echo "Individual Tool Results:"
-        echo "  • Trivy: ${{ needs.trivy-scan.outputs.status }}"
-        echo "  • Nancy: ${{ needs.nancy-scan.outputs.status }}"
-        echo "  • gosec: ${{ needs.gosec-scan.outputs.status }}"
-        echo "  • staticcheck: ${{ needs.staticcheck-scan.outputs.status }}"
+        echo "  • Trivy: $TRIVY_STATUS"
+        echo "  • Nancy: $NANCY_STATUS"
+        echo "  • gosec: $GOSEC_STATUS"
+        echo "  • staticcheck: $STATICCHECK_STATUS"
         echo ""
-        
+
         # Determine if any issues were found
-        if [ "${{ needs.trivy-scan.outputs.issues-found }}" = "true" ] || \
-           [ "${{ needs.nancy-scan.outputs.issues-found }}" = "true" ] || \
-           [ "${{ needs.gosec-scan.outputs.issues-found }}" = "true" ] || \
-           [ "${{ needs.staticcheck-scan.outputs.issues-found }}" = "true" ]; then
+        if [ "$TRIVY_ISSUES" = "true" ] || \
+           [ "$NANCY_ISSUES" = "true" ] || \
+           [ "$GOSEC_ISSUES" = "true" ] || \
+           [ "$STATICCHECK_ISSUES" = "true" ]; then
           echo "issues-found=true" >> $GITHUB_OUTPUT
           echo "❌ Security issues detected across tools"
         else
@@ -367,18 +376,24 @@ jobs:
     if: github.ref == 'refs/heads/main'
     steps:
     - name: Production Deployment Decision
+      env:
+        TRIVY_STATUS: ${{ needs.security-validation.outputs.trivy-status }}
+        NANCY_STATUS: ${{ needs.security-validation.outputs.nancy-status }}
+        GOSEC_STATUS: ${{ needs.security-validation.outputs.gosec-status }}
+        STATICCHECK_STATUS: ${{ needs.security-validation.outputs.staticcheck-status }}
+        ISSUES_FOUND: ${{ needs.security-validation.outputs.issues-found }}
       run: |
         echo "🚪 PRODUCTION DEPLOYMENT GATE"
         echo "============================"
         echo ""
         echo "Security Scan Results:"
-        echo "  • Trivy: ${{ needs.security-validation.outputs.trivy-status }}"
-        echo "  • Nancy: ${{ needs.security-validation.outputs.nancy-status }}"
-        echo "  • gosec: ${{ needs.security-validation.outputs.gosec-status }}"
-        echo "  • staticcheck: ${{ needs.security-validation.outputs.staticcheck-status }}"
+        echo "  • Trivy: $TRIVY_STATUS"
+        echo "  • Nancy: $NANCY_STATUS"
+        echo "  • gosec: $GOSEC_STATUS"
+        echo "  • staticcheck: $STATICCHECK_STATUS"
         echo ""
-        
-        if [ "${{ needs.security-validation.outputs.issues-found }}" = "true" ]; then
+
+        if [ "$ISSUES_FOUND" = "true" ]; then
           echo "❌ PRODUCTION DEPLOYMENT BLOCKED"
           echo "   Critical security issues must be resolved before deployment"
           echo ""
@@ -401,19 +416,25 @@ jobs:
     if: always()
     steps:
     - name: Security Scan Summary
+      env:
+        TRIVY_DISPLAY: ${{ needs.security-validation.outputs.trivy-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        NANCY_DISPLAY: ${{ needs.security-validation.outputs.nancy-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        GOSEC_DISPLAY: ${{ needs.security-validation.outputs.gosec-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        STATICCHECK_DISPLAY: ${{ needs.security-validation.outputs.staticcheck-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        ISSUES_FOUND: ${{ needs.security-validation.outputs.issues-found }}
       run: |
         echo "## Security Scan Summary 🛡️" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Scan Results" >> $GITHUB_STEP_SUMMARY
         echo "| Tool | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Trivy | ${{ needs.security-validation.outputs.trivy-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Nancy | ${{ needs.security-validation.outputs.nancy-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| gosec | ${{ needs.security-validation.outputs.gosec-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| staticcheck | ${{ needs.security-validation.outputs.staticcheck-status == 'passed' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Trivy | $TRIVY_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "| Nancy | $NANCY_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "| gosec | $GOSEC_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "| staticcheck | $STATICCHECK_DISPLAY |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ needs.security-validation.outputs.issues-found }}" = "true" ]; then
+
+        if [ "$ISSUES_FOUND" = "true" ]; then
           echo "### 🤖 Automated Remediation" >> $GITHUB_STEP_SUMMARY
           echo "Security issues detected! Use Claude Code for automated fixes:" >> $GITHUB_STEP_SUMMARY
           echo "1. Download the \`security-scan-results\` artifact" >> $GITHUB_STEP_SUMMARY
