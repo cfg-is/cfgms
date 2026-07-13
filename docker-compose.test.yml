@@ -673,6 +673,11 @@ services:
     build:
       context: .
       dockerfile: cmd/controller/Dockerfile
+      x-bake:
+        cache-from:
+          - type=gha,scope=cfgms-fleet-controller
+        cache-to:
+          - type=gha,mode=max,scope=cfgms-fleet-controller
     ports:
       - "4437:4433/udp"   # gRPC-over-QUIC transport
       - "8090:9080"       # HTTP API
@@ -734,6 +739,11 @@ services:
       dockerfile: cmd/steward/Dockerfile.debian
       args:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
+      x-bake:
+        cache-from:
+          - type=gha,scope=cfgms-fleet-steward-debian
+        cache-to:
+          - type=gha,mode=max,scope=cfgms-fleet-steward-debian
     environment:
       CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_a"
       CFGMS_LOG_LEVEL: "debug"
@@ -767,6 +777,11 @@ services:
       dockerfile: cmd/steward/Dockerfile.debian
       args:
         STEWARD_CONTROLLER_URL: "https://fleet-controller:9080"
+      x-bake:
+        cache-from:
+          - type=gha,scope=cfgms-fleet-steward-debian
+        cache-to:
+          - type=gha,mode=max,scope=cfgms-fleet-steward-debian
     environment:
       CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_b"
       CFGMS_LOG_LEVEL: "debug"

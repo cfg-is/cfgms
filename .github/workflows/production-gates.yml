@@ -417,6 +417,20 @@ jobs:
         make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+    - name: Build test runner image
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        file: ./Dockerfile.test-runner
+        push: false
+        load: true
+        tags: cfgms-test-runner
+        cache-from: type=gha,scope=cfgms-test-runner
+        cache-to: type=gha,mode=max,scope=cfgms-test-runner
+
     - name: Run Controller Integration Tests
       env:
         CFGMS_TEST_INTEGRATION: "1"
@@ -428,9 +442,6 @@ jobs:
         set -a
         source .env.test
         set +a
-
-        # Build test runner for container-to-container networking (enables UDP/QUIC)
-        docker build -t cfgms-test-runner -f Dockerfile.test-runner .
 
         # Get Docker socket group to grant non-root user access
         DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
