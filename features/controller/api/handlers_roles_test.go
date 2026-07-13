@@ -229,7 +229,7 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 
 	// tenant-a caller tries to delete tenant-b's role — must get 403.
 	// The middleware sets tenantID from the API key; tenant-a key can't access tenant-b.
-	// Here we simulate by injecting a tenant-a principal trying to act on tenant-b context.
+	// Here we exercise cross-tenant enforcement by injecting a tenant-a principal trying to act on tenant-b context.
 	ctxA := context.WithValue(context.Background(), principalContextKey, &Principal{
 		ID:       "caller-a",
 		TenantID: "tenant-a",
