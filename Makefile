@@ -370,7 +370,7 @@ test-install-cfg: build-cli
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
-	@go clean -testcache
+	@if [ "$$GITHUB_ACTIONS" != "true" ]; then go clean -testcache; fi
 	@echo "🧪 Testing OSS Build..."
 	@echo "  Testing framework (excluding modules and long-running tests)..."
 	@go test -race -short -timeout=5m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
