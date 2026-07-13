@@ -436,6 +436,46 @@ func TestApplySourceGated_RecreateCleansUpSeedMedia(t *testing.T) {
 		"seed VHDX must be deleted before New-VHD, otherwise the stale file blocks creation (0x80070050)")
 }
 
+// TestSet_VMAbsent_CleansUpSeedMedia proves the VM-deletion (state: absent) half
+// of the seed-media idempotency fix (Issue #2466). Deleting a VM that has staged
+// seed media must reclaim it synchronously: DeleteProvision removes the record, so
+// sweepStaleSeedMedia's TTL sweep can no longer see the VM, making this delete the
+// only collector. The delete uses the observed VHD path from the pre-delete getVM
+// (cur.VHDPath), so a VM being torn down with no desired source config still gets
+// its media cleaned. This is the call site TestApplySourceGated_RecreateCleansUpSeedMedia
+// does NOT cover.
+func TestSet_VMAbsent_CleansUpSeedMedia(t *testing.T) {
+	// getVM (call 0) reports the VM present with a VHD at C:\ClusterStorage\CSV01\stw-01.vhdx.
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01",
+		mapConfigState{"name": "stw-01", "state": "absent"}))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// seed_dir is unset, so the media derives next to the observed VHD (Issue #2044).
+	const vhdPath = `C:\ClusterStorage\CSV01\stw-01.vhdx`
+	seedDeleteIdx := deleteSeedMediaCallIndex(calls, seedVHDPath("stw-01", vhdPath, ""))
+	isoDeleteIdx := deleteSeedMediaCallIndex(calls, answerISOPath("stw-01", vhdPath, ""))
+	require.NotEqual(t, -1, seedDeleteIdx, "deleting a VM must reclaim its seed VHDX")
+	require.NotEqual(t, -1, isoDeleteIdx, "deleting a VM must reclaim its answer ISO")
+
+	// Cleanup must run after the VM teardown (Remove-VM).
+	removeVMIdx := -1
+	for i, c := range calls {
+		if strings.Contains(c.scriptBlock, "Remove-VM") && !strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
+			removeVMIdx = i
+		}
+	}
+	require.NotEqual(t, -1, removeVMIdx, "absent path must tear down the VM (Remove-VM)")
+	assert.Less(t, removeVMIdx, seedDeleteIdx, "seed-media cleanup must run after the VM teardown")
+}
+
 // deleteSeedMediaCallIndex returns the index of the first psDeleteSeedMedia call
 // whose Path argument equals wantPath, or -1 if none. The path travels via psArgs
 // (recorded in winRMCall.args), never the scriptBlock text (S3).

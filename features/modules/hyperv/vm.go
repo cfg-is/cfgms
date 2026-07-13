@@ -833,6 +833,19 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		if err := m.removeVM(ctx, vmName, deleteBefore); err != nil {
 			return err
 		}
+		// Remove any orphaned seed media (seed VHDX + answer ISO) for the deleted
+		// VM, using the observed VHD path from the pre-delete getVM. This runs
+		// BEFORE the fallible DeleteProvision/DeleteMove below: once the provision
+		// record is gone, sweepStaleSeedMedia's TTL safety net can no longer see
+		// this VM, so a store error after the record delete would permanently
+		// orphan the media. On a genuine deletion nothing ever rebuilds, so this
+		// synchronous delete is the only collector. cur may be nil (VM already
+		// absent) → empty VHD path, which is fine when seedDir is configured.
+		vhdPath := ""
+		if cur != nil {
+			vhdPath = cur.VHDPath
+		}
+		m.deleteSeedMediaForVM(ctx, vmName, vhdPath)
 		// Delete the provisioning record so a subsequent source: declaration
 		// provisions cleanly without hitting the surface-and-wait wedge.
 		// Mirrors the on_existing: recreate path in applySourceGated. Route via
@@ -846,16 +859,6 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		if err := m.moveStore().DeleteMove(ctx, vmName); err != nil && !errors.Is(err, ErrMoveNotFound) {
 			return err
 		}
-		// Remove any orphaned seed media (seed VHDX + answer ISO) for the deleted
-		// VM. DeleteProvision above removed the record, so sweepStaleSeedMedia's TTL
-		// safety net can no longer collect it; this synchronous delete is the only
-		// collector for a deleted VM's seed media. cur may be nil (VM already
-		// absent) → empty VHD path, which is fine when seedDir is configured.
-		vhdPath := ""
-		if cur != nil {
-			vhdPath = cur.VHDPath
-		}
-		m.deleteSeedMediaForVM(ctx, vmName, vhdPath)
 		return nil
 	}
 
@@ -1191,17 +1194,19 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		if err := m.removeVM(ctx, vmName, recreateBefore); err != nil {
 			return err
 		}
+		// Clear any seed media (seed VHDX + answer ISO) left by a prior provision
+		// before re-provisioning. This runs BEFORE the fallible DeleteProvision
+		// below on purpose: a leftover seed VHDX wedges the rebuild at New-VHD
+		// (0x80070050), and once the record is deleted the TTL sweep is blind to
+		// this VM — so a DeleteProvision error must not be able to abort the
+		// recreate before cleanup and permanently orphan the media. Best-effort;
+		// runs even when no media exists (idempotent).
+		m.deleteSeedMediaForVM(ctx, vmName, cfg.VHDPath)
 		// Route via storeFor(cfg): an ha_role+CSV recreate must reset the
 		// cluster-visible record, not a stale host-local one.
 		if err := m.storeFor(cfg).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
 			return err
 		}
-		// Clear any seed media (seed VHDX + answer ISO) left by a prior provision
-		// before re-provisioning: DeleteProvision above just removed the record, so
-		// the TTL sweep can no longer collect it, and a leftover seed VHDX would
-		// wedge the recreate at New-VHD (0x80070050). Best-effort; runs even when
-		// no media exists (idempotent).
-		m.deleteSeedMediaForVM(ctx, vmName, cfg.VHDPath)
 		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
 			return err
 		}

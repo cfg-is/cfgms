@@ -849,10 +849,11 @@ func (m *hypervModule) sweepStaleSeedMedia(ctx context.Context) {
 // This is required on the on_existing: recreate and VM-deletion paths, which both
 // call DeleteProvision immediately after removeVM. Once the provision record is
 // gone, sweepStaleSeedMedia's TTL safety net can no longer see the VM, so orphaned
-// media left by those paths would never be collected. A leftover seed VHDX also
-// wedges the next recreate at New-VHD with "The file exists. (0x80070050)" — the
-// Cfgms-NewSeedVHD delete-if-exists guard covers the VHDX, but the answer ISO has
-// no such guard, so synchronous cleanup here is the primary collector for both.
+// media left by those paths would never be collected. On the recreate path a
+// leftover seed VHDX also wedges the rebuild at New-VHD with "The file exists.
+// (0x80070050)" (the Cfgms-NewSeedVHD guard covers the rebuild too). On a genuine
+// VM deletion nothing ever rebuilds, so this synchronous delete is the only thing
+// that reclaims the seed VHDX and the answer ISO.
 func (m *hypervModule) deleteSeedMediaForVM(ctx context.Context, vmName, vhdPath string) {
 	if m.transport == nil {
 		return

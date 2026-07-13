@@ -688,10 +688,14 @@ func TestNewSeedVHD_DeletesExistingFileBeforeCreate(t *testing.T) {
 	assert.Contains(t, body, "New-VHD",
 		"Cfgms-NewSeedVHD must still create the seed VHD")
 
+	testPathIdx := strings.Index(body, "Test-Path -LiteralPath $Path")
 	removeIdx := strings.Index(body, "Remove-Item")
 	newVHDIdx := strings.Index(body, "New-VHD")
+	require.NotEqual(t, -1, testPathIdx)
 	require.NotEqual(t, -1, removeIdx)
 	require.NotEqual(t, -1, newVHDIdx)
+	assert.Less(t, testPathIdx, removeIdx,
+		"the Test-Path existence guard must precede Remove-Item (delete only when the file is present)")
 	assert.Less(t, removeIdx, newVHDIdx,
 		"Remove-Item must be ordered before New-VHD, otherwise the leftover file blocks creation with 0x80070050")
 }
