@@ -97,6 +97,34 @@ declaration that makes resolution possible.
 `owns:` entries (e.g. `patch` in issue #2472). The `owns:` parsing support is
 provided by this story (#2471) and is ready to use.
 
+### `required_fields` declaration (ADR-020)
+
+Each `owns:` entry may carry a `required_fields` list declaring which fragment fields
+must be present and non-empty for the DNA snapshot to be accepted at write time:
+
+```yaml
+# module.yaml — ownership + required-field declaration example
+owns:
+  - kind: service
+    required_fields:
+      - name   # object identity key
+      - state  # managed field that must be present in a valid DNA snapshot
+```
+
+**Semantics:** The controller collects `required_fields` across all modules active for
+an entity and checks the union at DNA write time. A field that is absent or empty in
+the snapshot fails the write-integrity guard. Omitting `required_fields` from an
+`owns:` entry is valid — the module declares ownership but imposes no additional
+required-field constraint. The full declaration contract and configuration-type
+resolution rules are defined in [ADR-020](../decisions/020-dna-required-field-declaration.md).
+
+**Current status (follow-on implementation pending):** Until the manifest-driven
+loader story lands, the operative required-field table is the hand-coded map in
+`features/controller/service/dna_integrity.go` (seeded by issue #2617 with
+`full-os-device → {hostname, os}`). Adding `required_fields` to a `module.yaml` today
+documents intent; it does not yet drive the guard. When the loader is built, the
+manifest entries become the authoritative source and the hand-coded table is retired.
+
 ### `Get` canonical fragment contract (ADR-016 clause 4)
 
 Every module's `Get` implementation must return a **canonical,
