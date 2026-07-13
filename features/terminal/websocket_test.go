@@ -20,7 +20,6 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
-	testutil "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // withTestTenant wraps an http.Handler to inject a test tenant ID into the request context.
@@ -77,6 +76,29 @@ func waitForActiveSessions(t *testing.T, manager SessionManager, minCount int) {
 		"timed out waiting for %d active session(s)", minCount)
 }
 
+// waitForResize polls until the session reflects the given terminal dimensions,
+// reading the mutex-guarded fields safely. It asserts on timeout rather than
+// sleeping a fixed interval, so it verifies the server actually processed the
+// resize message.
+func waitForResize(t *testing.T, session *Session, cols, rows int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		session.mu.RLock()
+		gotCols, gotRows := session.Cols, session.Rows
+		session.mu.RUnlock()
+		if gotCols == cols && gotRows == rows {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	session.mu.RLock()
+	gotCols, gotRows := session.Cols, session.Rows
+	session.mu.RUnlock()
+	assert.Equal(t, cols, gotCols, "timed out waiting for resize to apply cols")
+	assert.Equal(t, rows, gotRows, "timed out waiting for resize to apply rows")
+}
+
 // waitForLogEntry polls capLogger until an entry with the given message appears,
 // then returns the session_id value from that entry.
 func waitForLogEntry(t *testing.T, capLogger *kvCapturingLogger, msg string) (string, bool) {
@@ -92,7 +114,7 @@ func waitForLogEntry(t *testing.T, capLogger *kvCapturingLogger, msg string) (st
 }
 
 func TestWebSocketHandlerCreation(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -108,7 +130,7 @@ func TestWebSocketHandlerCreation(t *testing.T) {
 }
 
 func TestWebSocketUpgrade(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -149,7 +171,7 @@ func TestWebSocketUpgrade(t *testing.T) {
 }
 
 func TestWebSocketMessageHandling(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -180,6 +202,12 @@ func TestWebSocketMessageHandling(t *testing.T) {
 		}
 	}()
 
+	// Wait for the server to establish the session before driving messages.
+	waitForActiveSessions(t, manager, 1)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	session := sessions[0]
+
 	// Test data message
 	dataMsg := &TerminalMessage{
 		Type: MessageTypeData,
@@ -198,12 +226,13 @@ func TestWebSocketMessageHandling(t *testing.T) {
 	err = conn.WriteJSON(resizeMsg)
 	assert.NoError(t, err)
 
-	// Give server time to process
-	time.Sleep(100 * time.Millisecond)
+	// Assert the resize was actually applied to server-side session state,
+	// polling with a deadline rather than sleeping a fixed interval.
+	waitForResize(t, session, 120, 30)
 }
 
 func TestWebSocketAuthentication(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -290,7 +319,7 @@ func TestWebSocketAuthentication(t *testing.T) {
 }
 
 func TestWebSocketBidirectionalCommunication(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -321,31 +350,44 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 		}
 	}()
 
-	// Send command
+	// Wait for the server to establish the session so we can drive both directions.
+	waitForActiveSessions(t, manager, 1)
+	sessions := manager.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	session := sessions[0]
+
+	// Client → server direction: send input over the WebSocket.
 	inputMsg := &TerminalMessage{
 		Type: MessageTypeData,
 		Data: []byte("echo 'test'\n"),
 	}
+	require.NoError(t, conn.WriteJSON(inputMsg))
 
-	err = conn.WriteJSON(inputMsg)
-	require.NoError(t, err)
+	// Server → client direction: inject steward output and require it to be
+	// relayed to the WebSocket client. This drives real output through the
+	// session rather than passing unconditionally on a read timeout.
+	testOutput := []byte("CFGMS_BIDI_OUTPUT_SENTINEL_67890")
+	require.NoError(t, session.HandleOutput(context.Background(), testOutput))
 
-	// Read response (in real implementation, this would come from the shell)
-	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Logf("Failed to set read deadline: %v", err)
+	deadline := time.Now().Add(2 * time.Second)
+	found := false
+	for time.Now().Before(deadline) && !found {
+		if setErr := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); setErr != nil {
+			t.Logf("Failed to set read deadline: %v", setErr)
+		}
+		var outputMsg TerminalMessage
+		if readErr := conn.ReadJSON(&outputMsg); readErr != nil {
+			continue
+		}
+		if outputMsg.Type == MessageTypeData && string(outputMsg.Data) == string(testOutput) {
+			found = true
+		}
 	}
-	var outputMsg TerminalMessage
-	err = conn.ReadJSON(&outputMsg)
-
-	// In this test, we expect either an acknowledgment or timeout
-	// The actual shell output would come through the steward connection
-	if err == nil {
-		assert.NotEmpty(t, outputMsg.Type)
-	}
+	assert.True(t, found, "steward output must be relayed back to the WebSocket client")
 }
 
 func TestWebSocketSessionCleanup(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -372,7 +414,7 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for session to be created (session creation is asynchronous)
-	time.Sleep(100 * time.Millisecond)
+	waitForActiveSessions(t, manager, 1)
 
 	// Check that session was created
 	activeSessions := manager.GetActiveSessions()
@@ -388,7 +430,7 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 }
 
 func TestWebSocketConcurrentConnections(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    10,
@@ -421,8 +463,8 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 		connections[i] = conn
 	}
 
-	// Give connections time to establish sessions
-	time.Sleep(100 * time.Millisecond)
+	// Wait for all connections to establish sessions (session creation is asynchronous)
+	waitForActiveSessions(t, manager, 3)
 
 	// All sessions should be active
 	activeSessions := manager.GetActiveSessions()
@@ -441,7 +483,7 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 
 // TestWebSocketOriginCheck verifies the origin enforcement logic.
 func TestWebSocketOriginCheck(t *testing.T) {
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	config := &Config{
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
@@ -726,6 +768,16 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
+	// Stop the manager before conn/server teardown (LIFO: this defer runs first).
+	// manager.Stop closes all sessions and calls recorder.Close(), which releases
+	// the .rec file handle held in DefaultSessionRecorder.activeWrites. Without
+	// this, t.TempDir()'s cleanup races an open handle — on Windows (NT) you
+	// cannot unlink a file while it is open, so the cleanup fails intermittently.
+	defer func() {
+		if m, ok := manager.(*DefaultSessionManager); ok {
+			_ = m.Stop(context.Background())
+		}
+	}()
 
 	waitForActiveSessions(t, manager, 1)
 	sessions := manager.GetActiveSessions()
