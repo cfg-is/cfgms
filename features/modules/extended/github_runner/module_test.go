@@ -18,6 +18,20 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
+// validConfigOwnerRepo builds a RunnerConfig with owner+repo instead of an
+// explicit service_name, for use in derivation tests.
+func validConfigOwnerRepo(workDir, owner, repo string) *RunnerConfig {
+	return &RunnerConfig{
+		Version:     "2.319.1",
+		AgentURL:    "https://example.invalid/runner.tar.gz",
+		AgentSHA256: strings.Repeat("a", 64),
+		Labels:      []string{"linux", "ci", "self-hosted"},
+		WorkDir:     workDir,
+		Owner:       owner,
+		Repo:        repo,
+	}
+}
+
 // errEnsureBoom is a sentinel the test service executor returns to verify Set
 // propagates a service-convergence failure.
 var errEnsureBoom = errors.New("ensure failed (test)")
@@ -494,5 +508,131 @@ func TestModule_StoredConfig_ConvergesViaWorkDir(t *testing.T) {
 	}
 	if inst.calls != 1 {
 		t.Fatalf("second Set re-downloaded agent (installer calls=%d, want 1)", inst.calls)
+	}
+}
+
+// TestModule_Set_DerivedServiceName verifies that when service_name is absent
+// (owner+repo present) Set derives actions.runner.<owner>-<repo>.<hostname> and
+// records it in the state marker so subsequent Get/Test use the correct name.
+func TestModule_Set_DerivedServiceName(t *testing.T) {
+	srv, url, sha := agentServer(t)
+	defer srv.Close()
+	workDir := t.TempDir()
+	exec := &testServiceExecutor{installed: true, makeRunOnSet: true}
+	m, _ := moduleFor(exec, srv)
+
+	cfg := validConfigOwnerRepo(workDir, "myorg", "myrepo")
+	cfg.AgentURL, cfg.AgentSHA256 = url, sha
+
+	ctx := context.Background()
+	if err := m.Set(ctx, workDir, cfg); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	wantSvcName := "actions.runner." + sanitizeComponent("myorg") + "-" + sanitizeComponent("myrepo") + "." + sanitizeComponent(hostname)
+
+	st, err := readState(workDir)
+	if err != nil {
+		t.Fatalf("readState: %v", err)
+	}
+	if st.ServiceName != wantSvcName {
+		t.Errorf("state service_name = %q, want %q", st.ServiceName, wantSvcName)
+	}
+
+	// Get must report state keyed by the derived name (via state marker).
+	state, err := m.Get(ctx, workDir)
+	if err != nil {
+		t.Fatalf("Get after derived-name Set: %v", err)
+	}
+	rc := state.(*RunnerConfig)
+	if rc.ServiceName != wantSvcName {
+		t.Errorf("Get service_name = %q, want derived %q", rc.ServiceName, wantSvcName)
+	}
+}
+
+// TestModule_Set_ExplicitServiceName_Honored verifies that an explicit
+// service_name bypasses derivation and is stored verbatim in the state marker.
+func TestModule_Set_ExplicitServiceName_Honored(t *testing.T) {
+	srv, url, sha := agentServer(t)
+	defer srv.Close()
+	workDir := t.TempDir()
+	exec := &testServiceExecutor{installed: true, makeRunOnSet: true}
+	m, _ := moduleFor(exec, srv)
+
+	const explicitSvcName = "actions.runner.acme-myrepo.dedicated-host.service"
+	cfg := validConfig(workDir, explicitSvcName)
+	cfg.AgentURL, cfg.AgentSHA256 = url, sha
+
+	ctx := context.Background()
+	if err := m.Set(ctx, workDir, cfg); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	st, err := readState(workDir)
+	if err != nil {
+		t.Fatalf("readState: %v", err)
+	}
+	if st.ServiceName != explicitSvcName {
+		t.Errorf("state service_name = %q, want explicit %q", st.ServiceName, explicitSvcName)
+	}
+}
+
+// TestModule_Set_DerivedServiceName_TooLong verifies that a derived service
+// name that exceeds the serviceNamePattern length limit is rejected with a
+// clear error, not silently truncated.
+func TestModule_Set_DerivedServiceName_TooLong(t *testing.T) {
+	workDir := t.TempDir()
+	exec := &testServiceExecutor{}
+	m := newModule(exec, newHTTPInstaller())
+
+	// Derive a name that will be much longer than 255 chars.
+	longRepo := strings.Repeat("a", 300)
+	cfg := &RunnerConfig{
+		Version:     "2.319.1",
+		AgentURL:    "https://example.invalid/runner.tar.gz",
+		AgentSHA256: strings.Repeat("a", 64),
+		WorkDir:     workDir,
+		Owner:       "myorg",
+		Repo:        longRepo,
+	}
+
+	err := m.Set(context.Background(), workDir, cfg)
+	if err == nil {
+		t.Fatal("Set accepted a config whose derived service name exceeds the length limit")
+	}
+	if !errors.Is(err, modules.ErrInvalidInput) {
+		t.Errorf("Set error = %v, want to wrap modules.ErrInvalidInput", err)
+	}
+}
+
+// TestModule_Configure_EmptyServiceName_WithOwnerRepo verifies that Configure
+// accepts a config where service_name is absent but owner+repo are set.
+func TestModule_Configure_EmptyServiceName_WithOwnerRepo(t *testing.T) {
+	workDir := t.TempDir()
+	m := newModule(&testServiceExecutor{}, newHTTPInstaller())
+	cfg := validConfigOwnerRepo(workDir, "myorg", "myrepo")
+	if err := m.Configure(cfg); err != nil {
+		t.Fatalf("Configure rejected valid owner+repo config: %v", err)
+	}
+}
+
+// TestModule_Configure_EmptyServiceName_MissingOwnerRepo verifies that Configure
+// rejects a config where service_name is absent and owner+repo are also absent.
+func TestModule_Configure_EmptyServiceName_MissingOwnerRepo(t *testing.T) {
+	workDir := t.TempDir()
+	m := newModule(&testServiceExecutor{}, newHTTPInstaller())
+	cfg := &RunnerConfig{
+		Version:     "2.319.1",
+		AgentURL:    "https://example.invalid/runner.tar.gz",
+		AgentSHA256: strings.Repeat("a", 64),
+		WorkDir:     workDir,
+		// ServiceName, Owner, and Repo all empty
+	}
+	if err := m.Configure(cfg); err == nil {
+		t.Fatal("Configure accepted a config with no service_name, owner, or repo")
 	}
 }

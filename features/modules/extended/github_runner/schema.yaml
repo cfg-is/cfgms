@@ -12,7 +12,6 @@ resources:
       - agent_url
       - agent_sha256
       - work_dir
-      - service_name
     properties:
       version:
         type: string
@@ -37,9 +36,24 @@ resources:
       work_dir:
         type: string
         description: Absolute install directory for the runner agent (also the resource ID).
+      owner:
+        type: string
+        description: >
+          GitHub organization or user owning the repository. Required when
+          service_name is not set; used with repo to derive the service name as
+          actions.runner.<owner>-<repo>.<hostname>.
+      repo:
+        type: string
+        description: >
+          GitHub repository name (without the owner prefix). Required when
+          service_name is not set; used with owner to derive the service name as
+          actions.runner.<owner>-<repo>.<hostname>.
       service_name:
         type: string
         description: >
           OS service name of the runner service (systemd unit on Linux, SCM
           service on Windows), e.g. "actions.runner.acme-repo.host1.service".
+          Optional: when omitted, owner and repo must be set and the module
+          derives the name as actions.runner.<owner>-<repo>.<hostname> at
+          convergence time, producing a host-unique name from a shared role config.
         pattern: "^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,254}$"

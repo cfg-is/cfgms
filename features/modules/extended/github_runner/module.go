@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 
@@ -231,6 +232,19 @@ func (m *runnerModule) Set(ctx context.Context, resourceID string, config module
 	if err := desired.Validate(); err != nil {
 		return err
 	}
+
+	// Resolve the effective service name. When service_name is empty the module
+	// derives it from owner, repo, and the steward's own hostname at convergence
+	// time (the module runs as a subprocess on the host per ADR-006).
+	hostname, herr := os.Hostname()
+	if herr != nil {
+		return fmt.Errorf("get hostname for service name derivation: %w", herr)
+	}
+	resolvedServiceName := desired.ResolveServiceName(hostname)
+	if !serviceNamePattern.MatchString(resolvedServiceName) {
+		return fmt.Errorf("%w: derived service_name %q violates serviceNamePattern (check owner/repo/hostname length)", modules.ErrInvalidInput, resolvedServiceName)
+	}
+
 	logger := m.GetEffectiveLogger(logging.ForModule("github_runner"))
 
 	st, err := readState(desired.WorkDir)
@@ -256,10 +270,10 @@ func (m *runnerModule) Set(ctx context.Context, resourceID string, config module
 		st.Version = desired.Version
 	}
 
-	// Record desired labels + service name so drift is resolved locally.
+	// Record desired labels + resolved service name so drift is resolved locally.
 	st.Labels = append([]string(nil), desired.Labels...)
 	sort.Strings(st.Labels)
-	st.ServiceName = desired.ServiceName
+	st.ServiceName = resolvedServiceName
 	if werr := writeState(desired.WorkDir, st); werr != nil {
 		return fmt.Errorf("write runner state: %w", werr)
 	}
@@ -267,19 +281,19 @@ func (m *runnerModule) Set(ctx context.Context, resourceID string, config module
 	// Ensure the service is enabled + running. Skipped when the service is not
 	// yet registered (the provisioning workflow registers it on first standup);
 	// in that case Get/Test report drift until registration completes.
-	status, serr := m.executor.status(ctx, desired.ServiceName)
+	status, serr := m.executor.status(ctx, resolvedServiceName)
 	if serr != nil {
-		return fmt.Errorf("query runner service %q: %w", logging.SanitizeLogValue(desired.ServiceName), serr)
+		return fmt.Errorf("query runner service %q: %w", logging.SanitizeLogValue(resolvedServiceName), serr)
 	}
 	if status.Installed {
-		if eerr := m.executor.ensure(ctx, desired.ServiceName, true, true); eerr != nil {
-			return fmt.Errorf("ensure runner service %q: %w", logging.SanitizeLogValue(desired.ServiceName), eerr)
+		if eerr := m.executor.ensure(ctx, resolvedServiceName, true, true); eerr != nil {
+			return fmt.Errorf("ensure runner service %q: %w", logging.SanitizeLogValue(resolvedServiceName), eerr)
 		}
 	} else {
 		logger.WarnCtx(ctx, "runner service not yet registered; agent staged, awaiting provisioning registration",
 			"operation", "github_runner_set",
 			"resource_id", logging.SanitizeLogValue(resourceID),
-			"service_name", logging.SanitizeLogValue(desired.ServiceName))
+			"service_name", logging.SanitizeLogValue(resolvedServiceName))
 	}
 
 	logger.InfoCtx(ctx, "github_runner converged",
