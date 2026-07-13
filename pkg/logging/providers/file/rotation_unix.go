@@ -24,7 +24,7 @@ func (p *FileProvider) calculateDiskUsage() (float64, error) {
 	// int64 on Linux but uint32 on Darwin — go through int64 so the guard
 	// compiles and lints cleanly on both (a direct `stat.Bsize < 0` is
 	// statically false on Darwin and staticcheck SA4003 rejects it there).
-	bsize := int64(stat.Bsize)
+	bsize := int64(stat.Bsize) //nolint:unconvert // no-op on linux; required on darwin where Bsize is uint32
 	if bsize <= 0 {
 		return 0, fmt.Errorf("invalid block size: %d", bsize)
 	}
