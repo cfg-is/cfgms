@@ -919,6 +919,96 @@ func TestInitializeUpgradeStore_InitializeFailure_FallsBackToInMemory(t *testing
 	assertUpgradeStoreFunctional(t, ctx, store)
 }
 
+// ---------------------------------------------------------------------------
+// initializeTagStore degradation tests (Issue #2542 / #2544)
+//
+// initializeTagStore returns nil (not a fallback) on any failure — the
+// controller must start even when tag persistence is unavailable.
+// ---------------------------------------------------------------------------
+
+// TestInitializeTagStore_NoSQLitePath_ReturnsNil verifies that initializeTagStore
+// returns nil and logs a warning when the Storage config is absent or SQLitePath
+// is empty, instead of blocking controller startup.
+func TestInitializeTagStore_NoSQLitePath_ReturnsNil(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "nil Storage", cfg: &config.Config{}},
+		{name: "empty SQLitePath", cfg: &config.Config{Storage: &config.StorageConfig{SQLitePath: ""}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingLogger{}
+			store := initializeTagStore(ctx, tc.cfg, rec)
+			assert.Nil(t, store, "unconfigured SQLitePath must degrade to nil, not panic")
+			assert.True(t, rec.containsAny("not configured"),
+				"silent degradation must emit an observable warning")
+		})
+	}
+}
+
+// TestInitializeTagStore_OpenFailure_ReturnsNil verifies that initializeTagStore
+// returns nil and warns when the SQLite DSN cannot be opened (e.g. DSN points
+// at a directory rather than a writable file).
+func TestInitializeTagStore_OpenFailure_ReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingLogger{}
+
+	// A directory path causes the busy_timeout PRAGMA to fail (not a valid DB file).
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{SQLitePath: t.TempDir()},
+	}
+
+	store := initializeTagStore(ctx, cfg, rec)
+	assert.Nil(t, store, "an unopenable SQLite DSN must degrade to nil")
+	assert.True(t, rec.containsAny("failed to open"),
+		"open failure must emit an observable warning")
+}
+
+// TestInitializeTagStore_InitializeFailure_ReturnsNil verifies that
+// initializeTagStore returns nil and warns when the DSN opens but schema
+// initialization fails (corrupt/non-SQLite file content).
+func TestInitializeTagStore_InitializeFailure_ReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingLogger{}
+
+	dbPath := filepath.Join(t.TempDir(), "corrupt_tags.db")
+	require.NoError(t, os.WriteFile(dbPath, []byte("not a sqlite database, just raw bytes"), 0o600))
+
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{SQLitePath: dbPath},
+	}
+
+	store := initializeTagStore(ctx, cfg, rec)
+	assert.Nil(t, store, "a schema-init failure must degrade to nil")
+	assert.True(t, rec.containsAny("failed to initialize"),
+		"initialize failure must emit an observable warning")
+}
+
+// TestInitializeTagStore_HappyPath_ReturnsUsableStore verifies that a valid
+// SQLitePath produces a non-nil store that accepts tag round-trips.
+func TestInitializeTagStore_HappyPath_ReturnsUsableStore(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tags.db")
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{SQLitePath: dbPath},
+	}
+
+	store := initializeTagStore(ctx, cfg, logging.NewNoopLogger())
+	require.NotNil(t, store, "valid SQLitePath must return a non-nil store")
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Round-trip: store must accept writes and serve reads.
+	require.NoError(t, store.Set(ctx, "steward-1", []string{"env-prod"}))
+	tags, err := store.Get(ctx, "steward-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"env-prod"}, tags)
+}
+
 // assertUpgradeStoreFunctional performs a round-trip write/read to prove the
 // fallback store is genuinely usable, not merely non-nil.
 func assertUpgradeStoreFunctional(t *testing.T, ctx context.Context, store business.UpgradeStore) {

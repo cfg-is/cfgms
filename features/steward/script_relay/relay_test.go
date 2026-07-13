@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -25,6 +26,21 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// testIDCounter guarantees each execution ID minted within a single test
+// binary is distinct.
+var testIDCounter int64
+
+// uniqueExecID returns a process-unique execution ID derived from base. The
+// per-execution socket path is deterministic (/tmp/cfgms-<id>/api.sock), so two
+// relays sharing an execution ID would bind the same path and the second
+// net.Listen fails with EADDRINUSE. Fixed IDs collide when the harness runs this
+// package in overlapping or concurrent test-binary invocations (smart-mode
+// selection pass + full pass); folding in the PID and a per-process counter
+// makes every socket path unique so no two invocations can ever collide.
+func uniqueExecID(base string) string {
+	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), atomic.AddInt64(&testIDCounter, 1))
+}
 
 // newTestRelay creates a Relay for testing. It captures published events and
 // returns a thread-safe accessor function for reading them. The relay is
@@ -73,7 +89,7 @@ func statUID(t *testing.T, path string) uint32 {
 // 0600 socket owned by the execution UID, and that Stop removes them
 // (AC1 — socket lifecycle and ownership).
 func TestRelay_SocketCreation(t *testing.T) {
-	execID := "test-exec-socket"
+	execID := uniqueExecID("test-exec-socket")
 	r, _ := newTestRelay(t, execID)
 
 	sockPath := r.SocketPath()
@@ -114,7 +130,7 @@ func TestRelay_SocketCreation_ChownsToExecutionUID(t *testing.T) {
 
 	// UID 1 (daemon/bin) exists on every POSIX system and is never root.
 	const execUID = 1
-	r, _ := newTestRelayWithUID(t, "test-exec-chown", execUID)
+	r, _ := newTestRelayWithUID(t, uniqueExecID("test-exec-chown"), execUID)
 	defer r.Stop()
 
 	sockPath := r.SocketPath()
@@ -144,12 +160,13 @@ func TestNewRelay_InvalidUIDChownFails(t *testing.T) {
 	}
 
 	publish := func(_ context.Context, _ *cpTypes.Event) {}
-	_, err := NewRelay("test-exec-badchown", "steward-1", 0, publish, logging.NewNoopLogger())
+	execID := uniqueExecID("test-exec-badchown")
+	_, err := NewRelay(execID, "steward-1", 0, publish, logging.NewNoopLogger())
 	require.Error(t, err, "NewRelay must fail when the socket cannot be chowned to the execution UID")
 	assert.Contains(t, err.Error(), "chown")
 
 	// The failed socket directory must not be left behind.
-	sockDir := filepath.Join(os.TempDir(), "cfgms-test-exec-badchown")
+	sockDir := filepath.Join(os.TempDir(), "cfgms-"+execID)
 	_, statErr := os.Stat(sockDir)
 	assert.True(t, os.IsNotExist(statErr), "socket directory must be cleaned up after a failed chown")
 }
@@ -158,7 +175,7 @@ func TestNewRelay_InvalidUIDChownFails(t *testing.T) {
 // script connects, sends HTTP request, relay publishes event, response is
 // delivered, script receives HTTP response.
 func TestRelay_RequestResponseCycle(t *testing.T) {
-	execID := "test-exec-cycle"
+	execID := uniqueExecID("test-exec-cycle")
 	r, capturedEvents := newTestRelay(t, execID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -235,7 +252,7 @@ func TestRelay_RequestResponseCycle(t *testing.T) {
 // TestRelay_StopCancelsWaiting verifies that Stop unblocks a relay goroutine
 // waiting for a response.
 func TestRelay_StopCancelsWaiting(t *testing.T) {
-	execID := "test-exec-stop"
+	execID := uniqueExecID("test-exec-stop")
 	r, _ := newTestRelay(t, execID)
 
 	ctx := context.Background()
@@ -268,7 +285,7 @@ func TestRelay_StopCancelsWaiting(t *testing.T) {
 // TestRelay_ExecutionIDInEvent verifies the execution_id in the event Details
 // matches the relay's bound execution_id (never from the request body).
 func TestRelay_ExecutionIDInEvent(t *testing.T) {
-	execID := "bound-exec-id"
+	execID := uniqueExecID("bound-exec-id")
 	r, capturedEvents := newTestRelay(t, execID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

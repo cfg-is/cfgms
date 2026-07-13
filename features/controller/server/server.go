@@ -2507,11 +2507,15 @@ type serverFleetStewardProvider struct {
 
 func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardData {
 	infos := p.svc.GetAllStewards()
+	tagStore := p.svc.TagStore()
 	result := make([]controllerFleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		var attrs map[string]string
 		if info.DNA != nil {
 			attrs = info.DNA.Attributes
+		}
+		if tagStore != nil {
+			attrs = mergeControllerTags(attrs, tagStore.TagsFor(info.ID))
 		}
 		result = append(result, controllerFleet.StewardData{
 			ID:            info.ID,
@@ -2522,6 +2526,48 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 		})
 	}
 	return result
+}
+
+// mergeControllerTags returns a copy of attrs with controller-stored ctrlTags
+// merged into the "tags" key. If attrs already carries a DNA-reported "tags"
+// value, the two sets are unioned (DNA tags first, then controller tags;
+// duplicates dropped). Returns attrs unchanged when ctrlTags is empty.
+// Never mutates the input map — attrs aliases info.DNA.Attributes which is a
+// shared, cached reference; mutating it in place would corrupt the DNA cache.
+func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]string {
+	if len(ctrlTags) == 0 {
+		return attrs
+	}
+	// Copy to avoid mutating the shared DNA.Attributes alias.
+	merged := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	// Union DNA-reported tags with controller-stored tags; DNA tags come first.
+	seen := make(map[string]struct{})
+	var all []string
+	for _, t := range strings.Split(merged["tags"], ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	for _, t := range ctrlTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	merged["tags"] = strings.Join(all, ",")
+	return merged
 }
 
 // assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
