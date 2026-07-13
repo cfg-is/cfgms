@@ -168,14 +168,14 @@ The controller decides which steward gets which cfg based on:
 - **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth ✓ implemented (`InheritanceResolver.ResolveConfiguration()`)
 - **Cluster membership** — a steward that belongs to one or more clusters (Hyper-V, SQL, etc.) receives an additional `cluster-policies/<clusterName>` config layer inserted after Group-level and before Device-level in the merge order ✓ implemented (`InheritanceResolver` cluster-policies cascade, Issue #2425)
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
-- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression — tags exist on steward records (fleet query supports tag filtering for device lists), but tag-based cfg distribution fanout is not yet implemented; the current fanout sends to all active stewards
-- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) — desired state; not currently implemented in cfg distribution
+- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression via role configs ✓ implemented (`roleConfigAdapter` in config_service_v2.go injects matching role fragments into `InheritanceResolver`, Issue #2546)
+- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) via role config selectors ✓ implemented (same role-policies cascade, Issue #2546)
 
 **Deployment rings:** see the Deployment Rings section below for the v1 mechanism. Operator-tagged phased rollouts using separate cfgs are still supported alongside rings.
 
-### Cluster-Policies Cascade
+### Cluster-Policies and Role-Policies Cascade
 
-Stewards that are members of a named cluster (Hyper-V failover cluster, SQL AG, etc.) receive an additional configuration layer sourced from `cluster-policies/<clusterName>`. This layer is applied by `InheritanceResolver.ResolveConfiguration()` after the tenant hierarchy and before device-level config.
+Stewards receive additional configuration layers beyond the tenant hierarchy: cluster membership adds a `cluster-policies/<clusterName>` layer, and matching role configs add a `role-policies/<roleName>` layer. Both are applied by `InheritanceResolver.ResolveConfiguration()` after the tenant hierarchy and before device-level config.
 
 **Merge priority order (lowest → highest):**
 
@@ -185,9 +185,10 @@ Stewards that are members of a named cluster (Hyper-V failover cluster, SQL AG, 
 | Client | `client-policies/<tenantID>` | Tenant hierarchy |
 | Group | `group-policies/<tenantID>-groups` | Tenant hierarchy |
 | **Cluster** | **`cluster-policies/<clusterName>`** | **Cluster membership (DNA attributes)** |
+| **Role** | **`role-policies/<roleName>`** | **Selector match (DNA + controller tags)** |
 | Device | `stewards/<stewardID>` | Device-level override |
 
-A device-level resource of the same name always wins over a cluster-policy resource. A cluster-policy resource overrides group-level defaults for the same name.
+A device-level resource always wins. A role resource overrides cluster-policies for the same resource name. A cluster resource overrides group-level defaults.
 
 **Sourcing cluster membership:** the cluster registry is derived from steward DNA attributes published by the steward's `DNARefreshLoop` ticker (default 30 min). A steward that carries `cluster:<clusterName>.*` DNA attributes is recorded as a member of that cluster. Membership is **eventually consistent**: a steward joining or leaving a cluster can take up to one refresh interval before `ResolveConfiguration` reflects the change.
 
@@ -195,9 +196,9 @@ A device-level resource of the same name always wins over a cluster-policy resou
 
 **No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
 
-### Role-Policies Namespace (Issue #2543)
+### Role-Policies Namespace (Issues #2543, #2546)
 
-The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution (S4) the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward, and merges the fragments into the effective config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb.
+The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward's DNA + controller-stored tags, and merges the fragments into the effective config after cluster-policies and before device config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb.
 
 **Role config object shape:**
 
@@ -224,7 +225,7 @@ ConfigKey{TenantID: "<tenant>", Namespace: "role-policies", Name: "<roleName>"}
 
 **Authoring:** `POST /api/v1/roles` (requires `role:write`), `GET /api/v1/roles` / `GET /api/v1/roles/{name}` (requires `role:read`), `DELETE /api/v1/roles/{name}` (requires `role:write`). Cross-tenant authoring is rejected with 403. See `cfg role --help` for CLI usage.
 
-**Resolution:** role configs do not affect the config-resolution pipeline until S4 is implemented. The storage and REST surface are authoritative for authoring only.
+**Resolution:** `InheritanceResolver.ResolveConfiguration()` applies matching role fragments between cluster-policies and device-level config (Issue #2546). The `roleConfigAdapter` in `config_service_v2.go` lists all `role-policies` entries for the tenant, parses each selector via `pkg/fleet/selector.Parse`, and returns the matching fragments sorted alphabetically by name. Multiple matching roles merge in that order; later names override earlier ones for the same resource. A role-provider error is non-fatal: resolution continues without role fragments and a WARN is emitted.
 
 ## Deployment Rings
 
