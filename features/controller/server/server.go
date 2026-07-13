@@ -1609,7 +1609,7 @@ func (s *Server) Start() error {
 		}
 
 		tenantQueue := controllerTransport.NewTenantQueue()
-		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue)
+		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
 		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
 		logStreamHandler := controllerTransport.NewLogStreamHandler(
 			s.stewardEventManager,
