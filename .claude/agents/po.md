@@ -493,12 +493,14 @@ issues that a rebase would clear. So PRs sit stuck even with all required
 checks green (DIRTY case) or with failures that aren't actually their
 fault (stale-base case).
 
-The preflight surfaces three actions in `review_recommendations`:
+The preflight surfaces these actions in `review_recommendations`:
 
 | Action | When | What to do |
 |---|---|---|
 | `rebase` | mergeStateStatus is DIRTY or (BEHIND with auto-merge armed) | Run `rebase-pr.sh`. The PR's branch needs to be current before any other action makes sense. |
 | `rebase_then_investigate` | CI red (any required check failed) | Run `rebase-pr.sh`. If `REBASE_OK`, wait one cycle for CI to re-run. If `REBASE_NOOP`, the branch was already current → the failure is real → diagnose + dispatch-fix. |
+| `rerun_failed_checks` | reviewed PASS, head CI red, PR out of the queue, failing run is attempt 1 (Issue #2589) | One-shot `./.claude/scripts/po-act.sh rerun <PR>` to clear a transient flake before enqueue. Budget is one rerun — if CI is still red next cycle the failing run is now attempt > 1 and the preflight routes to `investigate_queue_failures` instead. Do NOT rerun a PR already in the queue (the queue re-runs merge-group checks itself). |
+| `investigate_queue_failures` | reviewed PASS but the PR was evicted from the merge queue ≥ 2 times since its latest commit, OR its CI is still red after the one-shot rerun (Issue #2589) | The PR's merge-commit CI keeps failing (two evictions on the same head SHA ⇒ implicated; one can be innocent ALLGREEN-group fallout). Do NOT keep re-enqueuing. Same handling as `rebase_then_investigate`'s NOOP branch: `po-act.sh diagnose <PR>` then set status `Fix`. |
 | `investigate` (legacy) | rare; falls through if neither rebase nor red applies | Same handling as rebase_then_investigate's NOOP branch. |
 
 For each `rebase` or `rebase_then_investigate` recommendation, first acquire the
