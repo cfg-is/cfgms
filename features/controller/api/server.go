@@ -137,6 +137,7 @@ type Server struct {
 	stopCleanup                    chan struct{}                         // signals startAPIKeyCleanup to exit
 	cleanupDone                    chan struct{}                         // closed when cleanup goroutine exits
 	closeOnce                      sync.Once                             // idempotent Close
+	roleConfigStore                cfgconfig.ConfigStore                 // Issue #2543: role-config storage under role-policies namespace
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -505,6 +506,13 @@ func (s *Server) setupRouter() {
 	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
 	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
 	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
+
+	// Role config endpoints (Issue #2543)
+	roles := api.PathPrefix("/roles").Subrouter()
+	roles.Handle("", s.requirePermission("role", "read")(http.HandlerFunc(s.handleListRoleConfigs))).Methods("GET")
+	roles.Handle("", s.requirePermission("role", "write")(http.HandlerFunc(s.handleCreateRoleConfig))).Methods("POST")
+	roles.Handle("/{name}", s.requirePermission("role", "read")(http.HandlerFunc(s.handleGetRoleConfig))).Methods("GET")
+	roles.Handle("/{name}", s.requirePermission("role", "write")(http.HandlerFunc(s.handleDeleteRoleConfig))).Methods("DELETE")
 
 	// Audit log readback endpoint (Issue #2190)
 	api.Handle("/audit/entries", s.requirePermission("audit", "list")(http.HandlerFunc(s.handleListAuditEntries))).Methods("GET")
@@ -1014,6 +1022,15 @@ func (s *Server) SetPrivilegeStore(cs cfgconfig.ConfigStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.privilegeStore = cs
+}
+
+// SetRoleConfigStore wires the config store used to persist role configs under
+// the role-policies namespace (Issue #2543).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetRoleConfigStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.roleConfigStore = cs
 }
 
 // SetRegistry wires the active-steward connection registry so that
