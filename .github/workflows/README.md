@@ -1,281 +1,286 @@
 # GitHub Actions Workflows
 
-This directory contains automated CI/CD workflows for CFGMS. All workflows are now active for the public repository.
+This directory contains automated CI/CD workflows for CFGMS. All workflows are active for the public repository.
+
+## Required Status Checks (develop ruleset)
+
+These are the exact context names configured as required checks in the develop branch ruleset. All must pass (or be satisfied by a stub) before a PR can merge:
+
+| Context name | Source workflow |
+|---|---|
+| `unit-tests` | `test-suite.yml` (PR/merge_group) or `documentation.yml` stub |
+| `integration-tests` | `test-suite.yml` (PR/merge_group) or `documentation.yml` stub |
+| `Build Gate` | `production-gates.yml` or `documentation.yml` stub |
+| `security-deployment-gate` | `production-gates.yml` or `documentation.yml` stub |
+| `Controller Integration Tests (Linux)` | `cross-platform-build.yml` or `documentation.yml` stub |
+| `zizmor` | `zizmor.yml` |
+| `CLA signature check` | `cla-check.yml` |
+| `trivy-scan` | `security-scan.yml` or `documentation.yml` stub |
+| `CodeQL` | `codeql-analysis.yml` or `codeql-stub.yml` |
+
+Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to `docs/**`, `*.md`, `.claude/**`) so they clear all nine required contexts without running the full code-validation suite.
+
+---
 
 ## Active Workflows
 
-### Build & Test Workflows
+### Build & Test
 
-#### `frontend-ci.yml`
-**Purpose**: Frontend lint, typecheck, tests, security audit, and production build
+#### `test-suite.yml` — Test Suite Validation
 
-**Triggers**: Pull Requests, Merge Group, Manual dispatch
+**Triggers**: Pull Requests to main/develop, Merge Group, push to main, Manual dispatch
 
-**What it does**:
-- Detects whether `web/**` changed against the PR merge base (always runs)
-- **No `web/` changes**: exits green immediately — Go-only and docs-only PRs are never blocked
-- **`web/` changes**: runs the full frontend check suite in order:
-  - `npm ci` — reproducible install from `package-lock.json`
-  - `npm run lint` — ESLint flat config with security rules at error severity
-  - `npm run typecheck` — TypeScript strict-mode check, no emit
-  - `npm run test` — Vitest (jsdom + Testing Library)
-  - `npm run build` — typecheck + production Vite build
-  - `npm audit --audit-level=high` — blocks on high/critical advisories (gate, not mutator)
+**Jobs**:
+- `unit-tests` — `make test` with `CFGMS_TEST_INTEGRATION=0`; every PR; emits the `unit-tests` required context
+- `integration-tests` — `make test-production-critical` on self-hosted Linux (hermetic container); needs `unit-tests`; emits the `integration-tests` required context
+- `cross-feature-tests` / `production-readiness` / `synthetic-monitoring` — workflow_dispatch `all`/`full` level only
 
-**Node toolchain**: version read from `web/.nvmrc`; zero Go steps
-
-**Runtime**: ~1 minute (stub exit for non-web PRs) / ~5-8 minutes (full suite)
+**Runtime**: unit-tests ~5 min; integration-tests ~10–15 min (self-hosted)
 
 ---
 
-#### `cross-platform-build.yml`
-**Purpose**: Cross-platform compilation and native build validation
+#### `cross-platform-build.yml` — Cross-Platform Build Validation
 
-**Triggers**: Push to main/develop, Pull Requests, Manual dispatch
+**Triggers**: Pull Requests to main/develop, Merge Group, Manual dispatch
 
-**Platforms**:
-- Linux (AMD64)
-- Windows (AMD64)
-- macOS (ARM64 - Apple Silicon)
+**Jobs**:
+- `cross-compile-check` — `make build-cross-validate` for all targets (Linux/macOS/Windows AMD64+ARM64)
+- `native-builds` — matrix: Linux (ubuntu-latest), macOS (macos-latest), Windows (windows-latest); each runs `make build` + unit tests with `-race` on Linux/macOS; emits `Controller Integration Tests (Linux)` context via the Linux leg
+- `integration-tests` — Docker-infrastructure integration tests; Linux only
 
-**What it does**:
-- Cross-compilation verification for all supported platforms
-- Native builds on Linux, Windows, and macOS
-- Integration tests with Docker infrastructure
-- Binary artifact validation
+**Coverage note**: the Linux `native-builds` leg (`go test -race -short ./pkg/... ./features/...`) is the only per-PR Linux race-detector sweep of the full module tree. Do not remove it.
 
-**Runtime**: ~4-5 minutes
+**Runtime**: ~11–15 min (measured 2026-07-13; dominated by native-builds matrix)
 
 ---
 
-#### `test-suite.yml`
-**Purpose**: Complete test suite execution
+#### `fleet-e2e.yml` — Fleet E2E Tests
 
-**Triggers**: Push to main/develop, Pull Requests
+**Triggers**: Merge Group only (not pull_request — moved off PR per #2550 audit)
 
-**What it does**:
-- Full unit test coverage
-- Integration test execution
-- Module testing (file, directory, script, etc.)
-- Race condition detection (-race flag)
-- Commercial build validation
+**Jobs**: `fleet-e2e-tests` — runs fleet end-to-end scenario tests; emits the `fleet-e2e-tests` context (required check in develop ruleset via `documentation.yml` stub on docs PRs)
 
-**Runtime**: ~3-4 minutes
+**Runtime**: ~10–20 min
 
 ---
 
-#### `production-gates.yml`
-**Purpose**: Production Risk Gates with cross-platform validation
+### Security
 
-**Triggers**: Push to main/develop, Pull Requests, Manual dispatch with gate selection
+#### `security-scan.yml` — Security Scanning Workflow
+
+**Triggers**: Pull Requests, Merge Group, push to main/develop, Daily schedule (3 AM UTC)
 
 **What it does**:
-- Security deployment gate (Critical/High vulnerability blocking)
-- Cross-platform integration tests (Linux, Windows, macOS)
-- Template and configuration validation
-- Production readiness verification
-- Emergency override support (with justification required)
+- Trivy filesystem scan (emits `trivy-scan` required context)
+- gosec — Go security static analysis
+- staticcheck — advanced Go static analysis
+- nancy — Go dependency vulnerability checking
+- Uploads SARIF to GitHub Security tab
+- Emits `security-deployment-gate` context
 
-**Features**:
-- Emergency override mechanism with audit trail
-- Comprehensive security scanning
-- Platform-specific validation
-
-**Runtime**: ~8-12 minutes
+**Runtime**: ~2–5 min (measured 2026-07-13: ~2.5 min)
 
 ---
 
-### Security Workflows
+#### `codeql-analysis.yml` — CodeQL Security Analysis
 
-#### `security-scan.yml`
-**Purpose**: Comprehensive security vulnerability scanning
-
-**Triggers**: Push to main/develop, Pull Requests, Daily schedule (3 AM UTC)
-
-**Security Tools**:
-- **Trivy**: Dependency vulnerability scanning
-- **gosec**: Go security code analysis
-- **staticcheck**: Advanced Go static analysis
-- **nancy**: Go dependency vulnerability checking
+**Triggers**: Pull Requests (Go/CodeQL paths), Merge Group, push to main/develop, Weekly schedule
 
 **What it does**:
-- Scans dependencies for known vulnerabilities
-- Performs static security analysis of Go code
-- Checks for common security anti-patterns
-- Uploads results to GitHub Security tab (SARIF)
-
-**Runtime**: ~5-7 minutes
-
----
-
-#### `codeql-analysis.yml`
-**Purpose**: GitHub CodeQL security analysis
-
-**Triggers**: Push to main/develop, Pull Requests, Weekly schedule
-
-**What it does**:
-- Advanced semantic code analysis
-- Security vulnerability detection
-- Code quality analysis
+- Semantic code analysis using the `cfg-is/cfgms-go-extensions` data-extension pack (published via `codeql-pack-publish.yml`)
 - Uploads findings to GitHub Security tab
+- Emits the `CodeQL` required context for Go PRs
 
-**Runtime**: ~2-3 minutes
+**Runtime**: ~5–10 min
 
 ---
 
-#### `docker-security.yml`
-**Purpose**: Container image security scanning
+#### `codeql-stub.yml` — CodeQL Stub
 
-**Triggers**: Push to main/develop, Pull Requests, Manual dispatch
+**Triggers**: Pull Requests that touch no Go code or CodeQL config (exact complement of `codeql-analysis.yml`'s path filter)
+
+**What it does**: Emits `CodeQL` as success for docs-only / scripts-only / yaml-only PRs so the required check is satisfied without running the full analysis. Does NOT trigger on `merge_group` (the real analysis is authoritative there).
+
+**Runtime**: <1 min
+
+---
+
+#### `codeql-pack-publish.yml` — Publish CodeQL Extension Pack
+
+**Triggers**: push to main/develop touching `.github/codeql/extensions/**`, Manual dispatch
+
+**What it does**: Publishes the `cfg-is/cfgms-go-extensions` CodeQL data-extension pack to ghcr.io. Required because `codeql-action`'s `packs:` input rejects local-path references; the pack must be registry-published for `codeql-analysis.yml` to consume it. Idempotent: re-publishing the same version is a no-op.
+
+---
+
+#### `docker-security.yml` — Docker Security Scanning
+
+**Triggers**: Pull Requests, push to main/develop, Manual dispatch
+
+**What it does**: Scans container images for vulnerabilities, validates Dockerfile best practices, generates SBOM.
+
+**Runtime**: ~3–5 min
+
+---
+
+#### `zizmor.yml` — zizmor
+
+**Triggers**: Pull Requests to main/develop, Merge Group, Manual dispatch
+
+**What it does**: Runs [zizmor](https://github.com/zizmorcore/zizmor) GitHub Actions security audit. Emits the `zizmor` required context. `continue-on-error: true` on the scan step so findings are uploaded as SARIF without blocking; the required-check gate is the enforcing mechanism.
+
+**Runtime**: <1 min (measured 2026-07-13: ~20 s)
+
+---
+
+#### `dependency-pin-check.yml` — Dependency Pin Freshness Check
+
+**Triggers**: Weekly schedule (Wednesday 09:00 UTC), Manual dispatch, Pull Requests touching Dockerfiles/workflows/Makefile
+
+**Jobs**:
+- `denylist-check` — hard-fails any PR that pins a known-compromised Trivy version (CVE-2026-33634)
+- `check-tool-versions` — schedule/manual only; checks gosec, staticcheck, gitleaks, nancy, trufflehog, trivy, go-licenses, golangci-lint, and Go toolchain against latest releases; opens a GitHub issue if outdated
+
+---
+
+### Compliance & Quality
+
+#### `production-gates.yml` — Production Risk Gates
+
+**Triggers**: Pull Requests, Merge Group, push to main/develop, Manual dispatch
 
 **What it does**:
-- Scans Docker images for vulnerabilities
-- Validates Dockerfile best practices
-- Checks base image security
-- SBOM (Software Bill of Materials) generation
-
-**Runtime**: ~3-4 minutes
+- Emits `Build Gate` and `security-deployment-gate` required contexts
+- Cross-platform integration tests and production readiness verification
 
 ---
 
-### Compliance & Quality Workflows
+#### `license-check.yml` — License Compliance
 
-#### `license-check.yml`
-**Purpose**: License compliance and dependency validation
+**Triggers**: Pull Requests, push to main/develop
 
-**Triggers**: Push to main/develop, Pull Requests
+**What it does**: Validates all dependencies have compatible licenses; generates license report and SBOM.
 
-**What it does**:
-- Validates all dependencies have compatible licenses
-- Generates license report
-- Checks for license conflicts
-- SBOM generation for compliance
-
-**Runtime**: ~2-3 minutes
+**Runtime**: ~2–3 min
 
 ---
 
-### Release Workflows
+#### `cla-check.yml` — CLA Check
 
-CFGMS does not currently ship signed release binaries from CI. The `release.yml` and `release-automation.yml` workflows were removed on 2026-05-25 — pre-1.0, distribution is via `git clone && make build` against a tagged commit. A proper release-engineering pipeline (cross-platform signed builds, SBOM attestation, MSI/pkg installers) will land once the Hyper-V dev infrastructure (Phase 2, Epic #390) provides controlled build hosts.
+**Triggers**: `pull_request_target` (opened/synchronize/reopened/ready_for_review), Merge Group
+
+**What it does**: Verifies the PR author has signed the CFGMS CLA v2.0 by appearing in `CONTRIBUTORS.md`. Posts a sign-in comment on unsigned PRs. Bot accounts and maintainers (`jrdnr`, `cfg-agent`) are bypassed. Merge Group trigger is a no-op pass-through (authorship was verified at PR time). Emits `CLA signature check` required context.
+
+**Runtime**: <1 min
 
 ---
 
-## Workflow Status Badges
+#### `label-decommission-gate.yml` — Label Decommission Gate
 
-Add these badges to your README.md:
+**Triggers**: Pull Requests to main/develop
 
-```markdown
-[![Cross-Platform Build](https://github.com/cfg-is/cfgms/actions/workflows/cross-platform-build.yml/badge.svg)](https://github.com/cfg-is/cfgms/actions/workflows/cross-platform-build.yml)
-[![Security Scan](https://github.com/cfg-is/cfgms/actions/workflows/security-scan.yml/badge.svg)](https://github.com/cfg-is/cfgms/actions/workflows/security-scan.yml)
-[![CodeQL](https://github.com/cfg-is/cfgms/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/cfg-is/cfgms/actions/workflows/codeql-analysis.yml)
-```
+**What it does**: Asserts that no executable code paths reference decommissioned `pipeline:*` or `agent:*` labels (all work-queue state is now in GitHub Projects V2). Also asserts no raw `gh issue create` calls outside the sanctioned `pipeline-helper.sh` paths.
 
-## Running Workflows Locally
+**Runtime**: <1 min
 
-Most workflow validation can be run locally using make targets:
+---
 
-```bash
-# Run full test suite (same as test-suite.yml)
-make test
+### Documentation
 
-# Run security scans (similar to security-scan.yml)
-make security-scan
+#### `documentation.yml` — Documentation Validation
 
-# Combined validation (tests + security)
-make test-commit
+**Triggers**: Pull Requests touching `docs/**`, `*.md`, `.claude/**` (and a few other non-code paths); push to main (same paths); Merge Group; Manual dispatch
 
-# Complete CI validation (matches production-gates.yml)
-make test-ci
+**Jobs**:
+- `validate-claude-md` — verifies CLAUDE.md contains required structural concepts and that all internal file references resolve; runs on `pull_request` and `push` (blocking)
+- `validate-roadmap` — checks `docs/product/roadmap.md` format; runs on `pull_request` and `push`
+- `documentation-summary` — step summary aggregating both jobs
+- Stub jobs: `unit-tests`, `integration-tests`, `Build Gate`, `security-deployment-gate`, `Controller Integration Tests (Linux)`, `fleet-e2e-tests`, `trivy-scan` — satisfy all required check contexts for docs-only PRs
 
-# Generate test certificates (matches CI approach)
-make generate-test-certificates
+**Runtime**: <1 min per job
 
-# Or run full integration test setup (includes certificates)
-make test-integration-setup && make generate-test-certificates
-```
+---
+
+### Monitoring
+
+#### `develop-sanity.yml` — Develop Branch Sanity
+
+**Triggers**: push to develop only
+
+**What it does**: Runs `go build ./...` after every merge to develop. On failure, opens a `pipeline:incident`-labeled issue with the build output so regressions are immediately visible. Not a PR gate — fires post-merge.
+
+**Runtime**: ~1 min
+
+---
+
+#### `merge-gate.yml` — Merge Gate
+
+**Triggers**: `workflow_run` completion of Test Suite, Cross-Platform Build, Security Scan, or CodeQL; Manual dispatch
+
+**What it does**: Aggregates all check statuses for a PR commit SHA and fails if any required check failed. Legacy gate — the develop branch ruleset's native required-status-checks configuration now enforces the same guarantee. Retained for observability.
+
+---
 
 ## Workflow Trigger Matrix
 
-| Workflow | Push (main/develop) | Pull Request | Schedule | Manual |
-|----------|---------------------|--------------|----------|--------|
-| frontend-ci.yml | ❌ | ✅ | ❌ | ✅ |
-| cross-platform-build.yml | ✅ | ✅ | ❌ | ✅ |
-| test-suite.yml | ✅ | ✅ | ❌ | ❌ |
-| production-gates.yml | ✅ | ✅ | ❌ | ✅ |
-| security-scan.yml | ✅ | ✅ | Daily (3 AM UTC) | ❌ |
-| codeql-analysis.yml | ✅ | ✅ | Weekly | ❌ |
-| docker-security.yml | ✅ | ✅ | ❌ | ✅ |
-| license-check.yml | ✅ | ✅ | ❌ | ❌ |
-
-## Required Status Checks for Branch Protection
-
-The following workflows should be configured as required status checks:
-
-- **cross-platform-build.yml**: All platform builds must pass
-- **test-suite.yml**: Complete test suite must pass
-- **security-scan.yml**: No critical/high vulnerabilities allowed
-- **codeql-analysis.yml**: CodeQL security analysis must pass
-- **license-check.yml**: License compliance must pass
-
-See [Branch Protection Rules](https://github.com/cfg-is/cfgms/settings/branches) for configuration.
-
-## Troubleshooting
-
-### Workflow Failures
-
-**Security scan blocking deployment**:
-- Check GitHub Security tab for vulnerability details
-- Run `make security-scan` locally to reproduce
-- Fix vulnerabilities or request emergency override (production-gates.yml)
-
-**Cross-platform build failures**:
-- Verify code compiles on target platform
-- Check platform-specific dependencies
-- Review cross-compilation settings in Makefile
-
-**Test failures**:
-- Run `make test` locally to reproduce
-- Check for race conditions with `make test-race`
-- Review test logs in GitHub Actions output
-
-### Emergency Override (Production Gates)
-
-In exceptional circumstances, the production-gates.yml workflow supports emergency override:
-
-1. Trigger manual workflow dispatch
-2. Enable `emergency_override: true`
-3. Provide detailed `override_reason`
-4. Override is logged and auditable
-5. Use only for critical production deployments
-
-**Note**: Emergency overrides require justification and are tracked in audit logs.
-
-## Adding New Workflows
-
-When creating new workflows:
-
-1. Place `.yml` file in `.github/workflows/`
-2. Follow naming convention: `feature-name.yml`
-3. Include clear `name:` field
-4. Document purpose in this README
-5. Test locally before committing
-6. Consider adding to required status checks
-
-## Security Considerations
-
-- **No secrets in workflows**: Use GitHub Secrets for sensitive data
-- **Minimal permissions**: Workflows run with least privilege
-- **SARIF uploads**: Security findings uploaded to GitHub Security tab
-- **Audit trail**: All workflow runs logged and traceable
-
-## References
-
-- [GitHub Actions Documentation](https://docs.github.com/en/actions)
-- [CFGMS Contributing Guide](../../CONTRIBUTING.md)
-- [CFGMS Development Workflow](../../docs/development/story-checklist.md)
-- [Security Policy](../../SECURITY.md)
+| Workflow | push main/develop | pull_request | merge_group | Schedule | Manual |
+|---|---|---|---|---|---|
+| `test-suite.yml` | push main only | ✅ | ✅ | ❌ | ✅ |
+| `cross-platform-build.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
+| `fleet-e2e.yml` | ❌ | ❌ | ✅ | ❌ | ❌ |
+| `security-scan.yml` | ✅ | ✅ | ✅ | Daily 3 AM UTC | ❌ |
+| `codeql-analysis.yml` | ✅ | ✅ (Go paths) | ✅ | Weekly | ❌ |
+| `codeql-stub.yml` | ❌ | ✅ (non-Go) | ❌ | ❌ | ❌ |
+| `codeql-pack-publish.yml` | ✅ (extensions path) | ❌ | ❌ | ❌ | ✅ |
+| `docker-security.yml` | ✅ | ✅ | ❌ | ❌ | ✅ |
+| `zizmor.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
+| `dependency-pin-check.yml` | ❌ | ✅ (path-filtered) | ❌ | Weekly Wed | ✅ |
+| `production-gates.yml` | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `license-check.yml` | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `cla-check.yml` | ❌ | pull_request_target | ✅ | ❌ | ❌ |
+| `label-decommission-gate.yml` | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `documentation.yml` | push main (paths) | ✅ (paths) | ✅ | ❌ | ✅ |
+| `develop-sanity.yml` | push develop only | ❌ | ❌ | ❌ | ❌ |
+| `merge-gate.yml` | ❌ | ❌ | ❌ | ❌ | ✅ (also workflow_run) |
+| `frontend-ci.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 
 ---
 
-**Last Updated**: 2025-12-28 (v0.8.0 - Re-enabled all workflows for public repository)
+## Running Workflows Locally
+
+```bash
+# Fast unit tests (same as test-suite.yml unit-tests job)
+make test
+
+# Pre-commit validation (tests + security + lint)
+make test-commit
+
+# Complete CI validation — matches all required checks
+make test-complete
+
+# Security scans
+make security-scan
+
+# Architecture constraint check
+make check-architecture
+```
+
+---
+
+## Troubleshooting
+
+**Security scan blocking merge**: check the GitHub Security tab, run `make security-scan` locally. For CodeQL findings, genuine bugs → fix the code; false positives → extend `.github/codeql/extensions/` (see `docs/development/security-workflow-guide.md`).
+
+**Cross-platform build failures**: verify code compiles on the target platform; check platform-specific build tags; review `Makefile` cross-compilation targets.
+
+**CLA check failing**: add your name to `CONTRIBUTORS.md` in the format shown in the bot comment. The check re-runs on the next push.
+
+**CodeQL pack publish failing** with "already exists": expected — bump `version:` in `.github/codeql/extensions/qlpack.yml` only when changing the model.
+
+---
+
+## References
+
+- [Commit & PR Standards](../../docs/development/commit-and-pr-standards.md)
+- [Security Workflow Guide](../../docs/development/security-workflow-guide.md)
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)

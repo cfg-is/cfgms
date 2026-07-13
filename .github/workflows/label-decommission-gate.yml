@@ -1,8 +1,6 @@
 name: label-decommission-gate
 
 on:
-  push:
-    branches: [develop, main, 'feature/**', 'fix/**']
   pull_request:
     branches: [develop, main]
 

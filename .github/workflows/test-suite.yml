@@ -165,9 +165,6 @@ jobs:
       shell: bash
       run: .github/scripts/resource-sampler.sh start "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}"
 
-    - name: Run Fast Comprehensive Tests
-      run: make test-fast
-
     - name: Run Production Critical Tests
       run: make test-production-critical
 
