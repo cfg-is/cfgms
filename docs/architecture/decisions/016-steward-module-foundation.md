@@ -111,6 +111,8 @@ Authority is **atomic at the object level**: when an active module owns an objec
 
 Sub-property co-authorship of one object (module owns some fields, osquery others) is explicitly rejected — it re-introduces the two-sources-one-fragment non-determinism that breaks partial-sync hash validation.
 
+**Required-field extension (ADR-020).** The `owns:` clause is extended by [ADR-020](020-dna-required-field-declaration.md) to carry a `required_fields` list within each entry, declaring which fragment fields must be present and non-empty for a valid DNA snapshot. This is the same module-authority concern as ownership — both live in `module.yaml` to maintain a single declaration site per module.
+
 ### 6. Stdlib completeness is an enforced gate
 
 A CI/build check (Makefile target) asserts, for every module under `stdlib/`, that it:
