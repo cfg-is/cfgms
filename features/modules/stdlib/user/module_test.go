@@ -4,6 +4,7 @@ package user
 
 import (
 	"context"
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -367,10 +368,13 @@ func TestUserModule_ConformanceDeterministicGet(t *testing.T) {
 	m := New()
 	state, err := m.Get(context.Background(), username)
 	if err != nil {
-		t.Skipf("skipping conformance test: Get(%q) error: %v", username, err)
+		if errors.Is(err, modules.ErrUnsupportedPlatform) {
+			t.Skipf("skipping conformance test: Get(%q) unsupported on this platform: %v", username, err)
+		}
+		t.Fatalf("Get(%q) returned unexpected error: %v", username, err)
 	}
 	if state == nil {
-		t.Skipf("skipping conformance test: Get(%q) returned nil (user may not exist)", username)
+		t.Fatalf("Get(%q) returned nil state with nil error; Get must return a non-nil ConfigState on success", username)
 	}
 	conformance.AssertDeterministicGet(t, m, username)
 }
@@ -382,10 +386,13 @@ func TestUserModule_ConformanceNoEphemeralFields(t *testing.T) {
 	m := New()
 	state, err := m.Get(context.Background(), username)
 	if err != nil {
-		t.Skipf("skipping: Get(%q) error: %v", username, err)
+		if errors.Is(err, modules.ErrUnsupportedPlatform) {
+			t.Skipf("skipping: Get(%q) unsupported on this platform: %v", username, err)
+		}
+		t.Fatalf("Get(%q) returned unexpected error: %v", username, err)
 	}
 	if state == nil {
-		t.Skipf("skipping: Get(%q) returned nil (user may not exist)", username)
+		t.Fatalf("Get(%q) returned nil state with nil error; Get must return a non-nil ConfigState on success", username)
 	}
 	conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
 }

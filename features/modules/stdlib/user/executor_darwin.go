@@ -38,17 +38,7 @@ func (e *darwinExecutor) getState(username string) (userState, error) {
 
 	state := userState{Exists: true}
 
-	// Parse RealName from multi-line dscl output.
-	// Format can be "RealName:\n <value>" or "RealName: <value>".
-	lines := strings.Split(output, "\n")
-	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "RealName:" && i+1 < len(lines) {
-			state.FullName = strings.TrimSpace(lines[i+1])
-		} else if strings.HasPrefix(line, "RealName:") {
-			state.FullName = strings.TrimSpace(strings.TrimPrefix(line, "RealName:"))
-		}
-	}
+	state.FullName = parseDsclRealName(output)
 
 	// Resolve group names via id -Gn (all groups, space-separated).
 	groupOut, err := exec.Command("id", "-Gn", username).CombinedOutput() // #nosec G204 - username validated by caller
@@ -163,9 +153,33 @@ func (e *darwinExecutor) nextAvailableUID() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("dscl -list /Users UniqueID: %w", err)
 	}
+	return firstFreeUID(parseUsedUIDs(string(out)))
+}
 
+// parseDsclRealName extracts the RealName value from "dscl . -read /Users/<u>"
+// output. dscl emits one of two formats: inline ("RealName: value") or a key
+// line followed by an indented value line ("RealName:\n value"). This is a pure
+// function of its input so both formats can be exercised with fixtures.
+func parseDsclRealName(output string) string {
+	var fullName string
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "RealName:" && i+1 < len(lines) {
+			fullName = strings.TrimSpace(lines[i+1])
+		} else if strings.HasPrefix(line, "RealName:") {
+			fullName = strings.TrimSpace(strings.TrimPrefix(line, "RealName:"))
+		}
+	}
+	return fullName
+}
+
+// parseUsedUIDs extracts the set of allocated UIDs from the output of
+// "dscl . -list /Users UniqueID". Each non-empty line is "<username> <uid>";
+// malformed lines are skipped. Pure function of its input for fixture testing.
+func parseUsedUIDs(output string) map[int]bool {
 	used := make(map[int]bool)
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -175,7 +189,12 @@ func (e *darwinExecutor) nextAvailableUID() (int, error) {
 			used[uid] = true
 		}
 	}
+	return used
+}
 
+// firstFreeUID returns the lowest unused UID in the macOS regular-user range
+// [501, 60000). It returns an error if the range is exhausted.
+func firstFreeUID(used map[int]bool) (int, error) {
 	for uid := 501; uid < 60000; uid++ {
 		if !used[uid] {
 			return uid, nil

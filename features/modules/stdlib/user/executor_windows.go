@@ -37,6 +37,15 @@ func (e *windowsExecutor) getState(username string) (userState, error) {
 		return userState{}, fmt.Errorf("net user %s: %w (output: %s)", username, err, output)
 	}
 
+	return parseNetUserOutput(output), nil
+}
+
+// parseNetUserOutput converts the textual output of a successful
+// "net user <username>" invocation into a userState. It is a pure function of
+// its input so the parsing contract can be exercised with fixtures on any
+// platform. Callers are responsible for detecting the "user absent" case before
+// invoking this function; it always sets Exists=true.
+func parseNetUserOutput(output string) userState {
 	state := userState{Exists: true}
 
 	for _, rawLine := range strings.Split(output, "\n") {
@@ -63,7 +72,7 @@ func (e *windowsExecutor) getState(username string) (userState, error) {
 	}
 
 	sort.Strings(state.Groups)
-	return state, nil
+	return state
 }
 
 // setState creates, modifies, or deletes the local user account to match desired.
