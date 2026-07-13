@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh install-cfg uninstall-cfg test-install-cfg
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh install-cfg uninstall-cfg test-install-cfg
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -900,24 +900,6 @@ test-performance-benchmarks:
 
 
 
-# Performance baseline establishment (for new releases)
-# Performance regression tests removed — will be rebuilt with real profiling data
-# when the system has enough infrastructure to establish meaningful baselines
-test-performance-baseline:
-	@echo "📈 Performance Baselines"
-	@echo "========================"
-	@echo "ℹ️  Performance regression tests not yet implemented"
-	@echo "   Will be added when real profiling data establishes meaningful baselines"
-	@echo "   See: features/steward/performance/ for component-level performance tests"
-
-# Data consistency testing (Story #85)
-test-data-consistency:
-	@echo "📊 DATA CONSISTENCY VALIDATION"
-	@echo "==============================="
-	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/TestDataFlow" ./test/e2e/...
-	@echo "✅ Data consistency validation complete"
-
 # Production Risk Testing - Automated Gates
 .PHONY: test-production-critical
 
@@ -1167,31 +1149,6 @@ test-security: security-scan
 	@echo "- ✅ All security scans passed"
 	@echo ""
 	@echo "🔒 Security validation complete"
-
-# Performance and load testing
-test-performance: test-performance-baseline
-	@echo ""
-	@echo "✅ PERFORMANCE TESTING FINISHED"
-	@echo "=================================="
-	@echo "- ✅ Performance benchmarks completed"
-	@echo ""
-	@echo "📊 Performance validation complete"
-
-# Cross-feature integration testing (Story #85)
-test-cross-feature-integration:
-	@echo "🔗 CROSS-FEATURE INTEGRATION TESTING"
-	@echo "====================================="
-	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration)" ./test/e2e/...
-	@echo "✅ Cross-feature integration testing complete"
-
-# Failure propagation testing (Story #85)
-test-failure-propagation:
-	@echo "🔄 FAILURE PROPAGATION TESTING"
-	@echo "==============================="
-	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/TestFailurePropagation" ./test/e2e/...
-	@echo "✅ Failure propagation testing complete"
 
 # Docker environment management
 test-docker: test-integration-status
