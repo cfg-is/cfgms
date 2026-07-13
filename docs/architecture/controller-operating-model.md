@@ -195,6 +195,37 @@ A device-level resource of the same name always wins over a cluster-policy resou
 
 **No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
 
+### Role-Policies Namespace (Issue #2543)
+
+The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution (S4) the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward, and merges the fragments into the effective config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb.
+
+**Role config object shape:**
+
+```json
+{
+  "name":      "github-runners",
+  "tenant_id": "acme/ops",
+  "selector":  "os:windows tag:github-runner",
+  "fragment":  { ... StewardConfig fields ... },
+  "created_at": "2026-07-13T00:00:00Z",
+  "created_by": "ops-admin"
+}
+```
+
+- `name` — unique within the tenant; alphanumerics, hyphens, underscores, and dots only.
+- `selector` — standard fleet selector expression parsed by `pkg/fleet/selector.Parse`; stored verbatim. Validated at author time; an un-parseable selector is rejected with 400.
+- `fragment` — a partial `StewardConfig`; no steward ID is required. Fields that are empty or zero-valued in the fragment are not merged (the field retains the value from the lower-priority layer).
+
+**ConfigKey:**
+
+```
+ConfigKey{TenantID: "<tenant>", Namespace: "role-policies", Name: "<roleName>"}
+```
+
+**Authoring:** `POST /api/v1/roles` (requires `role:write`), `GET /api/v1/roles` / `GET /api/v1/roles/{name}` (requires `role:read`), `DELETE /api/v1/roles/{name}` (requires `role:write`). Cross-tenant authoring is rejected with 403. See `cfg role --help` for CLI usage.
+
+**Resolution:** role configs do not affect the config-resolution pipeline until S4 is implemented. The storage and REST surface are authoritative for authoring only.
+
 ## Deployment Rings
 
 Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; each steward subscribes to a ring via its DNA attribute `deployment_ring`; and config delivery resolves the effective `desired_version` from the ring.
