@@ -795,6 +795,13 @@ for arg in "$@"; do
         exit 0
     fi
 done
+# Pass 2 (Issue #2634): python fetches these WITHOUT --jq (parses raw JSON).
+for arg in "$@"; do
+    if [[ "$arg" == *"/pulls/"*"/files"* ]]; then printf '%s' "${FILES_JSON:-[]}"; exit 0; fi
+done
+for arg in "$@"; do
+    if [[ "$arg" == *"/code-scanning/alerts"* ]]; then printf '%s' "${ALERTS_JSON:-[]}"; exit 0; fi
+done
 exit 0
 MOCKEOF
     chmod +x "$tmp_dir/gh"
@@ -844,6 +851,32 @@ MOCKEOF
         log_pass "pr-security-findings.sh: no findings → empty output (PASS path)"
     else
         log_fail "pr-security-findings.sh: expected empty output for no findings, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2634): advisory code-scanning alert on an ADDED line is
+    #     emitted; an OPEN alert on an unchanged line (inherited) is NOT ---
+    # Patch adds new-file lines 255-258 (line 254 is a context line).
+    local FILES_ADD='[{"filename":"pkg/config/inheritance.go","patch":"@@ -250,1 +254,5 @@\n context254\n+line255\n+line256\n+line257\n+line258"}]'
+    # Two OPEN alerts: one on added line 258 (new-in-PR), one on context line 254 (inherited).
+    local ALERTS_MIX='[{"most_recent_instance":{"location":{"path":"pkg/config/inheritance.go","start_line":258}},"rule":{"id":"go/log-injection"}},{"most_recent_instance":{"location":{"path":"pkg/config/inheritance.go","start_line":254}},"rule":{"id":"go/log-injection"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_ADD" ALERTS_JSON="$ALERTS_MIX" PATH="$tmp_dir:$PATH" bash "$script" 2623 2>/dev/null) || true
+    if echo "$output" | grep -q "pkg/config/inheritance.go:258:go/log-injection"; then
+        log_pass "pr-security-findings.sh: advisory CodeQL alert on an ADDED line is emitted (pass 2)"
+    else
+        log_fail "pr-security-findings.sh: expected added-line alert :258, got: '$output'"
+    fi
+    if echo "$output" | grep -q "pkg/config/inheritance.go:254"; then
+        log_fail "pr-security-findings.sh: inherited alert on unchanged line :254 must NOT be emitted, got: '$output'"
+    else
+        log_pass "pr-security-findings.sh: inherited alert on unchanged line NOT emitted (added-line intersection)"
+    fi
+
+    # --- Pass 2: with no alerts data, the extra passes stay silent (PASS) ---
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_ADD" PATH="$tmp_dir:$PATH" bash "$script" 2623 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: added lines but no open alerts → empty (PASS path)"
+    else
+        log_fail "pr-security-findings.sh: expected empty output when no open alerts, got: '$output'"
     fi
 
     # --- Test: check-runs API error → exits 0, empty (not propagated) ---
