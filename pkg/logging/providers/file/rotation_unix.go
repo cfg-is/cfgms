@@ -20,12 +20,16 @@ func (p *FileProvider) calculateDiskUsage() (float64, error) {
 		return 0, fmt.Errorf("failed to get filesystem stats: %w", err)
 	}
 
-	// Calculate usage percentage with bounds checking
-	if stat.Bsize < 0 {
-		return 0, fmt.Errorf("invalid block size: %d", stat.Bsize)
+	// Calculate usage percentage with bounds checking. Statfs_t.Bsize is
+	// int64 on Linux but uint32 on Darwin — go through int64 so the guard
+	// compiles and lints cleanly on both (a direct `stat.Bsize < 0` is
+	// statically false on Darwin and staticcheck SA4003 rejects it there).
+	bsize := int64(stat.Bsize)
+	if bsize <= 0 {
+		return 0, fmt.Errorf("invalid block size: %d", bsize)
 	}
-	// #nosec G115 - Block size is validated above to be non-negative
-	blockSize := uint64(stat.Bsize)
+	// #nosec G115 - Block size is validated above to be positive
+	blockSize := uint64(bsize)
 
 	totalBytes := stat.Blocks * blockSize
 	freeBytes := stat.Bavail * blockSize

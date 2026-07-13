@@ -158,6 +158,14 @@ linters-settings:
 
 linters:
   disable-all: true
+  # v2-format path exclusions. The legacy `run.skip-dirs` above is v1 syntax
+  # that golangci-lint v2 ignores; without this stanza a local `web/` with
+  # node_modules installed gets linted (the flatted npm package ships Go
+  # files). CI never installs node_modules before linting, so the gap only
+  # bites local runs. Full v1→v2 config migration is a separate story.
+  exclusions:
+    paths:
+      - web/
   enable:
     # Central Provider Architecture Enforcement (CRITICAL)
     # NOTE: depguard disabled - architectural enforcement via make check-architecture

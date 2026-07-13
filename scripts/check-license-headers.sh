@@ -10,8 +10,10 @@ ERRORS=""
 # Check Go files
 echo "🔍 Checking Go files for SPDX license headers..."
 while IFS= read -r file; do
-    # Skip vendor, .git, .cache, and .gomod directories
-    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]] || [[ "$file" == *"/.gomod/"* ]]; then
+    # Skip vendored/generated trees: vendor, .git, .cache, .gomod,
+    # node_modules (npm packages may ship Go/proto sources), and
+    # .claude/worktrees (separate agent checkouts, scanned in their own runs)
+    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]] || [[ "$file" == *"/.gomod/"* ]] || [[ "$file" == *"/node_modules/"* ]] || [[ "$file" == *"/.claude/worktrees/"* ]]; then
         continue
     fi
 
@@ -25,8 +27,10 @@ done < <(find . -name "*.go" -type f)
 # Check proto files
 echo "🔍 Checking .proto files for SPDX license headers..."
 while IFS= read -r file; do
-    # Skip vendor, .git, .cache, and .gomod directories
-    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]] || [[ "$file" == *"/.gomod/"* ]]; then
+    # Skip vendored/generated trees: vendor, .git, .cache, .gomod,
+    # node_modules (npm packages may ship Go/proto sources), and
+    # .claude/worktrees (separate agent checkouts, scanned in their own runs)
+    if [[ "$file" == *"/vendor/"* ]] || [[ "$file" == *"/.git/"* ]] || [[ "$file" == *"/.cache/"* ]] || [[ "$file" == *"/.gomod/"* ]] || [[ "$file" == *"/node_modules/"* ]] || [[ "$file" == *"/.claude/worktrees/"* ]]; then
         continue
     fi
 
