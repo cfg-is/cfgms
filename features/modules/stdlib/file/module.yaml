@@ -26,6 +26,9 @@ interfaces:
 
 owns:
   - kind: file  # authority over file:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
 
 security:
   requires_root: false

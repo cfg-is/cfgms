@@ -20,6 +20,9 @@ interfaces:
 
 owns:
   - kind: firewall  # authority over firewall:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
 
 security:
   requires_root: true

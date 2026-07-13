@@ -3,21 +3,102 @@
 package service
 
 import (
+	"fmt"
+	"io/fs"
+	"os"
+	"sort"
+
 	common "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // configType identifies the configuration type of a managed device.
-// The per-type required-field table is seeded here for full-OS devices;
-// #2618 will extend it for additional device kinds without rewriting the guard.
 type configType string
 
 const configTypeFullOSDevice configType = "full-os-device"
 
-// dnaRequiredFields maps each configuration type to the Attributes keys that
-// must be present and non-empty for a valid DNA snapshot.
-// Seed: only full-os-device (all current stewards). #2618 adds further entries.
-var dnaRequiredFields = map[configType][]string{
-	configTypeFullOSDevice: {"hostname", "os"},
+// dnaRequiredFields is the active required-field table built from the embedded
+// stdlib module manifests at package init. All steward-kind modules' required_fields
+// are unioned into configTypeFullOSDevice per ADR-020 Path A (steward-hosted entities
+// inferred from active module set). Tests may pass a custom table to
+// checkDNAIntegrityWithTable to probe different declaration states.
+var dnaRequiredFields map[configType][]string
+
+func init() {
+	var err error
+	dnaRequiredFields, err = buildRequiredFieldsFromManifestFS(modules.StdlibManifests, "stdlib")
+	if err != nil {
+		// StdlibManifests is compiled in — this path should not be reached in
+		// practice. An empty table (conservative default: unknown contracts cannot
+		// be violated) keeps the guard from falsely rejecting snapshots.
+		dnaRequiredFields = map[configType][]string{}
+	}
+}
+
+// buildRequiredFieldsFromManifests reads all module.yaml files rooted at dir
+// and returns the required-field table. Steward-kind modules contribute their
+// required_fields to configTypeFullOSDevice (ADR-020 Path A). The result is the
+// union of all declared fields; duplicates are eliminated.
+//
+// This function is used by tests to build tables from test-fixture manifests.
+// Production code uses buildRequiredFieldsFromManifestFS with the embedded FS.
+func buildRequiredFieldsFromManifests(dir string) (map[configType][]string, error) {
+	return buildRequiredFieldsFromManifestFS(os.DirFS(dir), ".")
+}
+
+// buildRequiredFieldsFromManifestFS is the canonical loader: walks fsys under
+// root, parses every module.yaml, and unions required_fields from all steward
+// modules into configTypeFullOSDevice.
+func buildRequiredFieldsFromManifestFS(fsys fs.FS, root string) (map[configType][]string, error) {
+	seen := map[configType]map[string]struct{}{}
+	table := map[configType][]string{}
+
+	err := fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || d.Name() != "module.yaml" {
+			return nil
+		}
+
+		f, openErr := fsys.Open(path)
+		if openErr != nil {
+			return fmt.Errorf("open %s: %w", path, openErr)
+		}
+		defer func() { _ = f.Close() }()
+
+		meta, parseErr := modules.ParseModuleMetadata(f)
+		if parseErr != nil {
+			return fmt.Errorf("parse %s: %w", path, parseErr)
+		}
+
+		if meta.Kind != "steward" {
+			return nil
+		}
+
+		ct := configTypeFullOSDevice
+		if _, ok := seen[ct]; !ok {
+			seen[ct] = map[string]struct{}{}
+		}
+		for _, own := range meta.Owns {
+			for _, field := range own.RequiredFields {
+				if _, dup := seen[ct][field]; !dup {
+					seen[ct][field] = struct{}{}
+					table[ct] = append(table[ct], field)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort each slice for deterministic ordering in tests and logs.
+	for ct := range table {
+		sort.Strings(table[ct])
+	}
+	return table, nil
 }
 
 // dnaIntegrityResult is the outcome of a DNA integrity check.
@@ -27,18 +108,25 @@ type dnaIntegrityResult struct {
 }
 
 // checkDNAIntegrity returns whether the DNA snapshot satisfies the required-field
-// contract for the given configuration type. A nil DNA, or any required Attributes
-// key that is absent or empty, fails the check and lists the offending fields.
+// contract for the given configuration type. The required-set is read from the
+// package-level dnaRequiredFields table, which is built from the embedded stdlib
+// module manifests at init time (ADR-020).
 //
-// The check is table-driven: to seed the required set for a new device kind,
-// add an entry to dnaRequiredFields (see #2618). An unregistered config type
-// passes by default (conservative: unknown contracts cannot be violated).
+// Call sites in AcceptRegistration and SyncDNA are unchanged from #2617.
 func checkDNAIntegrity(dna *common.DNA, ct configType) dnaIntegrityResult {
+	return checkDNAIntegrityWithTable(dna, ct, dnaRequiredFields)
+}
+
+// checkDNAIntegrityWithTable is the table-parameterised implementation. Tests
+// call this directly with a table built from test-fixture manifests to prove
+// that the required-set drives the guard without any code change to guard logic.
+func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[configType][]string) dnaIntegrityResult {
 	if dna == nil {
 		return dnaIntegrityResult{missingFields: []string{"(nil DNA)"}}
 	}
-	required, ok := dnaRequiredFields[ct]
+	required, ok := table[ct]
 	if !ok {
+		// Conservative default: unknown config types have no declared contract.
 		return dnaIntegrityResult{valid: true}
 	}
 	var missing []string
