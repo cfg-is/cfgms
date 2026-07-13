@@ -347,7 +347,19 @@ func (m *hypervModule) Monitor(_ context.Context, resourceID string, _ modules.C
 	m.monMu.Lock()
 	defer m.monMu.Unlock()
 	if m.monClosed {
-		return fmt.Errorf("hyperv monitor: closed")
+		// Close() is terminal for the monitor subsystem, but the executor's
+		// monitor engine calls Close() merely to STOP monitors before restarting
+		// them on the next config push (client_transport.go StartMonitors →
+		// stopMonitorEngine → Close), reusing this cached module instance. A fresh
+		// Monitor() call therefore re-arms the subsystem: Close() already released
+		// the OS watchers, joined the cluster pollers, and nilled the changes
+		// channel, so clear the closed flag and stale interest and let the
+		// establishment paths below rebuild a clean subscription. Without this,
+		// every hyperv resource (VM and cluster) fails monitoring after the first
+		// config re-push and stops emitting module/cluster DNA.
+		m.monClosed = false
+		m.monInterest = nil
+		m.monClusterInterest = nil
 	}
 	if m.monChanges == nil {
 		m.monChanges = make(chan modules.ChangeEvent, monitorChannelDepth)
