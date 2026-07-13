@@ -30,6 +30,12 @@ type RegistrationRequest struct {
 	DeviceID           string `json:"device_id,omitempty"`            // 64-char lowercase hex SHA-256 of Ed25519 public key
 	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64-encoded Ed25519 public key (32 bytes)
 	KeyProtectionLevel string `json:"key_protection_level,omitempty"` // "file" or "tpm"
+
+	// Best-effort identity hints seeded into initial DNA so the controller is not
+	// blind to connected stewards before their first DNA sync (Issue #2640).
+	// Registration succeeds even when these fields are absent.
+	Hostname string `json:"hostname,omitempty"`
+	OS       string `json:"os,omitempty"`
 }
 
 // RegistrationResponse represents the steward registration response for an approved registration.
@@ -540,6 +546,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	stewardID := fmt.Sprintf("steward-%d", time.Now().UnixNano())
 
+	// Build initial DNA attributes from best-effort identity hints (Issue #2640).
+	// Hostname and OS are optional; registration succeeds when absent.
+	var initialAttrs map[string]string
+	if req.Hostname != "" || req.OS != "" {
+		initialAttrs = make(map[string]string)
+		if req.Hostname != "" {
+			initialAttrs["hostname"] = req.Hostname
+		}
+		if req.OS != "" {
+			initialAttrs["os"] = req.OS
+		}
+	}
+
 	// Perennial tokens survive registration; log the use for auditability.
 	s.logger.Info("Token used for registration",
 		"token_prefix", logging.RedactedID(req.Token),
@@ -609,7 +628,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
 					return
 				}
-				if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, quarantineTransportAddr, "quarantined"); err != nil {
+				if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
 					s.logger.Error("Failed to register quarantined steward in controller service",
 						"steward_id", stewardID, "error", err)
 				}
@@ -756,7 +775,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"steward_id", stewardID,
 		"validity_days", validityDays)
 
-	if err := s.controllerService.RegisterSteward(stewardID, token.TenantID, resp.TransportAddress, "registered"); err != nil {
+	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, resp.TransportAddress, "registered", initialAttrs); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
 			"steward_id", stewardID, "error", err)
 	}
