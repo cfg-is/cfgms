@@ -1887,7 +1887,7 @@ test-e2e-ci:
 	@echo ""
 	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
 	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
-	DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock) && \
+	DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock) && \
 	docker run --rm \
 		--user $$(id -u):$$(id -g) \
 		--network cfgms-test \
@@ -1941,16 +1941,16 @@ test-e2e-fast:
 	@echo ""
 	@echo "⚡ FAST E2E VALIDATION"
 	@echo "======================"
-	@echo "Running 2 core test suites in parallel:"
+	@echo "Running 2 core test suites sequentially:"
 	@echo "  1️⃣  Transport integration tests"
 	@echo "  2️⃣  Controller E2E tests"
 	@echo ""
-	@echo "⏱️  Expected runtime: ~3-5 minutes"
+	@echo "⏱️  Expected runtime: ~5-8 minutes"
 	@echo "⚠️  Excludes long-running performance/scale tests (use test-e2e-parallel for full validation)"
 	@echo ""
 	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) -j2 test-e2e-transport test-e2e-controller || { \
+	@$(MAKE) test-e2e-transport test-e2e-controller || { \
 		echo ""; \
 		echo "❌ One or more E2E test suites failed"; \
 		$(MAKE) test-transport-cleanup; \
