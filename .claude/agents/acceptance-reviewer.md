@@ -107,7 +107,7 @@ All required CI checks must pass before reviewing code:
 
 - ALL PASSING → continue to Phase 2.1
 - ANY FAILING → verdict is FAIL, stop here. Report which checks failed.
-- ANY PENDING → verdict is WAIT, stop here. Report which checks are pending.
+- ANY PENDING → verdict is WAIT, stop here. Report which checks are pending. **Do NOT post the structured review comment** (the one containing `<!-- cfgms-acceptance-review -->` or the `## Acceptance Review` heading) — those markers signal a *completed* review and would cause the PO preflight to treat this PR as permanently reviewed once CI goes green, skipping re-spawn of the acceptance reviewer. Instead, either omit the comment entirely and report pending checks via your completion message, or post a plain comment using a heading like `## CI Status — Checks Pending` that does not contain `<!-- cfgms-acceptance-review -->` or the `## Acceptance Review` heading.
 
 ## Phase 2.1: GitHub Advanced Security Findings (BLOCKING)
 
