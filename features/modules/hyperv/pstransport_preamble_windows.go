@@ -65,7 +65,7 @@ function Cfgms-GetVM {
         try {
             $v = Get-VHD -Path $diskPath -ErrorAction Stop
             while ($v.ParentPath) { $rootPath = $v.ParentPath; $v = Get-VHD -Path $v.ParentPath -ErrorAction Stop }
-        } catch { }
+        } catch { Write-Warning "Get-VHD chain resolution failed for $diskPath: $($_.Exception.Message)" }
     }
     $checkpointCount = @(Get-VMSnapshot -VMName $Name -ErrorAction SilentlyContinue).Count
     # $vm.MemoryStartupBytes is empty on Server 2025's Hyper-V PowerShell

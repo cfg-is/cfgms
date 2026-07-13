@@ -411,10 +411,24 @@ func makeSelfSignedCert(t *testing.T) *x509.Certificate {
 	return makeAdminTestCert(t, false)
 }
 
+// sharedTestRSAKey lazily generates a single 2048-bit RSA key for the whole
+// package test run. RSA-2048 keygen is expensive (Miller-Rabin primality search,
+// especially under the FIPS path), and this package builds admin/self-signed test
+// certs at 60+ call sites. Regenerating a key per cert pushed the package past the
+// 5m -timeout limit; generating it once keeps cert construction effectively free.
+// The key material is irrelevant to these unit tests — only the cert fields and the
+// admin marker matter — so a shared key is safe.
+var sharedTestRSAKey = sync.OnceValue(func() *rsa.PrivateKey {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(fmt.Sprintf("test setup: rsa.GenerateKey failed: %v", err))
+	}
+	return key
+})
+
 func makeAdminTestCert(t *testing.T, withMarker bool) *x509.Certificate {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
+	key := sharedTestRSAKey()
 
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1234),
