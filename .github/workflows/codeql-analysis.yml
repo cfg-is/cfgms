@@ -173,3 +173,40 @@ jobs:
         echo "- ✅ Data flow and control flow" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Security vulnerabilities" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Code quality issues" >> $GITHUB_STEP_SUMMARY
+
+  # ── CodeQL gate (Issue #2609 / Epic #2586) ────────────────────────────────
+  # A single stable `CodeQL` status context, emitted on the SAME events as the
+  # analysis above (PR with Go changes, merge_group, push, schedule). This
+  # closes the gap that bricked the merge queue: the real analysis reports as
+  # `CodeQL Analysis (go)` (job name × matrix language), and NOTHING emitted a
+  # plain `CodeQL` context on merge_group (codeql-stub.yml is pull_request-only
+  # by design, and GitHub's native code-scanning `CodeQL` status is PR-only),
+  # so a `CodeQL`-required merge queue waited forever for a context that never
+  # arrived. This gate provides it.
+  #
+  # `needs: [analyze]` makes the gate green ONLY when every matrix language
+  # passes, so adding a language later (e.g. javascript for the frontend) is
+  # gated automatically with no branch-protection ruleset change — the whole
+  # point of an aggregation gate over a language-pinned required context. On
+  # non-Go pull requests this workflow is path-filtered out entirely and
+  # codeql-stub.yml owns the `CodeQL` context (exact-complement paths).
+  codeql-summary:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    needs: [analyze]
+    if: always()
+    steps:
+      - name: CodeQL gate
+        env:
+          # needs.analyze.result is a fixed job-result enum (success/failure/
+          # cancelled/skipped), not user input — but pass it via env to keep
+          # ${{ }} out of the run: script (zizmor template-injection lint).
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+        run: |
+          echo "CodeQL analyze matrix result: ${ANALYZE_RESULT}"
+          if [ "${ANALYZE_RESULT}" = "success" ]; then
+            echo "CodeQL gate: PASS — all analyzed languages clean"
+            exit 0
+          fi
+          echo "CodeQL gate: FAIL — analyze result was '${ANALYZE_RESULT}'"
+          exit 1
