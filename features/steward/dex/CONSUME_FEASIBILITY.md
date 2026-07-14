@@ -215,10 +215,49 @@ signing surface that (b) would add). cgo is a **build-time** consideration
 (CGO_ENABLED=1 for the DEX build target); the PoC keeps it fully isolated behind
 the `dexconsume` tag so the current CGO_ENABLED=0 steward build is unaffected.
 
+## Memory-safe variant — Rust, PROVEN in-process (live)
+
+The C spike answers "is it feasible"; it does **not** mean C is the right production
+language. The irreducibly-unsafe part of raw ETW consumption is exactly one thing —
+the OS hands the callback a raw `EVENT_RECORD*` valid only for that call, and
+*something* must dereference it. Everything else (the ring, indices, counters,
+string handling — where the C variant's one review bug lived) can be memory-safe.
+
+To prove that, the **same architecture was re-implemented in Rust**
+(`features/steward/dex/rust/`, a `staticlib` exporting the identical `cfgms_*` C
+ABI, linked into the same Go wrapper via cgo under the `dexrust` build tag). The
+unsafe surface is reduced to two marked spots: the shared static ring (`UnsafeCell`
++ `unsafe impl Sync`) and the single raw `EVENT_RECORD` deref. windows-sys provides
+the exact ETW struct layouts, so field offsets are correct by construction.
+
+**Live SYSTEM run (CFG-70-02, 20 s), Rust callback:**
+
+| Metric | C variant | **Rust variant** |
+|--------|-----------|------------------|
+| Events consumed | 47,426 (12 s) / 6,094,835 (10 min) | **52,877 (20 s)** |
+| Ring drops / ETW-lost | 0 / 0 | **0 / 0** |
+| Runtime crash | none | **none** (`process_trace_status=0`) |
+| CPU (1-core) | 0.39–0.487 % | **0.469 %** |
+| Attribution | works (shared Go drain) | **works** (65 PIDs, same Go code) |
+| TDH decode | proven | not ported (orthogonal; Rust PoC skips it) |
+
+Same crash-safe in-process consumption, comparable overhead, in a memory-safe
+language. The Rust variant also passes the identical SPSC-ring unit tests
+(`go test -tags "dexconsume dexrust"`). Cost: a Rust GNU toolchain at build time
+and the windows-sys static-lib link (documented in `rust/build.sh` +
+`consume_rust_link_windows.go`).
+
 ## Recommended consume architecture
 
-1. **In-process, non-reentrant C callback → C ring → Go drain** (candidate (c)).
-   Proven stable and cheap. This is the load-bearing recommendation.
+1. **In-process, non-reentrant native callback → ring → Go drain** (candidate (c)).
+   Proven stable and cheap in **both C and Rust** — the mechanism is the load-bearing
+   recommendation; the native language is an orthogonal call.
+   - **For production, prefer Rust over C** (in-process staticlib via cgo, or an
+     out-of-process Rust helper if the steward must stay pure Go): the unsafe
+     surface shrinks to ~2 lines, and the exact class of bug the C review caught
+     (an out-of-bounds read in the TDH string decode) is a compile-time
+     non-starter in safe Rust. Adopting either is a real toolchain / signing-pipeline
+     decision for a Go-first codebase, so it is called out here, not assumed.
 2. **Decode selectively, off the hot path.** TDH per-event is expensive; the hot
    callback should stay header-only (+ raw payload copy where a signal needs it),
    and decode only the specific events a configured signal consumes.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-//go:build windows && dexconsume
+//go:build windows && dexconsume && !dexrust
 
 // consume_etw_windows.c — non-reentrant C-callback ETW consumer (#2571).
 // See consume_etw_windows.h for the architecture rationale.

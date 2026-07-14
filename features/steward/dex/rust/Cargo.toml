@@ -1,0 +1,27 @@
+# Throwaway Rust variant of the DEX in-process ETW consumer (#2571) — proves the
+# same non-reentrant-callback architecture in a memory-safe language. Built as a
+# staticlib and linked into the Go PoC via cgo under the `dexrust` build tag.
+# Never part of the production steward build.
+[package]
+name = "dexetw"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "dexetw"
+crate-type = ["staticlib"]
+
+[dependencies]
+# windows-sys gives the exact ETW struct layouts (EVENT_RECORD/EVENT_HEADER),
+# so we never hand-guess field offsets — reading pid/timestamp/provider is correct
+# by construction. Only the raw pointer deref itself is `unsafe`.
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Time",
+    "Win32_Foundation",
+] }
+
+[profile.release]
+opt-level = 3
+panic = "abort"
