@@ -153,8 +153,15 @@ static void tdh_decode_one(PEVENT_RECORD ev, int provider_idx) {
             case TDH_INTYPE_POINTER: decode_appendf("%s=%llu;", nameA, (unsigned long long)*(UINT64 *)buf); emitted++; break;
             case TDH_INTYPE_INT64:  decode_appendf("%s=%lld;", nameA, (long long)*(INT64 *)buf); emitted++; break;
             case TDH_INTYPE_UNICODESTRING: {
+                // Bound the wide-char scan to the property's own byte length: TDH does
+                // NOT guarantee a terminating NUL within propSize, so passing -1 would
+                // let WideCharToMultiByte read past buf[512]. Convert exactly the
+                // wchars the property holds, then NUL-terminate the output ourselves.
                 char sval[256];
-                if (WideCharToMultiByte(CP_UTF8, 0, (WCHAR *)buf, -1, sval, sizeof(sval), NULL, NULL) > 0) {
+                int wch = (int)(propSize / sizeof(WCHAR));
+                int w = WideCharToMultiByte(CP_UTF8, 0, (WCHAR *)buf, wch, sval, (int)sizeof(sval) - 1, NULL, NULL);
+                if (w > 0) {
+                    sval[w] = '\0';
                     decode_appendf("%s=%s;", nameA, sval); emitted++;
                 }
                 break;
@@ -173,31 +180,56 @@ static void tdh_decode_one(PEVENT_RECORD ev, int provider_idx) {
 
 // ─── the callback (pure C, never re-enters Go) ───────────────────────────────
 
-static void WINAPI cfgms_event_cb(PEVENT_RECORD ev) {
+// ring_push is the single producer-side enqueue: it counts the event and writes
+// it to the ring (or increments dropped_ring when full). Shared by the ETW
+// callback and the test hook so both exercise the identical SPSC write path.
+static void ring_push(uint64_t timestamp, uint32_t pid, uint32_t tid,
+                      uint16_t provider_idx, uint16_t event_id, uint8_t opcode) {
     __atomic_add_fetch(&g_total_seen, 1, __ATOMIC_RELAXED);
-
-    int decode_target = 0;
-    int pidx = provider_lookup(&ev->EventHeader.ProviderId, &decode_target);
 
     unsigned int head = __atomic_load_n(&g_head, __ATOMIC_RELAXED);
     unsigned int tail = __atomic_load_n(&g_tail, __ATOMIC_ACQUIRE);
     if ((head - tail) >= RING_CAP) {
         __atomic_add_fetch(&g_dropped_ring, 1, __ATOMIC_RELAXED);
-    } else {
-        CfgmsEvent *slot = &g_ring[head & RING_MASK];
-        slot->timestamp    = (uint64_t)ev->EventHeader.TimeStamp.QuadPart;
-        slot->pid          = ev->EventHeader.ProcessId;
-        slot->tid          = ev->EventHeader.ThreadId;
-        slot->provider_idx = (uint16_t)pidx;
-        slot->event_id     = ev->EventHeader.EventDescriptor.Id;
-        slot->opcode       = ev->EventHeader.EventDescriptor.Opcode;
-        __atomic_store_n(&g_head, head + 1, __ATOMIC_RELEASE);
+        return;
     }
+    CfgmsEvent *slot = &g_ring[head & RING_MASK];
+    slot->timestamp    = timestamp;
+    slot->pid          = pid;
+    slot->tid          = tid;
+    slot->provider_idx = provider_idx;
+    slot->event_id     = event_id;
+    slot->opcode       = opcode;
+    __atomic_store_n(&g_head, head + 1, __ATOMIC_RELEASE);
+}
+
+static void WINAPI cfgms_event_cb(PEVENT_RECORD ev) {
+    int decode_target = 0;
+    int pidx = provider_lookup(&ev->EventHeader.ProviderId, &decode_target);
+
+    ring_push((uint64_t)ev->EventHeader.TimeStamp.QuadPart,
+              ev->EventHeader.ProcessId, ev->EventHeader.ThreadId,
+              (uint16_t)pidx, ev->EventHeader.EventDescriptor.Id,
+              ev->EventHeader.EventDescriptor.Opcode);
 
     if (decode_target && g_decode_count < DECODE_CAP) {
         g_decode_count++;
         tdh_decode_one(ev, pidx);
     }
+}
+
+void cfgms_test_enqueue(unsigned int pid, unsigned short provider_idx, unsigned short event_id) {
+    ring_push(0, pid, 0, provider_idx, event_id, 0);
+}
+
+void cfgms_reset(void) {
+    __atomic_store_n(&g_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_tail, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_total_seen, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_dropped_ring, 0, __ATOMIC_RELAXED);
+    g_provider_count = 0;
+    g_decode_len = 0;
+    g_decode_count = 0;
 }
 
 // ─── run / stop ──────────────────────────────────────────────────────────────

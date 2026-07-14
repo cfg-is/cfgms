@@ -160,6 +160,7 @@ type ConsumeReport struct {
 	WithinBudget     bool             `json:"within_budget"`
 	WorkingSetMB     float64          `json:"working_set_mb"`
 	MemSamples       []MemSample      `json:"mem_samples,omitempty"` // periodic trend (Part 5)
+	ProcessTraceStat uint32           `json:"process_trace_status"`  // ProcessTrace return (0=SUCCESS, 1223=CANCELLED on clean stop)
 	Crashed          bool             `json:"crashed"`               // always false if we returned (proof of no runtime crash)
 }
 
@@ -226,6 +227,11 @@ func RunConsume(ctx context.Context, cfg ConsumeConfig) ConsumeReport {
 		report.ProvidersEnabled = append(report.ProvidersEnabled, p.name)
 	}
 
+	// Clear any C-global state from a prior run in this process so a second
+	// RunConsume call starts clean (fresh ring indices, counters, provider
+	// registry, decode sample).
+	C.cfgms_reset()
+
 	// 1. Start the real-time session.
 	handle, err := startNamedTrace(cfg.SessionName, eventTraceRealTimeMode)
 	if err != nil {
@@ -267,12 +273,13 @@ func RunConsume(ctx context.Context, cfg ConsumeConfig) ConsumeReport {
 	copy((*[1 << 16]byte)(cName)[:len(nameUTF16)*2], (*[1 << 16]byte)(unsafe.Pointer(&nameUTF16[0]))[:len(nameUTF16)*2])
 
 	var producerWG sync.WaitGroup
+	var runStatus C.ulong
 	producerWG.Add(1)
 	go func() {
 		defer producerWG.Done()
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
-		C.cfgms_run((*C.ushort)(cName))
+		runStatus = C.cfgms_run((*C.ushort)(cName))
 	}()
 
 	// 4. Drain loop for the window (attribute + count).
@@ -340,7 +347,8 @@ drainLoop:
 	C.cfgms_stop()                              // CloseTrace → ProcessTrace returns
 	_ = stopNamedTrace(handle, cfg.SessionName) //nolint:errcheck // best-effort teardown
 	producerWG.Wait()
-	drain() // final sweep of anything left in the ring
+	report.ProcessTraceStat = uint32(runStatus) // safe: happens-after producerWG.Wait
+	drain()                                     // final sweep of anything left in the ring
 
 	cpuAfter, _ := processTimesNs()
 	wallElapsed := time.Since(wallBefore).Seconds()

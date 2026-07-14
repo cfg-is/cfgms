@@ -48,8 +48,18 @@ unsigned long cfgms_run(const unsigned short *sessionNameW);
 // cfgms_stop closes the trace so ProcessTrace returns. Safe to call once.
 void cfgms_stop(void);
 
+// cfgms_reset clears all whole-run C state (ring indices, counters, provider
+// registry, decode sample) so a process may run more than one consume window.
+// Call before registering providers for a fresh run.
+void cfgms_reset(void);
+
 // cfgms_drain pops up to max events from the ring into out; returns the count.
 int cfgms_drain(CfgmsEvent *out, int max);
+
+// cfgms_test_enqueue pushes one synthetic event through the exact producer path
+// the callback uses (ring write + total_seen / dropped_ring accounting), so the
+// SPSC ring + drain can be unit-tested without ETW privilege. Test-only.
+void cfgms_test_enqueue(unsigned int pid, unsigned short provider_idx, unsigned short event_id);
 
 // Counters (monotonic, whole-run):
 unsigned long long cfgms_total_seen(void);   // events the callback observed
