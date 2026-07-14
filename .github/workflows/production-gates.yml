@@ -31,14 +31,36 @@ on:
 permissions: {}
 
 jobs:
+  # PR-time stub for the `security-deployment-gate` required context (#2595).
+  # The real scan runs in the merge queue (security-deployment-gate job below);
+  # this posts the required check green on code PRs so branch protection is
+  # satisfied without double-scanning every push. Docs-only PRs are covered by
+  # documentation.yml's stub instead (this workflow is paths-ignored for docs).
+  # Same check-name as the real job; the two are mutually exclusive by event.
+  security-deployment-gate-pr-stub:
+    name: security-deployment-gate
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: PR-time stub (real scan runs in the merge queue)
+        run: |
+          echo "security-deployment-gate: real vulnerability scan runs in the merge queue (merge_group) per #2595."
+          echo "This PR-time stub posts the required context; the authoritative scan runs against the merge commit."
+
   # Security Gate - Critical Vulnerability Blocking (Story #99)
-  # NOTE: Runs on PRs and push to main only (skips post-merge to develop to avoid redundancy)
+  # QUEUE-REAL (#2595): the real vulnerability scan runs in the merge queue
+  # (merge_group) and on push to main — NOT on pull_request. The queue must scan
+  # the actual merge commit (zero-trust posture), and this is the dedup half of
+  # the #2595 split. The `security-deployment-gate` required context is posted on
+  # PRs by the lightweight `security-deployment-gate-pr-stub` job below (code PRs)
+  # and by documentation.yml (docs-only PRs).
   security-deployment-gate:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     outputs:
       security-status: ${{ steps.security-gate.outputs.security-status }}
       deployment-allowed: ${{ steps.security-gate.outputs.deployment-allowed }}

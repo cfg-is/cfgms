@@ -210,11 +210,16 @@ jobs:
           echo "   Skipping code unit tests (no code changes)"
           echo "   Documentation validation is sufficient for merge"
 
+  # QUEUE-REAL context (#2595): the real security-deployment-gate scan runs in the
+  # merge queue (production-gates.yml). This stub only covers docs-only PRs, where
+  # that workflow is paths-ignored. It must NOT fire on merge_group — the real job
+  # is the sole queue poster there. (Code PRs are covered by production-gates.yml's
+  # security-deployment-gate-pr-stub.)
   security-deployment-gate:
     name: security-deployment-gate
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Docs-only security validation
         run: |
@@ -270,11 +275,14 @@ jobs:
           echo "   Skipping fleet E2E tests (no code changes)"
           echo "   No fleet test validation required for docs-only changes"
 
+  # QUEUE-REAL context (#2595): the real trivy-scan runs in the merge queue
+  # (security-scan.yml). This stub only covers docs-only PRs; it must NOT fire on
+  # merge_group. (Code PRs are covered by security-scan.yml's trivy-scan-pr-stub.)
   trivy-scan:
     name: trivy-scan
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Docs-only Trivy validation
         run: |
