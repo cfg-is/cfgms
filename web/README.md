@@ -149,8 +149,47 @@ The app authenticates against the controller's web session endpoints
 - **Route guard.** `RequireAuth` renders the login screen
   ([`src/pages/Login.tsx`](src/pages/Login.tsx), canonical design:
   [`docs/design/mockups/login.html`](../docs/design/mockups/login.html))
-  for any unauthenticated visit; the authenticated placeholder it protects
-  is replaced by the app shell in #2496.
+  for any unauthenticated visit; the authenticated screen it protects is
+  the app shell (#2496).
+
+## App shell architecture (Story #2496)
+
+Every authenticated screen mounts inside [`src/shell/AppShell.tsx`](src/shell/AppShell.tsx)
+— the persistent chrome fixed by
+[`docs/design/mockups/fleet-overview.html`](../docs/design/mockups/fleet-overview.html)
+(lines ~102-266): sidebar navigation, a top app bar (tenant-scope switcher,
+global search, alert center, user menu), and the responsive drawer/scrim
+behavior below 1024px. `App.tsx` renders `AppShell` as the sole child of
+`RequireAuth`; later epics mount their views into `AppShell`'s `.content`
+area (fleet overview, #2497, is the first occupant — this story ships that
+area as an empty-state placeholder).
+
+- **Tenant-scope context — a display convenience, not a security boundary
+  (security A8.1).** [`src/shell/TenantScopeContext.tsx`](src/shell/TenantScopeContext.tsx)
+  holds the currently selected scope and the set of paths observed so far
+  (seeded with the principal's own root path; later views call
+  `registerObservedPath` as they see more of the tenant tree — there is no
+  list-tenants API). `isScopeMatch` mirrors the server's path-separator-aware
+  ancestor check in `handlers_stewards.go` (`tenant-a` must never match
+  `tenant-abc`). **Server-side tenant scoping on every API call is the only
+  real enforcement** — this context only decides what a technician sees in
+  the switcher and gives views a shared scope to filter by.
+- **Global search / alert center are chrome only.** No search or alerting
+  backend exists yet; `GlobalSearch` is a controlled input a later view can
+  wire up, and `AlertCenter` renders its designed empty state rather than
+  fabricated sample data.
+- **User menu.** Shows the signed-in principal from `AuthContext` and hosts
+  logout via the #2495 auth actions, plus the design-system theme toggle
+  (auto/light/dark via `:root[data-theme]`). Theme choice persists in
+  `localStorage` under `cfgms.theme` — a display preference, not auth data,
+  so it's explicitly allowlisted in the A7.2 source scan
+  ([`src/pages/Login.test.tsx`](src/pages/Login.test.tsx)
+  `STORAGE_ALLOWLIST`) rather than exempt from it: any new storage key
+  anywhere in `web/` must be added to that allowlist by exact `(file, key)`
+  match or the scan fails, and a non-literal key always fails closed.
+- **Responsive drawer.** Below 1024px the sidebar becomes an off-canvas
+  drawer opened by the hamburger button; a scrim covers the content and
+  Escape or a scrim click closes it, matching the mockup harness.
 
 ## Testing
 
@@ -161,8 +200,10 @@ pre-session flow, 401 interception),
 [`src/auth/AuthContext.test.tsx`](src/auth/AuthContext.test.tsx) (state
 transitions, web-storage assertions), and
 [`src/pages/Login.test.tsx`](src/pages/Login.test.tsx) (mockup states,
-source scans). Setup (jest-dom matchers, RTL cleanup, in-memory Storage
-for the A7.2 assertions): [`src/test/setup.ts`](src/test/setup.ts).
+source scans), and `src/shell/*.test.tsx` (tenant-scope prefix matching,
+drawer/scrim/Escape behavior, user-menu logout dispatch). Setup (jest-dom
+matchers, RTL cleanup, in-memory Storage for the A7.2 assertions):
+[`src/test/setup.ts`](src/test/setup.ts).
 
 ## License
 

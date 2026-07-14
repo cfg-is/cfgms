@@ -176,7 +176,12 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
   //
   // NEVER add an auth/session/principal/credential key here — that data
   // must stay in-memory only (React context), per A7.2.
-  const STORAGE_ALLOWLIST: ReadonlyArray<{ path: string; key: string }> = []
+  const STORAGE_ALLOWLIST: ReadonlyArray<{ path: string; key: string }> = [
+    // Theme preference (Story #2496) — a UI display preference, not auth
+    // data; persists across reloads so the sidebar/topbar don't reset to
+    // "auto" every visit.
+    { path: 'shell/UserMenu.tsx', key: 'cfgms.theme' },
+  ]
 
   it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {
     const offenders: string[] = []
@@ -200,11 +205,12 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     expect(offenders).toEqual([])
   })
 
-  // Proves the allowlist mechanism is live: an unauthorized literal key is
-  // rejected, a non-literal (computed) key is rejected, and — once a real
-  // entry exists — an allowlisted key is accepted. Uses synthetic source
-  // text so the test doesn't depend on any real file's current content.
-  it('the storage allowlist rejects unauthorized and non-literal keys', () => {
+  // Proves the allowlist mechanism is live: an allowlisted literal key is
+  // accepted, an unauthorized literal key is rejected, and a non-literal
+  // (computed) key is rejected even if its runtime value would be fine.
+  // Uses synthetic source text so the test doesn't depend on any real
+  // file's current content.
+  it('the storage allowlist accepts only the exact allowlisted key', () => {
     const check = (path: string, content: string) => {
       const anyCallPattern = /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)\(/g
       const literalCallPattern =
@@ -220,9 +226,14 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
       }
       return 'ok'
     }
-    expect(check('shell/UserMenu.tsx', "localStorage.setItem('cfgms.theme', mode)")).toBe(
-      'unauthorized', // no allowlist entry exists yet — every new key must be added deliberately
+    // The real, currently-allowlisted entry (Story #2496 theme toggle).
+    expect(check('shell/UserMenu.tsx', "localStorage.setItem('cfgms.theme', mode)")).toBe('ok')
+    // A different key on the same file is not automatically allowed.
+    expect(check('shell/UserMenu.tsx', "localStorage.setItem('cfgms.session_hint', mode)")).toBe(
+      'unauthorized',
     )
+    // A computed key is rejected even though it can't be inspected — fails
+    // closed rather than trusting the call site.
     expect(check('shell/UserMenu.tsx', 'localStorage.setItem(dynamicKey, mode)')).toBe('non-literal')
   })
 })
