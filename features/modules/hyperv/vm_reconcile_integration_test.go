@@ -385,6 +385,159 @@ func TestExistenceGating_RecreateOnlyWhenExplicit(t *testing.T) {
 	assert.Less(t, removeIdx, newIdx, "Remove-VM must precede New-VM on the recreate path")
 }
 
+// TestApplySourceGated_RecreateCleansUpSeedMedia proves the seed-media idempotency
+// fix (Issue #2466) on the on_existing: recreate path. The recreate branch calls
+// DeleteProvision immediately after removeVM, so the torn-down VM leaves
+// sweepStaleSeedMedia's TTL safety net — a leftover seed VHDX / answer ISO from a
+// prior attempt would then never be collected, and a stale seed VHDX wedges the
+// rebuild at New-VHD with "The file exists. (0x80070050)". This asserts the recreate
+// cycle issues Cfgms-DeleteSeedMedia for BOTH the seed VHDX and the answer ISO,
+// ordered after the teardown (Remove-VM) and before the seed is rebuilt (New-VHD).
+func TestApplySourceGated_RecreateCleansUpSeedMedia(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	configMap := sourceVMConfigMap(2, "linux")
+	src := configMap["source"].(map[string]interface{})
+	src["on_existing"] = "recreate"
+
+	cfg := rawConfigState{m: configMap}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// seed_dir is unset on the test module, so the seed media derives next to the
+	// VM's own VHD (seedVHDPath / answerISOPath, Issue #2044).
+	const vhdPath = `C:\ClusterStorage\CSV01\stw-01.vhdx`
+	seedDeleteIdx := deleteSeedMediaCallIndex(calls, seedVHDPath("stw-01", vhdPath, ""))
+	isoDeleteIdx := deleteSeedMediaCallIndex(calls, answerISOPath("stw-01", vhdPath, ""))
+	require.NotEqual(t, -1, seedDeleteIdx, "recreate must delete the leftover seed VHDX before rebuilding it")
+	require.NotEqual(t, -1, isoDeleteIdx, "recreate must delete the leftover answer ISO")
+
+	// Ordering: cleanup runs after the VM teardown (Remove-VM) and before the seed
+	// VHDX is rebuilt (New-VHD), so New-VHD never hits a pre-existing file.
+	removeVMIdx, newVHDIdx := -1, -1
+	for i, c := range calls {
+		if strings.Contains(c.scriptBlock, "Remove-VM") && !strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
+			removeVMIdx = i
+		}
+		if strings.Contains(c.scriptBlock, "New-VHD") && newVHDIdx == -1 {
+			newVHDIdx = i
+		}
+	}
+	require.NotEqual(t, -1, removeVMIdx, "recreate must tear down the existing VM (Remove-VM)")
+	require.NotEqual(t, -1, newVHDIdx, "recreate must rebuild the seed VHDX (New-VHD)")
+	assert.Less(t, removeVMIdx, seedDeleteIdx, "seed-media cleanup must run after the VM teardown")
+	assert.Less(t, seedDeleteIdx, newVHDIdx,
+		"seed VHDX must be deleted before New-VHD, otherwise the stale file blocks creation (0x80070050)")
+}
+
+// TestApplySourceGated_RecreateCleansUpSeedMedia_VHDPathChanged proves that when
+// vhd_path changes alongside on_existing: recreate, the seed-media cleanup uses the
+// OBSERVED (pre-recreate) VHD path, not the new desired path. Without this fix, old
+// seed media sitting beside the old disk would be permanently orphaned once
+// DeleteProvision removes the record (TTL sweep can no longer see the VM after that).
+func TestApplySourceGated_RecreateCleansUpSeedMedia_VHDPathChanged(t *testing.T) {
+	const oldVHDPath = `C:\OldStorage\stw-01.vhdx`
+	const newVHDPath = `C:\NewStorage\stw-01.vhdx`
+
+	// call 0 (getVM) returns the VM with the OLD VHD path; subsequent calls
+	// return empty string (output discarded by Remove-VM / provision verbs).
+	oldVMJSON := `{"found":true,"Name":"stw-01","MemoryStartupBytes":4294967296,` +
+		`"ProcessorCount":2,"Generation":2,"Path":"C:\\OldStorage\\stw-01.vhdx",` +
+		`"SwitchName":"HVSwitch_1G","SwitchNames":["HVSwitch_1G"],"State":"Running"}`
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{oldVMJSON},
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	configMap := sourceVMConfigMap(2, "linux")
+	configMap["vhd_path"] = newVHDPath // desired path differs from the observed old path
+	src := configMap["source"].(map[string]interface{})
+	src["on_existing"] = "recreate"
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", rawConfigState{m: configMap}))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// Cleanup must use the OLD observed VHD path so the seed VHDX next to the
+	// original disk is found and removed.
+	seedDeleteIdx := deleteSeedMediaCallIndex(calls, seedVHDPath("stw-01", oldVHDPath, ""))
+	isoDeleteIdx := deleteSeedMediaCallIndex(calls, answerISOPath("stw-01", oldVHDPath, ""))
+	require.NotEqual(t, -1, seedDeleteIdx,
+		"recreate must delete seed VHDX at the OBSERVED (pre-recreate) vhd_path, not the new desired path")
+	require.NotEqual(t, -1, isoDeleteIdx,
+		"recreate must delete answer ISO at the OBSERVED (pre-recreate) vhd_path, not the new desired path")
+
+	// The new-path seed media must not be attempted (it doesn't exist yet at cleanup time).
+	newSeedDeleteIdx := deleteSeedMediaCallIndex(calls, seedVHDPath("stw-01", newVHDPath, ""))
+	assert.Equal(t, -1, newSeedDeleteIdx,
+		"must not attempt to delete seed media at the new desired vhd_path (it hasn't been created yet)")
+}
+
+// TestSet_VMAbsent_CleansUpSeedMedia proves the VM-deletion (state: absent) half
+// of the seed-media idempotency fix (Issue #2466). Deleting a VM that has staged
+// seed media must reclaim it synchronously: DeleteProvision removes the record, so
+// sweepStaleSeedMedia's TTL sweep can no longer see the VM, making this delete the
+// only collector. The delete uses the observed VHD path from the pre-delete getVM
+// (cur.VHDPath), so a VM being torn down with no desired source config still gets
+// its media cleaned. This is the call site TestApplySourceGated_RecreateCleansUpSeedMedia
+// does NOT cover.
+func TestSet_VMAbsent_CleansUpSeedMedia(t *testing.T) {
+	// getVM (call 0) reports the VM present with a VHD at C:\ClusterStorage\CSV01\stw-01.vhdx.
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Running"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01",
+		mapConfigState{"name": "stw-01", "state": "absent"}))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	// seed_dir is unset, so the media derives next to the observed VHD (Issue #2044).
+	const vhdPath = `C:\ClusterStorage\CSV01\stw-01.vhdx`
+	seedDeleteIdx := deleteSeedMediaCallIndex(calls, seedVHDPath("stw-01", vhdPath, ""))
+	isoDeleteIdx := deleteSeedMediaCallIndex(calls, answerISOPath("stw-01", vhdPath, ""))
+	require.NotEqual(t, -1, seedDeleteIdx, "deleting a VM must reclaim its seed VHDX")
+	require.NotEqual(t, -1, isoDeleteIdx, "deleting a VM must reclaim its answer ISO")
+
+	// Cleanup must run after the VM teardown (Remove-VM).
+	removeVMIdx := -1
+	for i, c := range calls {
+		if strings.Contains(c.scriptBlock, "Remove-VM") && !strings.Contains(c.scriptBlock, "Remove-VMNetworkAdapter") {
+			removeVMIdx = i
+		}
+	}
+	require.NotEqual(t, -1, removeVMIdx, "absent path must tear down the VM (Remove-VM)")
+	assert.Less(t, removeVMIdx, seedDeleteIdx, "seed-media cleanup must run after the VM teardown")
+}
+
+// deleteSeedMediaCallIndex returns the index of the first psDeleteSeedMedia call
+// whose Path argument equals wantPath, or -1 if none. The path travels via psArgs
+// (recorded in winRMCall.args), never the scriptBlock text (S3).
+func deleteSeedMediaCallIndex(calls []winRMCall, wantPath string) int {
+	for i, c := range calls {
+		if c.scriptBlock != psDeleteSeedMedia {
+			continue
+		}
+		for _, a := range c.args {
+			if s, ok := a.(string); ok && s == wantPath {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry proves surface-and-
 // wait: when an own provisioning record exists at installing but the VM is
 // absent from the host (mid-install / transiently not yet visible), the module

@@ -670,6 +670,36 @@ func TestPreamble_DeleteSeedMediaUsesLiteralPathAndSilentContinue(t *testing.T) 
 		"Cfgms-DeleteSeedMedia must call Remove-Item")
 }
 
+// TestNewSeedVHD_DeletesExistingFileBeforeCreate guards the seed-VHDX idempotency
+// fix (Issue #2466). A failed/retried seed build previously wedged on a leftover
+// file: New-VHD refuses to overwrite an existing path with
+// "The file exists. (0x80070050)". The dispatch tests assert only the synthesised
+// Cfgms-NewSeedVHD call string, never the function body, so a missing guard stayed
+// green. This asserts the preamble function deletes an existing file at $Path
+// (mirroring Cfgms-PrepCloudBootDisk) and that the delete is ordered BEFORE
+// New-VHD, otherwise the stale file still blocks creation.
+func TestNewSeedVHD_DeletesExistingFileBeforeCreate(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-NewSeedVHD")
+
+	assert.Contains(t, body, "Test-Path -LiteralPath $Path",
+		"Cfgms-NewSeedVHD must test for an existing file via -LiteralPath (no glob expansion) before creating the VHD")
+	assert.Contains(t, body, "Remove-Item -LiteralPath $Path -Force",
+		"Cfgms-NewSeedVHD must delete an existing file at $Path before New-VHD, mirroring Cfgms-PrepCloudBootDisk")
+	assert.Contains(t, body, "New-VHD",
+		"Cfgms-NewSeedVHD must still create the seed VHD")
+
+	testPathIdx := strings.Index(body, "Test-Path -LiteralPath $Path")
+	removeIdx := strings.Index(body, "Remove-Item")
+	newVHDIdx := strings.Index(body, "New-VHD")
+	require.NotEqual(t, -1, testPathIdx)
+	require.NotEqual(t, -1, removeIdx)
+	require.NotEqual(t, -1, newVHDIdx)
+	assert.Less(t, testPathIdx, removeIdx,
+		"the Test-Path existence guard must precede Remove-Item (delete only when the file is present)")
+	assert.Less(t, removeIdx, newVHDIdx,
+		"Remove-Item must be ordered before New-VHD, otherwise the leftover file blocks creation with 0x80070050")
+}
+
 // preambleFunctionBody extracts the body of a `function <name> { ... }` block
 // from psHostPreamble, balancing braces so nested blocks (if/foreach) are
 // included. It fails the test if the function is not found.

@@ -226,6 +226,7 @@ function Cfgms-DisconnectVMNic {
 function Cfgms-NewSeedVHD {
     param([Parameter(Mandatory)][string]$Path, [int]$SizeBytes = 67108864)
     New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
     New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null
 }
 
