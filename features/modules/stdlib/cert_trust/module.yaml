@@ -35,6 +35,7 @@ security:
 behavioral_envelope:
   shells_out_to:
     - update-ca-certificates  # Debian-family Linux: refreshes /etc/ssl/certs bundle
+    - certutil                # Windows: manages Local Machine "Root" certificate store (addstore/delstore)
     - security                # macOS: security add-trusted-cert / remove-trusted-cert
   writes_paths:
     - /etc/ssl/certs          # Linux: PEM files written per-cert

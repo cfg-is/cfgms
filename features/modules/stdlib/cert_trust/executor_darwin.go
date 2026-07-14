@@ -44,8 +44,24 @@ func (e *darwinExecutor) list() ([]certEntry, error) {
 		return nil, fmt.Errorf("security find-certificate: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
+	return parseSecurityFindCertificateOutput(string(out)), nil
+}
+
+// parseSecurityFindCertificateOutput parses the output of
+// `security find-certificate -a -Z -p` into certEntry values. It is a pure
+// string-processing function with no dependency on the security(1) binary, so
+// it is fully testable on any platform.
+//
+// The output interleaves "SHA-256 hash:" lines (the fingerprint reported by
+// security, in uppercase hex, possibly colon- or space-separated) with PEM
+// CERTIFICATE blocks. Each PEM block is paired with the most recently seen
+// SHA-256 hash line. Certificate metadata (subject, issuer, expiry) is derived
+// from the decoded DER via certEntryFromDER, while the fingerprint reported by
+// security is preserved. Blocks that cannot be decoded or parsed, and blocks
+// with no preceding SHA-256 hash line, are skipped.
+func parseSecurityFindCertificateOutput(out string) []certEntry {
 	var entries []certEntry
-	lines := strings.Split(string(out), "\n")
+	lines := strings.Split(out, "\n")
 	var currentFP string
 	var pemLines []string
 	inPEM := false
@@ -83,7 +99,7 @@ func (e *darwinExecutor) list() ([]certEntry, error) {
 		}
 	}
 
-	return entries, nil
+	return entries
 }
 
 // install adds the DER-encoded certificate to the System keychain and marks it

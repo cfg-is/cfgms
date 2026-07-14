@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // windowsExecutor manages the Windows Local Machine "Root" trust store via
@@ -80,8 +81,8 @@ func (e *windowsExecutor) list() ([]certEntry, error) {
 			current.Issuer = strings.TrimPrefix(line, "Issuer:")
 			current.Issuer = strings.TrimSpace(current.Issuer)
 		} else if strings.HasPrefix(line, "NotAfter:") {
-			current.NotAfter = strings.TrimPrefix(line, "NotAfter:")
-			current.NotAfter = strings.TrimSpace(current.NotAfter)
+			raw := strings.TrimPrefix(line, "NotAfter:")
+			current.NotAfter = parseCertutilDate(raw)
 		}
 	}
 
@@ -110,6 +111,29 @@ func (e *windowsExecutor) install(certDER []byte) error {
 		return fmt.Errorf("certutil -addstore Root: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// parseCertutilDate parses a date string from certutil -store Root output and
+// returns it in RFC3339 format. Certutil output format is locale-dependent;
+// common Windows locale formats are tried in order. Returns empty string when
+// no known format matches, rather than propagating a locale-dependent value.
+func parseCertutilDate(s string) string {
+	s = strings.TrimSpace(s)
+	// Try common certutil date formats. The en-US 12h format covers most server
+	// deployments; additional entries handle 24h and European locales.
+	formats := []string{
+		"1/2/2006 3:04 PM",    // en-US 12h: "1/15/2035 12:00 AM"
+		"1/2/2006 15:04",      // en-US 24h
+		"2/1/2006 15:04",      // European day-first 24h
+		"02/01/2006 15:04",    // European zero-padded
+		"2006-01-02 15:04:05", // ISO-like (rare but possible)
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return "" // unknown format: omit rather than propagate locale-dependent value
 }
 
 // remove deletes the certificate with the given SHA-256 fingerprint from the
