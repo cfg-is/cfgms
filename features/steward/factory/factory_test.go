@@ -345,4 +345,3 @@ func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
 	assert.Error(t, statErr,
 		"durable store root must not exist on the fallback path")
 }
-
