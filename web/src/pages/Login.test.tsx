@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { AuthProvider } from '../auth/AuthContext.tsx'
+import Login from './Login.tsx'
+
+function jsonResponse(status: number, body: unknown = {}): Response {
+  return new Response(status === 204 ? null : JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+const fetchMock = vi.fn<typeof fetch>()
+
+function mockLoginEndpoints(loginStatus: number, delayMs = 0) {
+  fetchMock.mockImplementation((input) => {
+    const url = String(input)
+    if (url.endsWith('/api/v1/web/csrf')) {
+      document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+      return Promise.resolve(jsonResponse(204))
+    }
+    if (url.endsWith('/api/v1/web/login')) {
+      if (delayMs > 0) {
+        return new Promise((resolve) =>
+          setTimeout(() => resolve(jsonResponse(loginStatus)), delayMs),
+        )
+      }
+      return Promise.resolve(jsonResponse(loginStatus))
+    }
+    return Promise.resolve(jsonResponse(200))
+  })
+}
+
+beforeEach(() => {
+  fetchMock.mockReset()
+  vi.stubGlobal('fetch', fetchMock)
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+function renderLogin() {
+  return render(
+    <AuthProvider>
+      <Login />
+    </AuthProvider>,
+  )
+}
+
+describe('Login screen states (mockup: docs/design/mockups/login.html)', () => {
+  it('signin: renders wordmark, lead copy, fields, and the sign-in button', () => {
+    renderLogin()
+    expect(screen.getByText('CFGMS')).toBeInTheDocument()
+    expect(screen.getByText('Sign in to the controller')).toBeInTheDocument()
+    expect(screen.getByLabelText(/username/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
+    // No error/expired copy in the default state.
+    expect(
+      screen.queryByText('Invalid username or password.'),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/session expired/i)).not.toBeInTheDocument()
+  })
+
+  it('loading: disables the button while the login request is in flight', async () => {
+    mockLoginEndpoints(200, 50)
+    renderLogin()
+    fireEvent.change(screen.getByLabelText(/username/i), {
+      target: { value: 'admin@msp-a' },
+    })
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: 'pw-pw-pw-pw' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeDisabled()
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /sign in/i }),
+      ).toBeEnabled(),
+    )
+  })
+
+  it('invalid: shows the mockup error copy and preserves the username field', async () => {
+    mockLoginEndpoints(401)
+    renderLogin()
+    fireEvent.change(screen.getByLabelText(/username/i), {
+      target: { value: 'admin@msp-a' },
+    })
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: 'wrong-password' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    await waitFor(() =>
+      expect(
+        screen.getByText('Invalid username or password.'),
+      ).toBeInTheDocument(),
+    )
+    expect(screen.getByLabelText(/username/i)).toHaveValue('admin@msp-a')
+  })
+
+  it('expired: shows the session-expired banner when auth state is expired', async () => {
+    // Sign in, then 401 an API call to force the expired state.
+    mockLoginEndpoints(200)
+    renderLogin()
+    fireEvent.change(screen.getByLabelText(/username/i), {
+      target: { value: 'admin@msp-a' },
+    })
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: 'pw-pw-pw-pw' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    const { apiFetch } = await import('../api/client.ts')
+    await act(async () => {
+      await apiFetch('/api/v1/stewards')
+    })
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/session expired\. sign in again to continue\./i),
+      ).toBeInTheDocument(),
+    )
+  })
+})
+
+describe('no auth data in web storage (security A7.2)', () => {
+  it('leaves localStorage and sessionStorage empty across a full login', async () => {
+    mockLoginEndpoints(200)
+    renderLogin()
+    fireEvent.change(screen.getByLabelText(/username/i), {
+      target: { value: 'admin@msp-a' },
+    })
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: 'pw-pw-pw-pw' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+  })
+})
+
+describe('forbidden references in source (security A7.1 / A7.2)', () => {
+  // Raw-import every source file at build time — no fs access needed.
+  const sources = import.meta.glob('../**/*.{ts,tsx,css}', {
+    query: '?raw',
+    import: 'default',
+    eager: true,
+  }) as Record<string, string>
+  const appSources = Object.entries(sources).filter(
+    ([path]) => !/\.test\.(ts|tsx)$/.test(path) && !path.includes('/test/'),
+  )
+
+  it('no non-test source file references cfgms_session', () => {
+    expect(appSources.length).toBeGreaterThan(0)
+    const offenders = appSources
+      .filter(([, content]) => content.includes('cfgms_session'))
+      .map(([path]) => path)
+    expect(offenders).toEqual([])
+  })
+
+  it('no non-test source file references localStorage or sessionStorage', () => {
+    const offenders = appSources
+      .filter(([, content]) => /localStorage|sessionStorage/.test(content))
+      .map(([path]) => path)
+    expect(offenders).toEqual([])
+  })
+})

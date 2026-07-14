@@ -115,11 +115,54 @@ solely inside the Vite dev server and is not part of any production artifact.
 In production the controller serves the built app itself, same-origin — no
 proxy and no TLS-verification bypass exist there.
 
+## Auth and session architecture (Story #2495, ADR-018)
+
+The app authenticates against the controller's web session endpoints
+(#2493) using **cookie transport** — no token ever passes through JS.
+
+- **Session cookie (HttpOnly).** Set by `POST /api/v1/web/login`, attached
+  automatically by the browser on every same-origin request
+  (`credentials: 'same-origin'`). App code never reads, names, or stores
+  it; a source-scan test fails if any non-test source references it.
+- **CSRF (double-submit).** [`src/api/client.ts`](src/api/client.ts) is the
+  single fetch wrapper for cookie-authenticated calls. On every unsafe
+  method (POST/PUT/PATCH/DELETE) it echoes the JS-readable `cfgms_csrf`
+  cookie as the `X-CSRF-Token` header. GET/HEAD carry no CSRF header.
+- **Login pre-flight.** The login POST itself is gated by a **pre-session**
+  token: the client first calls `GET /api/v1/web/csrf` (which sets the
+  single-use `cfgms_csrf_pre` cookie) and echoes that value as
+  `X-CSRF-Token` on `POST /api/v1/web/login`. Credentials travel only in
+  the JSON body.
+- **401 handling (ADR-018 §4).** Any 401 on a normal API call means the
+  session is gone (idle/absolute expiry or revocation): a central listener
+  in [`src/auth/AuthContext.tsx`](src/auth/AuthContext.tsx) drops the app
+  to the login screen in its **"session expired"** state. Login and logout
+  requests are exempt — a 401 there is invalid credentials / an
+  already-dead session, not expiry.
+- **Logout.** `POST /api/v1/web/logout` (CSRF-checked) revokes the session
+  server-side; the client returns to the fresh signin state.
+- **In-memory state only (security A7.2).** The signed-in principal lives
+  in React context. Nothing auth-related is ever written to web storage —
+  enforced by both a runtime test and a source-scan test. A page reload
+  starts signed out; the first authenticated data call re-establishes or
+  expires the session naturally.
+- **Route guard.** `RequireAuth` renders the login screen
+  ([`src/pages/Login.tsx`](src/pages/Login.tsx), canonical design:
+  [`docs/design/mockups/login.html`](../docs/design/mockups/login.html))
+  for any unauthenticated visit; the authenticated placeholder it protects
+  is replaced by the app shell in #2496.
+
 ## Testing
 
-Vitest with jsdom and Testing Library. Smoke test:
-[`src/App.test.tsx`](src/App.test.tsx). Setup (jest-dom matchers):
-[`src/test/setup.ts`](src/test/setup.ts).
+Vitest with jsdom and Testing Library. Suites:
+[`src/App.test.tsx`](src/App.test.tsx) (guard + full login/logout flow),
+[`src/api/client.test.ts`](src/api/client.test.ts) (CSRF injection,
+pre-session flow, 401 interception),
+[`src/auth/AuthContext.test.tsx`](src/auth/AuthContext.test.tsx) (state
+transitions, web-storage assertions), and
+[`src/pages/Login.test.tsx`](src/pages/Login.test.tsx) (mockup states,
+source scans). Setup (jest-dom matchers, RTL cleanup, in-memory Storage
+for the A7.2 assertions): [`src/test/setup.ts`](src/test/setup.ts).
 
 ## License
 

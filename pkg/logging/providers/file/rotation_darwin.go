@@ -1,9 +1,9 @@
-//go:build !windows
-// +build !windows
+//go:build darwin
+// +build darwin
 
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package file - Platform-specific disk usage calculation for Unix-like systems
+// Package file - Platform-specific disk usage calculation for macOS
 
 package file
 
@@ -20,11 +20,8 @@ func (p *FileProvider) calculateDiskUsage() (float64, error) {
 		return 0, fmt.Errorf("failed to get filesystem stats: %w", err)
 	}
 
-	// Calculate usage percentage with bounds checking. Statfs_t.Bsize is
-	// int64 on Linux but uint32 on Darwin — go through int64 so the guard
-	// compiles and lints cleanly on both (a direct `stat.Bsize < 0` is
-	// statically false on Darwin and staticcheck SA4003 rejects it there).
-	bsize := int64(stat.Bsize) //nolint:unconvert // no-op on linux; required on darwin where Bsize is uint32
+	// Bsize is uint32 on Darwin; widen before the bounds check.
+	bsize := int64(stat.Bsize)
 	if bsize <= 0 {
 		return 0, fmt.Errorf("invalid block size: %d", bsize)
 	}
