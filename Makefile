@@ -136,6 +136,7 @@ build-cert-manager:
 
 # Stdlib module binaries (out-of-process gRPC binaries bundled in the steward installer)
 STDLIB_MODULES := \
+	cert_trust \
 	file \
 	firewall \
 	package \

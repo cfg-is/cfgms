@@ -144,6 +144,7 @@ fi
 # ── Install stdlib module binaries ────────────────────────────────────────────
 
 STDLIB_MODULES=(
+    cfgms-module-cert_trust
     cfgms-module-file
     cfgms-module-firewall
     cfgms-module-package

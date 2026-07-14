@@ -1,0 +1,47 @@
+name: cert_trust
+version: 0.1.0
+description: >
+  Manages OS-level trust store entries on the system.
+  Provides idempotent Get/Set management of trusted CA certificates — installing,
+  trusting, and removing them from the system trust store — via the native trust
+  store mechanism (certutil/CertOpenSystemStore on Windows, security framework on
+  macOS, /etc/ssl/certs + update-ca-certificates on Debian-family Linux).
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local trust-store management on steward systems
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "32MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: cert_trust  # authority over cert_trust:* objects this module manages
+
+security:
+  requires_root: true  # modifying the system trust store requires elevated privileges
+  capabilities: []
+  ports: []
+
+behavioral_envelope:
+  shells_out_to:
+    - update-ca-certificates  # Debian-family Linux: refreshes /etc/ssl/certs bundle
+    - certutil                # Windows: manages Local Machine "Root" certificate store (addstore/delstore)
+    - security                # macOS: security add-trusted-cert / remove-trusted-cert
+  writes_paths:
+    - /etc/ssl/certs          # Linux: PEM files written per-cert
+    - /usr/local/share/ca-certificates  # Debian-family staging directory
+  reads_paths:
+    - /etc/ssl/certs          # Linux: list reads all .crt files
+
+documentation:
+  api: "docs/modules/cert_trust.md"

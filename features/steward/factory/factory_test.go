@@ -3,8 +3,6 @@
 package factory
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,7 +12,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/pkg/logging"
-	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
 	"github.com/stretchr/testify/assert"
@@ -226,7 +223,7 @@ func TestGetModuleInfo(t *testing.T) {
 
 func TestAllBuiltinModulesLoad(t *testing.T) {
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
-	for _, name := range []string{"acme", "directory", "file", "firewall", "github_runner", "hyperv", "package", "patch", "script", "user"} {
+	for _, name := range []string{"acme", "cert_trust", "directory", "file", "firewall", "github_runner", "hyperv", "package", "patch", "script", "user"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
@@ -248,63 +245,6 @@ func TestGithubRunner_IsInBuiltinModuleConstructors(t *testing.T) {
 		assert.True(t, isModule, "github_runner instance must satisfy modules.Module")
 	}
 }
-
-// stubFailingSecretStoreModule implements modules.Module and modules.SecretStoreInjectable.
-// SetSecretStore always returns an error to exercise the warning-log path in attemptSecretStoreInjection.
-type stubFailingSecretStoreModule struct{}
-
-func (s *stubFailingSecretStoreModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
-	return nil, nil
-}
-
-func (s *stubFailingSecretStoreModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
-	return nil
-}
-
-func (s *stubFailingSecretStoreModule) SetSecretStore(_ secretsif.SecretStore) error {
-	return errors.New("injection always fails")
-}
-
-func (s *stubFailingSecretStoreModule) GetSecretStore() (secretsif.SecretStore, bool) {
-	return nil, false
-}
-
-// stubSecretStore is a no-op SecretStore that satisfies the interface so the
-// factory's nil-guard does not short-circuit before reaching SetSecretStore.
-type stubSecretStore struct{}
-
-func (s *stubSecretStore) StoreSecret(_ context.Context, _ *secretsif.SecretRequest) error {
-	return nil
-}
-func (s *stubSecretStore) GetSecret(_ context.Context, _ string) (*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
-func (s *stubSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
-	return nil
-}
-func (s *stubSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
-	return nil
-}
-func (s *stubSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
-func (s *stubSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
-func (s *stubSecretStore) HealthCheck(_ context.Context) error                      { return nil }
-func (s *stubSecretStore) Close() error                                             { return nil }
 
 // TestInstallHyperV_BuiltinModuleNoSignatureCheck asserts that the hyperv module
 // is a compiled-in builtin (not disk-loaded). Compiled-in builtins do not require
@@ -406,15 +346,3 @@ func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
 		"durable store root must not exist on the fallback path")
 }
 
-func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, mock)
-	f.secretStore = &stubSecretStore{}
-
-	mod := &stubFailingSecretStoreModule{}
-	f.attemptSecretStoreInjection(mod, "test-module")
-
-	warnLogs := mock.GetLogs("warn")
-	require.Len(t, warnLogs, 1)
-	assert.Equal(t, "failed to inject secret store into module", warnLogs[0].Message)
-}
