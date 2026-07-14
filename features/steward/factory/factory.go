@@ -43,6 +43,7 @@ import (
 	acme_module "github.com/cfgis/cfgms/features/modules/extended/acme"
 	github_runner_module "github.com/cfgis/cfgms/features/modules/extended/github_runner"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
+	cert_trust_module "github.com/cfgis/cfgms/features/modules/stdlib/cert_trust"
 	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/features/modules/stdlib/firewall"
 	package_module "github.com/cfgis/cfgms/features/modules/stdlib/package"
@@ -177,6 +178,7 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 // (which wires the durable provision store) and early-returned in loadBuiltinModule.
 var builtinModuleConstructors = map[string]func() modules.Module{
 	"acme":          func() modules.Module { return acme_module.New() },
+	"cert_trust":    func() modules.Module { return cert_trust_module.New() },
 	"directory":     func() modules.Module { return file.New() }, // merged into file module (type: directory)
 	"file":          func() modules.Module { return file.New() },
 	"firewall":      func() modules.Module { return firewall.New() },

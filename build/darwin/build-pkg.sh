@@ -159,6 +159,7 @@ echo "  Launcher payload: $PAYLOAD_DIR/usr/local/bin/cfgms-launcher"
 
 # Install stdlib module binaries into the payload tree.
 STDLIB_MODULES=(
+    cfgms-module-cert_trust
     cfgms-module-file
     cfgms-module-firewall
     cfgms-module-package

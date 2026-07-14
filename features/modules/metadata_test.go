@@ -995,9 +995,9 @@ func TestModuleMetadata_Clone_Owns(t *testing.T) {
 // owns: entries is parsed correctly and that omitting it is backward-compatible.
 func TestParseModuleMetadata_RequiredFields(t *testing.T) {
 	tests := []struct {
-		name           string
-		yaml           string
-		wantOwns       []OwnershipDeclaration
+		name     string
+		yaml     string
+		wantOwns []OwnershipDeclaration
 	}{
 		{
 			name: "owns with required_fields",
