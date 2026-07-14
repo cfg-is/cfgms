@@ -10,6 +10,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Module implements the modules.Module interface for script execution
@@ -25,6 +26,12 @@ type Module struct {
 	signingConfig ModuleSigningConfig
 	// logger provides structured logging for the module
 	logger *logging.ModuleLogger
+	// secretStore resolves param_bindings on the stage and execute paths.
+	// Optional; if nil, stage actions with secret-store bindings will fail.
+	secretStore secretsif.SecretStore
+	// scriptRepo is the library repository used to look up scripts by id+version
+	// on the stage action path. Optional; if nil, stage actions will fail.
+	scriptRepo ScriptRepository
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
 }
@@ -36,6 +43,8 @@ type ExecutionState struct {
 	Result    *ExecutionResult
 	Error     error
 	StartTime int64
+	// Staged holds the staged library script reference when Status == StatusStaged.
+	Staged *StagedRef
 }
 
 // New creates a new instance of the Script module
@@ -140,6 +149,14 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 		}
 	}
 
+	// Record start time early for both execute and stage paths.
+	var startTime int64
+	if timestamp, ok := ctx.Value("timestamp").(int64); ok {
+		startTime = timestamp
+	} else {
+		startTime = time.Now().Unix()
+	}
+
 	// Validate the configuration
 	if err := scriptConfig.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "Configuration validation failed",
@@ -150,6 +167,11 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 			"error_code", "CONFIG_VALIDATION_FAILED",
 			"error_details", err.Error())
 		return fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Branch on action type: stage action does not execute inline content.
+	if scriptConfig.Action == ScriptActionStage {
+		return m.executeStageAction(ctx, resourceID, scriptConfig, logger, tenantID, startTime)
 	}
 
 	// Create executor and validate shell availability
@@ -176,14 +198,6 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 			"signing_policy", string(scriptConfig.SigningPolicy),
 			"error_details", err.Error())
 		return fmt.Errorf("signature validation failed: %w", err)
-	}
-
-	// Track execution state
-	var startTime int64
-	if timestamp, ok := ctx.Value("timestamp").(int64); ok {
-		startTime = timestamp
-	} else {
-		startTime = time.Now().Unix()
 	}
 
 	m.mu.Lock()
@@ -249,6 +263,89 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 			"duration_ms", result.Duration.Milliseconds())
 		m.updateExecutionStatus(resourceID, StatusFailed, result, scriptErr)
 	}
+
+	return nil
+}
+
+// executeStageAction handles the "stage" action path: looks up a library script
+// by id+version, resolves param_bindings, and records the staged state without
+// executing any inline script content.
+func (m *Module) executeStageAction(
+	ctx context.Context,
+	resourceID string,
+	cfg *ScriptConfig,
+	logger logging.Logger,
+	tenantID string,
+	startTime int64,
+) error {
+	logger.InfoCtx(ctx, "Staging library script",
+		"operation", "script_stage",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"script_id", cfg.Stage.ID,
+		"script_version", cfg.Stage.Version)
+
+	// Look up the library script by id+version.
+	m.mu.RLock()
+	repo := m.scriptRepo
+	store := m.secretStore
+	m.mu.RUnlock()
+
+	if repo == nil {
+		return fmt.Errorf("stage action requires a script repository: none configured for resource %q", resourceID)
+	}
+
+	script, err := repo.Get(cfg.Stage.ID, cfg.Stage.Version)
+	if err != nil {
+		logger.ErrorCtx(ctx, "Library script lookup failed",
+			"operation", "script_stage",
+			"resource_id", resourceID,
+			"tenant_id", tenantID,
+			"script_id", cfg.Stage.ID,
+			"script_version", cfg.Stage.Version,
+			"error_details", err.Error())
+		return fmt.Errorf("library script lookup failed (id=%q version=%q): %w",
+			cfg.Stage.ID, cfg.Stage.Version, err)
+	}
+
+	// Resolve param_bindings via the secret store. This is the same path used
+	// by the execute action; callers must not stage a script when secret resolution fails.
+	var resolved []ResolvedParam
+	if len(cfg.ParamBindings) > 0 {
+		resolved, err = ResolveSecretBindings(ctx, store, cfg.ParamBindings)
+		if err != nil {
+			logger.ErrorCtx(ctx, "Param binding resolution failed during stage",
+				"operation", "script_stage",
+				"resource_id", resourceID,
+				"tenant_id", tenantID,
+				"script_id", cfg.Stage.ID,
+				"error_details", err.Error())
+			return fmt.Errorf("param binding resolution failed for stage action: %w", err)
+		}
+	}
+
+	// Record the staged state — no execution occurs on this path.
+	m.mu.Lock()
+	m.executions[resourceID] = &ExecutionState{
+		Config:    cfg,
+		Status:    StatusStaged,
+		StartTime: startTime,
+		Staged: &StagedRef{
+			ID:             cfg.Stage.ID,
+			Version:        cfg.Stage.Version,
+			Script:         script,
+			ResolvedParams: resolved,
+		},
+	}
+	m.mu.Unlock()
+
+	logger.InfoCtx(ctx, "Library script staged successfully",
+		"operation", "script_stage",
+		"resource_id", resourceID,
+		"tenant_id", tenantID,
+		"script_id", cfg.Stage.ID,
+		"script_version", cfg.Stage.Version,
+		"param_bindings_count", len(cfg.ParamBindings))
 
 	return nil
 }
@@ -381,4 +478,21 @@ func (m *Module) SetSigningConfig(cfg ModuleSigningConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.signingConfig = cfg
+}
+
+// SetSecretStore injects a secret store for resolving param_bindings on the
+// stage and execute paths. Must be called before Set() when param_bindings
+// contain secret-store references.
+func (m *Module) SetSecretStore(store secretsif.SecretStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.secretStore = store
+}
+
+// SetScriptRepository injects the library repository used to look up scripts
+// by id+version on the stage action path.
+func (m *Module) SetScriptRepository(repo ScriptRepository) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scriptRepo = repo
 }

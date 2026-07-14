@@ -4,13 +4,110 @@ package script
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
 
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+// inMemoryScriptRepo is a simple in-memory ScriptRepository for tests.
+// It stores scripts by "id@version" key and returns ErrNotFound for missing keys.
+type inMemoryScriptRepo struct {
+	scripts map[string]*VersionedScript
+}
+
+func newInMemoryScriptRepo(scripts ...*VersionedScript) *inMemoryScriptRepo {
+	r := &inMemoryScriptRepo{scripts: make(map[string]*VersionedScript)}
+	for _, s := range scripts {
+		key := s.Metadata.ID + "@" + s.Metadata.Version.String()
+		r.scripts[key] = s
+	}
+	return r
+}
+
+func (r *inMemoryScriptRepo) Get(id, version string) (*VersionedScript, error) {
+	key := id + "@" + version
+	if s, ok := r.scripts[key]; ok {
+		return s, nil
+	}
+	return nil, fmt.Errorf("script %s@%s not found", id, version)
+}
+
+func (r *inMemoryScriptRepo) Create(s *VersionedScript) error {
+	key := s.Metadata.ID + "@" + s.Metadata.Version.String()
+	r.scripts[key] = s
+	return nil
+}
+
+func (r *inMemoryScriptRepo) List(_ *ScriptFilter) ([]*ScriptMetadata, error) {
+	result := make([]*ScriptMetadata, 0, len(r.scripts))
+	for _, s := range r.scripts {
+		result = append(result, s.Metadata)
+	}
+	return result, nil
+}
+
+func (r *inMemoryScriptRepo) Update(s *VersionedScript) error {
+	key := s.Metadata.ID + "@" + s.Metadata.Version.String()
+	r.scripts[key] = s
+	return nil
+}
+
+func (r *inMemoryScriptRepo) Delete(id, version string) error {
+	key := id + "@" + version
+	delete(r.scripts, key)
+	return nil
+}
+
+func (r *inMemoryScriptRepo) ListVersions(id string) ([]*Version, error) {
+	var versions []*Version
+	for _, s := range r.scripts {
+		if s.Metadata.ID == id {
+			v := *s.Metadata.Version
+			versions = append(versions, &v)
+		}
+	}
+	return versions, nil
+}
+
+func (r *inMemoryScriptRepo) GetLatestVersion(id string) (*Version, error) {
+	var latest *Version
+	for _, s := range r.scripts {
+		if s.Metadata.ID == id {
+			if latest == nil || s.Metadata.Version.Compare(latest) > 0 {
+				v := *s.Metadata.Version
+				latest = &v
+			}
+		}
+	}
+	if latest == nil {
+		return nil, fmt.Errorf("no versions found for script %s", id)
+	}
+	return latest, nil
+}
+
+func (r *inMemoryScriptRepo) Rollback(id, version string) error { return nil }
+
+// makeTestVersionedScript builds a minimal VersionedScript for test use.
+func makeTestVersionedScript(id, version string) *VersionedScript {
+	v, _ := ParseVersion(version)
+	return &VersionedScript{
+		Metadata: &ScriptMetadata{
+			ID:       id,
+			Name:     id,
+			Version:  v,
+			Shell:    getTestShell(),
+			Platform: []string{"linux", "darwin", "windows"},
+		},
+		Content: getTestScript(),
+		Hash:    "abc123",
+	}
+}
 
 // testConfigState mirrors the executor's unexported genericConfigState so tests
 // can exercise CompareStates against the real comparator without importing the
@@ -450,6 +547,160 @@ func TestScriptModule_FailedRunNotMarkedConverged(t *testing.T) {
 	if !driftDetected {
 		t.Errorf("expected drift to be detected after failed script (resource would be wrongly skipped); diff: %s", diff.GetDetailedDiff())
 	}
+}
+
+// TestModule_StageAction verifies that the stage action:
+//  1. Looks up a library script by id+version from the script repository.
+//  2. Records staged state (StatusStaged) without executing the inline content.
+//  3. Resolves param_bindings via the secret store on that path.
+func TestModule_StageAction(t *testing.T) {
+	const scriptID = "cirunner-provision"
+	const scriptVersion = "1.0.0"
+
+	// Populate the in-memory repository with a known script.
+	repo := newInMemoryScriptRepo(makeTestVersionedScript(scriptID, scriptVersion))
+
+	// Set up a real secret store so we can verify secret binding resolution.
+	store := newTestSecretStore(t)
+	storeSecret(t, store, "github/runner-token", "ghs-staging-secret")
+
+	module := NewModule()
+	module.SetScriptRepository(repo)
+	module.SetSecretStore(store)
+
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
+	resourceID := "ci-runner-script"
+
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage: &StageConfig{
+			ID:      scriptID,
+			Version: scriptVersion,
+		},
+		ParamBindings: []ParamBinding{
+			{Name: "RunnerToken", From: ParamSourceSecretStore, Key: "github/runner-token"},
+			{Name: "OrgName", From: ParamSourceLiteral, Value: "my-org"},
+		},
+	}
+
+	err := module.Set(ctx, resourceID, cfg)
+	require.NoError(t, err, "stage action must succeed")
+
+	// Verify the module recorded staged status — no inline execution occurred.
+	state, exists := module.GetExecutionState(resourceID)
+	require.True(t, exists, "execution state must be recorded after stage")
+	assert.Equal(t, StatusStaged, state.Status, "status must be StatusStaged (not Running/Completed)")
+	assert.Nil(t, state.Result, "no ExecutionResult should be produced on the stage path")
+
+	// Verify the staged ref points to the correct script.
+	require.NotNil(t, state.Staged, "staged ref must be populated")
+	assert.Equal(t, scriptID, state.Staged.ID)
+	assert.Equal(t, scriptVersion, state.Staged.Version)
+	require.NotNil(t, state.Staged.Script, "library script must be fetched and recorded")
+	assert.Equal(t, scriptID, state.Staged.Script.Metadata.ID)
+
+	// Verify param_bindings were resolved.
+	require.Len(t, state.Staged.ResolvedParams, 2)
+	byName := make(map[string]ResolvedParam)
+	for _, p := range state.Staged.ResolvedParams {
+		byName[p.Name] = p
+	}
+
+	token := byName["RunnerToken"]
+	assert.Equal(t, "ghs-staging-secret", token.Value, "secret binding must be resolved")
+	assert.True(t, token.IsSecret, "RunnerToken must be marked as a secret")
+
+	org := byName["OrgName"]
+	assert.Equal(t, "my-org", org.Value, "literal binding must be resolved")
+	assert.False(t, org.IsSecret, "OrgName must not be marked as a secret")
+}
+
+// TestModule_StageAction_MissingRepo verifies that a stage action without
+// a configured script repository returns a clear error.
+func TestModule_StageAction_MissingRepo(t *testing.T) {
+	module := NewModule() // No script repository configured.
+
+	ctx := context.Background()
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "some-script", Version: "1.0.0"},
+	}
+
+	err := module.Set(ctx, "resource-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "script repository")
+}
+
+// TestModule_StageAction_MissingScript verifies that looking up a non-existent
+// library script returns a clear error.
+func TestModule_StageAction_MissingScript(t *testing.T) {
+	repo := newInMemoryScriptRepo() // Empty repository.
+	module := NewModule()
+	module.SetScriptRepository(repo)
+
+	ctx := context.Background()
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "nonexistent-script", Version: "1.0.0"},
+	}
+
+	err := module.Set(ctx, "resource-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "library script lookup failed")
+}
+
+// TestModule_StageAction_LiteralOnlyBindings verifies the stage path with
+// literal-only param bindings (no secret store required).
+func TestModule_StageAction_LiteralOnlyBindings(t *testing.T) {
+	const scriptID = "deploy-agent"
+	const scriptVersion = "2.0.1"
+
+	repo := newInMemoryScriptRepo(makeTestVersionedScript(scriptID, scriptVersion))
+	module := NewModule()
+	module.SetScriptRepository(repo)
+	// No secret store set — literal bindings must not require one.
+
+	ctx := context.Background()
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: scriptID, Version: scriptVersion},
+		ParamBindings: []ParamBinding{
+			{Name: "Endpoint", From: ParamSourceLiteral, Value: "https://api.example.com"},
+		},
+	}
+
+	err := module.Set(ctx, "resource-2", cfg)
+	require.NoError(t, err)
+
+	state, exists := module.GetExecutionState("resource-2")
+	require.True(t, exists)
+	assert.Equal(t, StatusStaged, state.Status)
+	require.Len(t, state.Staged.ResolvedParams, 1)
+	assert.Equal(t, "https://api.example.com", state.Staged.ResolvedParams[0].Value)
+}
+
+// TestModule_StageConfig_Validate_MissingStage verifies that a stage action
+// without a stage config fails validation.
+func TestModule_StageConfig_Validate_MissingStage(t *testing.T) {
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		// Stage is nil — must fail.
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage configuration is required")
+}
+
+// TestModule_StageConfig_Validate_MissingID verifies that a stage config without
+// an ID fails validation.
+func TestModule_StageConfig_Validate_MissingID(t *testing.T) {
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "", Version: "1.0.0"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage.id")
 }
 
 // TestScriptModule_SuccessRunNoDriftWithNonSecondTimeout verifies that a script

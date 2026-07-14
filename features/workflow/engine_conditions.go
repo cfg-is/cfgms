@@ -136,10 +136,19 @@ func (e *Engine) evaluateExpressionCondition(condition *Condition, variables map
 	return e.evaluateExpression(condition.Expression, variables)
 }
 
-// evaluateExpression evaluates a condition expression
+// evaluateExpression evaluates a condition expression.
+// Supports both ${var} substitution and {{ }} template syntax; template rendering
+// runs first so template-produced values are then available for ${} substitution.
 func (e *Engine) evaluateExpression(expression string, variables map[string]interface{}) (bool, error) {
-	// Replace variables in the expression
-	resolvedExpression := e.replaceVariables(expression, variables)
+	// Render {{ }} template expressions (e.g. "{{ ne .counter 0 }}") first.
+	// A template that evaluates to "true"/"false" is handled by parseExpression below.
+	rendered, err := renderStepString(expression, variables)
+	if err != nil {
+		return false, fmt.Errorf("template rendering failed for condition expression: %w", err)
+	}
+
+	// Then replace any remaining ${variable} placeholders.
+	resolvedExpression := e.replaceVariables(rendered, variables)
 
 	// Parse and evaluate the expression
 	return e.parseExpression(resolvedExpression, variables)
