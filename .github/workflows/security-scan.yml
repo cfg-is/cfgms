@@ -35,13 +35,31 @@ env:
 permissions: {}
 
 jobs:
+  # PR-time stub for the `trivy-scan` required context (#2595).
+  # QUEUE-REAL: the real Trivy scan runs in the merge queue (merge_group) and on
+  # push to main — see the trivy-scan job below. This posts the required check
+  # green on code PRs; docs-only PRs are covered by documentation.yml's stub.
+  # Same check-name as the real job; mutually exclusive by event.
+  trivy-scan-pr-stub:
+    name: trivy-scan
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: PR-time stub (real scan runs in the merge queue)
+        run: |
+          echo "trivy-scan: real image/dependency scan runs in the merge queue (merge_group) per #2595."
+          echo "This PR-time stub posts the required context; the authoritative scan runs against the merge commit."
+
   # Parallel security scanning jobs for optimal performance
+  # QUEUE-REAL (#2595): runs in the merge queue and on main, not on pull_request.
   trivy-scan:
     permissions:
       contents: read
       security-events: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
