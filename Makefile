@@ -1888,7 +1888,7 @@ test-e2e-ci:
 	@echo ""
 	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
 	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
-	DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock) && \
+	DOCKER_GID=$$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --entrypoint stat cfgms-test-runner -c '%g' /var/run/docker.sock) && \
 	docker run --rm \
 		--user $$(id -u):$$(id -g) \
 		--network cfgms-test \
