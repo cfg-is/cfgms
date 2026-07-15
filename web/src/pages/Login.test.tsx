@@ -163,10 +163,66 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     expect(offenders).toEqual([])
   })
 
-  it('no non-test source file references localStorage or sessionStorage', () => {
-    const offenders = appSources
-      .filter(([, content]) => /localStorage|sessionStorage/.test(content))
-      .map(([path]) => path)
+  // A7.2 forbids AUTH data in web storage, not the storage API itself — a
+  // non-auth UI preference (e.g. theme) may legitimately persist there.
+  // Rather than a keyword blocklist (bypassable by any key that doesn't
+  // happen to match a listed word), this is a closed allowlist: every
+  // localStorage/sessionStorage call site must use a literal string key
+  // that exactly matches an explicit (file, key) pair below. Adding a new
+  // entry is a deliberate, reviewable source change — nothing can add
+  // itself to this list. A call whose key isn't a plain string literal
+  // (e.g. computed or a variable) fails closed: it can't be checked
+  // against the allowlist, so it's a violation regardless of intent.
+  //
+  // NEVER add an auth/session/principal/credential key here — that data
+  // must stay in-memory only (React context), per A7.2.
+  const STORAGE_ALLOWLIST: ReadonlyArray<{ path: string; key: string }> = []
+
+  it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {
+    const offenders: string[] = []
+    const anyCallPattern = /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)\(/g
+    const literalCallPattern =
+      /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)\(\s*(['"`])([^'"`]*)\3/g
+    for (const [path, content] of appSources) {
+      const anyCalls = content.match(anyCallPattern) ?? []
+      if (anyCalls.length === 0) continue
+      const literalCalls = [...content.matchAll(literalCallPattern)]
+      if (literalCalls.length < anyCalls.length) {
+        offenders.push(`${path}: storage call with a non-literal key (cannot verify against allowlist)`)
+        continue
+      }
+      for (const match of literalCalls) {
+        const key = match[4]
+        const allowed = STORAGE_ALLOWLIST.some((entry) => path.endsWith(entry.path) && entry.key === key)
+        if (!allowed) offenders.push(`${path}: unauthorized storage key "${key}"`)
+      }
+    }
     expect(offenders).toEqual([])
+  })
+
+  // Proves the allowlist mechanism is live: an unauthorized literal key is
+  // rejected, a non-literal (computed) key is rejected, and — once a real
+  // entry exists — an allowlisted key is accepted. Uses synthetic source
+  // text so the test doesn't depend on any real file's current content.
+  it('the storage allowlist rejects unauthorized and non-literal keys', () => {
+    const check = (path: string, content: string) => {
+      const anyCallPattern = /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)\(/g
+      const literalCallPattern =
+        /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)\(\s*(['"`])([^'"`]*)\3/g
+      const anyCalls = content.match(anyCallPattern) ?? []
+      const literalCalls = [...content.matchAll(literalCallPattern)]
+      if (literalCalls.length < anyCalls.length) return 'non-literal'
+      for (const match of literalCalls) {
+        const key = match[4]
+        if (!STORAGE_ALLOWLIST.some((entry) => path.endsWith(entry.path) && entry.key === key)) {
+          return 'unauthorized'
+        }
+      }
+      return 'ok'
+    }
+    expect(check('shell/UserMenu.tsx', "localStorage.setItem('cfgms.theme', mode)")).toBe(
+      'unauthorized', // no allowlist entry exists yet — every new key must be added deliberately
+    )
+    expect(check('shell/UserMenu.tsx', 'localStorage.setItem(dynamicKey, mode)')).toBe('non-literal')
   })
 })
