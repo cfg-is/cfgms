@@ -26,9 +26,9 @@ func TestExampleRunnerConfigs_ParseAndValidate(t *testing.T) {
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "..")
 
 	tests := []struct {
-		name         string
-		cfgFile      string
-		windowsPath  bool // true when work_dir is a Windows absolute path (C:\...)
+		name        string
+		cfgFile     string
+		windowsPath bool // true when work_dir is a Windows absolute path (C:\...)
 	}{
 		{
 			name:    "linux-runner",
