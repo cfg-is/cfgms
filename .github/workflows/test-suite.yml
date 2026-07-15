@@ -164,7 +164,12 @@ jobs:
     # golang image lacks but hosted runners ship (jq for the script tests).
     container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.5-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 25
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group' || github.ref == 'refs/heads/main'
+    # always() is required here: unit-tests is intentionally skipped on
+    # merge_group (PR-real design above), and GitHub's default implicit
+    # `needs` gate treats "skipped" as not-satisfied — without always(), this
+    # job would itself silently skip on merge_group despite its own event
+    # condition matching, recreating the exact bug this split was meant to fix.
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group' || github.ref == 'refs/heads/main')
     needs: unit-tests
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
