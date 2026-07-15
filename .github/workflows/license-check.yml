@@ -175,11 +175,13 @@ jobs:
 
     - name: Generate step summary
       if: always()
+      env:
+        LICENSE_CHECK_STATUS: ${{ steps.forbidden-check.outputs.status }}
       run: |
         echo "## License Compliance Check Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
-        if [ "${{ steps.forbidden-check.outputs.status }}" == "passed" ]; then
+        if [ "$LICENSE_CHECK_STATUS" == "passed" ]; then
           echo "### ✅ License Check Passed" >> $GITHUB_STEP_SUMMARY
           echo "All dependencies use compatible open-source licenses." >> $GITHUB_STEP_SUMMARY
         else
