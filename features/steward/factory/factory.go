@@ -46,6 +46,7 @@ import (
 	cert_trust_module "github.com/cfgis/cfgms/features/modules/stdlib/cert_trust"
 	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/features/modules/stdlib/firewall"
+	hostname_module "github.com/cfgis/cfgms/features/modules/stdlib/hostname"
 	package_module "github.com/cfgis/cfgms/features/modules/stdlib/package"
 	"github.com/cfgis/cfgms/features/modules/stdlib/patch"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
@@ -184,6 +185,7 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 	"file":          func() modules.Module { return file.New() },
 	"firewall":      func() modules.Module { return firewall.New() },
 	"github_runner": func() modules.Module { return github_runner_module.New() },
+	"hostname":      func() modules.Module { return hostname_module.New() },
 	"package":       func() modules.Module { return package_module.New() },
 	"patch":         func() modules.Module { return patch.New() },
 	"script":        func() modules.Module { return script.New() },
