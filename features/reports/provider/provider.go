@@ -14,9 +14,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// dnaHistory is the minimal interface satisfied by *storage.Manager.
+// Defined here (not in storage) to keep the provider package self-contained and to
+// let test components inject a controlled store without depending on the concrete type.
+type dnaHistory interface {
+	GetHistory(ctx context.Context, deviceID string, options *storage.QueryOptions) (*storage.HistoryResult, error)
+}
+
 // DataProvider implements the interfaces.DataProvider interface
 type DataProvider struct {
-	storageManager *storage.Manager
+	storageManager dnaHistory
 	driftDetector  drift.Detector
 	logger         logging.Logger
 }
@@ -60,7 +67,10 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 				safeDeviceID := logging.SanitizeLogValue(deviceID)
 				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
 				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
-				p.logger.Warn("failed to get DNA history for device", "device_id", safeDeviceID, "error", err)
+				safeErr := err.Error()
+				safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+				safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+				p.logger.Warn("failed to get DNA history for device", "device_id", safeDeviceID, "error", safeErr)
 				continue
 			}
 
@@ -126,7 +136,13 @@ func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, t
 	for _, deviceID := range deviceIDs {
 		deviceStats, err := p.calculateDeviceStats(ctx, deviceID, timeRange)
 		if err != nil {
-			p.logger.Warn("failed to calculate stats for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+			safeDeviceID := logging.SanitizeLogValue(deviceID)
+			safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+			safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+			safeErr := err.Error()
+			safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+			safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+			p.logger.Warn("failed to calculate stats for device", "device_id", safeDeviceID, "error", safeErr)
 			continue
 		}
 		stats[deviceID] = deviceStats
