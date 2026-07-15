@@ -139,6 +139,7 @@ STDLIB_MODULES := \
 	cert_trust \
 	file \
 	firewall \
+	hostname \
 	package \
 	patch \
 	script \

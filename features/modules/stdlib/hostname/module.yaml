@@ -1,0 +1,48 @@
+name: hostname
+version: 0.1.0
+description: >
+  Manages the host system name (computer name) and workgroup (Windows-only).
+  Provides idempotent Get/Set management of the host identity: reading and
+  writing the machine name via in-process OS APIs on Linux (os.Hostname /
+  syscall.Sethostname + /etc/hostname), scutil on macOS, and wmic/netdom on
+  Windows. Workgroup is a Windows-only field; it is absent on Linux and macOS
+  fragments. This is a declare-once identity module per ADR-016 clause 1 —
+  the desired hostname is set once and held, not continuously re-derived.
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local system-name management on steward systems
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "32MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+
+owns:
+  - kind: hostname  # authority over hostname:* objects this module manages
+
+security:
+  requires_root: true  # writing /etc/hostname and syscall.Sethostname require root on Linux; scutil requires admin on macOS; wmic/netdom require admin on Windows
+  capabilities: []
+  ports: []
+
+behavioral_envelope:
+  shells_out_to:
+    - scutil        # macOS: computer name and hostname management
+    - wmic.exe      # Windows: workgroup read (computersystem get Workgroup) and set
+    - netdom.exe    # Windows: hostname rename (renamecomputer)
+  reads_paths:
+    - /etc/hostname  # Linux: current hostname (one-line FQDN or short name)
+  writes_paths:
+    - /etc/hostname  # Linux: desired hostname (written before runtime syscall apply)
+
+documentation:
+  api: "docs/modules/hostname.md"
+  examples: "docs/modules/hostname.md"

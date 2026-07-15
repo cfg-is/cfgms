@@ -214,7 +214,7 @@ Shipped in the steward installer, all `executors: [steward]` (closed set — see
 - `user` - Local users & groups, membership, lock/disable state, password presence (observed only)
 - `cert_trust` - System trust store: install/trust CA & certs; keeps the CFGMS mTLS chain healthy fleet-wide
 - `time` - Timezone + NTP/time-sync configuration (`timezone`, `ntp_servers`, `ntp_sync_enabled`)
-- `hostname` - System/computer name & workgroup — *planned (net-new)*
+- `hostname` - System/computer name & workgroup
 
 ### Extended steward modules (non-stdlib)
 

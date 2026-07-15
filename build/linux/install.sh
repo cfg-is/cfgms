@@ -147,6 +147,7 @@ STDLIB_MODULES=(
     cfgms-module-cert_trust
     cfgms-module-file
     cfgms-module-firewall
+    cfgms-module-hostname
     cfgms-module-package
     cfgms-module-patch
     cfgms-module-script

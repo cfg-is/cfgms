@@ -100,6 +100,9 @@
           <Component Id="ModuleFirewall" Guid="*">
             <File Id="ModuleFirewallExe" Source="$(var.ModulesDir)\cfgms-module-firewall.exe" Name="cfgms-module-firewall.exe" KeyPath="yes" />
           </Component>
+          <Component Id="ModuleHostname" Guid="*">
+            <File Id="ModuleHostnameExe" Source="$(var.ModulesDir)\cfgms-module-hostname.exe" Name="cfgms-module-hostname.exe" KeyPath="yes" />
+          </Component>
           <Component Id="ModulePatch" Guid="*">
             <File Id="ModulePatchExe" Source="$(var.ModulesDir)\cfgms-module-patch.exe" Name="cfgms-module-patch.exe" KeyPath="yes" />
           </Component>
@@ -122,6 +125,7 @@
       <ComponentRef Id="ModulePackage" />
       <ComponentRef Id="ModuleScript" />
       <ComponentRef Id="ModuleFirewall" />
+      <ComponentRef Id="ModuleHostname" />
       <ComponentRef Id="ModulePatch" />
       <ComponentRef Id="ModuleTime" />
       <ComponentRef Id="ModuleUser" />
