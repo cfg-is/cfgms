@@ -1044,6 +1044,29 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Issue #2545: Wire the durable tag store into the HTTP API server too. The
+	// service layer was wired above (line ~371) so the selector engine / role
+	// adapter can read tags, but the REST admin endpoints (`/api/v1/stewards/
+	// {id}/tags`, handlers_tags.go) read the API server's OWN tagStore field —
+	// without this call it stays nil and every tag REST request returns 503
+	// TAG_STORE_UNAVAILABLE even though tags resolve fine internally. Nil when
+	// SQLite is unconfigured (SetTagStore is a no-op on nil; endpoints degrade to
+	// 503 by design in that case).
+	if tagStoreInstance != nil {
+		httpServer.SetTagStore(tagStoreInstance)
+	}
+
+	// Issue #2543: Wire the role-config store into the HTTP API server. Same
+	// wiring gap as the tag store above — the role-config REST endpoints
+	// (`/api/v1/roles`, handlers_roles.go) read the API server's roleConfigStore
+	// field, which is otherwise nil, so every author/list/delete returns 503
+	// "Role config store not available". The canonical store is the controller's
+	// config store under the role-policies namespace (the same store the
+	// selector-driven role adapter reads via GetConfigStore, config_service_v2.go).
+	if cs := storageManager.GetConfigStore(); cs != nil {
+		httpServer.SetRoleConfigStore(cs)
+	}
+
 	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
 	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
 	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile

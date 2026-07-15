@@ -38,6 +38,45 @@ type createRoleConfigRequest struct {
 	Fragment stewardtypes.StewardConfig `json:"fragment"`
 }
 
+// roleTenantFromRequest resolves the target tenant for a role-config request.
+// Role configs are stored per tenant (the selector-driven resolver lists
+// role-policies under each steward's own tenant), so every role operation needs a
+// concrete tenant. A tenant-scoped caller is always pinned to its own tenant
+// (the auth middleware sets ctxkeys.TenantID from the authenticated principal). A
+// root/global admin — whose principal carries no tenant — selects the target
+// tenant explicitly via the ?tenant= query parameter; without it there is no way
+// to author into a named tenant and every store call fails "tenant ID is
+// required" (Issue #2548).
+func roleTenantFromRequest(r *http.Request, principal *Principal) string {
+	if principal.TenantID != "" {
+		return principal.TenantID
+	}
+	if q := strings.TrimSpace(r.URL.Query().Get("tenant")); q != "" {
+		return q
+	}
+	ctxTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	return ctxTenant
+}
+
+// resolveRoleTenant resolves the target tenant for a role request, or writes a
+// 400 TENANT_REQUIRED and returns ok=false when none can be determined (a global
+// admin that omitted ?tenant=). Every role operation — create, get, list, delete
+// — needs a concrete tenant: role configs are stored per tenant, and an empty
+// tenant reaching the store is not harmless. On the default flatfile backend a
+// get/delete with an empty tenant 500s (the key validator rejects it, so it never
+// surfaces as a clean not-found), and a list with an empty tenant filter omits
+// the tenant predicate entirely and returns roles across ALL tenants. Guarding
+// here keeps all four handlers consistent and closes that cross-tenant list.
+func (s *Server) resolveRoleTenant(w http.ResponseWriter, r *http.Request, principal *Principal) (string, bool) {
+	tenantID := roleTenantFromRequest(r, principal)
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"tenant is required: a global admin must pass ?tenant=<id> (role configs are stored per tenant)", "TENANT_REQUIRED")
+		return "", false
+	}
+	return tenantID, true
+}
+
 // handleCreateRoleConfig implements POST /api/v1/roles.
 func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.roleConfigStore == nil {
@@ -45,19 +84,13 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-
-	// Tenant scoping: a scoped caller may only author roles within their own tenant.
-	if principal.TenantID != "" && tenantID == "" {
-		tenantID = principal.TenantID
-	}
-	if principal.TenantID != "" && tenantID != principal.TenantID {
-		s.writeErrorResponse(w, http.StatusForbidden, "caller may only author roles within their own tenant", "FORBIDDEN")
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
 		return
 	}
 
@@ -130,14 +163,14 @@ func (s *Server) handleGetRoleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	if principal.TenantID != "" && tenantID == "" {
-		tenantID = principal.TenantID
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
+		return
 	}
 
 	name := mux.Vars(r)["name"]
@@ -178,14 +211,14 @@ func (s *Server) handleListRoleConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	if principal.TenantID != "" && tenantID == "" {
-		tenantID = principal.TenantID
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
+		return
 	}
 
 	entries, err := s.roleConfigStore.ListConfigs(r.Context(), &cfgconfig.ConfigFilter{
@@ -218,17 +251,13 @@ func (s *Server) handleDeleteRoleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	if principal.TenantID != "" && tenantID == "" {
-		tenantID = principal.TenantID
-	}
-	if principal.TenantID != "" && tenantID != principal.TenantID {
-		s.writeErrorResponse(w, http.StatusForbidden, "caller may only delete roles within their own tenant", "FORBIDDEN")
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
 		return
 	}
 
