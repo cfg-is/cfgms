@@ -4,9 +4,8 @@
 # CFGMS Web UI
 
 React + TypeScript + Vite application for the controller-served web UI
-(Epic #2344). This is the toolchain scaffold (Story #2488): a buildable,
-lintable, testable app with a minimal placeholder screen. The login screen
-(#2495) and app shell (#2496) land in later stories.
+(Epic #2344): toolchain scaffold (#2488), login screen (#2495), app shell
+(#2496), and the fleet overview (#2497).
 
 The JS/TS toolchain is fully contained in `web/` and does not participate in
 any Go build or test gate. CI runs the same scripts (`lint`, `typecheck`,
@@ -161,8 +160,8 @@ Every authenticated screen mounts inside [`src/shell/AppShell.tsx`](src/shell/Ap
 global search, alert center, user menu), and the responsive drawer/scrim
 behavior below 1024px. `App.tsx` renders `AppShell` as the sole child of
 `RequireAuth`; later epics mount their views into `AppShell`'s `.content`
-area (fleet overview, #2497, is the first occupant — this story ships that
-area as an empty-state placeholder).
+area (fleet overview, #2497, is the first occupant; the shell's global
+search box doubles as its live filter).
 
 - **Tenant-scope context — a display convenience, not a security boundary
   (security A8.1).** [`src/shell/TenantScopeContext.tsx`](src/shell/TenantScopeContext.tsx)
@@ -191,6 +190,79 @@ area as an empty-state placeholder).
   drawer opened by the hamburger button; a scrim covers the content and
   Escape or a scrim click closes it, matching the mockup harness.
 
+## Fleet overview (Story #2497)
+
+[`src/fleet/FleetOverview.tsx`](src/fleet/FleetOverview.tsx) renders the
+steward table inside the app shell. Canonical design:
+[`docs/design/mockups/fleet-overview.html`](../docs/design/mockups/fleet-overview.html).
+Saved views and the row drill-in asset-DNA drawer are Story #2498.
+
+### Data flow
+
+- **Endpoint:** `GET /api/v1/stewards?limit=<n>&offset=<n>` through the
+  #2495 client (`apiFetch` — cookie session, central 401 handling). The
+  response is the `{ data: { stewards, total, limit, offset } }` envelope
+  from Issue #2489: `total` is the post-filter, pre-slice fleet count and
+  page order is deterministic (steward-ID sort).
+- **Scale posture (48k+ stewards):** only the current server page is ever
+  held in memory; the full fleet is never fetched. The pager and the
+  toolbar count render the server `total`.
+- **Client-side semantics (fixed by the epic):** the live filter (the
+  shell's global search box) and column sort operate on the **displayed
+  page's rows** — the filter is not a fleet-wide query bar, and the server
+  provides only pagination + count (no sort/filter params). The pager's
+  "Showing X–Y of Z" always describes the server page window; the toolbar
+  count switches to "N of Z match" while a filter or narrowed scope is
+  active. The filter haystack covers every mapped DNA value (visible or
+  hidden columns) plus the derived health and check-in text.
+- **Tenant scope:** rows are narrowed by the #2496 scope context via
+  `isScopeMatch` when a scope below the principal's root is selected, and
+  tenant paths observed in page data are reported back through
+  `registerObservedPath`. Display convenience only — server-side tenant
+  scoping on the API call is the only enforcement (security A8.1).
+- **Untrusted data:** the response body is shape-validated
+  (`parseStewardPage`) before rendering, and every steward-supplied value
+  reaches the DOM as a text node only — never markup (security A9.1;
+  regression-tested with hostile DNA values).
+
+### DNA-attribute → column mapping
+
+Defined in [`src/fleet/columns.ts`](src/fleet/columns.ts). Default columns:
+Name, Company, Last user, IP, Health, Last check-in; opt-in: OS, Agent,
+Ring, Model, Serial, MAC. Missing values render an em-dash placeholder.
+
+| Column        | Source (payload field / `dna.attributes` key)                                           |
+|---------------|-----------------------------------------------------------------------------------------|
+| Name          | `dna.hostname`, fallback `id`                                                           |
+| Company       | `tenant` (tenant path; **not emitted by the controller yet** — renders `—` until it is) |
+| Last user     | `current_user`                                                                          |
+| IP            | `primary_ip`                                                                            |
+| Health        | derived from `status` + `last_seen` (see below)                                         |
+| Last check-in | `last_seen`, relative (`12s ago` … `3d ago`; `—` = never)                               |
+| OS            | `dna.os`, fallback `os_pretty_name`                                                     |
+| Agent         | `version`, fallback `steward.version`                                                   |
+| Ring          | `deployment_ring`                                                                       |
+| Model         | `system_model`, fallback `hardware_model`                                               |
+| Serial        | `system_serial_number`, fallback `motherboard_serial`                                   |
+| MAC           | `primary_mac`                                                                           |
+
+Column selection persists in `localStorage` under `cfgms.fleet.columns`
+(allowlisted in the A7.2 source scan; values read back are validated as
+untrusted input). Full named saved views are #2498.
+
+### Health mapping
+
+[`src/fleet/health.ts`](src/fleet/health.ts) folds lifecycle `status` and
+`last_seen` staleness into one cell, colored only by semantic state tokens:
+active/online + heartbeat ≤ 5 min → **Healthy** (ok); active/online but
+older (or never) → **Unreachable** (crit); `degraded` → **Degraded**
+(warn); `lost`/`offline` → **Unreachable** (crit); `revoked` → **Revoked**
+(crit); `registered`/`dormant`/`archived` → neutral; unknown statuses
+render neutral with the raw label as inert text. The 5-minute threshold is
+a display heuristic (the payload pins no heartbeat contract), anchored at
+fetch time; Go's zero time (`0001-01-01T00:00:00Z`) is treated as "never
+seen".
+
 ## Testing
 
 Vitest with jsdom and Testing Library. Suites:
@@ -200,8 +272,11 @@ pre-session flow, 401 interception),
 [`src/auth/AuthContext.test.tsx`](src/auth/AuthContext.test.tsx) (state
 transitions, web-storage assertions), and
 [`src/pages/Login.test.tsx`](src/pages/Login.test.tsx) (mockup states,
-source scans), and `src/shell/*.test.tsx` (tenant-scope prefix matching,
-drawer/scrim/Escape behavior, user-menu logout dispatch). Setup (jest-dom
+source scans), `src/shell/*.test.tsx` (tenant-scope prefix matching,
+drawer/scrim/Escape behavior, user-menu logout dispatch), and
+`src/fleet/*.test.*` (pagination contract, live filter, sort, column
+picker + persistence, health/staleness mapping, loading/error/empty
+states, hostile-DNA text-node rendering). Setup (jest-dom
 matchers, RTL cleanup, in-memory Storage for the A7.2 assertions):
 [`src/test/setup.ts`](src/test/setup.ts).
 

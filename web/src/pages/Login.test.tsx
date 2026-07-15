@@ -181,6 +181,10 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     // data; persists across reloads so the sidebar/topbar don't reset to
     // "auto" every visit.
     { path: 'shell/UserMenu.tsx', key: 'cfgms.theme' },
+    // Fleet column selection (Story #2497) — which device-DNA columns the
+    // technician shows; a display preference, not auth data. Values read
+    // back are shape-validated as untrusted input (columns.ts).
+    { path: 'fleet/columns.ts', key: 'cfgms.fleet.columns' },
   ]
 
   it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {

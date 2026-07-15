@@ -11,6 +11,17 @@ const fetchMock = vi.fn<typeof fetch>()
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
+  // The fleet view (#2497) fetches its steward page on mount; shell tests
+  // serve it an empty page so the chrome renders over a quiet content area.
+  fetchMock.mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        data: { stewards: [], total: 0, limit: 50, offset: 0 },
+        timestamp: new Date().toISOString(),
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ),
+  )
   document.body.className = ''
 })
 
@@ -34,10 +45,15 @@ describe('AppShell', () => {
     expect(screen.getAllByText(/soon/i).length).toBeGreaterThan(0)
   })
 
-  it('renders the content area empty-state placeholder (no fleet table in this story)', () => {
+  it('mounts the fleet overview (#2497) in the content area', async () => {
     renderShell()
-    expect(screen.getByText(/fleet overview lands in story #2497/i)).toBeInTheDocument()
-    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Fleet', level: 1 }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByText(/no stewards enrolled yet/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /columns/i })).toBeInTheDocument()
   })
 
   it('renders the tenant switcher, search, alert center, and user menu', () => {
