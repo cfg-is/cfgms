@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { AuthProvider } from '../auth/AuthContext.tsx'
+import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import UserMenu from './UserMenu.tsx'
 
 function jsonResponse(status: number, body: unknown = {}): Response {
@@ -27,26 +27,61 @@ afterEach(() => {
   localStorage.clear()
 })
 
-async function signIn() {
-  fetchMock.mockResolvedValueOnce(jsonResponse(200))
-  fetchMock.mockResolvedValueOnce(jsonResponse(200))
+// Drives a real sign-in through AuthProvider.login() — UserMenu has no
+// login form of its own, so a principal only exists once something calls
+// the provider's login() (same mechanism App.tsx's Login screen uses).
+function SignedInHarness({ username }: { username: string }) {
+  const { login } = useAuth()
+  return (
+    <>
+      <button type="button" onClick={() => void login(username, 'pw-pw-pw-pw')}>
+        drive-login
+      </button>
+      <UserMenu />
+    </>
+  )
+}
+
+async function signIn(username: string) {
+  fetchMock.mockResolvedValue(jsonResponse(200))
   render(
     <AuthProvider>
-      <UserMenu />
+      <SignedInHarness username={username} />
     </AuthProvider>,
+  )
+  fireEvent.click(screen.getByRole('button', { name: 'drive-login' }))
+  await waitFor(() =>
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/web/login',
+      expect.objectContaining({ method: 'POST' }),
+    ),
   )
 }
 
 describe('UserMenu', () => {
   it('shows initials derived from the signed-in principal', async () => {
-    // AuthProvider starts signedOut with no principal; render directly with
-    // a signed-in principal by driving login through the provider's probe
-    // is unnecessary here — UserMenu only needs a principal to render, so
-    // exercise it via the real provider's login flow.
-    await signIn()
-    // Not signed in yet in this render path (no login form here) — assert
-    // the menu renders without a principal gracefully (avatar shows '?').
-    expect(screen.getByRole('button', { name: /account menu/i })).toBeInTheDocument()
+    await signIn('admin@msp-a')
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /account menu/i })).toHaveTextContent('AD'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+    expect(screen.getByText('admin@msp-a')).toBeInTheDocument()
+  })
+
+  it('derives initials from a two-part local address (dot-separated)', async () => {
+    await signIn('jane.doe@msp-a')
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /account menu/i })).toHaveTextContent('JD'),
+    )
+  })
+
+  it('shows the fallback avatar when no principal is signed in', () => {
+    render(
+      <AuthProvider>
+        <UserMenu />
+      </AuthProvider>,
+    )
+    expect(screen.getByRole('button', { name: /account menu/i })).toHaveTextContent('?')
   })
 
   it('opens the menu and dispatches logout on click', async () => {

@@ -2,13 +2,16 @@
 // Copyright 2026 Jordan Ritz
 
 import { describe, expect, it } from 'vitest'
+import { useEffect } from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { TenantScopeProvider, useTenantScope } from './TenantScopeContext.tsx'
 import TenantSwitcher from './TenantSwitcher.tsx'
 
 function Harness() {
   const { registerObservedPath } = useTenantScope()
-  registerObservedPath('root/msp-a/client-1')
+  useEffect(() => {
+    registerObservedPath('root/msp-a/client-1')
+  }, [registerObservedPath])
   return <TenantSwitcher />
 }
 

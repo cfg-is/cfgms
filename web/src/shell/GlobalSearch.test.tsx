@@ -13,11 +13,18 @@ describe('GlobalSearch', () => {
     ).toBeInTheDocument()
   })
 
-  it('is a controlled input that reports changes without calling any API', () => {
+  it('is a controlled input that reports changes via onChange only', () => {
     const onChange = vi.fn()
-    render(<GlobalSearch value="" onChange={onChange} />)
-    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'acme' } })
-    expect(onChange).toHaveBeenCalledWith('acme')
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    try {
+      render(<GlobalSearch value="" onChange={onChange} />)
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'acme' } })
+      expect(onChange).toHaveBeenCalledWith('acme')
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('reflects the controlled value prop', () => {
