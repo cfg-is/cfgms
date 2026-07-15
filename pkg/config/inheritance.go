@@ -6,6 +6,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -237,13 +238,17 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 				// Non-fatal: parse failure for one cluster must not block others.
 				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
 				// so an error here signals a corrupt document that must be surfaced, not swallowed.
-				// Sanitize into log-only copies — never mutate stewardID/tenantID/clusterName,
-				// which are used afterward for tenant-scoped config resolution.
+				stewardID = strings.ReplaceAll(stewardID, "\n", "_")
+				stewardID = strings.ReplaceAll(stewardID, "\r", "_")
+				tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+				tenantID = strings.ReplaceAll(tenantID, "\r", "_")
+				clusterName = strings.ReplaceAll(clusterName, "\n", "_")
+				clusterName = strings.ReplaceAll(clusterName, "\r", "_")
 				ir.log().WarnCtx(ctx, "skipping cluster-policies config for cluster; treating as no membership",
-					"steward_id", logging.SanitizeLogValue(stewardID),
-					"tenant_id", logging.SanitizeLogValue(tenantID),
-					"cluster", logging.SanitizeLogValue(clusterName),
-					"error", logging.SanitizeLogValue(err.Error()))
+					"steward_id", stewardID,
+					"tenant_id", tenantID,
+					"cluster", clusterName,
+					"error", err.Error())
 			}
 		}
 	}
@@ -256,12 +261,14 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 	if ir.roleProvider != nil {
 		fragments, err := ir.roleProvider.MatchingRoleFragments(ctx, stewardID)
 		if err != nil {
-			// Sanitize into log-only copies — never mutate stewardID/tenantID, which
-			// are used afterward for tenant-scoped device config resolution.
+			stewardID = strings.ReplaceAll(stewardID, "\n", "_")
+			stewardID = strings.ReplaceAll(stewardID, "\r", "_")
+			tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+			tenantID = strings.ReplaceAll(tenantID, "\r", "_")
 			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"tenant_id", logging.SanitizeLogValue(tenantID),
-				"error", logging.SanitizeLogValue(err.Error()))
+				"steward_id", stewardID,
+				"tenant_id", tenantID,
+				"error", err.Error())
 		} else {
 			for _, frag := range fragments {
 				ir.applyRoleFragment(effective, tenantID, frag)

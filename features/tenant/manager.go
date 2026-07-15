@@ -373,12 +373,11 @@ func (m *Manager) recordConfigSourceEvent(ctx context.Context, tenantID, rawURL,
 		Detail("actor", actor)
 
 	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
-		logTenantID := tenantID
-		logTenantID = strings.ReplaceAll(logTenantID, "\n", "_")
-		logTenantID = strings.ReplaceAll(logTenantID, "\r", "_")
+		tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+		tenantID = strings.ReplaceAll(tenantID, "\r", "_")
 		slog.Warn("tenant: failed to record config source audit event",
 			"action", action,
-			"tenant_id", logTenantID,
+			"tenant_id", tenantID,
 			"error", err,
 		)
 	}
