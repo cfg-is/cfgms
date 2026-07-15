@@ -368,7 +368,8 @@ func TestFailProvision_RecordsFailedFrom(t *testing.T) {
 	// "failed"; the earliest failure phase (creating) is preserved.
 	// failProvision returns the original cause for the caller to propagate.
 	secondFailure := errors.New("second failure")
-	require.ErrorIs(t, m.failProvision(ctx, cfg, "vm-fail", rec, secondFailure), secondFailure)
+	require.ErrorIs(t, m.failProvision(ctx, cfg, "vm-fail", rec, secondFailure), secondFailure,
+		"failProvision returns the original cause on a re-fail")
 	assert.Equal(t, ProvisionStateFailed, rec.State)
 	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom,
 		"a re-fail must keep the earliest failure phase, not overwrite it with failed")
@@ -387,7 +388,8 @@ func TestAdvanceProvision_ClearsStaleFailedFrom(t *testing.T) {
 	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-retry", rec, ProvisionStateCreating))
 	// failProvision returns the original cause for the caller to propagate.
 	seedFailure := errors.New("seed failed")
-	require.ErrorIs(t, m.failProvision(ctx, cfg, "vm-retry", rec, seedFailure), seedFailure)
+	require.ErrorIs(t, m.failProvision(ctx, cfg, "vm-retry", rec, seedFailure), seedFailure,
+		"failProvision returns the original cause")
 	require.Equal(t, ProvisionStateCreating, rec.FailedFrom)
 
 	// A retry advances the record forward again → the stale failure phase clears.

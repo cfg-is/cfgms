@@ -292,11 +292,11 @@ func TestTimeModule_Set_WrongConfigType(t *testing.T) {
 // wrongConfigType is a stub that implements modules.ConfigState but is not *TimeConfig.
 type wrongConfigType struct{}
 
-func (w *wrongConfigType) AsMap() map[string]interface{}  { return nil }
-func (w *wrongConfigType) ToYAML() ([]byte, error)        { return nil, nil }
-func (w *wrongConfigType) FromYAML(_ []byte) error        { return nil }
-func (w *wrongConfigType) Validate() error                { return nil }
-func (w *wrongConfigType) GetManagedFields() []string     { return nil }
+func (w *wrongConfigType) AsMap() map[string]interface{} { return nil }
+func (w *wrongConfigType) ToYAML() ([]byte, error)       { return nil, nil }
+func (w *wrongConfigType) FromYAML(_ []byte) error       { return nil }
+func (w *wrongConfigType) Validate() error               { return nil }
+func (w *wrongConfigType) GetManagedFields() []string    { return nil }
 
 // TestTimeModule_LoggingInjection verifies the module implements LoggingInjectable.
 func TestTimeModule_LoggingInjection(t *testing.T) {
