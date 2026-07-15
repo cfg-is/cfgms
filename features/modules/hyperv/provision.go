@@ -50,6 +50,15 @@ type ProvisionRecord struct {
 	StartedAt     time.Time      `json:"started_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
 	LastError     string         `json:"last_error,omitempty"`
+	// FailedFrom records the state the record was in at the moment it was moved
+	// to ProvisionStateFailed. Because State overwrites in place, the prior phase
+	// is otherwise lost — but it is exactly the signal needed to tell a
+	// host-side seed/create-phase failure (fails from creating, before the guest
+	// ever installs) apart from a post-power-on failure (fails from installing/
+	// finalizing, e.g. a controller-side completion timeout). Empty on a record
+	// that was never failed, and on legacy records written before #2467; callers
+	// must treat empty as "unknown" and NOT infer a seed-phase failure from it.
+	FailedFrom ProvisionState `json:"failed_from,omitempty"`
 }
 
 // ProvisionStore is the persistence interface for VM provisioning records.
@@ -176,6 +185,11 @@ func (m *hypervModule) advanceProvision(ctx context.Context, cfg *VMConfig, vmNa
 	record.State = newState
 	record.UpdatedAt = time.Now().UTC()
 	record.LastError = ""
+	// Advancing forward means a fresh attempt is making progress; clear any stale
+	// failure phase from a prior failed attempt so a later ready/installing record
+	// does not carry a misleading FailedFrom (#2467). failedDuringSeedPhase gates
+	// on State==Failed first, so this is data hygiene, not a correctness gate.
+	record.FailedFrom = ""
 	if err := m.storeFor(cfg).SetProvision(ctx, record); err != nil {
 		return err
 	}
@@ -194,6 +208,13 @@ func (m *hypervModule) advanceProvision(ctx context.Context, cfg *VMConfig, vmNa
 // original error so the caller can propagate it. The error message is not
 // exposed via the log at error-detail level beyond the sanitized value.
 func (m *hypervModule) failProvision(ctx context.Context, cfg *VMConfig, vmName string, record *ProvisionRecord, cause error) error {
+	// Preserve the phase we failed from BEFORE overwriting State, so the exists-
+	// branch power-on gate (applySourceGated, #2467) can tell a seed/create-phase
+	// failure from a post-install one. Do not clobber an already-set FailedFrom on
+	// a re-fail of an already-failed record (keep the earliest failure phase).
+	if record.State != ProvisionStateFailed {
+		record.FailedFrom = record.State
+	}
 	record.State = ProvisionStateFailed
 	record.UpdatedAt = time.Now().UTC()
 	if cause != nil {
@@ -247,6 +268,34 @@ func (m *hypervModule) isOwnIncompleteAttempt(ctx context.Context, cfg *VMConfig
 		return true, nil
 	default:
 		return false, nil
+	}
+}
+
+// failedDuringSeedPhase reports whether record is a Failed provisioning record
+// whose failure happened during the host-side create/seed phase — before the
+// guest ever started installing. Such a VM has no working seed, so powering it
+// on would boot an unprovisioned guest; the exists-branch gate (applySourceGated,
+// #2467) leaves it OFF (surface-and-wait) until it is reseeded.
+//
+// The signal is FailedFrom (captured by failProvision, and by the controller-
+// side completion reconciler, at the moment of failure). The seed phase only
+// runs while the record is at creating (provisionVM's re-entry guard skips it
+// once at installing+), so a seed-phase failure always fails from creating (or,
+// defensively, absent). A record that failed from installing/finalizing is a
+// different, post-power-on failure class (e.g. a completion-timeout) and must
+// keep converging normally — so it returns false. An empty FailedFrom is
+// "unknown" (legacy record, or a failure path that did not record a phase): to
+// avoid regressing a VM that is actually fine into a stuck-off state, unknown is
+// treated as NOT a seed-phase failure.
+func failedDuringSeedPhase(record *ProvisionRecord) bool {
+	if record == nil || record.State != ProvisionStateFailed {
+		return false
+	}
+	switch record.FailedFrom {
+	case ProvisionStateAbsent, ProvisionStateCreating:
+		return true
+	default:
+		return false
 	}
 }
 

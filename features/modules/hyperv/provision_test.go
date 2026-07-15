@@ -333,3 +333,87 @@ func TestProvisionNotFound_IsSentinel(t *testing.T) {
 	assert.False(t, errors.Is(ErrProvisionNotFound, ErrVMNotFound),
 		"ErrProvisionNotFound must be a distinct sentinel from ErrVMNotFound")
 }
+
+// ─── #2467 phase-capture (FailedFrom) tests ───────────────────────────────────
+
+// TestFailProvision_RecordsFailedFrom is the write-site coverage for the #2467
+// phase capture: failProvision must stamp FailedFrom with the state the record
+// was in at failure time — the signal applySourceGated later uses to tell a
+// seed/create-phase failure from a post-install one — and must persist it. On a
+// re-fail of an already-failed record the earliest failure phase wins (the guard
+// must not clobber it with "failed").
+func TestFailProvision_RecordsFailedFrom(t *testing.T) {
+	ctx := context.Background()
+	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+	cfg := &VMConfig{Name: "vm-fail", VHDPath: `C:\VMs\vm-fail.vhdx`}
+
+	rec, err := m.loadOrInitProvision(ctx, cfg, "vm-fail")
+	require.NoError(t, err)
+	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-fail", rec, ProvisionStateCreating))
+
+	// First failure, from creating → FailedFrom captures creating.
+	cause := errors.New(`hyperv: create seed VHDX for VM "vm-fail": exit status 1`)
+	got := m.failProvision(ctx, cfg, "vm-fail", rec, cause)
+	require.ErrorIs(t, got, cause, "failProvision returns the original cause")
+	assert.Equal(t, ProvisionStateFailed, rec.State)
+	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom, "FailedFrom must capture the pre-failure phase")
+
+	// The persisted copy carries it too (not just the in-memory record).
+	stored, err := m.provisionStore.GetProvision(ctx, "vm-fail")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFailed, stored.State)
+	assert.Equal(t, ProvisionStateCreating, stored.FailedFrom)
+
+	// Re-fail the already-failed record → FailedFrom must NOT be clobbered to
+	// "failed"; the earliest failure phase (creating) is preserved.
+	m.failProvision(ctx, cfg, "vm-fail", rec, errors.New("second failure"))
+	assert.Equal(t, ProvisionStateFailed, rec.State)
+	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom,
+		"a re-fail must keep the earliest failure phase, not overwrite it with failed")
+}
+
+// TestAdvanceProvision_ClearsStaleFailedFrom proves a retry (advancing a record
+// forward after a prior failure) clears the stale FailedFrom, so a later
+// installing/ready record does not carry a misleading failure phase (#2467).
+func TestAdvanceProvision_ClearsStaleFailedFrom(t *testing.T) {
+	ctx := context.Background()
+	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+	cfg := &VMConfig{Name: "vm-retry", VHDPath: `C:\VMs\vm-retry.vhdx`}
+
+	rec, err := m.loadOrInitProvision(ctx, cfg, "vm-retry")
+	require.NoError(t, err)
+	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-retry", rec, ProvisionStateCreating))
+	m.failProvision(ctx, cfg, "vm-retry", rec, errors.New("seed failed"))
+	require.Equal(t, ProvisionStateCreating, rec.FailedFrom)
+
+	// A retry advances the record forward again → the stale failure phase clears.
+	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-retry", rec, ProvisionStateCreating))
+	assert.Empty(t, string(rec.FailedFrom), "advancing forward must clear the stale failure phase")
+}
+
+// TestFailedDuringSeedPhase is the direct branch-matrix unit test for the #2467
+// classifier (the read side of the phase signal): only a Failed record whose
+// FailedFrom is absent/creating (never reached installing) is a seed-phase
+// failure; an unknown (empty) FailedFrom is deliberately NOT one.
+func TestFailedDuringSeedPhase(t *testing.T) {
+	cases := []struct {
+		name   string
+		record *ProvisionRecord
+		want   bool
+	}{
+		{"nil record", nil, false},
+		{"not failed (installing)", &ProvisionRecord{State: ProvisionStateInstalling, FailedFrom: ProvisionStateCreating}, false},
+		{"failed from creating", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateCreating}, true},
+		{"failed from absent", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateAbsent}, true},
+		{"failed from installing", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateInstalling}, false},
+		{"failed from finalizing", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateFinalizing}, false},
+		{"failed from ready", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateReady}, false},
+		{"failed with empty FailedFrom (legacy/unknown)", &ProvisionRecord{State: ProvisionStateFailed}, false},
+		{"failed from degraded", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateDegraded}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, failedDuringSeedPhase(tc.record))
+		})
+	}
+}

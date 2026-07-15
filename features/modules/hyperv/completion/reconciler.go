@@ -83,6 +83,12 @@ func (r *ProvisionCompletionReconciler) OnConnect(ctx context.Context, stewardID
 		// Timeout sweep takes priority: advance overdue records to failed
 		// regardless of whether their CorrelationID matches this steward.
 		if now.Sub(rec.StartedAt) > r.completionTimeout {
+			// Preserve the phase we timed out from before overwriting State, so
+			// the host-side power-on gate (applySourceGated, #2467) can tell this
+			// post-power-on completion timeout (fails from installing/finalizing)
+			// apart from a host-side seed-phase failure. Without it these records
+			// would carry an empty FailedFrom and be treated as unknown.
+			rec.FailedFrom = rec.State
 			rec.State = hyperv.ProvisionStateFailed
 			rec.LastError = "completion.timeout elapsed"
 			rec.UpdatedAt = now
