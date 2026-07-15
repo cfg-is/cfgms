@@ -290,6 +290,7 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // clearWebSessionCookies expires both the session and CSRF cookies (Max-Age=0).
+// cfgms_session is HttpOnly (mirrors login-time design); cfgms_csrf is not (JS reads it).
 func clearWebSessionCookies(w http.ResponseWriter) {
 	for _, name := range []string{cookieWebSession, cookieCSRFSession} {
 		http.SetCookie(w, &http.Cookie{
@@ -298,6 +299,7 @@ func clearWebSessionCookies(w http.ResponseWriter) {
 			MaxAge:   -1, // serialised as Max-Age=0 → delete
 			Path:     "/",
 			Secure:   true,
+			HttpOnly: name == cookieWebSession,
 			SameSite: http.SameSiteStrictMode,
 		})
 	}
