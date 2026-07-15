@@ -1,8 +1,9 @@
 ---
 name: story-context
-description: Detect story from branch name, fetch GitHub issue details, and calculate acceptance criteria progress. Use when commands need story number, title, progress percentage, or remaining work items.
+description: Detect story from branch name (or roadmap when no branch), fetch GitHub issue details, and calculate acceptance criteria progress. Use when commands need story number, title, progress percentage, or remaining work items.
 context: fork
 agent: general-purpose
+model: haiku
 allowed-tools: Bash
 ---
 
@@ -10,12 +11,18 @@ allowed-tools: Bash
 
 ## Steps
 
-1. **Detect story number from branch**:
+1. **Detect story number**:
    ```bash
    git branch --show-current
    ```
    Extract the story number from the branch name by finding the numeric part after `story-`.
-   If no story number found in branch name, check if a story number was passed as argument: `$ARGUMENTS`
+   If no story number is found in the branch name, check `$ARGUMENTS` for one.
+   If still none (e.g. `/story-start` auto-detection before a branch exists), scan the roadmap for candidates instead — this keeps the large roadmap file and issue list out of the caller's context:
+   ```bash
+   grep -nE '^- \[ \] \*\*.*\*\* \(Issue #[0-9]+\)' docs/product/roadmap.md
+   gh issue list --state open --limit 50 --json number,title,labels
+   ```
+   Return the uncompleted candidates (number + title) rather than a single story, and let the caller choose.
 
 2. **Fetch issue details from GitHub** (use the extracted story number):
    ```bash
