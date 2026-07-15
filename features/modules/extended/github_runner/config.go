@@ -66,6 +66,19 @@ type RunnerConfig struct {
 	ServiceEnabled bool `yaml:"service_enabled,omitempty"`
 }
 
+// rollupState returns the single observed-state string for the runner, derived
+// from Installed and ServiceRunning. The three values match the literals the
+// CI-runner provisioning workflow's await condition polls for.
+func (c *RunnerConfig) rollupState() string {
+	if !c.Installed {
+		return "not-installed"
+	}
+	if !c.ServiceRunning {
+		return "installed-stopped"
+	}
+	return "enrolled-running"
+}
+
 // AsMap returns the drift-comparable fields. agent_url/agent_sha256 are inputs
 // that define HOW to converge, not observable drift dimensions, so they are
 // omitted from the comparison surface.
@@ -81,6 +94,7 @@ func (c *RunnerConfig) AsMap() map[string]interface{} {
 		"installed":       c.Installed,
 		"service_running": c.ServiceRunning,
 		"service_enabled": c.ServiceEnabled,
+		"state":           c.rollupState(),
 	}
 }
 
