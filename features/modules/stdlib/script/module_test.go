@@ -4,13 +4,50 @@ package script
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
 
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+// newTestGitScriptRepo creates a real GitScriptRepository backed by a temp-dir
+// FlatFile config store, pre-populated with the given scripts.
+// The hash field is computed from content so Get's integrity check passes.
+func newTestGitScriptRepo(t *testing.T, scripts ...*VersionedScript) *GitScriptRepository {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := NewGitScriptRepository(sm.GetConfigStore(), "test-tenant", false)
+	require.NoError(t, err)
+	for _, s := range scripts {
+		h := sha256.Sum256([]byte(s.Content))
+		s.Hash = fmt.Sprintf("%x", h)
+		require.NoError(t, repo.Create(s))
+	}
+	return repo
+}
+
+// makeTestVersionedScript builds a minimal VersionedScript for test use.
+func makeTestVersionedScript(id, version string) *VersionedScript {
+	v, _ := ParseVersion(version)
+	return &VersionedScript{
+		Metadata: &ScriptMetadata{
+			ID:       id,
+			Name:     id,
+			Version:  v,
+			Shell:    getTestShell(),
+			Platform: []string{"linux", "darwin", "windows"},
+		},
+		Content: getTestScript(),
+		Hash:    "abc123",
+	}
+}
 
 // testConfigState mirrors the executor's unexported genericConfigState so tests
 // can exercise CompareStates against the real comparator without importing the
@@ -450,6 +487,181 @@ func TestScriptModule_FailedRunNotMarkedConverged(t *testing.T) {
 	if !driftDetected {
 		t.Errorf("expected drift to be detected after failed script (resource would be wrongly skipped); diff: %s", diff.GetDetailedDiff())
 	}
+}
+
+// TestModule_StageAction verifies that the stage action:
+//  1. Looks up a library script by id+version from the script repository.
+//  2. Records staged state (StatusStaged) without executing the inline content.
+//  3. Resolves param_bindings via the secret store on that path.
+func TestModule_StageAction(t *testing.T) {
+	const scriptID = "cirunner-provision"
+	const scriptVersion = "1.0.0"
+
+	// Populate a real git-backed repository with a known script.
+	repo := newTestGitScriptRepo(t, makeTestVersionedScript(scriptID, scriptVersion))
+
+	// Set up a real secret store so we can verify secret binding resolution.
+	store := newTestSecretStore(t)
+	storeSecret(t, store, "github/runner-token", "ghs-staging-secret")
+
+	module := NewModule()
+	module.SetScriptRepository(repo)
+	module.SetSecretStore(store)
+
+	ctx := context.WithValue(context.Background(), timestampKey, time.Now().Unix())
+	resourceID := "ci-runner-script"
+
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage: &StageConfig{
+			ID:      scriptID,
+			Version: scriptVersion,
+		},
+		ParamBindings: []ParamBinding{
+			{Name: "RunnerToken", From: ParamSourceSecretStore, Key: "github/runner-token"},
+			{Name: "OrgName", From: ParamSourceLiteral, Value: "my-org"},
+		},
+	}
+
+	err := module.Set(ctx, resourceID, cfg)
+	require.NoError(t, err, "stage action must succeed")
+
+	// Verify the module recorded staged status — no inline execution occurred.
+	state, exists := module.GetExecutionState(resourceID)
+	require.True(t, exists, "execution state must be recorded after stage")
+	assert.Equal(t, StatusStaged, state.Status, "status must be StatusStaged (not Running/Completed)")
+	assert.Nil(t, state.Result, "no ExecutionResult should be produced on the stage path")
+
+	// Verify the staged ref points to the correct script.
+	require.NotNil(t, state.Staged, "staged ref must be populated")
+	assert.Equal(t, scriptID, state.Staged.ID)
+	assert.Equal(t, scriptVersion, state.Staged.Version)
+	require.NotNil(t, state.Staged.Script, "library script must be fetched and recorded")
+	assert.Equal(t, scriptID, state.Staged.Script.Metadata.ID)
+
+	// Verify param_bindings were resolved.
+	require.Len(t, state.Staged.ResolvedParams, 2)
+	byName := make(map[string]ResolvedParam)
+	for _, p := range state.Staged.ResolvedParams {
+		byName[p.Name] = p
+	}
+
+	token := byName["RunnerToken"]
+	assert.Equal(t, "ghs-staging-secret", token.Value, "secret binding must be resolved")
+	assert.True(t, token.IsSecret, "RunnerToken must be marked as a secret")
+
+	org := byName["OrgName"]
+	assert.Equal(t, "my-org", org.Value, "literal binding must be resolved")
+	assert.False(t, org.IsSecret, "OrgName must not be marked as a secret")
+}
+
+// TestModule_StageAction_MissingRepo verifies that a stage action without
+// a configured script repository returns a clear error.
+func TestModule_StageAction_MissingRepo(t *testing.T) {
+	module := NewModule() // No script repository configured.
+
+	ctx := context.Background()
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "some-script", Version: "1.0.0"},
+	}
+
+	err := module.Set(ctx, "resource-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "script repository")
+}
+
+// TestModule_StageAction_MissingScript verifies that looking up a non-existent
+// library script returns a clear error.
+func TestModule_StageAction_MissingScript(t *testing.T) {
+	repo := newTestGitScriptRepo(t) // Empty repository.
+	module := NewModule()
+	module.SetScriptRepository(repo)
+
+	ctx := context.Background()
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "nonexistent-script", Version: "1.0.0"},
+	}
+
+	err := module.Set(ctx, "resource-1", cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "library script lookup failed")
+}
+
+// TestModule_StageAction_LiteralOnlyBindings verifies the stage path with
+// literal-only param bindings (no secret store required).
+func TestModule_StageAction_LiteralOnlyBindings(t *testing.T) {
+	const scriptID = "deploy-agent"
+	const scriptVersion = "2.0.1"
+
+	repo := newTestGitScriptRepo(t, makeTestVersionedScript(scriptID, scriptVersion))
+	module := NewModule()
+	module.SetScriptRepository(repo)
+	// No secret store set — literal bindings must not require one.
+
+	ctx := context.Background()
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: scriptID, Version: scriptVersion},
+		ParamBindings: []ParamBinding{
+			{Name: "Endpoint", From: ParamSourceLiteral, Value: "https://api.example.com"},
+		},
+	}
+
+	err := module.Set(ctx, "resource-2", cfg)
+	require.NoError(t, err)
+
+	state, exists := module.GetExecutionState("resource-2")
+	require.True(t, exists)
+	assert.Equal(t, StatusStaged, state.Status)
+	require.Len(t, state.Staged.ResolvedParams, 1)
+	assert.Equal(t, "https://api.example.com", state.Staged.ResolvedParams[0].Value)
+}
+
+// TestModule_StageConfig_Validate_MissingStage verifies that a stage action
+// without a stage config fails validation.
+func TestModule_StageConfig_Validate_MissingStage(t *testing.T) {
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		// Stage is nil — must fail.
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage configuration is required")
+}
+
+// TestModule_StageConfig_Validate_MissingID verifies that a stage config without
+// an ID fails validation.
+func TestModule_StageConfig_Validate_MissingID(t *testing.T) {
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "", Version: "1.0.0"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage.id")
+}
+
+// TestModule_StageConfig_Validate_MissingVersion verifies that a stage config
+// with a non-empty ID but empty Version fails validation.
+func TestModule_StageConfig_Validate_MissingVersion(t *testing.T) {
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "my-script", Version: ""},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage.version")
+}
+
+// TestScriptConfig_Validate_UnsupportedAction verifies that an unrecognised
+// action value returns an error, exercising the default branch in Validate().
+func TestScriptConfig_Validate_UnsupportedAction(t *testing.T) {
+	cfg := &ScriptConfig{Action: "run"}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported action")
 }
 
 // TestScriptModule_SuccessRunNoDriftWithNonSecondTimeout verifies that a script

@@ -6,6 +6,36 @@ import (
 	"time"
 )
 
+// Script action constants
+const (
+	// ScriptActionExecute is the default action: run inline script content.
+	ScriptActionExecute = "execute"
+	// ScriptActionStage stages a library script by id+version for delivery
+	// without executing it inline. param_bindings are resolved on this path.
+	ScriptActionStage = "stage"
+)
+
+// StageConfig identifies a library script to stage for delivery.
+// Required when ScriptConfig.Action == ScriptActionStage.
+type StageConfig struct {
+	// ID is the library script identifier.
+	ID string `yaml:"id" json:"id"`
+	// Version is the semantic version to stage (e.g. "1.2.3").
+	Version string `yaml:"version" json:"version"`
+}
+
+// StagedRef holds the result of a successful stage action.
+type StagedRef struct {
+	// ID is the staged library script identifier.
+	ID string
+	// Version is the staged version string.
+	Version string
+	// Script is the fetched VersionedScript from the library repository.
+	Script *VersionedScript
+	// ResolvedParams are the parameter bindings resolved during staging.
+	ResolvedParams []ResolvedParam
+}
+
 // ExecutionContext defines how a script should be executed in terms of user privilege.
 type ExecutionContext string
 
@@ -78,4 +108,7 @@ const (
 	StatusFailed    ExecutionStatus = "failed"
 	StatusTimeout   ExecutionStatus = "timeout"
 	StatusCancelled ExecutionStatus = "cancelled"
+	// StatusStaged indicates a library script was staged for delivery.
+	// The module recorded the library reference without executing inline content.
+	StatusStaged ExecutionStatus = "staged"
 )

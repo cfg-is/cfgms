@@ -15,7 +15,10 @@ import (
 
 // ScriptConfig represents the configuration for a script resource
 type ScriptConfig struct {
-	Content          string                 `yaml:"content"`                     // Script content
+	// Action is the script action: "" or "execute" (default) runs inline Content;
+	// "stage" stages a library script by id+version for delivery without executing inline.
+	Action           string                 `yaml:"action,omitempty" json:"action,omitempty"`
+	Content          string                 `yaml:"content"`                     // Script content (required when Action == "execute")
 	Shell            ShellType              `yaml:"shell"`                       // Required shell type
 	Timeout          time.Duration          `yaml:"timeout"`                     // Execution timeout
 	Environment      map[string]string      `yaml:"environment,omitempty"`       // Environment variables
@@ -25,6 +28,11 @@ type ScriptConfig struct {
 	ExecutionContext ExecutionContext       `yaml:"execution_context,omitempty"` // How the script runs (system or logged_in_user)
 	Description      string                 `yaml:"description,omitempty"`       // Script description
 	Metadata         map[string]interface{} `yaml:"metadata,omitempty"`          // Additional metadata
+	// Stage is required when Action == ScriptActionStage.
+	Stage *StageConfig `yaml:"stage,omitempty" json:"stage,omitempty"`
+	// ParamBindings declares how script parameters receive their values at execution time.
+	// Resolved on both the "execute" and "stage" paths via the module's secret store.
+	ParamBindings []ParamBinding `yaml:"param_bindings,omitempty" json:"param_bindings,omitempty"`
 	// rawTimeout preserves the original string form (e.g. "5m") from operator YAML
 	// so AsMap() can echo it back without Go Duration.String() normalisation
 	// (which would turn "5m" into "5m0s", causing a false comparator mismatch).
@@ -85,6 +93,9 @@ func (c *ScriptConfig) FromYAML(data []byte) error {
 // timeout is parsed from its duration string. (Issue #1572)
 func scriptConfigFromMap(m map[string]interface{}) (*ScriptConfig, error) {
 	c := &ScriptConfig{}
+	if v, ok := m["action"].(string); ok {
+		c.Action = v
+	}
 	if v, ok := m["content"].(string); ok {
 		c.Content = v
 	}
@@ -136,11 +147,70 @@ func scriptConfigFromMap(m map[string]interface{}) (*ScriptConfig, error) {
 	case float64:
 		c.Timeout = time.Duration(t)
 	}
+
+	// Decode stage config if present.
+	if stageRaw, ok := m["stage"]; ok {
+		switch stageVal := stageRaw.(type) {
+		case map[string]interface{}:
+			stage := &StageConfig{}
+			if id, ok := stageVal["id"].(string); ok {
+				stage.ID = id
+			}
+			if ver, ok := stageVal["version"].(string); ok {
+				stage.Version = ver
+			}
+			c.Stage = stage
+		case *StageConfig:
+			c.Stage = stageVal
+		}
+	}
+
+	// Decode param_bindings if present.
+	if pbRaw, ok := m["param_bindings"]; ok {
+		switch pbVal := pbRaw.(type) {
+		case []ParamBinding:
+			c.ParamBindings = pbVal
+		case []interface{}:
+			for _, item := range pbVal {
+				if pbMap, ok := item.(map[string]interface{}); ok {
+					pb := ParamBinding{}
+					if name, ok := pbMap["name"].(string); ok {
+						pb.Name = name
+					}
+					if from, ok := pbMap["from"].(string); ok {
+						pb.From = ParamSource(from)
+					}
+					if key, ok := pbMap["key"].(string); ok {
+						pb.Key = key
+					}
+					if value, ok := pbMap["value"].(string); ok {
+						pb.Value = value
+					}
+					c.ParamBindings = append(c.ParamBindings, pb)
+				}
+			}
+		}
+	}
+
 	return c, nil
 }
 
 // Validate ensures the configuration is valid
 func (c *ScriptConfig) Validate() error {
+	// Validate the action field and dispatch to action-specific validation.
+	switch c.Action {
+	case "", ScriptActionExecute:
+		return c.validateExecuteAction()
+	case ScriptActionStage:
+		return c.validateStageAction()
+	default:
+		return fmt.Errorf("%w: unsupported action %q (must be %q or %q)",
+			modules.ErrInvalidInput, c.Action, ScriptActionExecute, ScriptActionStage)
+	}
+}
+
+// validateExecuteAction validates the configuration for the execute (default) action.
+func (c *ScriptConfig) validateExecuteAction() error {
 	if c.Content == "" {
 		return fmt.Errorf("%w: script content cannot be empty", modules.ErrInvalidInput)
 	}
@@ -196,6 +266,22 @@ func (c *ScriptConfig) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateStageAction validates the configuration for the stage action.
+// Content is NOT required; Stage.ID and Stage.Version are required.
+func (c *ScriptConfig) validateStageAction() error {
+	if c.Stage == nil {
+		return fmt.Errorf("%w: stage configuration is required when action is %q",
+			modules.ErrInvalidInput, ScriptActionStage)
+	}
+	if c.Stage.ID == "" {
+		return fmt.Errorf("%w: stage.id is required", modules.ErrInvalidInput)
+	}
+	if c.Stage.Version == "" {
+		return fmt.Errorf("%w: stage.version is required", modules.ErrInvalidInput)
+	}
 	return nil
 }
 
