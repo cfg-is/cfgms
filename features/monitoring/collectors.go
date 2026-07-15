@@ -17,6 +17,11 @@ func (sm *SystemMonitor) metricsCollectionLoop(ctx context.Context) {
 	ticker := time.NewTicker(sm.config.MetricsInterval)
 	defer ticker.Stop()
 
+	// Collect once immediately so metrics are available without waiting a full
+	// interval. Availability must not depend on the ticker firing, otherwise
+	// consumers that read shortly after Start observe an empty snapshot.
+	sm.collectMetrics(ctx)
+
 	for {
 		select {
 		case <-ticker.C:

@@ -6,11 +6,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -435,4 +439,117 @@ func TestHandleGetJob_NilStore_Returns503(t *testing.T) {
 	// batchJobStore is nil by default.
 	rec := getJobWithTenant(server, "any-id", "tenant-a")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// ── log-injection sanitization (AC: CodeQL go/log-injection) ─────────────────
+
+// errorCapturingLogger records Error-level log calls; all other levels are no-ops.
+// It is a real log-buffer implementation — not a mock of any CFGMS component —
+// following the same pattern as auditCapturingLogger in middleware_test.go.
+type errorCapturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries []struct {
+		msg string
+		kvs []interface{}
+	}
+}
+
+func (l *errorCapturingLogger) Error(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, struct {
+		msg string
+		kvs []interface{}
+	}{msg: msg, kvs: kvs})
+}
+
+// kvValue returns the first value for key across all captured Error entries, or nil.
+func (l *errorCapturingLogger) kvValue(key string) interface{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		for i := 0; i+1 < len(e.kvs); i += 2 {
+			if k, ok := e.kvs[i].(string); ok && k == key {
+				return e.kvs[i+1]
+			}
+		}
+	}
+	return nil
+}
+
+// errBatchJobExecutor is a real test component (not a mock) that returns a
+// pre-configured error from Execute. The done channel is closed when Execute
+// is called so tests can synchronize with the asynchronous handler goroutine.
+type errBatchJobExecutor struct {
+	err  error
+	done chan struct{}
+}
+
+func (e *errBatchJobExecutor) Execute(_ context.Context, _ *batchjob.BatchJob) error {
+	defer close(e.done)
+	return e.err
+}
+
+// TestHandleCreateJob_ExecutorError_LogValueSanitized is the required AC test for
+// the CodeQL go/log-injection fix at handlers_jobs.go:146.
+//
+// It asserts that an execErr containing \n/\r is stripped in the logged "error"
+// field (preventing log-line forgery), and that a normal error message with no
+// control characters passes through unchanged.
+func TestHandleCreateJob_ExecutorError_LogValueSanitized(t *testing.T) {
+	t.Run("newlines_stripped", func(t *testing.T) {
+		capLog := &errorCapturingLogger{}
+		server := setupTestServerWithLogger(t, capLog)
+		store := newTestBatchJobStoreForAPI()
+		server.batchJobStore = store
+
+		dirtyErr := errors.New("device sync failed\nforged log line\r\nalso forged")
+		exec := &errBatchJobExecutor{err: dirtyErr, done: make(chan struct{})}
+		server.batchJobExecutor = exec
+
+		rec := postCreateJob(server, `{"selector":"all","batch_size":3}`)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+
+		select {
+		case <-exec.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("executor goroutine did not complete within timeout")
+		}
+
+		loggedErr := capLog.kvValue("error")
+		require.NotNil(t, loggedErr, "expected 'error' key in logged Error entries")
+		loggedStr, ok := loggedErr.(string)
+		require.True(t, ok, "sanitized error must be logged as a string")
+		assert.NotContains(t, loggedStr, "\n", "\\n must be stripped from logged error")
+		assert.NotContains(t, loggedStr, "\r", "\\r must be stripped from logged error")
+		assert.Contains(t, loggedStr, "device sync failed", "error message text must be preserved")
+	})
+
+	t.Run("clean_error_passes_through", func(t *testing.T) {
+		capLog := &errorCapturingLogger{}
+		server := setupTestServerWithLogger(t, capLog)
+		store := newTestBatchJobStoreForAPI()
+		server.batchJobStore = store
+
+		cleanErr := errors.New("normal execution failure")
+		exec := &errBatchJobExecutor{err: cleanErr, done: make(chan struct{})}
+		server.batchJobExecutor = exec
+
+		rec := postCreateJob(server, `{"selector":"all","batch_size":3}`)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+
+		select {
+		case <-exec.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("executor goroutine did not complete within timeout")
+		}
+
+		loggedErr := capLog.kvValue("error")
+		require.NotNil(t, loggedErr)
+		loggedStr, ok := loggedErr.(string)
+		require.True(t, ok)
+		assert.Equal(t, "normal execution failure", loggedStr,
+			"clean error message must pass through unchanged")
+	})
 }

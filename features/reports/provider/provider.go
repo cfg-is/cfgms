@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet/storage"
@@ -54,7 +55,12 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 
 			historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
 			if err != nil {
-				p.logger.Warn("failed to get DNA history for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+				// Sequential-reassignment form required for CodeQL's ReplaceSanitizer;
+				// logging.SanitizeLogValue handles full control-char stripping for security.
+				safeDeviceID := logging.SanitizeLogValue(deviceID)
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+				p.logger.Warn("failed to get DNA history for device", "device_id", safeDeviceID, "error", err)
 				continue
 			}
 
