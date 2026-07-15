@@ -247,6 +247,14 @@ cfgms/operator action** (no `Move-ClusterGroup`), and convergence following — 
 duplicate, no gap.
 
 Procedure:
+0. **Prerequisite — a BOOTABLE ha_role VM.** The role must sustain as a *healthy*
+   clustered VM to be a live-migration candidate. A VM with an empty/0-byte VHD
+   (as the `#2426` cascade fixture uses — it only needs the role to *exist*) has no
+   guest OS, so it has no heartbeat; failover-cluster health monitoring keeps the
+   VM resource **Offline** and it cannot stay Online for the balancer to move.
+   Provision a real bootable image into the ha_role VM first (a `source:` seed on
+   the `hyperv.vm` resource), boot it, and confirm `Get-VM` shows a heartbeat
+   before proceeding.
 1. Confirm the balancer is on: `(Get-Cluster -Name cfg-lab).AutoBalancerMode` (2 =
    load-balance on join + every 30 min) and `.AutoBalancerLevel` (1 = balance when
    a node exceeds 80%).
