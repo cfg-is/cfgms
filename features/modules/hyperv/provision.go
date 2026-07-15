@@ -185,6 +185,11 @@ func (m *hypervModule) advanceProvision(ctx context.Context, cfg *VMConfig, vmNa
 	record.State = newState
 	record.UpdatedAt = time.Now().UTC()
 	record.LastError = ""
+	// Advancing forward means a fresh attempt is making progress; clear any stale
+	// failure phase from a prior failed attempt so a later ready/installing record
+	// does not carry a misleading FailedFrom (#2467). failedDuringSeedPhase gates
+	// on State==Failed first, so this is data hygiene, not a correctness gate.
+	record.FailedFrom = ""
 	if err := m.storeFor(cfg).SetProvision(ctx, record); err != nil {
 		return err
 	}

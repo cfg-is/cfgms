@@ -112,6 +112,11 @@ func TestCompletionReconciler_TimeoutSweepAdvancesToFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hyperv.ProvisionStateFailed, got.State, "overdue record must be advanced to failed")
 	assert.Contains(t, got.LastError, "completion.timeout", "LastError must mention completion.timeout")
+	// #2467: the timeout sweep must preserve the phase it timed out from
+	// (installing) so the host-side power-on gate classifies this post-power-on
+	// completion timeout as NOT a seed-phase failure and keeps converging.
+	assert.Equal(t, hyperv.ProvisionStateInstalling, got.FailedFrom,
+		"timeout sweep must record FailedFrom = the pre-timeout phase (installing)")
 }
 
 // TestCompletionReconciler_TimeoutSweepSkipsTerminalRecords verifies that

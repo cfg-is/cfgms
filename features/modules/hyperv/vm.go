@@ -1253,6 +1253,13 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	// different, post-power-on failure class such as a controller-side completion
 	// timeout, completion/reconciler.go) is deliberately NOT caught here and keeps
 	// converging normally.
+	//
+	// This runs BEFORE the isHealthyVMState/degraded check on purpose: a
+	// seed-phase failure is a more precise diagnosis than "existing VM looks
+	// unhealthy", and surface-and-wait (VM stays off) is the correct outcome for
+	// both a healthy-looking and a broken observed state — neither should power a
+	// seedless guest on. A record failed during the seed phase therefore takes
+	// precedence over the degraded surface.
 	if failedDuringSeedPhase(record) {
 		if logger, ok := m.GetLogger(); ok {
 			logger.Warn("hyperv: provisioning failed during the seed/create phase; surface-and-wait (VM stays off until reseeded, no power-on)",
