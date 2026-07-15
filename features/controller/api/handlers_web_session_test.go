@@ -343,6 +343,15 @@ func TestWebLogout_RevokesSessionAndClearsCookies(t *testing.T) {
 		}
 	}
 
+	// cfgms_session deletion cookie must carry HttpOnly (mirrors login-time design, clears CodeQL #1059).
+	if sess, ok := cookieMap[cookieWebSession]; ok {
+		assert.True(t, sess.HttpOnly, "cfgms_session deletion cookie must be HttpOnly")
+	}
+	// cfgms_csrf deletion cookie must NOT be HttpOnly (matches its login-time non-HttpOnly design).
+	if csrf, ok := cookieMap[cookieCSRFSession]; ok {
+		assert.False(t, csrf.HttpOnly, "cfgms_csrf deletion cookie must NOT be HttpOnly")
+	}
+
 	// Server-side session must be revoked — subsequent validation must fail.
 	srv.mu.RLock()
 	mgr := srv.webSessionManager
