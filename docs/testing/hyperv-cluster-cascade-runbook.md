@@ -133,7 +133,164 @@ from a VM that is still in config — is the separate, role-only path proven by 
 
 ---
 
-## 4. Cleanup / recovery
+## 4. Layer 2 — idiomatic, controller-driven validation (#2577)
+
+Section 3 above is observed manually. **Layer 2** makes the idiomatic path a
+first-class validation: config is authored at the tenant/cluster scope, cascaded
+by the controller, read by every member, with only the CNO acting — driven
+through **cfgms config + the `cfg` admin CLI**, never `module.Set` and never raw
+cluster cmdlets for anything under test (placement/membership). Raw cluster
+cmdlets are used ONLY to observe, and OS tools ONLY to inject load.
+
+### 4.1 Automated idiomatic suite
+
+`test/e2e/hyperv/cluster_cascade_idiomatic_test.go` (build tag `e2e`, package
+`hyperv_e2e`) drives the controller with the `cfg` CLI and observes each member's
+effective config + the live cluster. It reuses the Layer-1 harness (`ccVMInstances`
+et al.) and skips cleanly when the idiomatic controls are unset.
+
+```powershell
+# On a cfg-lab member node, elevated (cluster admin) or via the SYSTEM exec channel:
+$env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
+$env:CFGMS_E2E_CFG_BIN        = 'C:\git\cfgms\bin\cfg-dev.exe'
+$env:CFGMS_E2E_ADMIN_BUNDLE   = 'C:\Users\cfg\admin.bundle.yaml'   # or CFGMS_ADMIN_BUNDLE
+$env:CFGMS_E2E_MEMBER_IDS     = 'steward-1780659937223058807,steward-1782769671586775983,steward-1782769748587622286'
+# Optional (defaults shown): CFGMS_E2E_HAROLE_VM=cfgms-e2e-ha-01, CFGMS_E2E_ROLE_TAG=e2e-ha-cluster
+go test -tags e2e -v -run TestIdiomatic -timeout 20m ./test/e2e/hyperv/...
+```
+
+| Test | Drives (idiomatic) | Asserts |
+|------|--------------------|---------|
+| `TestIdiomaticCascade_IdenticalAcrossMembersSingleCreate` | reads each member's `cfg config show` | the cascaded `ha_role` VM is **identical** across all 3 members' effective config; exactly **one** VM cluster-wide (CNO create, no duplicate) |
+| `TestIdiomaticPlacement_DeclaredConfigReflectedLive` | reads the CNO's effective `hyperv.cluster` `roles.<vm>` | the LIVE cluster reflects the declared `preferred_owners` (group owners, ordered), `possible_owners` (resource owners, set), `anti_affinity_class` (group class) |
+| `TestIdiomaticLeave_DropsDefinitionKeepsVM` | `cfg steward tag rm` on a non-owner member | the VM definition **drops** from that member's effective config; the still-clustered VM is **NOT deleted** (single instance survives on its owner) |
+
+The suite never authors the VM or its placement (those are under test); a bed that
+has not been cascaded-in yet **skips** with a pointer here, rather than creating it.
+
+### 4.2 Idiomatic cascade-in + single CNO create (AC1)
+
+Authored as a role config whose selector is a tag on every member:
+
+```bash
+cfg role create e2e-ha-cluster --tenant infra-hyperv --selector "tag:e2e-ha-cluster" --config ha-vm.yaml
+cfg steward tag add <each member steward-id> e2e-ha-cluster
+# ha-vm.yaml resources: one hyperv.vm cfgms-e2e-ha-01 with ha_role.cluster_name: cfg-lab,
+# state: stopped, CSV-homed vhd_path C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx.
+```
+
+Observe (`cfg config show <id>`) that all three members carry an **identical**
+`cfgms-e2e-ha-01` `hyperv.vm` resource, and that exactly the CNO owner creates it
+(`Get-VM -ComputerName <each node>` shows one distinct VMId cluster-wide). Live-
+proven 2026-07-15 (all 3 members converge clean; owner "already in desired state",
+both non-owners "managed on another node — compliant by delegation"; one VMId).
+
+> **Note — role/tag changes do not bump the steward config version.** A steward
+> won't re-pull a pure selector change until its version bumps. Force a re-pull
+> with `cfg config upload <device.cfg> --steward <id>` (which bumps the version),
+> then converge. Avoid triple rapid version bumps — overlapping converge passes
+> race and transiently mis-report.
+
+### 4.3 Declarative FC placement (AC2)
+
+Author placement on the cluster-scoped `hyperv.cluster` resource (in this bed, on
+the CNO's device config — `role_names` + `roles.<vm>`), then `cfg config upload`
+to bump the version and re-pull:
+
+```yaml
+    - name: cfg-lab
+      module: hyperv.cluster
+      config:
+        name: cfg-lab
+        transport: ps-host
+        role_names: [cfgms-e2e-ha-01]
+        roles:
+          cfgms-e2e-ha-01:
+            preferred_owners: [CFG-AB-02, CFG-70-02]   # ordered; Set-ClusterOwnerNode -Group
+            possible_owners:  [CFG-70-02, CFG-AB-02]   # restriction (excludes CFG-C3-02); -Resource
+            anti_affinity_class: e2e-ha-affinity        # Set-ClusterGroup -AntiAffinityClass
+```
+
+Only the CNO owner reconciles (`reconcileRoleProperties`, `cluster.go`). Confirm
+on the live cluster (read-only):
+
+```powershell
+(Get-ClusterOwnerNode -Cluster cfg-lab -Group cfgms-e2e-ha-01).OwnerNodes.Name          # preferred, ordered
+$r = @(Get-ClusterResource -Cluster cfg-lab | Where-Object {
+        [string]$_.OwnerGroup -eq 'cfgms-e2e-ha-01' -and [string]$_.ResourceType -eq 'Virtual Machine' })
+(Get-ClusterOwnerNode -Cluster cfg-lab -Resource $r[0].Name).OwnerNodes.Name             # possible, set
+(Get-ClusterGroup -Cluster cfg-lab -Name cfgms-e2e-ha-01).AntiAffinityClassNames         # class
+```
+
+Live-proven 2026-07-15 (v0.9.29): preferred `{CFG-AB-02, CFG-70-02}`, possible
+`{CFG-70-02, CFG-AB-02}` (C3 excluded), anti-affinity `{e2e-ha-affinity}` — each
+matching the declared config.
+
+> **Bug the idiomatic path surfaced + fixed (#2577).** On the first push (v0.9.28)
+> `possible_owners` silently did not apply while preferred/anti-affinity did. Root
+> cause: `Cfgms-SetClusterRolePossibleOwners` resolved the VM resource with
+> `$_.OwnerGroup.Name` / `$_.ResourceType.Name`, but on Windows Server 2025
+> `Get-ClusterResource` returns those as plain **strings** (`.Name` is `$null`) —
+> so the filter matched nothing and possible_owners was skipped with no error. The
+> Layer-1 dispatch/reconcile tests use a fake transport, so they never saw the real
+> object shape. Fixed with `[string]` coercion (robust for string OR object);
+> guarded by `TestPreamble_PossibleOwnersFilterUsesStringCoercion`. Use the
+> `[string]`-coerced `Where-Object` above when observing possible owners.
+
+### 4.4 Re-balance under load — native dynamic optimization (AC3)
+
+**Goal:** prove the idiomatic loop (config → cascade → converge → owner-gate) holds
+through a **cluster-initiated** ownership change — the failover cluster's native VM
+load balancer (`(Get-Cluster).AutoBalancerMode`, enabled by default; cfgms authors
+no auto-balance property) moving the role under injected load, with **zero
+cfgms/operator action** (no `Move-ClusterGroup`), and convergence following — no
+duplicate, no gap.
+
+Procedure:
+1. Confirm the balancer is on: `(Get-Cluster -Name cfg-lab).AutoBalancerMode` (2 =
+   load-balance on join + every 30 min) and `.AutoBalancerLevel` (1 = balance when
+   a node exceeds 80%).
+2. Ensure `possible_owners` for the role admits a target node with headroom (widen
+   via the AC2 config if a prior restriction leaves no valid target).
+3. Bring the role **Online** on a node, then inject sustained CPU/memory pressure on
+   that node's host (OS tools — the ONLY raw-tool use here) until it crosses the
+   balancer level.
+4. With a background cross-node poller running (`ccVMInstances`: never 2 distinct
+   VMIds, never 0), wait for the balancer to live-migrate the role to another node
+   (up to the ~30-min evaluation cycle). Take no cfgms/operator action.
+5. Assert: the new owner's convergence adopts the role; the previous owner goes
+   quiet (owner-gate skip, no lifecycle writes); exactly one instance throughout.
+
+> **cfg-lab constraint (2026-07-15).** This bed is not ideal for the load path:
+> the cfgms controller itself (`cfgms-ctrl-01`) runs as a **clustered VM on these
+> same nodes**, so stressing nodes to the Level-1 (80%) threshold risks migrating/
+> disrupting the control plane; `CFG-70-02` sits at ~100% memory from the CI VMs
+> (no headroom to host the running role); and the balancer's 30-min evaluation
+> makes a single-session result non-deterministic. Run AC3 on a bed where the
+> controller is **not** a cluster VM and nodes have headroom. The cfgms code path
+> exercised is identical to Layer-1 `FailoverHandoff` (the owner-gate reacts to
+> whoever owns the role, transparent to what triggered the move); AC3 differs only
+> in the *trigger* (cluster load balancer vs operator `Move-ClusterGroup`).
+
+### 4.5 Idiomatic leave (AC4)
+
+Drop a member from the cascade by removing its role tag; the definition disappears
+from that member's effective config, the still-clustered VM is untouched:
+
+```bash
+cfg steward tag rm <member steward-id> e2e-ha-cluster
+cfg config show <member steward-id>   # cfgms-e2e-ha-01 no longer present
+```
+
+Live-proven 2026-07-15 on CFG-C3-02 (non-owner): effective config `cfgms-e2e-ha-01`
+occurrences 3 → 0; the VM survived unchanged (same VMId, present only on the owner
+CFG-70-02, one instance, clustered role still present). A dropped cascade
+definition is not a `state: absent` demote — no removal is issued (no-prune: untag
+≠ delete). Re-add the tag to restore full membership.
+
+---
+
+## 5. Cleanup / recovery
 
 If a run is interrupted before `ccCleanupRole` runs, remove the test artifacts
 manually (elevated, on any member):
