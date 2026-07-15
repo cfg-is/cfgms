@@ -1232,14 +1232,44 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	}
 
 	// on_existing is never (or empty). The VM is never destroyed.
+	//
+	// Load the VM's own provisioning record once for the two record-driven gates
+	// below (seed-phase-failure and degraded). loadOrInitProvision is read-only;
+	// the healthy path already re-reads it via finalizeProvision, so surfacing a
+	// store read error here introduces no new failure mode.
+	record, err := m.loadOrInitProvision(ctx, cfg, vmName)
+	if err != nil {
+		return err
+	}
+
+	// Seed-phase-failure gate (#2467): a VM whose own provisioning failed during
+	// the host-side create/seed phase (before the guest ever started installing)
+	// must NOT be powered on — it has no working seed, so starting it would boot
+	// an unprovisioned guest. Surface-and-wait (the VM stays off) until an
+	// operator or a future converge cycle retries from a clean seed (e.g. once
+	// the S4 seed-idempotency fix, #2466, unwedges the seed file). This mirrors
+	// the own-incomplete-attempt surface-and-wait idiom in the absent branch
+	// above. A record that failed AFTER reaching installing/finalizing (a
+	// different, post-power-on failure class such as a controller-side completion
+	// timeout, completion/reconciler.go) is deliberately NOT caught here and keeps
+	// converging normally.
+	if failedDuringSeedPhase(record) {
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: provisioning failed during the seed/create phase; surface-and-wait (VM stays off until reseeded, no power-on)",
+				"vm_name", logging.SanitizeLogValue(vmName),
+				"failed_from", string(record.FailedFrom),
+				"last_error", logging.SanitizeLogValue(record.LastError))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"vm-provision-skip-failed-seed-phase", "vm:"+vmName, nil,
+			map[string]interface{}{"reason": "seed-phase failure; VM left powered off"}, nil)
+		return nil
+	}
+
 	if !isHealthyVMState(currentVM.State) {
 		// Existing-but-broken VM → surface as degraded (ADR-009 §2). Never
 		// delete-and-rebuild. The record records the observed state so the
 		// operator (and the controller-side reconciler) can see it.
-		record, err := m.loadOrInitProvision(ctx, cfg, vmName)
-		if err != nil {
-			return err
-		}
 		return m.degradeProvision(ctx, cfg, vmName, record, currentVM.State)
 	}
 

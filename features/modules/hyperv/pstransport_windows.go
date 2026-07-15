@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 // psHostTransport is the post-#1894 in-host transport for the Hyper-V module.
@@ -253,8 +254,24 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 	cmd := exec.CommandContext(ctx, "powershell.exe",
 		"-NoProfile", "-NonInteractive", "-File", tmpPath,
 	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
+	start := time.Now()
 	out, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(start)
 	if runErr != nil {
+		// Distinguish a module-call deadline kill from a genuine non-zero exit.
+		// When the module-call context is cancelled/expired, CommandContext kills
+		// the process, so runErr is a bare "signal: killed"/"exit status 1" and
+		// `out` is typically empty — the generic path below would surface an
+		// uninformative `fresh seed op failed: exit status 1: ` with no clue that
+		// WE killed it at the deadline. Check ctx.Err() explicitly (reliable after
+		// a CommandContext kill) rather than pattern-matching the error string, and
+		// name the phase + elapsed time so a log reader — and any future
+		// retry-classification logic — can tell "killed at the deadline" from "the
+		// op ran and failed" (#2467).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return string(out), fmt.Errorf(
+				"hyperv-ps-host: seed op killed by deadline after %s (ctx: %w)", elapsed, ctxErr)
+		}
 		return string(out), fmt.Errorf("hyperv-ps-host: fresh seed op failed: %w: %s",
 			runErr, strings.TrimSpace(string(out)))
 	}

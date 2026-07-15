@@ -572,3 +572,91 @@ func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
 	assert.Equal(t, ProvisionStateInstalling, rec.State,
 		"surface-and-wait must leave the in-progress record at installing")
 }
+
+// TestApplySourceGated_FailedSeedPhaseDoesNotStartVM is the [REQUIRED TEST] for
+// the #2467 seed-phase gate. An existing, powered-OFF VM whose own provisioning
+// record failed during the host-side seed/create phase (Failed, FailedFrom=
+// creating — the phase the seed steps run in, never reached installing) must be
+// surfaced-and-waited-on: the module leaves the VM OFF and issues no Start-VM,
+// rather than powering on a guest that has no working seed. applySourceGated
+// (via Set) must return nil (surface-and-wait), not an error.
+func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
+	// getVM (call 0) reports the VM present but OFF; desired state is running
+	// (sourceVMConfigMap sets state: running), so absent the gate the VM would be
+	// started. Off is a healthy state (isHealthyVMState), so only the new gate —
+	// not the degraded branch — can keep it off.
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Off"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	// Seed the VM's own record as a seed-phase failure: Failed, having failed
+	// from creating. This is exactly what failProvision records when New-VHD /
+	// format / write-seed / attach-seed fails during provisionVM.
+	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateFailed,
+		FailedFrom:    ProvisionStateCreating,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		LastError:     `hyperv: create seed VHDX for VM "stw-01": exit status 1`,
+	}))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // state: running, on_existing: never
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg),
+		"a seed-phase-failed VM must surface-and-wait (return nil), not error")
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "Start-VM"),
+		"a VM whose seed phase failed must NOT be powered on (surface-and-wait)")
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"surface-and-wait must not create or recreate the VM")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"surface-and-wait must never destroy the existing VM")
+
+	// Surface-and-wait does not mutate the record — it is left at failed for an
+	// operator or a future converge cycle to retry from a clean seed.
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFailed, rec.State)
+	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom)
+}
+
+// TestApplySourceGated_FailedAfterInstallingStillConverges is the companion
+// [REQUIRED TEST] to the seed-phase gate: a Failed record that already passed
+// through installing (FailedFrom=installing — a post-power-on failure class such
+// as a controller-side completion timeout, completion/reconciler.go) must NOT
+// hit the new gate. The existing, healthy-but-off VM keeps converging to its
+// desired running state exactly as before (#2467 AC2 — no regression).
+func TestApplySourceGated_FailedAfterInstallingStillConverges(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Off"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateFailed,
+		FailedFrom:    ProvisionStateInstalling, // failed AFTER the guest began installing
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		LastError:     "completion.timeout elapsed",
+	}))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // state: running
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.NotEmpty(t, callsContaining(calls, "Start-VM"),
+		"a post-installing failure must keep converging: the off VM is started to its desired running state")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"convergence must still never destroy the existing VM")
+}
