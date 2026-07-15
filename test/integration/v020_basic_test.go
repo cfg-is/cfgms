@@ -26,8 +26,12 @@ func TestV020BasicIntegration(t *testing.T) {
 		require.NotNil(t, module)
 
 		// Test script configuration
+		// The sleep keeps the execution above 1ms: durations are recorded at
+		// millisecond granularity, and a bare echo can complete in <1ms on a
+		// fast Linux container, which would round AverageDuration down to 0
+		// and fail the metrics assertion below.
 		scriptConfig := &script.ScriptConfig{
-			Content:       "echo 'CFGMS v0.2.0 integration test successful'",
+			Content:       "echo 'CFGMS v0.2.0 integration test successful'; sleep 0.05",
 			Shell:         script.ShellBash,
 			Timeout:       30 * time.Second,
 			SigningPolicy: script.SigningPolicyNone,
