@@ -6,6 +6,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -237,10 +238,19 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 				// Non-fatal: parse failure for one cluster must not block others.
 				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
 				// so an error here signals a corrupt document that must be surfaced, not swallowed.
+				logStewardID := stewardID
+				logStewardID = strings.ReplaceAll(logStewardID, "\n", "_")
+				logStewardID = strings.ReplaceAll(logStewardID, "\r", "_")
+				logTenantID := tenantID
+				logTenantID = strings.ReplaceAll(logTenantID, "\n", "_")
+				logTenantID = strings.ReplaceAll(logTenantID, "\r", "_")
+				logClusterName := clusterName
+				logClusterName = strings.ReplaceAll(logClusterName, "\n", "_")
+				logClusterName = strings.ReplaceAll(logClusterName, "\r", "_")
 				ir.log().WarnCtx(ctx, "skipping cluster-policies config for cluster; treating as no membership",
-					"steward_id", stewardID,
-					"tenant_id", tenantID,
-					"cluster", clusterName,
+					"steward_id", logStewardID,
+					"tenant_id", logTenantID,
+					"cluster", logClusterName,
 					"error", err.Error())
 			}
 		}
@@ -254,9 +264,15 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 	if ir.roleProvider != nil {
 		fragments, err := ir.roleProvider.MatchingRoleFragments(ctx, stewardID)
 		if err != nil {
+			logStewardID := stewardID
+			logStewardID = strings.ReplaceAll(logStewardID, "\n", "_")
+			logStewardID = strings.ReplaceAll(logStewardID, "\r", "_")
+			logTenantID := tenantID
+			logTenantID = strings.ReplaceAll(logTenantID, "\n", "_")
+			logTenantID = strings.ReplaceAll(logTenantID, "\r", "_")
 			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
-				"steward_id", stewardID,
-				"tenant_id", tenantID,
+				"steward_id", logStewardID,
+				"tenant_id", logTenantID,
 				"error", err.Error())
 		} else {
 			for _, frag := range fragments {

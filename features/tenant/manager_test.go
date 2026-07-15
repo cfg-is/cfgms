@@ -4,9 +4,13 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -727,4 +731,191 @@ func TestManager_SuspendTenant_NotFound(t *testing.T) {
 
 	err := manager.SuspendTenant(ctx, "nonexistent-tenant")
 	require.Error(t, err)
+}
+
+// --- slog capture helpers for observable error-branch coverage ---
+
+// capturedLogRecord is a single slog record captured during a test.
+type capturedLogRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]any
+}
+
+// captureHandler is a real slog.Handler (not a mock) that records every emitted
+// record so tests can assert on the fields the tenant Manager logs via the global
+// slog logger. The tenant Manager writes to slog directly (no injectable logger),
+// so tests install this handler as the default for the duration of the test.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedLogRecord
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := capturedLogRecord{level: r.Level, msg: r.Message, attrs: make(map[string]any)}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, rec)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// find returns the first captured record whose message equals msg, or nil.
+func (h *captureHandler) find(msg string) *capturedLogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.records {
+		if h.records[i].msg == msg {
+			return &h.records[i]
+		}
+	}
+	return nil
+}
+
+// captureSlog installs a capturing slog handler as the default logger for the
+// duration of the test and restores the previous default on cleanup.
+func captureSlog(t *testing.T) *captureHandler {
+	t.Helper()
+	h := &captureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
+// failDeleteTenantStore wraps a real tenant Store but forces DeleteTenant to fail.
+// This is a real test double (not a mock framework): CreateTenant and every other
+// operation delegate to the embedded real store; only DeleteTenant returns the
+// injected error, exercising the rollback-failure branch in CreateTenant.
+type failDeleteTenantStore struct {
+	Store
+	delErr error
+}
+
+func (s *failDeleteTenantStore) DeleteTenant(_ context.Context, _ string) error {
+	return s.delErr
+}
+
+// failBulkRolesRBACStore wraps a real RBACStore but can be toggled to fail
+// StoreBulkRoles. It embeds the real store so initialization (which also calls
+// StoreBulkRoles for system roles) succeeds while fail is false; flipping fail to
+// true afterward makes CreateTenantDefaultRoles fail without touching any other path.
+type failBulkRolesRBACStore struct {
+	business.RBACStore
+	fail bool
+}
+
+func (s *failBulkRolesRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.Role) error {
+	if s.fail {
+		return errors.New("simulated durable RBAC store failure")
+	}
+	return s.RBACStore.StoreBulkRoles(ctx, roles)
+}
+
+// TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant covers the double-failure
+// branch at manager.go:139 — CreateTenantDefaultRoles fails AND the rollback
+// store.DeleteTenant also fails, firing the slog.Error path that warns operators about
+// an orphaned tenant record. Without this, that production branch had no coverage.
+func TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant(t *testing.T) {
+	storageManager := cfgmstesting.SetupTestStorage(t)
+	ctx := context.Background()
+
+	// Build a real RBAC manager whose durable store can be made to fail on demand.
+	failingRBACStore := &failBulkRolesRBACStore{RBACStore: storageManager.GetRBACStore()}
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		failingRBACStore,
+	)
+	require.NoError(t, rbacManager.Initialize(ctx))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	// After successful initialization, arm the failure so tenant default-role
+	// creation fails, triggering the rollback path.
+	failingRBACStore.fail = true
+
+	// Wrap the real tenant store so the rollback DeleteTenant also fails.
+	rollbackErr := errors.New("simulated storage failure during rollback")
+	store := &failDeleteTenantStore{Store: storageManager.GetTenantStore(), delErr: rollbackErr}
+	manager := NewManager(store, rbacManager)
+
+	capture := captureSlog(t)
+
+	_, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Orphan-Tenant"})
+	require.Error(t, err, "CreateTenant must fail when RBAC role creation fails")
+	assert.Contains(t, err.Error(), "failed to create tenant RBAC roles",
+		"returned error must surface the RBAC failure to the caller")
+
+	rec := capture.find("tenant: failed to roll back tenant after RBAC setup failure; orphaned tenant record left in storage")
+	require.NotNil(t, rec, "slog.Error must fire when both RBAC setup and rollback fail")
+	assert.Equal(t, slog.LevelError, rec.level, "orphaned-tenant log must be at Error level")
+
+	tenantID, ok := rec.attrs["tenant_id"].(string)
+	require.True(t, ok, "log record must include a string tenant_id")
+	assert.NotEmpty(t, tenantID)
+
+	rbErr, ok := rec.attrs["rollback_error"].(error)
+	require.True(t, ok, "log record must include the rollback error")
+	assert.Equal(t, rollbackErr, rbErr, "rollback_error must be the DeleteTenant failure")
+
+	_, ok = rec.attrs["rbac_error"]
+	require.True(t, ok, "log record must include the originating RBAC error")
+}
+
+// TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog covers the log-injection
+// sanitization at manager.go:376 — a tenantID containing newline/carriage-return
+// characters must be stripped to underscores before reaching the slog.Warn call in the
+// recordConfigSourceEvent error path, and a clean value must pass through unchanged.
+func TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog(t *testing.T) {
+	const warnMsg = "tenant: failed to record config source audit event"
+
+	// A stopped audit manager makes RecordEvent fail synchronously (enqueue returns
+	// "audit manager is stopped"), driving recordConfigSourceEvent into its error path.
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	require.NoError(t, auditMgr.Stop(context.Background()))
+
+	manager := newTestTenantManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.Background()
+
+	t.Run("injected control chars are stripped", func(t *testing.T) {
+		capture := captureSlog(t)
+
+		manager.recordConfigSourceEvent(ctx, "tenant\n123\rinjected",
+			"https://example.com/repo.git", "config_source_updated")
+
+		rec := capture.find(warnMsg)
+		require.NotNil(t, rec, "slog.Warn must fire when the audit record cannot be persisted")
+		tenantID, ok := rec.attrs["tenant_id"].(string)
+		require.True(t, ok, "tenant_id must be a string in the log entry")
+		assert.NotContains(t, tenantID, "\n", "logged tenant_id must not contain raw newline")
+		assert.NotContains(t, tenantID, "\r", "logged tenant_id must not contain raw carriage-return")
+		assert.Equal(t, "tenant_123_injected", tenantID,
+			"newline and CR must be replaced with underscore before logging")
+	})
+
+	t.Run("clean value passes through unchanged", func(t *testing.T) {
+		capture := captureSlog(t)
+
+		manager.recordConfigSourceEvent(ctx, "clean-tenant-456",
+			"https://example.com/repo.git", "config_source_updated")
+
+		rec := capture.find(warnMsg)
+		require.NotNil(t, rec, "slog.Warn must fire when the audit record cannot be persisted")
+		tenantID, ok := rec.attrs["tenant_id"].(string)
+		require.True(t, ok, "tenant_id must be a string in the log entry")
+		assert.Equal(t, "clean-tenant-456", tenantID, "clean tenant_id must pass through unchanged")
+	})
 }

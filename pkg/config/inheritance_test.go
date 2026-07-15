@@ -4,6 +4,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -831,4 +832,199 @@ func TestResolveRingVersion_NilDNAAttrs(t *testing.T) {
 	assert.Equal(t, "default", ring)
 	assert.True(t, didFallback)
 	assert.Equal(t, "", original)
+}
+
+// TestResolveConfiguration_ClusterConfigError_LogValueSanitized verifies that stewardID
+// and clusterName values containing newline/CR injection characters are stripped before
+// they appear in the WarnCtx call at inheritance.go:241 (the applyClusterConfiguration
+// error path). Also confirms a clean value (no control chars) passes through unchanged.
+func TestResolveConfiguration_ClusterConfigError_LogValueSanitized(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Store corrupt YAML for the cluster to trigger the WarnCtx error path.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "client", Namespace: "cluster-policies", Name: "bad-cluster"},
+		Data: []byte("{{{{this is not valid YAML: [[["),
+	}))
+
+	// stewardID containing newline and CR that must be stripped at the log call site.
+	injectedStewardID := "steward\n123\rinjected"
+	registry := buildClusterRegistry(injectedStewardID, "bad-cluster")
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+
+	capture := logging.NewCapturingLogger()
+	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
+	ir.WithLogger(capture)
+
+	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
+	require.NoError(t, err, "corrupt cluster-policies document must not fail ResolveConfiguration")
+	require.Len(t, capture.WarnEntries, 1, "exactly one WarnCtx entry expected for the corrupt cluster")
+
+	entry := capture.WarnEntries[0]
+
+	stewardIDVal, ok := entry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in the log entry")
+	assert.NotContains(t, stewardIDVal, "\n", "steward_id must not contain raw newline in logged field")
+	assert.NotContains(t, stewardIDVal, "\r", "steward_id must not contain raw carriage-return in logged field")
+	assert.Equal(t, "steward_123_injected", stewardIDVal,
+		"newline and CR in steward_id must be replaced with underscore before logging")
+
+	// A clean value (no control chars) must pass through unchanged.
+	cleanStewardID := "clean-steward-456"
+	cleanRegistry := buildClusterRegistry(cleanStewardID, "bad-cluster")
+	cleanCapture := logging.NewCapturingLogger()
+	irClean := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), cleanRegistry)
+	irClean.WithLogger(cleanCapture)
+
+	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)
+	require.NoError(t, err)
+	require.Len(t, cleanCapture.WarnEntries, 1, "exactly one WarnCtx entry expected for clean-value test")
+
+	cleanEntry := cleanCapture.WarnEntries[0]
+	cleanVal, ok := cleanEntry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in clean-value log entry")
+	assert.Equal(t, cleanStewardID, cleanVal, "clean value must pass through unchanged")
+}
+
+// --- Role cascade tests (NewInheritanceResolverWithRoles / applyRoleFragment) ---
+
+// fixedRoleProvider is a real roleConfigProvider implementation for tests that
+// returns a predetermined fragment list or a predetermined error. It never
+// delegates to a stub — it IS the implementation.
+type fixedRoleProvider struct {
+	fragments []RoleFragment
+	err       error
+}
+
+func (p *fixedRoleProvider) MatchingRoleFragments(_ context.Context, _ string) ([]RoleFragment, error) {
+	return p.fragments, p.err
+}
+
+// TestNewInheritanceResolverWithRoles_WiresClusterAndRoleProviders verifies that the
+// constructor stores both the cluster registry and the role provider on the resolver,
+// so the cascade layers are active when ResolveConfiguration runs.
+func TestNewInheritanceResolverWithRoles_WiresClusterAndRoleProviders(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
+	registry := buildClusterRegistry("steward-1", "cluster-a")
+	roles := &fixedRoleProvider{}
+
+	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry, roles)
+
+	require.NotNil(t, ir, "constructor must return a non-nil resolver")
+	assert.Same(t, registry, ir.clusterRegistry, "clusterRegistry must be wired by the constructor")
+	assert.Same(t, roles, ir.roleProvider, "roleProvider must be wired by the constructor")
+}
+
+// TestResolveConfiguration_RoleCascade_FragmentsApplied verifies that role fragments
+// returned by the provider are merged into the effective config via applyRoleFragment.
+// Role fragments must appear after cluster-policies and before device-level config
+// (cluster < role < device precedence): a device-level resource of the same name wins.
+func TestResolveConfiguration_RoleCascade_FragmentsApplied(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+
+	// Role fragment contributes role-resource and would override base-resource,
+	// but device-level must still win for base-resource.
+	roleFrags := []RoleFragment{
+		{
+			Name: "admin-role",
+			Config: stewardconfig.StewardConfig{
+				Resources: []stewardconfig.ResourceConfig{
+					{Name: "role-resource", Module: "file", Config: map[string]interface{}{"value": "from-role"}},
+					{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "role-override"}},
+				},
+			},
+		},
+	}
+
+	// Device-level must win over role for base-resource.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "stewards", Name: "steward-1"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{
+				{Name: "base-resource", Module: "file", Config: map[string]interface{}{"value": "device-wins"}},
+			},
+		}),
+	}))
+
+	router := &cfgStoreAsRouter{ConfigStore: cs}
+	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, &fixedRoleProvider{fragments: roleFrags})
+
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	resourcesByName := make(map[string]stewardconfig.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+
+	// role-resource must be present from the role fragment.
+	roleRes, ok := resourcesByName["role-resource"]
+	require.True(t, ok, "role-resource must appear from the role fragment")
+	assert.Equal(t, "from-role", roleRes.Config["value"], "role-resource value must come from the role fragment")
+
+	// device-level must win for the same resource name.
+	baseRes, ok := resourcesByName["base-resource"]
+	require.True(t, ok, "base-resource must appear in effective config")
+	assert.Equal(t, "device-wins", baseRes.Config["value"], "device-level must override role-level for same resource")
+
+	// Inheritance source must record the role origin.
+	src, ok := effective.Sources["resource.role-resource"]
+	require.True(t, ok, "role-resource source must be tracked")
+	assert.Contains(t, src.Source, "role-policies", "source must identify role-policies namespace")
+	assert.Equal(t, "admin-role", src.ConfigName, "source ConfigName must be the role name")
+}
+
+// TestResolveConfiguration_RoleProviderError_LogValueSanitized verifies that
+// stewardID values containing newline/CR injection characters are stripped before
+// they appear in the WarnCtx call at inheritance.go:258 (the role provider error
+// path). Also confirms a clean value (no control chars) passes through unchanged.
+func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
+	brokenRoles := &fixedRoleProvider{err: errors.New("simulated role provider failure")}
+
+	injectedStewardID := "steward\n456\rinjected"
+	capture := logging.NewCapturingLogger()
+	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, brokenRoles)
+	ir.WithLogger(capture)
+
+	_, err := ir.ResolveConfiguration(ctx, "client", injectedStewardID)
+	require.NoError(t, err, "role provider error must not fail ResolveConfiguration")
+	require.Len(t, capture.WarnEntries, 1, "exactly one WarnCtx entry expected for the role provider error")
+
+	entry := capture.WarnEntries[0]
+
+	stewardIDVal, ok := entry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in the log entry")
+	assert.NotContains(t, stewardIDVal, "\n", "steward_id must not contain raw newline in logged field")
+	assert.NotContains(t, stewardIDVal, "\r", "steward_id must not contain raw carriage-return in logged field")
+	assert.Equal(t, "steward_456_injected", stewardIDVal,
+		"newline and CR in steward_id must be replaced with underscore before logging")
+
+	// A clean value must pass through unchanged.
+	cleanStewardID := "clean-steward-789"
+	cleanCapture := logging.NewCapturingLogger()
+	irClean := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), nil, brokenRoles)
+	irClean.WithLogger(cleanCapture)
+
+	_, err = irClean.ResolveConfiguration(ctx, "client", cleanStewardID)
+	require.NoError(t, err)
+	require.Len(t, cleanCapture.WarnEntries, 1, "exactly one WarnCtx entry expected for clean-value test")
+
+	cleanEntry := cleanCapture.WarnEntries[0]
+	cleanVal, ok := cleanEntry["steward_id"].(string)
+	require.True(t, ok, "steward_id must be a string in clean-value log entry")
+	assert.Equal(t, cleanStewardID, cleanVal, "clean value must pass through unchanged")
 }
