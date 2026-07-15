@@ -122,7 +122,14 @@ Before uploading, edit the cfg to set:
 - `config.version` — the pinned runner agent release.
 - `config.agent_url` — the download URL matching the version and OS/arch.
 - `config.agent_sha256` — the SHA-256 of the archive (lowercase hex, 64 chars).
-  Verify with `sha256sum` (Linux) or `Get-FileHash` (Windows).
+  Verify with `sha256sum` (Linux) or `Get-FileHash` (Windows). The example
+  files ship with the real SHA-256 for their pinned versions; update this when
+  bumping `config.version` or `config.agent_url`.
+- `config.owner` — the GitHub organization or user that owns the repository
+  (e.g. `your-org`). Together with `config.repo`, the module derives the OS
+  service name as `actions.runner.<owner>-<repo>.<hostname>` at convergence
+  time — no manual `service_name` entry is required.
+- `config.repo` — the repository name without owner prefix (e.g. `your-repo`).
 - `runner-docker-group` script — replace `<RUNNER_USER>` with the OS user
   the runner agent runs as.
 - `ci-tools-dir` script — replace `<JQ_VERSION>` and `<JQ_SHA256_64HEX>`
