@@ -288,7 +288,7 @@ func TestGitHubAppProvider_RegistryWithSecretsStore(t *testing.T) {
 func TestNewEngine_SecretsStoreThreadedToProvider(t *testing.T) {
 	logger := pkgtesting.NewMockLogger(true)
 	store := newEmptyTestSecretStore()
-	engine := NewEngine(nil, logger, store, nil, nil)
+	engine := NewEngine(nil, logger, store, nil, nil, nil, nil)
 
 	provider, err := engine.providerRegistry.GetProvider("github")
 	require.NoError(t, err, "github provider must be registered in the engine's built-in registry")

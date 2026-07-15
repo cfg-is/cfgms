@@ -38,7 +38,7 @@ func TestHTTPStep_TemplateRendering(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "template-render-test",
@@ -93,7 +93,7 @@ func TestHTTPStep_TemplateRendering_UndefinedVar(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "undefined-var-test",
@@ -132,7 +132,7 @@ func TestHTTPStep_JSONResponseBinding(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "json-response-test",
@@ -194,7 +194,7 @@ func TestHTTPStep_JSONResponse_DownstreamTemplate(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "downstream-template-test",
@@ -242,7 +242,7 @@ func TestHTTPStep_JSONResponse_DownstreamTemplate(t *testing.T) {
 func TestWhileCondition_TemplateSupport(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	// Counter starts at 3, loop should run while counter != 0.
 	workflow := Workflow{
@@ -301,7 +301,7 @@ func TestWhileCondition_TemplateSupport(t *testing.T) {
 func TestWhileCondition_TemplateSupport_UndefinedVar(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "while-template-condition-undefined-var-test",
@@ -639,7 +639,7 @@ func (p *testCapturingMicrosoftProvider) ExecuteOperation(_ context.Context, con
 func TestAPIStep_TemplateRendering(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	provider := &testCapturingMicrosoftProvider{}
 	require.NoError(t, engine.providerRegistry.RegisterProvider("capture", provider))
@@ -708,7 +708,7 @@ func TestWebhookStep_TemplateRendering(t *testing.T) {
 
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "webhook-template-render-test",

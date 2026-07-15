@@ -584,6 +584,26 @@ func TestParser_ValidateWorkflow(t *testing.T) {
 			wantErr: true,
 			errMsg:  "workflow timeout cannot be negative",
 		},
+		{
+			name: "valid set_ha_role step",
+			workflow: Workflow{
+				Name: "set-ha-role-workflow",
+				Steps: []Step{
+					{Name: "promote-vm", Type: StepTypeSetHARole},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid move_resource_to_cluster step",
+			workflow: Workflow{
+				Name: "move-resource-workflow",
+				Steps: []Step{
+					{Name: "move-vm", Type: StepTypeMoveResourceToCluster},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	parser := NewParser()
@@ -615,6 +635,8 @@ func TestValidationHelpers(t *testing.T) {
 		{"valid sequential step type", func() bool { return isValidStepType(StepTypeSequential) }, true},
 		{"valid parallel step type", func() bool { return isValidStepType(StepTypeParallel) }, true},
 		{"valid conditional step type", func() bool { return isValidStepType(StepTypeConditional) }, true},
+		{"valid set_ha_role step type", func() bool { return isValidStepType(StepTypeSetHARole) }, true},
+		{"valid move_resource_to_cluster step type", func() bool { return isValidStepType(StepTypeMoveResourceToCluster) }, true},
 		{"invalid step type", func() bool { return isValidStepType("invalid") }, false},
 
 		{"valid stop action", func() bool { return isValidFailureAction(ActionStop) }, true},

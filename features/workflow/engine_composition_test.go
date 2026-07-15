@@ -18,7 +18,7 @@ import (
 // sequence value; OutputMappings propagate those values to the parent execution so
 // we can assert all three ran and produced their expected outputs.
 func TestExecuteComponentsDependency_LinearChain(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	// Register three minimal sub-workflows, each with a distinct sequence value.
 	engine.RegisterWorkflow(Workflow{
@@ -105,7 +105,7 @@ func TestExecuteComponentsDependency_LinearChain(t *testing.T) {
 // TestExecuteComponentsDependency_ParallelFanOut verifies that two independent
 // components (neither has DependsOn) both complete when using the dependency strategy.
 func TestExecuteComponentsDependency_ParallelFanOut(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	engine.RegisterWorkflow(Workflow{
 		Name:      "dep-fanout-x",
@@ -172,7 +172,7 @@ func TestExecuteComponentsDependency_ParallelFanOut(t *testing.T) {
 // components form a dependency cycle returns a non-nil error before any component
 // executes, and that the error message names the cycle path.
 func TestExecuteComponentsDependency_CycleDetected(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	// Register the component workflows so loading does not fail before cycle check.
 	engine.RegisterWorkflow(Workflow{
@@ -226,7 +226,7 @@ func TestExecuteComponentsDependency_CycleDetected(t *testing.T) {
 // TestExecuteComponentsDependency_UnknownDependency verifies that a component
 // referencing a non-existent dependency name returns a descriptive error.
 func TestExecuteComponentsDependency_UnknownDependency(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	engine.RegisterWorkflow(Workflow{
 		Name:  "unknown-dep-wf",
@@ -268,7 +268,7 @@ func TestExecuteComponentsDependency_UnknownDependency(t *testing.T) {
 // component runs. The test asserts that the threaded variable carries the exact value
 // set by component 1 — a bare no-error assertion would pass with the old sequential stub.
 func TestExecuteComponentsPipeline_OutputThreaded(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	// comp1 exposes output_val; OutputMappings propagate it to comp1_result in parent execution.
 	engine.RegisterWorkflow(Workflow{
@@ -338,7 +338,7 @@ func TestExecuteComponentsPipeline_OutputThreaded(t *testing.T) {
 // TestExecuteComponentsPipeline_EmptyPipeline verifies that a pipeline with zero
 // components returns nil immediately without error.
 func TestExecuteComponentsPipeline_EmptyPipeline(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	execution := &WorkflowExecution{
 		ID:           "test-empty-pipeline",
@@ -361,7 +361,7 @@ func TestExecuteComponentsPipeline_EmptyPipeline(t *testing.T) {
 // mapping referencing a non-existent FromVariable logs a warning but does not fail;
 // the pipeline completes successfully.
 func TestExecuteComponentsPipeline_MissingDataFlowVariable(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	engine.RegisterWorkflow(Workflow{
 		Name: "pipe-missing-src",
@@ -415,7 +415,7 @@ func TestExecuteComponentsPipeline_MissingDataFlowVariable(t *testing.T) {
 // component fails, handleComponentFailure propagates the error and the workflow
 // reaches StatusFailed — exercising the failure-propagation branch on line 518.
 func TestExecuteComponentsPipeline_ComponentFailure(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
 	// "unregistered-wf" is intentionally not registered so executeComponent fails.
 	workflow := Workflow{

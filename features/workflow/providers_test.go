@@ -225,7 +225,7 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 	// this test exercises the engine's variable-storage path, not the provider stubs.
 	moduleFactory := createTestFactory()
 	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	const providerName = "test-api-provider"
 	err := engine.providerRegistry.RegisterProvider(providerName, &MockProvider{name: providerName})

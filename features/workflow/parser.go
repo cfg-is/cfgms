@@ -317,7 +317,8 @@ func (p *Parser) validateCondition(condition Condition) error {
 // Validation helper functions
 func isValidStepType(stepType StepType) bool {
 	switch stepType {
-	case StepTypeTask, StepTypeSequential, StepTypeParallel, StepTypeConditional:
+	case StepTypeTask, StepTypeSequential, StepTypeParallel, StepTypeConditional,
+		StepTypeSetHARole, StepTypeMoveResourceToCluster:
 		return true
 	default:
 		return false

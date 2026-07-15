@@ -31,7 +31,7 @@ func TestServer_SetWorkflowHandler_RegistersRoutes_PostConstruction(t *testing.T
 
 	// Wire a handler exactly as production does: after New() returns.
 	// Include a real trigger manager so trigger routes are also registered.
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 	triggerMgr := trigger.NewControllerTriggerManager(nil, nil)
 	handler := NewWorkflowHandler(engine, nil, triggerMgr, logging.NewNoopLogger())
 	server.SetWorkflowHandler(handler)
@@ -133,7 +133,7 @@ func TestServer_SetRollbackManager_EnforcesPermissionGate(t *testing.T) {
 // passing nil to SetWorkflowHandler does not panic and leaves workflowHandler nil.
 func TestServer_SetWorkflowHandler_NilAfterSet_NoopSafe(t *testing.T) {
 	server := setupTestServer(t)
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 	handler := NewWorkflowHandler(engine, nil, nil, logging.NewNoopLogger())
 	server.SetWorkflowHandler(handler)
 
