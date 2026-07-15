@@ -28,11 +28,13 @@ func TestExampleRunnerConfigs_ParseAndValidate(t *testing.T) {
 	tests := []struct {
 		name        string
 		cfgFile     string
+		linuxPath   bool // true when work_dir is a Linux absolute path (/opt/...)
 		windowsPath bool // true when work_dir is a Windows absolute path (C:\...)
 	}{
 		{
-			name:    "linux-runner",
-			cfgFile: "linux-runner.cfg",
+			name:      "linux-runner",
+			cfgFile:   "linux-runner.cfg",
+			linuxPath: true,
 		},
 		{
 			name:        "windows-runner",
@@ -64,6 +66,11 @@ func TestExampleRunnerConfigs_ParseAndValidate(t *testing.T) {
 			// filepath.IsAbs("C:\...") returns false on Linux/macOS; substitute a
 			// valid temp dir so cross-platform CI can validate the rest of the config.
 			if tt.windowsPath && runtime.GOOS != "windows" {
+				rc.WorkDir = t.TempDir()
+			}
+			// filepath.IsAbs("/opt/...") returns false on Windows; substitute a
+			// valid temp dir so cross-platform CI can validate the rest of the config.
+			if tt.linuxPath && runtime.GOOS == "windows" {
 				rc.WorkDir = t.TempDir()
 			}
 
