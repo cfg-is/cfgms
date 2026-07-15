@@ -122,6 +122,9 @@ __pycache__/
 # Build cache
 /.cache/
 
+# Personal local-validation harness (not part of the product)
+/Dockerfile.validate
+
 # Git storage provider test artifacts (tenant data written to repo root by tests)
 # These are created when git-storage tests use repo-relative paths instead of t.TempDir()
 /2026/
