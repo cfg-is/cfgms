@@ -5,10 +5,11 @@
  * App shell (Story #2496) — mockups/fleet-overview.html lines ~102-266.
  * The persistent chrome every authenticated screen mounts into: sidebar +
  * top bar at desktop width, hamburger + off-canvas drawer + scrim below
- * 1024px, Escape closes overlays. Fleet overview (#2497) is the first real
- * occupant of `.content` — this story renders its empty-state placeholder.
+ * 1024px, Escape closes overlays. Fleet overview (#2497) occupies
+ * `.content`; the global search box is its live filter.
  */
 import { useEffect, useState } from 'react'
+import FleetOverview from '../fleet/FleetOverview.tsx'
 import { TenantScopeProvider } from './TenantScopeContext.tsx'
 import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
@@ -111,16 +112,7 @@ export default function AppShell() {
           </div>
 
           <div className="content">
-            <div className="htitle">
-              <h1>Fleet</h1>
-              <p>Stewards enrolled to this controller, with the device DNA you choose.</p>
-            </div>
-            <section className="panel">
-              <div className="notice empty">
-                <h3>Fleet overview lands in Story #2497</h3>
-                <p>This screen will list enrolled stewards once that story ships.</p>
-              </div>
-            </section>
+            <FleetOverview search={search} />
           </div>
         </div>
       </div>

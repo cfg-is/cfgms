@@ -66,7 +66,7 @@ describe('App', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('probes the session after login; a 401 drops to the expired login screen', async () => {
+  it('a 401 on the fleet data call drops to the expired login screen', async () => {
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
@@ -76,7 +76,8 @@ describe('App', () => {
       if (url.endsWith('/api/v1/web/login')) {
         return Promise.resolve(jsonResponse(200))
       }
-      // The authenticated probe — a dead session answers 401.
+      // The fleet view's steward-page fetch (#2497) doubles as the
+      // authenticated probe — a dead session answers 401.
       return Promise.resolve(jsonResponse(401))
     })
 
@@ -89,16 +90,16 @@ describe('App', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    // The probe fires on mount of the authenticated screen, 401s, and the
-    // guard drops back to the login screen in its expired state.
+    // The fleet data call fires on mount of the authenticated screen, 401s,
+    // and the guard drops back to the login screen in its expired state.
     await waitFor(() =>
       expect(
         screen.getByText(/session expired\. sign in again to continue\./i),
       ).toBeInTheDocument(),
     )
-    const probeCall = fetchMock.mock.calls.find((c) =>
+    const dataCall = fetchMock.mock.calls.find((c) =>
       String(c[0]).includes('/api/v1/stewards'),
     )
-    expect(probeCall).toBeDefined()
+    expect(dataCall).toBeDefined()
   })
 })

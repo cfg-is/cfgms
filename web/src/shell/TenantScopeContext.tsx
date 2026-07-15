@@ -37,6 +37,8 @@ export function isScopeMatch(candidate: TenantPath, scope: TenantPath): boolean 
 export interface TenantScopeValue {
   /** The currently selected scope. */
   scope: TenantPath
+  /** The principal's root path — scope === rootPath means "not narrowed". */
+  rootPath: TenantPath
   /** Selectable scopes: the principal's root path + observed descendants. */
   observedPaths: TenantPath[]
   setScope: (path: TenantPath) => void
@@ -61,8 +63,8 @@ export function TenantScopeProvider({
   }, [])
 
   const value = useMemo(
-    () => ({ scope, observedPaths, setScope, registerObservedPath }),
-    [scope, observedPaths, registerObservedPath],
+    () => ({ scope, rootPath, observedPaths, setScope, registerObservedPath }),
+    [scope, rootPath, observedPaths, registerObservedPath],
   )
 
   return (
