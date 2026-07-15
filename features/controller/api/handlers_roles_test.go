@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -227,9 +228,14 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 	server.handleCreateRoleConfig(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code, "seed tenant-b role: %s", rec.Body.String())
 
-	// tenant-a caller tries to delete tenant-b's role — must get 403.
-	// The middleware sets tenantID from the API key; tenant-a key can't access tenant-b.
-	// Here we exercise cross-tenant enforcement by injecting a tenant-a principal trying to act on tenant-b context.
+	// A tenant-a caller cannot reach tenant-b's role. A tenant-scoped caller is
+	// PINNED to its own tenant (#2548): roleTenantFromRequest ignores any request-
+	// supplied tenant and uses the principal's tenant, so this delete operates in
+	// tenant-a — where tenant-b-role does not exist — and returns 404. Even with a
+	// mismatching tenant context injected (which the middleware never produces —
+	// it sets the context tenant FROM the principal), the caller can neither act
+	// on nor learn of another tenant's role. This is stronger isolation than the
+	// prior 403: it discloses nothing about tenant-b's contents.
 	ctxA := context.WithValue(context.Background(), principalContextKey, &Principal{
 		ID:       "caller-a",
 		TenantID: "tenant-a",
@@ -237,10 +243,12 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 	ctxA = context.WithValue(ctxA, ctxkeys.TenantID, "tenant-b")
 
 	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/roles/tenant-b-role", nil)
-	req2 = req2.WithContext(ctxA)
+	// Direct handler call: set the {name} path var the router would normally supply.
+	req2 = mux.SetURLVars(req2.WithContext(ctxA), map[string]string{"name": "tenant-b-role"})
 	rec2 := httptest.NewRecorder()
 	server.handleDeleteRoleConfig(rec2, req2)
-	assert.Equal(t, http.StatusForbidden, rec2.Code)
+	assert.Equal(t, http.StatusNotFound, rec2.Code,
+		"scoped caller is pinned to its own tenant; tenant-b-role is not found there")
 
 	// GET via tenant-a API key returns 404 (not 200) because tenant-a has no roles.
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/roles/tenant-b-role", nil)
@@ -325,4 +333,57 @@ func TestHandleCreateRoleConfig_WithFragment(t *testing.T) {
 	logging, ok := steward["logging"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "debug", fmt.Sprintf("%v", logging["level"]))
+}
+
+// TestHandleRoleConfig_RootAdminTenantTargeting is the regression guard for the
+// #2548 authoring fix: role configs are stored per tenant, so a global/root admin
+// (empty principal tenant) must select the target tenant via ?tenant=. Without it
+// the store call fails "tenant ID is required"; the handler must reject that as a
+// 400 up front, and honor ?tenant= (with cross-tenant isolation) when present.
+func TestHandleRoleConfig_RootAdminTenantTargeting(t *testing.T) {
+	server := setupRoleConfigServer(t)
+	// A root/global admin (as minted by the mTLS admin bundle) carries no tenant.
+	// The API-key auth path cannot represent this (it requires a tenant), so drive
+	// the handlers directly with a root Principal in context — the tenant-
+	// resolution logic under test lives in the handler, not the middleware.
+	rootPrincipal := &Principal{ID: "root-admin"}
+	withRoot := func(req *http.Request) *http.Request {
+		return req.WithContext(context.WithValue(req.Context(), principalContextKey, rootPrincipal))
+	}
+
+	post := func(url string) *httptest.ResponseRecorder {
+		req := withRoot(httptest.NewRequest(http.MethodPost, url,
+			bytes.NewReader(validRolePayload("hyperv-host", "os:windows tag:hyperv-host"))))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.handleCreateRoleConfig(rec, req)
+		return rec
+	}
+	list := func(url string) *httptest.ResponseRecorder {
+		req := withRoot(httptest.NewRequest(http.MethodGet, url, nil))
+		rec := httptest.NewRecorder()
+		server.handleListRoleConfigs(rec, req)
+		return rec
+	}
+
+	// Without ?tenant= → 400 (a root admin cannot author into an empty tenant).
+	recNoTenant := post("/api/v1/roles")
+	require.Equal(t, http.StatusBadRequest, recNoTenant.Code,
+		"root admin without ?tenant= must be rejected; body: %s", recNoTenant.Body.String())
+
+	// With ?tenant=infra-x → 201, stored under that tenant.
+	recCreate := post("/api/v1/roles?tenant=infra-x")
+	require.Equal(t, http.StatusCreated, recCreate.Code,
+		"root admin with ?tenant= must succeed; body: %s", recCreate.Body.String())
+
+	// Listing the same tenant returns it; a different tenant does not (isolation).
+	recSame := list("/api/v1/roles?tenant=infra-x")
+	require.Equal(t, http.StatusOK, recSame.Code)
+	assert.Contains(t, recSame.Body.String(), "hyperv-host",
+		"role must be listed under the tenant it was authored in")
+
+	recOther := list("/api/v1/roles?tenant=other-tenant")
+	require.Equal(t, http.StatusOK, recOther.Code)
+	assert.NotContains(t, recOther.Body.String(), "hyperv-host",
+		"role must not leak across tenants")
 }

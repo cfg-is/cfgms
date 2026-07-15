@@ -33,10 +33,25 @@ var (
 	roleTLSCACert   string
 	roleTLSInsecure bool
 
+	// roleTenant targets a specific tenant. Role configs are stored per tenant, so
+	// a global/root admin must name the tenant explicitly; a tenant-scoped caller
+	// is pinned to its own tenant and this flag is ignored (Issue #2548).
+	roleTenant string
+
 	// create flags
 	roleSelector   string
 	roleConfigFile string
 )
+
+// roleTenantQuery returns the "?tenant=<id>" query suffix when --tenant is set,
+// or "" otherwise. Used by every role sub-command so a root admin can target a
+// tenant (the controller pins tenant-scoped callers to their own tenant).
+func roleTenantQuery() string {
+	if roleTenant == "" {
+		return ""
+	}
+	return "?tenant=" + url.QueryEscape(roleTenant)
+}
 
 // roleCmd is the parent command: cfg role ...
 var roleCmd = &cobra.Command{
@@ -112,6 +127,7 @@ func init() {
 		cmd.Flags().StringVar(&roleAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&roleTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&roleTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&roleTenant, "tenant", "", "Target tenant ID (required for a global admin; ignored for a tenant-scoped caller)")
 	}
 
 	roleCreateCmd.Flags().StringVar(&roleSelector, "selector", "", "Selector expression (required)")
@@ -195,7 +211,7 @@ func runRoleCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
+	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/roles"+roleTenantQuery(), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -223,7 +239,7 @@ func runRoleLs(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.Get(context.Background(), "/api/v1/roles")
+	resp, err := client.Get(context.Background(), "/api/v1/roles"+roleTenantQuery())
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -263,7 +279,7 @@ func runRoleShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.Get(context.Background(), "/api/v1/roles/"+name)
+	resp, err := client.Get(context.Background(), "/api/v1/roles/"+name+roleTenantQuery())
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -306,7 +322,7 @@ func runRoleDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.doRequest(context.Background(), http.MethodDelete, "/api/v1/roles/"+name, nil)
+	resp, err := client.doRequest(context.Background(), http.MethodDelete, "/api/v1/roles/"+name+roleTenantQuery(), nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
