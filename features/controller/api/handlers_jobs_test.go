@@ -446,6 +446,12 @@ func TestHandleGetJob_NilStore_Returns503(t *testing.T) {
 // errorCapturingLogger records Error-level log calls; all other levels are no-ops.
 // It is a real log-buffer implementation — not a mock of any CFGMS component —
 // following the same pattern as auditCapturingLogger in middleware_test.go.
+//
+// errCalledCh, if non-nil, is closed exactly once when the first Error call arrives.
+// Tests that need to synchronize with an asynchronous goroutine's Error call should
+// set this field and select on it rather than relying on a separate executor signal,
+// because the executor signal fires when Execute returns — before the caller's log
+// statement runs in the goroutine.
 type errorCapturingLogger struct {
 	logging.NoopLogger
 	mu      sync.Mutex
@@ -453,15 +459,21 @@ type errorCapturingLogger struct {
 		msg string
 		kvs []interface{}
 	}
+	errCalledCh chan struct{}
+	errOnce     sync.Once
 }
 
 func (l *errorCapturingLogger) Error(msg string, kvs ...interface{}) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.entries = append(l.entries, struct {
 		msg string
 		kvs []interface{}
 	}{msg: msg, kvs: kvs})
+	ch := l.errCalledCh
+	l.mu.Unlock()
+	if ch != nil {
+		l.errOnce.Do(func() { close(ch) })
+	}
 }
 
 // kvValue returns the first value for key across all captured Error entries, or nil.
@@ -499,7 +511,9 @@ func (e *errBatchJobExecutor) Execute(_ context.Context, _ *batchjob.BatchJob) e
 // control characters passes through unchanged.
 func TestHandleCreateJob_ExecutorError_LogValueSanitized(t *testing.T) {
 	t.Run("newlines_stripped", func(t *testing.T) {
-		capLog := &errorCapturingLogger{}
+		// errCalledCh lets us wait until s.logger.Error is called in the goroutine,
+		// not just until executor.Execute returns — the two are not synchronised.
+		capLog := &errorCapturingLogger{errCalledCh: make(chan struct{})}
 		server := setupTestServerWithLogger(t, capLog)
 		store := newTestBatchJobStoreForAPI()
 		server.batchJobStore = store
@@ -512,9 +526,9 @@ func TestHandleCreateJob_ExecutorError_LogValueSanitized(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code)
 
 		select {
-		case <-exec.done:
+		case <-capLog.errCalledCh:
 		case <-time.After(5 * time.Second):
-			t.Fatal("executor goroutine did not complete within timeout")
+			t.Fatal("executor goroutine did not log error within timeout")
 		}
 
 		loggedErr := capLog.kvValue("error")
@@ -527,7 +541,7 @@ func TestHandleCreateJob_ExecutorError_LogValueSanitized(t *testing.T) {
 	})
 
 	t.Run("clean_error_passes_through", func(t *testing.T) {
-		capLog := &errorCapturingLogger{}
+		capLog := &errorCapturingLogger{errCalledCh: make(chan struct{})}
 		server := setupTestServerWithLogger(t, capLog)
 		store := newTestBatchJobStoreForAPI()
 		server.batchJobStore = store
@@ -540,9 +554,9 @@ func TestHandleCreateJob_ExecutorError_LogValueSanitized(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code)
 
 		select {
-		case <-exec.done:
+		case <-capLog.errCalledCh:
 		case <-time.After(5 * time.Second):
-			t.Fatal("executor goroutine did not complete within timeout")
+			t.Fatal("executor goroutine did not log error within timeout")
 		}
 
 		loggedErr := capLog.kvValue("error")

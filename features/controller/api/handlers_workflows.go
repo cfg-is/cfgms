@@ -415,7 +415,14 @@ func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Requ
 
 	execution, err := h.engine.GetExecution(execID)
 	if err != nil || execution == nil {
-		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", err)
+		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+		safeErrStr := ""
+		if err != nil {
+			safeErrStr = err.Error()
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+		}
+		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
 		return
 	}
@@ -471,7 +478,14 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 	// not-found — neither signal is suitable for HTTP status mapping, so we gate here.
 	execution, err := h.engine.GetExecution(execID)
 	if err != nil || execution == nil {
-		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", err)
+		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+		safeErrStr := ""
+		if err != nil {
+			safeErrStr = err.Error()
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+		}
+		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
 		return
 	}

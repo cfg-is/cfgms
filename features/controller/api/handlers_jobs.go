@@ -84,8 +84,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
+		// err embeds req.Selector via selector.Parse format strings — sanitize before logging.
+		safeParseErr := err.Error()
+		safeParseErr = strings.ReplaceAll(safeParseErr, "\n", "_")
+		safeParseErr = strings.ReplaceAll(safeParseErr, "\r", "_")
 		s.logger.Info("Invalid selector expression",
-			"selector", safeSelector, "error", err)
+			"selector", safeSelector, "error", safeParseErr)
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
 		return
 	}

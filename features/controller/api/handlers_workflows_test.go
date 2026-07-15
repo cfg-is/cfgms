@@ -504,19 +504,24 @@ func (l *capturingLogger) Error(msg string, kvs ...interface{}) {
 
 // loggedNameValues returns all "name" key values captured across Error calls.
 func (l *capturingLogger) loggedNameValues() []string {
+	return l.loggedValuesForKey("name")
+}
+
+// loggedValuesForKey returns all string values for key across all captured Error calls.
+func (l *capturingLogger) loggedValuesForKey(key string) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var names []string
+	var vals []string
 	for _, e := range l.entries {
 		for i := 0; i+1 < len(e.kvs); i += 2 {
-			if k, ok := e.kvs[i].(string); ok && k == "name" {
+			if k, ok := e.kvs[i].(string); ok && k == key {
 				if v, ok := e.kvs[i+1].(string); ok {
-					names = append(names, v)
+					vals = append(vals, v)
 				}
 			}
 		}
 	}
-	return names
+	return vals
 }
 
 // --- fleet query wiring (Issue #609) -----------------------------------------
@@ -788,4 +793,62 @@ func TestWorkflowHandler_GetExecution_NotFound_Returns404(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestWorkflowHandler_GetExecution_SpecialCharsInVars_HandledSafely verifies that
+// execution IDs containing CWE-117 log-injection characters are stripped before they
+// reach the logger in both the exec_id field and the error field.
+//
+// engine.GetExecution embeds the raw execID in its error via fmt.Errorf with %s, so
+// without sanitization the error field also carries the tainted value.
+func TestWorkflowHandler_GetExecution_SpecialCharsInVars_HandledSafely(t *testing.T) {
+	_, configStore := newTestWorkflowHandler(t)
+	capLogger := &capturingLogger{}
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil)
+	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
+	router := newWorkflowRouter(h)
+
+	// %0a = LF (\n), %0d = CR (\r). gorilla/mux decodes percent-encoding when extracting
+	// path variables, so these characters arrive in mux.Vars(r)["exec_id"] unescaped.
+	// The engine returns fmt.Errorf("execution not found: %s", execID), embedding them.
+	req := httptest.NewRequest("GET", "/workflows/my-wf/executions/exec%0ainjected%0dfake", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	require.NotEmpty(t, capLogger.entries, "logger.Error must be called for unknown exec_id")
+
+	for _, key := range []string{"exec_id", "error"} {
+		for _, v := range capLogger.loggedValuesForKey(key) {
+			assert.NotContains(t, v, "\n", "logger key %q must not contain raw LF", key)
+			assert.NotContains(t, v, "\r", "logger key %q must not contain raw CR", key)
+		}
+	}
+}
+
+// TestWorkflowHandler_CancelExecution_SpecialCharsInVars_HandledSafely mirrors the get
+// variant above for the cancel path, which exercises the same engine error-embedding
+// pattern and the same CodeQL-recognised sanitization fix.
+func TestWorkflowHandler_CancelExecution_SpecialCharsInVars_HandledSafely(t *testing.T) {
+	_, configStore := newTestWorkflowHandler(t)
+	capLogger := &capturingLogger{}
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil)
+	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
+	router := newWorkflowRouter(h)
+
+	req := httptest.NewRequest("POST", "/workflows/my-wf/executions/exec%0ainjected%0dfake/cancel", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	require.NotEmpty(t, capLogger.entries, "logger.Error must be called for unknown exec_id on cancel")
+
+	for _, key := range []string{"exec_id", "error"} {
+		for _, v := range capLogger.loggedValuesForKey(key) {
+			assert.NotContains(t, v, "\n", "logger key %q must not contain raw LF", key)
+			assert.NotContains(t, v, "\r", "logger key %q must not contain raw CR", key)
+		}
+	}
 }
