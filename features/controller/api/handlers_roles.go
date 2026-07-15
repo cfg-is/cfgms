@@ -58,6 +58,25 @@ func roleTenantFromRequest(r *http.Request, principal *Principal) string {
 	return ctxTenant
 }
 
+// resolveRoleTenant resolves the target tenant for a role request, or writes a
+// 400 TENANT_REQUIRED and returns ok=false when none can be determined (a global
+// admin that omitted ?tenant=). Every role operation — create, get, list, delete
+// — needs a concrete tenant: role configs are stored per tenant, and an empty
+// tenant reaching the store is not harmless. On the default flatfile backend a
+// get/delete with an empty tenant 500s (the key validator rejects it, so it never
+// surfaces as a clean not-found), and a list with an empty tenant filter omits
+// the tenant predicate entirely and returns roles across ALL tenants. Guarding
+// here keeps all four handlers consistent and closes that cross-tenant list.
+func (s *Server) resolveRoleTenant(w http.ResponseWriter, r *http.Request, principal *Principal) (string, bool) {
+	tenantID := roleTenantFromRequest(r, principal)
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"tenant is required: a global admin must pass ?tenant=<id> (role configs are stored per tenant)", "TENANT_REQUIRED")
+		return "", false
+	}
+	return tenantID, true
+}
+
 // handleCreateRoleConfig implements POST /api/v1/roles.
 func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.roleConfigStore == nil {
@@ -70,10 +89,8 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID := roleTenantFromRequest(r, principal)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"tenant is required: a global admin must pass ?tenant=<id> (role configs are stored per tenant)", "TENANT_REQUIRED")
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
 		return
 	}
 
@@ -151,7 +168,10 @@ func (s *Server) handleGetRoleConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID := roleTenantFromRequest(r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
+		return
+	}
 
 	name := mux.Vars(r)["name"]
 	if name == "" {
@@ -196,7 +216,10 @@ func (s *Server) handleListRoleConfigs(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID := roleTenantFromRequest(r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
+		return
+	}
 
 	entries, err := s.roleConfigStore.ListConfigs(r.Context(), &cfgconfig.ConfigFilter{
 		TenantID:  tenantID,
@@ -233,7 +256,10 @@ func (s *Server) handleDeleteRoleConfig(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID := roleTenantFromRequest(r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	if !ok {
+		return
+	}
 
 	name := mux.Vars(r)["name"]
 	if name == "" {

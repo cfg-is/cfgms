@@ -386,4 +386,25 @@ func TestHandleRoleConfig_RootAdminTenantTargeting(t *testing.T) {
 	require.Equal(t, http.StatusOK, recOther.Code)
 	assert.NotContains(t, recOther.Body.String(), "hyperv-host",
 		"role must not leak across tenants")
+
+	// A root admin omitting ?tenant= must be rejected 400 on GET/LIST/DELETE too —
+	// NOT reach the store with an empty tenant (which 500s on get/delete and, worse,
+	// lists across ALL tenants on the default flatfile backend).
+	recListNoTenant := list("/api/v1/roles")
+	assert.Equal(t, http.StatusBadRequest, recListNoTenant.Code,
+		"root admin LIST without ?tenant= must be 400, not a cross-tenant listing; body: %s", recListNoTenant.Body.String())
+
+	getNoTenant := withRoot(httptest.NewRequest(http.MethodGet, "/api/v1/roles/hyperv-host", nil))
+	getNoTenant = mux.SetURLVars(getNoTenant, map[string]string{"name": "hyperv-host"})
+	recGet := httptest.NewRecorder()
+	server.handleGetRoleConfig(recGet, getNoTenant)
+	assert.Equal(t, http.StatusBadRequest, recGet.Code,
+		"root admin GET without ?tenant= must be 400, not 500; body: %s", recGet.Body.String())
+
+	delNoTenant := withRoot(httptest.NewRequest(http.MethodDelete, "/api/v1/roles/hyperv-host", nil))
+	delNoTenant = mux.SetURLVars(delNoTenant, map[string]string{"name": "hyperv-host"})
+	recDel := httptest.NewRecorder()
+	server.handleDeleteRoleConfig(recDel, delNoTenant)
+	assert.Equal(t, http.StatusBadRequest, recDel.Code,
+		"root admin DELETE without ?tenant= must be 400, not 500; body: %s", recDel.Body.String())
 }
