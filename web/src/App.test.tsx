@@ -26,10 +26,10 @@ describe('App', () => {
   it('guards the authenticated screen: unauthenticated visit renders the login screen', () => {
     render(<App />)
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
-    expect(screen.queryByText(/signed in as/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
   })
 
-  it('full flow: login lands on the authenticated placeholder; sign-out returns to signin', async () => {
+  it('full flow: login lands on the app shell; sign-out returns to signin', async () => {
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
@@ -48,12 +48,12 @@ describe('App', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    await waitFor(() =>
-      expect(screen.getByText(/signed in as/i)).toBeInTheDocument(),
-    )
-    expect(screen.getByText('admin@msp-a')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('navigation')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: /sign out/i }))
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+    expect(screen.getByText('admin@msp-a')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('menuitem', { name: /sign out/i }))
+
     await waitFor(() =>
       expect(
         screen.getByRole('button', { name: /sign in/i }),
