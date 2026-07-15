@@ -143,6 +143,7 @@ STDLIB_MODULES := \
 	patch \
 	script \
 	service \
+	time \
 	user
 
 # Stdlib payload boundary check: all five sources of stdlib module names must agree.

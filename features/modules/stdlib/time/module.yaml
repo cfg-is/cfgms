@@ -1,0 +1,52 @@
+name: time
+version: 0.1.0
+description: >
+  Manages host timezone and NTP/time-sync configuration.
+  Provides idempotent Get/Set management of timezone (IANA identifier),
+  NTP server list, and NTP sync enabled flag via native OS configuration
+  (timedatectl/systemd-timesyncd on Linux, w32tm/tzutil on Windows,
+  systemsetup on macOS). Correct time configuration is foundational:
+  time skew breaks Kerberos authentication, TLS certificate validation,
+  and log correlation.
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local time configuration management on steward systems
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "64MB"
+  min_disk: "1MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: time  # authority over time:* objects this module manages
+
+security:
+  requires_root: true  # writing /etc/timezone, /etc/systemd/timesyncd.conf, and calling timedatectl require root
+  capabilities: []
+  ports: []
+
+behavioral_envelope:
+  shells_out_to:
+    - timedatectl  # Linux: runtime timezone and NTP apply
+    - tzutil.exe   # Windows: timezone management
+    - w32tm.exe    # Windows: NTP/Windows Time Service management
+    - systemsetup  # macOS: timezone and network time management
+  reads_paths:
+    - /etc/timezone                # Linux: current IANA timezone name
+    - /etc/systemd/timesyncd.conf  # Linux: NTP server list and sync configuration
+  writes_paths:
+    - /etc/timezone                # Linux: desired timezone identifier
+    - /etc/systemd/timesyncd.conf  # Linux: desired NTP server list and sync state
+
+documentation:
+  api: "docs/modules/time.md"
+  examples: "docs/modules/time.md"
