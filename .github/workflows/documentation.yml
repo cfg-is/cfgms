@@ -263,18 +263,6 @@ jobs:
           echo "   Skipping controller integration tests (no code changes)"
           echo "   No controller test validation required for docs-only changes"
 
-  fleet-e2e-tests:
-    name: fleet-e2e-tests
-    permissions: {}
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-    steps:
-      - name: Docs-only fleet E2E validation
-        run: |
-          echo "✅ Documentation-only PR detected"
-          echo "   Skipping fleet E2E tests (no code changes)"
-          echo "   No fleet test validation required for docs-only changes"
-
   # QUEUE-REAL context (#2595): the real trivy-scan runs in the merge queue
   # (security-scan.yml). This stub only covers docs-only PRs; it must NOT fire on
   # merge_group. (Code PRs are covered by security-scan.yml's trivy-scan-pr-stub.)

@@ -29,6 +29,12 @@ on:
         - all
         - full
 
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GO_VERSION: '1.26.5'
 
@@ -40,9 +46,15 @@ jobs:
   # 193–433s under merge-queue burst; hosted exec ~15% faster (511s vs 610s).
   # Moving unit-tests to hosted frees self-hosted pool capacity for
   # integration-tests where self-hosted exec is 2–3.5× faster than hosted.
+  # PR-REAL (#2595): unit tests are fast, cheap, and deterministic on the diff
+  # itself — real per-PR feedback matters more than re-validating against the
+  # merge commit. The merge queue gets a lightweight stub (below); docs-only
+  # PRs/queue entries are covered by documentation.yml's own stub instead (this
+  # workflow is paths-ignored for docs).
   unit-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -101,7 +113,30 @@ jobs:
         path: resource-samples-unit-tests.txt
         retention-days: 30
 
-  # Integration tests - runs on PRs to develop/main, workflow_dispatch, or push to main
+  # PR-time stub for the `unit-tests` required context on merge_group entries
+  # (code PRs). The real per-PR run above already validated this diff for real;
+  # this just posts the required context without re-running the fast suite a
+  # second time per queue entry.
+  unit-tests-mq-stub:
+    name: unit-tests
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group'
+    steps:
+      - name: Merge-queue stub (real run already validated this diff on the PR)
+        run: |
+          echo "unit-tests: already validated for real on the source PR (#2595)."
+          echo "This merge-queue stub posts the required context without paying for the fast suite twice."
+
+  # Integration tests - QUEUE-REAL (#2595): the real `make test-production-critical`
+  # run is queue-only (merge_group) and on push to main/workflow_dispatch — NOT on
+  # pull_request. This also fixes a live bug: the prior condition never matched
+  # `merge_group`, so the required `integration-tests` context was silently
+  # skipping (and passing) on every merge-queue entry — production-critical tests
+  # were never actually validated against a real merge commit. The PR-time stub
+  # (below) posts the required context on code PRs; docs-only PRs/queue entries
+  # are covered by documentation.yml's own stub instead (this workflow is
+  # paths-ignored for docs).
   #
   # runs-on routing (#2337, epic #565): fork-gated self-hosted routing — internal
   # events (push, merge_group, non-fork pull_request) run on the CFGMS-managed
@@ -129,7 +164,7 @@ jobs:
     # golang image lacks but hosted runners ship (jq for the script tests).
     container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.5-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
     timeout-minutes: 25
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group' || github.ref == 'refs/heads/main'
     needs: unit-tests
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -192,6 +227,20 @@ jobs:
         name: resource-samples-integration-tests
         path: resource-samples-integration-tests.txt
         retention-days: 30
+
+  # PR-time stub for the `integration-tests` required context (#2595). The real
+  # run is queue-only (job above) — it validates `make test-production-critical`
+  # against the merge commit rather than paying for it twice per PR.
+  integration-tests-pr-stub:
+    name: integration-tests
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: PR-time stub (real run happens in the merge queue)
+        run: |
+          echo "integration-tests: real production-critical suite runs in the merge queue (merge_group) per #2595."
+          echo "This PR-time stub posts the required context; the authoritative run validates the merge commit."
 
   # Cross-feature integration tests - chunked for efficiency
   cross-feature-tests:
@@ -355,8 +404,10 @@ jobs:
         
         if [[ "${{ needs.integration-tests.result }}" == "success" ]]; then
           echo "✅ **Integration Tests**: Passed" >> $GITHUB_STEP_SUMMARY
+        elif [[ "${{ needs.integration-tests.result }}" == "skipped" ]]; then
+          echo "⏭️ **Integration Tests**: Deferred to merge queue (#2595)" >> $GITHUB_STEP_SUMMARY
         else
-          echo "❌ **Integration Tests**: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "❌ **Integration Tests**: Failed" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY

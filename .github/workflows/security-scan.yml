@@ -29,6 +29,12 @@ on:
         - full
         - remediation-report
 
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GO_VERSION: '1.26.5'
 
@@ -120,11 +126,15 @@ jobs:
         echo "❌ Trivy scan found CRITICAL/HIGH vulnerabilities — see scan output above"
         exit 1
 
+  # PR-REAL (#2595): advisory, non-required static analysis — fast, cheap, and
+  # deterministic on the diff. Developer/agent feedback matters more here than
+  # re-validating an unchanged dependency graph against the merge commit.
   nancy-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
@@ -164,11 +174,13 @@ jobs:
           echo "issues-found=true" >> $GITHUB_OUTPUT
         fi
 
+  # PR-REAL (#2595): advisory, non-required — see nancy-scan comment above.
   gosec-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
@@ -241,11 +253,13 @@ jobs:
         path: sarif-results/
         retention-days: 30
 
+  # PR-REAL (#2595): advisory, non-required — see nancy-scan comment above.
   staticcheck-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
