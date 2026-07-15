@@ -14,11 +14,23 @@ The Script module provides cross-platform script execution capabilities for CFGM
 
 This module is essential for executing custom logic, performing system operations, and integrating with external tools that require script-based automation. Unlike other modules that manage persistent resources, the script module focuses on execution rather than state management.
 
+## Actions
+
+The `action` field selects the execution path. Two values are accepted:
+
+| Value | Behaviour |
+|-------|-----------|
+| `execute` (default, may be omitted) | Runs inline `content` immediately |
+| `stage` | Looks up a library script by `id`+`version`, resolves `param_bindings`, records `StatusStaged` — **does not execute inline content** |
+
 ## Configuration options
 
-The module accepts configuration in YAML format with the following options:
+### Execute action (default)
+
+The execute action accepts configuration in YAML format with the following options:
 
 ```yaml
+# action: execute  # optional; "execute" is the default
 content: |
   echo "Hello World"
   echo "Script execution complete"
@@ -36,12 +48,12 @@ signature:
   public_key: "public-key-pem"
 ```
 
-### Required Fields
+#### Required Fields
 
 - **`content`** - The script content to execute
 - **`shell`** - The shell type to use for execution
 
-### Optional Fields
+#### Optional Fields
 
 - **`timeout`** - Execution timeout (default: 5 minutes)
 - **`signing_policy`** - Signature validation policy (`none`, `optional`, `required`)
@@ -49,6 +61,68 @@ signature:
 - **`environment`** - Environment variables to set during execution
 - **`working_dir`** - Working directory for script execution
 - **`signature`** - Script signature information (required if signing_policy is `required`)
+
+### Stage action
+
+The stage action looks up a versioned library script and stages it for delivery to the endpoint without executing inline content. Use this when a workflow needs to make a script available on the host but defer execution.
+
+```yaml
+action: stage
+stage:
+  id: "my-setup-script"
+  version: "1.2.3"
+param_bindings:
+  - name: api_token
+    from: secret-store
+    key: my-api-token-key
+  - name: environment
+    from: literal
+    value: "production"
+```
+
+#### Required Fields (stage action)
+
+- **`action`** - Must be `"stage"`
+- **`stage.id`** - The library script identifier to look up in the `ScriptRepository`
+- **`stage.version`** - The semantic version to stage (e.g. `"1.2.3"`)
+
+#### Optional Fields (stage action)
+
+- **`param_bindings`** - Parameter bindings resolved at staging time (see [Parameter Bindings](#parameter-bindings) below). `content` and `shell` are **not** used on this path.
+
+#### Stage execution status
+
+When the stage action completes successfully the resource status is set to `StatusStaged` (`"staged"`). No `ExecutionResult` is produced (the script was not run). Downstream steps can observe `"staged"` status to confirm a script is ready for delivery.
+
+## Parameter Bindings
+
+`param_bindings` declares how script parameters receive their values at execution time. Bindings are resolved on both the `execute` and `stage` paths via the module's secret store. Resolved values are injected as environment variables — secrets are never written to the command line or script block content.
+
+```yaml
+param_bindings:
+  - name: db_password       # parameter name
+    from: secret-store      # resolve from the steward secret store
+    key: prod/db/password   # secret store lookup key
+  - name: region
+    from: literal           # use the value field directly
+    value: "us-east-1"
+```
+
+### ParamSource values
+
+| `from` value | Description | Required field |
+|---|---|---|
+| `secret-store` | Fetches the value from the steward secret store at execution time. The plaintext value is never stored in the config. | `key` (secret store lookup key) |
+| `literal` | Uses the `value` field directly. Suitable for non-secret runtime variables. | `value` |
+
+### Environment variable naming
+
+Resolved parameter values are injected as environment variables. The variable name depends on the shell and whether the parameter is a secret:
+
+| Shell | Secret (`from: secret-store`) | Literal (`from: literal`) |
+|---|---|---|
+| PowerShell / CMD | `CFGMS_SECRET_<PARAM_UPPER>` | `CFGMS_PARAM_<PARAM_UPPER>` |
+| Bash / Zsh / Sh / Python | `<PARAM_UPPER>` | `CFGMS_PARAM_<PARAM_UPPER>` |
 
 ## Signing Policies
 
