@@ -15,6 +15,12 @@ on:
   merge_group:
   workflow_dispatch:
 
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GO_VERSION: '1.26.5'
 
@@ -22,12 +28,17 @@ permissions: {}
 
 jobs:
   # Fast cross-compilation check (single runner, all platforms)
+  # PR-REAL (#2595): fast single-runner compile check across all targets — cheap
+  # and deterministic on the diff. Native per-platform builds and Docker
+  # integration tests are queue-only (below); this job alone backs the PR-time
+  # Build Gate stub.
   cross-compile-check:
     name: Cross-Platform Compilation Check
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
@@ -86,6 +97,10 @@ jobs:
             platform: Windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    # QUEUE-REAL (#2595): the 3-platform native build+test matrix is the
+    # fleet's most expensive suite — validated once against the merge commit
+    # rather than paying for it twice per PR.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
@@ -140,12 +155,14 @@ jobs:
         retention-days: 5
 
   # Integration tests with Docker infrastructure (Linux only)
+  # QUEUE-REAL (#2595): Docker-heavy, validated once against the merge commit.
   integration-tests:
     name: Integration Tests (Docker)
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       with:
@@ -223,31 +240,65 @@ jobs:
       if: always()
       run: make test-integration-cleanup
 
-  # Integration gate - all platforms must succeed
+  # PR-time stub for the `Build Gate` required context (#2595). Real per-PR
+  # signal comes from cross-compile-check (fast compile validation); native
+  # multi-platform builds and Docker integration tests are queue-only (below) —
+  # running the fleet's most expensive suite twice per PR bought no additional
+  # coverage once the queue re-validates the merge commit.
+  build-gate-pr-stub:
+    name: Build Gate
+    permissions: {}
+    needs: [cross-compile-check]
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'pull_request'
+    steps:
+    - name: Check PR-time Build Results
+      run: |
+        echo "## Build Gate Results (PR)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        cross_compile="${{ needs.cross-compile-check.result }}"
+
+        echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
+        echo "| Native Builds + Docker Integration | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [[ "$cross_compile" == "success" ]]; then
+          echo "### BUILD GATE PASSED (PR stub)" >> $GITHUB_STEP_SUMMARY
+          echo "Cross-compilation validated. Native builds and Docker integration tests run for real in the merge queue (#2595)." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### BUILD GATE FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "Cross-compilation check failed." >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+  # QUEUE-REAL (#2595): the authoritative Build Gate — native multi-platform
+  # builds and Docker integration tests validate the actual merge commit here,
+  # not on every PR push. Mutually exclusive with the PR stub above by event.
   build-gate:
     name: Build Gate
     permissions: {}
-    needs: [cross-compile-check, native-builds, integration-tests]
+    needs: [native-builds, integration-tests]
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     steps:
     - name: Check Build Results
       run: |
         echo "## Build Gate Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
-        cross_compile="${{ needs.cross-compile-check.result }}"
         native="${{ needs.native-builds.result }}"
         integration="${{ needs.integration-tests.result }}"
 
         echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
         echo "| Native Builds | $native |" >> $GITHUB_STEP_SUMMARY
         echo "| Integration Tests | $integration |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
-        if [[ "$cross_compile" == "success" && "$native" == "success" && "$integration" == "success" ]]; then
+        if [[ "$native" == "success" && "$integration" == "success" ]]; then
           echo "### BUILD GATE PASSED" >> $GITHUB_STEP_SUMMARY
           echo "All platforms build and test successfully." >> $GITHUB_STEP_SUMMARY
         else
