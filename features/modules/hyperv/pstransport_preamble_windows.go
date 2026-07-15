@@ -775,7 +775,15 @@ function Cfgms-SetClusterRolePossibleOwners {
     # is the role (group) name — resolve its Virtual Machine resource. Materialise
     # the match into an array (no Select -First, which trips the FailoverClusters
     # provider with "pipeline has been stopped").
-    $res = @(Get-ClusterResource -Cluster $ClusterName -ErrorAction SilentlyContinue | Where-Object { $_.OwnerGroup.Name -eq $ResourceName -and $_.ResourceType.Name -eq 'Virtual Machine' })
+    #
+    # Compare via [string] coercion, NOT .OwnerGroup.Name / .ResourceType.Name:
+    # depending on the FailoverClusters PowerShell build, Get-ClusterResource
+    # returns .OwnerGroup and .ResourceType as plain STRINGS (verified on Windows
+    # Server 2025), on which .Name is $null — so a .Name filter silently matches
+    # nothing and possible_owners is never applied. [string]$_.OwnerGroup yields
+    # the group name whether the property is a string (itself) or a ClusterGroup
+    # object (ToString → name), so the filter is robust across builds.
+    $res = @(Get-ClusterResource -Cluster $ClusterName -ErrorAction SilentlyContinue | Where-Object { [string]$_.OwnerGroup -eq $ResourceName -and [string]$_.ResourceType -eq 'Virtual Machine' })
     if ($res.Count -gt 0) { Set-ClusterOwnerNode -Cluster $ClusterName -Resource $res[0].Name -Owners ($Owners -split ',') }
 }
 

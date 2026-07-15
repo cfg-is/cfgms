@@ -700,6 +700,36 @@ func TestNewSeedVHD_DeletesExistingFileBeforeCreate(t *testing.T) {
 		"Remove-Item must be ordered before New-VHD, otherwise the leftover file blocks creation with 0x80070050")
 }
 
+// TestPreamble_PossibleOwnersFilterUsesStringCoercion guards the regression the
+// idiomatic Layer-2 cascade surfaced live on cfg-lab (Windows Server 2025, Issue
+// #2577): Cfgms-SetClusterRolePossibleOwners resolved the role's Virtual Machine
+// resource with `$_.OwnerGroup.Name -eq $ResourceName -and $_.ResourceType.Name
+// -eq 'Virtual Machine'`. On that FailoverClusters PowerShell build,
+// Get-ClusterResource returns .OwnerGroup and .ResourceType as plain STRINGS, on
+// which .Name is $null — so the filter matched nothing, $res.Count was 0, and
+// possible_owners was silently never applied (no error, so reconcileRoleProperties
+// proceeded to the remaining properties). The dispatch tests assert only the
+// synthesised call string and the reconcile unit tests drive a fake transport, so
+// none exercise this filter against the real object shape and all stayed green.
+// The fix compares via [string] coercion, which yields the group/type name whether
+// the property is a string (itself) or an object (ToString), so it is robust
+// across builds. This asserts the robust form is used and the brittle .Name form
+// is gone.
+func TestPreamble_PossibleOwnersFilterUsesStringCoercion(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-SetClusterRolePossibleOwners")
+
+	assert.Contains(t, body, "[string]$_.OwnerGroup -eq $ResourceName",
+		"possible_owners resource lookup must match the owner group via [string] coercion (Get-ClusterResource returns .OwnerGroup as a string on some FailoverClusters builds, where .OwnerGroup.Name is $null)")
+	assert.Contains(t, body, "[string]$_.ResourceType -eq 'Virtual Machine'",
+		"possible_owners resource lookup must match the resource type via [string] coercion (.ResourceType is a string on some builds, where .ResourceType.Name is $null)")
+	assert.NotContains(t, body, "$_.OwnerGroup.Name",
+		"the brittle .OwnerGroup.Name filter silently matches nothing when Get-ClusterResource returns a string — it must not return")
+	assert.NotContains(t, body, "$_.ResourceType.Name",
+		"the brittle .ResourceType.Name filter silently matches nothing when Get-ClusterResource returns a string — it must not return")
+	assert.Contains(t, body, "Set-ClusterOwnerNode -Cluster $ClusterName -Resource",
+		"the function must still restrict possible owners on the resolved VM resource")
+}
+
 // preambleFunctionBody extracts the body of a `function <name> { ... }` block
 // from psHostPreamble, balancing braces so nested blocks (if/foreach) are
 // included. It fails the test if the function is not found.
