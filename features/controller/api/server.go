@@ -1048,6 +1048,24 @@ func (s *Server) SetTagStore(ts *tagstore.Store) {
 	s.tagStore = ts
 }
 
+// TagStore returns the wired tag store, or nil when unwired. Exposed so
+// controller startup wiring can be regression-tested (the tag REST endpoints
+// 503 when this is nil — Issue #2545/#2548).
+func (s *Server) TagStore() *tagstore.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tagStore
+}
+
+// RoleConfigStore returns the wired role-config store, or nil when unwired.
+// Exposed so controller startup wiring can be regression-tested (the role REST
+// endpoints 503 when this is nil — Issue #2543/#2548).
+func (s *Server) RoleConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.roleConfigStore
+}
+
 // SetRegistry wires the active-steward connection registry so that
 // GET /api/v1/stewards/{id} can report connection_state and active_sessions
 // (Issue #1323). Call this after New() returns but before Start() is called.
