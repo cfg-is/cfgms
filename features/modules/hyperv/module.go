@@ -68,6 +68,21 @@ type hypervModule struct {
 	vmsMu sync.RWMutex
 	vms   map[string]VMConfig
 
+	// Cluster resource-owner read cache (Story #2577). readResourceOwners is a
+	// single bulk cluster read that returns EVERY clustered role's owner, but the
+	// read-path membership probe (probeClusterRoleMembership) calls it once per HA
+	// VM — so N HA VMs cost N identical full cluster reads per converge pass. This
+	// caches the bulk result for a short freshness window so a pass issues ONE
+	// cluster read and filters per-VM in process, and is invalidated by any
+	// cluster-mutating op (invalidateClusterOwnersCache) so work we just performed
+	// is reflected on the next read. It backs only the fail-safe read path; the
+	// safety-critical write-path owner gate (clusterOwnershipHelper) always reads
+	// live.
+	clusterOwnersMu  sync.Mutex
+	clusterOwners    map[string]string
+	clusterOwnersAt  time.Time
+	clusterOwnersTTL time.Duration
+
 	// vswitches is the write-through vSwitch cache. Keys are the exact switch
 	// names admins specify (identical to the host-side names). Updated on
 	// transport success only.
@@ -212,6 +227,12 @@ func New(detector HypervDetector, opts ...HypervOption) modules.Module {
 		vswitches:      make(map[string]VSwitchConfig),
 		detector:       detector,
 		provisionStore: NewMemProvisionStore(),
+		// Freshness window for the bulk cluster-owner read cache (Story #2577).
+		// Long enough to collapse the per-VM membership probes of a single
+		// converge pass into one cluster read, short enough that an external
+		// failover is picked up on the read path within a few seconds; any op we
+		// perform invalidates it immediately regardless.
+		clusterOwnersTTL: 5 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -314,6 +335,19 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	// leaves it "" (non-fatal); audit then records an empty node identity, which
 	// the ownership helper still functions without.
 	m.clusterName, _ = configMap["cluster_name"].(string)
+	// An ha_role vm resource carries its cluster name only under the nested
+	// ha_role block, never as a top-level cluster_name key. Derive the S5 scope
+	// cap from there when the top-level key is absent, so the Get path
+	// (probeClusterRoleMembership) can report ha_role in current state and the
+	// resource round-trips through the executor's verify step. Without this,
+	// m.clusterName stays "" for an ha_role vm, the probe is gated off, Get omits
+	// ha_role, and every converge cycle re-detects it as unapplied "added" drift
+	// — a resource that never reports converged (Story #2577).
+	if m.clusterName == "" {
+		if hr := parseHARoleMap(configMap["ha_role"]); hr != nil {
+			m.clusterName = hr.ClusterName
+		}
+	}
 	m.clusterRoleNames = parseStringList(configMap["cluster_role_names"])
 	m.nodeHostname, _ = os.Hostname()
 	// Optional cluster DNA poll cadence (#2241). Accept a Go duration string;

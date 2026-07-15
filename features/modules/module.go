@@ -63,6 +63,23 @@ type ConfigState interface {
 	GetManagedFields() []string
 }
 
+// ManagedElsewhere, when implemented by a ConfigState returned from Module.Get,
+// tells the executor the resource is real and in its desired terminal state but
+// managed by a DIFFERENT authority — e.g. a clustered HA VM owned by another
+// failover-cluster node. The executor treats such a resource as compliant and
+// performs no Compare/Set/Verify: field-level drift against THIS node's local
+// view is not meaningful, because this node is not the resource's manager. The
+// single accountable authority (the cluster's CNO for HA VMs) is responsible for
+// the resource actually existing and having an owner — a non-owner only abstains
+// (Story #2577).
+type ManagedElsewhere interface {
+	// ManagedElsewhere reports whether the resource is managed by another
+	// authority and, if so, names it (the owning node/authority — used for logs
+	// and DNA provenance). A false return means "this node IS the manager; apply
+	// the normal Compare/Set/Verify flow."
+	ManagedElsewhere() (managed bool, authority string)
+}
+
 // Configurable is implemented by modules that require initialization from
 // operator config before Get() can safely read the current resource state.
 // The execution engine calls Configure(desiredState) before Get() when the

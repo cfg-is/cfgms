@@ -120,6 +120,118 @@ func TestGetVM_AbsentButClusteredRole_ReportsHARole(t *testing.T) {
 	assert.Equal(t, "lab-hv", cfg.HARole.ClusterName)
 }
 
+// TestGetVM_HostedElsewhere_ReportsManagedElsewhere (Story #2577): a clustered HA
+// VM absent on THIS node but registered and owned by ANOTHER node is flagged
+// managed-elsewhere (naming the owner), so the executor treats it compliant-by-
+// delegation without a field comparison. No owner BODY is read (that would need
+// cross-node WinRM, which isn't available) — only the bulk owner map, which works
+// cluster-wide, is consulted.
+func TestGetVM_HostedElsewhere_ReportsManagedElsewhere(t *testing.T) {
+	const vmName = "ha-hosted-elsewhere"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`, // local Cfgms-GetVM: absent here
+		`{"owners":{"ha-hosted-elsewhere":"NODE2"}}`, // bulk owner read (probe + owner lookup share it via the cache)
+	}}
+	m := vmModuleWithTransport(transport, "t-2577")
+	m.clusterName = "cfg-lab"
+	m.nodeHostname = "NODE1" // this host is a NON-owner (owner is NODE2)
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+
+	managed, owner := cfg.ManagedElsewhere()
+	assert.True(t, managed, "a registered clustered role owned by another node is managed-elsewhere")
+	assert.Equal(t, "NODE2", owner, "the owning node is named for compliance-by-delegation")
+	require.NotNil(t, cfg.HARole, "membership is still reported")
+	assert.Equal(t, "absent", cfg.State, "no owner body is fetched — State stays the honest local 'absent'")
+
+	// The bulk owner map is read ONCE and shared by the probe and the owner lookup
+	// via the cache — not once per concern (Story #2577 batching).
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	assert.Len(t, transport.calls, 2, "one local VM read + one bulk owner read (cached) — no re-read")
+}
+
+// TestGetVM_HostedElsewhere_OwnerIsSelf_NotManagedElsewhere (Story #2577): if the
+// owner map names THIS node (registered to us but the local read missed it — a
+// post-failover/create transient), the VM is NOT managed-elsewhere. It reads
+// absent so the normal owner-gated create/lifecycle path runs — we do not abstain
+// from a VM we are supposed to host.
+func TestGetVM_HostedElsewhere_OwnerIsSelf_NotManagedElsewhere(t *testing.T) {
+	const vmName = "ha-owned-here"
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		`{"found":false}`,                      // local: absent
+		`{"owners":{"ha-owned-here":"NODE1"}}`, // owner map: owned by THIS node
+	}}
+	m := vmModuleWithTransport(transport, "t-2577")
+	m.clusterName = "cfg-lab"
+	m.nodeHostname = "NODE1"
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err)
+	managed, _ := cfg.ManagedElsewhere()
+	assert.False(t, managed, "a role owned by THIS node is not managed-elsewhere")
+	assert.Equal(t, "absent", cfg.State)
+}
+
+// TestGetVM_HostedElsewhere_OwnerUnreadable_NotManagedElsewhere (Story #2577):
+// when the cluster owner map can't be read, the membership probe degrades to nil,
+// so getVM never flags managed-elsewhere — the VM reads absent and the normal
+// (owner-gated) create path runs next cycle. Degrade-safe: never a false compliant.
+func TestGetVM_HostedElsewhere_OwnerUnreadable_NotManagedElsewhere(t *testing.T) {
+	const vmName = "ha-owner-unreadable"
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":false}`, ``},
+		perCallErrors:  []error{nil, errors.New("cluster service down")},
+	}
+	m := vmModuleWithTransport(transport, "t-2577")
+	m.clusterName = "cfg-lab"
+	m.nodeHostname = "NODE1"
+
+	cfg, err := m.getVM(context.Background(), vmName)
+	require.NoError(t, err, "a cluster-read failure must not fail the VM read")
+	managed, _ := cfg.ManagedElsewhere()
+	assert.False(t, managed, "unreadable cluster ⇒ not managed-elsewhere (degrade safe)")
+	assert.Equal(t, "absent", cfg.State)
+}
+
+// TestCachedResourceOwners_BatchesReadsWithinWindow (Story #2577): the bulk owner
+// map is read from the transport at most once per freshness window — two
+// back-to-back getVM calls for different HA VMs issue ONE cluster read, not one
+// per VM (the per-VM probe was the N-reads-per-pass waste).
+func TestCachedResourceOwners_BatchesReadsWithinWindow(t *testing.T) {
+	transport := &testWinRMTransport{
+		// Local reads for two VMs both absent; a single bulk owner read serves both.
+		perCallOutputs: []string{
+			`{"found":false}`, // getVM("vm-a") local
+			`{"owners":{"vm-a":"NODE2","vm-b":"NODE2"}}`, // bulk owner read (cached after this)
+			`{"found":false}`, // getVM("vm-b") local
+		},
+	}
+	m := vmModuleWithTransport(transport, "t-2577")
+	m.clusterName = "cfg-lab"
+	m.nodeHostname = "NODE1"
+	m.clusterOwnersTTL = time.Minute // ensure both calls land in one window
+
+	for _, name := range []string{"vm-a", "vm-b"} {
+		cfg, err := m.getVM(context.Background(), name)
+		require.NoError(t, err)
+		managed, owner := cfg.ManagedElsewhere()
+		assert.True(t, managed, "%s is owned by NODE2 → managed-elsewhere", name)
+		assert.Equal(t, "NODE2", owner)
+	}
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	owners := 0
+	for _, c := range transport.calls {
+		if len(c.args) == 1 && c.args[0] == "cfg-lab" { // psGetClusterResourceOwner takes ClusterName
+			owners++
+		}
+	}
+	assert.Equal(t, 1, owners, "the bulk cluster-owner map must be read once for the whole pass, not per VM")
+}
+
 // TestGetVM_AbsentWithoutScope_NoProbe: the absent path issues no cluster probe
 // when no module-level cluster_name is configured — non-cluster hosts keep the
 // exact pre-#2420 single-call behavior.

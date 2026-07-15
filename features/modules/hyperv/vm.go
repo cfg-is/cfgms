@@ -176,6 +176,23 @@ type VMConfig struct {
 	// checked. It is NOT a per-VM YAML field (seed_dir is module-level config) —
 	// hence unexported and untagged so it never round-trips through YAML/AsMap.
 	seedDir string
+
+	// managedElsewhereOwner names the cluster node that owns this VM when getVM
+	// determines it is a registered clustered HA role hosted on ANOTHER node
+	// (Story #2577). When set, the module's Get result reports true from
+	// ManagedElsewhere, so the executor treats the resource as compliant-by-
+	// delegation and skips Compare/Set/Verify — a non-owner does not manage a VM
+	// it does not host. Unexported and untagged: it never serializes, never
+	// participates in the drift comparison.
+	managedElsewhereOwner string
+}
+
+// ManagedElsewhere implements modules.ManagedElsewhere. It reports true (naming
+// the owning node) when getVM resolved this VMConfig as a clustered HA role
+// hosted on another cluster node — signalling the executor to treat the resource
+// as compliant-by-delegation without a field-level comparison (Story #2577).
+func (c *VMConfig) ManagedElsewhere() (bool, string) {
+	return c.managedElsewhereOwner != "", c.managedElsewhereOwner
 }
 
 // HARoleConfig declares that a vm resource is a highly-available clustered role.
@@ -510,12 +527,20 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		}
 	}
 	// ha_role is only emitted when present so a non-HA VMConfig round-trips
-	// unchanged (omitempty parity with the YAML tag).
+	// unchanged (omitempty parity with the YAML tag). resource_group_name is
+	// likewise emitted only when non-empty: the membership probe never sets it
+	// and desired configs routinely omit it (it defaults to the VM name), so
+	// emitting an empty value would make the current state's ha_role map compare
+	// unequal to a desired ha_role that carries only cluster_name — flipping the
+	// verify result from a spurious "added" to a spurious "changed" (Story #2577).
 	if c.HARole != nil {
-		m["ha_role"] = map[string]interface{}{
-			"cluster_name":        c.HARole.ClusterName,
-			"resource_group_name": c.HARole.ResourceGroupName,
+		haRole := map[string]interface{}{
+			"cluster_name": c.HARole.ClusterName,
 		}
+		if c.HARole.ResourceGroupName != "" {
+			haRole["resource_group_name"] = c.HARole.ResourceGroupName
+		}
+		m["ha_role"] = haRole
 	}
 	return m
 }
@@ -663,22 +688,69 @@ func isHealthyVMState(state string) bool {
 // Returning state:"absent" rather than an error lets the unified executor
 // detect drift against a desired state:"present"/"running" config and
 // proceed to Set, instead of treating "absent" as a fatal Get failure.
+// getVM is the module's read/verify surface (module.Get → the executor's
+// compliance + verify diff). It is the local read, plus one cluster-aware rule
+// for HA roles: a clustered VM that is absent on THIS node but registered and
+// owned by ANOTHER cluster node is flagged "managed elsewhere" (Story #2577), so
+// the executor treats it as compliant-by-delegation and does no field
+// comparison. A non-owner is not that VM's manager — the owner converges it and
+// the CNO guarantees it exists (Layer 2, a separate story) — so re-detecting the
+// locally-absent body as drift every cycle is wrong. This needs only the owner's
+// NAME (a bulk cluster read that already works cluster-wide), never the owner's
+// VM body (which would require cross-node WinRM that isn't available).
+//
+// The write paths (setVM, the state:"absent" delete path) deliberately use
+// getVMLocal, NOT getVM: their create/lifecycle owner-gates key on LOCAL presence
+// (is the VM on THIS node?), which MUST read "absent" for a role hosted elsewhere
+// so the duplicate-prevention gate fires.
 func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, error) {
+	cfg, err := m.getVMLocal(ctx, vmName)
+	if err != nil {
+		return nil, err
+	}
+	// Locally absent but a registered clustered role owned elsewhere ⇒ managed by
+	// that owner. Flag it; the executor short-circuits to compliant. Unknown owner
+	// (unregistered, or cluster unreadable) leaves it "absent" so the create path
+	// still runs — degrades safe, converges next cycle.
+	if cfg.State == "absent" && cfg.HARole != nil {
+		if owner := m.clusteredRoleOwner(ctx, vmName); owner != "" && !strings.EqualFold(owner, m.nodeHostname) {
+			cfg.managedElsewhereOwner = owner
+		}
+	}
+	return cfg, nil
+}
+
+// clusteredRoleOwner returns the cluster node currently owning vmName's role, or
+// "" when the module has no cluster scope, the role is unregistered, or the
+// cluster read fails (fail-safe — the caller then treats the VM as not
+// managed-elsewhere). It reads through the bulk owner cache (Story #2577
+// batching) so a converge pass costs one cluster read, not one per HA VM.
+func (m *hypervModule) clusteredRoleOwner(ctx context.Context, vmName string) string {
+	if m.clusterName == "" {
+		return ""
+	}
+	owners, err := m.cachedResourceOwners(ctx, m.clusterName)
+	if err != nil {
+		return ""
+	}
+	return owners[vmName]
+}
+
+// getVMLocal reports a VM's state as observed on THIS host only (plus the
+// cluster-role membership probe). It is the source of truth for LOCAL presence:
+// a clustered role hosted on another node reads State:"absent" here, which is
+// exactly what setVM's existence/owner gates require to avoid creating a
+// duplicate. getVM layers cluster-wide reporting on top for the read/verify path.
+func (m *hypervModule) getVMLocal(ctx context.Context, vmName string) (*VMConfig, error) {
 	if m.transport == nil {
 		return nil, ErrVMNotFound
 	}
 
-	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": vmName})
+	cfg, found, err := m.readVMState(ctx, vmName)
 	if err != nil {
-		return nil, fmt.Errorf("hyperv: get vm %q: %w", vmName, err)
+		return nil, err
 	}
 
-	var parsed map[string]interface{}
-	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
-		return nil, fmt.Errorf("hyperv: parse get-vm response for %q: %w", vmName, jsonErr)
-	}
-
-	found, _ := parsed["found"].(bool)
 	if !found {
 		// Absent is a valid current state — the executor compares this against
 		// the desired state and calls Set to create the resource when needed.
@@ -691,6 +763,38 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 			State:  "absent",
 			HARole: m.probeClusterRoleMembership(ctx, vmName),
 		}, nil
+	}
+
+	// Cluster-role membership probe (#2372/#2420) — see
+	// probeClusterRoleMembership for the scope-cap and degrade semantics.
+	cfg.HARole = m.probeClusterRoleMembership(ctx, vmName)
+
+	// Write-through: update cache on successful read
+	m.vmsMu.Lock()
+	m.vms[vmName] = *cfg
+	m.vmsMu.Unlock()
+
+	return cfg, nil
+}
+
+// readVMState runs the local Cfgms-GetVM read and maps its JSON into a VMConfig.
+// It does NOT run the HA-role probe or touch the cache — those are the caller's
+// concern — so getVMLocal can layer them on. Returns (cfg, found, err);
+// found=false maps the Cfgms-GetVM {"found":false} sentinel.
+func (m *hypervModule) readVMState(ctx context.Context, vmName string) (*VMConfig, bool, error) {
+	output, err := m.transport.ExecutePS(ctx, psGetVM, map[string]string{"Name": vmName})
+	if err != nil {
+		return nil, false, fmt.Errorf("hyperv: get vm %q: %w", vmName, err)
+	}
+
+	var parsed map[string]interface{}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
+		return nil, false, fmt.Errorf("hyperv: parse get-vm response for %q: %w", vmName, jsonErr)
+	}
+
+	found, _ := parsed["found"].(bool)
+	if !found {
+		return nil, false, nil
 	}
 
 	// The host returns the VM by its exact name — no prefix to strip.
@@ -745,16 +849,7 @@ func (m *hypervModule) getVM(ctx context.Context, vmName string) (*VMConfig, err
 		}
 	}
 
-	// Cluster-role membership probe (#2372/#2420) — see
-	// probeClusterRoleMembership for the scope-cap and degrade semantics.
-	cfg.HARole = m.probeClusterRoleMembership(ctx, vmName)
-
-	// Write-through: update cache on successful read
-	m.vmsMu.Lock()
-	m.vms[vmName] = *cfg
-	m.vmsMu.Unlock()
-
-	return cfg, nil
+	return cfg, true, nil
 }
 
 // probeClusterRoleMembership reports whether vmName is a registered clustered
@@ -774,7 +869,7 @@ func (m *hypervModule) probeClusterRoleMembership(ctx context.Context, vmName st
 	if m.clusterName == "" {
 		return nil
 	}
-	owners, roErr := m.readResourceOwners(ctx, m.clusterName)
+	owners, roErr := m.cachedResourceOwners(ctx, m.clusterName)
 	if roErr != nil {
 		if logger, ok := m.GetLogger(); ok {
 			logger.Warn("hyperv: cluster-role membership probe failed; reporting no HA role this cycle",
@@ -822,7 +917,9 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		// also carries the removed VM's HARole + VHDPath, used below to route the
 		// provisioning-record delete to the same store it was written to.
 		var deleteBefore map[string]interface{}
-		cur, gErr := m.getVM(ctx, vmName)
+		// Local truth: the delete path removes the VM on THIS host — a role hosted
+		// elsewhere must read absent here (getVMLocal), never the owner's state.
+		cur, gErr := m.getVMLocal(ctx, vmName)
 		if gErr == nil && cur != nil && cur.State != "absent" {
 			deleteBefore = map[string]interface{}{
 				"cpu":       cur.CPUCount,
@@ -934,9 +1031,13 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// out-of-band), computing needed actions as no-ops. The write-through cache is
 	// still updated after a successful apply for the benefit of Get, but it is
 	// never the basis for an apply decision.
-	current, err := m.getVM(ctx, vmName)
+	// Local truth for the reconcile decision: setVM's create/lifecycle owner-gates
+	// key on whether the VM exists on THIS node. A clustered role hosted on another
+	// member must read "absent" here so the existence gate fires (getVMLocal, not
+	// the cluster-wide getVM which would report the owner's VM as present).
+	current, err := m.getVMLocal(ctx, vmName)
 	if err != nil {
-		// getVM no longer returns a sentinel for "not found" — absence is
+		// getVMLocal no longer returns a sentinel for "not found" — absence is
 		// signalled by State=="absent" with err==nil. Any real error here
 		// (module not configured, transport down, malformed response) is
 		// fatal for this Set call.

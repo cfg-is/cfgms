@@ -513,6 +513,52 @@ func TestModule_Configure_ExtractsAllKeys_WinRM(t *testing.T) {
 	assert.NotNil(t, m.transport, "transport must be wired after Configure")
 }
 
+// TestModule_Configure_ClusterNameFromHARole verifies that Configure derives the
+// S5 cluster scope cap from a vm resource's nested ha_role.cluster_name when no
+// top-level cluster_name key is present. A cascaded ha_role vm resource carries
+// the cluster name ONLY under ha_role, so without this derivation m.clusterName
+// stays empty, probeClusterRoleMembership is gated off, Get never reports
+// ha_role, and the resource is re-detected as unapplied "added" drift on every
+// converge cycle — never reporting converged (Story #2577).
+func TestModule_Configure_ClusterNameFromHARole(t *testing.T) {
+	store := newInlineStore()
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(store))
+
+	// A representative cascaded ha_role vm resource: cluster name only nested.
+	cfg := mapConfigState{
+		"name":     "cfgms-e2e-ha-01",
+		"vhd_path": `C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx`,
+		"ha_role": map[string]interface{}{
+			"cluster_name": "cfg-lab",
+		},
+	}
+	require.NoError(t, m.Configure(cfg))
+	assert.Equal(t, "cfg-lab", m.clusterName,
+		"cluster scope cap must be derived from ha_role.cluster_name when top-level cluster_name is absent")
+}
+
+// TestModule_Configure_TopLevelClusterNameWins verifies that an explicit
+// top-level cluster_name key still takes precedence over the nested
+// ha_role.cluster_name (the derivation only fills the gap when the top-level key
+// is absent — it never overrides an operator-declared scope cap).
+func TestModule_Configure_TopLevelClusterNameWins(t *testing.T) {
+	store := newInlineStore()
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(store))
+
+	cfg := mapConfigState{
+		"name":         "cfgms-e2e-ha-01",
+		"cluster_name": "explicit-cluster",
+		"ha_role": map[string]interface{}{
+			"cluster_name": "cfg-lab",
+		},
+	}
+	require.NoError(t, m.Configure(cfg))
+	assert.Equal(t, "explicit-cluster", m.clusterName,
+		"an explicit top-level cluster_name must win over the ha_role-derived value")
+}
+
 func TestModule_Configure_NilConfig(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetSecretStore(newInlineStore()))
