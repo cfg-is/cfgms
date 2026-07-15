@@ -1,21 +1,35 @@
 ---
 name: story-context
-description: Detect story from branch name, fetch GitHub issue details, and calculate acceptance criteria progress. Use when commands need story number, title, progress percentage, or remaining work items.
+description: Detect story from branch name (or roadmap when no branch), fetch GitHub issue details, and calculate acceptance criteria progress. Use when commands need story number, title, progress percentage, or remaining work items.
 context: fork
 agent: general-purpose
+model: haiku
 allowed-tools: Bash
 ---
 
 # Story Context Detection & Progress
 
+**Execute the steps below NOW, autonomously, and return only the structured result.** Do not greet, do not ask what to work on, and do not ask for a story number — derive everything from repo state. `$ARGUMENTS` may be empty; that is normal and is NOT a blocker. Detect the situation from state and act:
+
+- **Branch has a `story-<N>` segment** → that story: run steps 2–6 and return its progress.
+- **No story branch (e.g. bare `/story-start`)** → run the roadmap auto-detection in step 1 and return the candidate list. This is the default and requires no arguments.
+
+Only fall back to asking the caller if a shell command genuinely fails (no roadmap file, `gh` unavailable) — and even then, return what you *did* find plus the specific error, never a generic "how can I help" reply.
+
 ## Steps
 
-1. **Detect story number from branch**:
+1. **Detect story number**:
    ```bash
    git branch --show-current
    ```
    Extract the story number from the branch name by finding the numeric part after `story-`.
-   If no story number found in branch name, check if a story number was passed as argument: `$ARGUMENTS`
+   If no story number is found in the branch name, check `$ARGUMENTS` for one.
+   If still none (e.g. `/story-start` auto-detection before a branch exists), scan the roadmap for candidates instead — this keeps the large roadmap file and issue list out of the caller's context:
+   ```bash
+   grep -nE '^- \[ \] \*\*.*\*\* \(Issue #[0-9]+\)' docs/product/roadmap.md
+   gh issue list --state open --limit 50 --json number,title,labels
+   ```
+   Return the uncompleted candidates (number + title) rather than a single story, and let the caller choose.
 
 2. **Fetch issue details from GitHub** (use the extracted story number):
    ```bash
