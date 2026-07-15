@@ -9,6 +9,13 @@ allowed-tools: Bash
 
 # Story Context Detection & Progress
 
+**Execute the steps below NOW, autonomously, and return only the structured result.** Do not greet, do not ask what to work on, and do not ask for a story number — derive everything from repo state. `$ARGUMENTS` may be empty; that is normal and is NOT a blocker. Detect the situation from state and act:
+
+- **Branch has a `story-<N>` segment** → that story: run steps 2–6 and return its progress.
+- **No story branch (e.g. bare `/story-start`)** → run the roadmap auto-detection in step 1 and return the candidate list. This is the default and requires no arguments.
+
+Only fall back to asking the caller if a shell command genuinely fails (no roadmap file, `gh` unavailable) — and even then, return what you *did* find plus the specific error, never a generic "how can I help" reply.
+
 ## Steps
 
 1. **Detect story number**:
