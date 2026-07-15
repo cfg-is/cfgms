@@ -49,6 +49,7 @@ import (
 	package_module "github.com/cfgis/cfgms/features/modules/stdlib/package"
 	"github.com/cfgis/cfgms/features/modules/stdlib/patch"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	time_module "github.com/cfgis/cfgms/features/modules/stdlib/time"
 	user_module "github.com/cfgis/cfgms/features/modules/stdlib/user"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
@@ -186,6 +187,7 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 	"package":       func() modules.Module { return package_module.New() },
 	"patch":         func() modules.Module { return patch.New() },
 	"script":        func() modules.Module { return script.New() },
+	"time":          func() modules.Module { return time_module.New() },
 	"user":          func() modules.Module { return user_module.New() },
 }
 

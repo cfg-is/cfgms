@@ -213,7 +213,7 @@ Shipped in the steward installer, all `executors: [steward]` (closed set — see
 - `patch` - OS patch management (Windows Update COM API on Windows; `modules.ErrUnsupportedPlatform` fallback on Linux/macOS — real non-Windows backends are out of scope per ADR-016 PM Notes)
 - `user` - Local users & groups, membership, lock/disable state, password presence (observed only)
 - `cert_trust` - System trust store: install/trust CA & certs; keeps the CFGMS mTLS chain healthy fleet-wide
-- `time` - Timezone + NTP/time-sync — *planned (net-new)*
+- `time` - Timezone + NTP/time-sync configuration (`timezone`, `ntp_servers`, `ntp_sync_enabled`)
 - `hostname` - System/computer name & workgroup — *planned (net-new)*
 
 ### Extended steward modules (non-stdlib)

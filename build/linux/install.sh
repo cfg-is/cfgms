@@ -151,6 +151,7 @@ STDLIB_MODULES=(
     cfgms-module-patch
     cfgms-module-script
     cfgms-module-service
+    cfgms-module-time
     cfgms-module-user
 )
 MODULES_INSTALL_DIR="${INSTALL_PREFIX}/usr/local/lib/cfgms/modules"
