@@ -616,24 +616,18 @@ func TestRenderStepString(t *testing.T) {
 	}
 }
 
-// capturingProvider is a test implementation of APIProvider that records the
-// APIConfig it receives so tests can assert the values reaching the provider
-// were template-rendered by the executeAPIStep call site.
-type capturingProvider struct {
-	name     string
+// testCapturingMicrosoftProvider extends MicrosoftProvider with capture of the
+// received APIConfig for test assertions. It inherits real service/operation
+// metadata and config validation from MicrosoftProvider; only ExecuteOperation
+// is overridden to record inputs and return a synthetic success response.
+// Registered under a test-only name so it does not collide with the built-in
+// "microsoft" registration.
+type testCapturingMicrosoftProvider struct {
+	MicrosoftProvider
 	received atomic.Value // *APIConfig
 }
 
-func (p *capturingProvider) GetName() string                 { return p.name }
-func (p *capturingProvider) GetServices() []string           { return []string{"graph"} }
-func (p *capturingProvider) GetOperations(string) []string   { return []string{"createUser"} }
-func (p *capturingProvider) ValidateConfig(*APIConfig) error { return nil }
-func (p *capturingProvider) GetAuthenticationMethods() []AuthType {
-	return []AuthType{AuthTypeAPIKey}
-}
-func (p *capturingProvider) RefreshToken(context.Context, *APIConfig) error { return nil }
-
-func (p *capturingProvider) ExecuteOperation(_ context.Context, config *APIConfig) (*APIResponse, error) {
+func (p *testCapturingMicrosoftProvider) ExecuteOperation(_ context.Context, config *APIConfig) (*APIResponse, error) {
 	p.received.Store(config)
 	return &APIResponse{Success: true, StatusCode: 200, Data: map[string]interface{}{"ok": true}}, nil
 }
@@ -647,7 +641,7 @@ func TestAPIStep_TemplateRendering(t *testing.T) {
 	logger := logging.NewLogger("info")
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil)
 
-	provider := &capturingProvider{name: "capture"}
+	provider := &testCapturingMicrosoftProvider{}
 	require.NoError(t, engine.providerRegistry.RegisterProvider("capture", provider))
 
 	workflow := Workflow{
@@ -686,7 +680,7 @@ func TestAPIStep_TemplateRendering(t *testing.T) {
 	assert.Equal(t, StatusCompleted, finalExec.GetStatus(), "workflow must complete: %s", finalExec.GetError())
 
 	got, ok := provider.received.Load().(*APIConfig)
-	require.True(t, ok, "provider must have received an APIConfig")
+	require.True(t, ok, "testCapturingMicrosoftProvider must have received an APIConfig")
 	assert.Equal(t, "capture", got.Provider, "provider must be rendered")
 	assert.Equal(t, "graph", got.Service, "service must be rendered")
 	assert.Equal(t, "createUser", got.Operation, "operation must be rendered")

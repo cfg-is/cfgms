@@ -4,94 +4,34 @@ package script
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"runtime"
 	"testing"
 	"time"
 
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
-// inMemoryScriptRepo is a simple in-memory ScriptRepository for tests.
-// It stores scripts by "id@version" key and returns ErrNotFound for missing keys.
-type inMemoryScriptRepo struct {
-	scripts map[string]*VersionedScript
-}
-
-func newInMemoryScriptRepo(scripts ...*VersionedScript) *inMemoryScriptRepo {
-	r := &inMemoryScriptRepo{scripts: make(map[string]*VersionedScript)}
+// newTestGitScriptRepo creates a real GitScriptRepository backed by a temp-dir
+// FlatFile config store, pre-populated with the given scripts.
+// The hash field is computed from content so Get's integrity check passes.
+func newTestGitScriptRepo(t *testing.T, scripts ...*VersionedScript) *GitScriptRepository {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := NewGitScriptRepository(sm.GetConfigStore(), "test-tenant", false)
+	require.NoError(t, err)
 	for _, s := range scripts {
-		key := s.Metadata.ID + "@" + s.Metadata.Version.String()
-		r.scripts[key] = s
+		h := sha256.Sum256([]byte(s.Content))
+		s.Hash = fmt.Sprintf("%x", h)
+		require.NoError(t, repo.Create(s))
 	}
-	return r
+	return repo
 }
-
-func (r *inMemoryScriptRepo) Get(id, version string) (*VersionedScript, error) {
-	key := id + "@" + version
-	if s, ok := r.scripts[key]; ok {
-		return s, nil
-	}
-	return nil, fmt.Errorf("script %s@%s not found", id, version)
-}
-
-func (r *inMemoryScriptRepo) Create(s *VersionedScript) error {
-	key := s.Metadata.ID + "@" + s.Metadata.Version.String()
-	r.scripts[key] = s
-	return nil
-}
-
-func (r *inMemoryScriptRepo) List(_ *ScriptFilter) ([]*ScriptMetadata, error) {
-	result := make([]*ScriptMetadata, 0, len(r.scripts))
-	for _, s := range r.scripts {
-		result = append(result, s.Metadata)
-	}
-	return result, nil
-}
-
-func (r *inMemoryScriptRepo) Update(s *VersionedScript) error {
-	key := s.Metadata.ID + "@" + s.Metadata.Version.String()
-	r.scripts[key] = s
-	return nil
-}
-
-func (r *inMemoryScriptRepo) Delete(id, version string) error {
-	key := id + "@" + version
-	delete(r.scripts, key)
-	return nil
-}
-
-func (r *inMemoryScriptRepo) ListVersions(id string) ([]*Version, error) {
-	var versions []*Version
-	for _, s := range r.scripts {
-		if s.Metadata.ID == id {
-			v := *s.Metadata.Version
-			versions = append(versions, &v)
-		}
-	}
-	return versions, nil
-}
-
-func (r *inMemoryScriptRepo) GetLatestVersion(id string) (*Version, error) {
-	var latest *Version
-	for _, s := range r.scripts {
-		if s.Metadata.ID == id {
-			if latest == nil || s.Metadata.Version.Compare(latest) > 0 {
-				v := *s.Metadata.Version
-				latest = &v
-			}
-		}
-	}
-	if latest == nil {
-		return nil, fmt.Errorf("no versions found for script %s", id)
-	}
-	return latest, nil
-}
-
-func (r *inMemoryScriptRepo) Rollback(id, version string) error { return nil }
 
 // makeTestVersionedScript builds a minimal VersionedScript for test use.
 func makeTestVersionedScript(id, version string) *VersionedScript {
@@ -557,8 +497,8 @@ func TestModule_StageAction(t *testing.T) {
 	const scriptID = "cirunner-provision"
 	const scriptVersion = "1.0.0"
 
-	// Populate the in-memory repository with a known script.
-	repo := newInMemoryScriptRepo(makeTestVersionedScript(scriptID, scriptVersion))
+	// Populate a real git-backed repository with a known script.
+	repo := newTestGitScriptRepo(t, makeTestVersionedScript(scriptID, scriptVersion))
 
 	// Set up a real secret store so we can verify secret binding resolution.
 	store := newTestSecretStore(t)
@@ -634,7 +574,7 @@ func TestModule_StageAction_MissingRepo(t *testing.T) {
 // TestModule_StageAction_MissingScript verifies that looking up a non-existent
 // library script returns a clear error.
 func TestModule_StageAction_MissingScript(t *testing.T) {
-	repo := newInMemoryScriptRepo() // Empty repository.
+	repo := newTestGitScriptRepo(t) // Empty repository.
 	module := NewModule()
 	module.SetScriptRepository(repo)
 
@@ -655,7 +595,7 @@ func TestModule_StageAction_LiteralOnlyBindings(t *testing.T) {
 	const scriptID = "deploy-agent"
 	const scriptVersion = "2.0.1"
 
-	repo := newInMemoryScriptRepo(makeTestVersionedScript(scriptID, scriptVersion))
+	repo := newTestGitScriptRepo(t, makeTestVersionedScript(scriptID, scriptVersion))
 	module := NewModule()
 	module.SetScriptRepository(repo)
 	// No secret store set — literal bindings must not require one.
@@ -701,6 +641,27 @@ func TestModule_StageConfig_Validate_MissingID(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stage.id")
+}
+
+// TestModule_StageConfig_Validate_MissingVersion verifies that a stage config
+// with a non-empty ID but empty Version fails validation.
+func TestModule_StageConfig_Validate_MissingVersion(t *testing.T) {
+	cfg := &ScriptConfig{
+		Action: ScriptActionStage,
+		Stage:  &StageConfig{ID: "my-script", Version: ""},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage.version")
+}
+
+// TestScriptConfig_Validate_UnsupportedAction verifies that an unrecognised
+// action value returns an error, exercising the default branch in Validate().
+func TestScriptConfig_Validate_UnsupportedAction(t *testing.T) {
+	cfg := &ScriptConfig{Action: "run"}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported action")
 }
 
 // TestScriptModule_SuccessRunNoDriftWithNonSecondTimeout verifies that a script
