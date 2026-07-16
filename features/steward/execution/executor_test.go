@@ -991,3 +991,76 @@ func TestExecuteResource_TimeoutWarn_LogsActualEnforcedBudget(t *testing.T) {
 	assert.LessOrEqual(t, timeoutMS, int64(1000),
 		"timeout_ms must reflect the actual enforced budget (~200ms outer ctx), not the configured 10000ms module timeout")
 }
+
+// ─── Story #2577: managed-elsewhere short-circuit ──────────────────────────────
+
+// managedElsewhereState is a ConfigState that reports it is managed by another
+// authority (e.g. a clustered HA VM owned by another cluster node). The executor
+// must treat it as compliant with no Compare/Set/Verify.
+type managedElsewhereState struct{ owner string }
+
+func (s *managedElsewhereState) AsMap() map[string]interface{} {
+	return map[string]interface{}{"state": "absent"}
+}
+func (s *managedElsewhereState) ToYAML() ([]byte, error)          { return nil, nil }
+func (s *managedElsewhereState) FromYAML([]byte) error            { return nil }
+func (s *managedElsewhereState) Validate() error                  { return nil }
+func (s *managedElsewhereState) GetManagedFields() []string       { return []string{"state"} }
+func (s *managedElsewhereState) ManagedElsewhere() (bool, string) { return true, s.owner }
+
+var _ modules.ManagedElsewhere = (*managedElsewhereState)(nil)
+
+// managedElsewhereModule.Get reports a managed-elsewhere resource; Set must never
+// run because the executor short-circuits to compliant before it.
+type managedElsewhereModule struct{ setCalled int32 }
+
+func (m *managedElsewhereModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &managedElsewhereState{owner: "NODE2"}, nil
+}
+func (m *managedElsewhereModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	atomic.AddInt32(&m.setCalled, 1)
+	return nil
+}
+
+var _ modules.Module = (*managedElsewhereModule)(nil)
+
+// TestExecuteResource_ManagedElsewhere_CompliantNoSet (Story #2577): when a
+// module's Get reports the resource is managed by another authority, the executor
+// short-circuits to compliant — no drift comparison, no Set, no Verify — even
+// though the desired config would otherwise show drift against the local view.
+func TestExecuteResource_ManagedElsewhere_CompliantNoSet(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	mod := &managedElsewhereModule{}
+	f.RegisterModule("managed-elsewhere", mod)
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		StewardID:     "test-steward-2577",
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	// A desired config that WOULD show drift against the reported "absent" state —
+	// the managed-elsewhere signal must short-circuit before any comparison.
+	resource := stewardconfig.ResourceConfig{
+		Name:   "ha-vm-elsewhere",
+		Module: "managed-elsewhere",
+		Config: map[string]interface{}{"state": "running", "cpu_count": 2},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusNoChange, result.Status,
+		"a managed-elsewhere resource must report compliant (StatusNoChange)")
+	assert.False(t, result.DriftDetected,
+		"no drift comparison is performed for a managed-elsewhere resource")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&mod.setCalled),
+		"Set must never be called for a resource managed on another node")
+}

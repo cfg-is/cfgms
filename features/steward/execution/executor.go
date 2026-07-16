@@ -380,6 +380,24 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// not only when a change-event fires — with no extra module call.
 	e.cacheModuleDNAState(resourceID, currentState)
 
+	// Managed-elsewhere short-circuit (Story #2577): a module may report from Get
+	// that the resource is real and in its desired terminal state but managed by a
+	// DIFFERENT authority — e.g. a clustered HA VM owned by another cluster node.
+	// This node is not the manager, so field-level drift against its local view is
+	// not meaningful; treat it as compliant with no Compare/Set/Verify. The
+	// accountable authority (the CNO for HA VMs) owns "does it exist / have an
+	// owner"; a non-owner only abstains.
+	if me, ok := currentState.(modules.ManagedElsewhere); ok {
+		if managed, authority := me.ManagedElsewhere(); managed {
+			result.Status = StatusNoChange
+			result.ExecutionTime = time.Since(startTime)
+			e.logger.Info("Resource managed on another node — compliant by delegation",
+				"resource", resource.Name,
+				"managed_by", authority)
+			return result
+		}
+	}
+
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
 	result.DriftDetected = driftDetected
 	result.StateDiff = &stateDiff

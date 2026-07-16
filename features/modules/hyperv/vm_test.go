@@ -25,6 +25,10 @@ func vmModuleWithTransport(transport winrmTransport, tenantID string) *hypervMod
 		tenantID:  tenantID,
 		vms:       make(map[string]VMConfig),
 		detector:  &fakeDetector{result: true},
+		// Production parity: New() sets this so the bulk cluster-owner read is
+		// cached within a converge pass (Story #2577). Without it caching is off
+		// and the read-path owner lookup would re-query the cluster per concern.
+		clusterOwnersTTL: 5 * time.Second,
 	}
 }
 
@@ -1391,6 +1395,21 @@ func TestVMConfig_HARole_NonCSV_Unaffected(t *testing.T) {
 	require.NotNil(t, haBack.HARole)
 	assert.Equal(t, "lab-hv", haBack.HARole.ClusterName)
 	assert.Equal(t, "rg-ha2", haBack.HARole.ResourceGroupName)
+
+	// HA VMConfig with no resource_group_name: AsMap must emit an ha_role map
+	// carrying only cluster_name — NOT an empty resource_group_name key. The
+	// membership probe never sets ResourceGroupName and desired configs routinely
+	// omit it, so an always-present empty key made current-vs-desired ha_role
+	// compare unequal and the resource never reported converged (Story #2577).
+	haNoRG := &VMConfig{
+		Name: "ha-norg", VHDPath: `C:\ClusterStorage\CSV01\ha-norg.vhdx`,
+		HARole: &HARoleConfig{ClusterName: "lab-hv"},
+	}
+	haNoRGMap, ok := haNoRG.AsMap()["ha_role"].(map[string]interface{})
+	require.True(t, ok, "HA AsMap must emit an ha_role map")
+	assert.Equal(t, "lab-hv", haNoRGMap["cluster_name"])
+	_, hasRG := haNoRGMap["resource_group_name"]
+	assert.False(t, hasRG, "an empty resource_group_name must be omitted for omitempty parity")
 }
 
 // TestSetVM_HARole_RegistersClusteredRole verifies that on the create path an

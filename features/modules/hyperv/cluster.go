@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -597,6 +598,39 @@ func (m *hypervModule) readResourceOwners(ctx context.Context, clusterName strin
 	return parsed.Owners, nil
 }
 
+// cachedResourceOwners returns the bulk cluster resource-owner map, reading it
+// from the transport at most once per freshness window (Story #2577). This
+// collapses the per-HA-VM membership probes of one converge pass into a single
+// cluster read instead of one read per VM. It backs only the fail-safe READ
+// path (probeClusterRoleMembership); the write-path owner gate keeps reading
+// live via clusterOwnershipHelper. Any cluster-mutating op calls
+// invalidateClusterOwnersCache so work we just performed is reflected at once.
+// A returned map is treated as read-only by callers (it is the shared cache).
+func (m *hypervModule) cachedResourceOwners(ctx context.Context, clusterName string) (map[string]string, error) {
+	m.clusterOwnersMu.Lock()
+	defer m.clusterOwnersMu.Unlock()
+	if m.clusterOwners != nil && m.clusterOwnersTTL > 0 && time.Since(m.clusterOwnersAt) < m.clusterOwnersTTL {
+		return m.clusterOwners, nil
+	}
+	owners, err := m.readResourceOwners(ctx, clusterName)
+	if err != nil {
+		return nil, err
+	}
+	m.clusterOwners = owners
+	m.clusterOwnersAt = time.Now()
+	return owners, nil
+}
+
+// invalidateClusterOwnersCache drops the cached bulk owner map so the next read
+// path re-queries the cluster. Called after any op that changes clustered-role
+// ownership or membership (register, move, remove) so a freshly-mutated cluster
+// is never served stale from the Story #2577 read cache.
+func (m *hypervModule) invalidateClusterOwnersCache() {
+	m.clusterOwnersMu.Lock()
+	m.clusterOwners = nil
+	m.clusterOwnersMu.Unlock()
+}
+
 // setCluster reconciles the placement/scheduling PROPERTIES of existing
 // clustered VM roles (#2306). It is the Set("cluster:<name>", config) write
 // path — cluster-scoped only since #2372: it never creates or removes VM-role
@@ -808,6 +842,9 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 			"cluster-set-remove", "cluster:"+clusterName,
 			map[string]interface{}{"role": role, "exists": true},
 			map[string]interface{}{"removed": true, "cno_owner": cnoOwner}, nil)
+		// Membership changed — drop the Story #2577 read cache so the next probe
+		// sees the removed role.
+		m.invalidateClusterOwnersCache()
 		return nil
 	}
 
@@ -844,6 +881,9 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 			map[string]interface{}{"created": false}, addErr)
 		return fmt.Errorf("hyperv: reconcile role membership %q add role %q: %w", clusterName, role, addErr)
 	}
+	// A role was registered (or observed already-registered) — drop the Story
+	// #2577 read cache so the next membership probe reflects the new owner map.
+	m.invalidateClusterOwnersCache()
 	return nil
 }
 
