@@ -205,6 +205,8 @@ A device-level resource always wins. A role resource overrides cluster-policies 
 
 Non-healthy statuses surface as `health.Alert` entries (critical for missing/split-brain, warning for dead-owner) and `health.ComponentHealth` entries in the response. Detection is on-demand (no background poll): the endpoint scans the current DNA snapshot and config store on each call.
 
+**Workflow-driven `ha_role` writes (Issue #2667):** the `set_ha_role` workflow step is the first production writer of a resource's `ha_role` field via the workflow engine. It reads the target steward's device-scope config document (`stewards/<steward_id>`), locates the named `hyperv.vm` resource, and merges `{cluster_name, resource_group_name}` into its `ha_role` block. The write goes through `ConfigurationServiceV2.SetConfiguration` — the same validated + fan-out path as every other device-scope write — ensuring `ValidateConfiguration` runs and the registered `FanoutCallback` (Save = Deploy) fires an immediate push to the steward.
+
 **No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
 
 ### Role-Policies Namespace (Issues #2543, #2546)

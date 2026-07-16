@@ -53,6 +53,7 @@ import (
 	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/workflow"
+	workflownodes "github.com/cfgis/cfgms/features/workflow/nodes"
 	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
 	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/audit"
@@ -1228,7 +1229,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
-	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore())
+	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
 	if workflowHandler != nil {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
@@ -1485,6 +1486,7 @@ func initializeWorkflowHandler(
 	workflowRT *workflowruntime.ModuleRuntime,
 	logger logging.Logger,
 	secrets secretsif.SecretStore,
+	configService *service.ConfigurationServiceV2,
 ) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl) {
 	// Workflow module factory: looks up controller-kind module bundles by
 	// name in the controller's module cache (#1883) and fork/execs them as
@@ -1496,9 +1498,10 @@ func initializeWorkflowHandler(
 	// REST-only deployments that never resolve modules through the engine are unaffected.
 	moduleFactory := workflow.NewWorkflowModuleFactory(moduleCache, workflowRT)
 
-	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, nil, nil)
-
 	configStore := storageManager.GetConfigStore()
+
+	setHARoleExecutor := workflownodes.NewSetHARoleNodeExecutor(configStore, configService)
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, nil)
 
 	// workflowEngineAdapter bridges workflow.Engine to trigger.WorkflowTrigger.
 	// Triggers resolve workflows by name from the default tenant store.
