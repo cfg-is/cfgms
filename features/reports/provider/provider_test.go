@@ -270,3 +270,77 @@ func TestGetDNAData_StorageError_LogValueSanitized(t *testing.T) {
 			"clean error message must pass through unchanged")
 	})
 }
+
+// ── GetDeviceStats log sanitization ──────────────────────────────────────────
+
+// TestGetDeviceStats_CalculateError_LogValueSanitized covers the log-injection
+// mitigation in GetDeviceStats' per-device failure path (provider.go), the
+// analogue of the GetDNAData fix. A single-device storage failure propagates out
+// of calculateDeviceStats; GetDeviceStats then skips the device and logs a Warn.
+//
+// Both the caller-supplied device_id AND the wrapped error message can carry
+// attacker-controlled \n/\r, so this asserts both fields are stripped in the log
+// while their payload text survives.
+func TestGetDeviceStats_CalculateError_LogValueSanitized(t *testing.T) {
+	timeRange := interfaces.TimeRange{
+		Start: time.Now().Add(-24 * time.Hour),
+		End:   time.Now(),
+	}
+
+	t.Run("newlines_stripped_in_device_id_and_error", func(t *testing.T) {
+		capLog := &warnCapturingLogger{}
+		dirtyErr := errors.New("history read failed\nforged log line\r\nalso forged")
+		p := &DataProvider{
+			storageManager: &errDNAHistoryStore{err: dirtyErr},
+			logger:         capLog,
+		}
+		dirtyDeviceID := "device-1\nINJECTED admin login\r\nfrom 10.0.0.1"
+
+		stats, err := p.GetDeviceStats(context.Background(), []string{dirtyDeviceID}, timeRange)
+
+		require.NoError(t, err, "GetDeviceStats logs the per-device failure and continues")
+		assert.Empty(t, stats, "device with a failing calculateDeviceStats must be skipped")
+
+		loggedID := capLog.kvValue("device_id")
+		require.NotNil(t, loggedID, "expected 'device_id' key in logged Warn entries")
+		loggedIDStr, ok := loggedID.(string)
+		require.True(t, ok, "sanitized device_id must be logged as a string")
+		assert.NotContains(t, loggedIDStr, "\n", "\\n must be stripped from logged device_id")
+		assert.NotContains(t, loggedIDStr, "\r", "\\r must be stripped from logged device_id")
+		assert.Contains(t, loggedIDStr, "device-1", "device id text must be preserved")
+
+		loggedErr := capLog.kvValue("error")
+		require.NotNil(t, loggedErr, "expected 'error' key in logged Warn entries")
+		loggedErrStr, ok := loggedErr.(string)
+		require.True(t, ok, "sanitized error must be logged as a string")
+		assert.NotContains(t, loggedErrStr, "\n", "\\n must be stripped from logged error")
+		assert.NotContains(t, loggedErrStr, "\r", "\\r must be stripped from logged error")
+		assert.Contains(t, loggedErrStr, "history read failed", "error message text must be preserved")
+	})
+
+	t.Run("clean_device_id_and_error_pass_through", func(t *testing.T) {
+		capLog := &warnCapturingLogger{}
+		cleanErr := errors.New("normal history failure")
+		p := &DataProvider{
+			storageManager: &errDNAHistoryStore{err: cleanErr},
+			logger:         capLog,
+		}
+
+		stats, err := p.GetDeviceStats(context.Background(), []string{"device-clean"}, timeRange)
+
+		require.NoError(t, err)
+		assert.Empty(t, stats)
+
+		loggedID := capLog.kvValue("device_id")
+		require.NotNil(t, loggedID)
+		assert.Equal(t, "device-clean", loggedID,
+			"clean device id must pass through unchanged")
+
+		loggedErr := capLog.kvValue("error")
+		require.NotNil(t, loggedErr)
+		loggedErrStr, ok := loggedErr.(string)
+		require.True(t, ok)
+		assert.Contains(t, loggedErrStr, "normal history failure",
+			"clean error message must pass through unchanged")
+	})
+}

@@ -171,15 +171,27 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 		DeviceID: deviceID,
 	}
 
-	// Get DNA records for the device
-	dnaQuery := interfaces.DataQuery{
-		TimeRange: timeRange,
-		DeviceIDs: []string{deviceID},
+	// Get DNA records for the single, explicitly-requested device.
+	//
+	// Query storage directly rather than through GetDNAData: GetDNAData is a
+	// discovery/aggregation path that intentionally swallows per-device storage
+	// errors and continues so one bad device never fails a fleet-wide report.
+	// For single-device stats a storage failure is fatal — silently reporting
+	// zero records would misrepresent the device — so the error propagates to
+	// GetDeviceStats, which skips and logs (sanitized) the offending device.
+	options := &storage.QueryOptions{
+		TimeRange:   &storage.TimeRange{Start: timeRange.Start, End: timeRange.End},
+		IncludeData: true,
 	}
 
-	dnaRecords, err := p.GetDNAData(ctx, dnaQuery)
+	historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
 	if err != nil {
 		return stats, fmt.Errorf("failed to get DNA records: %w", err)
+	}
+
+	dnaRecords := make([]storage.DNARecord, 0, len(historyResult.Records))
+	for _, record := range historyResult.Records {
+		dnaRecords = append(dnaRecords, *record)
 	}
 
 	stats.DNARecordCount = len(dnaRecords)
@@ -196,7 +208,10 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 	}
 
 	// Get drift events for the device
-	driftEvents, err := p.GetDriftEvents(ctx, dnaQuery)
+	driftEvents, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
+		TimeRange: timeRange,
+		DeviceIDs: []string{deviceID},
+	})
 	if err != nil {
 		return stats, fmt.Errorf("failed to get drift events: %w", err)
 	}
