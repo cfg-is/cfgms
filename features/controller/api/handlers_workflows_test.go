@@ -804,7 +804,7 @@ func TestWorkflowHandler_GetExecution_NotFound_Returns404(t *testing.T) {
 func TestWorkflowHandler_GetExecution_SpecialCharsInVars_HandledSafely(t *testing.T) {
 	_, configStore := newTestWorkflowHandler(t)
 	capLogger := &capturingLogger{}
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil, nil, nil)
 	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
@@ -833,7 +833,7 @@ func TestWorkflowHandler_GetExecution_SpecialCharsInVars_HandledSafely(t *testin
 func TestWorkflowHandler_CancelExecution_SpecialCharsInVars_HandledSafely(t *testing.T) {
 	_, configStore := newTestWorkflowHandler(t)
 	capLogger := &capturingLogger{}
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), capLogger, nil, nil, nil, nil, nil)
 	h := NewWorkflowHandler(engine, configStore, nil, capLogger)
 	router := newWorkflowRouter(h)
 
