@@ -64,6 +64,13 @@ var (
 	// the build); this is enforced eagerly at validate-time rather than letting
 	// the provisioning path stall (see vm_provision.go CSV seed-dir hang).
 	ErrInvalidHARoleSeedDir = errors.New("hyperv: invalid ha_role: a CSV primary vhd_path requires a host-local seed_dir (seed_dir must be set and not under C:\\ClusterStorage\\)")
+
+	// ErrInvalidCheckpointPolicy is returned when a checkpoints block declares
+	// policy: retain with neither max nor max_age set (#2627). "retain everything,
+	// no cap" is indistinguishable from the absent-block (observe-only) default, so
+	// it is rejected fail-closed rather than left as an ambiguous no-op that two
+	// reasonable implementations could read differently.
+	ErrInvalidCheckpointPolicy = errors.New("hyperv: invalid checkpoints: policy retain requires max or max_age (a bare retain with no bound is indistinguishable from observe-only)")
 )
 
 // csvPathPrefix is the Cluster Shared Volume mount root. A VHDX or seed dir under
@@ -155,6 +162,14 @@ type VMConfig struct {
 	// (non-HA) resource with unchanged behavior.
 	HARole *HARoleConfig `yaml:"ha_role,omitempty"`
 
+	// CheckpointPolicy, when non-nil, opts the VM into declarative checkpoint
+	// lifecycle management (#2627): setVM converges the VM's checkpoint set to the
+	// policy by MERGING stray checkpoints (Remove-VMSnapshot folds the differencing
+	// disk into its parent — non-destructive; never Restore/revert). Absent
+	// (nil) = observe-only, the #2626 default: checkpoints are surfaced as DNA via
+	// CheckpointCount but never touched. See vm_checkpoint.go.
+	CheckpointPolicy *CheckpointPolicy `yaml:"checkpoints,omitempty"`
+
 	// ConfigLocation is the OBSERVED configuration-file location (Hyper-V
 	// ConfigurationLocation), populated by getVM and exposed on the Get/DNA
 	// surface. It is never declared in config — the desired location is always
@@ -207,6 +222,36 @@ type HARoleConfig struct {
 	// ResourceGroupName is the optional cluster resource-group name. It defaults
 	// to the VM name (the clustered role is registered under the VM name).
 	ResourceGroupName string `yaml:"resource_group_name,omitempty"`
+}
+
+// CheckpointPolicy is the declarative checkpoint lifecycle a hyperv.vm opts into
+// (#2627). Cleanup is MERGE-ONLY (Remove-VMSnapshot folds a checkpoint's
+// differencing disk into its parent — it never reverts VM state); Restore-VMSnapshot
+// is deliberately out of scope. Semantics (see resolveCheckpointAction / Validate):
+//
+//   - Policy "none", or Max == 0 → merge ALL checkpoints ("this VM should have none").
+//   - Policy "retain" with Max N → retain the newest N, merge the rest (oldest-first).
+//   - Policy "retain" with MaxAge D → retain checkpoints younger than D, merge the rest.
+//   - Max and MaxAge together → a checkpoint is retained only if it satisfies BOTH
+//     bounds (within the newest N AND younger than D); anything violating either is merged.
+//   - Policy "" with only Max/MaxAge set → implicit "retain" (a bound with no explicit
+//     policy means retain-with-bound, never observe-only).
+//   - Policy "retain" with neither Max nor MaxAge → invalid (ErrInvalidCheckpointPolicy).
+//
+// A nil *CheckpointPolicy (absent checkpoints block) is observe-only (#2626 default).
+type CheckpointPolicy struct {
+	// Policy is the lifecycle mode: "none" (merge all), "retain" (keep a bounded
+	// set), or "" (implicit retain when Max/MaxAge is set; otherwise treated as
+	// observe-only by resolveCheckpointAction).
+	Policy string `yaml:"policy,omitempty"`
+	// Max is a pointer so an explicit `max: 0` (a merge-all trigger, equivalent to
+	// policy: none — AC1) is distinguishable from an unset max (no count bound, used
+	// with max_age). *&0 → merge all; *&N (N>0) → retain the newest N; nil → no
+	// count bound.
+	Max *int `yaml:"max,omitempty"`
+	// MaxAge is a Go duration string (e.g. "24h"); checkpoints older than this are
+	// merged. Empty means "no age bound". Validated as a duration in Validate().
+	MaxAge string `yaml:"max_age,omitempty"`
 }
 
 // stringOrStringList is a YAML scalar-or-sequence: switch_name may be a single
@@ -385,6 +430,14 @@ func (c *VMConfig) Validate() error {
 			return ErrInvalidHARoleSeedDir
 		}
 	}
+	// Declarative checkpoint policy (#2627): reject a bare `policy: retain` with no
+	// bound and a malformed max_age fail-closed, mirroring the sentinel-error
+	// pattern above. See CheckpointPolicy.validate in vm_checkpoint.go.
+	if c.CheckpointPolicy != nil {
+		if err := c.CheckpointPolicy.validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -510,6 +563,12 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		// from GetManagedFields so they never participate in drift comparison.
 		"configuration_location": c.ConfigLocation,
 		"checkpoint_count":       c.CheckpointCount,
+		// Declarative checkpoint policy (#2627). Unlike checkpoint_count this IS a
+		// managed field (see GetManagedFields): the desired config emits its declared
+		// policy while getVM never sets CheckpointPolicy (emits ""), so declaring a
+		// policy drifts and drives setVM → reconcileCheckpoints each converge. An
+		// absent policy emits "" on both sides ⇒ no drift ⇒ #2626 observe-only default.
+		"checkpoint_policy": canonicalCheckpointPolicy(c.CheckpointPolicy),
 	}
 	if c.Source != nil {
 		m["source"] = map[string]interface{}{
@@ -585,7 +644,7 @@ func (c *VMConfig) FromYAML(data []byte) error {
 
 // GetManagedFields returns the list of fields this configuration manages.
 func (c *VMConfig) GetManagedFields() []string {
-	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source", "ha_role"}
+	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source", "ha_role", "checkpoint_policy"}
 }
 
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
@@ -1014,6 +1073,11 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// as a clustered role; absent ⇒ standalone VM (unchanged behavior).
 	cfg.HARole = parseHARoleMap(configMap["ha_role"])
 
+	// checkpoints (the declarative checkpoint policy, #2627) arrives as a nested
+	// map on the executor-supplied config map. Parse it so the reconcile-via-merge
+	// runs on convergence; absent ⇒ nil ⇒ observe-only (#2626 default).
+	cfg.CheckpointPolicy = parseCheckpointPolicyMap(configMap["checkpoints"])
+
 	// Also handle *VMConfig passed directly
 	if vc, ok := config.(*VMConfig); ok {
 		*cfg = *vc
@@ -1138,7 +1202,13 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	}
 
 	if vmExists {
-		return m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state)
+		if err := m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state); err != nil {
+			return err
+		}
+		// Converge the checkpoint set to the declared policy (#2627). No-op when
+		// CheckpointPolicy is nil (observe-only). Runs after the power/resource
+		// reconcile so it operates on the settled VM.
+		return m.reconcileCheckpoints(ctx, hostName, cfg.CheckpointPolicy)
 	}
 
 	// VM does not exist — create it (plain lifecycle, no source block).
