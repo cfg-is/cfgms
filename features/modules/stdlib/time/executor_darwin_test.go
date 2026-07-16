@@ -75,7 +75,7 @@ func TestDarwinExecutor_GetNTPEnabled_Parsing(t *testing.T) {
 	}{
 		{"Using Network Time: On", true},
 		{"Using Network Time: Off", false},
-		{"using network time: on", true},  // lowercase variant
+		{"using network time: on", true},   // lowercase variant
 		{"using network time: off", false}, // lowercase variant
 		{"Using Network Time: ON", true},   // uppercase variant
 	}
