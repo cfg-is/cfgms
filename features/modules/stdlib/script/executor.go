@@ -17,6 +17,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
+// reapGracePeriod bounds how long Execute waits for cmd.Wait to return after it
+// has terminated a timed-out process tree. A successful tree kill closes the
+// inherited pipe handles and Wait returns almost immediately, well within this
+// window; the timer only fires in the pathological case where a handle lingers,
+// guaranteeing Execute returns rather than wedging the steward's exec channel
+// indefinitely (Issue #2715).
+const reapGracePeriod = 10 * time.Second
+
 // Executor handles cross-platform script execution
 type Executor struct {
 	config         *ScriptConfig
@@ -140,11 +148,24 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
+	// Prepare process-tree tracking BEFORE Start so the Job Object exists and the
+	// process can be assigned to it as the very first post-Start action. On Windows
+	// this closes Issue #2715: a detached grandchild (e.g. a `--runasservice` step)
+	// that inherited the stdout/stderr pipe would otherwise keep cmd.Wait() — and
+	// this goroutine, plus the steward's per-device execution slot — blocked forever
+	// after a top-level-only cmd.Process.Kill().
+	tree := newProcessTree(e.logger)
+	tree.prepare()
+	defer tree.close()
+
 	// Start the command
 	if err := cmd.Start(); err != nil {
 		cleanupToken()
 		return nil, fmt.Errorf("failed to start command: %w", err)
 	}
+	// Assign the process to its Job Object immediately, before any other work, so
+	// it becomes a job member before it can spawn descendants.
+	tree.track(cmd)
 	// Token (Windows) or no-op (Unix): release the handle after the process is created.
 	cleanupToken()
 
@@ -177,13 +198,24 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 		return result, nil
 
 	case <-timeoutCtx.Done():
-		// Timeout occurred
-		if err := cmd.Process.Kill(); err != nil {
-			e.logger.Warn("failed to kill timed-out script process", "error", err)
-		}
+		// Timeout occurred. Terminate the ENTIRE process tree (Issue #2715), not
+		// just the top-level process — otherwise a grandchild holding an inherited
+		// stdout/stderr pipe keeps cmd.Wait() blocked forever below.
+		tree.terminate(cmd)
+
 		// Reap the killed process so cmd.Wait returns and its output-copy
-		// goroutines exit; partial output is discarded on timeout.
-		<-done
+		// goroutines exit; partial output is discarded on timeout. With the tree
+		// terminated the inherited pipe handles close and done fires promptly. The
+		// grace timer is a bounded backstop so Execute can never block the exec
+		// channel indefinitely even in the pathological case where the tree kill
+		// did not release every handle (AC2). A working tree kill always reaches
+		// done first, so the executor goroutine exits and is not leaked.
+		select {
+		case <-done:
+		case <-time.After(reapGracePeriod):
+			e.logger.Warn("script process tree did not reap within grace period after termination",
+				"grace", reapGracePeriod, "pid", result.PID)
+		}
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(result.StartTime)
 		result.ExitCode = -1
