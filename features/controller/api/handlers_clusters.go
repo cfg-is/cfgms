@@ -27,9 +27,9 @@ type ClusterInfo struct {
 
 // ClusterReconciliationResponse is returned by GET /api/v1/clusters/{name}/reconciliation.
 type ClusterReconciliationResponse struct {
-	ClusterName string                         `json:"cluster_name"`
-	Resources   []ClusterResourceStatus        `json:"resources"`
-	Alerts      []health.Alert                 `json:"alerts,omitempty"`
+	ClusterName string                            `json:"cluster_name"`
+	Resources   []ClusterResourceStatus           `json:"resources"`
+	Alerts      []health.Alert                    `json:"alerts,omitempty"`
 	Components  map[string]health.ComponentHealth `json:"components,omitempty"`
 }
 
