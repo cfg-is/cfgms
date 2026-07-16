@@ -194,6 +194,17 @@ A device-level resource always wins. A role resource overrides cluster-policies 
 
 **Authoring cluster-policies configs:** use the existing config-push path (`cfg config upload`) to store a `ConfigKey{Namespace: "cluster-policies", Name: "<clusterName>"}` document for the cluster's tenant. The resolver looks up this document automatically for every member steward.
 
+**Accountable-authority reconciliation (Issue #2704):** the controller exposes `GET /api/v1/clusters/{name}/reconciliation` as the **single accountable authority** that reconciles the declared clustered resources (sourced from `cluster-policies/<clusterName>`) against the actual cluster registry (derived from steward DNA). For each declared resource the endpoint produces one of four classifications:
+
+| Status | Meaning |
+|--------|---------|
+| `present-with-live-owner` | Resource exists in the registry and its owner steward has a heartbeat within the last 60 s. Healthy. |
+| `declared-but-missing` | Resource declared in `cluster-policies` but no steward has published a `resource_owner.<role>` DNA attribute for it (create-coverage gap). Non-owner stewards' compliant-by-delegation abstain is **not safe** for this resource. |
+| `orphan-dead-owner` | Registry entry exists but the owner steward's last heartbeat exceeds 60 s (`DeadOwnerStaleThreshold`, matching the 3-missed-heartbeat offline timeout from epic #1664). Resource is orphaned. |
+| `split-brain` | Two or more cluster members report different `resource_owner.<role>` values for the same role. All distinct claims are listed in `all_owner_claims`. |
+
+Non-healthy statuses surface as `health.Alert` entries (critical for missing/split-brain, warning for dead-owner) and `health.ComponentHealth` entries in the response. Detection is on-demand (no background poll): the endpoint scans the current DNA snapshot and config store on each call.
+
 **No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
 
 ### Role-Policies Namespace (Issues #2543, #2546)

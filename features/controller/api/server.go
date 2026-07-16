@@ -469,9 +469,11 @@ func (s *Server) setupRouter() {
 	// Cluster registry endpoints (Issue #2424): read-only view of cluster topology
 	// derived on demand from steward DNA attributes. Eventually consistent (up to one
 	// DNARefreshInterval, default 30 min) — see docs/api/rest-api.md for details.
+	// Reconciliation endpoint (Issue #2704): compares declared vs actual cluster state.
 	clusters := api.PathPrefix("/clusters").Subrouter()
 	clusters.Handle("", s.requirePermission("cluster", "list")(http.HandlerFunc(s.handleListClusters))).Methods("GET")
 	clusters.Handle("/{name}", s.requirePermission("cluster", "read")(http.HandlerFunc(s.handleGetCluster))).Methods("GET")
+	clusters.Handle("/{name}/reconciliation", s.requirePermission("cluster", "read")(http.HandlerFunc(s.handleClusterReconciliation))).Methods("GET")
 
 	// Steward management endpoints (require API key authentication)
 	stewards := api.PathPrefix("/stewards").Subrouter()

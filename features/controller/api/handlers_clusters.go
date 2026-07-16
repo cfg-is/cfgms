@@ -3,14 +3,17 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -20,6 +23,22 @@ type ClusterInfo struct {
 	Name       string            `json:"name"`
 	Members    []string          `json:"members"`
 	RoleOwners map[string]string `json:"role_owners,omitempty"`
+}
+
+// ClusterReconciliationResponse is returned by GET /api/v1/clusters/{name}/reconciliation.
+type ClusterReconciliationResponse struct {
+	ClusterName string                         `json:"cluster_name"`
+	Resources   []ClusterResourceStatus        `json:"resources"`
+	Alerts      []health.Alert                 `json:"alerts,omitempty"`
+	Components  map[string]health.ComponentHealth `json:"components,omitempty"`
+}
+
+// ClusterResourceStatus is the per-role entry in a reconciliation response.
+type ClusterResourceStatus struct {
+	RoleName       string                         `json:"role_name"`
+	Status         clusterregistry.ResourceStatus `json:"status"`
+	OwnerID        string                         `json:"owner_id,omitempty"`
+	AllOwnerClaims []string                       `json:"all_owner_claims,omitempty"`
 }
 
 // stewardsToFleetData converts the controller service's StewardInfo slice to the
@@ -127,4 +146,194 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 		Members:    members,
 		RoleOwners: entry.RoleOwners,
 	})
+}
+
+// handleClusterReconciliation handles GET /api/v1/clusters/{name}/reconciliation.
+//
+// Returns the reconciliation status for each declared clustered resource in the
+// named cluster. The declared set is sourced from the cluster-policies config
+// stored under the caller's tenant (via InheritanceResolver's cluster-policies
+// namespace). The actual set is derived from steward DNA attributes via
+// clusterregistry.BuildRegistry.
+//
+// Four outcomes are possible per resource (Issue #2704):
+//   - present-with-live-owner: resource exists in the registry, owner is live.
+//   - declared-but-missing: resource declared in config but absent from registry
+//     (create-coverage gap — a non-owner's compliant-by-delegation is unsafe).
+//   - orphan-dead-owner: resource has a registry entry, but the owner steward's
+//     heartbeat exceeds the DeadOwnerStaleThreshold (60 s).
+//   - split-brain: multiple cluster members report different owner values for
+//     the same role (>1 claimed owner).
+//
+// Returns 404 when the cluster does not exist or is outside the caller's tenant
+// scope (same 404-not-403 pattern as handleGetCluster).
+func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	clusterName := vars["name"]
+	clusterNameForLog := logging.SanitizeLogValue(clusterName)
+
+	if clusterName == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Cluster name is required", "MISSING_CLUSTER_NAME")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	stewards := s.stewardsInTenantScope(callerTenant)
+	reg := clusterregistry.BuildRegistry(stewards)
+
+	if reg.Cluster(clusterName) == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Cluster not found", "CLUSTER_NOT_FOUND")
+		return
+	}
+
+	// Build the declared-resource set from the cluster-policies config
+	// (same namespace the InheritanceResolver uses in applyClusterConfiguration).
+	declared := s.clusterDeclaredResources(r.Context(), callerTenant, clusterName)
+
+	// Build a liveness checker from steward DNA hostnames and steward IDs.
+	// The owner value in resource_owner.<role> is typically the cluster node
+	// hostname (e.g. "CFG-70-02"); the matching steward publishes that hostname
+	// in DNA["hostname"]. A fallback by steward ID handles test fixtures.
+	hostnameIdx := make(map[string]fleet.StewardData, len(stewards))
+	stewardIDIdx := make(map[string]fleet.StewardData, len(stewards))
+	for _, sd := range stewards {
+		stewardIDIdx[sd.ID] = sd
+		if hostname, ok := sd.DNAAttributes["hostname"]; ok && hostname != "" {
+			hostnameIdx[hostname] = sd
+		}
+	}
+	isOwnerLive := func(ownerID string) bool {
+		var sd fleet.StewardData
+		var found bool
+		if sd, found = hostnameIdx[ownerID]; !found {
+			if sd, found = stewardIDIdx[ownerID]; !found {
+				return false // unknown owner — cannot confirm liveness → treat as dead
+			}
+		}
+		return time.Since(sd.LastHeartbeat) <= clusterregistry.DeadOwnerStaleThreshold
+	}
+
+	results := clusterregistry.Reconcile(declared, reg, stewards, isOwnerLive)
+
+	// Shape results into the response, generating health.Alert and
+	// health.ComponentHealth entries for each non-healthy status.
+	resources := make([]ClusterResourceStatus, 0, len(results))
+	var alerts []health.Alert
+	components := make(map[string]health.ComponentHealth)
+
+	for _, res := range results {
+		rs := ClusterResourceStatus{
+			RoleName:       res.RoleName,
+			Status:         res.Status,
+			OwnerID:        res.OwnerID,
+			AllOwnerClaims: res.AllOwnerClaims,
+		}
+		resources = append(resources, rs)
+
+		componentKey := clusterName + "/" + res.RoleName
+		switch res.Status {
+		case clusterregistry.StatusPresentLiveOwner:
+			components[componentKey] = health.ComponentHealth{
+				Name:    componentKey,
+				Status:  "healthy",
+				Message: "owner is live",
+			}
+
+		case clusterregistry.StatusDeclaredMissing:
+			alert := health.Alert{
+				ID:          componentKey + "/declared-but-missing",
+				Severity:    health.SeverityCritical,
+				Title:       "Cluster role not created",
+				Description: "Role " + res.RoleName + " declared in cluster-policies for cluster " + clusterName + " but has no owner in the registry (create-coverage gap).",
+				MetricType:  health.MetricTypeApplication,
+				MetricName:  "cluster_role_missing",
+				Status:      "active",
+			}
+			alerts = append(alerts, alert)
+			components[componentKey] = health.ComponentHealth{
+				Name:    componentKey,
+				Status:  "unhealthy",
+				Message: "declared but not created",
+			}
+
+		case clusterregistry.StatusOrphanDeadOwner:
+			alert := health.Alert{
+				ID:          componentKey + "/orphan-dead-owner",
+				Severity:    health.SeverityWarning,
+				Title:       "Cluster role owner offline",
+				Description: "Role " + res.RoleName + " in cluster " + clusterName + " is registered but its owner (" + res.OwnerID + ") has a stale heartbeat — compliant-by-delegation is not safe.",
+				MetricType:  health.MetricTypeApplication,
+				MetricName:  "cluster_role_dead_owner",
+				Status:      "active",
+			}
+			alerts = append(alerts, alert)
+			components[componentKey] = health.ComponentHealth{
+				Name:    componentKey,
+				Status:  "degraded",
+				Message: "owner offline: " + res.OwnerID,
+			}
+
+		case clusterregistry.StatusSplitBrain:
+			alert := health.Alert{
+				ID:          componentKey + "/split-brain",
+				Severity:    health.SeverityCritical,
+				Title:       "Cluster role split-brain",
+				Description: "Role " + res.RoleName + " in cluster " + clusterName + " has multiple owners claiming it — split-brain detected.",
+				MetricType:  health.MetricTypeApplication,
+				MetricName:  "cluster_role_split_brain",
+				Status:      "active",
+			}
+			alerts = append(alerts, alert)
+			components[componentKey] = health.ComponentHealth{
+				Name:    componentKey,
+				Status:  "unhealthy",
+				Message: "split-brain: multiple owners",
+			}
+		}
+	}
+
+	resp := ClusterReconciliationResponse{
+		ClusterName: clusterName,
+		Resources:   resources,
+		Alerts:      alerts,
+		Components:  components,
+	}
+
+	s.logger.Info("Reconciled cluster",
+		"cluster_name", clusterNameForLog,
+		"resource_count", len(results),
+		"alert_count", len(alerts))
+	s.writeSuccessResponse(w, resp)
+}
+
+// clusterDeclaredResources returns the DeclaredResource list for the given cluster
+// by reading the cluster-policies/<clusterName> config document from storage. When
+// the document does not exist or configService is unavailable, returns an empty
+// slice (no create-coverage gaps can be detected, but dead-owner and split-brain
+// detection still work from the DNA-derived registry).
+func (s *Server) clusterDeclaredResources(ctx context.Context, tenantID, clusterName string) []clusterregistry.DeclaredResource {
+	if s.configService == nil {
+		return nil
+	}
+	resources, err := s.configService.GetClusterDeclaredResources(ctx, tenantID, clusterName)
+	if err != nil {
+		s.logger.Warn("Failed to load cluster-policies config; create-coverage detection disabled",
+			"cluster_name", logging.SanitizeLogValue(clusterName),
+			"error", err.Error())
+		return nil
+	}
+	if len(resources) == 0 {
+		return nil
+	}
+	declared := make([]clusterregistry.DeclaredResource, 0, len(resources))
+	for _, r := range resources {
+		if r.Name != "" {
+			declared = append(declared, clusterregistry.DeclaredResource{
+				ClusterName: clusterName,
+				RoleName:    r.Name,
+			})
+		}
+	}
+	return declared
 }
