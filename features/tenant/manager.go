@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/rbac"
@@ -132,8 +133,16 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 	// Create default RBAC roles for the tenant (if RBAC is enabled)
 	if m.rbacManager != nil {
 		if err := m.rbacManager.CreateTenantDefaultRoles(ctx, tenantID); err != nil {
-			// Rollback tenant creation if RBAC setup fails
-			_ = m.store.DeleteTenant(ctx, tenantID)
+			// Rollback tenant creation if RBAC setup fails. If the rollback itself
+			// fails the tenant record is orphaned in storage, so surface the error
+			// loudly for operators to reconcile rather than swallowing it.
+			if delErr := m.store.DeleteTenant(ctx, tenantID); delErr != nil {
+				slog.Error("tenant: failed to roll back tenant after RBAC setup failure; orphaned tenant record left in storage",
+					"tenant_id", tenantID,
+					"rbac_error", err,
+					"rollback_error", delErr,
+				)
+			}
 			return nil, fmt.Errorf("failed to create tenant RBAC roles: %w", err)
 		}
 	}
@@ -364,6 +373,8 @@ func (m *Manager) recordConfigSourceEvent(ctx context.Context, tenantID, rawURL,
 		Detail("actor", actor)
 
 	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+		tenantID = strings.ReplaceAll(tenantID, "\r", "_")
 		slog.Warn("tenant: failed to record config source audit event",
 			"action", action,
 			"tenant_id", tenantID,

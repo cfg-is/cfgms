@@ -6,6 +6,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -237,6 +238,12 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 				// Non-fatal: parse failure for one cluster must not block others.
 				// Missing cluster config is already silently skipped inside applyClusterConfiguration,
 				// so an error here signals a corrupt document that must be surfaced, not swallowed.
+				stewardID = strings.ReplaceAll(stewardID, "\n", "_")
+				stewardID = strings.ReplaceAll(stewardID, "\r", "_")
+				tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+				tenantID = strings.ReplaceAll(tenantID, "\r", "_")
+				clusterName = strings.ReplaceAll(clusterName, "\n", "_")
+				clusterName = strings.ReplaceAll(clusterName, "\r", "_")
 				ir.log().WarnCtx(ctx, "skipping cluster-policies config for cluster; treating as no membership",
 					"steward_id", stewardID,
 					"tenant_id", tenantID,
@@ -254,6 +261,10 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 	if ir.roleProvider != nil {
 		fragments, err := ir.roleProvider.MatchingRoleFragments(ctx, stewardID)
 		if err != nil {
+			stewardID = strings.ReplaceAll(stewardID, "\n", "_")
+			stewardID = strings.ReplaceAll(stewardID, "\r", "_")
+			tenantID = strings.ReplaceAll(tenantID, "\n", "_")
+			tenantID = strings.ReplaceAll(tenantID, "\r", "_")
 			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
 				"steward_id", stewardID,
 				"tenant_id", tenantID,
