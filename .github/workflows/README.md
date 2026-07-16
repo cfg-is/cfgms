@@ -31,7 +31,7 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 **Triggers**: Pull Requests to main/develop, Merge Group, push to main, Manual dispatch
 
 **Jobs**:
-- `unit-tests` — `make test` with `CFGMS_TEST_INTEGRATION=0`; every PR; emits the `unit-tests` required context
+- `unit-tests` — `make check-stdlib-completeness` (ADR-016 clause 6 gate) then `make test` with `CFGMS_TEST_INTEGRATION=0`; every PR; emits the `unit-tests` required context
 - `integration-tests` — `make test-production-critical` on self-hosted Linux (hermetic container); needs `unit-tests`; emits the `integration-tests` required context
 - `cross-feature-tests` / `production-readiness` / `synthetic-monitoring` — workflow_dispatch `all`/`full` level only
 

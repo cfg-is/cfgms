@@ -77,6 +77,9 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
+    - name: Stdlib completeness gate (ADR-016 clause 6)
+      run: make check-stdlib-completeness
+
     - name: Start Linux resource sampler (self-hosted only, best-effort)
       if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
       continue-on-error: true
