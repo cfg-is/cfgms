@@ -1,0 +1,59 @@
+workflow:
+  name: promote-hv-role
+  description: >
+    Hyper-V VM promotion from standalone to Failover Cluster role.
+
+    Writes the ha_role block into the target VM's device-scope config
+    (set_ha_role step), soaks for a fixed delay to allow the steward's
+    convergence loop to register the cluster VM role, then moves the VM
+    resource definition from device scope to cluster-policies scope
+    (move_resource_to_cluster step).
+
+    The soak delay is a fixed wait, not an active convergence check.
+    ConfigurationServiceV2.SetConfiguration triggers an immediate fanout push
+    to the steward, so the delay window is tight; the steward does not need to
+    poll before acting. For slow cluster registration, increase the delay at
+    execute time by passing an updated workflow definition — this default (30s)
+    is intentionally conservative.
+
+    The workflow halts (on_failure: stop) if set_ha_role fails, ensuring no
+    cluster-scope write is attempted when the device-scope config is incomplete.
+
+    Operator setup:
+      1. Supply vm_name, steward_id, cluster_name, and tenant_id at execute
+         time via "cfg workflow promote-hv-role" (S5) or directly via
+         POST .../execute {"variables": {...}}.  Do NOT edit the variable
+         placeholders in this file — they are intentionally empty strings;
+         real values are always injected at execute time, not templated here.
+      2. Ensure the target steward (steward_id) is registered, reachable, and
+         already manages the VM (vm_name) before executing this workflow.
+      3. The soak delay (step 2, default 30s) is a fixed wait, not an active
+         convergence check. Epic #2520 tracks convergence-poll gaps; this
+         workflow intentionally avoids unreliable DNA polling in v1.
+
+    Durability note (v1): this workflow runs on the in-memory engine. A
+    controller restart during execution loses progress; re-run the workflow.
+    Config writes that completed before the restart are durable (git-backed).
+
+  version: "1.0"
+  timeout: 10m
+  on_failure: stop
+
+  variables:
+    vm_name: ""
+    steward_id: ""
+    cluster_name: ""
+    tenant_id: ""
+
+  steps:
+    - name: set-ha-role
+      type: set_ha_role
+
+    - name: soak-before-cluster-move
+      type: delay
+      delay:
+        duration: 30s
+        message: "Waiting for steward convergence loop to register the cluster VM role before moving resource to cluster scope"
+
+    - name: move-to-cluster
+      type: move_resource_to_cluster
