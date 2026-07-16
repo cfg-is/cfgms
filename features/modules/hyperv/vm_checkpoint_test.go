@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -294,7 +295,7 @@ func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
 	// Compliant: 0 checkpoints under policy none → echo the block → no drift.
 	mc := vmModuleWithTransport(&testWinRMTransport{
 		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 0)}}, "t-echo-clean")
-	mc.desiredCheckpointsRaw = desired
+	mc.checkpointDesired["cp-vm"] = desired
 	cc, err := mc.getVM(context.Background(), "cp-vm")
 	require.NoError(t, err)
 	assert.Equal(t, desired, cc.AsMap()["checkpoints"],
@@ -303,7 +304,7 @@ func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
 	// Non-compliant: 2 checkpoints under policy none → omit the block → drift.
 	md := vmModuleWithTransport(&testWinRMTransport{
 		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 2)}}, "t-echo-dirty")
-	md.desiredCheckpointsRaw = desired
+	md.checkpointDesired["cp-vm"] = desired
 	cd, err := md.getVM(context.Background(), "cp-vm")
 	require.NoError(t, err)
 	_, present := cd.AsMap()["checkpoints"]
@@ -332,13 +333,65 @@ func TestGetVM_CheckpointEcho_MaxAgeFetchesSnapshotList(t *testing.T) {
 		snapJSON,                              // 2nd: psGetVMSnapshots (max_age needs times)
 	}}
 	m := vmModuleWithTransport(transport, "t-echo-age")
-	m.desiredCheckpointsRaw = desired
+	m.checkpointDesired["cp-vm"] = desired
 	cfg, err := m.getVM(context.Background(), "cp-vm")
 	require.NoError(t, err)
 	assert.Equal(t, desired, cfg.AsMap()["checkpoints"],
 		"a checkpoint within the max_age window is retained ⇒ compliant ⇒ echo")
 	assert.Equal(t, psGetVMSnapshots, transport.calls[1].scriptBlock,
 		"a max_age policy must fetch the snapshot list to judge compliance")
+}
+
+// TestCheckpointDesired_KeyedPerVM_NoCrossLeak (#2627): the factory caches ONE
+// hyperv module instance per bundle, so every VM shares it. The desired-policy
+// store must be keyed by VM name — VM-A's policy must never leak into VM-B's
+// compliance judgment. Here VM-A (policy none) has 0 checkpoints (compliant) and
+// VM-B (retain max 5) has 3 (compliant); each must echo ITS OWN block.
+func TestCheckpointDesired_KeyedPerVM_NoCrossLeak(t *testing.T) {
+	blockA := map[string]interface{}{"policy": "none"}
+	blockB := map[string]interface{}{"policy": "retain", "max": 5}
+
+	// One shared module/transport instance serving both VMs (call 0 = A, 1 = B).
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSONWithCheckpoints("vm-a", 0),
+		hostVMJSONWithCheckpoints("vm-b", 3),
+	}}
+	m := vmModuleWithTransport(transport, "t-cp-keyed")
+	m.checkpointDesired["vm-a"] = blockA
+	m.checkpointDesired["vm-b"] = blockB
+
+	ca, err := m.getVM(context.Background(), "vm-a")
+	require.NoError(t, err)
+	cb, err := m.getVM(context.Background(), "vm-b")
+	require.NoError(t, err)
+
+	assert.Equal(t, blockA, ca.AsMap()["checkpoints"], "VM-A must echo its own policy block")
+	assert.Equal(t, blockB, cb.AsMap()["checkpoints"], "VM-B must echo its own policy block (no leak from VM-A)")
+}
+
+// TestCheckpointDesired_ConcurrentAccess_NoRace (#2627): the monitor goroutine's
+// targeted reconciles run concurrently with the convergence loop on the SAME
+// shared module instance, so the per-VM policy store must be mutex-guarded.
+// Exercises concurrent writes (setVM-style) and reads (getVM) for distinct VMs;
+// run under `go test -race` this fails if the map access is unguarded.
+func TestCheckpointDesired_ConcurrentAccess_NoRace(t *testing.T) {
+	m := vmModuleWithTransport(&testWinRMTransport{output: hostVMJSONWithCheckpoints("x", 0)}, "t-cp-race")
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		vm := fmt.Sprintf("vm-%d", i)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			m.checkpointDesiredMu.Lock()
+			m.checkpointDesired[vm] = map[string]interface{}{"policy": "none"}
+			m.checkpointDesiredMu.Unlock()
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = m.getVM(context.Background(), vm)
+		}()
+	}
+	wg.Wait()
 }
 
 // TestParseCheckpointPolicyMap (#2627, QA gap): the executor-map parse path,

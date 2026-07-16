@@ -843,12 +843,17 @@ func (m *hypervModule) getVMLocal(ctx context.Context, vmName string) (*VMConfig
 	cfg.HARole = m.probeClusterRoleMembership(ctx, vmName)
 
 	// Checkpoint-policy compliance echo (#2627): when a checkpoints policy is
-	// declared for this resource (stashed by Configure), report the desired block
-	// back on the Get surface IFF the live checkpoint set already complies — so a
-	// compliant VM shows no drift, and a VM with stray checkpoints omits the key
-	// and drifts (→ setVM reconcile). Best-effort: a probe error degrades to "omit
-	// the echo" (treated as drift, reconciled next Set) rather than failing Get.
-	if policy := parseCheckpointPolicyMap(m.desiredCheckpointsRaw); policy != nil {
+	// known for this VM (recorded by a prior setVM, keyed by VM name), report the
+	// desired block back on the Get surface IFF the live checkpoint set already
+	// complies — so a compliant VM shows no drift, and a VM with stray checkpoints
+	// omits the key and drifts (→ setVM reconcile). Until the first Set records the
+	// policy the authored `checkpoints` key drifts (no echo), which drives that
+	// first Set; thereafter a compliant VM is drift-free. Best-effort: a probe
+	// error degrades to "omit the echo" (treated as drift) rather than failing Get.
+	m.checkpointDesiredMu.RLock()
+	desiredCheckpoints := m.checkpointDesired[vmName]
+	m.checkpointDesiredMu.RUnlock()
+	if policy := parseCheckpointPolicyMap(desiredCheckpoints); policy != nil {
 		if comply, cErr := m.checkpointsComply(ctx, vmName, policy, cfg.CheckpointCount); cErr != nil {
 			if logger, ok := m.GetLogger(); ok {
 				logger.Warn("hyperv: checkpoint compliance probe failed; reporting as drift this cycle",
@@ -856,7 +861,7 @@ func (m *hypervModule) getVMLocal(ctx context.Context, vmName string) (*VMConfig
 					"error", cErr.Error())
 			}
 		} else if comply {
-			cfg.checkpointsEcho = m.desiredCheckpointsRaw
+			cfg.checkpointsEcho = desiredCheckpoints
 		}
 	}
 
@@ -1000,6 +1005,21 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	vmName := parts[1]
 
 	configMap := config.AsMap()
+
+	// Record the authored `checkpoints` block for this VM so getVM's compliance
+	// echo is policy-aware (#2627). Keyed by VM name + mutex-guarded: the module
+	// instance is SHARED across all hyperv resources (factory caches one instance
+	// per bundle) and the monitor and convergence goroutines converge concurrently,
+	// so per-VM state must be keyed, not a single instance field. Populated here —
+	// Set receives the correctly-scoped per-resource config as an argument — rather
+	// than in Configure (a module-level hook that would race/leak across VMs).
+	m.checkpointDesiredMu.Lock()
+	if m.checkpointDesired == nil {
+		m.checkpointDesired = make(map[string]interface{})
+	}
+	m.checkpointDesired[vmName] = configMap["checkpoints"]
+	m.checkpointDesiredMu.Unlock()
+
 	state, _ := configMap["state"].(string)
 
 	if state == "absent" {

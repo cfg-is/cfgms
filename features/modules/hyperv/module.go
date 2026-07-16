@@ -83,12 +83,19 @@ type hypervModule struct {
 	clusterOwnersAt  time.Time
 	clusterOwnersTTL time.Duration
 
-	// desiredCheckpointsRaw is the authored `checkpoints` block for the resource
-	// this module instance is converging (#2627), stashed by Configure. A fresh
-	// module instance is created per resource (executor.executeResource), Configured
-	// then Get/Set/verified, so a single per-instance value is safe. getVM reads it
-	// to make its compliance echo policy-aware; nil ⇒ observe-only.
-	desiredCheckpointsRaw interface{}
+	// checkpointDesired maps a VM name to the authored `checkpoints` block last
+	// seen for it, so getVM's compliance echo is policy-aware (#2627). It is
+	// keyed by VM name and mutex-guarded because the factory caches ONE module
+	// instance per bundle (factory.LoadModule) — every hyperv resource on a
+	// steward shares this instance, and the monitor goroutine's targeted
+	// reconciles run concurrently with the convergence loop. It is populated by
+	// setVM (which receives the per-resource desired config as an argument, so it
+	// is correctly scoped per VM), NOT by Configure (a module-level hook on the
+	// shared instance — using it for per-VM state would race/leak across VMs). A
+	// VM converges its policy on the first Set (the authored `checkpoints` key
+	// drifts until getVM can echo it); an empty entry ⇒ observe-only.
+	checkpointDesiredMu sync.RWMutex
+	checkpointDesired   map[string]interface{}
 
 	// vswitches is the write-through vSwitch cache. Keys are the exact switch
 	// names admins specify (identical to the host-side names). Updated on
@@ -229,11 +236,12 @@ func WithProfileStore(s ProfileStore) HypervOption {
 // record store, which otherwise defaults to an in-memory store).
 func New(detector HypervDetector, opts ...HypervOption) modules.Module {
 	m := &hypervModule{
-		executor:       newExecutor(),
-		vms:            make(map[string]VMConfig),
-		vswitches:      make(map[string]VSwitchConfig),
-		detector:       detector,
-		provisionStore: NewMemProvisionStore(),
+		executor:          newExecutor(),
+		vms:               make(map[string]VMConfig),
+		vswitches:         make(map[string]VSwitchConfig),
+		checkpointDesired: make(map[string]interface{}),
+		detector:          detector,
+		provisionStore:    NewMemProvisionStore(),
 		// Freshness window for the bulk cluster-owner read cache (Story #2577).
 		// Long enough to collapse the per-VM membership probes of a single
 		// converge pass into one cluster read, short enough that an external
@@ -333,12 +341,6 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
 	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
 	m.seedDir, _ = configMap["seed_dir"].(string)
-
-	// Stash the authored `checkpoints` block so getVM's compliance echo is
-	// policy-aware (#2627). This is the SAME object the drift comparator sees as
-	// desired.AsMap()["checkpoints"], so echoing it back on compliance compares
-	// equal (reflect.DeepEqual) and produces no false drift. nil ⇒ observe-only.
-	m.desiredCheckpointsRaw = configMap["checkpoints"]
 
 	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this
 	// steward will read; cluster_role_names bounds the clustered VM roles in

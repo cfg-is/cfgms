@@ -20,11 +20,12 @@ import (
 // and tenantID for VM operation tests. vms cache is initialised empty.
 func vmModuleWithTransport(transport winrmTransport, tenantID string) *hypervModule {
 	return &hypervModule{
-		executor:  &stubHypervExecutor{},
-		transport: transport,
-		tenantID:  tenantID,
-		vms:       make(map[string]VMConfig),
-		detector:  &fakeDetector{result: true},
+		executor:          &stubHypervExecutor{},
+		transport:         transport,
+		tenantID:          tenantID,
+		vms:               make(map[string]VMConfig),
+		checkpointDesired: make(map[string]interface{}),
+		detector:          &fakeDetector{result: true},
 		// Production parity: New() sets this so the bulk cluster-owner read is
 		// cached within a converge pass (Story #2577). Without it caching is off
 		// and the read-path owner lookup would re-query the cluster per concern.
