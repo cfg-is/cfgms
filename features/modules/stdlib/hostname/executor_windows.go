@@ -6,10 +6,13 @@
 package hostname
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // windowsExecutor manages host identity configuration on Windows via
@@ -85,6 +88,9 @@ func (e *windowsExecutor) setState(desired hostnameState) error {
 func wmicGetWorkgroup(computerName string) (string, error) {
 	out, err := exec.Command("wmic", "computersystem", "get", "Workgroup", "/format:list").CombinedOutput() // #nosec G204 - no user-controlled values in arguments
 	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return "", fmt.Errorf("wmic.exe not present on this host: %w", modules.ErrUnsupportedPlatform)
+		}
 		return "", fmt.Errorf("wmic computersystem get Workgroup: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	for _, line := range strings.Split(string(out), "\n") {
@@ -114,6 +120,9 @@ func wmicSetWorkgroup(computerName, workgroup string) error {
 	out, err := exec.Command("wmic", "computersystem", "where", whereClause,
 		"call", "JoinDomainOrWorkgroup", fmt.Sprintf("WorkgroupName=%q", workgroup)).CombinedOutput() // #nosec G204 - workgroup validated by Validate()
 	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("wmic.exe not present on this host: %w", modules.ErrUnsupportedPlatform)
+		}
 		return fmt.Errorf("wmic JoinDomainOrWorkgroup: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
