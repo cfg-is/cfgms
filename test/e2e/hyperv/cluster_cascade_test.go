@@ -268,6 +268,22 @@ func ccRolePresent(t *testing.T, cluster, role string) bool {
 	return strings.TrimSpace(out) == "yes"
 }
 
+// ccGroupState returns the State string of a cluster group ("Online", "Offline",
+// "PartiallyOnline", etc.) or "" when the group is absent.
+func ccGroupState(t *testing.T, cluster, group string) string {
+	t.Helper()
+	out, _ := ccPS(t, `try { (Get-ClusterGroup -Cluster '`+cluster+`' -Name '`+group+`' -ErrorAction Stop).State.ToString() } catch { "" }`)
+	return strings.TrimSpace(out)
+}
+
+// ccAutoBalancerEnabled reports whether the cluster's native VM dynamic optimizer
+// is enabled (AutoBalancerMode >= 1: rebalance on join, or on join + periodic).
+func ccAutoBalancerEnabled(t *testing.T, cluster string) bool {
+	t.Helper()
+	out, _ := ccPS(t, `try { if ((Get-Cluster -Name '`+cluster+`').AutoBalancerMode -ge 1) { "true" } else { "false" } } catch { "false" }`)
+	return strings.TrimSpace(out) == "true"
+}
+
 // ccVMInstances snapshots, per cluster node, whether the named VM is present and
 // its Hyper-V VMId. Two truths matter for the epic's safety property, and they
 // are DIFFERENT:

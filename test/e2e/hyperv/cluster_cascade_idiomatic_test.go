@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -372,6 +373,178 @@ func TestIdiomaticLeave_DropsDefinitionKeepsVM(t *testing.T) {
 	assert.Lenf(t, presAfter, 1, "the VM keeps running on its single owner after the leave (present on %v)", presAfter)
 	assert.True(t, ccRolePresent(t, ic.cluster, ic.vmName),
 		"the clustered role must still exist after a member leaves the cascade")
+}
+
+// ─── AC3 (idiomatic): re-balance under native dynamic optimization ────────────
+
+const (
+	// envRebalanceTimeout is the maximum time to wait for the cluster's native
+	// dynamic optimizer to migrate the role under injected load. Must cover the
+	// default ~30-min Windows AutoBalancer evaluation cycle. Override to a shorter
+	// value only on a bed where the cluster is configured for a faster interval.
+	envRebalanceTimeout = "CFGMS_E2E_REBALANCE_TIMEOUT"
+
+	// defaultRebalanceTimeout covers the default ~30-min Windows AutoBalancer
+	// evaluation cycle plus a 5-minute margin.
+	defaultRebalanceTimeout = 35 * time.Minute
+)
+
+// TestIdiomaticRebalance_NativeDynamicOptimizationHandoff (REQUIRED, #2577 AC3) —
+// Windows' native cluster dynamic optimizer (AutoBalancerMode ≥ 1) migrates the
+// ha_role VM to another node under injected CPU pressure with zero cfgms/operator
+// action, and the idiomatic convergence loop follows: the new owner adopts the
+// role and exactly one VM instance exists cluster-wide throughout.
+//
+// This is the idiomatic complement to Layer-1 TestClusterCascade_FailoverHandoff:
+// the cfgms code path is identical — the owner-gate reacts to whoever the cluster
+// reports as owner, transparent to what triggered the ownership change (operator
+// Move-ClusterGroup or the cluster's own balancer). AC3 proves the same idiomatic
+// loop (config → cascade → converge → owner-gate) holds through a cluster-initiated
+// transfer with zero operator action.
+//
+// Prerequisite (runbook §4.4 step 0): the ha_role VM must be a BOOTABLE guest
+// with a real OS, a healthy heartbeat, and an Online cluster state. The cascade
+// fixture (#2426) uses a 0-byte VHD — the cluster keeps it Offline (no heartbeat)
+// and the load balancer cannot live-migrate an Offline role. When the role is not
+// Online, this test skips cleanly rather than failing or timing out.
+func TestIdiomaticRebalance_NativeDynamicOptimizationHandoff(t *testing.T) {
+	ic := icSetup(t)
+
+	// Prerequisite 1 — the role must be Online (bootable VM with heartbeat). A
+	// 0-byte VHD has no guest OS, so the cluster keeps it Offline and the native
+	// dynamic optimizer cannot live-migrate it. Skip with a runbook pointer rather
+	// than waiting up to 35 minutes only to time out.
+	roleState := ccGroupState(t, ic.cluster, ic.vmName)
+	if !strings.EqualFold(roleState, "Online") {
+		t.Skipf("AC3 re-balance: role %q is %q (not Online) — provision a bootable ha_role VM (real OS + heartbeat) per runbook §4.4 prerequisite 0, confirm Get-VM shows Heartbeat=OkApplicationsUnknown, then re-run", ic.vmName, roleState)
+	}
+
+	// Prerequisite 2 — the cluster's native dynamic optimizer must be enabled.
+	if !ccAutoBalancerEnabled(t, ic.cluster) {
+		t.Skipf("AC3 re-balance: cluster %q AutoBalancerMode < 1 (disabled) — enable per runbook §4.4 step 1, then re-run", ic.cluster)
+	}
+
+	// Resolve the rebalance wait ceiling (env override for faster-interval beds).
+	rebalanceTimeout := defaultRebalanceTimeout
+	if s := os.Getenv(envRebalanceTimeout); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			rebalanceTimeout = d
+		}
+	}
+
+	owner := ccGroupOwner(t, ic.cluster, ic.vmName)
+	require.NotEmptyf(t, owner, "precondition: role %q must have a current owner when Online", ic.vmName)
+	targetNode := ccOtherNode(ic.ccEnv, owner)
+	require.NotEmptyf(t, targetNode, "AC3 re-balance: at least two cluster nodes required; found only one")
+
+	// Continuous cross-node safety poller across the entire load-injection +
+	// rebalance window. Tracks the worst-case distinct VMId count (duplicate
+	// metric) and minimum presence count (liveness metric). A silent peer failure
+	// is tracked as an error because it could mask a real duplicate.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var pollMu sync.Mutex
+	maxDistinct := 1
+	minPresent := 1
+	var pollErr error
+	var pollWG sync.WaitGroup
+	pollWG.Add(1)
+	go func() {
+		defer pollWG.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			present, distinct, err := ccVMInstances(t, ic.ccEnv)
+			pollMu.Lock()
+			if err != nil {
+				if pollErr == nil {
+					pollErr = err
+				}
+			} else {
+				if distinct > maxDistinct {
+					maxDistinct = distinct
+				}
+				if len(present) < minPresent {
+					minPresent = len(present)
+				}
+			}
+			pollMu.Unlock()
+			time.Sleep(ccPollInterval)
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		pollWG.Wait()
+	})
+
+	// Inject sustained CPU pressure on the owner node via PS remoting. The load
+	// job runs in the background on the remote node and is cancelled on cleanup
+	// regardless of test outcome. If PS remoting is unavailable, injection fails
+	// silently and the test may time out (bed needs PS remoting; see runbook §4.4).
+	const loadJobName = "cfgmsE2ERebalanceLoad"
+	remoteInject := `Invoke-Command -ComputerName '` + owner + `' -ScriptBlock { ` +
+		`Start-Job -Name ` + loadJobName + ` -ScriptBlock { ` +
+		`$end = [DateTime]::UtcNow.AddMinutes(45); ` +
+		`while ([DateTime]::UtcNow -lt $end) { [Math]::Sqrt([double]::MaxValue) | Out-Null } ` +
+		`} | Out-Null } -ErrorAction SilentlyContinue`
+	remoteCancel := `Invoke-Command -ComputerName '` + owner + `' -ScriptBlock { ` +
+		`Stop-Job -Name ` + loadJobName + ` -ErrorAction SilentlyContinue; ` +
+		`Remove-Job -Name ` + loadJobName + ` -Force -ErrorAction SilentlyContinue ` +
+		`} -ErrorAction SilentlyContinue`
+	if _, err := ccPS(t, remoteInject); err != nil {
+		t.Logf("AC3 re-balance: load injection on %q via PS remoting failed (%v) — the balancer may not trigger; bed needs PS remoting configured, see runbook §4.4", owner, err)
+	} else {
+		t.Logf("AC3 re-balance: CPU load injected on %q; waiting up to %s for the cluster's native dynamic optimizer to migrate %q (no operator action)", owner, rebalanceTimeout, ic.vmName)
+	}
+	t.Cleanup(func() { _, _ = ccPS(t, remoteCancel) })
+
+	// Wait for the cluster's native balancer to migrate the role. We do NOT call
+	// Move-ClusterGroup — that would replicate Layer-1 FailoverHandoff. AC3 proves
+	// the idiomatic loop holds through a cluster-initiated transfer.
+	migrated := false
+	var newOwner string
+	deadline := time.Now().Add(rebalanceTimeout)
+	for time.Now().Before(deadline) {
+		newOwner = ccGroupOwner(t, ic.cluster, ic.vmName)
+		if newOwner != "" && !strings.EqualFold(newOwner, owner) {
+			migrated = true
+			t.Logf("AC3 re-balance: cluster migrated %q from %q to %q (native dynamic optimizer; zero operator action)", ic.vmName, owner, newOwner)
+			break
+		}
+		time.Sleep(ccPollInterval)
+	}
+	// Cancel load immediately after migration (or timeout) so the bed recovers.
+	_, _ = ccPS(t, remoteCancel)
+
+	require.Truef(t, migrated,
+		"AC3 re-balance: cluster's native dynamic optimizer did not migrate role %q from %q within %s under injected load — verify AutoBalancerMode >= 1, AutoBalancerLevel <= 2, and a non-owner node has CPU/memory headroom; see runbook §4.4",
+		ic.vmName, owner, rebalanceTimeout)
+
+	// ── Convergence assertions after the cluster-initiated handoff ──────────────
+
+	// (a) Safety invariant throughout the window: no duplicate VM, no gap.
+	cancel()
+	pollWG.Wait()
+	pollMu.Lock()
+	snapshotMax, snapshotMin, snapshotErr := maxDistinct, minPresent, pollErr
+	pollMu.Unlock()
+	require.NoError(t, snapshotErr, "cross-node VM queries must not fail during the rebalance window (a silent peer error could mask a duplicate)")
+	assert.LessOrEqualf(t, snapshotMax, 1, "no duplicate VM during the cluster-initiated rebalance (at most 1 distinct VMId; a live-migration transient of the same VMId is not a duplicate)")
+	assert.GreaterOrEqualf(t, snapshotMin, 1, "VM must be present on at least one node throughout the rebalance window (no gap)")
+
+	// (b) New owner: exactly one instance, role Online — convergence adopted it.
+	ccWaitSingleInstanceOn(t, ic.ccEnv, newOwner)
+	assert.Equalf(t, "Online", ccGroupState(t, ic.cluster, ic.vmName),
+		"role %q must be Online on the new owner %q after the cluster-initiated rebalance", ic.vmName, newOwner)
+
+	// (c) Final snapshot: exactly one VM cluster-wide.
+	present, distinct, err := ccVMInstances(t, ic.ccEnv)
+	require.NoError(t, err)
+	assert.Equalf(t, 1, distinct, "exactly one VM cluster-wide after the native rebalance (present on %v)", present)
+	assert.Lenf(t, present, 1, "VM present on exactly one node after the native rebalance (present on %v)", present)
 }
 
 // ─── live-cluster read helpers (read-only; author nothing) ──────────────────────

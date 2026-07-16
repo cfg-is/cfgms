@@ -526,9 +526,15 @@ func TestModule_Configure_ClusterNameFromHARole(t *testing.T) {
 	require.NoError(t, m.SetSecretStore(store))
 
 	// A representative cascaded ha_role vm resource: cluster name only nested.
+	// Pin transport: "winrm" so this test compiles and passes on Linux CI (the
+	// ps-host path falls through to winrm on non-Windows and requires winrm_host).
 	cfg := mapConfigState{
-		"name":     "cfgms-e2e-ha-01",
-		"vhd_path": `C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx`,
+		"transport":         "winrm",
+		"winrm_host":        "hyperv-host.local",
+		"winrm_user_secret": "svc-user",
+		"winrm_pass_secret": "svc-pass",
+		"name":              "cfgms-e2e-ha-01",
+		"vhd_path":          `C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx`,
 		"ha_role": map[string]interface{}{
 			"cluster_name": "cfg-lab",
 		},
@@ -547,9 +553,15 @@ func TestModule_Configure_TopLevelClusterNameWins(t *testing.T) {
 	m := &hypervModule{executor: &stubHypervExecutor{}}
 	require.NoError(t, m.SetSecretStore(store))
 
+	// Pin transport: "winrm" so this test passes on Linux CI (ps-host falls through
+	// to winrm on non-Windows and requires winrm_host).
 	cfg := mapConfigState{
-		"name":         "cfgms-e2e-ha-01",
-		"cluster_name": "explicit-cluster",
+		"transport":         "winrm",
+		"winrm_host":        "hyperv-host.local",
+		"winrm_user_secret": "svc-user",
+		"winrm_pass_secret": "svc-pass",
+		"name":              "cfgms-e2e-ha-01",
+		"cluster_name":      "explicit-cluster",
 		"ha_role": map[string]interface{}{
 			"cluster_name": "cfg-lab",
 		},
