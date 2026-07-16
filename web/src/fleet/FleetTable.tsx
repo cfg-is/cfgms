@@ -67,12 +67,14 @@ export default function FleetTable({
   sort,
   onSort,
   nowMs,
+  onRowSelect,
 }: {
   stewards: Steward[]
   columns: ColumnDef[]
   sort: SortState | null
   onSort: (key: string) => void
   nowMs: number
+  onRowSelect?: (steward: Steward) => void
 }) {
   return (
     <table className="tbl">
@@ -105,7 +107,11 @@ export default function FleetTable({
       </thead>
       <tbody>
         {stewards.map((steward) => (
-          <tr key={steward.id}>
+          <tr
+            key={steward.id}
+            className={onRowSelect ? 'clickable' : undefined}
+            onClick={onRowSelect ? () => onRowSelect(steward) : undefined}
+          >
             {columns.map((column) => (
               <Cell
                 key={column.key}

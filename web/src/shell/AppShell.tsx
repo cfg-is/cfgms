@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from 'react'
 import FleetOverview from '../fleet/FleetOverview.tsx'
+import { useAuth } from '../auth/AuthContext.tsx'
 import { TenantScopeProvider } from './TenantScopeContext.tsx'
 import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
 export default function AppShell() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const { principal } = useAuth()
 
   useEffect(() => {
     document.body.classList.toggle('drawer', drawerOpen)
@@ -112,7 +114,11 @@ export default function AppShell() {
           </div>
 
           <div className="content">
-            <FleetOverview search={search} />
+            <FleetOverview
+              search={search}
+              onSearchChange={setSearch}
+              username={principal?.username ?? ''}
+            />
           </div>
         </div>
       </div>

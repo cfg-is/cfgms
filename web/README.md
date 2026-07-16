@@ -248,7 +248,79 @@ Ring, Model, Serial, MAC. Missing values render an em-dash placeholder.
 
 Column selection persists in `localStorage` under `cfgms.fleet.columns`
 (allowlisted in the A7.2 source scan; values read back are validated as
-untrusted input). Full named saved views are #2498.
+untrusted input). Full named saved views are covered in the §Saved views
+section below.
+
+## Saved views and DNA drawer (Story #2498)
+
+### Saved views
+
+[`src/fleet/SavedViews.tsx`](src/fleet/SavedViews.tsx) — a popup button
+above the fleet table that lets a technician save and restore named view
+configurations.
+
+**Captured state per view:** filter text, sort column + direction, visible
+column set, page size. Tenant scope is intentionally excluded (it is
+session chrome in the app bar, not a per-view preference).
+
+**Storage format** — `localStorage` key `cfgms.fleet.views` (literal
+string; allowlisted in the A7.2 source scan):
+
+```json
+{
+  "admin@msp-a": [
+    { "name": "Unreachable hosts", "filter": "unreachable",
+      "sort": { "key": "name", "direction": 1 },
+      "columns": ["name", "health", "seen"], "pageSize": 25 }
+  ],
+  "tech@msp-a": [ ... ]
+}
+```
+
+The top-level object is keyed by principal username so each user's views
+are independent. A well-formed entry is shape-validated (`isValidView`)
+before use: `name` must be a non-empty string; `sort` must be `null` or
+`{ key: string; direction: 1 | -1 }`; `columns` must be an array;
+`pageSize` must be a number. Invalid or extra fields are silently discarded
+(A10.2); unknown extra fields are tolerated for forward-compatibility.
+
+### Asset-DNA drawer
+
+[`src/fleet/DnaDrawer.tsx`](src/fleet/DnaDrawer.tsx) — clicking any row in
+the fleet table opens a 400 px fixed panel on the right. A scrim at z-index
+40 dims the content; the panel sits at z-index 45. Escape or a scrim click
+closes it.
+
+**Data flow:**
+
+- **Endpoint:** `GET /api/v1/stewards/{id}/dna` via `apiFetch`.
+  Response envelope: `{ data: DNAInfo }` where `DNAInfo = { hostname,
+  os, architecture, attributes: Record<string,string> }`.
+- **Fetch state** follows the derived-state pattern from `useStewards.ts`:
+  a single `result` object keyed by steward ID; `loading` is `true` while
+  no matching result has arrived. The effect body never calls `setState`
+  synchronously.
+- **Cancel guard:** the effect returns a cancellation flag so a fast
+  steward-switch never races a slow prior fetch.
+
+**Attribute groups** — group headings and row labels are client-side
+constants (A10.1); they are never derived from server data:
+
+| Group | Attribute keys |
+|-------|---------------|
+| Identity | `tenant`, `deployment_ring`, `fqdn`, `enrolled_at` |
+| Network | `primary_ip`, `primary_mac` |
+| System | `os_pretty_name`, `system_model`/`hardware_model`, `system_serial_number`/`motherboard_serial`, `cpu_count`, `total_memory`, `uptime` |
+| Session & agent | `current_user`, `module_trust_mode`, `last_convergence` + `last_seen` / `version` from the steward record |
+
+**Other attributes** — any key returned by the endpoint that is not in the
+groups above is rendered in a final "Other attributes" section, sorted
+alphabetically. Both key and value reach the DOM as JSX text nodes only —
+never `dangerouslySetInnerHTML` (A9.1).
+
+**Safe key access** — all `dna.attributes` lookups use
+`Object.entries().find()` instead of `attrs[key]` bracket notation, matching
+the `columns.ts` idiom (A9.1).
 
 ### Health mapping
 

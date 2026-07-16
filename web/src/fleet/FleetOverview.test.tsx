@@ -479,3 +479,114 @@ describe('hostile steward values (security A9.1)', () => {
     expect(document.title).not.toBe('pwned')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Story #2498 integration: row-click → DnaDrawer, saved-view → state update
+// ---------------------------------------------------------------------------
+describe('DNA drawer integration (Story #2498)', () => {
+  const steward = makeSteward({ id: 'sw-42', hostname: 'host-42' })
+
+  function mockFleetWithDna() {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.includes('/dna')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: { hostname: 'host-42', os: 'linux', architecture: 'amd64', attributes: {} },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ data: { stewards: [steward], total: 1, limit: 50, offset: 0 }, timestamp: '' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    })
+  }
+
+  it('clicking a table row opens the DnaDrawer for that steward', async () => {
+    mockFleetWithDna()
+    render(
+      <TenantScopeProvider rootPath="root">
+        <FleetOverview search="" />
+      </TenantScopeProvider>,
+    )
+    await screen.findByRole('table')
+    const [row] = within(screen.getByRole('table')).getAllByRole('row').slice(1)
+    fireEvent.click(row!)
+    expect(await screen.findByTestId('dna-drawer')).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: /DNA detail for host-42/i })).toBeInTheDocument()
+  })
+
+  it('closing the drawer via the X button removes it from the DOM', async () => {
+    mockFleetWithDna()
+    render(
+      <TenantScopeProvider rootPath="root">
+        <FleetOverview search="" />
+      </TenantScopeProvider>,
+    )
+    await screen.findByRole('table')
+    const [row] = within(screen.getByRole('table')).getAllByRole('row').slice(1)
+    fireEvent.click(row!)
+    await screen.findByTestId('dna-drawer')
+    fireEvent.click(screen.getByRole('button', { name: /close dna detail/i }))
+    expect(screen.queryByTestId('dna-drawer')).not.toBeInTheDocument()
+  })
+})
+
+describe('saved-view apply integration (Story #2498)', () => {
+  const STORAGE_KEY = 'cfgms.fleet.views'
+
+  it('applying a saved view calls onSearchChange with the saved filter', async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        'admin@msp-a': [
+          { name: 'DC servers', filter: 'dc-', sort: null, columns: ['name', 'health', 'seen'], pageSize: 50 },
+        ],
+      }),
+    )
+    mockFleet([makeSteward({ id: 's1', hostname: 'dc-01' })])
+    const onSearchChange = vi.fn()
+    render(
+      <TenantScopeProvider rootPath="root">
+        <FleetOverview search="" onSearchChange={onSearchChange} username="admin@msp-a" />
+      </TenantScopeProvider>,
+    )
+    await screen.findByRole('table')
+
+    // Open views popup and apply.
+    fireEvent.click(screen.getByRole('button', { name: /all stewards/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'DC servers' }))
+
+    expect(onSearchChange).toHaveBeenCalledWith('dc-')
+  })
+
+  it('applying a view updates the active view label in the SavedViews button', async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        'admin@msp-a': [
+          { name: 'My view', filter: '', sort: null, columns: ['name', 'health', 'seen'], pageSize: 50 },
+        ],
+      }),
+    )
+    mockFleet([makeSteward({ id: 's1' })])
+    render(
+      <TenantScopeProvider rootPath="root">
+        <FleetOverview search="" username="admin@msp-a" />
+      </TenantScopeProvider>,
+    )
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('button', { name: /all stewards/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'My view' }))
+
+    // After applying, the button label should reflect the active view name.
+    expect(screen.getByRole('button', { name: /views: my view/i })).toBeInTheDocument()
+  })
+})

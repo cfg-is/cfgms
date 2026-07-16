@@ -20,6 +20,10 @@
 .colpicker {
   position: relative;
 }
+/* Clickable table rows (Story #2498 — DNA drawer row-select seam) */
+.tbl tbody tr.clickable {
+  cursor: pointer;
+}
 .colbtn {
   display: flex;
   align-items: center;
@@ -34,10 +38,136 @@
   color: var(--text-primary);
   cursor: pointer;
 }
+/* Shared popup base — used by both ColumnPicker and SavedViews */
+.pop {
+  position: absolute;
+  z-index: 60;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 6px;
+  display: none;
+}
+.pop.open {
+  display: block;
+}
+.pop h4 {
+  margin: 2px 8px 6px;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.pop .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 9px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.pop .row:hover {
+  background: var(--bg-elevated);
+}
+.pop .row.cur {
+  background: var(--tint-blue);
+  color: var(--accent);
+  font-weight: 600;
+}
+.pop .sep {
+  height: 1px;
+  background: var(--border);
+  margin: 5px 4px;
+}
+
 .colpop {
   left: 0;
   top: 40px;
   min-width: 210px;
+}
+
+/* Saved views popup */
+.viewpop {
+  left: 0;
+  top: 40px;
+  min-width: 220px;
+}
+.viewrow {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.viewrow:hover {
+  background: var(--bg-elevated);
+}
+.viewrow.cur {
+  background: var(--tint-blue);
+}
+.viewrow.cur .view-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+.view-name {
+  flex: 1;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-base);
+  text-align: left;
+  padding: 8px 9px;
+  cursor: pointer;
+}
+.view-del {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 16px;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+.view-del:hover {
+  color: var(--state-crit);
+  background: var(--state-crit-bg);
+}
+.view-save-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+}
+.view-save-row input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: var(--text-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  outline: none;
+}
+.view-save-row input:focus {
+  border-color: var(--accent);
+}
+.view-save-row button {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
 }
 .ck {
   display: flex;
