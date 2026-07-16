@@ -185,6 +185,12 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     // technician shows; a display preference, not auth data. Values read
     // back are shape-validated as untrusted input (columns.ts).
     { path: 'fleet/columns.ts', key: 'cfgms.fleet.columns' },
+    // Saved fleet views (Story #2498) — named view configurations (filter,
+    // sort, columns, page size), keyed per principal INSIDE the stored
+    // record (the storage key itself stays literal). Display preference,
+    // not auth data. Values read back are shape- and type-validated as
+    // untrusted input (SavedViews.tsx, security A10.2).
+    { path: 'fleet/SavedViews.tsx', key: 'cfgms.fleet.views' },
   ]
 
   it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {

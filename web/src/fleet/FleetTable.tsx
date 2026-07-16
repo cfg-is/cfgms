@@ -9,8 +9,8 @@
  * text interpolation — text nodes only, never markup. Do not introduce
  * dangerouslySetInnerHTML here.
  *
- * Row drill-in (asset-DNA drawer) is Story #2498; it will attach through an
- * onRowSelect seam on this component.
+ * Row drill-in (Story #2498): rows are selectable via click or Enter/Space;
+ * the parent opens the asset-DNA drawer for the selected steward.
  */
 import { deriveHealth, formatLastSeen } from './health.ts'
 import type { ColumnDef, Steward } from './columns.ts'
@@ -67,12 +67,14 @@ export default function FleetTable({
   sort,
   onSort,
   nowMs,
+  onRowSelect,
 }: {
   stewards: Steward[]
   columns: ColumnDef[]
   sort: SortState | null
   onSort: (key: string) => void
   nowMs: number
+  onRowSelect?: (steward: Steward) => void
 }) {
   return (
     <table className="tbl">
@@ -105,7 +107,21 @@ export default function FleetTable({
       </thead>
       <tbody>
         {stewards.map((steward) => (
-          <tr key={steward.id}>
+          <tr
+            key={steward.id}
+            className={onRowSelect ? 'sel' : undefined}
+            tabIndex={onRowSelect ? 0 : undefined}
+            onClick={onRowSelect && (() => onRowSelect(steward))}
+            onKeyDown={
+              onRowSelect &&
+              ((event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onRowSelect(steward)
+                }
+              })
+            }
+          >
             {columns.map((column) => (
               <Cell
                 key={column.key}

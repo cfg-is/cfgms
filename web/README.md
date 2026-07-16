@@ -195,7 +195,8 @@ search box doubles as its live filter).
 [`src/fleet/FleetOverview.tsx`](src/fleet/FleetOverview.tsx) renders the
 steward table inside the app shell. Canonical design:
 [`docs/design/mockups/fleet-overview.html`](../docs/design/mockups/fleet-overview.html).
-Saved views and the row drill-in asset-DNA drawer are Story #2498.
+Story #2498 adds saved views and the row drill-in asset-DNA drawer (both
+below).
 
 ### Data flow
 
@@ -248,7 +249,73 @@ Ring, Model, Serial, MAC. Missing values render an em-dash placeholder.
 
 Column selection persists in `localStorage` under `cfgms.fleet.columns`
 (allowlisted in the A7.2 source scan; values read back are validated as
-untrusted input). Full named saved views are #2498.
+untrusted input).
+
+### Saved views (Story #2498)
+
+[`src/fleet/SavedViews.tsx`](src/fleet/SavedViews.tsx) — the toolbar's
+"View:" panel (mockup `pop-views`). A saved view captures the current
+**filter text, sort (column + direction), visible column set, and page
+size** under a technician-chosen name; applying one restores exactly those
+four fields. Tenant scope is session chrome (per the mockup) and is never
+captured or restored. Save, apply, rename, and delete all happen in the
+panel; the built-in **All stewards** entry restores the defaults.
+
+**Storage format.** Views persist in `localStorage` under the literal key
+`cfgms.fleet.views` (allowlisted in the A7.2 source scan), keyed per
+principal *inside* the stored record so the storage key itself stays
+literal:
+
+```json
+{
+  "<username>": [
+    {
+      "name": "acme servers",
+      "config": {
+        "filter": "acme",
+        "sort": { "key": "name", "direction": -1 },
+        "columns": ["name", "company", "os", "health", "seen"],
+        "pageSize": 100
+      }
+    }
+  ]
+}
+```
+
+Everything read back is **untrusted input** (security A10.2): the record,
+each view, and every config field are shape- and type-validated
+(`sort.key` and `columns` against the column registry, `pageSize` against
+the fixed page-size set, length caps on names and filter text). A view
+that fails validation is dropped; valid siblings survive. At most 50 views
+per principal. There is no server-side persistence endpoint in this epic —
+sharing/roaming views across browsers is future work.
+
+### Asset-DNA drawer (Story #2498)
+
+[`src/fleet/DnaDrawer.tsx`](src/fleet/DnaDrawer.tsx) — clicking (or
+Enter/Space on) a fleet row opens the right-hand drawer (mockup `.det`)
+for that steward. Escape or a scrim click closes it, matching the shell
+overlay conventions.
+
+**Data flow.** The drawer fetches `GET /api/v1/stewards/{id}/dna` through
+the #2495 client and validates the `{ data: DNAInfo }` envelope
+(`parseDNAInfo`) as untrusted wire data. A **fixed client-side allowlist**
+maps known attribute keys into the mockup's designed groups (Identity,
+Network, System, Session & agent); every attribute the steward reports
+beyond the allowlist renders under **Other attributes**, so new steward
+DNA appears without UI changes. Group headings and row labels come only
+from that allowlist, never from data, and steward-supplied keys and values
+reach the DOM as text nodes only (security A10.1). A raw-JSON `<details>`
+view shows the full parsed payload.
+
+**Redaction tolerance.** The endpoint may 404 (cross-tenant requests 404
+rather than 403, no DNA reported yet) and the controller denylists
+sensitive attribute keys — the drawer renders its error state with a retry
+affordance for failed fetches and simply renders whatever attribute set
+comes back, never a blank panel.
+
+Deep-linking the drawer (steward ID in the route) is deferred until the
+app has a router; the seam is marked in `FleetOverview.tsx`.
 
 ### Health mapping
 
@@ -276,7 +343,9 @@ source scans), `src/shell/*.test.tsx` (tenant-scope prefix matching,
 drawer/scrim/Escape behavior, user-menu logout dispatch), and
 `src/fleet/*.test.*` (pagination contract, live filter, sort, column
 picker + persistence, health/staleness mapping, loading/error/empty
-states, hostile-DNA text-node rendering). Setup (jest-dom
+states, hostile-DNA text-node rendering, saved-view round-trip +
+untrusted-config validation, DNA drawer fetch/grouping/error states +
+hostile attribute keys/values). Setup (jest-dom
 matchers, RTL cleanup, in-memory Storage for the A7.2 assertions):
 [`src/test/setup.ts`](src/test/setup.ts).
 

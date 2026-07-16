@@ -229,8 +229,13 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			// A known-good version that fast-exits coinciding with a
 			// context cancel is an environmental fault (e.g. WMI race on
 			// boot), not an upgrade failure. Return clean shutdown rather
-			// than rolling back or looping on a cancelled context.
+			// than rolling back or looping on a cancelled context. Log the
+			// suppression decision first: without it, an operator inspecting
+			// why the launcher exited on a proven binary sees nothing, and
+			// the rollback-suppression guarantee for known-good versions
+			// (Issue #2033) is indistinguishable from a silent crash.
 			if isKnownGood {
+				_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — fast exit (ran %s) coincided with shutdown; rollback suppressed, exiting cleanly\n", current, ranFor)
 				return nil
 			}
 			// Fall through to the rollback logic below — this looks

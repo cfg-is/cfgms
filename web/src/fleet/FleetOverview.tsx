@@ -9,11 +9,14 @@
  * filter and sort operate on the displayed page's rows, not the whole fleet.
  *
  * The live-filter input is the shell's global search box (#2496 chrome);
- * its value arrives via the `search` prop. Tenant scope (#2496 context) is
- * a display convenience narrowing displayed rows — server-side tenant
- * scoping on the API is the only enforcement (security A8.1).
+ * its value arrives via the `search` prop and saved views restore it via
+ * `onSearchChange`. Tenant scope (#2496 context) is a display convenience
+ * narrowing displayed rows — server-side tenant scoping on the API is the
+ * only enforcement (security A8.1); it is session chrome, never captured
+ * by a saved view.
  *
- * Saved views and the row drill-in asset-DNA drawer land in Story #2498.
+ * Story #2498 adds saved views (SavedViews.tsx) and the row drill-in
+ * asset-DNA drawer (DnaDrawer.tsx).
  */
 import { useMemo, useState } from 'react'
 import { isScopeMatch, useTenantScope } from '../shell/TenantScopeContext.tsx'
@@ -27,13 +30,16 @@ import {
 } from './columns.ts'
 import { deriveHealth, formatLastSeen, parseLastSeen } from './health.ts'
 import ColumnPicker from './ColumnPicker.tsx'
+import DnaDrawer from './DnaDrawer.tsx'
 import FleetTable, { type SortState } from './FleetTable.tsx'
 import { ErrorNotice, FleetEmpty, LoadingRows, NoMatch } from './FleetStates.tsx'
+import SavedViews, {
+  DEFAULT_PAGE_SIZE,
+  PAGE_SIZES,
+  type ViewConfig,
+} from './SavedViews.tsx'
 import { useStewards } from './useStewards.ts'
 import './FleetOverview.css'
-
-const PAGE_SIZES = [25, 50, 100, 250] as const
-const DEFAULT_PAGE_SIZE = 50
 
 const formatCount = new Intl.NumberFormat('en-US')
 
@@ -74,7 +80,13 @@ function matchesFilter(steward: Steward, needle: string, nowMs: number): boolean
   return haystack.includes(needle)
 }
 
-export default function FleetOverview({ search }: { search: string }) {
+export default function FleetOverview({
+  search,
+  onSearchChange,
+}: {
+  search: string
+  onSearchChange: (value: string) => void
+}) {
   const { scope, rootPath } = useTenantScope()
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
   const [pageIndex, setPageIndex] = useState(0)
@@ -82,6 +94,9 @@ export default function FleetOverview({ search }: { search: string }) {
   const [visible, setVisible] = useState<ReadonlySet<ColumnKey>>(
     () => new Set(loadColumnPrefs() ?? DEFAULT_VISIBLE),
   )
+  // Row drill-in (deep-link seam: when a router lands, this belongs in the
+  // route so a drawer is linkable by steward ID).
+  const [selected, setSelected] = useState<Steward | null>(null)
 
   const { page, loading, error, fetchedAtMs, retry } = useStewards(
     pageSize,
@@ -144,6 +159,29 @@ export default function FleetOverview({ search }: { search: string }) {
     setPageIndex(0)
   }
 
+  /* The saved-view contract: exactly filter text, sort, visible column set,
+   * and page size — tenant scope is deliberately absent. */
+  const currentConfig = useMemo<ViewConfig>(
+    () => ({
+      filter: search,
+      sort:
+        sort === null
+          ? null
+          : { key: sort.key as ColumnKey, direction: sort.direction },
+      columns: COLUMNS.filter((c) => visible.has(c.key)).map((c) => c.key),
+      pageSize,
+    }),
+    [search, sort, visible, pageSize],
+  )
+
+  function applyView(config: ViewConfig) {
+    onSearchChange(config.filter)
+    setSort(config.sort)
+    setVisible(new Set(config.columns))
+    setPageSize(config.pageSize)
+    setPageIndex(0)
+  }
+
   const columns = COLUMNS.filter((column) => visible.has(column.key))
   const total = page?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / pageSize))
@@ -165,6 +203,7 @@ export default function FleetOverview({ search }: { search: string }) {
       </div>
       <section className="panel">
         <div className="ptool">
+          <SavedViews current={currentConfig} onApply={applyView} />
           <ColumnPicker visible={visible} onToggle={onToggleColumn} />
           <span className="cnt" data-testid="fleet-count">
             {page === null ? '' : countText}
@@ -186,6 +225,15 @@ export default function FleetOverview({ search }: { search: string }) {
             sort={sort}
             onSort={onSort}
             nowMs={nowMs}
+            onRowSelect={setSelected}
+          />
+        )}
+
+        {selected !== null && (
+          <DnaDrawer
+            steward={selected}
+            nowMs={nowMs}
+            onClose={() => setSelected(null)}
           />
         )}
 
