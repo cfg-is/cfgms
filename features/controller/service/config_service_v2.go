@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/rollback"
@@ -529,6 +531,38 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 // GetEffectiveConfiguration returns the effective configuration with inheritance metadata
 func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
 	return s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, stewardID)
+}
+
+// GetConfigStore returns the underlying config store for direct namespace access
+// (e.g., reading cluster-policies or role-policies entries by key).
+func (s *ConfigurationServiceV2) GetConfigStore() cfgconfig.ConfigStore {
+	return s.storageManager.GetConfigStore()
+}
+
+// GetClusterDeclaredResources returns the resource configs stored in the
+// cluster-policies/<clusterName> document for the given tenant. These are the
+// resources declared to exist in the cluster (the "declared" side of the
+// reconciliation comparison against the actual cluster registry).
+//
+// Returns nil resources (no error) when no cluster-policies document exists for
+// the cluster — the caller treats this as an empty declared set, meaning
+// only dead-owner and split-brain conditions can be detected (not create-coverage
+// gaps). A non-nil error is returned only for genuine parse failures.
+func (s *ConfigurationServiceV2) GetClusterDeclaredResources(ctx context.Context, tenantID, clusterName string) ([]stewardtypes.ResourceConfig, error) {
+	key := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "cluster-policies",
+		Name:      clusterName,
+	}
+	entry, err := s.storageManager.GetConfigStore().GetConfig(ctx, key)
+	if err != nil {
+		return nil, nil // not found is non-fatal; no declared resources
+	}
+	var cfg stewardtypes.StewardConfig
+	if err := yaml.Unmarshal(entry.Data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing cluster-policies/%s: %w", clusterName, err)
+	}
+	return cfg.Resources, nil
 }
 
 // RollbackConfiguration performs configuration rollback via the canonical rollback manager.

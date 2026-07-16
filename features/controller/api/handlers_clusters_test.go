@@ -7,12 +7,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
+	"github.com/cfgis/cfgms/features/controller/health"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
@@ -200,6 +205,242 @@ func TestHandleGetCluster_MissingName(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// --- Cluster reconciliation handler tests (Issue #2704) ---
+
+// seedClusterPoliciesConfig stores a cluster-policies YAML document in the test
+// server's config store, declaring the given role names as required clustered
+// resources. This simulates an admin having pushed a cluster-policies config for
+// the cluster.
+func seedClusterPoliciesConfig(t *testing.T, server *Server, tenantID, clusterName string, roleNames ...string) {
+	t.Helper()
+	var sb strings.Builder
+	sb.WriteString("resources:\n")
+	for _, name := range roleNames {
+		sb.WriteString("  - name: " + name + "\n    module: file\n")
+	}
+	require.NoError(t, server.configService.GetConfigStore().StoreConfig(
+		context.Background(),
+		&cfgconfig.ConfigEntry{
+			Key: &cfgconfig.ConfigKey{
+				TenantID:  tenantID,
+				Namespace: "cluster-policies",
+				Name:      clusterName,
+			},
+			Data:   []byte(sb.String()),
+			Format: cfgconfig.ConfigFormatYAML,
+		},
+	))
+}
+
+// TestHandleClusterReconciliation_PresentWithLiveOwner is the required AC test:
+// a declared resource with a registry entry and a live owner returns
+// present-with-live-owner with no alerts.
+func TestHandleClusterReconciliation_PresentWithLiveOwner(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Steward publishes resource_owner.vm1 = "CFG-70-02" and its own hostname so
+	// the handler's isOwnerLive closure can match hostname → last heartbeat.
+	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
+		"cluster:cfg-lab.resource_owner.vm1": "CFG-70-02",
+		"hostname":                           "CFG-70-02",
+	})
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "vm1")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 1)
+	r := resp.Data.Resources[0]
+	assert.Equal(t, "vm1", r.RoleName)
+	assert.Equal(t, clusterregistry.StatusPresentLiveOwner, r.Status)
+	assert.Equal(t, "CFG-70-02", r.OwnerID)
+	assert.Empty(t, r.AllOwnerClaims)
+	assert.Empty(t, resp.Data.Alerts, "no alerts for a healthy cluster resource")
+}
+
+// TestHandleClusterReconciliation_DeclaredButMissing is the required AC test:
+// a declared resource that has no registry entry → declared-but-missing (create-
+// coverage gap), and a critical alert is emitted.
+func TestHandleClusterReconciliation_DeclaredButMissing(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Cluster member exists but has not published resource_owner.vm2.
+	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
+		"cluster:cfg-lab.member_nodes": "node-a",
+	})
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "vm2")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 1)
+	r := resp.Data.Resources[0]
+	assert.Equal(t, "vm2", r.RoleName)
+	assert.Equal(t, clusterregistry.StatusDeclaredMissing, r.Status)
+	assert.Empty(t, r.OwnerID, "declared-but-missing must not report an owner")
+	require.Len(t, resp.Data.Alerts, 1, "one critical alert for a create-coverage gap")
+	assert.Equal(t, health.SeverityCritical, resp.Data.Alerts[0].Severity)
+	assert.Equal(t, "cluster_role_missing", resp.Data.Alerts[0].MetricName)
+}
+
+// TestHandleClusterReconciliation_DeadOwner is the required AC test:
+// a registry entry whose owner steward has a heartbeat older than
+// DeadOwnerStaleThreshold (60 s) → orphan-dead-owner, warning alert.
+func TestHandleClusterReconciliation_DeadOwner(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
+		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
+		"hostname":                           "CFG-70-02",
+	})
+	// Backdate the heartbeat past DeadOwnerStaleThreshold (60 s).
+	ok := server.controllerService.RecordHeartbeat("steward-a", "", time.Now().Add(-2*time.Minute))
+	require.True(t, ok, "RecordHeartbeat must find the registered steward")
+
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "csv")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 1)
+	r := resp.Data.Resources[0]
+	assert.Equal(t, "csv", r.RoleName)
+	assert.Equal(t, clusterregistry.StatusOrphanDeadOwner, r.Status)
+	assert.Equal(t, "CFG-70-02", r.OwnerID)
+	require.Len(t, resp.Data.Alerts, 1, "one warning alert for a dead owner")
+	assert.Equal(t, health.SeverityWarning, resp.Data.Alerts[0].Severity)
+	assert.Equal(t, "cluster_role_dead_owner", resp.Data.Alerts[0].MetricName)
+}
+
+// TestHandleClusterReconciliation_SplitBrain is the required AC test:
+// two cluster members reporting different owner values for the same role →
+// split-brain status, critical alert, AllOwnerClaims populated.
+func TestHandleClusterReconciliation_SplitBrain(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Both stewards claim to own "csv" but report different owner values.
+	seedClusterSteward(t, server, "node-a", "default", map[string]string{
+		"cluster:cfg-lab.resource_owner.csv": "node-a",
+	})
+	seedClusterSteward(t, server, "node-b", "default", map[string]string{
+		"cluster:cfg-lab.resource_owner.csv": "node-b",
+	})
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "csv")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 1)
+	r := resp.Data.Resources[0]
+	assert.Equal(t, "csv", r.RoleName)
+	assert.Equal(t, clusterregistry.StatusSplitBrain, r.Status)
+	assert.ElementsMatch(t, []string{"node-a", "node-b"}, r.AllOwnerClaims,
+		"split-brain must surface all distinct owner claims")
+	require.Len(t, resp.Data.Alerts, 1, "one critical alert for split-brain")
+	assert.Equal(t, health.SeverityCritical, resp.Data.Alerts[0].Severity)
+	assert.Equal(t, "cluster_role_split_brain", resp.Data.Alerts[0].MetricName)
+}
+
+// TestHandleClusterReconciliation_NotFound verifies 404 for unknown clusters and
+// clusters that are out of the caller's tenant scope (404 not 403 — same
+// information-hiding pattern as handleGetCluster).
+func TestHandleClusterReconciliation_NotFound(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-b", "tenant-b", map[string]string{
+		"cluster:cfg-prod.member_nodes": "node-b",
+	})
+
+	t.Run("unknown cluster name returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/no-such-cluster/reconciliation", nil)
+		req = withVars(req, map[string]string{"name": "no-such-cluster"})
+		rec := httptest.NewRecorder()
+		server.handleClusterReconciliation(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("cluster outside caller tenant returns 404 not 403", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-prod/reconciliation", nil)
+		req = withVars(req, map[string]string{"name": "cfg-prod"})
+		req = withClusterTenant(req, "tenant-a")
+		rec := httptest.NewRecorder()
+		server.handleClusterReconciliation(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
+// TestHandleClusterReconciliation_MissingName verifies 400 when the {name} path
+// variable is empty.
+func TestHandleClusterReconciliation_MissingName(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters//reconciliation", nil)
+	req = withVars(req, map[string]string{"name": ""})
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleClusterReconciliation_NoDeclaredResources verifies that when no
+// cluster-policies config is stored, the response still has 200 with an empty
+// resources list (graceful degradation — dead-owner/split-brain can still be
+// detected even when the declared set is unknown).
+func TestHandleClusterReconciliation_NoDeclaredResources(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
+		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
+	})
+	// No seedClusterPoliciesConfig call → declared set is empty.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Data.Resources, "no declared resources → nothing to reconcile")
+	assert.Empty(t, resp.Data.Alerts)
+}
+
 // TestHandleClusters_RoutedViaAPIKey exercises the full router path with API keys
 // to verify the route registration and permission gates are wired correctly.
 func TestHandleClusters_RoutedViaAPIKey(t *testing.T) {
@@ -230,5 +471,30 @@ func TestHandleClusters_RoutedViaAPIKey(t *testing.T) {
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("GET /api/v1/clusters/{name}/reconciliation with cluster:read key returns 404 for unknown", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/no-such-cluster/reconciliation", nil)
+		req.Header.Set("X-API-Key", readKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		// 404: cluster not in registry, but route resolved and permission passed.
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("GET /api/v1/clusters/{name}/reconciliation without credentials returns 401", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("GET /api/v1/clusters/{name}/reconciliation with insufficient permissions returns 403", func(t *testing.T) {
+		stewardKey := NewTestKey(t, server, []string{"steward:list"})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+		req.Header.Set("X-API-Key", stewardKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 }

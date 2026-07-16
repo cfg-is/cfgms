@@ -1843,6 +1843,94 @@ across tenant boundaries.
 | 400 | `MISSING_CLUSTER_NAME` | `name` path variable is empty |
 | 404 | `CLUSTER_NOT_FOUND` | Cluster does not exist or is outside the caller's tenant |
 
+#### GET /api/v1/clusters/{name}/reconciliation
+
+Reconcile the declared clustered resources for a named cluster against the actual
+cluster registry. This is the **controller's accountable-authority** view: it
+cross-checks the resource declarations stored in `cluster-policies/<name>` (the
+"should exist" side) with the `cluster:<name>.resource_owner.*` DNA attributes
+published by member stewards (the "does exist" side).
+
+Returns 404 under the same conditions as `GET /api/v1/clusters/{name}`.
+
+**Required permission:** `cluster:read`
+
+**Parameters:**
+
+- `name` (path): Cluster name (e.g., `cfg-lab`)
+
+**Response (200):**
+
+```json
+{
+  "data": {
+    "cluster_name": "cfg-lab",
+    "resources": [
+      {
+        "role_name": "csv",
+        "status": "present-with-live-owner",
+        "owner_id": "CFG-70-02"
+      },
+      {
+        "role_name": "vm2",
+        "status": "declared-but-missing"
+      },
+      {
+        "role_name": "cno",
+        "status": "orphan-dead-owner",
+        "owner_id": "CFG-AB-02"
+      },
+      {
+        "role_name": "dfs",
+        "status": "split-brain",
+        "all_owner_claims": ["CFG-70-02", "CFG-AB-02"]
+      }
+    ],
+    "alerts": [
+      {
+        "id": "cfg-lab/vm2/declared-but-missing",
+        "severity": "critical",
+        "title": "Cluster role not created",
+        "metric_name": "cluster_role_missing",
+        "status": "active"
+      }
+    ],
+    "components": {
+      "cfg-lab/csv": { "name": "cfg-lab/csv", "status": "healthy", "message": "owner is live" },
+      "cfg-lab/vm2": { "name": "cfg-lab/vm2", "status": "unhealthy", "message": "declared but not created" }
+    }
+  },
+  "timestamp": "2026-07-16T10:00:00Z"
+}
+```
+
+**Resource status values:**
+
+| Status | Meaning |
+|--------|---------|
+| `present-with-live-owner` | Declared resource exists in the registry with a heartbeat-live owner. |
+| `declared-but-missing` | Declared in `cluster-policies` but no registry entry (create-coverage gap). Non-owner stewards' compliant-by-delegation abstain is **not safe** here. |
+| `orphan-dead-owner` | Registry entry exists but owner's last heartbeat exceeds 60 s. |
+| `split-brain` | Multiple cluster members report different owner values for the same role; all claims listed in `all_owner_claims`. |
+
+**Alert severity:**
+
+- `critical` — `declared-but-missing` or `split-brain` (resource availability is compromised)
+- `warning` — `orphan-dead-owner` (owner offline but registry entry is intact)
+
+**Notes:**
+
+- Detection is on-demand: the endpoint scans the current DNA snapshot and config store on each call; there is no background reconciliation loop.
+- When no `cluster-policies` config is stored for the cluster, the declared set is empty and only dead-owner and split-brain can be detected (no missing-resource alerts).
+- Owner liveness: `owner_id` is matched to a steward by DNA `hostname` attribute first, then by steward ID; an unknown owner is treated as dead.
+
+**Error responses:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `MISSING_CLUSTER_NAME` | `name` path variable is empty |
+| 404 | `CLUSTER_NOT_FOUND` | Cluster does not exist or is outside the caller's tenant |
+
 ### Internal Endpoints (not for external use)
 
 #### POST /raft/message
@@ -1862,6 +1950,8 @@ Internal Raft consensus message endpoint. mTLS peer CN verification is enforced 
 | `EXPIRED_API_KEY` | API key has expired |
 | `MISSING_STEWARD_ID` | Steward ID parameter is required |
 | `STEWARD_NOT_FOUND` | Steward with given ID not found |
+| `MISSING_CLUSTER_NAME` | Cluster name path variable is empty |
+| `CLUSTER_NOT_FOUND` | Cluster does not exist or is outside the caller's tenant |
 | `INVALID_JSON` | Request body contains invalid JSON |
 | `SERVICE_UNAVAILABLE` | Required service is not available |
 | `INTERNAL_ERROR` | Internal server error |
