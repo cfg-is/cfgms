@@ -6,6 +6,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -20,6 +22,9 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed templates/promote-hv-role.yaml
+var promoteHVRoleTemplateData []byte
 
 // workflowNameRE bounds workflow names to a safe character set so they cannot
 // inject path segments or query fragments when used to construct request URLs.
@@ -41,6 +46,8 @@ var (
 
 	workflowStatusWorkflow string
 	workflowCancelWorkflow string
+
+	workflowPromoteHVRoleCluster string
 )
 
 // workflowCmd is the parent command for workflow subcommands.
@@ -107,6 +114,45 @@ Examples:
 	RunE: runWorkflowCancel,
 }
 
+// workflowPromoteHVRoleCmd submits the embedded promote-hv-role workflow template
+// for a specific VM on a single host identified by the steward selector.
+var workflowPromoteHVRoleCmd = &cobra.Command{
+	Use:   "promote-hv-role <vmname> <host-selector>",
+	Short: "Promote a Hyper-V VM from standalone to Failover Cluster role",
+	Long: `Submit the promote-hv-role workflow for a specific VM on the host identified by
+<host-selector>. The selector uses the same grammar as 'cfg steward' commands —
+see docs/administration/cli-selectors.md for the full reference.
+
+Selector forms:
+  hv01                   bare hostname (exact match)
+  name:es-hv0*           hostname glob
+  acme-corp/hv01         tenant-path/hostname (unambiguous cross-tenant)
+  id:<steward-id>        exact steward ID
+
+The selector MUST resolve to exactly one steward; a selector matching zero or
+more than one steward is always a hard error. Use a tenant-path prefix or
+id:<steward-id> to disambiguate across tenants that share a hostname.
+
+When the resolved host belongs to exactly one cluster, --cluster is optional.
+When it belongs to more than one, --cluster is required to name which cluster
+to promote the VM into.
+
+The command prints the execution ID, which can be observed with:
+  cfg workflow status <execution-id> --workflow promote-hv-role
+
+Examples:
+  # Unambiguous single-tenant host with one cluster:
+  cfg workflow promote-hv-role MyVM hv01 --url=https://controller.example.com
+
+  # Multi-tenant environment — use tenant path to disambiguate:
+  cfg workflow promote-hv-role MyVM acme-corp/hv01 --url=https://controller.example.com
+
+  # Host in multiple clusters — specify which cluster:
+  cfg workflow promote-hv-role MyVM hv01 --cluster fc-east --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(2),
+	RunE: runWorkflowPromoteHVRole,
+}
+
 func init() {
 	workflowRunCmd.Flags().StringVar(&workflowURL, "url", "", "Controller API URL (required)")
 	workflowRunCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
@@ -136,7 +182,14 @@ func init() {
 	_ = workflowCancelCmd.MarkFlagRequired("url")
 	_ = workflowCancelCmd.MarkFlagRequired("workflow")
 
-	workflowCmd.AddCommand(workflowRunCmd, workflowListCmd, workflowStatusCmd, workflowCancelCmd)
+	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowURL, "url", "", "Controller API URL (required)")
+	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
+	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	workflowPromoteHVRoleCmd.Flags().BoolVar(&workflowTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowPromoteHVRoleCluster, "cluster", "", "Cluster name (required only to disambiguate a multi-cluster host)")
+	_ = workflowPromoteHVRoleCmd.MarkFlagRequired("url")
+
+	workflowCmd.AddCommand(workflowRunCmd, workflowListCmd, workflowStatusCmd, workflowCancelCmd, workflowPromoteHVRoleCmd)
 }
 
 // workflowDefinition is the local representation of a workflow YAML file.
@@ -206,6 +259,56 @@ func getWorkflowClient() (*APIClient, error) {
 	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
 }
 
+// submitWorkflow POSTs the workflow definition to the controller and executes it,
+// printing the execution ID. executeBody is the raw JSON body for the execute
+// endpoint — pass []byte("{}") for no variables.
+//
+// url.PathEscape on the workflow name closes the SSRF path-injection sink
+// (CWE-918); the workflowNameRE validation at call sites is defense-in-depth.
+func submitWorkflow(ctx context.Context, client *APIClient, def workflowDefinition, executeBody []byte) error {
+	body, err := json.Marshal(def)
+	if err != nil {
+		return fmt.Errorf("failed to marshal workflow: %w", err)
+	}
+
+	createResp, err := client.doRequest(ctx, http.MethodPost, "/api/v1/workflows", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create workflow: %w", err)
+	}
+	defer func() { _ = createResp.Body.Close() }()
+
+	if createResp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(createResp.Body)
+		return fmt.Errorf("failed to create workflow: %s - %s", createResp.Status, string(respBody))
+	}
+	_, _ = io.Copy(io.Discard, createResp.Body)
+
+	executePath := "/api/v1/workflows/" + url.PathEscape(def.Name) + "/execute"
+	executeResp, err := client.doRequest(ctx, http.MethodPost, executePath, bytes.NewReader(executeBody))
+	if err != nil {
+		return fmt.Errorf("failed to execute workflow: %w", err)
+	}
+	defer func() { _ = executeResp.Body.Close() }()
+
+	if executeResp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(executeResp.Body)
+		return fmt.Errorf("failed to execute workflow: %s - %s", executeResp.Status, string(respBody))
+	}
+
+	var execResult struct {
+		ExecutionID  string `json:"execution_id"`
+		WorkflowName string `json:"workflow_name"`
+		Status       string `json:"status"`
+	}
+	if err := json.NewDecoder(executeResp.Body).Decode(&execResult); err != nil {
+		return fmt.Errorf("failed to parse execution response: %w", err)
+	}
+
+	fmt.Printf("Workflow submitted: %s\nExecution ID: %s\nStatus: %s\n",
+		execResult.WorkflowName, execResult.ExecutionID, execResult.Status)
+	return nil
+}
+
 func runWorkflow(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("workflow file argument is required")
@@ -234,53 +337,137 @@ func runWorkflow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	// POST /api/v1/workflows
-	body, err := json.Marshal(def)
+	return submitWorkflow(context.Background(), client, def, []byte("{}"))
+}
+
+// requireSingleSteward enforces the single-target constraint for promote-hv-role.
+// It returns the one matching steward when len(matches) == 1, and a hard error
+// listing all candidates when len(matches) > 1. len(matches) == 0 is never
+// reached here because resolveOrFailFast already errors before this is called.
+func requireSingleSteward(matches []StewardInfo) (StewardInfo, error) {
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "selector matched %d stewards; promote-hv-role requires exactly one target.\n", len(matches))
+	fmt.Fprintf(&sb, "Matched stewards:\n")
+	for _, m := range matches {
+		key := stewardKey(m)
+		if m.TenantID != "" {
+			fmt.Fprintf(&sb, "  %s (tenant: %s)\n", key, m.TenantID)
+		} else {
+			fmt.Fprintf(&sb, "  %s\n", key)
+		}
+	}
+	fmt.Fprintf(&sb, "Narrow the selector with a tenant-path prefix (e.g. acme-corp/hv01) or use id:<steward-id>.")
+	return StewardInfo{}, fmt.Errorf("%s", sb.String())
+}
+
+// deriveHVPromoteCluster resolves the cluster name for a promote-hv-role operation
+// by scanning the resolved steward's DNA attributes for cluster:<name>.* keys —
+// replicating the identical parsing rule used by clusterregistry.BuildRegistry
+// (features/controller/clusterregistry/registry.go:78-92).
+//
+// Outcomes:
+//
+//	0 candidates → error: host is not a cluster member
+//	1 candidate  → use it; error if clusterOverride is set but mismatched
+//	2+ candidates → require clusterOverride; error listing candidates when absent or mismatched
+func deriveHVPromoteCluster(steward StewardInfo, clusterOverride string) (string, error) {
+	seen := make(map[string]struct{})
+	if steward.DNA != nil {
+		for key := range steward.DNA.Attributes {
+			if !strings.HasPrefix(key, "cluster:") {
+				continue
+			}
+			rest := key[len("cluster:"):]
+			dotIdx := strings.Index(rest, ".")
+			if dotIdx <= 0 {
+				continue
+			}
+			seen[rest[:dotIdx]] = struct{}{}
+		}
+	}
+
+	candidates := make([]string, 0, len(seen))
+	for name := range seen {
+		candidates = append(candidates, name)
+	}
+	sort.Strings(candidates)
+
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("host is not a member of any cluster; nothing to promote")
+	case 1:
+		clusterName := candidates[0]
+		if clusterOverride != "" && clusterOverride != clusterName {
+			return "", fmt.Errorf("--cluster %q does not match the host's only cluster %q", clusterOverride, clusterName)
+		}
+		return clusterName, nil
+	default:
+		if clusterOverride == "" {
+			return "", fmt.Errorf("host belongs to multiple clusters (%s); use --cluster to disambiguate",
+				strings.Join(candidates, ", "))
+		}
+		for _, name := range candidates {
+			if name == clusterOverride {
+				return clusterOverride, nil
+			}
+		}
+		return "", fmt.Errorf("--cluster %q does not match any of the host's clusters (%s)",
+			clusterOverride, strings.Join(candidates, ", "))
+	}
+}
+
+// workflowFileWrapper wraps the top-level "workflow:" key used by the
+// promote-hv-role.yaml template so yaml.Unmarshal populates workflowDefinition
+// correctly.
+type workflowFileWrapper struct {
+	Workflow workflowDefinition `yaml:"workflow"`
+}
+
+func runWorkflowPromoteHVRole(cmd *cobra.Command, args []string) error {
+	vmName := args[0]
+	selector := args[1]
+
+	client, err := getWorkflowClient()
 	if err != nil {
-		return fmt.Errorf("failed to marshal workflow: %w", err)
+		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	createResp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/workflows", bytes.NewReader(body))
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to create workflow: %w", err)
+		return err
 	}
-	defer func() { _ = createResp.Body.Close() }()
 
-	if createResp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(createResp.Body)
-		return fmt.Errorf("failed to create workflow: %s - %s", createResp.Status, string(respBody))
-	}
-	// Drain body to allow connection reuse.
-	_, _ = io.Copy(io.Discard, createResp.Body)
-
-	// POST /api/v1/workflows/{name}/execute
-	// url.PathEscape on def.Name closes the SSRF path-injection sink (CWE-918);
-	// defense-in-depth with the workflowNameRE validation above.
-	executePath := "/api/v1/workflows/" + url.PathEscape(def.Name) + "/execute"
-	executeResp, err := client.doRequest(context.Background(), http.MethodPost, executePath, bytes.NewReader([]byte("{}")))
+	steward, err := requireSingleSteward(matches)
 	if err != nil {
-		return fmt.Errorf("failed to execute workflow: %w", err)
-	}
-	defer func() { _ = executeResp.Body.Close() }()
-
-	if executeResp.StatusCode != http.StatusAccepted {
-		respBody, _ := io.ReadAll(executeResp.Body)
-		return fmt.Errorf("failed to execute workflow: %s - %s", executeResp.Status, string(respBody))
+		return err
 	}
 
-	var execResult struct {
-		ExecutionID  string `json:"execution_id"`
-		WorkflowName string `json:"workflow_name"`
-		Status       string `json:"status"`
-	}
-	if err := json.NewDecoder(executeResp.Body).Decode(&execResult); err != nil {
-		return fmt.Errorf("failed to parse execution response: %w", err)
+	clusterName, err := deriveHVPromoteCluster(steward, workflowPromoteHVRoleCluster)
+	if err != nil {
+		return err
 	}
 
-	fmt.Printf("Workflow submitted: %s\nExecution ID: %s\nStatus: %s\n",
-		execResult.WorkflowName, execResult.ExecutionID, execResult.Status)
+	var wrapper workflowFileWrapper
+	if err := yaml.Unmarshal(promoteHVRoleTemplateData, &wrapper); err != nil {
+		return fmt.Errorf("failed to parse embedded promote-hv-role template: %w", err)
+	}
+	def := wrapper.Workflow
 
-	return nil
+	variables := map[string]interface{}{
+		"vm_name":      vmName,
+		"steward_id":   steward.ID,
+		"cluster_name": clusterName,
+		"tenant_id":    steward.TenantID,
+	}
+	executeBody, err := json.Marshal(map[string]interface{}{"variables": variables})
+	if err != nil {
+		return fmt.Errorf("failed to marshal execute body: %w", err)
+	}
+
+	return submitWorkflow(context.Background(), client, def, executeBody)
 }
 
 func runWorkflowList(cmd *cobra.Command, args []string) error {

@@ -87,10 +87,32 @@ type DefaultSessionRecorder struct {
 	hmacKey      []byte
 }
 
+// recordQueueDepth bounds the per-session in-flight recording backlog. Frames
+// are copied into this buffer by RecordData (a fast, lock-free channel send) and
+// drained to disk by a dedicated writer goroutine. The depth is large enough to
+// absorb realistic output bursts without applying backpressure to the terminal
+// output path; if a burst still overruns it, the newest frame is dropped with a
+// warning rather than blocking output relay (best-effort recording, matching the
+// existing resilience stance where recording errors never fail terminal I/O).
+const recordQueueDepth = 4096
+
+// recordChunk is one queued recording frame awaiting durable write. The data is
+// an owned copy, so the caller may reuse its buffer immediately after enqueue.
+type recordChunk struct {
+	data      []byte
+	direction DataDirection
+}
+
 // recordingWriter manages writing data for a single session in the binary
 // length-prefixed format: [4-byte content len][content][32-byte HMAC].
+//
+// Disk I/O is decoupled from callers: enqueue performs a non-blocking channel
+// send and a dedicated pump goroutine performs the HMAC compute and file writes.
+// This keeps Session.HandleOutput (and WriteData) off the synchronous disk path
+// so a slow disk or an active recorder can never stall terminal output.
 type recordingWriter struct {
 	sessionID        string
+	logger           logging.Logger
 	file             *os.File
 	useCompression   bool
 	hmacKey          []byte
@@ -104,6 +126,13 @@ type recordingWriter struct {
 	size             int64
 	maxSize          int64
 	mu               sync.Mutex
+
+	queue     chan recordChunk // buffered backlog of frames pending durable write
+	stop      chan struct{}    // closed by close() to signal the pump to drain and exit
+	drained   chan struct{}    // closed by the pump once every queued frame is written
+	stopOnce  sync.Once
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // computeEventChecksum binds (sequence, previous, content) under the HMAC key.
@@ -185,6 +214,7 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 
 	writer := &recordingWriter{
 		sessionID:        sessionID,
+		logger:           r.logger,
 		file:             file,
 		useCompression:   r.config.Compression,
 		hmacKey:          r.hmacKey,
@@ -193,7 +223,12 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 		metadata:         metadata,
 		startTime:        time.Now(),
 		maxSize:          int64(r.config.MaxRecordingMB * 1024 * 1024),
+		queue:            make(chan recordChunk, recordQueueDepth),
+		stop:             make(chan struct{}),
+		drained:          make(chan struct{}),
 	}
+
+	go writer.pump()
 
 	r.activeWrites[sessionID] = writer
 
@@ -224,7 +259,14 @@ func (r *DefaultSessionRecorder) RecordData(sessionID string, data []byte, direc
 		r.mu.RUnlock()
 	}
 
-	return writer.writeData(data, direction)
+	if !writer.enqueue(data, direction) {
+		// Backlog is full: drop this frame rather than block the terminal output
+		// path. Recording is best-effort; the caller (Session.HandleOutput /
+		// WriteData) already treats recording errors as non-fatal.
+		r.logger.Warn("Terminal recording frame dropped; disk writer is not draining fast enough",
+			"session_id", logging.RedactedID(sessionID))
+	}
+	return nil
 }
 
 // EndRecording ends recording for a session.
@@ -487,6 +529,61 @@ func (r *DefaultSessionRecorder) cleanupLegacyFiles() {
 	}
 }
 
+// enqueue copies data and hands it to the pump goroutine via a non-blocking
+// channel send. It returns false only when the backlog is full (frame dropped),
+// so callers on the terminal output path never block on disk I/O.
+func (w *recordingWriter) enqueue(data []byte, direction DataDirection) bool {
+	// Own a copy: the caller may reuse its buffer as soon as this returns.
+	buf := make([]byte, len(data))
+	copy(buf, data)
+
+	select {
+	case <-w.stop:
+		// Recording is being finalized; refuse further frames.
+		return false
+	default:
+	}
+
+	select {
+	case w.queue <- recordChunk{data: buf, direction: direction}:
+		return true
+	default:
+		return false
+	}
+}
+
+// pump drains queued frames to disk on a dedicated goroutine, preserving
+// per-session ordering. On stop it flushes every remaining buffered frame before
+// signaling drained, so EndRecording/Close observe a complete recording.
+func (w *recordingWriter) pump() {
+	defer close(w.drained)
+	for {
+		select {
+		case chunk := <-w.queue:
+			w.writeChunk(chunk)
+		case <-w.stop:
+			for {
+				select {
+				case chunk := <-w.queue:
+					w.writeChunk(chunk)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// writeChunk persists a single frame. Write errors (size-limit reached, disk
+// failure) are logged and the pump stays alive — recording is best-effort and
+// must never take down terminal I/O.
+func (w *recordingWriter) writeChunk(chunk recordChunk) {
+	if err := w.writeData(chunk.data, chunk.direction); err != nil {
+		w.logger.Warn("Failed to persist terminal recording frame",
+			"session_id", logging.RedactedID(w.sessionID), "error", err)
+	}
+}
+
 // writeData writes one event in the binary length-prefixed format:
 // [4-byte content length][content bytes][32-byte HMAC].
 // HMAC is computed over the post-compression bytes that land on disk.
@@ -537,8 +634,22 @@ func (w *recordingWriter) writeData(data []byte, direction DataDirection) error 
 	return nil
 }
 
-// close finalises the recording file and writes the metadata JSON.
+// close stops the pump, waits for every queued frame to be flushed to disk, then
+// finalises the recording file and writes the metadata JSON. It is idempotent.
 func (w *recordingWriter) close() error {
+	w.closeOnce.Do(func() {
+		// Signal the pump to drain, then wait for it to finish so metadata anchors
+		// (first/last checksum, event count) reflect the complete recording.
+		w.stopOnce.Do(func() { close(w.stop) })
+		<-w.drained
+		w.closeErr = w.finalize()
+	})
+	return w.closeErr
+}
+
+// finalize writes out the recording file's trailer metadata. It runs only after
+// the pump has exited, so it has exclusive access to the writer's fields.
+func (w *recordingWriter) finalize() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

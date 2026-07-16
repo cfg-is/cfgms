@@ -74,6 +74,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 	for _, res := range results {
 		info := StewardInfo{
 			ID:       res.ID,
+			TenantID: res.TenantID,
 			Status:   res.Status,
 			LastSeen: res.LastHeartbeat,
 		}

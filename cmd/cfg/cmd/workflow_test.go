@@ -666,4 +666,354 @@ func TestWorkflowCmd_SubcommandsRegistered(t *testing.T) {
 	assert.True(t, names["list"], "workflow list must be registered")
 	assert.True(t, names["status"], "workflow status must be registered")
 	assert.True(t, names["cancel"], "workflow cancel must be registered")
+	assert.True(t, names["promote-hv-role"], "workflow promote-hv-role must be registered")
+}
+
+// ---- requireSingleSteward ---------------------------------------------------
+
+func TestRequireSingleSteward_OneMatch_ReturnsIt(t *testing.T) {
+	s := StewardInfo{ID: "steward-abc", TenantID: "acme-corp/hv", DNA: &StewardInfoDNA{Hostname: "hv01"}}
+	got, err := requireSingleSteward([]StewardInfo{s})
+	require.NoError(t, err)
+	assert.Equal(t, s, got)
+}
+
+func TestRequireSingleSteward_MultipleMatches_HardError(t *testing.T) {
+	matches := []StewardInfo{
+		{ID: "steward-a", TenantID: "msp/client-1", DNA: &StewardInfoDNA{Hostname: "hv01"}},
+		{ID: "steward-b", TenantID: "msp/client-2", DNA: &StewardInfoDNA{Hostname: "hv01"}},
+	}
+	_, err := requireSingleSteward(matches)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2", "error must mention the match count")
+	assert.Contains(t, err.Error(), "hv01#steward-a", "error must list the first candidate key")
+	assert.Contains(t, err.Error(), "hv01#steward-b", "error must list the second candidate key")
+	assert.Contains(t, err.Error(), "msp/client-1", "error must include tenant in listing")
+	assert.Contains(t, err.Error(), "id:<steward-id>", "error must hint at narrowing with id:")
+}
+
+func TestRequireSingleSteward_MultipleMatches_NoYesEscape(t *testing.T) {
+	// Confirm there is no --yes or proceed path: the function always errors for N>1.
+	matches := []StewardInfo{
+		{ID: "a", DNA: &StewardInfoDNA{Hostname: "h"}},
+		{ID: "b", DNA: &StewardInfoDNA{Hostname: "h"}},
+	}
+	_, err := requireSingleSteward(matches)
+	require.Error(t, err, "N>1 must always be a hard error with no escape hatch")
+}
+
+// ---- deriveHVPromoteCluster -------------------------------------------------
+
+func TestDeriveHVPromoteCluster_NoClusterMembership_Error(t *testing.T) {
+	s := StewardInfo{
+		ID:  "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{"hostname": "hv01", "os": "windows"}},
+	}
+	_, err := deriveHVPromoteCluster(s, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member of any cluster")
+}
+
+func TestDeriveHVPromoteCluster_OneCluster_ResolvedAutomatically(t *testing.T) {
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:prod-fc.member": "true",
+			"cluster:prod-fc.role":   "node",
+		}},
+	}
+	name, err := deriveHVPromoteCluster(s, "")
+	require.NoError(t, err)
+	assert.Equal(t, "prod-fc", name)
+}
+
+func TestDeriveHVPromoteCluster_OneCluster_OverrideMatch_OK(t *testing.T) {
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:prod-fc.member": "true",
+		}},
+	}
+	name, err := deriveHVPromoteCluster(s, "prod-fc")
+	require.NoError(t, err)
+	assert.Equal(t, "prod-fc", name)
+}
+
+func TestDeriveHVPromoteCluster_OneCluster_OverrideMismatch_Error(t *testing.T) {
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:prod-fc.member": "true",
+		}},
+	}
+	_, err := deriveHVPromoteCluster(s, "other-cluster")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "other-cluster")
+	assert.Contains(t, err.Error(), "prod-fc")
+}
+
+func TestDeriveHVPromoteCluster_MultipleClusters_RequiresOverride(t *testing.T) {
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:fc-east.member": "true",
+			"cluster:fc-west.member": "true",
+		}},
+	}
+	_, err := deriveHVPromoteCluster(s, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fc-east")
+	assert.Contains(t, err.Error(), "fc-west")
+	assert.Contains(t, err.Error(), "--cluster")
+}
+
+func TestDeriveHVPromoteCluster_MultipleClusters_OverrideMatch_OK(t *testing.T) {
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:fc-east.member": "true",
+			"cluster:fc-west.member": "true",
+		}},
+	}
+	name, err := deriveHVPromoteCluster(s, "fc-east")
+	require.NoError(t, err)
+	assert.Equal(t, "fc-east", name)
+}
+
+func TestDeriveHVPromoteCluster_MultipleClusters_OverrideMismatch_Error(t *testing.T) {
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:fc-east.member": "true",
+			"cluster:fc-west.member": "true",
+		}},
+	}
+	_, err := deriveHVPromoteCluster(s, "fc-north")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fc-north")
+	assert.Contains(t, err.Error(), "fc-east")
+	assert.Contains(t, err.Error(), "fc-west")
+}
+
+func TestDeriveHVPromoteCluster_NilDNA_NoClusterError(t *testing.T) {
+	s := StewardInfo{ID: "s1", DNA: nil}
+	_, err := deriveHVPromoteCluster(s, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member of any cluster")
+}
+
+func TestDeriveHVPromoteCluster_MalformedClusterKey_Ignored(t *testing.T) {
+	// cluster: keys without a dot separator are silently skipped (matches BuildRegistry rule).
+	s := StewardInfo{
+		ID: "s1",
+		DNA: &StewardInfoDNA{Attributes: map[string]string{
+			"cluster:nodot":          "true", // malformed — no dot after name
+			"cluster:good.member":    "true", // valid
+		}},
+	}
+	name, err := deriveHVPromoteCluster(s, "")
+	require.NoError(t, err)
+	assert.Equal(t, "good", name)
+}
+
+// ---- runWorkflowPromoteHVRole ------------------------------------------------
+
+// makePromoteServer returns a test HTTP server that captures the resolve,
+// create-workflow, and execute-workflow requests.
+type promoteTestCapture struct {
+	resolveSelector string
+	createBody      map[string]interface{}
+	executeBody     map[string]interface{}
+	executePath     string
+}
+
+func makePromoteServer(t *testing.T, cap *promoteTestCapture, stewards []map[string]interface{}) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/fleet/resolve":
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			cap.resolveSelector = req["selector"]
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": stewards,
+			})
+
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workflows":
+			_ = json.NewDecoder(r.Body).Decode(&cap.createBody)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{})
+
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/execute"):
+			cap.executePath = r.URL.Path
+			_ = json.NewDecoder(r.Body).Decode(&cap.executeBody)
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"execution_id":  "exec-promote-1",
+				"workflow_name": "promote-hv-role",
+				"status":        "running",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestRunWorkflowPromoteHVRole_HappyPath_SingleCluster(t *testing.T) {
+	var cap promoteTestCapture
+	steward := map[string]interface{}{
+		"id":        "steward-hv01",
+		"tenant_id": "acme/prod",
+		"status":    "online",
+		"last_seen": "2026-07-01T00:00:00Z",
+		"dna": map[string]interface{}{
+			"hostname": "hv01",
+			"attributes": map[string]interface{}{
+				"cluster:fc-prod.member": "true",
+			},
+		},
+	}
+	srv := makePromoteServer(t, &cap, []map[string]interface{}{steward})
+	defer srv.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origCluster := workflowPromoteHVRoleCluster
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowPromoteHVRoleCluster = origCluster
+	})
+	workflowURL = srv.URL
+	workflowTLSInsecure = true
+	workflowPromoteHVRoleCluster = ""
+
+	output := captureStdout(t, func() {
+		err := runWorkflowPromoteHVRole(workflowPromoteHVRoleCmd, []string{"MyVM", "hv01"})
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, output, "exec-promote-1", "execution ID must be printed")
+	assert.Equal(t, "/api/v1/workflows/promote-hv-role/execute", cap.executePath)
+
+	vars, ok := cap.executeBody["variables"].(map[string]interface{})
+	require.True(t, ok, "execute body must have variables")
+	assert.Equal(t, "MyVM", vars["vm_name"])
+	assert.Equal(t, "steward-hv01", vars["steward_id"])
+	assert.Equal(t, "fc-prod", vars["cluster_name"])
+	assert.Equal(t, "acme/prod", vars["tenant_id"])
+}
+
+func TestRunWorkflowPromoteHVRole_ZeroStewards_ErrorBeforeWorkflow(t *testing.T) {
+	var cap promoteTestCapture
+	srv := makePromoteServer(t, &cap, []map[string]interface{}{})
+	defer srv.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+	})
+	workflowURL = srv.URL
+	workflowTLSInsecure = true
+
+	err := runWorkflowPromoteHVRole(workflowPromoteHVRoleCmd, []string{"MyVM", "hv01"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matched no stewards")
+	assert.Nil(t, cap.createBody, "no workflow must be created when selector matches zero stewards")
+}
+
+func TestRunWorkflowPromoteHVRole_MultipleStewards_HardError(t *testing.T) {
+	var cap promoteTestCapture
+	stewards := []map[string]interface{}{
+		{"id": "s-a", "tenant_id": "msp/c1", "status": "online", "last_seen": "2026-01-01T00:00:00Z",
+			"dna": map[string]interface{}{"hostname": "hv01", "attributes": map[string]interface{}{}}},
+		{"id": "s-b", "tenant_id": "msp/c2", "status": "online", "last_seen": "2026-01-01T00:00:00Z",
+			"dna": map[string]interface{}{"hostname": "hv01", "attributes": map[string]interface{}{}}},
+	}
+	srv := makePromoteServer(t, &cap, stewards)
+	defer srv.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+	})
+	workflowURL = srv.URL
+	workflowTLSInsecure = true
+
+	err := runWorkflowPromoteHVRole(workflowPromoteHVRoleCmd, []string{"MyVM", "hv01"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2", "must list the ambiguous count")
+	assert.Nil(t, cap.createBody, "no workflow must be created when selector is ambiguous")
+}
+
+func TestRunWorkflowPromoteHVRole_ExecuteBodyContainsAllVariables(t *testing.T) {
+	var cap promoteTestCapture
+	steward := map[string]interface{}{
+		"id":        "steward-xyz",
+		"tenant_id": "tenant-123",
+		"status":    "online",
+		"last_seen": "2026-07-01T00:00:00Z",
+		"dna": map[string]interface{}{
+			"hostname": "hv02",
+			"attributes": map[string]interface{}{
+				"cluster:cluster-a.node": "node1",
+			},
+		},
+	}
+	srv := makePromoteServer(t, &cap, []map[string]interface{}{steward})
+	defer srv.Close()
+
+	origURL := workflowURL
+	origInsecure := workflowTLSInsecure
+	origCluster := workflowPromoteHVRoleCluster
+	t.Cleanup(func() {
+		workflowURL = origURL
+		workflowTLSInsecure = origInsecure
+		workflowPromoteHVRoleCluster = origCluster
+	})
+	workflowURL = srv.URL
+	workflowTLSInsecure = true
+	workflowPromoteHVRoleCluster = ""
+
+	_ = captureStdout(t, func() {
+		err := runWorkflowPromoteHVRole(workflowPromoteHVRoleCmd, []string{"VmAlpha", "hv02"})
+		require.NoError(t, err)
+	})
+
+	vars, ok := cap.executeBody["variables"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "VmAlpha", vars["vm_name"])
+	assert.Equal(t, "steward-xyz", vars["steward_id"])
+	assert.Equal(t, "cluster-a", vars["cluster_name"])
+	assert.Equal(t, "tenant-123", vars["tenant_id"])
+}
+
+func TestWorkflowPromoteHVRoleCmd_FlagsRegistered(t *testing.T) {
+	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("url"))
+	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("api-key"))
+	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("tls-ca-cert"))
+	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("tls-insecure"))
+	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("cluster"), "--cluster must be registered")
+	assert.Nil(t, workflowPromoteHVRoleCmd.Flags().Lookup("yes"), "--yes must NOT be registered on promote-hv-role")
+}
+
+func TestWorkflowPromoteHVRoleCmd_RequiresExactlyTwoArgs(t *testing.T) {
+	err := workflowPromoteHVRoleCmd.Args(workflowPromoteHVRoleCmd, []string{})
+	require.Error(t, err)
+
+	err = workflowPromoteHVRoleCmd.Args(workflowPromoteHVRoleCmd, []string{"vmname"})
+	require.Error(t, err)
+
+	err = workflowPromoteHVRoleCmd.Args(workflowPromoteHVRoleCmd, []string{"vmname", "selector", "extra"})
+	require.Error(t, err)
+
+	err = workflowPromoteHVRoleCmd.Args(workflowPromoteHVRoleCmd, []string{"vmname", "selector"})
+	require.NoError(t, err)
 }
