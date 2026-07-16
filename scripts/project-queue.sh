@@ -516,6 +516,84 @@ def graphql(payload):
     return resp['data']
 
 
+def add_content_idempotent(project_id, content_node_id):
+    """Add a content node to the project, returning the project item id.
+
+    addProjectV2ItemById is not reliably idempotent: when the content is
+    already in the project GitHub returns a "Content already exists in this
+    project" GraphQL error. Detect that case and return the id of the
+    existing project item instead of failing.
+    """
+    payload = {
+        'query': (
+            'mutation($p:ID!,$c:ID!){'
+            'addProjectV2ItemById(input:{projectId:$p,contentId:$c}){'
+            'item{id}}}'
+        ),
+        'variables': {'p': project_id, 'c': content_node_id}
+    }
+    r = subprocess.run(
+        ['gh', 'api', 'graphql', '--input', '-'],
+        input=json.dumps(payload).encode(),
+        capture_output=True
+    )
+    resp = None
+    try:
+        resp = json.loads(r.stdout)
+    except (ValueError, json.JSONDecodeError):
+        resp = None
+
+    if resp and resp.get('data', {}).get('addProjectV2ItemById', {}).get('item'):
+        return resp['data']['addProjectV2ItemById']['item']['id']
+
+    errors = (resp or {}).get('errors') or []
+    already_exists = any(
+        'already exists' in (e.get('message', '').lower()) for e in errors
+    )
+    if already_exists:
+        existing = find_existing_item(project_id, content_node_id)
+        if existing:
+            return existing
+
+    # Genuine failure — surface the error and exit non-zero.
+    if errors:
+        for e in errors:
+            print(e.get('message', str(e)), file=sys.stderr)
+    else:
+        print(r.stderr.decode().strip(), file=sys.stderr)
+    sys.exit(1)
+
+
+def find_existing_item(project_id, content_node_id):
+    """Return the project item id whose content matches content_node_id."""
+    query = (
+        'query($p:ID!,$cursor:String){'
+        'node(id:$p){...on ProjectV2{'
+        'items(first:100,after:$cursor){'
+        'pageInfo{hasNextPage endCursor}'
+        'nodes{id content{'
+        '...on DraftIssue{id}'
+        '...on Issue{id}'
+        '...on PullRequest{id}'
+        '}}}}}}'
+    )
+    cursor = None
+    while True:
+        variables = {'p': project_id}
+        if cursor:
+            variables['cursor'] = cursor
+        data = graphql({'query': query, 'variables': variables})
+        items_data = data['node']['items']
+        for item in items_data['nodes']:
+            content = item.get('content') or {}
+            if content.get('id') == content_node_id:
+                return item['id']
+        page_info = items_data['pageInfo']
+        if not page_info['hasNextPage']:
+            return None
+        cursor = page_info['endCursor']
+
+
 project_id = os.environ['GQ_PROJECT_ID']
 issue_num = int(os.environ['GQ_ISSUE_NUM'])
 owner = os.environ['GQ_REPO_OWNER']
@@ -524,15 +602,7 @@ repo = os.environ['GQ_REPO_NAME']
 issue_data = gh_api(f'repos/{owner}/{repo}/issues/{issue_num}')
 node_id = issue_data['node_id']
 
-data = graphql({
-    'query': (
-        'mutation($p:ID!,$c:ID!){'
-        'addProjectV2ItemById(input:{projectId:$p,contentId:$c}){'
-        'item{id}}}'
-    ),
-    'variables': {'p': project_id, 'c': node_id}
-})
-new_item_id = data['addProjectV2ItemById']['item']['id']
+new_item_id = add_content_idempotent(project_id, node_id)
 
 print(json.dumps({
     'item_id': new_item_id,
@@ -582,6 +652,84 @@ def graphql(payload):
     return resp['data']
 
 
+def add_content_idempotent(project_id, content_node_id):
+    """Add a content node to the project, returning the project item id.
+
+    addProjectV2ItemById is not reliably idempotent: when the content is
+    already in the project GitHub returns a "Content already exists in this
+    project" GraphQL error. Detect that case and return the id of the
+    existing project item instead of failing.
+    """
+    payload = {
+        'query': (
+            'mutation($p:ID!,$c:ID!){'
+            'addProjectV2ItemById(input:{projectId:$p,contentId:$c}){'
+            'item{id}}}'
+        ),
+        'variables': {'p': project_id, 'c': content_node_id}
+    }
+    r = subprocess.run(
+        ['gh', 'api', 'graphql', '--input', '-'],
+        input=json.dumps(payload).encode(),
+        capture_output=True
+    )
+    resp = None
+    try:
+        resp = json.loads(r.stdout)
+    except (ValueError, json.JSONDecodeError):
+        resp = None
+
+    if resp and resp.get('data', {}).get('addProjectV2ItemById', {}).get('item'):
+        return resp['data']['addProjectV2ItemById']['item']['id']
+
+    errors = (resp or {}).get('errors') or []
+    already_exists = any(
+        'already exists' in (e.get('message', '').lower()) for e in errors
+    )
+    if already_exists:
+        existing = find_existing_item(project_id, content_node_id)
+        if existing:
+            return existing
+
+    # Genuine failure — surface the error and exit non-zero.
+    if errors:
+        for e in errors:
+            print(e.get('message', str(e)), file=sys.stderr)
+    else:
+        print(r.stderr.decode().strip(), file=sys.stderr)
+    sys.exit(1)
+
+
+def find_existing_item(project_id, content_node_id):
+    """Return the project item id whose content matches content_node_id."""
+    query = (
+        'query($p:ID!,$cursor:String){'
+        'node(id:$p){...on ProjectV2{'
+        'items(first:100,after:$cursor){'
+        'pageInfo{hasNextPage endCursor}'
+        'nodes{id content{'
+        '...on DraftIssue{id}'
+        '...on Issue{id}'
+        '...on PullRequest{id}'
+        '}}}}}}'
+    )
+    cursor = None
+    while True:
+        variables = {'p': project_id}
+        if cursor:
+            variables['cursor'] = cursor
+        data = graphql({'query': query, 'variables': variables})
+        items_data = data['node']['items']
+        for item in items_data['nodes']:
+            content = item.get('content') or {}
+            if content.get('id') == content_node_id:
+                return item['id']
+        page_info = items_data['pageInfo']
+        if not page_info['hasNextPage']:
+            return None
+        cursor = page_info['endCursor']
+
+
 project_id = os.environ['GQ_PROJECT_ID']
 pr_num = int(os.environ['GQ_PR_NUM'])
 owner = os.environ['GQ_REPO_OWNER']
@@ -590,15 +738,7 @@ repo = os.environ['GQ_REPO_NAME']
 pr_data = gh_api(f'repos/{owner}/{repo}/pulls/{pr_num}')
 node_id = pr_data['node_id']
 
-data = graphql({
-    'query': (
-        'mutation($p:ID!,$c:ID!){'
-        'addProjectV2ItemById(input:{projectId:$p,contentId:$c}){'
-        'item{id}}}'
-    ),
-    'variables': {'p': project_id, 'c': node_id}
-})
-new_item_id = data['addProjectV2ItemById']['item']['id']
+new_item_id = add_content_idempotent(project_id, node_id)
 
 print(json.dumps({
     'item_id': new_item_id,

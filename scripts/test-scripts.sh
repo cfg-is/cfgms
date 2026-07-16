@@ -1040,6 +1040,33 @@ test_project_queue_invalid_args() {
     fi
 }
 
+# Poll list-by-status until the given item_id appears, absorbing GitHub
+# Projects V2 eventual-consistency lag. A newly created/updated item is
+# immediately visible via get-item (a direct node fetch) but can take several
+# seconds to surface in the project-wide items() connection that list-by-status
+# walks. Exponential backoff, ~30s total budget. Echoes "yes" or "no".
+pq_list_status_contains() {
+    local script="$1" status="$2" want_id="$3"
+    local attempt delay=1 out found
+    for attempt in 1 2 3 4 5 6 7; do
+        out=$(bash "$script" list-by-status "$status" 2>/dev/null) || out="[]"
+        found=$(echo "$out" | ITEM_ID="$want_id" python3 -c "
+import json, os, sys
+want = os.environ['ITEM_ID']
+try:
+    items = json.load(sys.stdin)
+    print('yes' if any(i.get('item_id') == want for i in items) else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null) || found="no"
+        [[ "$found" == "yes" ]] && { echo "yes"; return 0; }
+        [[ "$attempt" -eq 7 ]] && break
+        sleep "$delay"
+        (( delay < 8 )) && delay=$(( delay * 2 ))
+    done
+    echo "no"
+}
+
 test_project_queue_integration() {
     log_test "Testing project-queue.sh: integration against live cfgms-pipeline project..."
 
@@ -1145,9 +1172,10 @@ print(','.join(missing) if missing else 'ok')
     fi
 
     # ── AC 2: list-by-status Draft ────────────────────────────────────────────
-    # GitHub Projects V2 has ~2s eventual consistency for newly created items.
-    # Retry up to 5 times with 1s delay to let the item become visible.
-    local list_out found is_array attempt
+    # GitHub Projects V2 items() connection is eventually consistent for newly
+    # created items. Poll with backoff (pq_list_status_contains) to let the
+    # item surface before asserting.
+    local list_out found is_array
     exit_code=0
     list_out=$(bash "$script" list-by-status Draft 2>&1) || exit_code=$?
     if [[ $exit_code -ne 0 ]]; then
@@ -1160,21 +1188,8 @@ print(','.join(missing) if missing else 'ok')
             log_fail "project-queue.sh list-by-status: output is not a JSON array: $list_out"
         fi
 
-        # Retry until item is visible (accounts for GitHub API eventual consistency)
-        found="no"
-        for attempt in 1 2 3 4 5; do
-            list_out=$(bash "$script" list-by-status Draft 2>&1) || true
-            found=$(echo "$list_out" | python3 -c "
-import json, sys
-try:
-    items = json.load(sys.stdin)
-    print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
-except Exception:
-    print('no')
-" 2>/dev/null) || found="no"
-            [[ "$found" == "yes" ]] && break
-            sleep 1
-        done
+        # Poll until item is visible (accounts for GitHub API eventual consistency)
+        found=$(pq_list_status_contains "$script" Draft "$item_id")
 
         if [[ "$found" == "yes" ]]; then
             log_pass "project-queue.sh list-by-status: created item appears in Draft list (AC 2)"
@@ -1248,6 +1263,9 @@ print(d.get('fields',{}).get('Title',''))
     fi
 
     # ── AC 2: list-by-status Ready (item moved from Draft) ───────────────────
+    # The status update propagates to the items() connection with the same
+    # eventual-consistency lag as creation, so poll with backoff rather than
+    # asserting on a single listing.
     exit_code=0
     local ready_list
     ready_list=$(bash "$script" list-by-status Ready 2>&1) || exit_code=$?
@@ -1255,11 +1273,7 @@ print(d.get('fields',{}).get('Title',''))
         log_fail "project-queue.sh list-by-status Ready: failed (exit $exit_code): $ready_list"
     else
         local found_ready
-        found_ready=$(echo "$ready_list" | python3 -c "
-import json, sys
-items = json.load(sys.stdin)
-print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
-" 2>/dev/null) || found_ready="parse-error"
+        found_ready=$(pq_list_status_contains "$script" Ready "$item_id")
         if [[ "$found_ready" == "yes" ]]; then
             log_pass "project-queue.sh list-by-status Ready: item appears after status update (AC 2)"
         else
