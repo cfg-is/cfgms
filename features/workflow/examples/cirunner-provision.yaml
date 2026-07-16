@@ -25,15 +25,21 @@ timeout: 30m
 on_failure: stop
 
 variables:
+  # REQUIRED: replace with your GitHub organization name.
   github_owner: "your-org"
+  # REQUIRED: replace with your GitHub repository name.
   github_repo: "your-repo"
+  # REQUIRED: update to match github_owner/github_repo above.
   repo_url: "https://github.com/your-org/your-repo"
+  # REQUIRED: replace with the URL of your CFGMS controller instance.
   controller_url: "https://controller.example.com:8443"
+  # REQUIRED: replace with the enrolled steward ID of the CI host to provision.
   steward_id: "your-steward-id"
+  # Target OS for the runner: "linux" or "windows".
+  # stage-register-script derives the script id and version from this value —
+  # changing runner_os is the only change needed to target a different OS.
   runner_os: "linux"
   runner_labels: "self-hosted,linux,cfgms"
-  register_script_id: "register-github-runner-linux"
-  register_script_version: "1.0.0"
   # Secret-store key the staging step binds to the RUNNER_TOKEN script param.
   runner_token_secret_key: "cfgms/cirunner/registration-token"
 
@@ -55,17 +61,25 @@ steps:
         backoff_multiplier: 2.0
 
   # 2. Stage the stable per-OS register script from the library and bind the
-  #    just-minted token as a SECRET param (from: secret-store). The script is
-  #    referenced by id + version — NOT generated per standup. The token value
-  #    is resolved at execution time and injected as CFGMS_SECRET_RUNNER_TOKEN;
-  #    it is never written here.
+  #    just-minted token as a SECRET param (from: secret-store). The script id
+  #    and version are derived from runner_os at render time — changing runner_os
+  #    is the only operator action needed to target a different OS. Linux uses
+  #    1.0.0; Windows requires 1.1.0 (adds --runasservice; the linux script does
+  #    not). Avoids the silent mismatch when id/version were independent
+  #    variables that could drift from runner_os (Issue #2336 regression guard).
+  #
+  #    stage.id and stage.version are nested under the "stage:" key per the
+  #    ScriptConfig schema (scriptConfigFromMap in script/config.go) — top-level
+  #    script_id/script_version keys are never decoded by that path.
+  #    param_bindings stays top-level (ParamBindings field on ScriptConfig).
   - name: stage-register-script
     type: task
     module: script
     config:
       action: stage
-      script_id: "{{ .register_script_id }}"
-      script_version: "{{ .register_script_version }}"
+      stage:
+        id: "register-github-runner-{{ .runner_os }}"
+        version: '{{ if eq .runner_os "windows" }}1.1.0{{ else }}1.0.0{{ end }}'
       param_bindings:
         - name: RUNNER_TOKEN
           from: secret-store
@@ -100,6 +114,16 @@ steps:
   #    each iteration is an HTTP GET of the steward DNA, and the loop continues
   #    WHILE the module is not yet enrolled+running. Bounded by max_iterations
   #    and the workflow timeout — never a fixed sleep.
+  #
+  #    The poll step name is underscore-separated (poll_steward_dna) because
+  #    Go's text/template rejects hyphens (U+002D) in dot-field access; the
+  #    engine binds the decoded response as <step_name>_response_json.
+  #
+  #    DNAInfo.Attributes is a flat map[string]string (features/controller/api/
+  #    types.go) keyed by the "<resourceID>.<field>" convention from
+  #    CollectModuleDNAAttributes (features/steward/execution/monitor.go).
+  #    There is no nested "modules" object on the DNA response — the condition
+  #    reads the flat attribute key "github_runner.state" directly.
   - name: await-runner-enrollment
     type: while
     loop:
@@ -109,9 +133,9 @@ steps:
         type: expression
         # Keep looping while the github_runner module has not yet reported the
         # service enrolled and running in the polled steward DNA.
-        expression: '{{ ne (index .poll_steward_dna_http_response.modules "github_runner").state "enrolled-running" }}'
+        expression: '{{ ne (index .poll_steward_dna_response_json.attributes "github_runner.state") "enrolled-running" }}'
     steps:
-      - name: poll-steward-dna
+      - name: poll_steward_dna
         type: http
         timeout: 15s
         http:
