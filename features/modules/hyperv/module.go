@@ -83,6 +83,13 @@ type hypervModule struct {
 	clusterOwnersAt  time.Time
 	clusterOwnersTTL time.Duration
 
+	// desiredCheckpointsRaw is the authored `checkpoints` block for the resource
+	// this module instance is converging (#2627), stashed by Configure. A fresh
+	// module instance is created per resource (executor.executeResource), Configured
+	// then Get/Set/verified, so a single per-instance value is safe. getVM reads it
+	// to make its compliance echo policy-aware; nil ⇒ observe-only.
+	desiredCheckpointsRaw interface{}
+
 	// vswitches is the write-through vSwitch cache. Keys are the exact switch
 	// names admins specify (identical to the host-side names). Updated on
 	// transport success only.
@@ -326,6 +333,12 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
 	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
 	m.seedDir, _ = configMap["seed_dir"].(string)
+
+	// Stash the authored `checkpoints` block so getVM's compliance echo is
+	// policy-aware (#2627). This is the SAME object the drift comparator sees as
+	// desired.AsMap()["checkpoints"], so echoing it back on compliance compares
+	// equal (reflect.DeepEqual) and produces no false drift. nil ⇒ observe-only.
+	m.desiredCheckpointsRaw = configMap["checkpoints"]
 
 	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this
 	// steward will read; cluster_role_names bounds the clustered VM roles in

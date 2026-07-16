@@ -275,23 +275,161 @@ func TestCheckpointReconcile_NeverRestores(t *testing.T) {
 	}
 }
 
-// TestCheckpointPolicy_ManagedFieldDrivesConvergence (#2627 convergence trigger):
-// checkpoint_policy is a MANAGED field (so a declared policy drifts vs getVM's
-// empty observed value and drives setVM), while an absent policy emits "" on both
-// sides — preserving the #2626 observe-only default (no false drift).
-func TestCheckpointPolicy_ManagedFieldDrivesConvergence(t *testing.T) {
-	assert.Contains(t, (&VMConfig{}).GetManagedFields(), "checkpoint_policy",
-		"checkpoint_policy must be a managed field so a declared policy triggers Set")
+// hostVMJSONWithCheckpoints builds a psGetVM response for a VM with the given
+// observed checkpoint count (the field getVM reads for count-based compliance).
+func hostVMJSONWithCheckpoints(name string, count int) string {
+	return fmt.Sprintf(`{"found":true,"Name":%q,"MemoryStartupBytes":2147483648,"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\%s.vhdx","ConfigurationLocation":"C:\\VMs","CheckpointCount":%d,"SwitchName":"","SwitchNames":[],"State":"Running"}`, name, name, count)
+}
 
-	// Observed side (getVM never sets CheckpointPolicy) → empty canonical string.
-	observed := &VMConfig{Name: "cp-vm", CheckpointCount: 3}
-	assert.Equal(t, "", observed.AsMap()["checkpoint_policy"],
-		"getVM output has no policy ⇒ empty ⇒ no drift when the config declares none (observe-only)")
+// TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts (#2627, the
+// false-drift fix): getVM echoes the authored `checkpoints` block on the Get
+// surface ONLY when the live set complies with the policy, so a compliant VM
+// matches desired (no drift) while a VM with stray checkpoints omits the key and
+// drifts (→ reconcile). No declared policy ⇒ no `checkpoints` key at all
+// (observe-only, #2626). This is the policy-aware-Get behaviour that eliminates
+// the every-cycle false drift.
+func TestGetVM_CheckpointEcho_CompliantEchoesNoncompliantDrifts(t *testing.T) {
+	desired := map[string]interface{}{"policy": "none"}
 
-	// Desired side with a policy → non-empty canonical string ⇒ drifts vs observed "".
-	three := 3
-	desired := &VMConfig{Name: "cp-vm", CheckpointPolicy: &CheckpointPolicy{Policy: "retain", Max: &three}}
-	assert.Equal(t, "retain:max=3", desired.AsMap()["checkpoint_policy"])
-	assert.NotEqual(t, observed.AsMap()["checkpoint_policy"], desired.AsMap()["checkpoint_policy"],
-		"a declared policy must differ from the observed empty value so Set (reconcile) runs")
+	// Compliant: 0 checkpoints under policy none → echo the block → no drift.
+	mc := vmModuleWithTransport(&testWinRMTransport{
+		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 0)}}, "t-echo-clean")
+	mc.desiredCheckpointsRaw = desired
+	cc, err := mc.getVM(context.Background(), "cp-vm")
+	require.NoError(t, err)
+	assert.Equal(t, desired, cc.AsMap()["checkpoints"],
+		"a compliant VM must echo the desired checkpoints block so it compares equal (no false drift)")
+
+	// Non-compliant: 2 checkpoints under policy none → omit the block → drift.
+	md := vmModuleWithTransport(&testWinRMTransport{
+		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 2)}}, "t-echo-dirty")
+	md.desiredCheckpointsRaw = desired
+	cd, err := md.getVM(context.Background(), "cp-vm")
+	require.NoError(t, err)
+	_, present := cd.AsMap()["checkpoints"]
+	assert.False(t, present,
+		"a VM with stray checkpoints must omit the block so it drifts vs desired and triggers reconcile")
+
+	// Observe-only (no stashed policy): getVM never emits a checkpoints key.
+	mo := vmModuleWithTransport(&testWinRMTransport{
+		perCallOutputs: []string{hostVMJSONWithCheckpoints("cp-vm", 5)}}, "t-echo-observe")
+	co, err := mo.getVM(context.Background(), "cp-vm")
+	require.NoError(t, err)
+	_, present = co.AsMap()["checkpoints"]
+	assert.False(t, present,
+		"no declared policy ⇒ getVM emits no checkpoints key (observe-only #2626 default, drift-free)")
+}
+
+// TestGetVM_CheckpointEcho_MaxAgeFetchesSnapshotList (#2627): a max_age policy
+// can't be judged from the count alone, so getVM issues a second call
+// (psGetVMSnapshots) to evaluate per-snapshot ages. A wide window ⇒ all retained
+// ⇒ compliant ⇒ echo.
+func TestGetVM_CheckpointEcho_MaxAgeFetchesSnapshotList(t *testing.T) {
+	desired := map[string]interface{}{"policy": "retain", "max_age": "100000h"}
+	snapJSON := snapshotListJSON(t, vmSnapshot{Name: "cp1", CreationTime: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)})
+	transport := &testWinRMTransport{perCallOutputs: []string{
+		hostVMJSONWithCheckpoints("cp-vm", 1), // 1st: psGetVM
+		snapJSON,                              // 2nd: psGetVMSnapshots (max_age needs times)
+	}}
+	m := vmModuleWithTransport(transport, "t-echo-age")
+	m.desiredCheckpointsRaw = desired
+	cfg, err := m.getVM(context.Background(), "cp-vm")
+	require.NoError(t, err)
+	assert.Equal(t, desired, cfg.AsMap()["checkpoints"],
+		"a checkpoint within the max_age window is retained ⇒ compliant ⇒ echo")
+	assert.Equal(t, psGetVMSnapshots, transport.calls[1].scriptBlock,
+		"a max_age policy must fetch the snapshot list to judge compliance")
+}
+
+// TestParseCheckpointPolicyMap (#2627, QA gap): the executor-map parse path,
+// including the JSON-sourced float64 max and the explicit-max:0-vs-unset *int
+// distinction that the whole feature hinges on.
+func TestParseCheckpointPolicyMap(t *testing.T) {
+	assert.Nil(t, parseCheckpointPolicyMap(nil))
+	assert.Nil(t, parseCheckpointPolicyMap(map[string]interface{}{}), "empty block ⇒ nil (observe-only)")
+
+	// float64 (JSON/executor-sourced) max survives as *int.
+	p := parseCheckpointPolicyMap(map[string]interface{}{"policy": "retain", "max": float64(3)})
+	require.NotNil(t, p)
+	require.NotNil(t, p.Max)
+	assert.Equal(t, 3, *p.Max)
+
+	// Explicit max: 0 ⇒ *int &0 (merge-all), distinct from absent.
+	pz := parseCheckpointPolicyMap(map[string]interface{}{"max": 0})
+	require.NotNil(t, pz)
+	require.NotNil(t, pz.Max)
+	assert.Equal(t, 0, *pz.Max)
+	assert.True(t, resolveCheckpointAction(pz).mergeAll, "explicit max: 0 resolves to merge-all")
+
+	// max_age only ⇒ implicit retain with Max nil (no count bound).
+	pa := parseCheckpointPolicyMap(map[string]interface{}{"max_age": "24h"})
+	require.NotNil(t, pa)
+	assert.Nil(t, pa.Max)
+	assert.Equal(t, "24h", pa.MaxAge)
+}
+
+// TestVMConfig_FromYAML_CheckpointsMaxZeroVsUnset (#2627, QA gap): the YAML parse
+// path must preserve the explicit-max:0-vs-unset distinction end to end.
+func TestVMConfig_FromYAML_CheckpointsMaxZeroVsUnset(t *testing.T) {
+	var withZero VMConfig
+	require.NoError(t, withZero.FromYAML([]byte("name: v\ncheckpoints:\n  max: 0\n")))
+	require.NotNil(t, withZero.CheckpointPolicy)
+	require.NotNil(t, withZero.CheckpointPolicy.Max, "explicit max: 0 must parse as *int &0, not nil")
+	assert.Equal(t, 0, *withZero.CheckpointPolicy.Max)
+	assert.True(t, resolveCheckpointAction(withZero.CheckpointPolicy).mergeAll, "max: 0 ⇒ merge-all")
+
+	var withAge VMConfig
+	require.NoError(t, withAge.FromYAML([]byte("name: v\ncheckpoints:\n  policy: retain\n  max_age: 24h\n")))
+	require.NotNil(t, withAge.CheckpointPolicy)
+	assert.Nil(t, withAge.CheckpointPolicy.Max, "unset max must parse as nil (no count bound), distinct from max: 0")
+	assert.Equal(t, "24h", withAge.CheckpointPolicy.MaxAge)
+}
+
+// TestParseVMSnapshots_Shapes (#2627, QA gap): empty/array/single-object payloads
+// and an unparsable CreationTime (kept as a zero-time snapshot, not dropped).
+func TestParseVMSnapshots_Shapes(t *testing.T) {
+	for _, empty := range []string{"", "  ", "null", "[]"} {
+		s, err := parseVMSnapshots(empty)
+		require.NoError(t, err)
+		assert.Empty(t, s, "empty payload %q ⇒ no snapshots", empty)
+	}
+
+	// Single object — PS collapses a 1-element array to a bare object.
+	s, err := parseVMSnapshots(`{"Name":"only","CreationTime":"2026-07-01T00:00:00Z"}`)
+	require.NoError(t, err)
+	require.Len(t, s, 1)
+	assert.Equal(t, "only", s[0].Name)
+	assert.False(t, s[0].CreationTime.IsZero())
+
+	// Array of two.
+	s, err = parseVMSnapshots(`[{"Name":"a","CreationTime":"2026-07-01T00:00:00Z"},{"Name":"b","CreationTime":"2026-07-02T00:00:00Z"}]`)
+	require.NoError(t, err)
+	require.Len(t, s, 2)
+
+	// Unparsable CreationTime ⇒ zero time, snapshot still retained.
+	s, err = parseVMSnapshots(`[{"Name":"weird","CreationTime":"not-a-time"}]`)
+	require.NoError(t, err)
+	require.Len(t, s, 1)
+	assert.True(t, s[0].CreationTime.IsZero(), "an unparsable timestamp keeps the snapshot with a zero time")
+}
+
+// TestCheckpointsToMerge_BothBounds (#2627, QA warning): with max AND max_age set,
+// a checkpoint is retained only if it satisfies BOTH bounds; anything violating
+// either is merged, oldest-first.
+func TestCheckpointsToMerge_BothBounds(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	snaps := []vmSnapshot{
+		{Name: "old-outside-n", CreationTime: now.Add(-72 * time.Hour)}, // beyond newest-2 AND too old
+		{Name: "old-inside-n", CreationTime: now.Add(-48 * time.Hour)},  // within newest-2 but too old
+		{Name: "young-inside-n", CreationTime: now.Add(-1 * time.Hour)}, // within newest-2 and young
+	}
+	two := 2
+	merge := checkpointsToMerge(snaps, &CheckpointPolicy{Policy: "retain", Max: &two, MaxAge: "24h"}, now)
+
+	names := make([]string, 0, len(merge))
+	for _, s := range merge {
+		names = append(names, s.Name)
+	}
+	assert.Equal(t, []string{"old-outside-n", "old-inside-n"}, names,
+		"retained only if within newest-N AND younger than max_age; violating either bound is merged, oldest-first")
 }

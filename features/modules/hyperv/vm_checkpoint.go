@@ -134,29 +134,39 @@ func (p *CheckpointPolicy) validate() error {
 	return nil
 }
 
-// canonicalCheckpointPolicy renders a policy as the stable string the drift
-// comparator sees for the managed "checkpoint_policy" field (vm.go AsMap). The
-// desired config emits its declared policy; getVM never sets CheckpointPolicy so
-// the observed side emits "" — a declared (non-observe) policy therefore drifts
-// and drives setVM → reconcileCheckpoints, while an absent/observe-only policy
-// emits "" on both sides (no drift, #2626 default preserved).
-func canonicalCheckpointPolicy(p *CheckpointPolicy) string {
-	a := resolveCheckpointAction(p)
+// checkpointsComply reports whether a VM's live checkpoint set already satisfies
+// the declared policy — the signal getVM uses to decide whether to echo the
+// desired `checkpoints` block (no drift) or omit it (drift → reconcile, #2627).
+// Count-only policies (none / max with no max_age) are judged from the
+// already-observed count with NO extra PowerShell; only a max_age bound needs the
+// per-snapshot creation times, so it (and only it) issues psGetVMSnapshots.
+func (m *hypervModule) checkpointsComply(ctx context.Context, hostName string, policy *CheckpointPolicy, observedCount int) (bool, error) {
+	action := resolveCheckpointAction(policy)
 	switch {
-	case a.observe:
-		return ""
-	case a.mergeAll:
-		return "merge-all"
-	default:
-		parts := []string{"retain"}
-		if a.hasMax {
-			parts = append(parts, fmt.Sprintf("max=%d", a.max))
+	case action.observe:
+		return true, nil
+	case action.mergeAll:
+		return observedCount == 0, nil
+	case action.maxAge == 0:
+		// Count-only retain: compliant when within the newest-N bound (or no bound).
+		if action.hasMax {
+			return observedCount <= action.max, nil
 		}
-		if a.maxAge > 0 {
-			parts = append(parts, "max_age="+a.maxAge.String())
-		}
-		return strings.Join(parts, ":")
+		return true, nil
 	}
+	// A max_age bound needs per-snapshot times to judge — fetch and evaluate.
+	if m.transport == nil {
+		return false, modules.ErrNotImplemented
+	}
+	output, err := m.transport.ExecutePS(ctx, psGetVMSnapshots, map[string]string{"Name": hostName})
+	if err != nil {
+		return false, err
+	}
+	snaps, err := parseVMSnapshots(output)
+	if err != nil {
+		return false, err
+	}
+	return len(checkpointsToMerge(snaps, policy, time.Now().UTC())) == 0, nil
 }
 
 // parseCheckpointPolicyMap reconstructs a *CheckpointPolicy from the generic

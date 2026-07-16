@@ -187,6 +187,22 @@ function Cfgms-SetVMMemory {
     Set-VM -Name $Name -MemoryStartupBytes ($MemoryMB * 1MB)
 }
 
+# ── Declarative checkpoint policy (#2627) ──────────────────────────────
+# Cfgms-GetVMSnapshots lists checkpoints oldest-first as JSON (Name + UTC ISO
+# CreationTime) for the Go-side policy evaluation. Cfgms-RemoveVMSnapshot MERGES
+# one checkpoint by name (Remove-VMSnapshot folds its differencing disk into the
+# parent — non-destructive; never Restore/revert). Both take values only as
+# declared params (never string-interpolated).
+function Cfgms-GetVMSnapshots {
+    param([Parameter(Mandatory)][string]$Name)
+    $snaps = @(Get-VMSnapshot -VMName $Name -ErrorAction SilentlyContinue | Sort-Object CreationTime | ForEach-Object { [pscustomobject]@{ Name = $_.Name; CreationTime = $_.CreationTime.ToUniversalTime().ToString('o') } })
+    ConvertTo-Json @($snaps) -Compress -Depth 3
+}
+function Cfgms-RemoveVMSnapshot {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SnapshotName)
+    Remove-VMSnapshot -VMName $Name -Name $SnapshotName -ErrorAction Stop
+}
+
 # ── VM network reconcile (declarative multi-NIC, #2021) ────────────────
 # Connect/disconnect primitives driven by the VM's desired switch set in
 # vm.go reconcileNetwork — NOT a standalone resource. Resurrected from the

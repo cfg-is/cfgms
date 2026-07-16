@@ -200,6 +200,14 @@ type VMConfig struct {
 	// it does not host. Unexported and untagged: it never serializes, never
 	// participates in the drift comparison.
 	managedElsewhereOwner string
+
+	// checkpointsEcho, when non-nil, is the desired `checkpoints` block that getVM
+	// echoes on the Get surface to signal the VM COMPLIES with its declared
+	// checkpoint policy (#2627). AsMap emits it under the managed `checkpoints`
+	// key so a compliant VM matches desired (no drift); getVM leaves it nil when
+	// the live set violates the policy (drift → setVM reconcile). Observed/computed
+	// only — never authored, never round-trips through YAML.
+	checkpointsEcho interface{}
 }
 
 // ManagedElsewhere implements modules.ManagedElsewhere. It reports true (naming
@@ -563,12 +571,18 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		// from GetManagedFields so they never participate in drift comparison.
 		"configuration_location": c.ConfigLocation,
 		"checkpoint_count":       c.CheckpointCount,
-		// Declarative checkpoint policy (#2627). Unlike checkpoint_count this IS a
-		// managed field (see GetManagedFields): the desired config emits its declared
-		// policy while getVM never sets CheckpointPolicy (emits ""), so declaring a
-		// policy drifts and drives setVM → reconcileCheckpoints each converge. An
-		// absent policy emits "" on both sides ⇒ no drift ⇒ #2626 observe-only default.
-		"checkpoint_policy": canonicalCheckpointPolicy(c.CheckpointPolicy),
+	}
+	// Declarative checkpoint policy (#2627): the drift comparator compares the
+	// AUTHORED `checkpoints` block (a managed config key) against what getVM
+	// reports here. getVM echoes the desired block back (checkpointsEcho) ONLY when
+	// the live checkpoint set already COMPLIES with the policy — so a compliant VM
+	// shows NO drift, while a VM with stray checkpoints omits the key and drifts,
+	// driving setVM → reconcileCheckpoints. This mirrors the ha_role observed-block
+	// pattern (a nested managed block getVM reports to match desired when in state).
+	// A desired config with no checkpoints block has no managed `checkpoints` key,
+	// so the comparison never runs — the #2626 observe-only default, drift-free.
+	if c.checkpointsEcho != nil {
+		m["checkpoints"] = c.checkpointsEcho
 	}
 	if c.Source != nil {
 		m["source"] = map[string]interface{}{
@@ -644,7 +658,7 @@ func (c *VMConfig) FromYAML(data []byte) error {
 
 // GetManagedFields returns the list of fields this configuration manages.
 func (c *VMConfig) GetManagedFields() []string {
-	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source", "ha_role", "checkpoint_policy"}
+	return []string{"name", "memory_mb", "cpu_count", "vhd_path", "switch_name", "generation", "state", "source", "ha_role"}
 }
 
 // psGetVM is the script block passed to ExecutePS for VM retrieval.
@@ -827,6 +841,24 @@ func (m *hypervModule) getVMLocal(ctx context.Context, vmName string) (*VMConfig
 	// Cluster-role membership probe (#2372/#2420) — see
 	// probeClusterRoleMembership for the scope-cap and degrade semantics.
 	cfg.HARole = m.probeClusterRoleMembership(ctx, vmName)
+
+	// Checkpoint-policy compliance echo (#2627): when a checkpoints policy is
+	// declared for this resource (stashed by Configure), report the desired block
+	// back on the Get surface IFF the live checkpoint set already complies — so a
+	// compliant VM shows no drift, and a VM with stray checkpoints omits the key
+	// and drifts (→ setVM reconcile). Best-effort: a probe error degrades to "omit
+	// the echo" (treated as drift, reconciled next Set) rather than failing Get.
+	if policy := parseCheckpointPolicyMap(m.desiredCheckpointsRaw); policy != nil {
+		if comply, cErr := m.checkpointsComply(ctx, vmName, policy, cfg.CheckpointCount); cErr != nil {
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: checkpoint compliance probe failed; reporting as drift this cycle",
+					"vm_name", logging.SanitizeLogValue(vmName),
+					"error", cErr.Error())
+			}
+		} else if comply {
+			cfg.checkpointsEcho = m.desiredCheckpointsRaw
+		}
+	}
 
 	// Write-through: update cache on successful read
 	m.vmsMu.Lock()
@@ -1469,7 +1501,14 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	// (UpdatedAt = now) is naturally excluded by the TTL check. Best-effort —
 	// a sweep failure does not block convergence.
 	m.sweepStaleSeedMedia(ctx)
-	return m.applyVMState(ctx, vmName, hostName, cfg, currentVM, state)
+	if err := m.applyVMState(ctx, vmName, hostName, cfg, currentVM, state); err != nil {
+		return err
+	}
+	// Converge the checkpoint set to the declared policy (#2627) on the
+	// source-provisioned existing-VM path too — a source: VM with a checkpoints
+	// policy self-heals identically to a plain-lifecycle VM. No-op when the policy
+	// is nil (observe-only).
+	return m.reconcileCheckpoints(ctx, hostName, cfg.CheckpointPolicy)
 }
 
 // createVM issues New-VM with the desired generation and connects every

@@ -284,20 +284,21 @@ chain **without reverting** the VM's current running state. Reverting
 (`Restore-VMSnapshot`, destructive) is deliberately **out of scope** and is never
 issued.
 
-The `checkpoints` block:
+The `checkpoints` block (a top-level key of the resource `config:`, alongside
+`memory_mb`, `vhd_path`, etc.):
 
 ```yaml
 resources:
   - name: db-vm
-    module: hyperv
+    module: hyperv.vm
     config:
-      vm:
-        name: db-vm
-        # ...
-        checkpoints:
-          policy: retain   # none | retain
-          max: 3           # retain the newest N; 0 (or policy: none) = merge all
-          max_age: 168h    # retain checkpoints younger than this Go duration
+      memory_mb: 4096
+      vhd_path: "C:\\VMs\\db-vm.vhdx"
+      state: running
+      checkpoints:
+        policy: retain   # none | retain
+        max: 3           # retain the newest N; 0 (or policy: none) = merge all
+        max_age: 168h    # retain checkpoints younger than this Go duration
 ```
 
 Semantics:
@@ -316,11 +317,18 @@ Merges always run **oldest-first** (from the base of the chain upward). Because
 `Remove-VMSnapshot` is a non-destructive merge, the VM's current state and data
 are preserved; only the stray checkpoint layers are collapsed.
 
-Convergence trigger: `checkpoint_policy` is a **managed field** whose desired
-value is the declared policy, while `Get` never reports one (observe-only stays
-`""`). A declared policy therefore registers as drift and drives the reconcile
-each convergence; an absent policy compares equal (`""` on both sides) and never
-drifts, so opting out costs nothing.
+Convergence trigger (drift-free at steady state): the authored `checkpoints`
+block is a managed config key, so it is compared against what `Get` reports.
+`Get` is **policy-aware** — it evaluates the live checkpoint set against the
+declared policy and **echoes the block back only when the VM already complies**.
+So a compliant VM reports the block that matches desired (no drift), while a VM
+with stray checkpoints omits it (drift → reconcile → merge → compliant next
+cycle). A VM with no `checkpoints` block has no managed key to compare, so
+opting out costs nothing. This mirrors the observed-block pattern the `ha_role`
+setting already uses, and means a compliant checkpointed VM does **not** report
+false drift every cycle. (For a `max_age` policy, `Get` issues one extra
+read-only `Get-VMSnapshot` to judge per-checkpoint ages; `none`/`max` policies
+are judged from the observed count with no extra call.)
 
 ### Create an external virtual switch
 
@@ -592,7 +600,7 @@ store, large-object transfer, or ISO distribution path.
 7. **No host ISO-builder dependency for the seed** — the unattended answer file is delivered on a host-native VHDX seed disk built with `New-VHD`/`Mount-VHD`/`Format-Volume` (present with the Hyper-V + Storage roles the host already runs), so it needs **no** `oscdimg.exe` (Windows ADK) or `mkisofs` on the host. If you choose to author a profile that ships its answer file via a secondary ISO instead of the VHDX seed, building that ISO on the host would require `oscdimg.exe` or `mkisofs` — neither is present on a stock Hyper-V host, which is why the VHDX seed is the supported mechanism.
 8. **Windows enrollment `.ppkg` must be pre-signed** — the Windows path applies a provisioning package (`.ppkg`) at first logon for steward enrollment. The package is referenced by host path (via a secret key) and must be signed ahead of time; this module does not sign `.ppkg` artifacts. An unsigned/self-signed package is acceptable only for lab/dogfood under `module_trust.mode: bypass`.
 9. **Provisioning advances one step per convergence cycle** — a long-running OS install does not block the convergence loop. The host-side module advances only as far as `finalizing`; the `ready` transition is controller-side.
-10. **A declared checkpoint policy reconciles every convergence cycle (#2627)** — because `Get` never reports a policy, the managed `checkpoint_policy` field always differs from a declared policy, so a VM with a `checkpoints` block registers as drift and runs the (idempotent, merge-only) reconcile each cycle even when already compliant. This keeps the merge-to-clean self-healing but re-reports "drift" on a compliant VM. Opting out (no `checkpoints` block) is fully drift-free — the observe-only default compares equal on both sides. Making a *compliant* declared policy converge drift-free (a policy-aware `Get`) is a deferred refinement; it needs `Get` to evaluate the live checkpoint set against the desired policy, which is out of this story's scope.
+10. **A `max_age` checkpoint policy costs one extra read per convergence (#2627)** — judging age-based compliance needs per-checkpoint creation times, so a VM with a `max_age` policy issues one additional read-only `Get-VMSnapshot` in `Get` each cycle. `none`/`max` policies add no extra call (judged from the observed checkpoint count). Checkpoint reconciliation is opt-in, so VMs with no `checkpoints` block are unaffected.
 
 ## Host detection
 
