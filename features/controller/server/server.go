@@ -1501,7 +1501,8 @@ func initializeWorkflowHandler(
 	configStore := storageManager.GetConfigStore()
 
 	setHARoleExecutor := workflownodes.NewSetHARoleNodeExecutor(configStore, configService)
-	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, nil)
+	moveResourceToClusterExecutor := workflownodes.NewMoveResourceToClusterNodeExecutor(configStore, configService)
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor)
 
 	// workflowEngineAdapter bridges workflow.Engine to trigger.WorkflowTrigger.
 	// Triggers resolve workflows by name from the default tenant store.
