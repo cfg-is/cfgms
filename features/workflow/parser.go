@@ -71,9 +71,15 @@ type stepDefinition struct {
 	Config    map[string]interface{} `yaml:"config,omitempty"`
 	Steps     []stepDefinition       `yaml:"steps,omitempty"`
 	Condition *conditionDefinition   `yaml:"condition,omitempty"`
+	Delay     *delayDefinition       `yaml:"delay,omitempty"`
 	Timeout   string                 `yaml:"timeout,omitempty"`
 	OnFailure string                 `yaml:"on_failure,omitempty"`
 	Variables map[string]interface{} `yaml:"variables,omitempty"`
+}
+
+type delayDefinition struct {
+	Duration string `yaml:"duration"`
+	Message  string `yaml:"message,omitempty"`
 }
 
 type conditionDefinition struct {
@@ -160,6 +166,18 @@ func (p *Parser) convertSteps(stepDefs []stepDefinition) ([]Step, error) {
 				return nil, fmt.Errorf("failed to convert condition for step %s: %w", stepDef.Name, err)
 			}
 			step.Condition = &condition
+		}
+
+		// Convert delay config
+		if stepDef.Delay != nil {
+			dur, err := time.ParseDuration(stepDef.Delay.Duration)
+			if err != nil {
+				return nil, fmt.Errorf("invalid delay duration for step %s: %w", stepDef.Name, err)
+			}
+			step.Delay = &DelayConfig{
+				Duration: dur,
+				Message:  stepDef.Delay.Message,
+			}
 		}
 
 		steps[i] = step
@@ -318,7 +336,7 @@ func (p *Parser) validateCondition(condition Condition) error {
 func isValidStepType(stepType StepType) bool {
 	switch stepType {
 	case StepTypeTask, StepTypeSequential, StepTypeParallel, StepTypeConditional,
-		StepTypeSetHARole, StepTypeMoveResourceToCluster:
+		StepTypeDelay, StepTypeSetHARole, StepTypeMoveResourceToCluster:
 		return true
 	default:
 		return false
