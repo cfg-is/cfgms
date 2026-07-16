@@ -1,5 +1,6 @@
-# Authoritative source — also copied to cmd/cfg/cmd/templates/promote-hv-role.yaml
-# (Issue #2670) for CLI embedding; keep both in sync.
+# Embedded copy of features/workflow/templates/promote-hv-role.yaml (Issue #2669).
+# Keep both files in sync — this copy exists solely because //go:embed cannot
+# reference paths outside the embedding package's directory tree.
 workflow:
   name: promote-hv-role
   description: >

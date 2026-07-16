@@ -31,6 +31,7 @@ type APIError struct {
 // StewardInfo represents steward information for API responses
 type StewardInfo struct {
 	ID          string            `json:"id"`
+	TenantID    string            `json:"tenant_id,omitempty"`
 	Status      string            `json:"status"`
 	LastSeen    time.Time         `json:"last_seen"`
 	Version     string            `json:"version"`

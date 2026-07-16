@@ -494,3 +494,28 @@ func TestHandleResolveSelector_TenantIsolation(t *testing.T) {
 	item := list[0].(map[string]interface{})
 	assert.Equal(t, "tenant-a-steward", item["id"])
 }
+
+// TestHandleResolveSelector_TenantIDPresentInResponse verifies that the
+// tenant_id field is populated on each resolved StewardInfo entry, completing
+// the contract the CLI-side StewardInfo type already declares.
+func TestHandleResolveSelector_TenantIDPresentInResponse(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-123", "hv01", "linux", "amd64", "prod"),
+	)
+	// makeSeedSteward hard-codes TenantID = "tenant-a" in the fleet data;
+	// the handler must now forward it in the JSON response.
+
+	rec := postResolveSelector(server, `{"selector":"all"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1)
+
+	item := list[0].(map[string]interface{})
+	assert.Equal(t, "tenant-a", item["tenant_id"],
+		"tenant_id must be present in the resolve response so the CLI can derive it without a second round-trip")
+}
