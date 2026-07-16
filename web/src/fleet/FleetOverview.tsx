@@ -173,6 +173,13 @@ export default function FleetOverview({
     [onSearchChange],
   )
 
+  const onRenameView = useCallback(
+    (oldName: string, newName: string) => {
+      setActiveViewName((current) => (current === oldName ? newName : current))
+    },
+    [],
+  )
+
   const columns = COLUMNS.filter((column) => visible.has(column.key))
   const total = page?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / pageSize))
@@ -202,6 +209,7 @@ export default function FleetOverview({
             currentPageSize={pageSize}
             activeName={activeViewName}
             onApply={onApplyView}
+            onRename={onRenameView}
           />
           <ColumnPicker visible={visible} onToggle={onToggleColumn} />
           <span className="cnt" data-testid="fleet-count">

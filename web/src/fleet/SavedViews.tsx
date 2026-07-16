@@ -90,6 +90,7 @@ export default function SavedViews({
   currentPageSize,
   activeName,
   onApply,
+  onRename,
 }: {
   username: string
   currentFilter: string
@@ -98,19 +99,29 @@ export default function SavedViews({
   currentPageSize: number
   activeName: string | null
   onApply: (config: SavedViewConfig) => void
+  onRename?: (oldName: string, newName: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const [views, setViews] = useState<SavedViewConfig[]>(() => loadViews(username))
   const [showSaveInput, setShowSaveInput] = useState(false)
   const [savingName, setSavingName] = useState('')
+  const [renamingName, setRenamingName] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
 
   // Close on Escape + outside-click — consistent with ColumnPicker behavior.
+  // When a rename is in progress, Escape cancels it without closing the popup.
   useEffect(() => {
     if (!open) return
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
+        if (renamingName !== null) {
+          setRenamingName(null)
+          setRenameValue('')
+          return
+        }
         setOpen(false)
         setShowSaveInput(false)
         setSavingName('')
@@ -121,6 +132,8 @@ export default function SavedViews({
         setOpen(false)
         setShowSaveInput(false)
         setSavingName('')
+        setRenamingName(null)
+        setRenameValue('')
       }
     }
     document.addEventListener('keydown', onKeyDown)
@@ -129,12 +142,17 @@ export default function SavedViews({
       document.removeEventListener('keydown', onKeyDown)
       document.removeEventListener('mousedown', onPointerDown)
     }
-  }, [open])
+  }, [open, renamingName])
 
   // Auto-focus the name input when it appears.
   useEffect(() => {
     if (showSaveInput) inputRef.current?.focus()
   }, [showSaveInput])
+
+  // Auto-focus the rename input when it appears.
+  useEffect(() => {
+    if (renamingName !== null) renameInputRef.current?.focus()
+  }, [renamingName])
 
   function commitSave() {
     const name = savingName.trim()
@@ -164,6 +182,33 @@ export default function SavedViews({
   function handleApply(view: SavedViewConfig) {
     onApply(view)
     setOpen(false)
+    setRenamingName(null)
+    setRenameValue('')
+  }
+
+  function startRename(name: string) {
+    setRenamingName(name)
+    setRenameValue(name)
+  }
+
+  function commitRename() {
+    const newName = renameValue.trim()
+    const oldName = renamingName
+    setRenamingName(null)
+    setRenameValue('')
+    if (!newName || oldName === null || newName === oldName) return
+    const next = views
+      .filter((v) => v.name !== newName)
+      .map((v) => (v.name === oldName ? { ...v, name: newName } : v))
+    setViews(next)
+    persistViews(username, next)
+    onRename?.(oldName, newName)
+    setOpen(false)
+  }
+
+  function cancelRename() {
+    setRenamingName(null)
+    setRenameValue('')
   }
 
   return (
@@ -199,21 +244,54 @@ export default function SavedViews({
           <h4>Saved views</h4>
           {views.map((view) => (
             <div key={view.name} className={`viewrow${activeName === view.name ? ' cur' : ''}`}>
-              <button
-                type="button"
-                className="view-name"
-                onClick={() => handleApply(view)}
-              >
-                {view.name}
-              </button>
-              <button
-                type="button"
-                className="view-del"
-                aria-label={`Delete view "${view.name}"`}
-                onClick={() => handleDelete(view.name)}
-              >
-                ×
-              </button>
+              {renamingName === view.name ? (
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  className="view-rename-input"
+                  value={renameValue}
+                  aria-label={`Rename "${view.name}"`}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRename()
+                    if (e.key === 'Escape') cancelRename()
+                  }}
+                />
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="view-name"
+                    onClick={() => handleApply(view)}
+                  >
+                    {view.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="view-rename"
+                    aria-label={`Rename view "${view.name}"`}
+                    onClick={() => startRename(view.name)}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M16 3l5 5L7 22H2v-5L16 3z"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    className="view-del"
+                    aria-label={`Delete view "${view.name}"`}
+                    onClick={() => handleDelete(view.name)}
+                  >
+                    ×
+                  </button>
+                </>
+              )}
             </div>
           ))}
           <div className="sep" />

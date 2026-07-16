@@ -22,6 +22,7 @@ interface TestProps {
   currentPageSize: number
   activeName: string | null
   onApply: (config: SavedViewConfig) => void
+  onRename?: (oldName: string, newName: string) => void
 }
 
 const DEFAULT_PROPS: TestProps = {
@@ -296,6 +297,103 @@ describe('localStorage persistence', () => {
     openPopup()
     expect(screen.getByRole('button', { name: 'Keep' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+  })
+})
+
+describe('renaming views', () => {
+  function seedView(name: string, username = 'admin@msp-a') {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        [username]: [{ name, filter: '', sort: null, columns: ['name'], pageSize: 50 }],
+      }),
+    )
+  }
+
+  it('each saved view has a rename button', () => {
+    seedView('My view')
+    renderViews()
+    openPopup()
+    expect(screen.getByRole('button', { name: /rename view "My view"/i })).toBeInTheDocument()
+  })
+
+  it('clicking rename shows an input pre-filled with the current view name', () => {
+    seedView('My view')
+    renderViews()
+    openPopup()
+    fireEvent.click(screen.getByRole('button', { name: /rename view "My view"/i }))
+    const input = screen.getByRole('textbox', { name: /rename "My view"/i })
+    expect(input).toBeInTheDocument()
+    expect((input as HTMLInputElement).value).toBe('My view')
+  })
+
+  it('typing a new name and pressing Enter renames the view', () => {
+    seedView('My view')
+    renderViews()
+    openPopup()
+    fireEvent.click(screen.getByRole('button', { name: /rename view "My view"/i }))
+    const input = screen.getByRole('textbox', { name: /rename "My view"/i })
+    fireEvent.change(input, { target: { value: 'Renamed view' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    openPopup()
+    expect(screen.getByRole('button', { name: 'Renamed view' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'My view' })).not.toBeInTheDocument()
+  })
+
+  it('pressing Escape in the rename input cancels without changing the name', () => {
+    seedView('My view')
+    renderViews()
+    openPopup()
+    fireEvent.click(screen.getByRole('button', { name: /rename view "My view"/i }))
+    const input = screen.getByRole('textbox', { name: /rename "My view"/i })
+    fireEvent.change(input, { target: { value: 'Discarded name' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+
+    // Popup stays open, original name is still there.
+    expect(screen.getByText('Saved views')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'My view' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Discarded name' })).not.toBeInTheDocument()
+  })
+
+  it('blank rename input is a no-op — original name is preserved', () => {
+    seedView('My view')
+    renderViews()
+    openPopup()
+    fireEvent.click(screen.getByRole('button', { name: /rename view "My view"/i }))
+    const input = screen.getByRole('textbox', { name: /rename "My view"/i })
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    // Blank name is a no-op; popup stays open with original view name.
+    expect(screen.getByRole('button', { name: 'My view' })).toBeInTheDocument()
+  })
+
+  it('rename persists to localStorage', () => {
+    seedView('Old name')
+    renderViews()
+    openPopup()
+    fireEvent.click(screen.getByRole('button', { name: /rename view "Old name"/i }))
+    const input = screen.getByRole('textbox', { name: /rename "Old name"/i })
+    fireEvent.change(input, { target: { value: 'New name' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    const raw = localStorage.getItem(STORAGE_KEY)
+    expect(raw).not.toBeNull()
+    const parsed = JSON.parse(raw as string)
+    expect(parsed['admin@msp-a'][0].name).toBe('New name')
+  })
+
+  it('onRename callback is called with old and new names', () => {
+    seedView('Before')
+    const onRename = vi.fn()
+    renderViews({ onRename })
+    openPopup()
+    fireEvent.click(screen.getByRole('button', { name: /rename view "Before"/i }))
+    const input = screen.getByRole('textbox', { name: /rename "Before"/i })
+    fireEvent.change(input, { target: { value: 'After' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRename).toHaveBeenCalledWith('Before', 'After')
   })
 })
 
