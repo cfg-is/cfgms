@@ -19,6 +19,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// jobExecutor is the minimal interface satisfied by *batchjob.RollingBatchExecutor.
+// Defined here (not in batchjob) to keep the api package self-contained and to let
+// test components inject a controlled executor without depending on the concrete type.
+type jobExecutor interface {
+	Execute(ctx context.Context, job *batchjob.BatchJob) error
+}
+
 // createJobRequest is the JSON body for POST /api/v1/jobs.
 type createJobRequest struct {
 	Selector          string `json:"selector"`
@@ -67,14 +74,22 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		batchSize = 10
 	}
 
-	// safeSelector strips newlines so CodeQL's go/log-injection taint does not
-	// reach the log calls below (logging.SanitizeLogValue is not modeled by CodeQL).
-	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
+	// safeSelector strips control characters for safe log inclusion. SanitizeLogValue
+	// handles the full control-character set; the sequential strings.ReplaceAll pair is
+	// required additionally because CodeQL's ReplaceSanitizer only recognises top-level
+	// variable re-assignments with literal "\n"/"\r", not function-call boundaries.
+	safeSelector := logging.SanitizeLogValue(req.Selector)
+	safeSelector = strings.ReplaceAll(safeSelector, "\n", "_")
+	safeSelector = strings.ReplaceAll(safeSelector, "\r", "_")
 
 	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
+		// err embeds req.Selector via selector.Parse format strings — sanitize before logging.
+		safeParseErr := err.Error()
+		safeParseErr = strings.ReplaceAll(safeParseErr, "\n", "_")
+		safeParseErr = strings.ReplaceAll(safeParseErr, "\r", "_")
 		s.logger.Info("Invalid selector expression",
-			"selector", safeSelector, "error", err)
+			"selector", safeSelector, "error", safeParseErr)
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
 		return
 	}
@@ -142,8 +157,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		executor := s.batchJobExecutor
 		go func() {
 			if execErr := executor.Execute(context.Background(), job); execErr != nil {
+				// execErr may embed job.Selector (user-tainted) via executor error messages.
+				// Sanitize with the sequential-reassignment form that CodeQL's ReplaceSanitizer
+				// recognises; logging.SanitizeLogValue alone is not recognised at call sites.
+				safeExecErr := execErr.Error()
+				safeExecErr = strings.ReplaceAll(safeExecErr, "\n", "_")
+				safeExecErr = strings.ReplaceAll(safeExecErr, "\r", "_")
 				s.logger.Error("Batch job execution failed",
-					"job_id", jobID, "error", execErr)
+					"job_id", jobID, "error", safeExecErr)
 			}
 		}()
 	}

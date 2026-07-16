@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -403,12 +404,25 @@ func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Sequential-reassignment form required for CodeQL's ReplaceSanitizer to recognise
+	// these values as sanitized (logging.SanitizeLogValue alone is not modelled by CodeQL).
 	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog = strings.ReplaceAll(nameForLog, "\n", "_")
+	nameForLog = strings.ReplaceAll(nameForLog, "\r", "_")
 	execIDForLog := logging.SanitizeLogValue(execID)
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\n", "_")
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\r", "_")
 
 	execution, err := h.engine.GetExecution(execID)
 	if err != nil || execution == nil {
-		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", err)
+		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+		safeErrStr := ""
+		if err != nil {
+			safeErrStr = err.Error()
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+		}
+		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
 		return
 	}
@@ -450,15 +464,28 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Sequential-reassignment form required for CodeQL's ReplaceSanitizer to recognise
+	// these values as sanitized (logging.SanitizeLogValue alone is not modelled by CodeQL).
 	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog = strings.ReplaceAll(nameForLog, "\n", "_")
+	nameForLog = strings.ReplaceAll(nameForLog, "\r", "_")
 	execIDForLog := logging.SanitizeLogValue(execID)
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\n", "_")
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\r", "_")
 
 	// Pre-check existence before acting. CancelExecution returns nil for already-terminal
 	// executions (it skips the cancel when Cancel func is nil) and a plain error string for
 	// not-found — neither signal is suitable for HTTP status mapping, so we gate here.
 	execution, err := h.engine.GetExecution(execID)
 	if err != nil || execution == nil {
-		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", err)
+		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+		safeErrStr := ""
+		if err != nil {
+			safeErrStr = err.Error()
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+		}
+		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
 		return
 	}

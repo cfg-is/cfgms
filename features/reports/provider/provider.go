@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet/storage"
@@ -13,9 +14,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// dnaHistory is the minimal interface satisfied by *storage.Manager.
+// Defined here (not in storage) to keep the provider package self-contained and to
+// let test components inject a controlled store without depending on the concrete type.
+type dnaHistory interface {
+	GetHistory(ctx context.Context, deviceID string, options *storage.QueryOptions) (*storage.HistoryResult, error)
+}
+
 // DataProvider implements the interfaces.DataProvider interface
 type DataProvider struct {
-	storageManager *storage.Manager
+	storageManager dnaHistory
 	driftDetector  drift.Detector
 	logger         logging.Logger
 }
@@ -54,7 +62,15 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 
 			historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
 			if err != nil {
-				p.logger.Warn("failed to get DNA history for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+				// Sequential-reassignment form required for CodeQL's ReplaceSanitizer;
+				// logging.SanitizeLogValue handles full control-char stripping for security.
+				safeDeviceID := logging.SanitizeLogValue(deviceID)
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+				safeErr := err.Error()
+				safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+				safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+				p.logger.Warn("failed to get DNA history for device", "device_id", safeDeviceID, "error", safeErr)
 				continue
 			}
 
@@ -120,7 +136,13 @@ func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, t
 	for _, deviceID := range deviceIDs {
 		deviceStats, err := p.calculateDeviceStats(ctx, deviceID, timeRange)
 		if err != nil {
-			p.logger.Warn("failed to calculate stats for device", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+			safeDeviceID := logging.SanitizeLogValue(deviceID)
+			safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+			safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+			safeErr := err.Error()
+			safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+			safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+			p.logger.Warn("failed to calculate stats for device", "device_id", safeDeviceID, "error", safeErr)
 			continue
 		}
 		stats[deviceID] = deviceStats
@@ -149,15 +171,27 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 		DeviceID: deviceID,
 	}
 
-	// Get DNA records for the device
-	dnaQuery := interfaces.DataQuery{
-		TimeRange: timeRange,
-		DeviceIDs: []string{deviceID},
+	// Get DNA records for the single, explicitly-requested device.
+	//
+	// Query storage directly rather than through GetDNAData: GetDNAData is a
+	// discovery/aggregation path that intentionally swallows per-device storage
+	// errors and continues so one bad device never fails a fleet-wide report.
+	// For single-device stats a storage failure is fatal — silently reporting
+	// zero records would misrepresent the device — so the error propagates to
+	// GetDeviceStats, which skips and logs (sanitized) the offending device.
+	options := &storage.QueryOptions{
+		TimeRange:   &storage.TimeRange{Start: timeRange.Start, End: timeRange.End},
+		IncludeData: true,
 	}
 
-	dnaRecords, err := p.GetDNAData(ctx, dnaQuery)
+	historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
 	if err != nil {
 		return stats, fmt.Errorf("failed to get DNA records: %w", err)
+	}
+
+	dnaRecords := make([]storage.DNARecord, 0, len(historyResult.Records))
+	for _, record := range historyResult.Records {
+		dnaRecords = append(dnaRecords, *record)
 	}
 
 	stats.DNARecordCount = len(dnaRecords)
@@ -174,7 +208,10 @@ func (p *DataProvider) calculateDeviceStats(ctx context.Context, deviceID string
 	}
 
 	// Get drift events for the device
-	driftEvents, err := p.GetDriftEvents(ctx, dnaQuery)
+	driftEvents, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
+		TimeRange: timeRange,
+		DeviceIDs: []string{deviceID},
+	})
 	if err != nil {
 		return stats, fmt.Errorf("failed to get drift events: %w", err)
 	}

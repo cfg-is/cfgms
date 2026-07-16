@@ -21,7 +21,6 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -131,7 +130,7 @@ type Server struct {
 	membershipStore                cluster.MembershipStore               // Issue #2283: cluster node membership (nil when cluster not configured)
 	clusterDraining                atomic.Bool                           // Issue #2283: true after drain is initiated; causes /health to return 503
 	batchJobStore                  business.BatchJobStore                // Issue #2296: durable batch-job persistence
-	batchJobExecutor               *batchjob.RollingBatchExecutor        // Issue #2296: rolling-batch executor for fleet-wide updates
+	batchJobExecutor               jobExecutor                           // Issue #2296: rolling-batch executor for fleet-wide updates
 	rolloutStore                   business.RolloutStore                 // Issue #2340: durable rollout-orchestration-state persistence
 	onRolloutSoak                  func(rolloutID string)                // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
 	onRolloutTerminal              func(rolloutID string)                // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
@@ -1242,7 +1241,7 @@ func (s *Server) SetBatchJobStore(store business.BatchJobStore) {
 // SetBatchJobExecutor wires the rolling-batch executor used to run batch jobs
 // asynchronously (Issue #2296). When nil (default), job creation still persists
 // the record but does not start execution. Call after New() but before Start().
-func (s *Server) SetBatchJobExecutor(exec *batchjob.RollingBatchExecutor) {
+func (s *Server) SetBatchJobExecutor(exec jobExecutor) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.batchJobExecutor = exec
