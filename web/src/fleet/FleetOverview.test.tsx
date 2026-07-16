@@ -17,6 +17,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import { AuthProvider } from '../auth/AuthContext.tsx'
 import {
   TenantScopeProvider,
   useTenantScope,
@@ -91,9 +92,11 @@ function mockFleet(stewards: Steward[]) {
 
 function renderFleet(search = '') {
   return render(
-    <TenantScopeProvider rootPath="root">
-      <FleetOverview search={search} />
-    </TenantScopeProvider>,
+    <AuthProvider>
+      <TenantScopeProvider rootPath="root">
+        <FleetOverview search={search} onSearchChange={() => {}} />
+      </TenantScopeProvider>
+    </AuthProvider>,
   )
 }
 
@@ -177,9 +180,11 @@ describe('live filter', () => {
     expect(dataRows()).toHaveLength(3)
 
     rerender(
-      <TenantScopeProvider rootPath="root">
-        <FleetOverview search="web-ingest" />
-      </TenantScopeProvider>,
+      <AuthProvider>
+        <TenantScopeProvider rootPath="root">
+          <FleetOverview search="web-ingest" onSearchChange={() => {}} />
+        </TenantScopeProvider>
+      </AuthProvider>,
     )
     expect(dataRows()).toHaveLength(1)
     expect(screen.getByText('web-ingest-04')).toBeInTheDocument()
@@ -192,9 +197,11 @@ describe('live filter', () => {
     await screen.findByRole('table')
     // Agent version is not a default column but is part of the haystack.
     rerender(
-      <TenantScopeProvider rootPath="root">
-        <FleetOverview search="v0.42" />
-      </TenantScopeProvider>,
+      <AuthProvider>
+        <TenantScopeProvider rootPath="root">
+          <FleetOverview search="v0.42" onSearchChange={() => {}} />
+        </TenantScopeProvider>
+      </AuthProvider>,
     )
     expect(dataRows()).toHaveLength(3)
   })
@@ -399,7 +406,7 @@ describe('tenant scope', () => {
           narrow-scope
         </button>
         <span data-testid="observed">{observedPaths.join(',')}</span>
-        <FleetOverview search="" />
+        <FleetOverview search="" onSearchChange={() => {}} />
       </div>
     )
   }
@@ -414,9 +421,11 @@ describe('tenant scope', () => {
   it('registers observed tenant paths and narrows displayed rows to the scope', async () => {
     mockFleet(fleet)
     render(
-      <TenantScopeProvider rootPath="root">
-        <ScopeHarness />
-      </TenantScopeProvider>,
+      <AuthProvider>
+        <TenantScopeProvider rootPath="root">
+          <ScopeHarness />
+        </TenantScopeProvider>
+      </AuthProvider>,
     )
     await screen.findByRole('table')
 
@@ -439,14 +448,16 @@ describe('tenant scope', () => {
           <button type="button" onClick={() => setScope('root/msp-a')}>
             narrow-scope
           </button>
-          <FleetOverview search="" />
+          <FleetOverview search="" onSearchChange={() => {}} />
         </div>
       )
     }
     render(
-      <TenantScopeProvider rootPath="root">
-        <NarrowToEmpty />
-      </TenantScopeProvider>,
+      <AuthProvider>
+        <TenantScopeProvider rootPath="root">
+          <NarrowToEmpty />
+        </TenantScopeProvider>
+      </AuthProvider>,
     )
     await screen.findByRole('table')
     fireEvent.click(screen.getByRole('button', { name: 'narrow-scope' }))

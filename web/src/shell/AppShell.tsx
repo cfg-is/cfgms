@@ -112,7 +112,7 @@ export default function AppShell() {
           </div>
 
           <div className="content">
-            <FleetOverview search={search} />
+            <FleetOverview search={search} onSearchChange={setSearch} />
           </div>
         </div>
       </div>
