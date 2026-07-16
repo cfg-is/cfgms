@@ -64,6 +64,14 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 			"Cfgms-SetVMMemory -Name "+quoteArg(psArgs, "Name")+
 				" -MemoryMB "+intArg(psArgs, "MemoryMB"))
 
+	// ── Declarative checkpoint policy (#2627) ────────────────────────
+	case psGetVMSnapshots:
+		return t.run(ctx, "Cfgms-GetVMSnapshots -Name "+quoteArg(psArgs, "Name"))
+	case psRemoveVMSnapshot:
+		return t.run(ctx,
+			"Cfgms-RemoveVMSnapshot -Name "+quoteArg(psArgs, "Name")+
+				" -SnapshotName "+quoteArg(psArgs, "SnapshotName"))
+
 	// ── VM provisioning: seed VHDX disk ops (#2044) ──────────────────
 	// These four use runFresh (a fresh `powershell -File` process), NOT the
 	// persistent `-Command -` host: Mount-VHD/Dismount-VHD deadlock there
