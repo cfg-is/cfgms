@@ -176,7 +176,7 @@ Everything else — however useful — is an `extended` module, built as a stand
 
 ### Stdlib membership is enforced by the build
 
-Adding or removing a module from stdlib requires **five coordinated changes**, each enforced by `make check-stdlib-payload-boundary` (wired into `make test-commit`):
+Adding or removing a module from stdlib requires **five coordinated changes**, each enforced by `make check-stdlib-payload-boundary` (wired into `make test-commit` and enforced in CI via the `unit-tests` job):
 
 1. `features/modules/stdlib/<name>/` — the module directory
 2. `Makefile` `STDLIB_MODULES` variable — drives compilation
@@ -188,7 +188,7 @@ The build fails if any of the five disagree. New entries in `.wxs`, `install.sh`
 
 ### Stdlib completeness is enforced by the build (ADR-016 clause 6)
 
-In addition to the payload boundary, `make check-stdlib-completeness` (also wired into `make test-commit`, via `check-stdlib-payload-boundary` as a prerequisite) asserts that every module under `stdlib/` is fully compliant:
+In addition to the payload boundary, `make check-stdlib-completeness` (also wired into `make test-commit`, via `check-stdlib-payload-boundary` as a prerequisite, and enforced in CI via the `unit-tests` job) asserts that every module under `stdlib/` is fully compliant:
 
 | Check | What is verified |
 |-------|-----------------|
