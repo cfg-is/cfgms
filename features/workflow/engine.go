@@ -38,20 +38,38 @@ type RingHealthStepExecutor interface {
 	ExecuteRingHealthStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
+// SetHARoleStepExecutor executes a workflow step of type set_ha_role.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers (S2) pass *nodes.SetHARoleNodeExecutor.
+type SetHARoleStepExecutor interface {
+	ExecuteSetHARoleStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
+// MoveResourceToClusterStepExecutor executes a workflow step of type move_resource_to_cluster.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an
+// import cycle. Concrete callers (S3) pass *nodes.MoveResourceToClusterNodeExecutor.
+type MoveResourceToClusterStepExecutor interface {
+	ExecuteMoveResourceToClusterStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
+}
+
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory      ModuleLoader
-	logger             *logging.ModuleLogger
-	executions         map[string]*WorkflowExecution
-	workflows          map[string]Workflow
-	mutex              sync.RWMutex
-	httpClient         *HTTPClient
-	providerRegistry   *ProviderRegistry
-	errorHandler       ErrorHandler
-	syncManager        *SyncManager
-	debugEngine        *DebugEngineImpl
-	transformExecutor  TransformStepExecutor
-	ringHealthExecutor RingHealthStepExecutor
+	moduleFactory                 ModuleLoader
+	logger                        *logging.ModuleLogger
+	executions                    map[string]*WorkflowExecution
+	workflows                     map[string]Workflow
+	mutex                         sync.RWMutex
+	httpClient                    *HTTPClient
+	providerRegistry              *ProviderRegistry
+	errorHandler                  ErrorHandler
+	syncManager                   *SyncManager
+	debugEngine                   *DebugEngineImpl
+	transformExecutor             TransformStepExecutor
+	ringHealthExecutor            RingHealthStepExecutor
+	setHARoleExecutor             SetHARoleStepExecutor
+	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
 }
 
 // NewEngine creates a new workflow engine instance.
@@ -59,8 +77,10 @@ type Engine struct {
 // (e.g. steward-side) — providers that require secrets will surface a clear error.
 // transformExecutor handles StepTypeTransform steps; pass nil if transform steps are not used.
 // ringHealthExecutor handles StepTypeQueryRingHealth steps; pass nil if ring-health steps are not used.
+// setHARoleExecutor handles StepTypeSetHARole steps; pass nil until S2 wires the real executor.
+// moveResourceToClusterExecutor handles StepTypeMoveResourceToCluster steps; pass nil until S3 wires the real executor.
 // executeStep returns a clear error for any step type whose executor is nil.
-func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor) *Engine {
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor, setHARoleExecutor SetHARoleStepExecutor, moveResourceToClusterExecutor MoveResourceToClusterStepExecutor) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -80,16 +100,18 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 	providerRegistry := NewProviderRegistry(logger, secrets)
 
 	engine := &Engine{
-		moduleFactory:      moduleFactory,
-		logger:             workflowLogger,
-		executions:         make(map[string]*WorkflowExecution),
-		workflows:          make(map[string]Workflow),
-		httpClient:         httpClient,
-		providerRegistry:   providerRegistry,
-		errorHandler:       NewDefaultErrorHandler(),
-		syncManager:        NewSyncManager(),
-		transformExecutor:  transformExecutor,
-		ringHealthExecutor: ringHealthExecutor,
+		moduleFactory:                 moduleFactory,
+		logger:                        workflowLogger,
+		executions:                    make(map[string]*WorkflowExecution),
+		workflows:                     make(map[string]Workflow),
+		httpClient:                    httpClient,
+		providerRegistry:              providerRegistry,
+		errorHandler:                  NewDefaultErrorHandler(),
+		syncManager:                   NewSyncManager(),
+		transformExecutor:             transformExecutor,
+		ringHealthExecutor:            ringHealthExecutor,
+		setHARoleExecutor:             setHARoleExecutor,
+		moveResourceToClusterExecutor: moveResourceToClusterExecutor,
 	}
 
 	// Initialize debug engine
@@ -483,6 +505,22 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 			var rhResult StepResult
 			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
 			execution.SetStepResult(step.Name, rhResult)
+		}
+	case StepTypeSetHARole:
+		if e.setHARoleExecutor == nil {
+			err = fmt.Errorf("set_ha_role executor not configured")
+		} else {
+			var haResult StepResult
+			haResult, err = e.setHARoleExecutor.ExecuteSetHARoleStep(ctx, step, execution)
+			execution.SetStepResult(step.Name, haResult)
+		}
+	case StepTypeMoveResourceToCluster:
+		if e.moveResourceToClusterExecutor == nil {
+			err = fmt.Errorf("move_resource_to_cluster executor not configured")
+		} else {
+			var moveResult StepResult
+			moveResult, err = e.moveResourceToClusterExecutor.ExecuteMoveResourceToClusterStep(ctx, step, execution)
+			execution.SetStepResult(step.Name, moveResult)
 		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)

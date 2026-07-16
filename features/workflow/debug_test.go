@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func TestDebugEngine_StartDebugSession(t *testing.T) {
@@ -633,8 +632,8 @@ func TestBreakpointCondition_RespectedOnHit(t *testing.T) {
 
 func createTestEngineWithDebug(t *testing.T) (*Engine, logging.Logger) {
 	t.Helper()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(createTestFactory(), logger, nil, nil, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(createTestFactory(), logger, nil, nil, nil, nil, nil)
 	return engine, logger
 }
 

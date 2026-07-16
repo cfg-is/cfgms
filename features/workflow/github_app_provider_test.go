@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // generateTestRSAKeyPEM generates a fresh 2048-bit RSA private key and returns
@@ -88,7 +88,7 @@ func TestGitHubAppJWT_InvalidPEM(t *testing.T) {
 // produces a wrapped ErrSecretNotFound without panicking.
 func TestGitHubAppProvider_MissingSecret(t *testing.T) {
 	store := newEmptyTestSecretStore()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	provider := NewGitHubAppProvider(store, logger, nil)
 
 	config := &APIConfig{
@@ -208,7 +208,7 @@ func TestGitHubAppProvider_GetMethods(t *testing.T) {
 // the default provider registry and that the runners/registration-token operation
 // can be validated from a YAML workflow configuration.
 func TestGitHubAppProvider_RegisteredInBuiltins(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	registry := NewProviderRegistry(logger, nil)
 
 	provider, err := registry.GetProvider("github")
@@ -233,7 +233,7 @@ func TestGitHubAppProvider_RegisteredInBuiltins(t *testing.T) {
 // github provider returns the expected "secrets store not configured" error
 // rather than panicking or producing a nil-pointer dereference.
 func TestGitHubAppProvider_RegistryExecuteWithoutSecrets(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	registry := NewProviderRegistry(logger, nil)
 
 	config := &APIConfig{
@@ -256,7 +256,7 @@ func TestGitHubAppProvider_RegistryExecuteWithoutSecrets(t *testing.T) {
 // the store and fails on a MISSING secret rather than "secrets store not configured".
 // This is the [REQUIRED TEST] from the story-2374 acceptance criteria.
 func TestGitHubAppProvider_RegistryWithSecretsStore(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	store := newEmptyTestSecretStore() // real store, no secrets pre-populated
 	registry := NewProviderRegistry(logger, store)
 
@@ -286,9 +286,9 @@ func TestGitHubAppProvider_RegistryWithSecretsStore(t *testing.T) {
 // The provider must fail on ErrSecretNotFound (secrets store reachable) rather than
 // "secrets store not configured" (secrets store nil).
 func TestNewEngine_SecretsStoreThreadedToProvider(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	store := newEmptyTestSecretStore()
-	engine := NewEngine(nil, logger, store, nil, nil)
+	engine := NewEngine(nil, logger, store, nil, nil, nil, nil)
 
 	provider, err := engine.providerRegistry.GetProvider("github")
 	require.NoError(t, err, "github provider must be registered in the engine's built-in registry")
@@ -366,7 +366,7 @@ func TestGitHubAppProvider_ExecuteOperation_E2E(t *testing.T) {
 	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubInstallationID, Value: installID}))
 	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubPrivateKeyPEM, Value: string(privPEM)}))
 
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	provider := NewGitHubAppProvider(store, logger, stubServer.Client())
 	provider.baseURL = stubServer.URL // redirect to stub; no real network calls
 
@@ -442,7 +442,7 @@ func TestGitHubAppIntegration(t *testing.T) {
 	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubInstallationID, Value: installID}))
 	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubPrivateKeyPEM, Value: pemRaw}))
 
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	provider := NewGitHubAppProvider(store, logger, nil)
 
 	config := &APIConfig{

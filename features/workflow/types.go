@@ -231,6 +231,16 @@ const (
 	// Counts on-version, failed, and pending stewards in the ring and exposes the results
 	// as step outputs (on_version_pct, failed_pct, pending_count).
 	StepTypeQueryRingHealth StepType = "query_ring_health"
+
+	// StepTypeSetHARole writes the ha_role block into a steward's device-scope config,
+	// triggering the steward's existing convergence loop to register the VM as a cluster role.
+	// Implemented by features/workflow/nodes in S2.
+	StepTypeSetHARole StepType = "set_ha_role"
+
+	// StepTypeMoveResourceToCluster moves a VM resource definition from device scope
+	// (stewards/<id>) to cluster-policies scope (<clusterName>), completing FC-role promotion.
+	// Implemented by features/workflow/nodes in S3.
+	StepTypeMoveResourceToCluster StepType = "move_resource_to_cluster"
 )
 
 // Condition defines execution conditions for conditional steps

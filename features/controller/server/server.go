@@ -1496,7 +1496,7 @@ func initializeWorkflowHandler(
 	// REST-only deployments that never resolve modules through the engine are unaffected.
 	moduleFactory := workflow.NewWorkflowModuleFactory(moduleCache, workflowRT)
 
-	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil)
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, nil, nil)
 
 	configStore := storageManager.GetConfigStore()
 
