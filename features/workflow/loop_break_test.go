@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestForLoopBreak(t *testing.T) {
@@ -51,7 +51,7 @@ func TestForLoopBreak(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -109,7 +109,7 @@ func TestForLoopContinue(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -172,7 +172,7 @@ func TestWhileLoopBreak(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -229,7 +229,7 @@ func TestForeachLoopBreak(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -267,7 +267,7 @@ func TestBreakContinueOutsideLoop(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 

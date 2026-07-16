@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestSwitchStep_BasicFunctionality(t *testing.T) {
@@ -153,7 +153,7 @@ func TestSwitchStep_BasicFunctionality(t *testing.T) {
 
 			// Create engine and execute workflow
 			moduleFactory := createTestFactory()
-			logger := pkgtesting.NewMockLogger(true)
+			logger := logging.NewNoopLogger()
 			engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 			ctx := context.Background()
 
@@ -234,7 +234,7 @@ func TestSwitchStep_DefaultCase(t *testing.T) {
 	}
 
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -288,7 +288,7 @@ func TestSwitchStep_NoMatchNoDefault(t *testing.T) {
 	}
 
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -367,7 +367,7 @@ func TestSwitchStep_ExpressionBasedSwitch(t *testing.T) {
 	}
 
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -417,7 +417,7 @@ func TestSwitchStep_VariableResolutionError(t *testing.T) {
 	}
 
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -497,7 +497,7 @@ func TestSwitchStep_NestedSwitchStatements(t *testing.T) {
 	}
 
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 

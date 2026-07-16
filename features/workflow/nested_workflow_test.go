@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestNestedWorkflowByName(t *testing.T) {
@@ -41,7 +41,7 @@ func TestNestedWorkflowByName(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
@@ -103,7 +103,7 @@ steps:
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -151,7 +151,7 @@ func TestNestedWorkflowParameterMapping(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
@@ -186,7 +186,7 @@ func TestNestedWorkflowTimeout(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
@@ -231,7 +231,7 @@ func TestNestedWorkflowAsync(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()
@@ -262,7 +262,7 @@ func TestNestedWorkflowMissingConfiguration(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -297,7 +297,7 @@ func TestNestedWorkflowMissingWorkflowSpec(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -329,7 +329,7 @@ func TestNestedWorkflowNotFound(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -377,7 +377,7 @@ func TestNestedWorkflowComplexParameterMapping(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	engine.RegisterWorkflow(testNestedWorkflow)
 	ctx := context.Background()

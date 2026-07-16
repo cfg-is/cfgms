@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestTrySuccess(t *testing.T) {
@@ -66,7 +66,7 @@ func TestTrySuccess(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -131,7 +131,7 @@ func TestTryCatchHandled(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -196,7 +196,7 @@ func TestTryCatchNotHandled(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -261,7 +261,7 @@ func TestTryCatchByErrorType(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -312,7 +312,7 @@ func TestTryFinallyWithoutCatch(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -377,7 +377,7 @@ func TestCatchAllErrors(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
@@ -407,7 +407,7 @@ func TestTryMissingConfiguration(t *testing.T) {
 
 	// Create engine and execute workflow
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 

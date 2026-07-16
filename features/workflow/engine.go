@@ -56,20 +56,20 @@ type MoveResourceToClusterStepExecutor interface {
 
 // Engine implements the WorkflowEngine interface
 type Engine struct {
-	moduleFactory      ModuleLoader
-	logger             *logging.ModuleLogger
-	executions         map[string]*WorkflowExecution
-	workflows          map[string]Workflow
-	mutex              sync.RWMutex
-	httpClient         *HTTPClient
-	providerRegistry   *ProviderRegistry
-	errorHandler       ErrorHandler
-	syncManager        *SyncManager
-	debugEngine        *DebugEngineImpl
-	transformExecutor              TransformStepExecutor
-	ringHealthExecutor             RingHealthStepExecutor
-	setHARoleExecutor              SetHARoleStepExecutor
-	moveResourceToClusterExecutor  MoveResourceToClusterStepExecutor
+	moduleFactory                 ModuleLoader
+	logger                        *logging.ModuleLogger
+	executions                    map[string]*WorkflowExecution
+	workflows                     map[string]Workflow
+	mutex                         sync.RWMutex
+	httpClient                    *HTTPClient
+	providerRegistry              *ProviderRegistry
+	errorHandler                  ErrorHandler
+	syncManager                   *SyncManager
+	debugEngine                   *DebugEngineImpl
+	transformExecutor             TransformStepExecutor
+	ringHealthExecutor            RingHealthStepExecutor
+	setHARoleExecutor             SetHARoleStepExecutor
+	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
 }
 
 // NewEngine creates a new workflow engine instance.
@@ -100,14 +100,14 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 	providerRegistry := NewProviderRegistry(logger, secrets)
 
 	engine := &Engine{
-		moduleFactory:      moduleFactory,
-		logger:             workflowLogger,
-		executions:         make(map[string]*WorkflowExecution),
-		workflows:          make(map[string]Workflow),
-		httpClient:         httpClient,
-		providerRegistry:   providerRegistry,
-		errorHandler:       NewDefaultErrorHandler(),
-		syncManager:        NewSyncManager(),
+		moduleFactory:                 moduleFactory,
+		logger:                        workflowLogger,
+		executions:                    make(map[string]*WorkflowExecution),
+		workflows:                     make(map[string]Workflow),
+		httpClient:                    httpClient,
+		providerRegistry:              providerRegistry,
+		errorHandler:                  NewDefaultErrorHandler(),
+		syncManager:                   NewSyncManager(),
 		transformExecutor:             transformExecutor,
 		ringHealthExecutor:            ringHealthExecutor,
 		setHARoleExecutor:             setHARoleExecutor,

@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func TestHTTPClient_ExecuteRequest(t *testing.T) {
@@ -112,7 +112,7 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
@@ -177,7 +177,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	// Mock the Microsoft Graph API URL by overriding the buildMicrosoftGraphRequest method
@@ -238,7 +238,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
@@ -285,7 +285,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 func TestEngine_ExecuteDelayStep(t *testing.T) {
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
@@ -357,7 +357,7 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 
 	// Create engine
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
