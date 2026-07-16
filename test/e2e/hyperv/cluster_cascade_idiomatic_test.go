@@ -62,7 +62,10 @@ import (
 //	CFGMS_E2E_HAROLE_VM      clustered ha_role VM/role name (default cfgms-e2e-ha-01)
 //	CFGMS_E2E_ROLE_TAG       tag whose role config cascades the VM (default e2e-ha-cluster)
 const (
-	envCfgBin      = "CFGMS_E2E_CFG_BIN"
+	// envCfgBin ("CFGMS_E2E_CFG_BIN") is declared once for the whole package in
+	// role_cascade_test.go and shared here — both CLI-driven suites read the same
+	// cfg admin binary path. Do NOT redeclare it (duplicate package-level const
+	// breaks the e2e build, which is invisible to CI behind the e2e build tag).
 	envAdminBundle = "CFGMS_E2E_ADMIN_BUNDLE"
 	envMemberIDs   = "CFGMS_E2E_MEMBER_IDS"
 	envRoleTag     = "CFGMS_E2E_ROLE_TAG"
