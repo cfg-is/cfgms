@@ -29,7 +29,7 @@ const NAV_ITEMS = [
   { label: 'Fleet', to: '/', soon: false },
   { label: 'Modules', to: null, soon: true },
   { label: 'Config', to: null, soon: true },
-  { label: 'Audit', to: null, soon: true },
+  { label: 'Audit', to: '/audit', soon: false },
 ] as const
 
 export default function AppShell() {
