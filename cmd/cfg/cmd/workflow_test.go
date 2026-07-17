@@ -807,8 +807,8 @@ func TestDeriveHVPromoteCluster_MalformedClusterKey_Ignored(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
 		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:nodot":       "true", // malformed — no dot after name
-			"cluster:good.member": "true", // valid
+			"cluster:nodot":          "true", // malformed — no dot after name
+			"cluster:good.member":    "true", // valid
 		}},
 	}
 	name, err := deriveHVPromoteCluster(s, "")
