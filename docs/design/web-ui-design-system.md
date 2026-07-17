@@ -130,6 +130,15 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
   **dependency/blast-radius graph**, a **change timeline**, and a
   **remediation plan** with preview/approve.
 - **State pills, stat tiles, sparklines** — semantic colour only.
+- **Asset-page tab frame** (Story #2723) — the per-steward page at
+  `/stewards/:id` wraps content in a horizontal tab strip: an active tab
+  (underline + accent colour, font-weight 600) and inert placeholders
+  carrying the same `soon` badge used in the sidebar nav (opacity 0.5,
+  cursor disabled, `tag` span). The tab panel (`role="tabpanel"`) mounts
+  the active tab's content. Inert tabs render a centred placeholder with
+  the `soon` badge and a short label; they do not throw or navigate.
+  Back-navigation is a breadcrumb `Fleet / {hostname}` above the `<h1>`;
+  the browser's own back button and the link both return to `/`.
 
 ---
 

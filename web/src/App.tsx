@@ -2,8 +2,12 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * App root: auth provider + route guard around the authenticated app
- * shell (Story #2496).
+ * App root: router + auth provider + route guard around the authenticated
+ * app shell (Story #2496).
+ *
+ * Route table (Story #2723):
+ *   /                → AppShell layout → FleetOverview
+ *   /stewards/:id    → AppShell layout → StewardAssetPage
  *
  * Session presence is inferred from API responses, never from reading
  * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
@@ -11,14 +15,22 @@
  * centrally and drops the app to the login screen ("session expired"), so
  * the shell no longer fires a separate probe request.
  */
+import { Routes, Route } from 'react-router-dom'
 import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
 import AppShell from './shell/AppShell.tsx'
+import FleetOverview from './fleet/FleetOverview.tsx'
+import StewardAssetPage from './fleet/StewardAssetPage.tsx'
 
 function App() {
   return (
     <AuthProvider>
       <RequireAuth>
-        <AppShell />
+        <Routes>
+          <Route path="/" element={<AppShell />}>
+            <Route index element={<FleetOverview />} />
+            <Route path="stewards/:id" element={<StewardAssetPage />} />
+          </Route>
+        </Routes>
       </RequireAuth>
     </AuthProvider>
   )

@@ -9,16 +9,19 @@
  * filter and sort operate on the displayed page's rows, not the whole fleet.
  *
  * The live-filter input is the shell's global search box (#2496 chrome);
- * its value arrives via the `search` prop and saved views restore it via
- * `onSearchChange`. Tenant scope (#2496 context) is a display convenience
- * narrowing displayed rows — server-side tenant scoping on the API is the
- * only enforcement (security A8.1); it is session chrome, never captured
- * by a saved view.
+ * its value and setter arrive via useOutletContext from AppShell (Story
+ * #2723). Tenant scope (#2496 context) is a display convenience narrowing
+ * displayed rows — server-side tenant scoping on the API is the only
+ * enforcement (security A8.1); it is session chrome, never captured by a
+ * saved view.
  *
  * Story #2498 adds saved views (SavedViews.tsx) and the row drill-in
- * asset-DNA drawer (DnaDrawer.tsx).
+ * asset-DNA drawer (DnaDrawer.tsx). Story #2723 converts the row drill-in
+ * from component state to a real route: clicking a row navigates to
+ * /stewards/:id (StewardAssetPage).
  */
 import { useMemo, useState } from 'react'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { isScopeMatch, useTenantScope } from '../shell/TenantScopeContext.tsx'
 import {
   COLUMNS,
@@ -30,7 +33,6 @@ import {
 } from './columns.ts'
 import { deriveHealth, formatLastSeen, parseLastSeen } from './health.ts'
 import ColumnPicker from './ColumnPicker.tsx'
-import DnaDrawer from './DnaDrawer.tsx'
 import FleetTable, { type SortState } from './FleetTable.tsx'
 import { ErrorNotice, FleetEmpty, LoadingRows, NoMatch } from './FleetStates.tsx'
 import SavedViews, {
@@ -80,13 +82,12 @@ function matchesFilter(steward: Steward, needle: string, nowMs: number): boolean
   return haystack.includes(needle)
 }
 
-export default function FleetOverview({
-  search,
-  onSearchChange,
-}: {
-  search: string
-  onSearchChange: (value: string) => void
-}) {
+export default function FleetOverview() {
+  const { search, onSearchChange } = useOutletContext<{
+    search: string
+    onSearchChange: (value: string) => void
+  }>()
+  const navigate = useNavigate()
   const { scope, rootPath } = useTenantScope()
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
   const [pageIndex, setPageIndex] = useState(0)
@@ -94,9 +95,6 @@ export default function FleetOverview({
   const [visible, setVisible] = useState<ReadonlySet<ColumnKey>>(
     () => new Set(loadColumnPrefs() ?? DEFAULT_VISIBLE),
   )
-  // Row drill-in (deep-link seam: when a router lands, this belongs in the
-  // route so a drawer is linkable by steward ID).
-  const [selected, setSelected] = useState<Steward | null>(null)
 
   const { page, loading, error, fetchedAtMs, retry } = useStewards(
     pageSize,
@@ -225,15 +223,9 @@ export default function FleetOverview({
             sort={sort}
             onSort={onSort}
             nowMs={nowMs}
-            onRowSelect={setSelected}
-          />
-        )}
-
-        {selected !== null && (
-          <DnaDrawer
-            steward={selected}
-            nowMs={nowMs}
-            onClose={() => setSelected(null)}
+            onRowSelect={(steward) =>
+              navigate(`/stewards/${encodeURIComponent(steward.id)}`)
+            }
           />
         )}
 

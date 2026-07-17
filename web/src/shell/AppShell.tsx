@@ -5,11 +5,13 @@
  * App shell (Story #2496) — mockups/fleet-overview.html lines ~102-266.
  * The persistent chrome every authenticated screen mounts into: sidebar +
  * top bar at desktop width, hamburger + off-canvas drawer + scrim below
- * 1024px, Escape closes overlays. Fleet overview (#2497) occupies
- * `.content`; the global search box is its live filter.
+ * 1024px, Escape closes overlays. Routed content occupies `.content` via
+ * <Outlet> (Story #2723); the global search box is passed to the outlet
+ * context so FleetOverview can live-filter without prop drilling through
+ * the route table.
  */
 import { useEffect, useState } from 'react'
-import FleetOverview from '../fleet/FleetOverview.tsx'
+import { NavLink, Outlet } from 'react-router-dom'
 import { TenantScopeProvider } from './TenantScopeContext.tsx'
 import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
@@ -17,11 +19,17 @@ import AlertCenter from './AlertCenter.tsx'
 import UserMenu from './UserMenu.tsx'
 import './AppShell.css'
 
+/** Context type exposed to outlet children via useOutletContext. */
+export interface AppShellContext {
+  search: string
+  onSearchChange: (value: string) => void
+}
+
 const NAV_ITEMS = [
-  { label: 'Fleet', active: true, soon: false },
-  { label: 'Modules', active: false, soon: true },
-  { label: 'Config', active: false, soon: true },
-  { label: 'Audit', active: false, soon: true },
+  { label: 'Fleet', to: '/', soon: false },
+  { label: 'Modules', to: null, soon: true },
+  { label: 'Config', to: null, soon: true },
+  { label: 'Audit', to: null, soon: true },
 ] as const
 
 export default function AppShell() {
@@ -73,17 +81,27 @@ export default function AppShell() {
             </button>
           </div>
           <nav>
-            {NAV_ITEMS.map((item) => (
-              <a
-                key={item.label}
-                role="link"
-                tabIndex={0}
-                className={`${item.active ? 'active' : ''}${item.soon ? ' soon' : ''}`}
-              >
-                {item.label}
-                {item.soon && <span className="tag">soon</span>}
-              </a>
-            ))}
+            {NAV_ITEMS.map((item) =>
+              item.soon ? (
+                <a
+                  key={item.label}
+                  role="link"
+                  tabIndex={0}
+                  className="soon"
+                >
+                  {item.label}
+                  <span className="tag">soon</span>
+                </a>
+              ) : (
+                <NavLink
+                  key={item.label}
+                  to={item.to}
+                  className={({ isActive }) => (isActive ? 'active' : '')}
+                >
+                  {item.label}
+                </NavLink>
+              ),
+            )}
           </nav>
         </aside>
 
@@ -112,7 +130,7 @@ export default function AppShell() {
           </div>
 
           <div className="content">
-            <FleetOverview search={search} onSearchChange={setSearch} />
+            <Outlet context={{ search, onSearchChange: setSearch } satisfies AppShellContext} />
           </div>
         </div>
       </div>

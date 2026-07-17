@@ -18,6 +18,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import {
   TenantScopeProvider,
@@ -143,7 +144,12 @@ function HarnessBody() {
       <button type="button" onClick={() => setScope('root/msp-a')}>
         narrow scope
       </button>
-      <FleetOverview search={search} onSearchChange={setSearch} />
+      <Routes>
+        <Route element={<Outlet context={{ search, onSearchChange: setSearch }} />}>
+          <Route index element={<FleetOverview />} />
+          <Route path="/stewards/:id" element={<div data-testid="nav-asset-page">asset</div>} />
+        </Route>
+      </Routes>
     </>
   )
 }
@@ -151,9 +157,11 @@ function HarnessBody() {
 function renderHarness(user = 'alice') {
   mockBackend()
   return render(
-    <AuthProvider>
-      <Harness user={user} />
-    </AuthProvider>,
+    <MemoryRouter initialEntries={['/']}>
+      <AuthProvider>
+        <Harness user={user} />
+      </AuthProvider>
+    </MemoryRouter>,
   )
 }
 
@@ -381,20 +389,10 @@ describe('saved views in the fleet overview', () => {
 })
 
 describe('row drill-in wiring', () => {
-  it('clicking a fleet row opens the asset-DNA drawer for that steward', async () => {
+  it('clicking a fleet row navigates to the steward asset page', async () => {
     renderHarness()
     const table = await screen.findByRole('table')
-    fetchMock.mockClear()
-
     fireEvent.click(within(table).getByText('acme-web-01'))
-    const dialog = await screen.findByRole('dialog')
-    expect(dialog).toBeTruthy()
-    const dnaCall = fetchMock.mock.calls
-      .map((call) => String(call[0]))
-      .find((url) => url.includes('/dna'))
-    expect(dnaCall).toBe('/api/v1/stewards/s1/dna')
-
-    fireEvent.keyDown(document, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(await screen.findByTestId('nav-asset-page')).toBeInTheDocument()
   })
 })

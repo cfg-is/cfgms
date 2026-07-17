@@ -3,7 +3,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from '../auth/AuthContext.tsx'
+import FleetOverview from '../fleet/FleetOverview.tsx'
 import AppShell from './AppShell.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -29,16 +31,27 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/**
+ * Renders AppShell as a layout route with FleetOverview at the index route.
+ * AppShell provides search state via Outlet context, which FleetOverview
+ * reads via useOutletContext.
+ */
 function renderShell() {
   return render(
-    <AuthProvider>
-      <AppShell />
-    </AuthProvider>,
+    <MemoryRouter initialEntries={['/']}>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<AppShell />}>
+            <Route index element={<FleetOverview />} />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
   )
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet active and other items marked soon', () => {
+  it('renders sidebar navigation with Fleet as a link and other items marked soon', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()

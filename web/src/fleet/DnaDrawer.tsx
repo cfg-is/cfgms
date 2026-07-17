@@ -2,10 +2,9 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Asset-DNA drawer (Story #2498) — mockup `.det`. Row drill-in for one
- * steward: fetches GET /api/v1/stewards/{id}/dna via the #2495 client and
- * renders the full attribute map as grouped key-value rows, machine values
- * in mono. Escape and scrim click close it (shell overlay conventions).
+ * Asset-DNA content (Story #2498, #2723) — DNA fetch/render for one
+ * steward, now route-driven. Gets the steward ID from `useParams` via the
+ * /stewards/:id route; mounted as the DNA tab inside StewardAssetPage.
  *
  * Grouping: a FIXED client-side allowlist maps known attribute keys into
  * the mockup's designed groups; every attribute the steward reports that
@@ -16,15 +15,11 @@
  * not introduce dangerouslySetInnerHTML here.
  *
  * The endpoint may 404 (cross-tenant, no DNA yet, denylist redaction) or
- * fail — those render the drawer's error state, never a blank panel.
- *
- * Deep-link seam: the app has no router yet; when one lands, the selected
- * steward ID belongs in the route so the drawer is linkable.
+ * fail — those render the error state, never a blank panel.
  */
 import { useEffect, useState } from 'react'
+import { useParams } from 'react-router-dom'
 import { apiFetch } from '../api/client.ts'
-import { deriveHealth } from './health.ts'
-import type { Steward } from './columns.ts'
 
 export interface StewardDNAInfo {
   hostname: string
@@ -197,22 +192,16 @@ function KVRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-export default function DnaDrawer({
-  steward,
-  nowMs,
-  onClose,
-}: {
-  steward: Steward
-  nowMs: number
-  onClose: () => void
-}) {
+/** DNA content panel — rendered inside the DNA tab of StewardAssetPage. */
+export default function DnaDrawer() {
+  const { id: stewardId = '' } = useParams<{ id: string }>()
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
-  const key = `${steward.id}:${attempt}`
+  const key = `${stewardId}:${attempt}`
 
   useEffect(() => {
     let cancelled = false
-    const path = `/api/v1/stewards/${encodeURIComponent(steward.id)}/dna`
+    const path = `/api/v1/stewards/${encodeURIComponent(stewardId)}/dna`
     apiFetch(path)
       .then(async (response) => {
         if (!response.ok) {
@@ -235,20 +224,10 @@ export default function DnaDrawer({
     return () => {
       cancelled = true
     }
-  }, [key, steward.id])
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
+  }, [key, stewardId])
 
   const current = outcome?.key === key ? outcome : null
   const dna = current?.dna
-  const health = deriveHealth(steward.status, steward.last_seen, nowMs)
-  const name = steward.dna?.hostname || steward.id
 
   const otherAttrs =
     dna === undefined
@@ -258,98 +237,73 @@ export default function DnaDrawer({
           .sort(([a], [b]) => a.localeCompare(b))
 
   return (
-    <>
-      <div className="scrim det-scrim" data-testid="dna-scrim" onClick={onClose} />
-      <aside className="det" role="dialog" aria-label={`Device DNA: ${name}`}>
-        <div className="dh">
-          <span className={`pill ${health.tone}`}>
-            <span className="dot" />
-            {health.label}
-          </span>
-          <span className="nm">{name}</span>
-          <button
-            type="button"
-            className="icobtn x"
-            aria-label="Close details"
-            onClick={onClose}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path
-                d="M6 6l12 12M18 6L6 18"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-        </div>
-        <div className="db">
-          {current === null ? (
-            <div data-testid="dna-loading" aria-label="Loading device DNA">
-              {Array.from({ length: 8 }, (_, i) => (
-                <div className="kv" key={i}>
-                  <span className="skel" style={{ width: '30%' }} />
-                  <span className="skel" style={{ width: '45%' }} />
-                </div>
-              ))}
-            </div>
-          ) : current.error !== undefined ? (
-            <div className="notice err" role="alert">
-              <div className="ic">!</div>
-              <h3>Couldn&apos;t load device DNA</h3>
-              <p>
-                The DNA for this steward isn&apos;t available — it may not have
-                reported yet, or you may not have access to it.
-              </p>
-              <span className="mono2 detail">{current.error}</span>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setAttempt((n) => n + 1)}
-              >
-                Retry
-              </button>
-            </div>
-          ) : (
-            dna !== undefined && (
-              <>
-                {DNA_GROUPS.map((group) => {
-                  const rows = group.rows
-                    .map((row) => ({ label: row.label, value: row.value(dna) }))
-                    .filter((row) => row.value !== '')
-                  if (rows.length === 0) return null
-                  return (
-                    <div key={group.heading}>
-                      <div className="grp">
-                        <div className="lbl">{group.heading}</div>
-                      </div>
-                      {rows.map((row) => (
-                        <KVRow key={row.label} label={row.label} value={row.value} />
-                      ))}
-                      <div className="gsep" />
-                    </div>
-                  )
-                })}
-                {otherAttrs.length > 0 && (
-                  <div>
+    <div className="det">
+      <div className="db">
+        {current === null ? (
+          <div data-testid="dna-loading" aria-label="Loading device DNA">
+            {Array.from({ length: 8 }, (_, i) => (
+              <div className="kv" key={i}>
+                <span className="skel" style={{ width: '30%' }} />
+                <span className="skel" style={{ width: '45%' }} />
+              </div>
+            ))}
+          </div>
+        ) : current.error !== undefined ? (
+          <div className="notice err" role="alert">
+            <div className="ic">!</div>
+            <h3>Couldn&apos;t load device DNA</h3>
+            <p>
+              The DNA for this steward isn&apos;t available — it may not have
+              reported yet, or you may not have access to it.
+            </p>
+            <span className="mono2 detail">{current.error}</span>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setAttempt((n) => n + 1)}
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          dna !== undefined && (
+            <>
+              {DNA_GROUPS.map((group) => {
+                const rows = group.rows
+                  .map((row) => ({ label: row.label, value: row.value(dna) }))
+                  .filter((row) => row.value !== '')
+                if (rows.length === 0) return null
+                return (
+                  <div key={group.heading}>
                     <div className="grp">
-                      <div className="lbl">{OTHER_HEADING}</div>
+                      <div className="lbl">{group.heading}</div>
                     </div>
-                    {otherAttrs.map(([attrKey, value]) => (
-                      <KVRow key={attrKey} label={attrKey} value={value} />
+                    {rows.map((row) => (
+                      <KVRow key={row.label} label={row.label} value={row.value} />
                     ))}
                     <div className="gsep" />
                   </div>
-                )}
-                <details className="raw">
-                  <summary>View all DNA (raw)</summary>
-                  <pre>{JSON.stringify(dna, null, 2)}</pre>
-                </details>
-              </>
-            )
-          )}
-        </div>
-      </aside>
-    </>
+                )
+              })}
+              {otherAttrs.length > 0 && (
+                <div>
+                  <div className="grp">
+                    <div className="lbl">{OTHER_HEADING}</div>
+                  </div>
+                  {otherAttrs.map(([attrKey, value]) => (
+                    <KVRow key={attrKey} label={attrKey} value={value} />
+                  ))}
+                  <div className="gsep" />
+                </div>
+              )}
+              <details className="raw">
+                <summary>View all DNA (raw)</summary>
+                <pre>{JSON.stringify(dna, null, 2)}</pre>
+              </details>
+            </>
+          )
+        )}
+      </div>
+    </div>
   )
 }
