@@ -55,9 +55,9 @@ describe('parseAuditEntries', () => {
   it('parses a valid array of entries', () => {
     const entries = parseAuditEntries([makeEntry()])
     expect(entries).toHaveLength(1)
-    expect(entries[0].id).toBe('e1')
-    expect(entries[0].action).toBe('login')
-    expect(entries[0].severity).toBe('low')
+    expect(entries[0]!.id).toBe('e1')
+    expect(entries[0]!.action).toBe('login')
+    expect(entries[0]!.severity).toBe('low')
   })
 
   it('skips entries with an empty id', () => {
@@ -88,9 +88,9 @@ describe('parseAuditEntries', () => {
       makeEntry({ action: 42, event_type: null, severity: true }),
     ])
     expect(entries).toHaveLength(1)
-    expect(entries[0].action).toBe('')
-    expect(entries[0].event_type).toBe('')
-    expect(entries[0].severity).toBe('')
+    expect(entries[0]!.action).toBe('')
+    expect(entries[0]!.event_type).toBe('')
+    expect(entries[0]!.severity).toBe('')
   })
 
   it('parses all declared string fields', () => {
@@ -105,11 +105,11 @@ describe('parseAuditEntries', () => {
       path: '/api/v1/cfg',
     })
     const [parsed] = parseAuditEntries([entry])
-    expect(parsed.user_type).toBe('system')
-    expect(parsed.resource_type).toBe('config')
-    expect(parsed.resource_name).toBe('main.yaml')
-    expect(parsed.error_code).toBe('UNAUTHORIZED')
-    expect(parsed.ip_address).toBe('10.0.0.1')
+    expect(parsed!.user_type).toBe('system')
+    expect(parsed!.resource_type).toBe('config')
+    expect(parsed!.resource_name).toBe('main.yaml')
+    expect(parsed!.error_code).toBe('UNAUTHORIZED')
+    expect(parsed!.ip_address).toBe('10.0.0.1')
   })
 })
 
@@ -127,7 +127,7 @@ describe('useAuditEntries', () => {
     const filters: AuditFilters = { ...DEFAULT_FILTERS, limit: 25, offset: 50 }
     renderHook(() => useAuditEntries(filters))
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const url = fetchMock.mock.calls[0][0] as string
+    const url = fetchMock.mock.calls[0]![0] as string
     expect(url).toContain('limit=25')
     expect(url).toContain('offset=50')
   })
@@ -147,7 +147,7 @@ describe('useAuditEntries', () => {
     }
     renderHook(() => useAuditEntries(filters))
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const url = fetchMock.mock.calls[0][0] as string
+    const url = fetchMock.mock.calls[0]![0] as string
     expect(url).toContain('severity=high')
     expect(url).toContain('result=failure')
     expect(url).toContain('user_id=user-abc')
@@ -168,7 +168,7 @@ describe('useAuditEntries', () => {
     }
     renderHook(() => useAuditEntries(filters))
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const url = fetchMock.mock.calls[0][0] as string
+    const url = fetchMock.mock.calls[0]![0] as string
     expect(url).toContain('since=2026-01-01T00%3A00%3A00Z')
     expect(url).toContain('until=2026-01-31T23%3A59%3A59Z')
     expect(url).toContain('module=patch')
@@ -181,7 +181,7 @@ describe('useAuditEntries', () => {
     const { result } = renderHook(() => useAuditEntries(DEFAULT_FILTERS))
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.entries).toHaveLength(2)
-    expect(result.current.entries[1].action).toBe('logout')
+    expect(result.current.entries[1]!.action).toBe('logout')
     expect(result.current.error).toBeNull()
   })
 

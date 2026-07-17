@@ -58,7 +58,7 @@ function makeResponse(entries: object[], status = 200) {
 /** Extract the URL from the most recent fetch call. */
 function lastFetchURL(): string {
   const calls = fetchMock.mock.calls
-  return calls[calls.length - 1][0] as string
+  return calls[calls.length - 1]![0] as string
 }
 
 function renderAuditView() {
@@ -300,7 +300,7 @@ describe('AuditView — untrusted-value rendering rule (security A9.1)', () => {
     await screen.findByText(xssAction)
 
     // The onerror handler must NOT have fired
-    expect((window as Record<string, unknown>).__auditXss).toBeUndefined()
+    expect((window as unknown as Record<string, unknown>).__auditXss).toBeUndefined()
   })
 
   it('does not inject markup from event_type, user_id, or resource fields', async () => {
