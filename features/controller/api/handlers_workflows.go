@@ -28,6 +28,9 @@ type WorkflowHandler struct {
 	triggerAPI     *trigger.APIHandler
 	logger         logging.Logger
 	fleetQuery     fleet.FleetQuery // Issue #609: fleet query for script dispatch targeting
+	// requirePermFn gates workflow routes by permission. When nil, routes are ungated (test use only).
+	// Wired from Server.requirePermission via SetRequirePermFn in SetWorkflowHandler (Issue #2725).
+	requirePermFn func(resourceType, action string) func(http.Handler) http.Handler
 }
 
 // NewWorkflowHandler creates a new WorkflowHandler.
@@ -55,17 +58,32 @@ func (h *WorkflowHandler) SetFleetQuery(q fleet.FleetQuery) {
 	h.fleetQuery = q
 }
 
+// SetRequirePermFn wires the server's permission-check factory into WorkflowHandler so
+// RegisterWorkflowRoutes can gate each route without importing the concrete Server type (Issue #2725).
+func (h *WorkflowHandler) SetRequirePermFn(fn func(resourceType, action string) func(http.Handler) http.Handler) {
+	h.requirePermFn = fn
+}
+
 // RegisterWorkflowRoutes registers workflow CRUD and execution routes on the provided subrouter.
+// Each route is wrapped with the permission gate set by SetRequirePermFn (Issue #2725).
+// When requirePermFn is nil (unit-test scenarios without RBAC wiring) routes are ungated.
 func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) {
-	router.HandleFunc("", h.handleListWorkflows).Methods("GET")
-	router.HandleFunc("", h.handleCreateWorkflow).Methods("POST")
-	router.HandleFunc("/{id}", h.handleGetWorkflow).Methods("GET")
-	router.HandleFunc("/{id}", h.handleUpdateWorkflow).Methods("PUT")
-	router.HandleFunc("/{id}", h.handleDeleteWorkflow).Methods("DELETE")
-	router.HandleFunc("/{id}/execute", h.handleExecuteWorkflow).Methods("POST")
-	router.HandleFunc("/{id}/executions", h.handleGetWorkflowExecutions).Methods("GET")
-	router.HandleFunc("/{id}/executions/{exec_id}", h.handleGetExecution).Methods("GET")
-	router.HandleFunc("/{id}/executions/{exec_id}/cancel", h.handleCancelExecution).Methods("POST")
+	gate := h.requirePermFn
+	wrap := func(action string, fn http.HandlerFunc) http.Handler {
+		if gate == nil {
+			return fn
+		}
+		return gate("workflow", action)(fn)
+	}
+	router.Handle("", wrap("list", h.handleListWorkflows)).Methods("GET")
+	router.Handle("", wrap("write", h.handleCreateWorkflow)).Methods("POST")
+	router.Handle("/{id}", wrap("read", h.handleGetWorkflow)).Methods("GET")
+	router.Handle("/{id}", wrap("write", h.handleUpdateWorkflow)).Methods("PUT")
+	router.Handle("/{id}", wrap("write", h.handleDeleteWorkflow)).Methods("DELETE")
+	router.Handle("/{id}/execute", wrap("execute", h.handleExecuteWorkflow)).Methods("POST")
+	router.Handle("/{id}/executions", wrap("read", h.handleGetWorkflowExecutions)).Methods("GET")
+	router.Handle("/{id}/executions/{exec_id}", wrap("read", h.handleGetExecution)).Methods("GET")
+	router.Handle("/{id}/executions/{exec_id}/cancel", wrap("cancel", h.handleCancelExecution)).Methods("POST")
 }
 
 // NewRegistrationApprovalHook creates a RegistrationApprovalHook backed by this handler's

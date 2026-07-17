@@ -95,6 +95,14 @@ var knownPermissions = map[string]bool{
 	// Cluster registry (Issue #2424)
 	"cluster:list": true,
 	"cluster:read": true,
+	// Workflow management (Issue #2725)
+	"workflow:list":    true,
+	"workflow:read":    true,
+	"workflow:write":   true,
+	"workflow:execute": true,
+	"workflow:cancel":  true,
+	// Trigger management (Issue #2725)
+	"trigger:manage": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
