@@ -827,6 +827,226 @@ func TestWorkflowHandler_GetExecution_SpecialCharsInVars_HandledSafely(t *testin
 	}
 }
 
+// --- permission gating (Issue #2725) -----------------------------------------
+
+// testRequirePermFn is a minimal requirePermFn for WorkflowHandler unit tests.
+// It mirrors the real s.requirePermission logic: admin principals always pass,
+// non-admin principals need the exact "resourceType:action" permission string.
+func testRequirePermFn(resourceType, action string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, _ := r.Context().Value(principalContextKey).(*Principal)
+			if p == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+				return
+			}
+			if p.IsAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+			need := resourceType + ":" + action
+			for _, have := range p.Permissions {
+				if have == need {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"insufficient permissions"}`))
+		})
+	}
+}
+
+// withPermissions injects a non-admin principal carrying the listed permissions.
+func withPermissions(r *http.Request, perms ...string) *http.Request {
+	p := &Principal{ID: "test-key", IsAdmin: false, Permissions: perms}
+	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+}
+
+// newPermGatedWorkflowRouter creates a mux.Router with workflow routes registered
+// under /workflows using testRequirePermFn permission gating.
+func newPermGatedWorkflowRouter(h *WorkflowHandler) *mux.Router {
+	h.SetRequirePermFn(testRequirePermFn)
+	router := mux.NewRouter()
+	sub := router.PathPrefix("/workflows").Subrouter()
+	h.RegisterWorkflowRoutes(sub)
+	return router
+}
+
+// TestWorkflowPermission_Execute_ForbiddenWithoutPermission verifies that
+// POST /workflows/{id}/execute returns 403 when the caller lacks workflow:execute.
+func TestWorkflowPermission_Execute_ForbiddenWithoutPermission(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+
+	// Create workflow as admin so the execute target exists.
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(minimalWorkflowBody("perm-exec-wf")))
+	createReq = withTenantContext(withAdminPrincipal(createReq), "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code, "setup: create workflow must succeed")
+
+	// Caller has workflow:read but not workflow:execute → 403.
+	req := httptest.NewRequest("POST", "/workflows/perm-exec-wf/execute", nil)
+	req = withTenantContext(withPermissions(req, "workflow:read"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestWorkflowPermission_Execute_SucceedsWithPermission verifies that
+// POST /workflows/{id}/execute returns 202 when the caller has workflow:execute.
+func TestWorkflowPermission_Execute_SucceedsWithPermission(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+
+	// Create workflow as admin.
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(minimalWorkflowBody("perm-exec-ok-wf")))
+	createReq = withTenantContext(withAdminPrincipal(createReq), "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+
+	// Caller has workflow:execute → 202.
+	req := httptest.NewRequest("POST", "/workflows/perm-exec-ok-wf/execute", nil)
+	req = withTenantContext(withPermissions(req, "workflow:execute"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+
+	// Clean up the execution goroutine so it doesn't outlive the test.
+	if engine != nil {
+		var execResp map[string]interface{}
+		if jsonErr := json.Unmarshal(rec.Body.Bytes(), &execResp); jsonErr == nil {
+			if execID, ok := execResp["execution_id"].(string); ok && execID != "" {
+				t.Cleanup(func() { _ = engine.CancelExecution(execID) })
+			}
+		}
+	}
+}
+
+// TestWorkflowPermission_Delete_ForbiddenWithoutPermission verifies that
+// DELETE /workflows/{id} returns 403 when the caller lacks workflow:write.
+func TestWorkflowPermission_Delete_ForbiddenWithoutPermission(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+
+	// Create workflow as admin.
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(minimalWorkflowBody("perm-del-wf")))
+	createReq = withTenantContext(withAdminPrincipal(createReq), "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+
+	// Caller has workflow:read but not workflow:write → 403.
+	req := httptest.NewRequest("DELETE", "/workflows/perm-del-wf", nil)
+	req = withTenantContext(withPermissions(req, "workflow:read"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestWorkflowPermission_Delete_SucceedsWithPermission verifies that
+// DELETE /workflows/{id} returns 200 when the caller has workflow:write.
+func TestWorkflowPermission_Delete_SucceedsWithPermission(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+
+	// Create workflow as admin.
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(minimalWorkflowBody("perm-del-ok-wf")))
+	createReq = withTenantContext(withAdminPrincipal(createReq), "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+
+	// Caller has workflow:write → 200.
+	req := httptest.NewRequest("DELETE", "/workflows/perm-del-ok-wf", nil)
+	req = withTenantContext(withPermissions(req, "workflow:write"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestWorkflowPermission_Cancel_ForbiddenWithoutPermission verifies that
+// POST /workflows/{id}/executions/{exec_id}/cancel returns 403 without workflow:cancel.
+func TestWorkflowPermission_Cancel_ForbiddenWithoutPermission(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+
+	// Create and execute a long-running workflow as admin so the execution is non-terminal.
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(mustMarshal(CreateWorkflowRequest{
+		Name: "perm-cancel-wf",
+		Steps: []workflow.Step{
+			{Name: "wait", Type: workflow.StepTypeDelay, Delay: &workflow.DelayConfig{Duration: 30 * time.Second}},
+		},
+	})))
+	createReq = withTenantContext(withAdminPrincipal(createReq), "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+
+	execReq := httptest.NewRequest("POST", "/workflows/perm-cancel-wf/execute", nil)
+	execReq = withTenantContext(withAdminPrincipal(execReq), "test-tenant")
+	execRec := httptest.NewRecorder()
+	router.ServeHTTP(execRec, execReq)
+	require.Equal(t, http.StatusAccepted, execRec.Code)
+
+	var execResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
+	execID, ok := execResp["execution_id"].(string)
+	require.True(t, ok && execID != "", "execution_id must be non-empty")
+	t.Cleanup(func() { _ = engine.CancelExecution(execID) })
+
+	// Caller has workflow:execute but not workflow:cancel → 403.
+	req := httptest.NewRequest("POST", "/workflows/perm-cancel-wf/executions/"+execID+"/cancel", nil)
+	req = withTenantContext(withPermissions(req, "workflow:execute"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestWorkflowPermission_Cancel_SucceedsWithPermission verifies that
+// POST /workflows/{id}/executions/{exec_id}/cancel returns 200 with workflow:cancel.
+func TestWorkflowPermission_Cancel_SucceedsWithPermission(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+
+	// Create and execute a long-running workflow as admin.
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(mustMarshal(CreateWorkflowRequest{
+		Name: "perm-cancel-ok-wf",
+		Steps: []workflow.Step{
+			{Name: "wait", Type: workflow.StepTypeDelay, Delay: &workflow.DelayConfig{Duration: 30 * time.Second}},
+		},
+	})))
+	createReq = withTenantContext(withAdminPrincipal(createReq), "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+
+	execReq := httptest.NewRequest("POST", "/workflows/perm-cancel-ok-wf/execute", nil)
+	execReq = withTenantContext(withAdminPrincipal(execReq), "test-tenant")
+	execRec := httptest.NewRecorder()
+	router.ServeHTTP(execRec, execReq)
+	require.Equal(t, http.StatusAccepted, execRec.Code)
+
+	var execResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
+	execID, ok := execResp["execution_id"].(string)
+	require.True(t, ok && execID != "", "execution_id must be non-empty")
+
+	// Caller has workflow:cancel → 200.
+	req := httptest.NewRequest("POST", "/workflows/perm-cancel-ok-wf/executions/"+execID+"/cancel", nil)
+	req = withTenantContext(withPermissions(req, "workflow:cancel"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	// Execution already cancelled; cleanup is a no-op but kept for consistency.
+	t.Cleanup(func() { _ = engine.CancelExecution(execID) })
+}
+
 // TestWorkflowHandler_CancelExecution_SpecialCharsInVars_HandledSafely mirrors the get
 // variant above for the cancel path, which exercises the same engine error-embedding
 // pattern and the same CodeQL-recognised sanitization fix.

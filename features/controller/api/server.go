@@ -963,7 +963,9 @@ func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 
 // SetWorkflowHandler sets the workflow handler and registers workflow and trigger API routes
 // (Issue #414). Propagates the server's fleet query so that script dispatch targeting is wired
-// at setup time (Issue #609). Call this after New() returns but before Start() is called.
+// at setup time (Issue #609). Wires requirePermission into the handler so every workflow route
+// is RBAC-gated and the trigger subrouter carries a coarse-grained trigger:manage gate (Issue #2725).
+// Call this after New() returns but before Start() is called.
 func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -974,9 +976,11 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	if h == nil {
 		return
 	}
+	h.SetRequirePermFn(s.requirePermission)
 	workflowRouter := s.apiRouter.PathPrefix("/workflows").Subrouter()
 	h.RegisterWorkflowRoutes(workflowRouter)
 	triggerRouter := s.apiRouter.PathPrefix("/triggers").Subrouter()
+	triggerRouter.Use(s.requirePermission("trigger", "manage"))
 	h.RegisterTriggerRoutes(triggerRouter)
 	s.logger.Info("Workflow and trigger API routes registered")
 }
