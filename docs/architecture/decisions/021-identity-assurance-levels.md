@@ -6,7 +6,7 @@
 
 **Deciders:** Founder, Architecture
 
-**Related:** [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — Bearer-token principals gain an assurance level here; its `IdleTimeout`/`AbsoluteTimeout` remain and cover the walked-away case). [018](018-web-session-semantics.md) (web-session semantics — the cookie session this ADR levels). [006](006-module-packaging-and-distribution.md) (module approval is the highest-blast-radius action gated by this ADR). Auth-tier policy epic #1419 (`authTier` / `tier3Permissions` — **superseded by this ADR**, see Migration). Epic #2713 (web UI management — surfaced the gap this ADR closes). Epic #2051 (SaaS cluster — **closed without covering sessions**; `pkg/session/contract.go:95` still defers the durable store to it, incorrectly — see Sequencing). `features/rbac/jit` (unwired JIT access — complementary, not superseded; see Context).
+**Related:** [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — Bearer-token principals gain an assurance level here; its `IdleTimeout`/`AbsoluteTimeout` remain and cover the walked-away case). [018](018-web-session-semantics.md) (web-session semantics — the cookie session this ADR levels). [006](006-module-packaging-and-distribution.md) (module approval is the highest-blast-radius action gated by this ADR). Auth-tier policy epic #1419 (`authTier` / `tier3Permissions` — **superseded by this ADR**, see Migration). Epic #2713 (web UI management — surfaced the gap this ADR closes). Epic #2051 (SaaS cluster — **closed without covering sessions**; `pkg/session/contract.go:95` still defers the durable store to it, incorrectly — see Sequencing). Epic #2735 / story #2736 (durable session store — **this ADR's epic is blocked on it**). Epic #2737 (implements this ADR). Stories #2728, #2732 (module approval REST + UI — **held pending this ADR**). `features/rbac/jit` (unwired JIT access — complementary, not superseded; see Context).
 
 ---
 
@@ -454,12 +454,15 @@ store means a node failover looks like a device change and **downgrades every
 session at once**; and building the state twice — once on `MemStore`, once on the
 durable store — is waste we can see coming.
 
-**That work currently has no owner.** `pkg/session/contract.go:95` defers it to
-"the SaaS cluster story (#2051)", but **#2051 is CLOSED and its scope never
+**That work was orphaned and is now scheduled.** `pkg/session/contract.go:95` defers
+it to "the SaaS cluster story (#2051)", but **#2051 is CLOSED and its scope never
 included sessions** — its success criteria cover DNA/fleet, config, and audit
 durable state only. The deferral pointer is stale and points at an epic that never
-owned the work. A story must be filed for it; that story also corrects the stale
-comment.
+owned the work.
+
+It now has an owner: **epic #2735** (durable controller session store), story
+**#2736** — which also corrects the stale comment. **This ADR's epic (#2737) is a
+hard dependent of #2736** and must not begin implementation until it merges.
 
 Note this is distinct from `pkg/storage/interfaces/business.SessionStore` (durable,
 with `database` and `sqlite` providers), which is a different type for a different
