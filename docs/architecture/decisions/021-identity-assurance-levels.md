@@ -1,12 +1,12 @@
 # ADR-021: Identity Assurance Levels and Step-Up Authentication
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-07-16
 
 **Deciders:** Founder, Architecture
 
-**Related:** [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — Bearer-token principals gain an assurance level here). [018](018-web-session-semantics.md) (web-session semantics — the cookie session this ADR levels). [006](006-module-packaging-and-distribution.md) (module approval is the highest-blast-radius action gated by this ADR). Auth-tier policy epic #1419 (`authTier` / `tier3Permissions` — **superseded by this ADR**, see Migration). Epic #2713 (web UI management — surfaced the gap this ADR closes).
+**Related:** [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — Bearer-token principals gain an assurance level here; its `IdleTimeout`/`AbsoluteTimeout` remain and cover the walked-away case). [018](018-web-session-semantics.md) (web-session semantics — the cookie session this ADR levels). [006](006-module-packaging-and-distribution.md) (module approval is the highest-blast-radius action gated by this ADR). Auth-tier policy epic #1419 (`authTier` / `tier3Permissions` — **superseded by this ADR**, see Migration). Epic #2713 (web UI management — surfaced the gap this ADR closes). Epic #2051 (SaaS cluster — **closed without covering sessions**; `pkg/session/contract.go:95` still defers the durable store to it, incorrectly — see Sequencing). `features/rbac/jit` (unwired JIT access — complementary, not superseded; see Context).
 
 ---
 
@@ -85,6 +85,26 @@ Verified against `develop` (2026-07-16):
   (`middleware.go:62`), and only for mTLS principals.
 - ADR-014 already provides `IdleTimeout: 15m`, `AbsoluteTimeout: 8h`
   (`pkg/session/contract.go:53`) — the "admin walked away" case is covered.
+
+**One adjacent system does exist, and is unwired.** `features/rbac/jit` is a
+complete, tested Just-In-Time access implementation — time-bounded grants
+(`JITAccessGrant`), approval workflows, an approver registry, notifications, audit
+integration, an optional durable `business.SessionStore` backing, and a
+`WorkflowProvider` hook documented as supporting "risk-based" policy. It has **zero
+production callers**: only its own tests import the package.
+
+JIT is **complementary to this ADR, not overlapping**, and the distinction matters:
+
+| | Question answered |
+|---|---|
+| **JIT access** (`features/rbac/jit`) | "You do not normally hold this permission — may you borrow it, for a while, with approval?" |
+| **Assurance** (this ADR) | "You hold this permission — are you really you, on the same device, and did you mean to do this?" |
+
+They compose (a JIT grant could itself carry an assurance requirement), but neither
+subsumes the other, and this ADR does **not** depend on JIT. Whether to wire, keep,
+or delete `features/rbac/jit` is a separate decision. **This ADR's implementation
+must neither half-wire it nor reinvent it** — if temporary elevation is wanted, that
+is a deliberate follow-on, not an accident of this work.
 
 ### What is actually needed
 
@@ -380,34 +400,86 @@ configuration errors at boot.
 
 ---
 
-## Open questions for decomposition
+## 7. Bootstrap and recovery ride the existing mTLS cert root of trust
 
-1. **Authenticator recovery.** What is the recovery path when an admin loses their
-   only passkey/token? Requiring a second registered authenticator is the clean
-   answer; the alternative (an mTLS-cert escape hatch) reintroduces a cert path we
-   just said browsers should not use. This needs a decision before the WebAuthn
-   story is written.
-2. **Bootstrap.** The first admin on a fresh controller has no passkey. Does
-   initial provisioning happen over the mTLS cert path only?
-3. **The `RequireUserPresence` set.** Proposed: `module:approve`, `module:reject`,
-   `publisher-trust:add` — actions whose blast radius is fleet-wide code execution.
-   Confirm, add, or remove. Every addition spends operator patience, and a control
-   that fires too often gets designed around; this set should stay small enough
-   that a key touch always feels proportionate to what it is authorizing.
-4. **Silent re-proof cadence.** Decision 3 re-proves on network change, after a
-   long activity gap, and on an interval. The interval needs a value — but note
-   that unlike a step-up timer it is invisible to the operator, so it can be
-   aggressive without a UX cost. The real constraint is that a browser can only
-   assert silently when the credential is available; confirm the behavior when
-   silent proof is impossible (fall back to `AssuranceBasic` and step up on next
-   sensitive action, presumably).
-5. **`cfg` non-interactive automation.** An operator's CI pipeline holds an API
-   key and is `AssuranceMachine` by construction. Confirm that no automated flow
-   legitimately needs a permission in `permissionAssurance` — if one does, the
-   boundary needs a deliberate exception mechanism rather than an accidental one.
-6. **Session store.** Decisions 3 and 5 add device/network state to
-   `pkg/session.Session`, which is in-memory only today (a controller restart drops
-   all sessions). Confirm whether this lands before or after the durable/shared
-   store (#2051) — in a multi-node deployment, continuity state that lives on one
-   node means a node failover looks like a device change and downgrades every
-   session.
+An admin obtains their first strong authenticator — and replaces a lost one — by
+**registering a passkey via `cfg`, authenticated with their mTLS admin cert.**
+
+This is the one design constraint the whole model rests on, because **every obvious
+recovery path is a downgrade attack**: if a phishable credential (password + email)
+can mint a phishing-resistant one, then phishing the password still yields
+everything and the model is decorative. The cert path avoids that by construction:
+
+- The cert is already `AssuranceStrong` — re-enrolling from it is not a downgrade.
+- The cert is already the root of trust: it is how `cfg` authenticates and it
+  already satisfies every current Tier-3 gate. **This adds no exposure** — whoever
+  holds the cert file is already omnipotent today. The ADR names the existing root
+  of trust rather than inventing a second one.
+- **The browser never sees a client certificate.** The cert stays in the CLI where
+  it already lives, so this does not reintroduce the browser client-cert selection
+  UX that Decision 1 rejects.
+
+Bootstrap and recovery are therefore the same flow: `cfg`, cert, register passkey.
+A fresh controller's first admin has a cert by definition — that is how the
+controller is administered.
+
+**Consequence to accept deliberately:** the admin cert file becomes the credential
+that can mint browser authenticators. It should be protected accordingly (HSM/OS
+keystore where available). This is a restatement of today's reality, not a new risk.
+
+## 8. Automation is terminal at `AssuranceMachine` — no exception mechanism
+
+No automated or non-interactive flow legitimately needs a permission in
+`permissionAssurance`. API-key principals therefore **cannot step up, and no
+elevation escape hatch is provided**. A CI pipeline cannot approve a module bundle,
+add a trusted publisher, provision an account, or decommission a steward.
+
+This is stated as a decision rather than left implicit so that a future
+implementer who hits the wall treats it as the design working, not a gap to route
+around. If an automated flow ever genuinely needs one of these, that requires a new
+ADR — a scoped, audited machine-elevation grant — not a weakened gate.
+
+---
+
+## Sequencing: blocked on a durable session store
+
+Decisions 3 and 5 add **device-continuity and network-context state to
+`pkg/session.Session`**, which records neither today (`contract.go:31-39`). That
+state must not be built on the current `MemStore`.
+
+**This ADR's epic is blocked on a durable/shared session store for `pkg/session`
+covering both managers** (`sessionManager` for `cfg`, `webSessionManager` for the
+browser — `server.go:126,128`). Rationale: continuity state on a per-node in-memory
+store means a node failover looks like a device change and **downgrades every
+session at once**; and building the state twice — once on `MemStore`, once on the
+durable store — is waste we can see coming.
+
+**That work currently has no owner.** `pkg/session/contract.go:95` defers it to
+"the SaaS cluster story (#2051)", but **#2051 is CLOSED and its scope never
+included sessions** — its success criteria cover DNA/fleet, config, and audit
+durable state only. The deferral pointer is stale and points at an epic that never
+owned the work. A story must be filed for it; that story also corrects the stale
+comment.
+
+Note this is distinct from `pkg/storage/interfaces/business.SessionStore` (durable,
+with `database` and `sqlite` providers), which is a different type for a different
+purpose — used by `features/rbac/jit` (unwired) and `cmd/cfg/cmd/session_token.go`.
+Whether the `pkg/session` durable store reuses it or defines its own is an
+implementation question for that story.
+
+---
+
+## Remaining tunables (PO-set, founder may override)
+
+These do not block decomposition and are config, not design:
+
+1. **The `RequireUserPresence` set** — `module:approve`, `module:reject`,
+   `publisher-trust:add`. Every addition spends operator patience, and a control
+   that fires too often gets designed around; the set should stay small enough that
+   a key touch always feels proportionate to what it authorizes. **Growing it is a
+   founder decision, not a reviewer's judgement call.**
+2. **Silent re-proof cadence** — re-prove on network-context change, after an
+   activity gap, and otherwise on a ~5-minute interval. Unlike a step-up timer this
+   is invisible to the operator, so it can be aggressive at no UX cost. When silent
+   proof is impossible (no credential available on this device), fall back to
+   `AssuranceBasic` and step up on the next sensitive action.

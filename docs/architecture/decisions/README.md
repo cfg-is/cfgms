@@ -67,7 +67,7 @@ What becomes easier or harder by making this decision?
 | [018](018-web-session-semantics.md) | Web-Session Semantics (Browser Credential Login) | 2026-07-04 | Accepted |
 | [019](019-third-party-module-inclusion-and-trust.md) | Third-Party Module Inclusion and Delegated Publisher Trust | 2026-07-04 | Proposed |
 | [020](020-dna-required-field-declaration.md) | DNA Required-Field Declaration — per-configuration-type contract, module-manifest sourced | 2026-07-13 | Accepted |
-| [021](021-identity-assurance-levels.md) | Identity Assurance Levels and Step-Up Authentication | 2026-07-16 | Proposed |
+| [021](021-identity-assurance-levels.md) | Identity Assurance Levels and Step-Up Authentication | 2026-07-16 | Accepted |
 
 ### Superseded/Deprecated
 
