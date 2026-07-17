@@ -64,10 +64,10 @@ export default function StewardAssetPage() {
     const keys = TABS.map((t) => t.key)
     const current = keys.indexOf(activeTab)
     if (event.key === 'ArrowRight') {
-      activateTab(keys[(current + 1) % keys.length])
+      activateTab(keys[(current + 1) % keys.length]!)
       event.preventDefault()
     } else if (event.key === 'ArrowLeft') {
-      activateTab(keys[(current - 1 + keys.length) % keys.length])
+      activateTab(keys[(current - 1 + keys.length) % keys.length]!)
       event.preventDefault()
     }
   }
