@@ -26,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -119,6 +120,91 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	tenantID := ""
 	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
 		tenantID = tid
+	}
+
+	// Selector-based search path: when ?q=<selector> is present, parse the
+	// expression and apply tenant-scope enforcement identical to handleResolveSelector
+	// (handlers_fleet.go:51-64). The existing ?os, ?platform, ?arch, ?status, ?tag,
+	// ?hostname params are unaffected — they remain active on the non-q path.
+	if q := r.URL.Query().Get("q"); q != "" {
+		s.logger.Debug("Steward list selector search",
+			"q", logging.SanitizeLogValue(q))
+		selectorFilter, parsedTenantPath, parseErr := selector.Parse(q)
+		if parseErr != nil {
+			s.logger.Info("Invalid selector expression in steward list",
+				"q", logging.SanitizeLogValue(q), "error", parseErr)
+			s.writeErrorResponse(w, http.StatusBadRequest, "invalid selector expression", "INVALID_SELECTOR")
+			return
+		}
+		// Enforce tenant subtree scope — must match handleResolveSelector exactly
+		// (same grammar, same boundary, same 403 CROSS_TENANT response code).
+		if parsedTenantPath != "" {
+			if tenantID != "" && parsedTenantPath != tenantID && !strings.HasPrefix(parsedTenantPath, tenantID+"/") {
+				s.logger.Info("Selector tenant outside caller subtree",
+					"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+					"caller_tenant", logging.SanitizeLogValue(tenantID))
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+				return
+			}
+			selectorFilter.TenantSubtree = parsedTenantPath
+		} else if tenantID != "" {
+			selectorFilter.TenantSubtree = tenantID
+		}
+
+		limit, offset, paginated, paginErr := parseStewardPagination(r.URL.Query())
+		if paginErr != nil {
+			s.logger.Warn("Rejected steward list pagination params",
+				"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
+				"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
+				"error", paginErr)
+			s.writeErrorResponse(w, http.StatusBadRequest, paginErr.Error(), "INVALID_PAGINATION")
+			return
+		}
+
+		results, searchErr := s.fleetQuery.Search(r.Context(), selectorFilter)
+		if searchErr != nil {
+			s.logger.Error("Fleet query failed", "error", searchErr)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+			return
+		}
+		stewardList := make([]StewardInfo, 0, len(results))
+		for _, res := range results {
+			info := StewardInfo{
+				ID:       res.ID,
+				TenantID: res.TenantID,
+				Status:   res.Status,
+				LastSeen: res.LastHeartbeat,
+				Version:  res.DNAAttributes["steward.version"],
+			}
+			if len(res.DNAAttributes) > 0 {
+				attrs := make(map[string]string, len(res.DNAAttributes)+1)
+				for k, v := range res.DNAAttributes {
+					attrs[k] = v
+				}
+				if res.TenantID != "" {
+					attrs["tenant"] = res.TenantID
+				}
+				info.DNA = &DNAInfo{
+					Hostname:     res.Hostname,
+					OS:           res.OS,
+					Architecture: res.Architecture,
+					Attributes:   attrs,
+				}
+			}
+			stewardList = append(stewardList, info)
+		}
+		if paginated {
+			page := paginateStewards(stewardList, limit, offset)
+			s.logger.Info("Listed stewards (selector, paginated)",
+				"q", logging.SanitizeLogValue(q), "count", len(page.Stewards), "total", page.Total)
+			s.writeSuccessResponse(w, page)
+			return
+		}
+		s.logger.Info("Listed stewards (selector)",
+			"q", logging.SanitizeLogValue(q), "count", len(stewardList))
+		s.writeSuccessResponse(w, stewardList)
+		return
 	}
 
 	// Build a filter from query params and authenticated tenant scope.

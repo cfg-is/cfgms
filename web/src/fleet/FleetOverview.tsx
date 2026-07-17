@@ -31,7 +31,7 @@ import {
   type ColumnKey,
   type Steward,
 } from './columns.ts'
-import { deriveHealth, formatLastSeen, parseLastSeen } from './health.ts'
+import { deriveHealth, parseLastSeen } from './health.ts'
 import ColumnPicker from './ColumnPicker.tsx'
 import FleetTable, { type SortState } from './FleetTable.tsx'
 import { ErrorNotice, FleetEmpty, LoadingRows, NoMatch } from './FleetStates.tsx'
@@ -68,19 +68,6 @@ function sortValue(key: ColumnKey, steward: Steward, nowMs: number): string | nu
   return column ? column.value(steward).toLowerCase() : ''
 }
 
-/* Filter haystack spans every mapped DNA value plus the derived health and
- * check-in text, whether or not the column is currently shown (mockup
- * behavior: hiding a column doesn't stop it matching). */
-function matchesFilter(steward: Steward, needle: string, nowMs: number): boolean {
-  const haystack = [
-    ...COLUMNS.map((column) => column.value(steward)),
-    deriveHealth(steward.status, steward.last_seen, nowMs).label,
-    formatLastSeen(steward.last_seen, nowMs),
-  ]
-    .join(' ')
-    .toLowerCase()
-  return haystack.includes(needle)
-}
 
 export default function FleetOverview() {
   const { search, onSearchChange } = useOutletContext<{
@@ -96,28 +83,37 @@ export default function FleetOverview() {
     () => new Set(loadColumnPrefs() ?? DEFAULT_VISIBLE),
   )
 
+  // Reset to page 0 whenever the selector changes so stale pages are not shown.
+  // Adjusted during render rather than in an effect: this way the first render
+  // after a selector change already requests offset 0, instead of fetching a
+  // stale page and refetching once the effect lands.
+  const [prevSearch, setPrevSearch] = useState(search)
+  if (search !== prevSearch) {
+    setPrevSearch(search)
+    setPageIndex(0)
+  }
+
   const { page, loading, error, fetchedAtMs, retry } = useStewards(
     pageSize,
     pageIndex * pageSize,
+    search,
   )
 
   // Relative times and staleness anchor at fetch time — the moment the data
   // was true — so the render itself stays pure.
   const nowMs = fetchedAtMs
-  const needle = search.trim().toLowerCase()
   const scoped = scope !== rootPath
 
   const displayRows = useMemo(() => {
     if (page === null) return []
     let rows = page.stewards
+    // Tenant scope is a client-side display filter (security is server-enforced).
+    // Text search is handled server-side via the selector param — no client filtering.
     if (scoped) {
       rows = rows.filter((steward) => {
         const tenantPath = steward.dna?.attributes?.['tenant']
         return tenantPath !== undefined && isScopeMatch(tenantPath, scope)
       })
-    }
-    if (needle !== '') {
-      rows = rows.filter((steward) => matchesFilter(steward, needle, nowMs))
     }
     if (sort !== null) {
       const key = sort.key as ColumnKey
@@ -131,7 +127,7 @@ export default function FleetOverview() {
       })
     }
     return rows
-  }, [page, scoped, scope, needle, sort, nowMs])
+  }, [page, scoped, scope, sort, nowMs])
 
   function onSort(key: string) {
     setSort((was) =>
@@ -184,7 +180,9 @@ export default function FleetOverview() {
   const total = page?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const current = pageIndex + 1
-  const narrowed = needle !== '' || scoped
+  // narrowed: only tenant scope creates a "X of total" count display.
+  // Search is server-side — total already reflects the selector filter.
+  const narrowed = scoped
   const pageRowCount = page?.stewards.length ?? 0
   const from = total === 0 ? 0 : pageIndex * pageSize + 1
   const to = pageIndex * pageSize + pageRowCount
@@ -212,10 +210,12 @@ export default function FleetOverview() {
           <LoadingRows />
         ) : error !== null ? (
           <ErrorNotice detail={error} onRetry={retry} />
-        ) : page === null || total === 0 ? (
+        ) : page === null || (total === 0 && search.trim() === '') ? (
           <FleetEmpty />
+        ) : total === 0 ? (
+          <NoMatch scopeOnly={false} />
         ) : displayRows.length === 0 ? (
-          <NoMatch scopeOnly={needle === ''} />
+          <NoMatch scopeOnly={true} />
         ) : (
           <FleetTable
             stewards={displayRows}

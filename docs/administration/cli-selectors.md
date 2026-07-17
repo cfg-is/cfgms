@@ -7,6 +7,11 @@ tenant-path scoping, the `--yes` confirmation gate, and `--json` output format.
 Use `cfg steward list <selector>` as a dry-run before any mutating command:
 `list` is read-only and shows exactly which stewards a selector would target.
 
+> **Web UI:** The fleet overview search box (Story #2726) uses the same
+> selector grammar via `GET /api/v1/stewards?q=<selector>`. Results are
+> fleet-wide and paginated — not limited to the currently loaded page. See
+> the inline syntax hint in the search box for a quick key reference.
+
 ---
 
 ## Grammar

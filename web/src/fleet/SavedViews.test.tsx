@@ -262,6 +262,8 @@ describe('saved views in the fleet overview', () => {
     fireEvent.change(screen.getByLabelText('Global filter'), {
       target: { value: 'acme' },
     })
+    // Search change triggers a new server fetch; wait for the table to return.
+    await screen.findByRole('table')
     const nameHeader = () => screen.getByRole('columnheader', { name: /^Name/ })
     fireEvent.click(nameHeader())
     fireEvent.click(nameHeader()) // descending
