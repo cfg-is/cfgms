@@ -60,7 +60,7 @@ This guide provides instructions for setting up a local CFGMS development enviro
 
 - **gosec** - Security scanning
   ```bash
-  go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+  go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
   ```
 
 - **Serena MCP server** - Semantic code navigation/editing for Claude Code. The

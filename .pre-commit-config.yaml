@@ -9,7 +9,7 @@
 repos:
   # Go security pattern analysis with gosec
   - repo: https://github.com/securego/gosec
-    rev: v2.27.1
+    rev: v2.28.0
     hooks:
       - id: gosec
         name: gosec security scan
