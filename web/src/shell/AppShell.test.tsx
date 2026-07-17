@@ -51,11 +51,19 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet as a link and other items marked soon', () => {
+  it('renders sidebar navigation with Fleet and Audit as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
+  })
+
+  it('marks Modules and Config as soon while Fleet and Audit are real links', () => {
+    renderShell()
+    // 2 soon-tagged items remain (Modules, Config); Audit is now a real link
     expect(screen.getAllByText(/soon/i).length).toBeGreaterThan(0)
+    // Audit is a NavLink, not a soon anchor
+    expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
   })
 
   it('mounts the fleet overview (#2497) in the content area', async () => {

@@ -5,9 +5,10 @@
  * App root: router + auth provider + route guard around the authenticated
  * app shell (Story #2496).
  *
- * Route table (Story #2723):
+ * Route table (Story #2723, #2727):
  *   /                → AppShell layout → FleetOverview
  *   /stewards/:id    → AppShell layout → StewardAssetPage
+ *   /audit           → AppShell layout → AuditView
  *
  * Session presence is inferred from API responses, never from reading
  * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
@@ -20,6 +21,7 @@ import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
 import AppShell from './shell/AppShell.tsx'
 import FleetOverview from './fleet/FleetOverview.tsx'
 import StewardAssetPage from './fleet/StewardAssetPage.tsx'
+import AuditView from './audit/AuditView.tsx'
 
 function App() {
   return (
@@ -29,6 +31,7 @@ function App() {
           <Route path="/" element={<AppShell />}>
             <Route index element={<FleetOverview />} />
             <Route path="stewards/:id" element={<StewardAssetPage />} />
+            <Route path="audit" element={<AuditView />} />
           </Route>
         </Routes>
       </RequireAuth>

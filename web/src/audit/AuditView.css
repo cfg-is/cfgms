@@ -1,0 +1,314 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright 2026 Jordan Ritz
+ *
+ * Audit log view (Story #2727). Filter bar + table + pager on the design
+ * tokens (docs/design/web-ui-design-tokens.css). Shared table chrome
+ * (.ptool, .tbl, .pager, .pill, .skel, .skrow, .notice) is self-contained
+ * here so the audit route is not implicitly coupled to FleetOverview.css.
+ */
+
+/* ── Filter bar ────────────────────────────────────────────────── */
+.audit-filters {
+  padding: 12px 13px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.audit-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+.audit-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.audit-filter-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.audit-filter-field input,
+.audit-filter-field select {
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  min-width: 0;
+}
+.audit-filter-field input[type='datetime-local'] {
+  width: 200px;
+}
+.audit-filter-field select {
+  width: 148px;
+}
+.audit-filter-field input[type='text'] {
+  width: 160px;
+}
+.audit-filter-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.audit-apply-btn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.audit-clear-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* ── Toolbar strip ─────────────────────────────────────────────── */
+.ptool {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--border);
+}
+.ptool .cnt {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Semantic state pills ──────────────────────────────────────── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.pill.ok {
+  background: var(--state-ok-bg);
+  color: var(--state-ok);
+}
+.pill.warn {
+  background: var(--state-warn-bg);
+  color: var(--state-warn);
+}
+.pill.crit {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.pill.neutral {
+  background: var(--state-neutral-bg);
+  color: var(--state-neutral);
+}
+
+/* ── Table ─────────────────────────────────────────────────────── */
+table.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+.tbl th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  user-select: none;
+}
+.tbl td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+@media (hover: hover) and (min-width: 720px) {
+  .tbl tbody tr:hover td {
+    background: var(--bg-elevated);
+  }
+}
+.nm {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.mut {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.mono2 {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.tbl th.c-spacer,
+.tbl td.c-spacer {
+  width: 100%;
+  padding: 0;
+}
+
+/* ── Pager ─────────────────────────────────────────────────────── */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+.pager .pg {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+.pager .pg button {
+  appearance: none;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.pager .pg button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Loading skeleton ──────────────────────────────────────────── */
+.skel {
+  background: linear-gradient(
+    90deg,
+    var(--bg-elevated) 25%,
+    var(--bg-sunk) 37%,
+    var(--bg-elevated) 63%
+  );
+  background-size: 400% 100%;
+  animation: audit-shimmer 1.3s ease infinite;
+  border-radius: 6px;
+  height: 12px;
+}
+@keyframes audit-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+  }
+}
+.skrow {
+  display: grid;
+  grid-template-columns: 1.2fr 0.6fr 1fr 1fr 1fr 0.8fr;
+  gap: 14px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.skrow:last-child {
+  border-bottom: 0;
+}
+
+/* ── Data state notices ────────────────────────────────────────── */
+.notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 40px 20px;
+  text-align: center;
+}
+.notice h3 {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.notice p {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  max-width: 380px;
+}
+.notice .ic {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+}
+.notice.err .ic {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.notice.empty .ic {
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+}
+.notice .btn {
+  margin-top: 6px;
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.notice.err .detail {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
