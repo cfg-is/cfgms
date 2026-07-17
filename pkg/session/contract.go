@@ -89,10 +89,11 @@ type Manager interface {
 	List(ctx context.Context) ([]*Session, error)
 }
 
-// Store is the in-memory backing store for the session Manager (ADR-014 §2, v1).
+// Store is the backing store for the session Manager (ADR-014 §2).
 // The key for Set/Get is SHA-256(token) encoded as hex — the controller never persists
-// the raw token. Delete removes by session ID. A controller restart drops all sessions
-// (re-auth required); durable/shared store is deferred to the SaaS cluster story (#2051).
+// the raw token. Delete removes by session ID. The durable implementation lives in
+// pkg/storage/providers/sqlite and enables sessions to survive controller restarts
+// (epic #2735, story #2736).
 //
 // The implementation lives in Story #4 of epic #2213.
 type Store interface {

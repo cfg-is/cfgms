@@ -37,6 +37,8 @@ There is no path by which `cfg` uses the long-lived admin credential without an 
 
 On a valid connect (admin mTLS), the controller mints an opaque token: **32 bytes from `crypto/rand`, base64url** (≥256-bit entropy), non-JWT for v1. Each authenticated request carries `Authorization: Bearer <token>`; each authenticated response returns a freshly-TTL'd replacement in the **`X-Session-Token`** header, so continuous use stays valid. The controller stores **`SHA-256(token)`**, never the raw token, and **never logs token values** (`logging.SanitizeLogValue`). The session store is **in-memory for v1** (controller restart ⇒ re-auth).
 
+**Addendum (story #2736, epic #2735):** A durable `session.Store` implementation backed by SQLite (`pkg/storage/providers/sqlite.SQLiteSessionTokenStore`) is now available. When wired via `server.SetDurableSessionStore`, both the CLI session manager and the web session manager share the same store, enabling sessions to survive controller restarts with no re-authentication. Nodes in a cluster that share the same SQLite file can validate each other's sessions (cache miss → store lookup) and detect cross-node revocation (store record deleted on revoke; the next Validate on any node sees ErrSessionNotFound). The SHA-256(token) key invariant is maintained: the raw token is never written to the durable store.
+
 ### 3. Lifecycle: idle TTL + absolute cap + immediate revocation
 
 Defaults: **idle TTL 15m**, **absolute cap 8h** (measured from the original connect — caps even a continuously-active session), **grace window 30s**. An idle gap beyond the TTL lapses the session. Revocation takes effect within **≤ 1 token TTL**. The revoke endpoint accepts **either a valid session token or an admin mTLS cert**, so a client holding an already-expired token can still clean up server-side. The grace window is **time-only** for v1 (the prior token stays valid for 30s after a renewal, tolerating concurrent/racing requests from a stateless CLI); consume-on-first-use-after-renewal is a documented future hardening.
@@ -87,6 +89,6 @@ Session-token principals are **RBAC-equivalent to API-key principals**. This mod
 **Negative / costs**
 
 - The `pkg/secrets/providers/oskeychain` provider is **net-new, security-sensitive, and per-platform** (Credential Manager / Keychain / Secret Service / keyring). Each backend is only fully testable on its OS; Windows is the priority backend and is live-validated on the Windows e2e host rather than in a Linux container — it must not merge as never-run code.
-- The in-memory controller session store drops all sessions on restart (re-auth). Acceptable for a single-controller v1; **revisit for the SaaS cluster** (#2051, durable/shared session store).
+- The in-memory controller session store drops all sessions on restart. Resolved by story #2736 (see §2 addendum): `SetDurableSessionStore` wires a SQLite-backed store so sessions survive restarts and validate across nodes.
 - The time-only 30s grace window is a bounded replay surface; documented, with consume-on-first-use as the upgrade.
 - The machine-bound credential is non-portable between hosts — intended (per-host "remember this controller"), but it means the encrypted credential cannot be copied to another machine; re-import the bundle there.

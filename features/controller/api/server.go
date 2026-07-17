@@ -1226,6 +1226,24 @@ func (s *Server) SetWebSessionManager(mgr session.Manager) {
 	s.webSessionManager = mgr
 }
 
+// SetDurableSessionStore wires both session managers with a shared durable session.Store
+// (Issue #2736, epic #2735). The CLI manager uses ADR-014 defaults (idle 15m / absolute 8h /
+// grace 30s); the web manager uses a longer-lived config (idle 60m / absolute 12h / grace 30s).
+// Sharing the same store lets sessions survive controller restarts and validate across cluster
+// nodes. Call after New() but before Start(); it overwrites any prior SetSessionManager /
+// SetWebSessionManager wiring.
+func (s *Server) SetDurableSessionStore(store session.Store) {
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionManager = session.NewManager(s.sessionCfg, store, time.Now)
+	s.webSessionManager = session.NewManager(webCfg, store, time.Now)
+}
+
 // SetMembershipStore wires the cluster MembershipStore used by the drain endpoint
 // (Issue #2283). When nil (default), POST /api/v1/cluster/nodes/{id}/drain returns
 // 503. Call after New() but before Start().

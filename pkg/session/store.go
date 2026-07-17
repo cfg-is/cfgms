@@ -74,12 +74,16 @@ func (s *MemStore) Get(_ context.Context, tokenHash string) (*Session, error) {
 	return entry.session, nil
 }
 
-// Delete removes all token-hash entries associated with the given session ID,
-// effectively invalidating any tokens that map to this session.
+// Delete removes all token-hash entries associated with the given session ID.
+// Returns ErrSessionNotFound when no entries exist for id (mirrors SQLiteSessionTokenStore).
 func (s *MemStore) Delete(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, h := range s.byID[id] {
+	hashes, ok := s.byID[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	for _, h := range hashes {
 		delete(s.records, h)
 	}
 	delete(s.byID, id)
