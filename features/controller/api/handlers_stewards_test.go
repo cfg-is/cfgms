@@ -2793,3 +2793,151 @@ func TestListStewards_SurfacesLostStatusFromStore(t *testing.T) {
 	}
 	assert.True(t, found, "lost steward must appear in the list response")
 }
+
+// ---- Issue #2724: tenant_id and dna.attributes.tenant population tests ----
+
+// TestHandleListStewards_FilteredPath_TenantIDPopulated verifies that the filtered
+// fleet-query path sets TenantID and injects dna.attributes["tenant"] on each result.
+func TestHandleListStewards_FilteredPath_TenantIDPopulated(t *testing.T) {
+	server := setupTestServer(t)
+	// NewTestKey creates a "test-tenant"-scoped key, which sets filter.TenantID and
+	// drives the filtered (fleetQuery) code path.
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-tenant-filtered",
+		"os":       "linux",
+		"arch":     "amd64",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotEmpty(t, resp.Data, "at least one steward must be returned")
+
+	for _, s := range resp.Data {
+		assert.Equal(t, "test-tenant", s.TenantID,
+			"filtered list: TenantID must be populated from fleet query result")
+		require.NotNil(t, s.DNA, "DNA must be present when DNA attributes exist")
+		assert.Equal(t, "test-tenant", s.DNA.Attributes["tenant"],
+			"filtered list: dna.attributes.tenant must equal TenantID")
+	}
+}
+
+// TestHandleListStewards_UnfilteredPath_TenantIDPopulated verifies that the unfiltered
+// (GetAllStewards) code path sets TenantID and injects dna.attributes["tenant"].
+func TestHandleListStewards_UnfilteredPath_TenantIDPopulated(t *testing.T) {
+	server := setupTestServer(t)
+
+	// RegisterStewardWithAttributes seeds initial DNA so DNA != nil in the unfiltered path.
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-unfiltered-tenant", "tenant-x", "addr", "registered",
+		map[string]string{"hostname": "host-unfiltered", "os": "linux", "arch": "amd64"},
+	))
+
+	// Call handler directly with an empty TenantID so isEmptyFilter returns true,
+	// triggering the GetAllStewards (unfiltered) code path.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req = withTenant(req, "")
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var found bool
+	for _, s := range resp.Data {
+		if s.ID == "s-unfiltered-tenant" {
+			found = true
+			assert.Equal(t, "tenant-x", s.TenantID,
+				"unfiltered list: TenantID must be populated from steward registration")
+			require.NotNil(t, s.DNA, "DNA must be present when DNA attributes were seeded")
+			assert.Equal(t, "tenant-x", s.DNA.Attributes["tenant"],
+				"unfiltered list: dna.attributes.tenant must equal TenantID")
+		}
+	}
+	assert.True(t, found, "registered steward must appear in unfiltered list")
+}
+
+// TestHandleGetSteward_TenantIDPopulated verifies that GET /api/v1/stewards/{id}
+// includes tenant_id and dna.attributes["tenant"] in the response.
+func TestHandleGetSteward_TenantIDPopulated(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "host-get-tenant",
+		"os":       "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+	assert.Equal(t, "test-tenant", resp.Data.TenantID,
+		"get steward: TenantID must be populated in response")
+	require.NotNil(t, resp.Data.DNA, "DNA must be present when DNA attributes exist")
+	assert.Equal(t, "test-tenant", resp.Data.DNA.Attributes["tenant"],
+		"get steward: dna.attributes.tenant must equal TenantID")
+}
+
+// TestHandleListStewards_CrossTenant_NoDisclosure verifies that a tenant-scoped caller
+// can only see stewards belonging to their own tenant, and that the populated tenant_id
+// field never discloses stewards from other tenants. The existing cross-tenant isolation
+// is exercised; this story adds no new disclosure surface.
+func TestHandleListStewards_CrossTenant_NoDisclosure(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Register two stewards under different tenants.
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-tenant-a-1", "tenant-a", "addr-a", "registered",
+		map[string]string{"hostname": "host-a", "os": "linux"},
+	))
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-tenant-b-1", "tenant-b", "addr-b", "registered",
+		map[string]string{"hostname": "host-b", "os": "linux"},
+	))
+
+	// "tenant-a"-scoped API key: sets filter.TenantID="tenant-a", triggering the
+	// filtered path; fleet query returns only "tenant-a" stewards.
+	tenantAKey := NewEphemeralTestKey(t, server, []string{"steward:list"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	req.Header.Set("X-API-Key", tenantAKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	for _, s := range resp.Data {
+		assert.Equal(t, "tenant-a", s.TenantID,
+			"cross-tenant: responses must only contain tenant-a stewards")
+		assert.NotEqual(t, "s-tenant-b-1", s.ID,
+			"cross-tenant: tenant-b steward must not appear in tenant-a response")
+		if s.DNA != nil {
+			assert.Equal(t, "tenant-a", s.DNA.Attributes["tenant"],
+				"cross-tenant: dna.attributes.tenant must not disclose tenant-b")
+		}
+	}
+}
