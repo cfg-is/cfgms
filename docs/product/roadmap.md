@@ -300,6 +300,7 @@ Controller nodes managed by stewards — clean separation of node management fro
 #### Post-Phase-2 epics on develop (untagged, in flight)
 
 - [ ] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership
+- [x] Epic #2657 — workflow-driven Hyper-V role promotion (standalone → FC-role): `cfg workflow promote-hv-role` writes `ha_role`, soaks for steward convergence, migrates the resource to cluster scope; live-validated on cfg-lab (`test/e2e/hyperv/promote_role_test.go`, runbook `docs/testing/hyperv-role-promotion-runbook.md`, #2671)
 - [ ] Epic #2359 — Operator-first CLI targeting: hostname & attribute selectors across `cfg steward` verbs
 
 #### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
