@@ -319,6 +319,18 @@ func (p *SQLiteProvider) CreatePendingRegistrationStore(config map[string]interf
 	return &SQLitePendingRegistrationStore{db: db}, nil
 }
 
+// CreateSessionTokenStore returns a SQLite-backed session.Store for pkg/session.Manager
+// (Issue #2736). This store is distinct from CreateSessionStore (business.SessionStore):
+// it uses token-hash keys and enables sessions to survive controller restarts and to
+// validate across cluster nodes that share the same SQLite file.
+func (p *SQLiteProvider) CreateSessionTokenStore(config map[string]interface{}) (*SQLiteSessionTokenStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteSessionTokenStore{db: db}, nil
+}
+
 // CreateIPTrustStore is not yet supported by the SQLite provider.
 // IP trust storage is implemented by the database (PostgreSQL) provider (Issue #1691).
 func (p *SQLiteProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {

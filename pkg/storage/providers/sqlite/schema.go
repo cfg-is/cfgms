@@ -498,6 +498,28 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_status       ON sessions(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at)`,
+
+		// Session token records for pkg/session.Store (Issue #2736 / epic #2735).
+		// Key is SHA-256(token) hex — the raw token is NEVER stored here or in any log.
+		// Multiple rows can share a session_id: one for the current token and one for
+		// the prior-token grace slot produced by Manager.Renew. Both rows hold identical
+		// session data; the distinction is maintained only in the Manager's in-memory state.
+		//
+		// hash_expires_at (nullable): set by StampGraceExpiry after Renew so that prior-token
+		// grace slots expire on cluster peers and after controller restarts, bounding the
+		// window in which a rotated-away token hash remains a valid credential.
+		`CREATE TABLE IF NOT EXISTS session_token_records (
+			token_hash            TEXT PRIMARY KEY,
+			session_id            TEXT NOT NULL,
+			principal_id          TEXT NOT NULL,
+			connection_name       TEXT NOT NULL,
+			tenant_id             TEXT NOT NULL,
+			issued_at             TEXT NOT NULL,
+			last_activity         TEXT NOT NULL,
+			absolute_expires_at   TEXT NOT NULL,
+			hash_expires_at       TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_token_records_session_id ON session_token_records(session_id)`,
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
