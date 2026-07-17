@@ -205,7 +205,7 @@ jobs:
       continue-on-error: true
 
     - name: Install gosec
-      run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+      run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
     
     - name: Run gosec Scan
       id: scan
@@ -371,7 +371,7 @@ jobs:
         sudo .github/scripts/install-trivy.sh 'v0.72.0' 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
 
         # Install gosec and staticcheck
-        go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+        go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
         go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Generate Remediation Report on Failure
