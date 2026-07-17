@@ -152,16 +152,24 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		for _, res := range results {
 			info := StewardInfo{
 				ID:       res.ID,
+				TenantID: res.TenantID,
 				Status:   res.Status,
 				LastSeen: res.LastHeartbeat,
 				Version:  res.DNAAttributes["steward.version"],
 			}
 			if len(res.DNAAttributes) > 0 {
+				attrs := make(map[string]string, len(res.DNAAttributes)+1)
+				for k, v := range res.DNAAttributes {
+					attrs[k] = v
+				}
+				if res.TenantID != "" {
+					attrs["tenant"] = res.TenantID
+				}
 				info.DNA = &DNAInfo{
 					Hostname:     res.Hostname,
 					OS:           res.OS,
 					Architecture: res.Architecture,
-					Attributes:   res.DNAAttributes,
+					Attributes:   attrs,
 				}
 			}
 			stewardList = append(stewardList, info)
@@ -190,6 +198,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 		info := StewardInfo{
 			ID:          steward.ID,
+			TenantID:    steward.TenantID,
 			Version:     steward.Version,
 			Status:      steward.Status,
 			LastSeen:    steward.LastHeartbeat,
@@ -198,11 +207,18 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if steward.DNA != nil {
+			attrs := make(map[string]string, len(steward.DNA.Attributes)+1)
+			for k, v := range steward.DNA.Attributes {
+				attrs[k] = v
+			}
+			if steward.TenantID != "" {
+				attrs["tenant"] = steward.TenantID
+			}
 			info.DNA = &DNAInfo{
 				Hostname:     steward.DNA.Attributes["hostname"],
 				OS:           steward.DNA.Attributes["os"],
 				Architecture: steward.DNA.Attributes["arch"],
-				Attributes:   steward.DNA.Attributes,
+				Attributes:   attrs,
 			}
 		}
 
@@ -302,6 +318,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 
 	apiStewardInfo := StewardInfo{
 		ID:              stewardInfo.ID,
+		TenantID:        stewardInfo.TenantID,
 		Status:          stewardInfo.Status,
 		LastSeen:        stewardInfo.LastHeartbeat,
 		Version:         stewardInfo.Version,
@@ -313,6 +330,14 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	// Include DNA information if available
 	if stewardInfo.DNA != nil {
 		apiStewardInfo.DNA = DNAFromProto(stewardInfo.DNA)
+		if apiStewardInfo.DNA != nil && stewardInfo.TenantID != "" {
+			attrs := make(map[string]string, len(apiStewardInfo.DNA.Attributes)+1)
+			for k, v := range apiStewardInfo.DNA.Attributes {
+				attrs[k] = v
+			}
+			attrs["tenant"] = stewardInfo.TenantID
+			apiStewardInfo.DNA.Attributes = attrs
+		}
 	}
 
 	s.writeSuccessResponse(w, apiStewardInfo)
