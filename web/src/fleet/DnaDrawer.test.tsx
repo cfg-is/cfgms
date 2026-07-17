@@ -2,18 +2,20 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Asset-DNA drawer suite (Story #2498): fetch/render of grouped attributes,
- * the "Other attributes" overflow group, loading and error states (incl.
- * 404-redaction tolerance — the endpoint 404s cross-tenant and for
- * denylisted attributes), Escape/scrim close, and the hostile-DNA
- * guarantees: attribute KEYS and VALUES render as escaped text only, and
- * group headings come from the fixed client-side allowlist, never from
- * data (security A10.1).
+ * Asset-DNA content suite (Story #2498, #2723): fetch/render of grouped
+ * attributes, the "Other attributes" overflow group, loading and error
+ * states (incl. 404-redaction tolerance — the endpoint 404s cross-tenant
+ * and for denylisted attributes), and the hostile-DNA guarantees: attribute
+ * KEYS and VALUES render as escaped text only, and group headings come from
+ * the fixed client-side allowlist, never from data (security A10.1).
+ *
+ * DnaDrawer is now route-driven — rendered at /stewards/:id; test wrapper
+ * uses MemoryRouter to provide the :id param.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import DnaDrawer, { DNA_GROUP_HEADINGS, parseDNAInfo } from './DnaDrawer.tsx'
-import type { Steward } from './columns.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -26,19 +28,6 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
 })
-
-const steward: Steward = {
-  id: 'stw-001',
-  status: 'active',
-  last_seen: new Date().toISOString(),
-  version: 'v0.42',
-  dna: {
-    hostname: 'web-ingest-04',
-    os: 'linux',
-    architecture: 'amd64',
-    attributes: {},
-  },
-}
 
 function mockDNA(attributes: Record<string, string>, extra: Record<string, unknown> = {}) {
   fetchMock.mockResolvedValue(
@@ -60,9 +49,20 @@ function mockDNA(attributes: Record<string, string>, extra: Record<string, unkno
   )
 }
 
-function renderDrawer(onClose = vi.fn()) {
-  render(<DnaDrawer steward={steward} nowMs={Date.now()} onClose={onClose} />)
-  return onClose
+/**
+ * Renders DnaDrawer within a MemoryRouter that provides /stewards/:id.
+ * The steward ID is URL-encoded in the initial path so that IDs containing
+ * special characters (including /) are correctly matched by the route.
+ */
+function renderDrawer(stewardId = 'stw-001') {
+  return render(
+    <MemoryRouter initialEntries={[`/stewards/${encodeURIComponent(stewardId)}`]}>
+      <Routes>
+        <Route path="/stewards/:id" element={<DnaDrawer />} />
+        <Route path="/" element={<div data-testid="fleet-page">Fleet</div>} />
+      </Routes>
+    </MemoryRouter>,
+  )
 }
 
 describe('parseDNAInfo (untrusted wire data)', () => {
@@ -89,7 +89,7 @@ describe('parseDNAInfo (untrusted wire data)', () => {
   })
 })
 
-describe('drawer fetch and grouped rendering', () => {
+describe('DNA fetch and grouped rendering', () => {
   it('fetches the steward DNA endpoint and renders known attributes in their designed groups', async () => {
     mockDNA({
       primary_ip: '10.20.4.14',
@@ -109,6 +109,14 @@ describe('drawer fetch and grouped rendering', () => {
     expect(screen.getByText('root/acme-corp')).toBeTruthy()
     expect(screen.getByText('Session & agent')).toBeTruthy()
     expect(screen.getByText('svc_deploy')).toBeTruthy()
+  })
+
+  it('encodes the steward ID in the fetch URL', async () => {
+    mockDNA({})
+    renderDrawer('stw/special chars')
+    await screen.findByText('Ubuntu 24.04')
+    const url = String(fetchMock.mock.calls[0]?.[0])
+    expect(url).toBe('/api/v1/stewards/stw%2Fspecial%20chars/dna')
   })
 
   it('lists unrecognized attributes under the Other attributes group', async () => {
@@ -135,7 +143,7 @@ describe('drawer fetch and grouped rendering', () => {
   })
 })
 
-describe('drawer error states', () => {
+describe('DNA error states', () => {
   it('renders the error state on 404 (cross-tenant / DNA not found), never a blank panel', async () => {
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ error: 'DNA not found', code: 'DNA_NOT_FOUND' }), {
@@ -159,33 +167,13 @@ describe('drawer error states', () => {
   })
 })
 
-describe('drawer close behavior (shell overlay conventions)', () => {
-  it('closes on Escape', async () => {
-    mockDNA({})
-    const onClose = renderDrawer()
-    await screen.findByText('Ubuntu 24.04')
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onClose).toHaveBeenCalledTimes(1)
-  })
-
-  it('closes on scrim click', async () => {
-    mockDNA({})
-    const onClose = renderDrawer()
-    await screen.findByText('Ubuntu 24.04')
-    fireEvent.click(screen.getByTestId('dna-scrim'))
-    expect(onClose).toHaveBeenCalledTimes(1)
-  })
-})
-
 describe('hostile DNA rendering (security A10.1)', () => {
   const hostileKey = '<img src=x onerror="window.__pwned_key=1">'
   const hostileValue = '<script>window.__pwned_val=1</script><b>bold</b>'
 
   it('renders hostile attribute KEYS and VALUES as escaped text in Other attributes', async () => {
     mockDNA({ [hostileKey]: hostileValue })
-    const { container } = render(
-      <DnaDrawer steward={steward} nowMs={Date.now()} onClose={vi.fn()} />,
-    )
+    const { container } = renderDrawer()
 
     expect(await screen.findByText('Other attributes')).toBeTruthy()
     // The hostile strings are present as literal TEXT...
@@ -209,9 +197,7 @@ describe('hostile DNA rendering (security A10.1)', () => {
       '<h1>evil</h1>': 'y',
       primary_ip: '10.0.0.1',
     })
-    const { container } = render(
-      <DnaDrawer steward={steward} nowMs={Date.now()} onClose={vi.fn()} />,
-    )
+    const { container } = renderDrawer()
     await screen.findByText('Other attributes')
 
     const headings = [...container.querySelectorAll('.grp .lbl')].map(

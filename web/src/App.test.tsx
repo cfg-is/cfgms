@@ -2,6 +2,7 @@
 // Copyright 2026 Jordan Ritz
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import App from './App.tsx'
 
 function jsonResponse(status: number, body: unknown = {}): Response {
@@ -22,9 +23,21 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/**
+ * App requires a router provider; production uses BrowserRouter in main.tsx.
+ * Tests use MemoryRouter so they don't depend on browser history.
+ */
+function renderApp() {
+  return render(
+    <MemoryRouter initialEntries={['/']}>
+      <App />
+    </MemoryRouter>,
+  )
+}
+
 describe('App', () => {
   it('guards the authenticated screen: unauthenticated visit renders the login screen', () => {
-    render(<App />)
+    renderApp()
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
   })
@@ -39,7 +52,7 @@ describe('App', () => {
       return Promise.resolve(jsonResponse(url.endsWith('/logout') ? 204 : 200))
     })
 
-    render(<App />)
+    renderApp()
     fireEvent.change(screen.getByLabelText(/username/i), {
       target: { value: 'admin@msp-a' },
     })
@@ -81,7 +94,7 @@ describe('App', () => {
       return Promise.resolve(jsonResponse(401))
     })
 
-    render(<App />)
+    renderApp()
     fireEvent.change(screen.getByLabelText(/username/i), {
       target: { value: 'admin@msp-a' },
     })
