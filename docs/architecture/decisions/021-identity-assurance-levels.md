@@ -66,13 +66,43 @@ because session-token principals also have IsAdmin==true."
    endpoint silently opens to it** — no code change, no failing test, no review
    signal.
 
+### Nothing exists to build on
+
+Verified against `develop` (2026-07-16):
+
+- **No continuous authentication or authorization work exists.** No continuous
+  access evaluation, no device posture, no device binding, no re-auth or step-up
+  machinery. (The `risk_score` fields in `pkg/dna/drift` and `pkg/directory/dna`
+  are **configuration**-drift scoring — unrelated to identity.)
+- **No WebAuthn / FIDO / passkey anywhere**, including `go.mod`. Net-new.
+- **Sessions carry no device or network context.** `pkg/session.Session`
+  (`contract.go:31-39`) holds only ID, ConnectionName, PrincipalID, TenantID,
+  IssuedAt, LastActivity, AbsoluteExpiresAt. `RemoteAddr` and `User-Agent` are
+  logged (`handlers_web_session.go:138,152,223,287`) but never stored — so there is
+  nothing today against which "has this device or location changed?" could be
+  evaluated.
+- The one device-ish binding that does exist is `Principal.CertFingerprint`
+  (`middleware.go:62`), and only for mTLS principals.
+- ADR-014 already provides `IdleTimeout: 15m`, `AbsoluteTimeout: 8h`
+  (`pkg/session/contract.go:53`) — the "admin walked away" case is covered.
+
 ### What is actually needed
 
 The distinction that matters is not *transport* (mTLS vs cookie) — it is **how
-strongly the human at the other end was authenticated, and how recently**. Some
-actions (listing stewards) are fine behind any authenticated session. Others
-(approving a module bundle that will execute fleet-wide) should require proof that
-is phishing-resistant and fresh.
+strongly the human at the other end was authenticated, whether that device is still
+demonstrably the same one, and whether a human deliberately authorized this
+particular action**. Some actions (listing stewards) are fine behind any
+authenticated session. Others (approving a module bundle that will execute
+fleet-wide) should require phishing-resistant proof and a deliberate human gesture.
+
+Note that these are three separate properties, and the design below keeps them
+separate rather than collapsing them into a clock:
+
+| Property | Answered by | Not answered by |
+|---|---|---|
+| How strongly was this principal authenticated? | Authenticator type (level) | Elapsed time |
+| Is this still the same principal on the same device? | Cryptographic device proof | IP/User-Agent signals (spoofable by a cookie thief on the same network); elapsed time |
+| Did a human deliberately authorize *this action*? | A user-presence gesture | Continuity; elapsed time |
 
 ---
 
@@ -94,8 +124,8 @@ const (
 
 type Principal struct {
     // ...
-    Assurance     AssuranceLevel
-    AuthenticatedAt time.Time // when the credential establishing Assurance was presented
+    Assurance    AssuranceLevel
+    LastProvenAt time.Time // when the device key last proved this Assurance (silently or by gesture)
 }
 ```
 
@@ -115,7 +145,7 @@ a `AssuranceStrong` requirement.
 the intended browser path — client-certificate selection UX in browsers is poor;
 WebAuthn is the browser-native answer.
 
-### 2. Sensitive actions declare a minimum level and a freshness window
+### 2. Sensitive actions declare a minimum level; a few also demand human presence
 
 `tier3Permissions` (`auth_tiers.go:20-42`) is already a registry of permissions
 that "require something stronger." It is **generalized**, not replaced by a
@@ -123,22 +153,41 @@ parallel system:
 
 ```go
 // Was: tier3Permissions map[string]struct{}
-// Now: the minimum assurance + maximum age required to exercise each permission.
+// Now: the minimum assurance — and, for a narrow catastrophic set, a demand for
+// a fresh human-presence gesture — required to exercise each permission.
 var permissionAssurance = map[string]Requirement{
-    "module:approve":         {Min: AssuranceStrong, MaxAge: 15 * time.Minute},
-    "module:reject":          {Min: AssuranceStrong, MaxAge: 15 * time.Minute},
-    "web-account:create":     {Min: AssuranceStrong, MaxAge: 15 * time.Minute},
-    "web-account:delete":     {Min: AssuranceStrong, MaxAge: 15 * time.Minute},
-    "steward:decommission":   {Min: AssuranceStrong, MaxAge: 15 * time.Minute},
+    "module:approve":       {Min: AssuranceStrong, RequireUserPresence: true},
+    "module:reject":        {Min: AssuranceStrong, RequireUserPresence: true},
+    "publisher-trust:add":  {Min: AssuranceStrong, RequireUserPresence: true},
+    "web-account:create":   {Min: AssuranceStrong},
+    "web-account:delete":   {Min: AssuranceStrong},
+    "steward:decommission": {Min: AssuranceStrong},
     // ... every current tier3Permissions entry maps here
 }
 // Anything absent from this map requires only its ordinary permission grant.
 ```
 
-**Freshness is part of the requirement, not decoration.** `AssuranceStrong`
-established eight hours ago is not evidence that the same human is present now.
-This is the `sudo`-timeout model: a strong authentication opens a window, and the
-window closes.
+**There is deliberately no blanket `MaxAge` timer.** An earlier draft required
+`AssuranceStrong` re-established within 15 minutes, on the `sudo` analogy. That is
+rejected for three reasons:
+
+1. **It duplicates an existing control.** ADR-014 already ships `IdleTimeout: 15m`
+   and `AbsoluteTimeout: 8h` (`pkg/session/contract.go:53`). The "admin walked
+   away" case is already covered; a freshness timer adds nothing there.
+2. **It taxes exactly the wrong behavior.** A fixed timer only ever interrupts
+   *continuous legitimate work* — re-authenticating every 15 minutes during an
+   incident is how a control teaches people to resent and route around it.
+3. **It does not stop the attack it appears to stop.** Malware or a hijacked
+   browser on the admin's own machine is inside every timer window the admin is
+   inside. A clock does not distinguish the human from the malware sharing the
+   session.
+
+**Assurance is maintained by continuity, not by a clock** (Decision 3), and the
+small set of catastrophic actions is gated on **human presence**, not on age
+(Decision 4). These are different properties and the distinction is load-bearing:
+continuity answers *"is this the same principal on the same device?"*; presence
+answers *"did a human deliberately authorize this specific action?"* No amount of
+continuity establishes the second.
 
 **Reads stay out.** The existing registry contains **zero** list/read entries
 across all eight resources it covers — reads are categorically outside the
@@ -146,19 +195,97 @@ elevated surface by design, and `GET /rbac/roles` / `GET /api-keys` are
 permission-gated only. That property is preserved: `permissionAssurance` gates
 mutations, never reads.
 
-### 3. Insufficient assurance returns a step-up challenge, not a refusal
+### 3. Assurance is maintained by silent device proof, not by a timer
 
-A caller whose level or freshness is insufficient does **not** get an opaque 403.
-The endpoint returns a challenge the client can satisfy and retry:
+`AssuranceStrong` persists for the life of the session **as long as device
+continuity holds**. Continuity is established by **cryptographic proof, not by
+signals**: a silent WebAuthn assertion (`userVerification: "discouraged"`) against
+the credential that established the session. The private key never leaves the
+authenticator's TPM/Secure Enclave, so a successful assertion proves *this
+request comes from the device that authenticated* — and it does so with **no user
+gesture, no modal, nothing the operator sees**.
+
+The controller re-proves silently when continuity is in doubt: on a network-context
+change (Decision 5), after a long gap in activity, or on a configurable interval.
+`LastProvenAt` records the last successful proof. A failed or impossible assertion
+downgrades the session to `AssuranceBasic`.
+
+**Why proof and not signals.** Source IP and `User-Agent` are the intuitive
+"is it the same device?" check and they are **not sufficient**. A session cookie is
+a bearer token: an attacker who steals it and replays from the same network with a
+copied `User-Agent` is *indistinguishable by signals*. Signals are corroboration;
+only the key is proof. (This is also why the model needs net-new session state —
+see Consequences: `pkg/session.Session` records no device or network context today,
+and `RemoteAddr` is only ever logged.)
+
+**Why no blanket timer** — see Decision 2. Silent re-proof gives the property a
+timer was reaching for (this is still the same authenticated device) without the
+property a timer actually delivers (interrupting whoever is working right now).
+
+### 4. Catastrophic actions require a fresh human-presence gesture
+
+A narrow set of permissions carries `RequireUserPresence: true`. These demand a
+WebAuthn assertion with `userVerification: "required"` — an actual touch of the
+key — taken **for that specific action**, regardless of session continuity.
+
+This is not a stricter version of continuity; it answers a **different question**.
+Continuity establishes *this is the same principal on the same device*. Presence
+establishes *a human is here and deliberately authorized this*. The gap between
+them is exactly the attack that continuity cannot see: **malware or a hijacked
+browser on the admin's own machine** has the same device, same location, same
+session, and perfect continuity. A timer would not have caught it either — the
+malware operates inside the admin's own window. Only a gesture the malware cannot
+produce distinguishes them.
+
+The set is deliberately tiny — actions whose blast radius justifies interrupting a
+human every single time:
+
+- `module:approve` / `module:reject` — an approved bundle is code that executes on
+  every managed endpoint. This is the largest blast radius in the system (ADR-006).
+- `publisher-trust:add` — grants an entire publisher standing authority.
+
+Everything else in `permissionAssurance` is gated on level alone. **Growing this
+set is a founder decision, not a reviewer's judgement call** — every addition
+spends operator patience, and a control that fires too often gets designed around.
+
+The resulting operator experience: *work all day, never re-authenticate; touch your
+key when you approve a module bundle.*
+
+### 5. Network context is a signal that downgrades, never a hard lock
+
+A change in the session's source IP **downgrades the session's effective assurance
+to `AssuranceBasic` and clears `LastProvenAt`**, so the next sensitive action
+triggers a silent re-proof (Decision 3) — or a step-up (Decision 6) if silent proof
+fails. The session is not killed.
+
+Hard-locking a session to its initial IP is explicitly rejected: it breaks on
+mobile roaming, corporate NAT egress rotation, CGNAT, and VPN reconnect —
+generating lockouts during legitimate work — while an attacker behind the same
+egress is unaffected. The device-bound key is what actually defeats cookie replay
+from another machine; IP is corroboration, not proof.
+
+This shape is deliberately extensible: `Assurance` is **computed and
+re-evaluatable**, so additional zero-trust signals (device posture, EDR health,
+impossible travel) can feed the same downgrade path later without redesign. A
+broader continuous-evaluation pipeline is **not** in v1 (see Non-Goals) — but
+Decision 3's silent re-proof is itself the first increment of one, and the
+mechanism the rest would hang off.
+
+### 6. Insufficient assurance returns a step-up challenge, not a refusal
+
+When silent proof cannot satisfy the requirement — no credential on this device,
+assertion failed, or the action demands presence (Decision 4) — the caller does
+**not** get an opaque 403. The endpoint returns a challenge the client can satisfy
+and retry:
 
 ```
 HTTP 401 Unauthorized
-WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", max_age=900
-{ "error": "step_up_required", "required_assurance": "strong", "max_age_seconds": 900 }
+WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"
+{ "error": "step_up_required", "required_assurance": "strong", "user_presence": true }
 ```
 
 - **Web UI:** presents a WebAuthn re-authentication modal; on success the session's
-  `Assurance`/`AuthenticatedAt` are raised server-side and the action is retried.
+  `Assurance`/`LastProvenAt` are raised server-side and the action is retried.
 - **`cfg` CLI:** prompts for the security key, or fails with an actionable message
   naming the required level when non-interactive.
 - **API-key callers:** cannot step up — `AssuranceMachine` is terminal. They
@@ -169,23 +296,6 @@ Step-up is chosen over hard refusal deliberately. Hard refusal pushes admins to
 start every session at the highest level and keep it open all day — which
 maximizes the lifetime of the most valuable credential and defeats the purpose.
 
-### 4. Network context is a signal that downgrades, never a hard lock
-
-A change in the session's source IP **downgrades the session's effective assurance
-to `AssuranceBasic` and clears its freshness**, forcing a step-up on the next
-sensitive action. The session is not killed.
-
-Hard-locking a session to its initial IP is explicitly rejected: it breaks on
-mobile roaming, corporate NAT egress rotation, CGNAT, and VPN reconnect —
-generating lockouts during legitimate work — while an attacker behind the same
-egress is unaffected. The device-bound key is what actually defeats cookie replay
-from another machine; IP is corroboration, not proof.
-
-This shape is deliberately extensible: `Assurance` is **computed and
-re-evaluatable**, so additional zero-trust signals (device posture, EDR health,
-impossible travel) can feed the same downgrade path later without redesign.
-Continuous evaluation is **not** in v1 (see Non-Goals).
-
 ---
 
 ## Non-Goals
@@ -194,10 +304,13 @@ Continuous evaluation is **not** in v1 (see Non-Goals).
   to the controller — a credential registered against a CFGMS account, not an
   external IdP.
 - **No continuous access evaluation in v1.** Assurance is computed at
-  authentication, on step-up, and on the IP-change downgrade. A real-time signal
-  pipeline is a later increment the model is shaped to accept.
+  authentication, on silent re-proof, on step-up, and on the IP-change downgrade.
+  A broader signal pipeline (device posture, EDR health, impossible travel) is a
+  later increment the model is shaped to accept — Decision 3's silent re-proof is
+  the first increment of it and the mechanism the rest hangs off.
 - **No TOTP as a high-trust factor** (see Decision 1).
-- **No hard IP locking** (see Decision 4).
+- **No hard IP locking** (see Decision 5).
+- **No blanket re-authentication timer** (see Decision 2).
 - **No new credential storage backend.** WebAuthn credentials are public keys —
   they extend the existing web-account record; they do not need secret storage.
 
@@ -217,6 +330,13 @@ Continuous evaluation is **not** in v1 (see Non-Goals).
   privilege grant.
 - Automation is bounded by construction: `AssuranceMachine` is terminal and cannot
   step up.
+- **Malware on the admin's own machine is bounded too** — the case no timer and no
+  continuity check reaches. `RequireUserPresence` demands a gesture the malware
+  cannot produce, for exactly the actions where that matters.
+- **The control fires rarely.** Silent re-proof means an operator working
+  continuously is never interrupted; the only prompt is a key touch when approving
+  a module bundle. A control that fires rarely is a control that survives contact
+  with operators instead of being designed around.
 
 ### Negative / costs
 
@@ -224,6 +344,16 @@ Continuous evaluation is **not** in v1 (see Non-Goals).
   `requireTier`, and `tier3Permissions` all change or disappear. Per the pre-GA
   policy this is a hard replacement — no shim, no dual-gate transition, no
   deprecation window.
+- **Sessions gain device-continuity state that does not exist today.**
+  `pkg/session.Session` (`contract.go:31-39`) records only ID, ConnectionName,
+  PrincipalID, TenantID, IssuedAt, LastActivity, AbsoluteExpiresAt — **no device
+  identity and no network context.** `RemoteAddr` and `User-Agent` are only ever
+  logged (`handlers_web_session.go:138,152,223,287`), never stored. Decisions 3 and
+  5 require binding a session to the credential that established it and recording
+  network context to detect change. This is net-new state on a struct that is
+  currently in-memory only (the store drops on controller restart; a durable/shared
+  store is deferred to #2051) — a shared store makes this state a cross-node
+  concern.
 - Every current Tier-3 route's tests change shape (403 → 401 + challenge).
 - The web UI gains a re-authentication modal and a retry path — real work in every
   story that touches a mutating admin surface.
@@ -259,10 +389,25 @@ configuration errors at boot.
    story is written.
 2. **Bootstrap.** The first admin on a fresh controller has no passkey. Does
    initial provisioning happen over the mTLS cert path only?
-3. **Freshness window.** 15 minutes is proposed by analogy to `sudo`. Confirm, or
-   set per-permission (module approval could reasonably be tighter than account
-   deletion).
-4. **`cfg` non-interactive automation.** An operator's CI pipeline holds an API
+3. **The `RequireUserPresence` set.** Proposed: `module:approve`, `module:reject`,
+   `publisher-trust:add` — actions whose blast radius is fleet-wide code execution.
+   Confirm, add, or remove. Every addition spends operator patience, and a control
+   that fires too often gets designed around; this set should stay small enough
+   that a key touch always feels proportionate to what it is authorizing.
+4. **Silent re-proof cadence.** Decision 3 re-proves on network change, after a
+   long activity gap, and on an interval. The interval needs a value — but note
+   that unlike a step-up timer it is invisible to the operator, so it can be
+   aggressive without a UX cost. The real constraint is that a browser can only
+   assert silently when the credential is available; confirm the behavior when
+   silent proof is impossible (fall back to `AssuranceBasic` and step up on next
+   sensitive action, presumably).
+5. **`cfg` non-interactive automation.** An operator's CI pipeline holds an API
    key and is `AssuranceMachine` by construction. Confirm that no automated flow
    legitimately needs a permission in `permissionAssurance` — if one does, the
    boundary needs a deliberate exception mechanism rather than an accidental one.
+6. **Session store.** Decisions 3 and 5 add device/network state to
+   `pkg/session.Session`, which is in-memory only today (a controller restart drops
+   all sessions). Confirm whether this lands before or after the durable/shared
+   store (#2051) — in a multi-node deployment, continuity state that lives on one
+   node means a node failover looks like a device change and downgrades every
+   session.
