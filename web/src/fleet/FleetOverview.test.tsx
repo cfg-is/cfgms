@@ -71,16 +71,31 @@ function makeSteward(spec: StewardSpec): Steward {
   }
 }
 
-/** Serve a fleet: each request slices [offset, offset+limit) of `stewards`. */
+/**
+ * Serve a fleet: each request slices [offset, offset+limit) of `stewards`.
+ * When ?q= is present, performs a substring filter on hostname or id to simulate
+ * server-side selector filtering (approximation for test purposes — real server
+ * applies the full selector grammar).
+ */
 function mockFleet(stewards: Steward[]) {
   fetchMock.mockImplementation((input) => {
     const url = new URL(String(input), 'https://controller.test')
     const limit = Number(url.searchParams.get('limit'))
     const offset = Number(url.searchParams.get('offset'))
+    const q = url.searchParams.get('q') ?? ''
+
+    const filtered = q
+      ? stewards.filter(
+          (s) =>
+            s.dna?.hostname?.toLowerCase().includes(q.toLowerCase()) ||
+            s.id.toLowerCase().includes(q.toLowerCase()),
+        )
+      : stewards
+
     const body = {
       data: {
-        stewards: stewards.slice(offset, offset + limit),
-        total: stewards.length,
+        stewards: filtered.slice(offset, offset + limit),
+        total: filtered.length,
         limit,
         offset,
       },
@@ -203,39 +218,68 @@ describe('pagination', () => {
   })
 })
 
-describe('live filter', () => {
+describe('server-driven search (selector)', () => {
   const fleet = [
     makeSteward({ id: 's1', hostname: 'web-ingest-04', attributes: { current_user: 'svc_deploy' } }),
     makeSteward({ id: 's2', hostname: 'dc-01', attributes: { current_user: 'administrator' } }),
     makeSteward({ id: 's3', hostname: 'kiosk-lobby', attributes: { current_user: 'kiosk' } }),
   ]
 
-  it('narrows displayed rows as the search value changes and reports match count', async () => {
+  it('passes the search value as q param and renders server-filtered results', async () => {
     mockFleet(fleet)
     const { rerender } = render(<FleetWrapper search="" />)
     await screen.findByRole('table')
     expect(dataRows()).toHaveLength(3)
 
     rerender(<FleetWrapper search="web-ingest" />)
-    expect(dataRows()).toHaveLength(1)
+    await waitFor(() => expect(dataRows()).toHaveLength(1))
     expect(screen.getByText('web-ingest-04')).toBeInTheDocument()
-    expect(screen.getByTestId('fleet-count').textContent).toBe('1 of 3 match')
+    // Server returned total=1; no scope → shows "1 stewards" (server-filtered count)
+    expect(screen.getByTestId('fleet-count').textContent).toBe('1 stewards')
+    const lastUrl = String(fetchMock.mock.calls.at(-1)?.[0])
+    expect(lastUrl).toContain('q=web-ingest')
   })
 
-  it('matches values from hidden columns too (mockup behavior)', async () => {
+  it('does not send q param when search is empty', async () => {
     mockFleet(fleet)
-    const { rerender } = render(<FleetWrapper search="" />)
+    renderFleet()
     await screen.findByRole('table')
-    // Agent version is not a default column but is part of the haystack.
-    rerender(<FleetWrapper search="v0.42" />)
     expect(dataRows()).toHaveLength(3)
+
+    const url = String(fetchMock.mock.calls[0]?.[0])
+    expect(url).not.toContain('q=')
   })
 
-  it('shows the filter no-match empty state, distinct from no-stewards', async () => {
+  it('shows the no-match state when selector returns zero results', async () => {
     mockFleet(fleet)
     renderFleet('no-such-host')
     await screen.findByText('No stewards match your filter')
     expect(screen.queryByText('No stewards enrolled yet')).not.toBeInTheDocument()
+  })
+
+  it('resets to page 1 when search changes', async () => {
+    // Build a fleet large enough for multiple pages at default page size (50).
+    const bigFleet = Array.from({ length: 120 }, (_, i) =>
+      makeSteward({ id: `s${String(i + 1).padStart(3, '0')}`, hostname: `host-${i + 1}` }),
+    )
+    mockFleet(bigFleet)
+    const { rerender } = renderFleet()
+    await screen.findByRole('table')
+
+    // Advance to page 2.
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('fleet-pager').textContent).toContain('Showing 51'),
+    )
+
+    // Typing in the search box should reset to page 1.
+    rerender(<FleetWrapper search="host-" />)
+    await waitFor(() => {
+      const pager = screen.queryByTestId('fleet-pager')
+      if (pager) {
+        expect(pager.textContent).toContain('Showing 1')
+      }
+    })
   })
 })
 

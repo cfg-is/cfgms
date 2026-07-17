@@ -94,7 +94,7 @@ interface FetchOutcome {
   fetchedAtMs: number
 }
 
-export function useStewards(limit: number, offset: number): UseStewardsResult {
+export function useStewards(limit: number, offset: number, selector = ''): UseStewardsResult {
   const { registerObservedPath } = useTenantScope()
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
@@ -103,7 +103,7 @@ export function useStewards(limit: number, offset: number): UseStewardsResult {
 
   // Loading is derived, not set: the view is loading whenever the latest
   // outcome doesn't answer the current request key.
-  const key = `${limit}:${offset}:${attempt}`
+  const key = `${limit}:${offset}:${selector}:${attempt}`
 
   useEffect(() => {
     let cancelled = false
@@ -111,6 +111,10 @@ export function useStewards(limit: number, offset: number): UseStewardsResult {
       limit: String(limit),
       offset: String(offset),
     })
+    const selectorTrimmed = selector.trim()
+    if (selectorTrimmed !== '') {
+      params.set('q', selectorTrimmed)
+    }
     apiFetch(`/api/v1/stewards?${params.toString()}`)
       .then(async (response) => {
         if (!response.ok) {
@@ -141,7 +145,7 @@ export function useStewards(limit: number, offset: number): UseStewardsResult {
     return () => {
       cancelled = true
     }
-  }, [key, limit, offset, registerObservedPath])
+  }, [key, limit, offset, selector, registerObservedPath])
 
   const current = outcome?.key === key ? outcome : null
   return {

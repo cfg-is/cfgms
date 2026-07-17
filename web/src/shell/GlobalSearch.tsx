@@ -2,10 +2,9 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Global search (Story #2496) — mockups/fleet-overview.html `.searchbox`.
- * Chrome only: a controlled input scoping to whatever view mounts under
- * the shell (fleet overview, #2497) filters client-side. No search
- * backend call is introduced here.
+ * Global search (Story #2496, #2726) — sends the selector expression to
+ * GET /api/v1/stewards?q= for fleet-wide, server-side filtering. The same
+ * grammar as `cfg steward list`; see docs/administration/cli-selectors.md.
  */
 export default function GlobalSearch({
   value,
@@ -23,10 +22,19 @@ export default function GlobalSearch({
       <input
         role="searchbox"
         type="text"
-        placeholder="Filter stewards by name, user, IP, company…"
+        placeholder="Search fleet: name:web* os:linux tag:prod"
+        aria-describedby="search-selector-hint"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
+      <span
+        id="search-selector-hint"
+        className="search-hint"
+        aria-label="Selector syntax"
+        data-testid="search-syntax-hint"
+      >
+        id: name: os: tag: dna.&lt;key&gt;:
+      </span>
     </div>
   )
 }

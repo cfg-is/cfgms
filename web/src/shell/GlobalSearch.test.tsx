@@ -6,11 +6,23 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import GlobalSearch from './GlobalSearch.tsx'
 
 describe('GlobalSearch', () => {
-  it('renders a search input with the mockup placeholder copy', () => {
+  it('renders a search input with selector-syntax placeholder', () => {
     render(<GlobalSearch value="" onChange={() => {}} />)
     expect(
-      screen.getByPlaceholderText(/filter stewards by name, user, ip, company/i),
+      screen.getByPlaceholderText(/search fleet/i),
     ).toBeInTheDocument()
+  })
+
+  it('shows inline selector syntax hint text', () => {
+    render(<GlobalSearch value="" onChange={() => {}} />)
+    const hint = screen.getByTestId('search-syntax-hint')
+    expect(hint).toBeInTheDocument()
+    // Hint must reference the core selector keys.
+    expect(hint.textContent).toContain('id:')
+    expect(hint.textContent).toContain('name:')
+    expect(hint.textContent).toContain('os:')
+    expect(hint.textContent).toContain('tag:')
+    expect(hint.textContent).toContain('dna.')
   })
 
   it('is a controlled input that reports changes via onChange only', () => {

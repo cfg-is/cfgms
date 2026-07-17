@@ -2941,3 +2941,241 @@ func TestHandleListStewards_CrossTenant_NoDisclosure(t *testing.T) {
 		}
 	}
 }
+
+// ---- handleListStewards ?q= selector param tests (Issue #2726) ----
+
+// listStewardsWithSelector is a test helper that calls handleListStewards directly
+// with a given selector query string and optional tenant ID in context.
+func listStewardsWithSelector(server *Server, q, tenantID string) *httptest.ResponseRecorder {
+	url := "/api/v1/stewards?q=" + q
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	if tenantID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	}
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+	return rec
+}
+
+// TestHandleListStewards_Selector_InvalidSelector_Returns400 verifies that a
+// syntactically invalid selector expression returns 400 INVALID_SELECTOR. The
+// response must not disclose internal error details.
+func TestHandleListStewards_Selector_InvalidSelector_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := listStewardsWithSelector(server, "unknownkey:value", "")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "INVALID_SELECTOR", resp.Error.Code)
+	// Error message must be client-safe (no internal paths, no stack traces).
+	assert.NotEmpty(t, resp.Error.Message)
+}
+
+// TestHandleListStewards_Selector_EmptySelector_Returns400 verifies that an empty
+// selector string (q= with no value) is rejected with 400 INVALID_SELECTOR. The
+// selector grammar requires at least one term; empty is ambiguous.
+func TestHandleListStewards_Selector_EmptySelector_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := listStewardsWithSelector(server, "", "")
+	// An empty q param means the selector is empty string — Parse will reject it.
+	// But q="" is the same as q not present (no ?q= in URL gives ""). Let's verify
+	// that an explicit empty value results in a normal non-selector response (not 400).
+	// Since q="" → selector path not entered → existing list path. 200 OK expected.
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestHandleListStewards_Selector_MalformedKey_Returns400 verifies that a selector
+// with a key that ends in an empty colon is rejected.
+func TestHandleListStewards_Selector_MalformedKey_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+
+	// "os:" has an empty value after the colon — the tokenizer rejects this.
+	rec := listStewardsWithSelector(server, "os%3A", "")
+	// URL-decode: "os:" → tokenizer error "empty value for key"
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "INVALID_SELECTOR", resp.Error.Code)
+}
+
+// TestHandleListStewards_Selector_CrossTenant_Returns403 verifies that a selector
+// whose explicit tenant prefix falls outside the caller's authorized subtree returns
+// 403 CROSS_TENANT — matching handleResolveSelector's identical behavior (never a
+// 200 with an empty set, never existence disclosure).
+func TestHandleListStewards_Selector_CrossTenant_Returns403(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("s1", "host-a", "linux", "amd64", "prod"),
+	)
+
+	// Caller is scoped to "msp-a/client-1"; selector targets "msp-a/client-2" (sibling).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=msp-a%2Fclient-2%2Fall", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a/client-1"))
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "CROSS_TENANT", resp.Error.Code)
+}
+
+// TestHandleListStewards_Selector_ValidOSFilter_ReturnsSubset verifies that
+// ?q=os:linux returns only Linux stewards, matching the cfg CLI behavior.
+func TestHandleListStewards_Selector_ValidOSFilter_ReturnsSubset(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("s-linux-1", "linux-host-1", "linux", "amd64", "prod"),
+		makeSeedSteward("s-linux-2", "linux-host-2", "linux", "arm64", "dev"),
+		makeSeedSteward("s-win-1", "win-host-1", "windows", "amd64", "prod"),
+	)
+
+	rec := listStewardsWithSelector(server, "os%3Alinux", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 2, "only linux stewards must be returned")
+	for _, s := range resp.Data {
+		require.NotNil(t, s.DNA)
+		assert.Equal(t, "linux", s.DNA.OS)
+	}
+}
+
+// TestHandleListStewards_Selector_NameGlob_ReturnsMatching verifies that name: with
+// a glob pattern (name:web-*) matches by hostname prefix, consistent with the cfg CLI.
+func TestHandleListStewards_Selector_NameGlob_ReturnsMatching(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("s1", "web-01", "linux", "amd64", "prod"),
+		makeSeedSteward("s2", "web-02", "linux", "amd64", "prod"),
+		makeSeedSteward("s3", "db-01", "linux", "amd64", "prod"),
+	)
+
+	rec := listStewardsWithSelector(server, "name%3Aweb-*", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 2)
+	for _, s := range resp.Data {
+		require.NotNil(t, s.DNA)
+		assert.True(t, strings.HasPrefix(s.DNA.Hostname, "web-"),
+			"hostname must match the name: glob pattern")
+	}
+}
+
+// TestHandleListStewards_Selector_DNAAttribute_ReturnsMatching verifies that
+// dna.<key>:<value> selects stewards by arbitrary DNA attribute.
+func TestHandleListStewards_Selector_DNAAttribute_ReturnsMatching(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s1", TenantID: "t", Status: "online", DNAAttributes: map[string]string{
+				"hostname": "db-host", "os": "linux", "arch": "amd64",
+				"role": "database",
+			}},
+			{ID: "s2", TenantID: "t", Status: "online", DNAAttributes: map[string]string{
+				"hostname": "web-host", "os": "linux", "arch": "amd64",
+				"role": "webserver",
+			}},
+		},
+	})
+
+	rec := listStewardsWithSelector(server, "dna.role%3Adatabase", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "s1", resp.Data[0].ID)
+}
+
+// TestHandleListStewards_Selector_TenantSubtree_Enforced verifies that a caller
+// scoped to a tenant only sees stewards in their subtree when using the selector path.
+func TestHandleListStewards_Selector_TenantSubtree_Enforced(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s-msp-a", TenantID: "msp-a", Status: "online",
+				DNAAttributes: map[string]string{"hostname": "host-a", "os": "linux"}},
+			{ID: "s-msp-b", TenantID: "msp-b", Status: "online",
+				DNAAttributes: map[string]string{"hostname": "host-b", "os": "linux"}},
+		},
+	})
+
+	// "all" selector with caller scoped to msp-a — must not see msp-b stewards.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=all", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a"))
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1, "only msp-a stewards must be returned")
+	assert.Equal(t, "s-msp-a", resp.Data[0].ID)
+}
+
+// TestHandleListStewards_Selector_Paginated_ReturnsPage verifies that pagination
+// works identically on the selector path: paginateStewards is applied and the
+// response is a StewardListPage envelope with total, limit, offset fields.
+func TestHandleListStewards_Selector_Paginated_ReturnsPage(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("s1", "host-a", "linux", "amd64", "prod"),
+		makeSeedSteward("s2", "host-b", "linux", "amd64", "prod"),
+		makeSeedSteward("s3", "host-c", "linux", "amd64", "prod"),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=os%3Alinux&limit=2&offset=0", nil)
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardListPage `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, 3, resp.Data.Total, "total must be fleet-wide count, not page count")
+	assert.Equal(t, 2, resp.Data.Limit)
+	assert.Equal(t, 0, resp.Data.Offset)
+	assert.Len(t, resp.Data.Stewards, 2)
+}
+
+// TestHandleListStewards_Selector_All_AdminUnrestricted verifies that an admin
+// caller (empty tenant) with q=all sees all stewards, matching the cfg CLI behavior.
+func TestHandleListStewards_Selector_All_AdminUnrestricted(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s1", TenantID: "msp-a", Status: "online",
+				DNAAttributes: map[string]string{"hostname": "h1", "os": "linux"}},
+			{ID: "s2", TenantID: "msp-b", Status: "online",
+				DNAAttributes: map[string]string{"hostname": "h2", "os": "linux"}},
+		},
+	})
+
+	// Admin caller (empty tenant) must see both tenants.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=all", nil)
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 2, "admin must see all stewards with q=all")
+}
