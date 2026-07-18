@@ -101,38 +101,34 @@ func TestLinuxSnapshot_Services(t *testing.T) {
 }
 
 // TestLinuxCollector_CPUBudget proves the collector stays within the sub-1%
-// sustained single-core CPU budget when polled at a realistic live-view cadence.
-// It measures THIS process's real CPU delta (not spike numbers) across a window
-// of 1 Hz Snapshot calls. 1 Hz is the operational cadence story #2764 wires for a
-// live "task manager" view.
+// sustained single-core CPU budget. It measures the real CPU TIME (from
+// /proc/self/stat — load-independent, unlike wall-clock %) consumed across many
+// back-to-back Snapshot calls to get a stable per-snapshot cost, then asserts the
+// amortized cost at the 1 Hz operational cadence story #2764 wires for a live
+// "task manager" view. Measuring per-snapshot CPU time avoids the noise of a
+// short wall-clock window on a busy CI host.
 func TestLinuxCollector_CPUBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("CPU budget measurement skipped in -short mode")
 	}
 	c := NewCollector()
 	ctx := context.Background()
-	// Prime the delta baseline so the measured window reflects steady-state cost.
+	// Prime the delta baseline so the measured iterations reflect steady state.
 	_, err := c.Snapshot(ctx)
 	require.NoError(t, err)
 
-	const pollInterval = 1 * time.Second
-	const window = 5 * time.Second
+	const iterations = 50
+	const cadenceHz = 1.0 // operational live-view poll rate (#2764)
 
 	cpuStart := selfCPUSeconds(t)
-	wallStart := time.Now()
-	deadline := wallStart.Add(window)
-	n := 0
-	for time.Now().Before(deadline) {
+	for i := 0; i < iterations; i++ {
 		_, err := c.Snapshot(ctx)
 		require.NoError(t, err)
-		n++
-		time.Sleep(pollInterval)
 	}
-	cpuUsed := selfCPUSeconds(t) - cpuStart
-	wall := time.Since(wallStart).Seconds()
-	cpuPct := cpuUsed / wall * 100.0
+	perSnapshotSec := (selfCPUSeconds(t) - cpuStart) / float64(iterations)
+	sustainedPct := perSnapshotSec * cadenceHz * 100.0
 
-	t.Logf("collector overhead: %.3f%% single-core over %.1fs (%d snapshots at %s cadence)", cpuPct, wall, n, pollInterval)
-	require.Greater(t, n, 1, "must have taken multiple snapshots")
-	assert.Less(t, cpuPct, 1.0, "sustained %s-cadence snapshot polling must stay within the 1%% single-core budget", pollInterval)
+	t.Logf("per-snapshot %.2f ms CPU → %.3f%% single-core at %.0f Hz sustained (%d iterations)",
+		perSnapshotSec*1000, sustainedPct, cadenceHz, iterations)
+	assert.Less(t, sustainedPct, 1.0, "sustained %.0f Hz snapshot polling must stay within the 1%% single-core budget", cadenceHz)
 }

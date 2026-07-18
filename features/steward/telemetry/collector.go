@@ -18,8 +18,10 @@
 // # Platform coverage
 //
 //   - Linux (build: linux): process table from /proc, services from systemd D-Bus.
-//   - Windows (build: windows): process table from WMI Win32_PerfFormattedData_
-//     PerfProc_Process, services from the Service Control Manager (svc/mgr).
+//   - Windows (build: windows): process table from NtQuerySystemInformation
+//     (SystemProcessInformation), services from the Service Control Manager
+//     (svc/mgr). See collector_windows.go for why the WMI perf-object query was
+//     rejected (it measured ~20× over the CPU budget).
 //   - Everything else (build: !windows && !linux, e.g. macOS): [NewCollector]
 //     returns a collector whose Snapshot yields [ErrPlatformNotSupported]. macOS
 //     collection (libproc/IOKit) is deferred — no macOS CI runner — but the

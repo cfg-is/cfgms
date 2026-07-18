@@ -50,6 +50,9 @@ func NewCollector() Collector {
 // valid environment, not a collection error). A failure to read /proc — the
 // core of the snapshot — is a hard error.
 func (c *linuxCollector) Snapshot(ctx context.Context) (Telemetry, error) {
+	if err := ctx.Err(); err != nil {
+		return Telemetry{}, err
+	}
 	procs, err := c.collectProcesses()
 	if err != nil {
 		return Telemetry{}, err
@@ -149,24 +152,27 @@ func readProcStat(pid int) (name string, ticks uint64, ok bool) {
 	return name, utime + stime, true
 }
 
-// readProcRSSBytes reads VmRSS (kibibytes) from /proc/[pid]/status and returns
-// it in bytes. Returns 0 when unreadable (process exited / permission).
+// pageSize is the system page size, resolved once, used to convert the
+// /proc/[pid]/statm resident-page count to bytes.
+var pageSize = uint64(os.Getpagesize())
+
+// readProcRSSBytes returns the resident set size in bytes from /proc/[pid]/statm.
+// statm is used in preference to /proc/[pid]/status (VmRSS): it is a single tiny
+// line of space-separated page counts ("size resident shared text lib data dt"),
+// so it is markedly cheaper to read and parse per PID than the ~50-line status
+// file — the per-snapshot CPU budget matters because #2764 polls repeatedly.
+// Field index 1 is the resident page count. Returns 0 when unreadable.
 func readProcRSSBytes(pid int) uint64 {
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/statm")
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "VmRSS:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				kib, _ := strconv.ParseUint(fields[1], 10, 64)
-				return kib * 1024
-			}
-			return 0
-		}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0
 	}
-	return 0
+	residentPages, _ := strconv.ParseUint(fields[1], 10, 64)
+	return residentPages * pageSize
 }
 
 // readProcIO reads cumulative storage read_bytes/write_bytes from

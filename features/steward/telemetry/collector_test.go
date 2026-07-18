@@ -4,9 +4,11 @@
 package telemetry
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestProcessFragmentID verifies the ADR-017 object-canonical process id shape.
@@ -38,4 +40,16 @@ func TestErrPlatformNotSupported(t *testing.T) {
 // usable (non-nil) Collector on every build target, including the stub.
 func TestNewCollectorNonNil(t *testing.T) {
 	assert.NotNil(t, NewCollector())
+}
+
+// TestSnapshotHonorsCanceledContext verifies Snapshot returns an error promptly
+// when handed an already-canceled context, on every build target. On Linux and
+// Windows the collector returns ctx.Err(); on the stub platform it returns
+// ErrPlatformNotSupported — both are errors, so a canceled Snapshot never
+// silently returns a partial success.
+func TestSnapshotHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewCollector().Snapshot(ctx)
+	require.Error(t, err, "a canceled-context Snapshot must return an error, not a partial result")
 }

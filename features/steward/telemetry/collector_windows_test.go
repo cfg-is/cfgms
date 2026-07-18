@@ -9,7 +9,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,17 +42,17 @@ func selfCPUSecondsWin(t *testing.T) float64 {
 }
 
 // TestWindowsSnapshot_RealProcessValues is the REQUIRED Windows test: it asserts
-// real values on a Windows host. It skips cleanly when the WMI performance
-// provider is unavailable (rare, but keeps non-standard CI images green). The
-// PerfProc counters refresh on an interval, so the just-launched test process
-// may take a sample or two to appear — hence the short retry.
+// real values on a Windows host. It skips cleanly if the process-table syscall
+// fails (rare, but keeps non-standard CI images green). NtQuerySystemInformation
+// returns a synchronous point-in-time table, so the test process appears in the
+// very first snapshot — no perf-counter warm-up / retry is needed.
 func TestWindowsSnapshot_RealProcessValues(t *testing.T) {
 	c := NewCollector()
 	ctx := context.Background()
 
 	tel, err := c.Snapshot(ctx)
 	if err != nil {
-		t.Skipf("WMI process provider unavailable on this host: %v", err)
+		t.Skipf("process table query (NtQuerySystemInformation) failed on this host: %v", err)
 	}
 	require.NotEmpty(t, tel.Processes, "the process table must not be empty")
 	assert.Greater(t, len(tel.Processes), 5, "a live Windows host has many processes")
@@ -69,17 +68,9 @@ func TestWindowsSnapshot_RealProcessValues(t *testing.T) {
 	}
 	assert.Greater(t, nonZeroMem, 0, "at least one process reports real working-set memory")
 
-	// The test process itself should appear once the perf provider samples it.
-	var self *ProcessSnapshot
-	for attempt := 0; attempt < 3 && self == nil; attempt++ {
-		if self = findPIDWin(tel.Processes, os.Getpid()); self != nil {
-			break
-		}
-		time.Sleep(1200 * time.Millisecond)
-		tel, err = c.Snapshot(ctx)
-		require.NoError(t, err)
-	}
-	require.NotNil(t, self, "the test process must appear in the WMI process snapshot")
+	// The test process itself must appear in the snapshot with real values.
+	self := findPIDWin(tel.Processes, os.Getpid())
+	require.NotNil(t, self, "the test process must appear in the process snapshot")
 	assert.NotEmpty(t, self.Name)
 	assert.Greater(t, self.MemoryBytes, uint64(0), "the test process has a real working set")
 }
@@ -91,7 +82,7 @@ func TestWindowsSnapshot_Services(t *testing.T) {
 	c := NewCollector()
 	tel, err := c.Snapshot(context.Background())
 	if err != nil {
-		t.Skipf("WMI process provider unavailable on this host: %v", err)
+		t.Skipf("process table query (NtQuerySystemInformation) failed on this host: %v", err)
 	}
 	if len(tel.Services) == 0 {
 		t.Skip("SCM services not enumerable in this environment")
@@ -109,34 +100,35 @@ func TestWindowsSnapshot_Services(t *testing.T) {
 }
 
 // TestWindowsCollector_CPUBudget proves the collector stays within the sub-1%
-// sustained single-core CPU budget at a realistic 1 Hz live-view cadence,
-// measuring this process's real CPU delta via GetProcessTimes.
+// sustained single-core CPU budget. It measures the real CPU TIME (via
+// GetProcessTimes — load-independent, unlike wall-clock %) consumed across many
+// back-to-back Snapshot calls to get a stable per-snapshot cost, then asserts the
+// amortized cost at the 1 Hz operational cadence story #2764 wires for a live
+// "task manager" view. Measuring per-snapshot CPU time avoids the noise of a
+// short wall-clock window on a busy CI host (GC/scheduling jitter would otherwise
+// swamp the few-millisecond signal).
 func TestWindowsCollector_CPUBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("CPU budget measurement skipped in -short mode")
 	}
 	c := NewCollector()
 	ctx := context.Background()
-	if _, err := c.Snapshot(ctx); err != nil {
-		t.Skipf("WMI process provider unavailable on this host: %v", err)
+	if _, err := c.Snapshot(ctx); err != nil { // prime + availability gate
+		t.Skipf("process table query (NtQuerySystemInformation) failed on this host: %v", err)
 	}
 
-	const pollInterval = 1 * time.Second
-	const window = 5 * time.Second
+	const iterations = 50
+	const cadenceHz = 1.0 // operational live-view poll rate (#2764)
 
 	cpuStart := selfCPUSecondsWin(t)
-	wallStart := time.Now()
-	deadline := wallStart.Add(window)
-	n := 0
-	for time.Now().Before(deadline) {
+	for i := 0; i < iterations; i++ {
 		_, err := c.Snapshot(ctx)
 		require.NoError(t, err)
-		n++
-		time.Sleep(pollInterval)
 	}
-	cpuPct := (selfCPUSecondsWin(t) - cpuStart) / time.Since(wallStart).Seconds() * 100.0
+	perSnapshotSec := (selfCPUSecondsWin(t) - cpuStart) / float64(iterations)
+	sustainedPct := perSnapshotSec * cadenceHz * 100.0
 
-	t.Logf("collector overhead: %.3f%% single-core over %.1fs (%d snapshots at %s cadence)", cpuPct, time.Since(wallStart).Seconds(), n, pollInterval)
-	require.Greater(t, n, 1, "must have taken multiple snapshots")
-	assert.Less(t, cpuPct, 1.0, "sustained %s-cadence snapshot polling must stay within the 1%% single-core budget", pollInterval)
+	t.Logf("per-snapshot %.2f ms CPU → %.3f%% single-core at %.0f Hz sustained (%d iterations)",
+		perSnapshotSec*1000, sustainedPct, cadenceHz, iterations)
+	assert.Less(t, sustainedPct, 1.0, "sustained %.0f Hz snapshot polling must stay within the 1%% single-core budget", cadenceHz)
 }
