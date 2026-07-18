@@ -49,4 +49,16 @@
 //
 // Measured against a sub-1% sustained single-core budget. The overhead report
 // is emitted to the sink alongside signals.
+//
+// # Related: production process/service telemetry
+//
+// This package is the DEX experience-SIGNAL acquisition spike (ETW/PSI event
+// streams, reachability + overhead measurement). It is NOT the home for
+// point-in-time process/service telemetry. The production "task manager"
+// collector — an on-demand snapshot of running processes (CPU/memory/disk) and
+// services (name/state) for the Web UI live-operations view — lives in
+// [github.com/cfgis/cfgms/features/steward/telemetry] (Issue #2763, epic #2738).
+// That collector reuses the proven mechanisms here (the /proc read shape on
+// Linux, the usermode-only WMI/OS-syscall posture on Windows) but is a separate,
+// non-spike package on the production build path.
 package dex
