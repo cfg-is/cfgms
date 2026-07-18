@@ -17,6 +17,165 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ── handleFleetHealth ─────────────────────────────────────────────────────────
+
+func getFleetHealth(server *Server) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil)
+	rec := httptest.NewRecorder()
+	server.handleFleetHealth(rec, req)
+	return rec
+}
+
+func getFleetHealthWithTenant(server *Server, tenantID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil)
+	if tenantID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	}
+	rec := httptest.NewRecorder()
+	server.handleFleetHealth(rec, req)
+	return rec
+}
+
+// fleetHealthData mirrors FleetHealthResponse for test unmarshaling.
+type fleetHealthData struct {
+	Healthy     int `json:"healthy"`
+	Degraded    int `json:"degraded"`
+	Unreachable int `json:"unreachable"`
+}
+
+func extractFleetHealth(t *testing.T, rec *httptest.ResponseRecorder) fleetHealthData {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var h fleetHealthData
+	require.NoError(t, json.Unmarshal(raw, &h))
+	return h
+}
+
+func TestHandleFleetHealth_EmptyFleet_ReturnsZeroCounts(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = seededFleetQuery()
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 0, h.Healthy)
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable)
+}
+
+func TestHandleFleetHealth_ClassifiesByStatusAndHeartbeat(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			// healthy: active + heartbeat within DegradedHeartbeatAge (5 min)
+			{ID: "s1", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s2", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-4 * time.Minute)},
+			// degraded: active + heartbeat older than DegradedHeartbeatAge
+			{ID: "s3", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-6 * time.Minute)},
+			{ID: "s4", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-30 * time.Minute)},
+			// unreachable: lost
+			{ID: "s5", TenantID: "t", Status: "lost", LastHeartbeat: now.Add(-2 * time.Hour)},
+			// not counted: other lifecycle states
+			{ID: "s6", TenantID: "t", Status: "registered", LastHeartbeat: time.Time{}},
+			{ID: "s7", TenantID: "t", Status: "archived", LastHeartbeat: now.Add(-24 * time.Hour)},
+			{ID: "s8", TenantID: "t", Status: "deregistered", LastHeartbeat: now.Add(-48 * time.Hour)},
+		},
+	})
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 2, h.Healthy, "2 active stewards with fresh heartbeats")
+	assert.Equal(t, 2, h.Degraded, "2 active stewards with stale heartbeats")
+	assert.Equal(t, 1, h.Unreachable, "1 lost steward")
+}
+
+// TestHandleFleetHealth_TenantIsolation is the REQUIRED acceptance-criteria test:
+// a caller scoped to tenant-a must never see tenant-b counts in the aggregate.
+func TestHandleFleetHealth_TenantIsolation(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			// tenant-a stewards (caller's tenant — must appear)
+			{ID: "ta-1", TenantID: "tenant-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "ta-2", TenantID: "tenant-a", Status: "active", LastHeartbeat: now.Add(-2 * time.Minute)},
+			// tenant-b stewards (different tenant — must NOT appear)
+			{ID: "tb-1", TenantID: "tenant-b", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "tb-2", TenantID: "tenant-b", Status: "lost", LastHeartbeat: now.Add(-2 * time.Hour)},
+		},
+	})
+
+	rec := getFleetHealthWithTenant(server, "tenant-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 2, h.Healthy, "tenant-a must only see its own 2 healthy stewards")
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable, "tenant-b lost steward must not appear in tenant-a response")
+}
+
+// TestHandleFleetHealth_SubtreeIncludesDescendants verifies that a caller scoped
+// to an ancestor tenant also sees stewards in descendant tenants.
+func TestHandleFleetHealth_SubtreeIncludesDescendants(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s-root", TenantID: "msp-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s-child", TenantID: "msp-a/client-1", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s-other", TenantID: "msp-b", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+		},
+	})
+
+	rec := getFleetHealthWithTenant(server, "msp-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 2, h.Healthy, "msp-a parent must see its own steward and child tenant's steward")
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable)
+}
+
+// TestHandleFleetHealth_AdminSeesFull verifies that an unauthenticated (admin mTLS)
+// caller with no tenant in context sees the full fleet.
+func TestHandleFleetHealth_AdminSeesFull(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s1", TenantID: "tenant-a", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			{ID: "s2", TenantID: "tenant-b", Status: "lost", LastHeartbeat: now.Add(-2 * time.Hour)},
+		},
+	})
+
+	rec := getFleetHealth(server) // no tenant in context = admin
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	h := extractFleetHealth(t, rec)
+	assert.Equal(t, 1, h.Healthy)
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 1, h.Unreachable)
+}
+
+func TestHandleFleetHealth_FleetQueryError_Returns500(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = &failingFleetQuery{}
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "INTERNAL_ERROR", resp.Error.Code)
+}
+
 // fleetTestStewardProvider backs MemoryQuery with a fixed steward list for resolve tests.
 type fleetTestStewardProvider struct {
 	stewards []fleet.StewardData

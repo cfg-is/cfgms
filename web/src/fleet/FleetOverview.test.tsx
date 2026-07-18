@@ -76,10 +76,18 @@ function makeSteward(spec: StewardSpec): Steward {
  * When ?q= is present, performs a substring filter on hostname or id to simulate
  * server-side selector filtering (approximation for test purposes — real server
  * applies the full selector grammar).
+ *
+ * Health tiles are best-effort; the mock returns a 503 for /api/v1/fleet/health so
+ * tiles stay hidden in tests that don't specifically test tile rendering.
  */
 function mockFleet(stewards: Steward[]) {
   fetchMock.mockImplementation((input) => {
     const url = new URL(String(input), 'https://controller.test')
+
+    if (url.pathname === '/api/v1/fleet/health') {
+      return Promise.resolve(new Response('{}', { status: 503 }))
+    }
+
     const limit = Number(url.searchParams.get('limit'))
     const offset = Number(url.searchParams.get('offset'))
     const q = url.searchParams.get('q') ?? ''
@@ -96,6 +104,43 @@ function mockFleet(stewards: Steward[]) {
       data: {
         stewards: filtered.slice(offset, offset + limit),
         total: filtered.length,
+        limit,
+        offset,
+      },
+      timestamp: new Date().toISOString(),
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+}
+
+/** Mock both the steward list and the fleet health aggregate. */
+function mockFleetAndHealth(
+  stewards: Steward[],
+  health: { healthy: number; degraded: number; unreachable: number },
+) {
+  fetchMock.mockImplementation((input) => {
+    const url = new URL(String(input), 'https://controller.test')
+
+    if (url.pathname === '/api/v1/fleet/health') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: health }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+
+    const limit = Number(url.searchParams.get('limit'))
+    const offset = Number(url.searchParams.get('offset'))
+    const body = {
+      data: {
+        stewards: stewards.slice(offset, offset + limit),
+        total: stewards.length,
         limit,
         offset,
       },
@@ -170,10 +215,14 @@ describe('pagination', () => {
     renderFleet()
     await screen.findByRole('table')
 
-    const firstUrl = String(fetchMock.mock.calls[0]?.[0])
-    expect(firstUrl).toContain('/api/v1/stewards?')
-    expect(firstUrl).toContain('limit=50')
-    expect(firstUrl).toContain('offset=0')
+    // Find the stewards call — health tiles also fire a fetch, so calls[0] is not always stewards.
+    const stewardsArgs = fetchMock.mock.calls.find(
+      (args) => String(args[0]).includes('/api/v1/stewards'),
+    )
+    const stewardsUrl = String(stewardsArgs?.[0])
+    expect(stewardsUrl).toContain('/api/v1/stewards?')
+    expect(stewardsUrl).toContain('limit=50')
+    expect(stewardsUrl).toContain('offset=0')
 
     expect(screen.getByTestId('fleet-count').textContent).toBe('120 stewards')
     expect(screen.getByTestId('fleet-pager').textContent).toContain(
@@ -447,11 +496,17 @@ describe('data states', () => {
   })
 
   it('treats an unexpected response shape as an error, never renders garbage', async () => {
-    fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ data: { wrong: true } }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
+    // Use mockImplementation to create a fresh Response per call — the health
+    // tiles also fetch on mount and would consume a shared body created by
+    // mockResolvedValue, causing the stewards call to fail with a body-read error
+    // rather than the expected "unexpected response shape" message.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ data: { wrong: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
     )
     renderFleet()
     await screen.findByRole('alert')
@@ -597,5 +652,29 @@ describe('hostile steward values (security A9.1)', () => {
     expect(document.querySelector('img')).toBeNull()
     expect(document.querySelector('script')).toBeNull()
     expect(document.title).not.toBe('pwned')
+  })
+})
+
+describe('fleet health tiles (Issue #2729)', () => {
+  it('renders three tiles with counts from GET /api/v1/fleet/health', async () => {
+    mockFleetAndHealth(
+      [makeSteward({ id: 's1', hostname: 'host-a', status: 'active' })],
+      { healthy: 12, degraded: 3, unreachable: 1 },
+    )
+    renderFleet()
+    await screen.findByTestId('fleet-health-tiles')
+
+    expect(screen.getByTestId('health-tile-healthy').textContent).toContain('12')
+    expect(screen.getByTestId('health-tile-degraded').textContent).toContain('3')
+    expect(screen.getByTestId('health-tile-unreachable').textContent).toContain('1')
+  })
+
+  it('hides the tiles when the health endpoint is unavailable', async () => {
+    // mockFleet returns 503 for the health endpoint by default.
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-a' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.queryByTestId('fleet-health-tiles')).not.toBeInTheDocument()
   })
 })

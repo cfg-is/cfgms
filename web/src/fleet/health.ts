@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
+import { apiFetch } from '../api/client.ts'
+
 /*
  * Health derivation for the fleet view (Story #2497).
  *
@@ -81,6 +83,45 @@ export function deriveHealth(
     default:
       // Unknown lifecycle states render as inert text, never a guessed tone.
       return { label: status?.trim() ? status.trim() : 'Unknown', tone: 'neutral' }
+  }
+}
+
+// ── Fleet health aggregate (Issue #2729) ─────────────────────────────────────
+
+/**
+ * Server-side fleet health aggregate returned by GET /api/v1/fleet/health.
+ * Counts are tenant-scoped and classified by the same degradation rule as
+ * DegradedHeartbeatAge on the controller (5 min stale heartbeat).
+ */
+export interface FleetHealth {
+  healthy: number
+  degraded: number
+  unreachable: number
+}
+
+/**
+ * Fetch the fleet health aggregate from GET /api/v1/fleet/health.
+ * Throws on non-2xx or an unrecognized response shape.
+ */
+export async function fetchFleetHealth(): Promise<FleetHealth> {
+  const resp = await apiFetch('/api/v1/fleet/health')
+  if (!resp.ok) {
+    throw new Error(`GET /api/v1/fleet/health — ${resp.status}`)
+  }
+  const body: unknown = await resp.json()
+  const d = (body as Record<string, unknown> | null)?.['data']
+  const rec = d as Record<string, unknown> | null | undefined
+  if (
+    typeof rec?.['healthy'] !== 'number' ||
+    typeof rec?.['degraded'] !== 'number' ||
+    typeof rec?.['unreachable'] !== 'number'
+  ) {
+    throw new Error('unexpected health response shape')
+  }
+  return {
+    healthy: rec['healthy'] as number,
+    degraded: rec['degraded'] as number,
+    unreachable: rec['unreachable'] as number,
   }
 }
 

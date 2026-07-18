@@ -10,6 +10,46 @@
  * `pop-views` and `.det`).
  */
 
+/* Fleet health tiles (Issue #2729) — three side-by-side summary cards above the table */
+.health-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  padding: 0 0 14px;
+}
+.ht {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.ht .ht-count {
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.ht .ht-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.ht.ok .ht-count,
+.ht.ok .ht-label {
+  color: var(--state-ok);
+}
+.ht.warn .ht-count,
+.ht.warn .ht-label {
+  color: var(--state-warn);
+}
+.ht.crit .ht-count,
+.ht.crit .ht-label {
+  color: var(--state-crit);
+}
+
 .ptool {
   display: flex;
   align-items: center;

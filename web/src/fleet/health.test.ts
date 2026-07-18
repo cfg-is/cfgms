@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   STALE_AFTER_MS,
   deriveHealth,
+  fetchFleetHealth,
   formatLastSeen,
   parseLastSeen,
 } from './health.ts'
@@ -98,5 +99,68 @@ describe('formatLastSeen', () => {
 
   it('clamps clock skew (future last_seen) to 0s ago', () => {
     expect(formatLastSeen(iso(-30_000), NOW)).toBe('0s ago')
+  })
+})
+
+// ── fetchFleetHealth (Issue #2729) ────────────────────────────────────────────
+
+const fetchMock = vi.fn<typeof fetch>()
+
+describe('fetchFleetHealth', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    // stub document.cookie so apiFetch doesn't throw in the test environment
+    vi.stubGlobal('document', { cookie: '' })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('returns healthy/degraded/unreachable counts from a valid response', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ data: { healthy: 5, degraded: 2, unreachable: 1 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const result = await fetchFleetHealth()
+    expect(result).toEqual({ healthy: 5, degraded: 2, unreachable: 1 })
+  })
+
+  it('returns zeros when all counts are zero', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ data: { healthy: 0, degraded: 0, unreachable: 0 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const result = await fetchFleetHealth()
+    expect(result).toEqual({ healthy: 0, degraded: 0, unreachable: 0 })
+  })
+
+  it('throws when the server returns a non-2xx status', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('{}', { status: 503 }))
+    await expect(fetchFleetHealth()).rejects.toThrow('GET /api/v1/fleet/health — 503')
+  })
+
+  it('throws when the response data shape is unexpected', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ data: { wrong: true } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    await expect(fetchFleetHealth()).rejects.toThrow('unexpected health response shape')
+  })
+
+  it('throws when data is missing entirely', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    await expect(fetchFleetHealth()).rejects.toThrow('unexpected health response shape')
   })
 })
