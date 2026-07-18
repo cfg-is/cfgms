@@ -13,6 +13,7 @@
  */
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
+import SelectorInput from '../shell/SelectorInput.tsx'
 import { usePushStatus } from './useConfigs.ts'
 
 interface PushPanelProps {
@@ -157,16 +158,17 @@ export default function PushPanel({ onClose }: PushPanelProps) {
         <div className="cfg-push-row">
           <div className="cfg-push-field">
             <span className="cfg-push-label">Selector</span>
-            <input
-              type="text"
-              className="wide"
-              aria-label="Selector"
-              placeholder="name:web* os:linux tag:prod"
+            <SelectorInput
               value={selector}
-              onChange={(e) => {
-                setSelector(e.target.value)
+              onChange={(next) => {
+                setSelector(next)
                 setResolvedCount(null)
               }}
+              className="wide"
+              ariaLabel="Selector"
+              placeholder="name:web* os:linux tag:prod"
+              hintId="push-selector-hint"
+              hintTestId="push-selector-syntax"
             />
           </div>
           <div className="cfg-push-field">
