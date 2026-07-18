@@ -13,15 +13,19 @@ const fetchMock = vi.fn<typeof fetch>()
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
-  // The fleet view (#2497) fetches its steward page on mount; shell tests
-  // serve it an empty page so the chrome renders over a quiet content area.
-  fetchMock.mockResolvedValue(
-    new Response(
-      JSON.stringify({
-        data: { stewards: [], total: 0, limit: 50, offset: 0 },
-        timestamp: new Date().toISOString(),
-      }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
+  // The fleet view (#2497) fetches its steward page on mount; the health tiles
+  // (Issue #2729) also fetch on mount. Use mockImplementation to create a fresh
+  // Response per call — a shared Response from mockResolvedValue would have its
+  // body consumed by the health fetch, breaking the stewards fetch.
+  fetchMock.mockImplementation(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify({
+          data: { stewards: [], total: 0, limit: 50, offset: 0 },
+          timestamp: new Date().toISOString(),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
     ),
   )
   document.body.className = ''

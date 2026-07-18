@@ -20,7 +20,7 @@
  * from component state to a real route: clicking a row navigates to
  * /stewards/:id (StewardAssetPage).
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { isScopeMatch, useTenantScope } from '../shell/TenantScopeContext.tsx'
 import {
@@ -31,7 +31,7 @@ import {
   type ColumnKey,
   type Steward,
 } from './columns.ts'
-import { deriveHealth, parseLastSeen } from './health.ts'
+import { deriveHealth, fetchFleetHealth, parseLastSeen, type FleetHealth } from './health.ts'
 import ColumnPicker from './ColumnPicker.tsx'
 import FleetTable, { type SortState } from './FleetTable.tsx'
 import { ErrorNotice, FleetEmpty, LoadingRows, NoMatch } from './FleetStates.tsx'
@@ -82,6 +82,16 @@ export default function FleetOverview() {
   const [visible, setVisible] = useState<ReadonlySet<ColumnKey>>(
     () => new Set(loadColumnPrefs() ?? DEFAULT_VISIBLE),
   )
+
+  const [fleetHealth, setFleetHealth] = useState<FleetHealth | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchFleetHealth()
+      .then((h) => { if (!cancelled) setFleetHealth(h) })
+      .catch(() => { /* tiles are best-effort; errors are non-blocking */ })
+    return () => { cancelled = true }
+  }, [])
 
   // Reset to page 0 whenever the selector changes so stale pages are not shown.
   // Adjusted during render rather than in an effect: this way the first render
@@ -197,6 +207,24 @@ export default function FleetOverview() {
         <h1>Fleet</h1>
         <p>Stewards enrolled to this controller, with the device DNA you choose.</p>
       </div>
+
+      {fleetHealth !== null && (
+        <div className="health-tiles" data-testid="fleet-health-tiles">
+          <div className="ht ok" data-testid="health-tile-healthy">
+            <span className="ht-count">{formatCount.format(fleetHealth.healthy)}</span>
+            <span className="ht-label">Healthy</span>
+          </div>
+          <div className="ht warn" data-testid="health-tile-degraded">
+            <span className="ht-count">{formatCount.format(fleetHealth.degraded)}</span>
+            <span className="ht-label">Degraded</span>
+          </div>
+          <div className="ht crit" data-testid="health-tile-unreachable">
+            <span className="ht-count">{formatCount.format(fleetHealth.unreachable)}</span>
+            <span className="ht-label">Unreachable</span>
+          </div>
+        </div>
+      )}
+
       <section className="panel">
         <div className="ptool">
           <SavedViews current={currentConfig} onApply={applyView} />

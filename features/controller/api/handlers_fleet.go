@@ -6,11 +6,28 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// DegradedHeartbeatAge is the heartbeat age beyond which an otherwise-active
+// steward is counted as Degraded in the fleet health aggregate
+// (GET /api/v1/fleet/health). An active steward whose last heartbeat arrived
+// more than DegradedHeartbeatAge ago is experiencing connectivity issues and
+// warrants attention. Mirrors the client-side STALE_AFTER_MS threshold
+// (web/src/fleet/health.ts) so aggregate counts align with per-row health pills.
+const DegradedHeartbeatAge = 5 * time.Minute
+
+// FleetHealthResponse is the response payload for GET /api/v1/fleet/health.
+type FleetHealthResponse struct {
+	Healthy     int `json:"healthy"`
+	Degraded    int `json:"degraded"`
+	Unreachable int `json:"unreachable"`
+}
 
 // SelectorResolveRequest is the request body for POST /api/v1/fleet/resolve.
 type SelectorResolveRequest struct {
@@ -92,4 +109,54 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Resolved selector",
 		"selector", logging.SanitizeLogValue(req.Selector), "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
+}
+
+// handleFleetHealth handles GET /api/v1/fleet/health.
+//
+// Returns tenant-scoped counts of stewards by health classification:
+//   - healthy:     status=="active" with a heartbeat within DegradedHeartbeatAge
+//   - degraded:    status=="active" with a heartbeat older than DegradedHeartbeatAge
+//   - unreachable: status=="lost"
+//
+// Other lifecycle states (registered, deregistered, archived, dormant, revoked)
+// are not counted. Scoping includes the caller's full tenant subtree (the caller
+// plus all descendant tenants), consistent with handleResolveSelector.
+// Admin callers (empty TenantID) see the full fleet.
+func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
+	tid, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	filter := fleet.Filter{}
+	if tid != "" {
+		filter.TenantSubtree = tid
+	}
+
+	results, err := s.fleetQuery.Search(r.Context(), filter)
+	if err != nil {
+		s.logger.Error("Fleet health query failed", "error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+		return
+	}
+
+	now := time.Now()
+	resp := FleetHealthResponse{}
+	for _, res := range results {
+		switch res.Status {
+		case "active":
+			if now.Sub(res.LastHeartbeat) <= DegradedHeartbeatAge {
+				resp.Healthy++
+			} else {
+				resp.Degraded++
+			}
+		case "lost":
+			resp.Unreachable++
+		}
+	}
+
+	s.logger.Info("Fleet health query",
+		"tenant_id", logging.SanitizeLogValue(tid),
+		"healthy", resp.Healthy,
+		"degraded", resp.Degraded,
+		"unreachable", resp.Unreachable,
+	)
+	s.writeSuccessResponse(w, resp)
 }

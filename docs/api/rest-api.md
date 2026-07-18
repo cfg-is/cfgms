@@ -310,6 +310,40 @@ List all currently-connected stewards from the live connection registry, filtere
 }
 ```
 
+### Fleet Health
+
+#### GET /api/v1/fleet/health
+
+Return tenant-scoped counts of stewards by health classification.
+
+**Authentication:** Required  
+**Required permission:** `steward:list`
+
+**Degraded rule:** A steward with `status == "active"` whose last heartbeat arrived more than 5 minutes ago is counted as Degraded (`DegradedHeartbeatAge = 5m`, defined in `features/controller/api/handlers_fleet.go`).
+
+**Classification:**
+
+| Bucket | Condition |
+|--------|-----------|
+| `healthy` | `status == "active"` and heartbeat within 5 minutes |
+| `degraded` | `status == "active"` and heartbeat older than 5 minutes |
+| `unreachable` | `status == "lost"` |
+
+Lifecycle terminal states (registered, deregistered, archived, dormant, revoked) are not counted in any bucket. Scoping includes the caller's full tenant subtree (caller plus all descendants).
+
+**Response:**
+
+```json
+{
+  "data": {
+    "healthy": 42,
+    "degraded": 3,
+    "unreachable": 1
+  },
+  "timestamp": "2026-07-18T10:30:05Z"
+}
+```
+
 ### Configuration Management
 
 #### GET /api/v1/stewards/{id}/config

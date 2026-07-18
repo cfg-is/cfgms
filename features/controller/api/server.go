@@ -534,6 +534,8 @@ func (s *Server) setupRouter() {
 	// Fleet selector resolve endpoint (Issue #1640)
 	fleetRouter := api.PathPrefix("/fleet").Subrouter()
 	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
+	// Fleet health aggregate endpoint (Issue #2729)
+	fleetRouter.Handle("/health", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleFleetHealth))).Methods("GET")
 
 	// Configuration push endpoint (Issue #1318) and push-status read (Issue #2366)
 	cfgPush := api.PathPrefix("/config").Subrouter()
