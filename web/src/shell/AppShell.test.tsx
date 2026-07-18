@@ -51,18 +51,20 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet and Audit as links', () => {
+  it('renders sidebar navigation with Fleet, Config, and Audit as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
   })
 
-  it('marks Modules and Config as soon while Fleet and Audit are real links', () => {
+  it('marks only Modules as soon; Config, Fleet, and Audit are real links', () => {
     renderShell()
-    // 2 soon-tagged items remain (Modules, Config); Audit is now a real link
-    expect(screen.getAllByText(/soon/i).length).toBeGreaterThan(0)
-    // Audit is a NavLink, not a soon anchor
+    // Only 1 soon-tagged item remains (Modules); Config is now a real link
+    expect(screen.getAllByText(/soon/i)).toHaveLength(1)
+    // Config and Audit are NavLinks, not soon anchors
+    expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
   })
 
