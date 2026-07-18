@@ -546,6 +546,47 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleListWebAccounts handles GET /api/v1/web/accounts (requirePermission only,
+// no Tier-3 wrapper — reads are categorically outside the Tier-3 surface; see
+// Implementation Notes in Issue #2733). The response uses WebAccountInfo: no
+// password hash or any other secret material is ever included.
+func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
+	if s.secretStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: webAccountSecretType,
+		},
+	})
+	if err != nil {
+		s.logger.Error("Failed to list web accounts", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list web accounts", "STORE_ERROR")
+		return
+	}
+
+	accounts := make([]WebAccountInfo, 0, len(metas))
+	for _, meta := range metas {
+		createdAt := meta.CreatedAt
+		if ts, ok := meta.Metadata["created_at"]; ok {
+			if t, parseErr := time.Parse(time.RFC3339, ts); parseErr == nil {
+				createdAt = t
+			}
+		}
+		accounts = append(accounts, WebAccountInfo{
+			ID:          meta.Metadata["id"],
+			Username:    meta.Metadata["username"],
+			TenantID:    meta.TenantID,
+			Permissions: parsePermissions(meta.Metadata["permissions"]),
+			CreatedAt:   createdAt,
+		})
+	}
+
+	s.writeSuccessResponse(w, accounts)
+}
+
 // handleDeleteWebAccount handles DELETE /api/v1/web/accounts/{username} (Tier-3).
 // It removes the account from the in-memory cache, the lockout state, and the
 // central secret store.

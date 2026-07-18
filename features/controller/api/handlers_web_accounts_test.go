@@ -523,6 +523,137 @@ func TestWebAccounts_VerifyRejectsMalformedInputsUniformly(t *testing.T) {
 	}
 }
 
+// listWebAccounts calls handleListWebAccounts directly with the given principal
+// and returns the parsed slice of WebAccountInfo from the response.
+func listWebAccounts(t *testing.T, server *Server, principal *Principal) (*httptest.ResponseRecorder, []WebAccountInfo) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handleListWebAccounts(rec, req)
+	return rec, parseWebAccountInfoList(t, rec)
+}
+
+// parseWebAccountInfoList extracts the []WebAccountInfo from an APIResponse body.
+func parseWebAccountInfoList(t *testing.T, rec *httptest.ResponseRecorder) []WebAccountInfo {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var accounts []WebAccountInfo
+	require.NoError(t, json.Unmarshal(raw, &accounts))
+	return accounts
+}
+
+// TestWebAccounts_ListReturnsAccountsWithNoSecretMaterial is the [REQUIRED TEST]:
+// the list endpoint returns WebAccountInfo records and NEVER includes a password
+// hash, password plaintext, or any other secret material in the response body.
+func TestWebAccounts_ListReturnsAccountsWithNoSecretMaterial(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const password = "list-test-secret-password"
+
+	// Create two accounts.
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "list-user-a",
+		Password:    password,
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	rec = postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "list-user-b",
+		Password:    password,
+		TenantID:    "tenant-b",
+		Permissions: []string{"steward:read"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// List returns 200 and the full response body.
+	listRec, accounts := listWebAccounts(t, server, admin)
+	require.Equal(t, http.StatusOK, listRec.Code, "body: %s", listRec.Body.String())
+
+	// Both accounts appear in the list.
+	usernames := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		usernames = append(usernames, a.Username)
+	}
+	assert.Contains(t, usernames, "list-user-a")
+	assert.Contains(t, usernames, "list-user-b")
+
+	// Every account has non-empty identity fields.
+	for _, a := range accounts {
+		assert.NotEmpty(t, a.ID, "account %q must have an id", a.Username)
+		assert.NotEmpty(t, a.Username)
+		assert.False(t, a.CreatedAt.IsZero(), "account %q must have a created_at", a.Username)
+	}
+
+	// [REQUIRED] The raw response body must not contain any password hash or
+	// secret material — not the plaintext password, and not an argon2id prefix.
+	body := listRec.Body.String()
+	assert.NotContains(t, body, password, "list response must not contain the password plaintext")
+	assert.NotContains(t, body, "$argon2id$", "list response must not contain any argon2id hash prefix")
+}
+
+// TestWebAccounts_ListReflectsDeletes confirms that after an account is deleted,
+// it no longer appears in the list response.
+func TestWebAccounts_ListReflectsDeletes(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "delete-list-user",
+		Password: "some-valid-password",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	_, accounts := listWebAccounts(t, server, admin)
+	found := false
+	for _, a := range accounts {
+		if a.Username == "delete-list-user" {
+			found = true
+		}
+	}
+	assert.True(t, found, "newly created account must appear in the list")
+
+	delRec := deleteWebAccount(t, server, admin, "delete-list-user")
+	require.Equal(t, http.StatusOK, delRec.Code, "body: %s", delRec.Body.String())
+
+	_, accounts = listWebAccounts(t, server, admin)
+	for _, a := range accounts {
+		assert.NotEqual(t, "delete-list-user", a.Username,
+			"deleted account must not appear in the list")
+	}
+}
+
+// TestWebAccounts_ListRequiresPermissionNotTier3 verifies that an API-key caller
+// with only the web-account:list permission CAN reach the list endpoint (no Tier-3
+// gate), while the create/delete endpoints remain Tier-3 gated.
+func TestWebAccounts_ListRequiresPermissionNotTier3(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"web-account:list"})
+
+	// POST an account first (using the admin path so the store has content).
+	postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
+		Username: "tier-check-user",
+		Password: "valid-password-123",
+	})
+
+	// An API-key caller with web-account:list reaches GET /api/v1/web/accounts.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"API-key caller with web-account:list must reach the list endpoint (no Tier-3 gate)")
+
+	// Confirm no secret material in the response even for API-key callers.
+	body := rec.Body.String()
+	assert.NotContains(t, body, "$argon2id$", "list response must not contain any argon2id hash")
+}
+
 // TestWebAccounts_HashParametersEncodedInPHCString pins the argon2id OWASP cost
 // parameters and verifies that encodeArgon2idHash embeds them into the PHC string.
 // Uses the *Default constants directly (not the active webArgon2* vars) so the test
