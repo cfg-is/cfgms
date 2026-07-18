@@ -427,7 +427,7 @@ export default function ConfigEditor({ stewardId, onClose }: ConfigEditorProps) 
                 onClick={handleDelete}
                 data-testid="editor-confirm-delete-btn"
               >
-                {deleting ? 'Deleting���' : 'Delete'}
+                {deleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>
