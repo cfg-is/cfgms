@@ -1,0 +1,619 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright 2026 Jordan Ritz
+ *
+ * Config management view (Story #2730). Shared chrome for ConfigListView,
+ * ConfigEditor, PushPanel, and RollbackPanel. Table chrome (.ptool, .tbl,
+ * .pager, .pill, .skel, .skrow, .notice) is self-contained here so the
+ * config route is not implicitly coupled to other page stylesheets.
+ */
+
+/* ── Page title ────────────────────────────────────────────────────── */
+.htitle {
+  padding: 20px 24px 0;
+}
+.htitle h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.htitle p {
+  margin: 0 0 16px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* ── Panel card ─────────────────────────────────────────────────────── */
+.panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: 0 24px 20px;
+}
+
+/* ── Toolbar strip ─────────────────────────────────────────────────── */
+.ptool {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--border);
+}
+.ptool .cnt {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Semantic state pills ──────────────────────────────────────────── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.pill.ok {
+  background: var(--state-ok-bg);
+  color: var(--state-ok);
+}
+.pill.warn {
+  background: var(--state-warn-bg);
+  color: var(--state-warn);
+}
+.pill.crit {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.pill.neutral {
+  background: var(--state-neutral-bg);
+  color: var(--state-neutral);
+}
+
+/* ── Table ─────────────────────────────────────────────────────────── */
+table.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+.tbl th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  user-select: none;
+}
+.tbl td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+@media (hover: hover) and (min-width: 720px) {
+  .tbl tbody tr:hover td {
+    background: var(--bg-elevated);
+  }
+}
+.tbl tbody tr.selected td {
+  background: var(--bg-elevated);
+}
+.tbl tbody tr {
+  cursor: pointer;
+}
+.nm {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.mut {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.mono2 {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.tbl th.c-spacer,
+.tbl td.c-spacer {
+  width: 100%;
+  padding: 0;
+}
+
+/* ── Loading skeleton ──────────────────────────────────────────────── */
+.skel {
+  background: linear-gradient(
+    90deg,
+    var(--bg-elevated) 25%,
+    var(--bg-sunk) 37%,
+    var(--bg-elevated) 63%
+  );
+  background-size: 400% 100%;
+  animation: cfg-shimmer 1.3s ease infinite;
+  border-radius: 6px;
+  height: 12px;
+}
+@keyframes cfg-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; }
+}
+.skrow {
+  display: grid;
+  grid-template-columns: 1.2fr 0.6fr 1fr 1fr 0.8fr;
+  gap: 14px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.skrow:last-child {
+  border-bottom: 0;
+}
+
+/* ── Data state notices ────────────────────────────────────────────── */
+.notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 40px 20px;
+  text-align: center;
+}
+.notice h3 {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.notice p {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  max-width: 380px;
+}
+.notice .ic {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+}
+.notice.err .ic {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.notice.empty .ic {
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+}
+.notice .btn {
+  margin-top: 6px;
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.notice.err .detail {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+/* ── Pager ─────────────────────────────────────────────────────────── */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+.pager .pg {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+.pager .pg button {
+  appearance: none;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.pager .pg button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Button styles ─────────────────────────────────────────────────── */
+.cfg-btn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.cfg-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cfg-btn-secondary {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.cfg-btn-danger {
+  appearance: none;
+  border: 1px solid var(--state-crit);
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* ── Confirm modal overlay ─────────────────────────────────────────── */
+.cfg-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+}
+.cfg-modal {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 480px;
+  width: calc(100% - 48px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+.cfg-modal h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.cfg-modal p {
+  margin: 0 0 6px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.cfg-modal .cfg-modal-count {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.cfg-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+/* ── Push panel ────────────────────────────────────────────────────── */
+.cfg-push-panel {
+  background: var(--bg-sunk);
+  border-bottom: 1px solid var(--border);
+  padding: 14px;
+}
+.cfg-push-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cfg-push-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+.cfg-push-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cfg-push-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.cfg-push-field input {
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  width: 220px;
+  min-width: 0;
+}
+.cfg-push-field input.wide {
+  width: 340px;
+}
+.cfg-push-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.cfg-push-status {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cfg-push-count {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* ── Config editor ─────────────────────────────────────────────────── */
+.cfg-editor {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: 0 24px 20px;
+  background: var(--bg-surface);
+}
+.cfg-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+.cfg-editor-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+.cfg-editor-header .cfg-editor-close {
+  margin-left: auto;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+.cfg-editor-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+.cfg-editor-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 9px 16px;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.cfg-editor-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.cfg-editor-body {
+  padding: 0;
+}
+.cfg-editor-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  align-items: center;
+}
+.cfg-editor-pre {
+  margin: 0;
+  padding: 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-sunk);
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.cfg-editor-textarea {
+  width: 100%;
+  min-height: 300px;
+  padding: 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-sunk);
+  border: none;
+  border-top: 1px solid var(--border);
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+.cfg-validation-result {
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+.cfg-validation-ok {
+  color: var(--state-ok);
+  font-weight: 600;
+}
+.cfg-validation-err {
+  color: var(--state-crit);
+}
+.cfg-validation-err-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cfg-validation-err-item {
+  padding: 6px 10px;
+  background: var(--state-crit-bg);
+  border-radius: var(--radius-sm);
+  color: var(--state-crit);
+  font-size: var(--text-sm);
+}
+
+/* ── Rollback panel ────────────────────────────────────────────────── */
+.cfg-rb-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.cfg-rb-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 9px 16px;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.cfg-rb-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.cfg-rb-body {
+  padding: 0;
+}
+.cfg-rb-point {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.cfg-rb-point:last-child {
+  border-bottom: 0;
+}
+.cfg-rb-point:hover {
+  background: var(--bg-elevated);
+}
+.cfg-rb-point.selected {
+  background: var(--bg-elevated);
+}
+.cfg-rb-point-meta {
+  flex: 1;
+  min-width: 0;
+}
+.cfg-rb-point-sha {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.cfg-rb-point-msg {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cfg-rb-point-detail {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+.cfg-rb-point-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.cfg-rb-preview {
+  padding: 14px;
+  background: var(--bg-sunk);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+.cfg-rb-preview h4 {
+  margin: 0 0 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
