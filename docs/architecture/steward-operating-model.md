@@ -525,6 +525,41 @@ When a rolling batch job runs, the `DnaRoleQuorumChecker` partitions the fleet s
 
 Stewards without a `cluster_role` are placed freely into available slots alongside role-bearing stewards, filling up to the requested batch size.
 
+### Live Telemetry Snapshots (#2763 / epic #2738)
+
+For the Web UI live-operations ("task manager") view, the steward exposes an
+on-demand, point-in-time snapshot of its **running processes** (per-process CPU%,
+memory, disk I/O; network counters are reserved — see below) and **installed
+services** (name, run state). This is `features/steward/telemetry` — distinct from
+`features/steward/dex` (the DEX experience-signal ETW/PSI spike) and from the
+convergence loop.
+
+Key properties:
+
+- **On-demand, subscription-scoped.** The collector is a callable snapshot
+  function that does **no work unless invoked** — no background goroutine, no
+  event stream. It runs only while a controller subscriber is attached (wired by
+  #2764); between calls it costs nothing.
+- **Usermode, in-process, no shell-out.** Linux reads `/proc` (process table) and
+  the systemd D-Bus `Manager.ListUnits` (services); Windows uses the
+  `NtQuerySystemInformation` process table and the Service Control Manager
+  (`svc/mgr`). No kernel driver, no eBPF, no ETW, and no `ps`/`tasklist`/
+  `systemctl`/`wmic` — matching the steward execution-path posture.
+- **Sub-1% sustained CPU budget.** Measured at a 1 Hz poll cadence: ~0.6% (Windows)
+  / ~0.8% (Linux) of a single core. `NtQuerySystemInformation` is used on Windows
+  in preference to the WMI perf-object query specifically because the latter
+  measured ~20× over budget.
+- **Read-only.** State observation only — no service start/stop/restart (that
+  overlaps the `service` stdlib module's desired-state enforcement, a separate
+  boundary).
+- **Join-able entities.** Each process/service carries an ADR-017 object-canonical
+  `fragment_id` (`process:<name>`, `service:<name>`) so a controller can join the
+  telemetry to DNA + the topology graph. Nothing here writes DNA.
+
+Per-process **network** byte accounting is structurally present in the wire format
+but not populated by this usermode collector — it requires kernel-assisted tracing
+(eBPF / the Windows Kernel-Network ETW provider), reserved for a future story.
+
 ## Registration
 
 How a steward joins a controller.
