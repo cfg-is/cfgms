@@ -31,6 +31,7 @@ const NAV_ITEMS = [
   { label: 'Config', to: '/config', soon: false },
   { label: 'Workflows', to: '/workflows', soon: false },
   { label: 'Audit', to: '/audit', soon: false },
+  { label: 'Accounts', to: '/accounts', soon: false },
 ] as const
 
 export default function AppShell() {

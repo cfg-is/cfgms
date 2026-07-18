@@ -95,6 +95,10 @@ var knownPermissions = map[string]bool{
 	// Cluster registry (Issue #2424)
 	"cluster:list": true,
 	"cluster:read": true,
+	// Web account management (Issue #2733)
+	"web-account:list":   true,
+	"web-account:create": true,
+	"web-account:delete": true,
 	// Workflow management (Issue #2725)
 	"workflow:list":    true,
 	"workflow:read":    true,

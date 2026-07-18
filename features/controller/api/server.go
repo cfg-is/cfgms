@@ -644,9 +644,11 @@ func (s *Server) setupRouter() {
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
-	// Web-admin account provisioning endpoints (Issue #2490). Tier-3 (admin mTLS
-	// only), mirroring the tenants-create registration above.
+	// Web-admin account provisioning endpoints (Issue #2490, #2733).
+	// GET /web/accounts — permission-gated only (reads are outside the Tier-3 surface; see Issue #2733).
+	// POST/DELETE /web/accounts — Tier-3 (admin mTLS only), mirroring the tenants-create registration.
 	webAccounts := api.PathPrefix("/web/accounts").Subrouter()
+	webAccounts.Handle("", s.requirePermission("web-account", "list")(http.HandlerFunc(s.handleListWebAccounts))).Methods("GET")
 	webAccounts.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount)))).Methods("POST")
 	webAccounts.Handle("/{username}", s.requireTier(TierMTLSOnly)(s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount)))).Methods("DELETE")
 

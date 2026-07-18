@@ -55,23 +55,25 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet, Config, Workflows, and Audit as links', () => {
+  it('renders sidebar navigation with Fleet, Config, Workflows, Audit, and Accounts as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
 
-  it('marks only Modules as soon; Config, Fleet, Workflows, and Audit are real links', () => {
+  it('marks only Modules as soon; Config, Fleet, Workflows, Audit, and Accounts are real links', () => {
     renderShell()
-    // Only 1 soon-tagged item remains (Modules); Config, Workflows, Audit are real links
+    // Only 1 soon-tagged item remains (Modules); Config, Workflows, Audit, Accounts are real links
     expect(screen.getAllByText(/soon/i)).toHaveLength(1)
-    // Config, Workflows, and Audit are NavLinks, not soon anchors
+    // Config, Workflows, Audit, and Accounts are NavLinks, not soon anchors
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
 
   it('mounts the fleet overview (#2497) in the content area', async () => {
