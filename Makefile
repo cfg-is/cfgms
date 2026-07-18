@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh install-cfg uninstall-cfg test-install-cfg
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -2073,7 +2073,27 @@ test-quality: test lint check-license-headers test-production-critical build-cro
 	@echo "ℹ️  Security scans run separately via security-engineer agent"
 	@echo "ℹ️  E2E tests available via make test-e2e-fast (for local CI debugging)"
 
-test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
+# Frontend validation — mirrors the CI `frontend-checks` job
+# (.github/workflows/frontend-ci.yml): lint, typecheck, unit tests, and a
+# production build over web/. Runs ONLY when web/ actually changed vs the
+# develop merge base (same detection CI uses), so Go-only work does not pay the
+# npm-install cost. Closes the gap where the agent gate had zero frontend
+# coverage, so a web story's lint/typecheck errors first surfaced as CI red
+# instead of being caught locally before the PR (observed on #2740, #2755, #2759).
+.PHONY: test-frontend
+test-frontend:
+	@MERGE_BASE=$$(git merge-base HEAD origin/develop 2>/dev/null || true); \
+	if [ -n "$$MERGE_BASE" ] && git diff --quiet "$$MERGE_BASE" HEAD -- web/ && git diff --quiet HEAD -- web/; then \
+		echo "⏩ test-frontend: no web/ changes vs develop — skipping (CI parity)"; \
+	else \
+		[ -z "$$MERGE_BASE" ] && echo "ℹ️  test-frontend: no develop merge base — running checks (safe fallback)" || true; \
+		echo "🧪 test-frontend: web/ changes detected — running frontend checks"; \
+		command -v npm >/dev/null 2>&1 || { echo "❌ test-frontend: npm not found but web/ changed. Install Node (see .devcontainer/Dockerfile)"; exit 1; }; \
+		( cd web && npm ci && npm run lint && npm run typecheck && npm run test && npm run build ); \
+		echo "✅ test-frontend: frontend checks passed"; \
+	fi
+
+test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-frontend test-integration-docker test-e2e-fast
 	@echo ""
 	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
 	@echo "========================================"
@@ -2101,7 +2121,7 @@ test-complete: test-complete-full
 # Used by headless agent containers that don't have access to Docker daemon
 # Story #435: Provides ~95% of validation coverage without Docker-in-Docker
 .PHONY: test-agent-complete
-test-agent-complete: test-commit test-fast test-production-critical build-cross-validate
+test-agent-complete: test-commit test-fast test-production-critical build-cross-validate test-frontend
 	@echo ""
 	@echo "✅ AGENT CONTAINER VALIDATION FINISHED"
 	@echo "========================================"
@@ -2109,6 +2129,7 @@ test-agent-complete: test-commit test-fast test-production-critical build-cross-
 	@echo "- ✅ Fast comprehensive tests passed (test-fast)"
 	@echo "- ✅ Production critical tests passed (test-production-critical)"
 	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo "- ✅ Frontend checks passed or skipped (test-frontend; web/ only)"
 	@echo ""
 	@echo "⏩ Deferred to CI (requires Docker daemon):"
 	@echo "   - test-integration-docker (storage/controller Docker tests)"
