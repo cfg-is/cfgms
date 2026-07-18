@@ -29,6 +29,7 @@ const NAV_ITEMS = [
   { label: 'Fleet', to: '/', soon: false },
   { label: 'Modules', to: null, soon: true },
   { label: 'Config', to: '/config', soon: false },
+  { label: 'Workflows', to: '/workflows', soon: false },
   { label: 'Audit', to: '/audit', soon: false },
 ] as const
 
