@@ -61,15 +61,15 @@ describe('parseWebAccountList', () => {
     ]
     const result = parseWebAccountList(raw)
     expect(result).toHaveLength(2)
-    expect(result[0].id).toBe('a1')
-    expect(result[1].permissions).toEqual(['steward:read'])
+    expect(result[0]!.id).toBe('a1')
+    expect(result[1]!.permissions).toEqual(['steward:read'])
   })
 
   it('skips invalid entries', () => {
     const raw = [{ id: 'valid', username: 'u', tenant_id: 't', permissions: [], created_at: '' }, null, 42]
     const result = parseWebAccountList(raw)
     expect(result).toHaveLength(1)
-    expect(result[0].id).toBe('valid')
+    expect(result[0]!.id).toBe('valid')
   })
 
   it('throws for non-array input', () => {
@@ -125,7 +125,7 @@ describe('parseRoleList', () => {
     ]
     const result = parseRoleList(raw)
     expect(result).toHaveLength(2)
-    expect(result[1].name).toBe('role-b')
+    expect(result[1]!.name).toBe('role-b')
   })
 
   it('throws for non-array input', () => {
