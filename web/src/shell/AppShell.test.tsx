@@ -55,20 +55,22 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet, Config, and Audit as links', () => {
+  it('renders sidebar navigation with Fleet, Config, Workflows, and Audit as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
   })
 
-  it('marks only Modules as soon; Config, Fleet, and Audit are real links', () => {
+  it('marks only Modules as soon; Config, Fleet, Workflows, and Audit are real links', () => {
     renderShell()
-    // Only 1 soon-tagged item remains (Modules); Config is now a real link
+    // Only 1 soon-tagged item remains (Modules); Config, Workflows, Audit are real links
     expect(screen.getAllByText(/soon/i)).toHaveLength(1)
-    // Config and Audit are NavLinks, not soon anchors
+    // Config, Workflows, and Audit are NavLinks, not soon anchors
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
   })
 
