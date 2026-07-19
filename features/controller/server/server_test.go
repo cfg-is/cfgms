@@ -1161,3 +1161,50 @@ func TestInitializeSessionStore_BadPath(t *testing.T) {
 		memStore.Close()
 	}
 }
+
+// TestInitializeSessionStore_ClusterMode_NoDSN verifies that cluster mode with no Postgres
+// DSN configured falls through to the single-node SQLite path unchanged.
+func TestInitializeSessionStore_ClusterMode_NoDSN(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		HA: &config.HAConfig{Mode: "cluster"},
+		Storage: &config.StorageConfig{
+			SQLitePath: filepath.Join(tempDir, "sessions.db"),
+			// Cluster is nil — no PostgresDSN configured; branch must fall through.
+		},
+	}
+
+	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, store)
+
+	// Without a cluster DSN the function falls through to the single-node SQLite path.
+	_, isMem := store.(*session.MemStore)
+	assert.False(t, isMem, "cluster mode without DSN must fall through to SQLite, not MemStore")
+
+	if c, ok := store.(io.Closer); ok {
+		t.Cleanup(func() { _ = c.Close() })
+	}
+}
+
+// TestInitializeSessionStore_ClusterMode_BadDSN verifies that a Postgres connection failure
+// in cluster mode falls back to the SQLite/mem path without blocking startup.
+func TestInitializeSessionStore_ClusterMode_BadDSN(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		HA: &config.HAConfig{Mode: "cluster"},
+		Storage: &config.StorageConfig{
+			SQLitePath: filepath.Join(tempDir, "sessions.db"),
+			Cluster: &config.ClusterStorageConfig{
+				// Unreachable DSN — CreateSessionTokenStore ping will fail; fallback must engage.
+				PostgresDSN: "postgres://invalid-host-does-not-exist:5432/cfgms?sslmode=disable&connect_timeout=1",
+			},
+		},
+	}
+
+	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, store, "cluster-mode Postgres failure must not block startup")
+
+	if c, ok := store.(io.Closer); ok {
+		t.Cleanup(func() { _ = c.Close() })
+	}
+}

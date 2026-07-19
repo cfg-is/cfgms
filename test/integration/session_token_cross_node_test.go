@@ -153,8 +153,10 @@ func TestSessionTokenCrossNodeGraceExpiry(t *testing.T) {
 	_, newTok, err := mgrA.Renew(ctx, oldTok)
 	require.NoError(t, err)
 
-	// Wait for grace window to expire.
-	time.Sleep(50 * time.Millisecond)
+	// Override the grace expiry with a past timestamp so the old hash is immediately
+	// rejected by the DB's NOW() check — no sleep needed (time.Sleep as synchronization
+	// is prohibited by CFGMS standards).
+	require.NoError(t, sharedStore.StampGraceExpiry(ctx, session.HashToken(oldTok), time.Now().Add(-time.Second)))
 
 	// Node B: new token is always valid.
 	_, err = mgrB.Validate(ctx, newTok)

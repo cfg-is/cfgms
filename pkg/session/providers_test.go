@@ -289,7 +289,6 @@ func TestGraceExpiryHonouredAcrossNodes(t *testing.T) {
 	dir := t.TempDir()
 	p := sqlite.NewSQLiteProvider(dir)
 	dbPath := filepath.Join(dir, "sessions.db")
-	// Use a very short GraceWindow so we can expire it with a short sleep.
 	cfg := session.Config{
 		IdleTimeout:     5 * time.Minute,
 		AbsoluteTimeout: 1 * time.Hour,
@@ -322,8 +321,13 @@ func TestGraceExpiryHonouredAcrossNodes(t *testing.T) {
 		t.Fatalf("Renew: %v", err)
 	}
 
-	// Wait for the grace window to expire.
-	time.Sleep(30 * time.Millisecond)
+	// Expire the old token's grace window deterministically by stamping its
+	// hash_expires_at into the past. This drives the store's hash_expires_at > NOW()
+	// predicate to reject the hash immediately — no sleep needed (time.Sleep as
+	// synchronization is prohibited by CFGMS standards).
+	if err := storeA.StampGraceExpiry(ctx, session.HashToken(oldToken), time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("StampGraceExpiry: %v", err)
+	}
 
 	// Node B: new token is always valid.
 	if _, err := mgrB.Validate(ctx, newToken); err != nil {

@@ -15,6 +15,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
+// mustGenerateToken generates a session token, failing the test if crypto/rand is unavailable.
+func mustGenerateToken(t *testing.T) string {
+	t.Helper()
+	tok, err := session.GenerateToken()
+	require.NoError(t, err)
+	return tok
+}
+
 // newTestSessionTokenStore creates a DatabaseSessionTokenStore against the test Postgres
 // instance, skipping if it is not available.
 func newTestSessionTokenStore(t *testing.T) *DatabaseSessionTokenStore {
@@ -25,7 +33,8 @@ func newTestSessionTokenStore(t *testing.T) *DatabaseSessionTokenStore {
 	db := getTestDB(t) // skips if postgres not reachable
 	// Drop and recreate the table so each test starts clean.
 	ctx := context.Background()
-	_, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
+	_, dropErr := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
+	require.NoError(t, dropErr)
 	_ = db.Close()
 
 	store, err := NewDatabaseSessionTokenStore(buildTestDSN(), getTestConfig())
@@ -76,8 +85,8 @@ func TestDatabaseSessionTokenStore_DeleteRemovesAllHashes(t *testing.T) {
 	store := newTestSessionTokenStore(t)
 	ctx := context.Background()
 
-	t1, _ := session.GenerateToken()
-	t2, _ := session.GenerateToken()
+	t1 := mustGenerateToken(t)
+	t2 := mustGenerateToken(t)
 	h1, h2 := session.HashToken(t1), session.HashToken(t2)
 	now := time.Now().UTC()
 	sess := &session.Session{
@@ -105,7 +114,7 @@ func TestDatabaseSessionTokenStore_DeleteIdempotent(t *testing.T) {
 	store := newTestSessionTokenStore(t)
 	ctx := context.Background()
 
-	tok, _ := session.GenerateToken()
+	tok := mustGenerateToken(t)
 	now := time.Now().UTC()
 	sess := &session.Session{
 		ID:                "del-idem-id",
@@ -129,7 +138,7 @@ func TestDatabaseSessionTokenStore_StampGraceExpiry(t *testing.T) {
 	store := newTestSessionTokenStore(t)
 	ctx := context.Background()
 
-	tok, _ := session.GenerateToken()
+	tok := mustGenerateToken(t)
 	hash := session.HashToken(tok)
 	now := time.Now().UTC()
 	sess := &session.Session{
@@ -170,13 +179,13 @@ func TestDatabaseSessionTokenStore_ListAllDeduplicates(t *testing.T) {
 	}
 
 	// s1: one hash.
-	t1, _ := session.GenerateToken()
+	t1 := mustGenerateToken(t)
 	s1 := mkSess("list-s1")
 	require.NoError(t, store.Set(ctx, session.HashToken(t1), s1))
 
 	// s2: two hashes (simulates current + grace slot from Renew).
-	t2a, _ := session.GenerateToken()
-	t2b, _ := session.GenerateToken()
+	t2a := mustGenerateToken(t)
+	t2b := mustGenerateToken(t)
 	s2 := mkSess("list-s2")
 	require.NoError(t, store.Set(ctx, session.HashToken(t2a), s2))
 	require.NoError(t, store.Set(ctx, session.HashToken(t2b), s2))
@@ -196,7 +205,7 @@ func TestDatabaseSessionTokenStore_NoRawToken(t *testing.T) {
 	store := newTestSessionTokenStore(t)
 	ctx := context.Background()
 
-	tok, _ := session.GenerateToken()
+	tok := mustGenerateToken(t)
 	hash := session.HashToken(tok)
 	now := time.Now().UTC()
 	sess := &session.Session{
@@ -224,7 +233,7 @@ func TestDatabaseSessionTokenStore_SetUpdatesExistingEntry(t *testing.T) {
 	store := newTestSessionTokenStore(t)
 	ctx := context.Background()
 
-	tok, _ := session.GenerateToken()
+	tok := mustGenerateToken(t)
 	hash := session.HashToken(tok)
 	now := time.Now().UTC()
 	sess := &session.Session{
@@ -301,7 +310,7 @@ func TestDatabaseProvider_CreateSessionTokenStore(t *testing.T) {
 
 	// Basic smoke test: round-trip a session.
 	ctx := context.Background()
-	tok, _ := session.GenerateToken()
+	tok := mustGenerateToken(t)
 	now := time.Now().UTC()
 	sess := &session.Session{
 		ID:                "factory-test",
