@@ -15,7 +15,6 @@ import (
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -167,7 +166,7 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 	//     this is always used in production and cannot be bypassed by the caller.
 	//   Phase 2 (fallback): caller-supplied steward_tenant_path field — used when
 	//     stewardTenantLookup is nil (e.g. handler unit tests).
-	if principal != nil && principal.Assurance < session.AssuranceBasic && principal.TenantID != "" {
+	if principal != nil && !principal.GlobalScope && principal.TenantID != "" {
 		var resolvedTenant string
 		if h.stewardTenantLookup != nil {
 			resolvedTenant = h.stewardTenantLookup(req.TargetID)

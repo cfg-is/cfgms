@@ -19,7 +19,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -234,9 +233,9 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	// Human-authenticated callers (Assurance >= AssuranceBasic, empty TenantID) may read any push record.
+	// Global-scope callers (GlobalScope=true, typically empty TenantID) may read any push record.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if principal.Assurance < session.AssuranceBasic && record.TenantID != callerTenant {
+	if !principal.GlobalScope && record.TenantID != callerTenant {
 		s.respondError(w, http.StatusNotFound, "push not found")
 		return
 	}

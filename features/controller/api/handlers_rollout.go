@@ -17,7 +17,6 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -103,15 +102,15 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant scope: scoped (non-admin) callers are confined to their own tenant. Only an
-	// admin mTLS principal may target another tenant via req.TenantID; a scoped caller that
-	// supplies a different tenant is rejected rather than silently redirected. This mirrors
-	// the cross-tenant guard in handlers_upgrade.go and closes the isolation gap where a
-	// tenant-scoped caller holding installer:dispatch:steward could drive orchestration
-	// against a victim tenant's fleet (Issue #2340).
+	// Tenant scope: tenant-scoped (non-global) callers are confined to their own tenant.
+	// Only a global-scope principal may target another tenant via req.TenantID; a scoped
+	// caller that supplies a different tenant is rejected rather than silently redirected.
+	// This mirrors the cross-tenant guard in handlers_upgrade.go and closes the isolation
+	// gap where a tenant-scoped caller holding installer:dispatch:steward could drive
+	// orchestration against a victim tenant's fleet (Issue #2340).
 	tenantID := callerTenantID
 	if req.TenantID != "" && req.TenantID != callerTenantID {
-		if principal.Assurance < session.AssuranceBasic {
+		if !principal.GlobalScope {
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Cannot start a rollout for another tenant",
 				"CROSS_TENANT")

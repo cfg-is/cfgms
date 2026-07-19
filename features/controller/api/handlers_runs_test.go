@@ -233,7 +233,7 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 		"shell":   "pwsh",
 	}
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}, body)
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
@@ -247,7 +247,7 @@ func TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 
 	body := map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"}
 	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}, body)
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected; body: %s", rec.Body.String())
@@ -279,7 +279,7 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 
 	// 1. Dispatch (POST) as admin.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
@@ -321,7 +321,7 @@ func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
 
 	// Admin dispatches a run owned by the global/empty tenant.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}, map[string]interface{}{
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, map[string]interface{}{
 			"target":  "id:steward-1",
 			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 			"shell":   "pwsh",
@@ -692,7 +692,7 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 	}{
 		{
 			name:      "AssuranceBasic_admin_any_tenant",
-			principal: &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""},
+			principal: &Principal{ID: "admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""},
 			tenantID:  "tenant-b",
 			wantVis:   true,
 		},
@@ -731,6 +731,58 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 				tc.principal, run.TenantID, tc.tenantID)
 		})
 	}
+}
+
+// ── [REQUIRED TEST] GlobalScope ⊥ Assurance independence (Issue #2787) ───────
+
+// TestGlobalScope_IndependentOfAssurance proves that GlobalScope and Assurance
+// are genuinely independent signals — not just relabeled versions of each other.
+// A hypothetical future tenant-scoped-but-strongly-authenticated principal
+// (Assurance=AssuranceStrong, GlobalScope=false) must be:
+//   - Confined by the tenant-scope sites (runVisibleTo returns false for cross-tenant)
+//   - Still admitted by auth-strength-gated actions (hasPermission returns true for
+//     AssuranceStrong-gated permissions)
+//
+// This principal is not constructible by any current code path. The test proves
+// that if such an account type were ever added, the two signals would correctly
+// remain independent: the account would see only its own tenant's data but could
+// still perform strongly-authenticated operations.
+func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
+	// Hypothetical tenant-scoped principal with strong assurance — not producible today.
+	strongScoped := &Principal{
+		ID:          "future-strong-scoped-account",
+		Assurance:   session.AssuranceStrong,
+		GlobalScope: false,
+		TenantID:    "tenant-a",
+	}
+
+	// Tenant-scope sites: GlobalScope=false confines the principal regardless of Assurance.
+	run := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
+	assert.False(t, runVisibleTo(strongScoped, run, "tenant-a"),
+		"AssuranceStrong+GlobalScope:false principal must be tenant-confined by runVisibleTo (cross-tenant run must be invisible)")
+	assert.True(t, runVisibleTo(strongScoped, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "tenant-a"),
+		"AssuranceStrong+GlobalScope:false principal must see same-tenant runs")
+
+	// Auth-strength-gated actions: Assurance=AssuranceStrong passes regardless of GlobalScope.
+	server := setupTestServer(t)
+	assert.True(t, server.hasPermission(strongScoped, "certificate:provision"),
+		"AssuranceStrong principal must pass hasPermission for any permission regardless of GlobalScope")
+	assert.True(t, server.hasPermission(strongScoped, "rbac:create-role"),
+		"AssuranceStrong principal must pass hasPermission for strong-gated permissions regardless of GlobalScope")
+
+	// requirePermission must admit the principal on an AssuranceStrong-gated route.
+	admitted := false
+	handler := server.requirePermission("certificate", "provision")(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			admitted = true
+			w.WriteHeader(http.StatusOK)
+		}))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, strongScoped))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.True(t, admitted,
+		"AssuranceStrong+GlobalScope:false principal must be admitted by requirePermission on a Strong-gated route (body: %s)", rec.Body.String())
 }
 
 // ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------

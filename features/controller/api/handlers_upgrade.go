@@ -24,7 +24,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -134,9 +133,9 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	// Scope to the caller's subtree. An explicit selector prefix must be within
 	// the caller's subtree; absent prefix defaults to callerTenantID and all
-	// descendants. Admin callers (empty callerTenantID) are unrestricted.
+	// descendants. Global-scope callers (empty callerTenantID) are unrestricted.
 	if parsedTenantPath != "" {
-		if principal.Assurance < session.AssuranceBasic && callerTenantID != "" &&
+		if !principal.GlobalScope && callerTenantID != "" &&
 			parsedTenantPath != callerTenantID &&
 			!strings.HasPrefix(parsedTenantPath, callerTenantID+"/") {
 			s.writeErrorResponse(w, http.StatusForbidden,
@@ -144,7 +143,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if principal.Assurance < session.AssuranceBasic {
+	} else if !principal.GlobalScope {
 		filter.TenantSubtree = callerTenantID
 	}
 
@@ -247,12 +246,12 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Record tenant: scoped callers are bound to their own tenant (== steward tenant by
-		// the isolation filter above). Admins (empty tenant) attribute each record to the
-		// target steward's tenant so per-tenant status/rollback isolation keeps working
-		// (Issue #1999).
+		// the isolation filter above). Global-scope callers (empty tenant) attribute each
+		// record to the target steward's tenant so per-tenant status/rollback isolation keeps
+		// working (Issue #1999).
 		recordTenantID := callerTenantID
 		authMethod := "api_key"
-		if principal.Assurance >= session.AssuranceBasic {
+		if principal.GlobalScope {
 			recordTenantID = st.TenantID
 			authMethod = "mtls_admin"
 		}
@@ -422,9 +421,9 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant isolation: machine-assurance callers can only view records in their own
-	// tenant; human-authenticated principals have global access (Issue #1999).
-	if principal.Assurance < session.AssuranceBasic && record.TenantID != callerTenantID {
+	// Tenant isolation: tenant-scoped callers can only view records in their own
+	// tenant; global-scope principals have cross-tenant access (Issue #1999).
+	if !principal.GlobalScope && record.TenantID != callerTenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
@@ -475,18 +474,18 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
-	// Tenant isolation: machine-assurance callers can only roll back records in their own
-	// tenant; human-authenticated principals have global access (Issue #1999).
-	if principal.Assurance < session.AssuranceBasic && original.TenantID != callerTenantID {
+	// Tenant isolation: tenant-scoped callers can only roll back records in their own
+	// tenant; global-scope principals have cross-tenant access (Issue #1999).
+	if !principal.GlobalScope && original.TenantID != callerTenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
 	// Record tenant: the rollback record is attributed to the original record's tenant for
-	// human-authenticated callers (global scope) and to the caller's tenant for machine-assurance
-	// callers (== original tenant by the isolation check above), so per-tenant status/listing
+	// global-scope callers and to the caller's tenant for tenant-scoped callers
+	// (== original tenant by the isolation check above), so per-tenant status/listing
 	// stays consistent (Issue #1999).
 	effectiveTenantID := callerTenantID
-	if principal.Assurance >= session.AssuranceBasic {
+	if principal.GlobalScope {
 		effectiveTenantID = original.TenantID
 	}
 	// Blob namespace: the rollback binary is read from the caller's namespace, the same place
@@ -563,7 +562,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rollbackAuthMethod := "api_key"
-	if principal.Assurance >= session.AssuranceBasic {
+	if principal.GlobalScope {
 		rollbackAuthMethod = "mtls_admin"
 	}
 	rollbackUpgradeID := uuid.New().String()

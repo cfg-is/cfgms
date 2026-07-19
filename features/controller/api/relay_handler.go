@@ -120,10 +120,12 @@ func (h *RelayHandler) handleRelayEvent(ctx context.Context, event *cpTypes.Even
 	// (set at dispatch time from device registration) — not from the event body.
 	// AssuranceMachine is deliberate: it makes the relay-script principal fail every
 	// Assurance >= AssuranceBasic check by construction (ADR-021, Issue #2780).
+	// GlobalScope: false confines the relay principal to its tenant subtree.
 	principal := &Principal{
 		ID:          fmt.Sprintf("relay:%s:%s", deviceID, executionID),
 		Name:        fmt.Sprintf("relay-script:%s", deviceID),
 		Assurance:   session.AssuranceMachine,
+		GlobalScope: false,
 		Permissions: grant.Scope,
 		TenantID:    grant.TenantID,
 	}

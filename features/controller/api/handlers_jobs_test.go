@@ -30,7 +30,7 @@ func newTestBatchJobStoreForAPI() batchjob.BatchJobStore {
 // adminPrincipal returns a global-admin principal with no tenant scope,
 // mirroring the mTLS admin certificate path in authenticationMiddleware.
 func adminPrincipal() *Principal {
-	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}
+	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 }
 
 // tenantPrincipal returns a machine-assurance principal scoped to the given tenant,
@@ -458,7 +458,7 @@ func TestJobsTenantIsolation_AssuranceBoundary(t *testing.T) {
 	}{
 		{
 			name:       "admin_AssuranceBasic_any_tenant",
-			principal:  &Principal{ID: "mTLS-admin", Assurance: session.AssuranceBasic, TenantID: ""},
+			principal:  &Principal{ID: "mTLS-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""},
 			jobTenant:  "tenant-z",
 			wantStatus: http.StatusOK,
 		},
