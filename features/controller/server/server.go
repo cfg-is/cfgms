@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1667,12 +1668,18 @@ func (s *Server) Start() error {
 			controllerTransport.DefaultLogStreamConfig(),
 		)
 		s.logStreamHandler = logStreamHandler
+		telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil)
 		composite := newCompositeTransportServer(cpHandler, s.logger)
 		composite.SetConfigHandler(s.configHandler)
 		composite.SetDNAHandler(dnaHandler)
 		composite.SetBulkHandler(bulkHandler)
 		composite.SetLogStreamHandler(logStreamHandler)
+		composite.SetTelemetryHandler(telemetryHandler)
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
+		// Wire telemetry WebSocket fan-out into the REST API (Issue #2765).
+		if s.httpServer != nil {
+			s.httpServer.SetTelemetryHandler(http.HandlerFunc(telemetryHandler.ServeWebSocket))
+		}
 
 		// Start serving on the shared QUIC listener
 		go func() {

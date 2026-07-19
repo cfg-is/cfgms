@@ -9,6 +9,7 @@ var knownPermissions = map[string]bool{
 	// Steward management
 	"steward:list":            true,
 	"steward:read":            true,
+	"steward:telemetry":       true, // Issue #2765: live telemetry WebSocket fan-out
 	"steward:read-dna":        true,
 	"steward:read-logs":       true,
 	"steward:auth-refresh":    true,

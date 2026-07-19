@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/workflow"
@@ -127,6 +128,61 @@ func TestServer_SetRollbackManager_EnforcesPermissionGate(t *testing.T) {
 		"rollback route must not return 403 for caller with config:rollback permission")
 	assert.NotEqual(t, http.StatusNotFound, rec.Code,
 		"rollback route must not return 404 for caller with config:rollback permission")
+}
+
+// TestServer_SetTelemetryHandler_RegistersRBACGatedRoute verifies that the
+// /api/v1/telemetry/ws/{id} WebSocket route is registered behind the
+// steward:telemetry RBAC gate with cross-tenant isolation when SetTelemetryHandler
+// is called (Issue #2765).
+func TestServer_SetTelemetryHandler_RegistersRBACGatedRoute(t *testing.T) {
+	const stewardID = "some-steward"
+	server := setupTestServer(t)
+
+	// Route must be absent before SetTelemetryHandler.
+	req := httptest.NewRequest("GET", "/api/v1/telemetry/ws/"+stewardID, nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"telemetry route must be 404 before SetTelemetryHandler")
+
+	// Wire a minimal handler post-construction, exactly as production does.
+	server.SetTelemetryHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+
+	// Register a steward so the tenant-isolation wrapper can find it.
+	// NewTestKey creates keys scoped to "test-tenant"; the steward must be in the
+	// same tenant subtree so the cross-tenant check does not return 404.
+	err := server.controllerService.RegisterSteward(stewardID, "test-tenant", "localhost:0", "active")
+	require.NoError(t, err, "test setup: RegisterSteward must not fail")
+
+	// Unauthenticated request must return 401 (route present, auth middleware fired).
+	req = httptest.NewRequest("GET", "/api/v1/telemetry/ws/"+stewardID, nil)
+	rec = httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"GET /api/v1/telemetry/ws/{id} must return 401 when unauthenticated (route present, not 404)")
+
+	// Caller with steward:read but NOT steward:telemetry must be denied.
+	noPermKey := NewTestKey(t, server, []string{"steward:read"})
+	req = httptest.NewRequest("GET", "/api/v1/telemetry/ws/"+stewardID, nil)
+	req.Header.Set("X-API-Key", noPermKey)
+	rec = httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"steward:read caller must be denied access to telemetry route (403, not 404 or 200)")
+
+	// Caller with steward:telemetry must pass the RBAC gate and reach the handler.
+	// The test handler returns 101 Switching Protocols.
+	permKey := NewTestKey(t, server, []string{"steward:telemetry"})
+	req = httptest.NewRequest("GET", "/api/v1/telemetry/ws/"+stewardID, nil)
+	req.Header.Set("X-API-Key", permKey)
+	rec = httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"steward:telemetry caller must not be denied (403)")
+	assert.NotEqual(t, http.StatusNotFound, rec.Code,
+		"steward:telemetry caller must not get 404")
 }
 
 // TestServer_SetWorkflowHandler_NilHandler_NoopSafe re-verifies (regression guard) that

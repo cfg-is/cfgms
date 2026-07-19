@@ -15,8 +15,8 @@ import (
 // compositeTransportServer delegates StewardTransport RPCs to the appropriate
 // handler. Control plane RPCs go to the CP handler; SyncConfig is handled
 // directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
-// by the bulk handler; LogStream by the log stream handler. Future RPCs
-// (TaskStream, Terminal) fall through to the Unimplemented base.
+// by the bulk handler; LogStream by the log stream handler; TelemetryStream
+// by the telemetry handler. Future RPCs fall through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
@@ -25,6 +25,7 @@ type compositeTransportServer struct {
 	dnaHandler       *controllerTransport.DNAHandler       // SyncDNA (direct handling)
 	bulkHandler      *controllerTransport.BulkHandler      // BulkTransfer (direct handling)
 	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
+	telemetryHandler *controllerTransport.TelemetryHandler // TelemetryStream (direct handling)
 	logger           logging.Logger
 }
 
@@ -59,6 +60,11 @@ func (c *compositeTransportServer) SetBulkHandler(h *controllerTransport.BulkHan
 // SetLogStreamHandler sets the LogStream handler. Call after newCompositeTransportServer.
 func (c *compositeTransportServer) SetLogStreamHandler(h *controllerTransport.LogStreamHandler) {
 	c.logStreamHandler = h
+}
+
+// SetTelemetryHandler sets the TelemetryStream handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetTelemetryHandler(h *controllerTransport.TelemetryHandler) {
+	c.telemetryHandler = h
 }
 
 // --- Control Plane RPCs (delegated to CP handler) ---
@@ -115,4 +121,15 @@ func (c *compositeTransportServer) LogStream(stream grpc.ClientStreamingServer[t
 		return c.logStreamHandler.HandleGRPC(stream)
 	}
 	return c.UnimplementedStewardTransportServer.LogStream(stream)
+}
+
+// TelemetryStream is handled directly by the telemetry handler. Received
+// TelemetrySnapshot frames are fanned out to browser WebSocket subscribers;
+// TelemetryRequest frames (subscribe/unsubscribe/interval) are sent upstream
+// on 0→1 and 1→0 browser subscriber transitions.
+func (c *compositeTransportServer) TelemetryStream(stream grpc.BidiStreamingServer[transportpb.TelemetrySnapshot, transportpb.TelemetryRequest]) error {
+	if c.telemetryHandler != nil {
+		return c.telemetryHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.TelemetryStream(stream)
 }
