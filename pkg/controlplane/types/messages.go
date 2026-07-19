@@ -48,6 +48,11 @@ const (
 	// Params: version (string), download_url (string), sha256 (string),
 	// platform (string), arch (string), publisher (string), bundle_signature ([]byte base64).
 	CommandPushStewardBinary CommandType = "push_steward_binary"
+
+	// CommandOpenTerminal instructs the steward to dial the controller's Terminal RPC
+	// and bridge the stream to a local PTY for an interactive admin session. (Issue #2760)
+	// Params: session_id (string), shell (string), cols (int32), rows (int32).
+	CommandOpenTerminal CommandType = "open_terminal"
 )
 
 // Command represents a command sent from controller to steward.

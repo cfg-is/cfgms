@@ -917,6 +917,16 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// the script module executor and publishes EventScriptCompleted (Issue #1669).
 	handler.RegisterExecuteScriptHandler()
 
+	// Register open_terminal handler — steward dials out Terminal RPC and bridges
+	// it to a local PTY for an interactive admin session. (Issue #2760)
+	//
+	// The dialer resolves the gRPC transport client lazily at Dial() time rather
+	// than at setup time. Registering unconditionally (like every other handler)
+	// removes the silent "no handler for command type" failure mode that occurred
+	// when the transport client was not yet available at setup, and makes the
+	// wiring exercisable with an in-process control plane.
+	handler.RegisterOpenTerminalHandler(&terminalDialer{c: c})
+
 	// Register push_signing_cert handler — controller pushes current signing cert on connect
 	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
 	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {
