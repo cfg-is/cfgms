@@ -5,6 +5,7 @@ package client
 import (
 	"context"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -248,6 +249,17 @@ func clampTelemetryInterval(ms int32) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// safePID converts an OS PID (int, architecture-dependent width) to int32 for
+// the proto wire type. OS PIDs on supported platforms fit well within int32
+// range (Linux max is 2^22, Windows HANDLE-carried PIDs are similar); the
+// explicit bounds check satisfies the narrowing-conversion invariant.
+func safePID(pid int) int32 {
+	if pid > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int32(pid)
+}
+
 // telemetryToProto converts a [telemetry.Telemetry] snapshot into the proto
 // wire type, stamping stewardID and a current timestamp.
 func telemetryToProto(t telemetry.Telemetry, stewardID string) *transportpb.TelemetrySnapshot {
@@ -255,7 +267,7 @@ func telemetryToProto(t telemetry.Telemetry, stewardID string) *transportpb.Tele
 	for i, p := range t.Processes {
 		processes[i] = &transportpb.ProcessSnapshot{
 			FragmentId:     p.FragmentID,
-			Pid:            int32(p.PID),
+			Pid:            safePID(p.PID),
 			Name:           p.Name,
 			CpuPercent:     p.CPUPercent,
 			MemoryBytes:    p.MemoryBytes,
