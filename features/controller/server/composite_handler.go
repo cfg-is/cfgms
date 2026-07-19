@@ -28,23 +28,37 @@ type compositeTransportServer struct {
 	logger           logging.Logger
 }
 
-// newCompositeTransportServer creates a composite handler that delegates RPCs.
+// newCompositeTransportServer creates a composite handler with the always-required
+// CP handler and logger. Wire optional data-plane handlers via SetConfigHandler,
+// SetDNAHandler, SetBulkHandler, and SetLogStreamHandler before serving.
 func newCompositeTransportServer(
 	cpHandler transportpb.StewardTransportServer,
-	dnaHandler *controllerTransport.DNAHandler,
-	bulkHandler *controllerTransport.BulkHandler,
-	configHandler *controllerTransport.ConfigHandler,
-	logStreamHandler *controllerTransport.LogStreamHandler,
 	logger logging.Logger,
 ) *compositeTransportServer {
 	return &compositeTransportServer{
-		cpHandler:        cpHandler,
-		configHandler:    configHandler,
-		dnaHandler:       dnaHandler,
-		bulkHandler:      bulkHandler,
-		logStreamHandler: logStreamHandler,
-		logger:           logger,
+		cpHandler: cpHandler,
+		logger:    logger,
 	}
+}
+
+// SetConfigHandler sets the SyncConfig handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetConfigHandler(h *controllerTransport.ConfigHandler) {
+	c.configHandler = h
+}
+
+// SetDNAHandler sets the SyncDNA handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetDNAHandler(h *controllerTransport.DNAHandler) {
+	c.dnaHandler = h
+}
+
+// SetBulkHandler sets the BulkTransfer handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetBulkHandler(h *controllerTransport.BulkHandler) {
+	c.bulkHandler = h
+}
+
+// SetLogStreamHandler sets the LogStream handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetLogStreamHandler(h *controllerTransport.LogStreamHandler) {
+	c.logStreamHandler = h
 }
 
 // --- Control Plane RPCs (delegated to CP handler) ---

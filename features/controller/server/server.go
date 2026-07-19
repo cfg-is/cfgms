@@ -1667,7 +1667,11 @@ func (s *Server) Start() error {
 			controllerTransport.DefaultLogStreamConfig(),
 		)
 		s.logStreamHandler = logStreamHandler
-		composite := newCompositeTransportServer(cpHandler, dnaHandler, bulkHandler, s.configHandler, logStreamHandler, s.logger)
+		composite := newCompositeTransportServer(cpHandler, s.logger)
+		composite.SetConfigHandler(s.configHandler)
+		composite.SetDNAHandler(dnaHandler)
+		composite.SetBulkHandler(bulkHandler)
+		composite.SetLogStreamHandler(logStreamHandler)
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
 
 		// Start serving on the shared QUIC listener
