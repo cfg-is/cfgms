@@ -147,6 +147,7 @@ func (g *genericConfigState) GetManagedFields() []string {
 		"winrm_user_secret":        true, // module operational: SecretStore key
 		"winrm_pass_secret":        true, // module operational: SecretStore key
 		"source":                   true, // create-time provisioning directive (existence-gated, ADR-009); never reported by getVM (source: nil), so comparing it drifts every cycle on a provisioned VM
+		"old_name":                 true, // #2776 in-place rename directive: consumed by setVM to locate the source VM, never reported by getVM (which returns the VM under its NEW name), so comparing it drifts every cycle after a completed rename. The rename still triggers — the VM under the new name is absent, so its other fields drift.
 		"enroll_token":             true, // module operational: hyperv create-from-source join token (ADR-010)
 		"enroll_ca_fingerprint":    true, // module operational: controller CA fingerprint for guest TOFU
 		"enroll_steward_path":      true, // module operational: host path to steward binary staged on seed

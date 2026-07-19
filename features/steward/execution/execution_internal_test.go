@@ -123,6 +123,7 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 		"source":                   map[string]interface{}{"image": "x.raw"},
 		"enroll_launcher_path":     `C:\seed\launcher`,
 		"debug_ssh_authorized_key": "ssh-ed25519 AAAA...",
+		"old_name":                 "demo-vm-old", // #2776 rename directive: consumed by setVM, never reported by getVM
 		// Actual resource state — must remain.
 		"switch_type": "internal",
 		"state":       "present",
@@ -135,7 +136,7 @@ func TestGenericConfigState_ExcludesModuleOperationalKeys(t *testing.T) {
 		"path", "name",
 		"transport", "tenant_id", "steward_id", "audit_manager",
 		"winrm_host", "winrm_user_secret", "winrm_pass_secret",
-		"source", "enroll_launcher_path", "debug_ssh_authorized_key",
+		"source", "enroll_launcher_path", "debug_ssh_authorized_key", "old_name",
 	} {
 		assert.NotContains(t, fields, key,
 			"%q is a module-operational/identifier key and must not appear in managed fields", key)
@@ -225,10 +226,14 @@ func TestCompareStates_ProvisionedVM_NoFalseDrift(t *testing.T) {
 		"source":                   map[string]interface{}{"image": `C:\iso\debian.raw`, "os_family": "linux", "on_existing": "never"},
 		"enroll_launcher_path":     `C:\ClusterStorage\CSV01\seed-assets\cfgms-steward-launcher-linux`,
 		"debug_ssh_authorized_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 cfgms-lab@cfg-lab",
+		// #2776 in-place rename directive left in config after the rename completed:
+		// consumed by setVM to locate the source VM, never reported by getVM (which
+		// returns the VM under its NEW name). Must not drift once the rename is done.
+		"old_name": "cfgms-ci-lin-01-old",
 	}}
 
 	// What getVM reports for the same running VM: observable state matches, but
-	// source is nil and the enrollment/ssh fields are absent.
+	// source is nil and the enrollment/ssh/old_name fields are absent.
 	current := &genericConfigState{data: map[string]interface{}{
 		"name":      "cfgms-ci-lin-01",
 		"state":     "running",
