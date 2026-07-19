@@ -82,15 +82,35 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
-// isTestFile reports whether the grep output line references a _test.go file.
-func isTestFile(line string) bool {
-	// grep output format: path/to/file.go:line:match
-	for i, c := range line {
-		if c == ':' {
-			return len(line) >= i && containsTestSuffix(line[:i])
+// extractGrepPath returns the file path portion of a grep output line.
+//
+// grep output format: path:linenum:match
+//
+// On Windows, the path may begin with a drive-letter prefix such as "D:\",
+// so the first ':' in the line is the drive colon, not the path/linenum separator.
+// We detect this case (single ASCII letter followed by ':') and skip over the
+// volume prefix before scanning for the real separator colon.
+func extractGrepPath(line string) string {
+	start := 0
+	// Windows volume prefix: single ASCII letter + ':' (e.g. "D:").
+	if len(line) >= 2 && line[1] == ':' && isASCIILetter(line[0]) {
+		start = 2
+	}
+	for i := start; i < len(line); i++ {
+		if line[i] == ':' {
+			return line[:i]
 		}
 	}
-	return false
+	return line
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// isTestFile reports whether the grep output line references a _test.go file.
+func isTestFile(line string) bool {
+	return containsTestSuffix(extractGrepPath(line))
 }
 
 func containsTestSuffix(path string) bool {
@@ -100,23 +120,138 @@ func containsTestSuffix(path string) bool {
 
 // isDocsPath reports whether the grep output line refers to a file under docs/.
 func isDocsPath(line string) bool {
-	for i, c := range line {
-		if c == ':' {
-			path := line[:i]
-			rel := filepath.ToSlash(path)
-			// Require the full directory boundary: "/docs/" or a relative path starting "docs/".
-			// Checking "/docs/" (6 chars) avoids false positives from filenames like
-			// "features/config/docstore.go" which contain "/docs" without being in docs/.
-			for j := 0; j < len(rel)-6; j++ {
-				if rel[j:j+6] == "/docs/" {
-					return true
-				}
-			}
-			if len(rel) >= 5 && rel[:5] == "docs/" {
-				return true
-			}
-			return false
+	path := extractGrepPath(line)
+	rel := filepath.ToSlash(path)
+	// Require the full directory boundary: "/docs/" or a relative path starting "docs/".
+	// Checking "/docs/" (6 chars) avoids false positives from filenames like
+	// "features/config/docstore.go" which contain "/docs" without being in docs/.
+	for j := 0; j < len(rel)-6; j++ {
+		if rel[j:j+6] == "/docs/" {
+			return true
 		}
 	}
-	return false
+	return len(rel) >= 5 && rel[:5] == "docs/"
+}
+
+// TestExtractGrepPath_WindowsDriveLetter verifies that extractGrepPath correctly
+// skips the Windows drive-letter colon so _test.go and docs/ filtering works
+// on merge-group Windows runners. Regression test for the eviction bug where
+// D:\...\foo_test.go:17:match was split at 'D' instead of the actual path.
+func TestExtractGrepPath_WindowsDriveLetter(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "unix_path",
+			line: "/home/runner/work/cfgms/features/controller/api/handlers.go:42:match",
+			want: "/home/runner/work/cfgms/features/controller/api/handlers.go",
+		},
+		{
+			name: "unix_test_path",
+			line: "/home/runner/work/cfgms/features/controller/api/no_isadmin_test.go:17:// TestNoIsAdminInGoSource",
+			want: "/home/runner/work/cfgms/features/controller/api/no_isadmin_test.go",
+		},
+		{
+			name: "windows_uppercase_drive",
+			line: `D:\a\cfgms\cfgms/features/controller/api/handlers.go:42:match`,
+			want: `D:\a\cfgms\cfgms/features/controller/api/handlers.go`,
+		},
+		{
+			name: "windows_test_file",
+			line: `D:\a\cfgms\cfgms/features/controller/api/no_isadmin_test.go:17:// TestNoIsAdminInGoSource`,
+			want: `D:\a\cfgms\cfgms/features/controller/api/no_isadmin_test.go`,
+		},
+		{
+			name: "windows_lowercase_drive",
+			line: `c:\workspace\cfgms\features\controller\api\handlers.go:100:match`,
+			want: `c:\workspace\cfgms\features\controller\api\handlers.go`,
+		},
+		{
+			name: "relative_path_no_drive",
+			line: "features/controller/api/handlers.go:42:match",
+			want: "features/controller/api/handlers.go",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractGrepPath(tc.line)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestIsTestFile_WindowsDriveLetter verifies that _test.go files are correctly
+// identified when the grep line contains a Windows drive-letter prefix.
+func TestIsTestFile_WindowsDriveLetter(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "windows_test_file_is_test",
+			line: `D:\a\cfgms\cfgms/features/controller/api/no_isadmin_test.go:17:// TestNoIsAdminInGoSource`,
+			want: true,
+		},
+		{
+			name: "windows_prod_file_not_test",
+			line: `D:\a\cfgms\cfgms/features/controller/api/handlers.go:42:.IsAdmin`,
+			want: false,
+		},
+		{
+			name: "unix_test_file_is_test",
+			line: "/workspace/features/controller/api/no_isadmin_test.go:25:s := string(line)",
+			want: true,
+		},
+		{
+			name: "unix_prod_file_not_test",
+			line: "/workspace/features/controller/api/handlers.go:42:.IsAdmin",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isTestFile(tc.line)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestIsDocsPath_WindowsDriveLetter verifies that docs/ paths are correctly
+// identified when the grep line contains a Windows drive-letter prefix.
+func TestIsDocsPath_WindowsDriveLetter(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "windows_docs_path",
+			line: `D:\a\cfgms\cfgms/docs/architecture/operating-model.md:5:IsAdmin`,
+			want: true,
+		},
+		{
+			name: "windows_non_docs_path",
+			line: `D:\a\cfgms\cfgms/features/controller/api/handlers.go:42:.IsAdmin`,
+			want: false,
+		},
+		{
+			name: "unix_docs_path",
+			line: "/workspace/docs/architecture/operating-model.md:5:IsAdmin",
+			want: true,
+		},
+		{
+			name: "windows_docstore_not_docs_dir",
+			line: `D:\a\cfgms\cfgms/features/config/docstore.go:10:.IsAdmin`,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isDocsPath(tc.line)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
