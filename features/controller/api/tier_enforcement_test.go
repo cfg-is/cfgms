@@ -74,6 +74,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/cluster/nodes/test-id/decommission", "cluster:decommission-node"},
 	// Session credential-minting (Issue #2780) — requires step-up before issuing Bearer token.
 	{"POST", "/api/v1/sessions", "session:create"},
+	// WebAuthn passkey / FIDO2 registration (Issue #2782) — credential-minting surface.
+	{"POST", "/api/v1/web/accounts/test-user/webauthn/register/begin", "webauthn:register"},
+	{"POST", "/api/v1/web/accounts/test-user/webauthn/register/finish", "webauthn:register"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

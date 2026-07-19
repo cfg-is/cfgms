@@ -91,6 +91,10 @@ var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 // Accounts carry the same principal fields the session path builds (Principal):
 // they are RBAC-equivalent to API-key principals (ADR-014 §7 parity), NOT
 // implicit global admins.
+//
+// Credentials holds registered WebAuthn passkeys / FIDO2 credentials (Issue #2782).
+// These are public keys — they are stored in the same secrets-store record as the
+// argon2id hash (one persistence path per account). See WebAuthnCredential.
 type webAccount struct {
 	ID           string
 	Username     string
@@ -98,6 +102,7 @@ type webAccount struct {
 	Permissions  []string
 	PasswordHash string // argon2id PHC string
 	CreatedAt    time.Time
+	Credentials  []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
 }
 
 // webAccountLockout is the per-account lockout state owned by this store.
@@ -289,14 +294,37 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 		PasswordHash: secret.Value,
 		CreatedAt:    secret.CreatedAt,
 	}
+	// Issue #2782: deserialize stored WebAuthn credentials (public keys; non-secret).
+	if credsJSON, ok := secret.Metadata["credentials"]; ok && credsJSON != "" {
+		var creds []WebAuthnCredential
+		if err := json.Unmarshal([]byte(credsJSON), &creds); err == nil {
+			acct.Credentials = creds
+		}
+	}
 	s.cacheWebAccount(acct)
 	return acct, nil
 }
 
 // persistWebAccount writes the account record through the central pkg/secrets seam
 // (same seam as API keys — handlers_apikeys.go): value is the argon2id PHC hash,
-// never the password.
+// never the password. WebAuthn credentials (public keys) are serialized to JSON
+// in the metadata — they are not secret material so the secrets store's encryption
+// is incidental (the same record is used for simplicity).
 func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, createdBy string) error {
+	meta := map[string]string{
+		secretsif.MetadataKeySecretType: webAccountSecretType,
+		"id":                            acct.ID,
+		"username":                      acct.Username,
+		"permissions":                   serializePermissions(acct.Permissions),
+		"created_at":                    acct.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	// Issue #2782: persist WebAuthn credentials (public keys) in metadata.
+	if len(acct.Credentials) > 0 {
+		credsJSON, err := json.Marshal(acct.Credentials)
+		if err == nil {
+			meta["credentials"] = string(credsJSON)
+		}
+	}
 	secretReq := &secretsif.SecretRequest{
 		Key:         webAccountStoreKey(acct.Username),
 		Value:       acct.PasswordHash, // argon2id PHC hash only — plaintext is never stored
@@ -304,13 +332,7 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 		CreatedBy:   createdBy,
 		Description: "web admin account",
 		Tags:        []string{"web-account"},
-		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
-			"id":                            acct.ID,
-			"username":                      acct.Username,
-			"permissions":                   serializePermissions(acct.Permissions),
-			"created_at":                    acct.CreatedAt.UTC().Format(time.RFC3339),
-		},
+		Metadata:    meta,
 	}
 	return s.secretStore.StoreSecret(ctx, secretReq)
 }
@@ -501,6 +523,8 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		if acct.Permissions == nil {
 			acct.Permissions = existing.Permissions
 		}
+		// Issue #2782: preserve registered WebAuthn credentials across password resets.
+		acct.Credentials = existing.Credentials
 		action = "web_account.password_reset"
 		status = http.StatusOK
 	}
