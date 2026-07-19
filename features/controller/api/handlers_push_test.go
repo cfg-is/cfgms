@@ -31,6 +31,7 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -1171,4 +1172,70 @@ func TestHandleConfigPush_FleetQueryError_Returns500(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, pending, "500 fleet-query failure must not create a push record")
 	assert.Empty(t, cp.ReceivedIDs(), "500 fleet-query failure must not trigger fan-out")
+}
+
+// ── Tenant isolation regression test — Issue #2781 ───────────────────────────
+
+// TestGetConfigPush_AssuranceBoundary is a table-driven regression test
+// confirming that the Assurance-based tenant-isolation gate in handlers_push.go
+// is byte-for-byte equivalent to the deleted IsAdmin-based check:
+//   - AssuranceBasic (admin) principal gets global read access regardless of the record's tenant.
+//   - AssuranceMachine (API key) principal sees only same-tenant records (404 otherwise).
+func TestGetConfigPush_AssuranceBoundary(t *testing.T) {
+	const recordTenant = "tenant-abc"
+
+	cases := []struct {
+		name       string
+		principal  *Principal
+		callerTID  string // tenantID context value
+		wantStatus int
+	}{
+		{
+			name:       "AssuranceBasic_admin_any_tenant",
+			principal:  &Principal{ID: "mtls-admin", Assurance: session.AssuranceBasic, TenantID: ""},
+			callerTID:  "",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "AssuranceMachine_same_tenant",
+			principal:  &Principal{ID: "api-key-abc", Assurance: session.AssuranceMachine, TenantID: recordTenant},
+			callerTID:  recordTenant,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "AssuranceMachine_cross_tenant_404",
+			principal:  &Principal{ID: "api-key-other", Assurance: session.AssuranceMachine, TenantID: "tenant-other"},
+			callerTID:  "tenant-other",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			// Defense-in-depth: relay-grant principal (AssuranceMachine, tenant-other scoped)
+			// must not see tenant-abc's push record — the handler's Assurance check is the barrier.
+			name:       "relay_grant_AssuranceMachine_cross_tenant_404",
+			principal:  &Principal{ID: "relay:device-1:exec-001", Name: "relay-script:device-1", Assurance: session.AssuranceMachine, TenantID: "tenant-other"},
+			callerTID:  "tenant-other",
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cp := &syncedControlPlane{}
+			server, pushStore := makePushServerWithStore(t, cp)
+
+			rec := createPushRecord(t, pushStore, "push-iso-"+tc.name, recordTenant, "cfg-001")
+
+			req := newGetPushRequest(t, rec.ID)
+			ctx := context.WithValue(req.Context(), principalContextKey, tc.principal)
+			ctx = context.WithValue(ctx, ctxkeys.TenantID, tc.callerTID)
+			req = req.WithContext(ctx)
+			httpRec := httptest.NewRecorder()
+
+			server.handleGetConfigPush(httpRec, req)
+
+			assert.Equal(t, tc.wantStatus, httpRec.Code,
+				"principal %+v accessing record in %q", tc.principal, recordTenant)
+		})
+	}
 }

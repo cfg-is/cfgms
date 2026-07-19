@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // jobExecutor is the minimal interface satisfied by *batchjob.RollingBatchExecutor.
@@ -98,7 +99,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
 	// Admin callers (empty tenantID) are unrestricted.
 	if parsedTenantPath != "" {
-		if !principal.IsAdmin && tenantID != "" &&
+		if principal.Assurance < session.AssuranceBasic && tenantID != "" &&
 			parsedTenantPath != tenantID &&
 			!strings.HasPrefix(parsedTenantPath, tenantID+"/") {
 			s.writeErrorResponse(w, http.StatusForbidden,
@@ -106,7 +107,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if !principal.IsAdmin {
+	} else if principal.Assurance < session.AssuranceBasic {
 		filter.TenantSubtree = tenantID
 	}
 
@@ -207,7 +208,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !principal.IsAdmin && job.TenantID != tenantID {
+	if principal.Assurance < session.AssuranceBasic && job.TenantID != tenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}

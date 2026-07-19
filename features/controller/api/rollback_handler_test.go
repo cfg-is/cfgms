@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // testRollbackManager implements rollback.RollbackManager for handler-level tests.
@@ -59,9 +60,9 @@ func (m *testRollbackManager) ListRollbackHistory(_ context.Context, _ rollback.
 func scopedPrincipalExtractor(tenantID string) func(*http.Request) *Principal {
 	return func(_ *http.Request) *Principal {
 		return &Principal{
-			ID:       "admin-api-key",
-			TenantID: tenantID,
-			IsAdmin:  false,
+			ID:        "admin-api-key",
+			TenantID:  tenantID,
+			Assurance: session.AssuranceMachine,
 		}
 	}
 }
@@ -69,8 +70,8 @@ func scopedPrincipalExtractor(tenantID string) func(*http.Request) *Principal {
 func adminPrincipalExtractor() func(*http.Request) *Principal {
 	return func(_ *http.Request) *Principal {
 		return &Principal{
-			ID:      "admin-cert-cn",
-			IsAdmin: true,
+			ID:        "admin-cert-cn",
+			Assurance: session.AssuranceBasic,
 		}
 	}
 }
@@ -145,7 +146,7 @@ func TestConfigRollback_AllowsChildTenant(t *testing.T) {
 }
 
 func TestConfigRollback_AdminPrincipalSkipsTenantCheck(t *testing.T) {
-	// Full admin (IsAdmin=true, TenantID="") can access any tenant.
+	// Full admin (Assurance >= AssuranceBasic, TenantID="") can access any tenant.
 	mgr := &testRollbackManager{}
 	handler := NewRollbackHandler(mgr, adminPrincipalExtractor(), nil, nil)
 

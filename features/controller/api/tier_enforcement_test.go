@@ -190,7 +190,6 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	strongPrincipal := &Principal{
 		ID:         "cert-admin",
 		Name:       "mtls-cert:cert-admin",
-		IsAdmin:    true,
 		Assurance:  session.AssuranceStrong,
 		CertSerial: "abc123",
 	}
@@ -256,7 +255,6 @@ func TestAssuranceGate_BasicAssurance_GetsStepUp(t *testing.T) {
 	basicPrincipal := &Principal{
 		ID:        "web-admin",
 		Name:      "web-session:web-admin",
-		IsAdmin:   true,
 		Assurance: session.AssuranceBasic,
 	}
 
@@ -298,7 +296,6 @@ func TestAssuranceGate_MachineAssurance_Gets403NotStepUp(t *testing.T) {
 	machinePrincipal := &Principal{
 		ID:        "machine-agent",
 		Name:      "api-key:machine-agent",
-		IsAdmin:   true,
 		Assurance: session.AssuranceMachine,
 	}
 
@@ -332,7 +329,6 @@ func TestAssuranceGate_StrongAssurance_ReachesHandler(t *testing.T) {
 	strongPrincipal := &Principal{
 		ID:         "cert-admin",
 		Name:       "mtls-cert:cert-admin",
-		IsAdmin:    true,
 		Assurance:  session.AssuranceStrong,
 		CertSerial: "abc123",
 	}
@@ -368,7 +364,6 @@ func TestAssuranceGate_RelayPrincipal_Gets403(t *testing.T) {
 	relayPrincipal := &Principal{
 		ID:          "relay-1",
 		Name:        "relay:relay-1",
-		IsAdmin:     false,
 		Assurance:   session.AssuranceMachine,
 		Permissions: []string{"api-key:create"},
 		TenantID:    "relay-tenant",
@@ -419,7 +414,7 @@ func assertStepUpFromRequirePermission(t *testing.T, server *Server, resource, a
 	t.Helper()
 	basicPrincipal := &Principal{
 		ID: "web-admin", Name: "web-session:web-admin",
-		IsAdmin: true, Assurance: session.AssuranceBasic,
+		Assurance: session.AssuranceBasic,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := server.requirePermission(resource, action)(probe)
@@ -462,7 +457,7 @@ func TestAssuranceGate_StepUp_ResponseContainsRequiredAssuranceField(t *testing.
 
 	basicPrincipal := &Principal{
 		ID: "web-admin", Name: "web-session:web-admin",
-		IsAdmin: true, Assurance: session.AssuranceBasic,
+		Assurance: session.AssuranceBasic,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := server.requirePermission("api-key", "create")(probe)

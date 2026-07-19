@@ -113,8 +113,8 @@ func newRelayTestHandler() http.Handler {
 			perms = principal.Permissions
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"permissions": perms,
-			"is_admin":    principal != nil && principal.IsAdmin,
+			"permissions":          perms,
+			"assurance_sufficient": principal != nil && principal.Assurance >= session.AssuranceBasic,
 		})
 	})
 }
@@ -123,8 +123,8 @@ func newRelayTestHandler() http.Handler {
 func newRelayForbiddenHandler(requiredPerm string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, _ := r.Context().Value(principalContextKey).(*Principal)
-		if principal == nil || principal.IsAdmin {
-			// Admin or nil — not expected in relay path.
+		if principal == nil || principal.Assurance >= session.AssuranceBasic {
+			// Human-authenticated or nil — not expected in relay path.
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -341,7 +341,7 @@ func TestRelayHandler_AdminPrincipal_NeverConstructed(t *testing.T) {
 	}))
 
 	require.NotNil(t, capturedPrincipal)
-	assert.False(t, capturedPrincipal.IsAdmin, "relay principal must never be admin")
+	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance, "relay principal must always be Machine assurance")
 	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance, "relay principal must always be Machine assurance")
 	assert.Equal(t, "tenant-1", capturedPrincipal.TenantID)
 }
@@ -504,7 +504,7 @@ func TestRequirePermission_RelayPrincipal_ScopeEnforcedWhenRBACNil(t *testing.T)
 	handler := s.requirePermission("steward", "execute-scripts")(inner)
 
 	// Relay principal has only read-scripts — not execute-scripts.
-	relay := &Principal{IsAdmin: false, Permissions: []string{"steward:read-scripts"}, TenantID: "t1"}
+	relay := &Principal{Assurance: session.AssuranceMachine, Permissions: []string{"steward:read-scripts"}, TenantID: "t1"}
 	ctx := context.WithValue(
 		context.WithValue(context.Background(), relayPrincipalKey, relay),
 		principalContextKey, relay)

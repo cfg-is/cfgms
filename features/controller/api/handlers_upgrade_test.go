@@ -1197,3 +1197,69 @@ func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
 	assert.Equal(t, approvedContent, getRec.Body.Bytes(),
 		"public download must return the exact bytes published under default")
 }
+
+// ── Tenant isolation regression test — Issue #2781 ───────────────────────────
+
+// TestUpgradeStatus_AssuranceBoundary is a table-driven regression test
+// confirming that the Assurance-based tenant-isolation gates in handlers_upgrade.go
+// are byte-for-byte equivalent to the deleted IsAdmin-based checks:
+//   - AssuranceBasic (admin) principal gets global read access regardless of the record's tenant.
+//   - AssuranceMachine (API key) principal sees only same-tenant records (403 otherwise).
+func TestUpgradeStatus_AssuranceBoundary(t *testing.T) {
+	const recordTenant = "tenant-a"
+
+	stewards := []fleet.StewardData{{ID: "steward-1", TenantID: recordTenant, Status: "online"}}
+	server, _ := setupUpgradeServer(t, recordTenant, stewards)
+	publishApprovedBinary(t, server, recordTenant, "v0.5.12", "linux", "amd64")
+
+	// Create one upgrade record owned by tenant-a.
+	dispRec := doDispatchUpgrade(server, recordTenant, "id:steward-1", "v0.5.12", "linux", "amd64")
+	require.Equal(t, http.StatusAccepted, dispRec.Code)
+	var dispResp APIResponse
+	require.NoError(t, json.Unmarshal(dispRec.Body.Bytes(), &dispResp))
+	upgradeID := dispResp.Data.(map[string]interface{})["upgrade_id"].(string)
+
+	cases := []struct {
+		name       string
+		tenantID   string
+		isAdmin    bool
+		wantStatus int
+	}{
+		{
+			name:       "AssuranceBasic_admin_any_tenant",
+			tenantID:   "",
+			isAdmin:    true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "AssuranceMachine_same_tenant",
+			tenantID:   recordTenant,
+			isAdmin:    false,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "AssuranceMachine_cross_tenant_403",
+			tenantID:   "tenant-b",
+			isAdmin:    false,
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var rec *httptest.ResponseRecorder
+			if tc.isAdmin {
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/"+upgradeID, nil)
+				req = withAdminPrincipal(req)
+				req = mux.SetURLVars(req, map[string]string{"upgrade_id": upgradeID})
+				rec = httptest.NewRecorder()
+				server.handleUpgradeStatus(rec, req)
+			} else {
+				rec = doUpgradeStatus(server, tc.tenantID, upgradeID)
+			}
+			assert.Equal(t, tc.wantStatus, rec.Code,
+				"tenantID=%q isAdmin=%v accessing upgrade record in %q", tc.tenantID, tc.isAdmin, recordTenant)
+		})
+	}
+}

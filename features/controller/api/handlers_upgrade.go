@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -135,7 +136,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	// the caller's subtree; absent prefix defaults to callerTenantID and all
 	// descendants. Admin callers (empty callerTenantID) are unrestricted.
 	if parsedTenantPath != "" {
-		if !principal.IsAdmin && callerTenantID != "" &&
+		if principal.Assurance < session.AssuranceBasic && callerTenantID != "" &&
 			parsedTenantPath != callerTenantID &&
 			!strings.HasPrefix(parsedTenantPath, callerTenantID+"/") {
 			s.writeErrorResponse(w, http.StatusForbidden,
@@ -143,7 +144,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if !principal.IsAdmin {
+	} else if principal.Assurance < session.AssuranceBasic {
 		filter.TenantSubtree = callerTenantID
 	}
 
@@ -251,7 +252,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		// (Issue #1999).
 		recordTenantID := callerTenantID
 		authMethod := "api_key"
-		if principal.IsAdmin {
+		if principal.Assurance >= session.AssuranceBasic {
 			recordTenantID = st.TenantID
 			authMethod = "mtls_admin"
 		}
@@ -421,9 +422,9 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant isolation: scoped (non-admin) callers can only view records in their own
-	// tenant; admin mTLS principals have global access (Issue #1999).
-	if !principal.IsAdmin && record.TenantID != callerTenantID {
+	// Tenant isolation: machine-assurance callers can only view records in their own
+	// tenant; human-authenticated principals have global access (Issue #1999).
+	if principal.Assurance < session.AssuranceBasic && record.TenantID != callerTenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
@@ -474,17 +475,18 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
-	// Tenant isolation: scoped (non-admin) callers can only roll back records in their own
-	// tenant; admin mTLS principals have global access (Issue #1999).
-	if !principal.IsAdmin && original.TenantID != callerTenantID {
+	// Tenant isolation: machine-assurance callers can only roll back records in their own
+	// tenant; human-authenticated principals have global access (Issue #1999).
+	if principal.Assurance < session.AssuranceBasic && original.TenantID != callerTenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
 	// Record tenant: the rollback record is attributed to the original record's tenant for
-	// admins (global scope) and to the caller's tenant for scoped callers (== original tenant
-	// by the isolation check above), so per-tenant status/listing stays consistent (Issue #1999).
+	// human-authenticated callers (global scope) and to the caller's tenant for machine-assurance
+	// callers (== original tenant by the isolation check above), so per-tenant status/listing
+	// stays consistent (Issue #1999).
 	effectiveTenantID := callerTenantID
-	if principal.IsAdmin {
+	if principal.Assurance >= session.AssuranceBasic {
 		effectiveTenantID = original.TenantID
 	}
 	// Blob namespace: the rollback binary is read from the caller's namespace, the same place
@@ -561,7 +563,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rollbackAuthMethod := "api_key"
-	if principal.IsAdmin {
+	if principal.Assurance >= session.AssuranceBasic {
 		rollbackAuthMethod = "mtls_admin"
 	}
 	rollbackUpgradeID := uuid.New().String()

@@ -21,6 +21,7 @@ import (
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/session"
 	_ "modernc.org/sqlite"
 )
 
@@ -232,7 +233,7 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 		"shell":   "pwsh",
 	}
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}, body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
@@ -246,7 +247,7 @@ func TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 
 	body := map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"}
 	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
-		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, body)
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}, body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected; body: %s", rec.Body.String())
@@ -264,7 +265,7 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 		"shell":   "pwsh",
 	}
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "scoped-key", IsAdmin: false, TenantID: ""}, body)
+		&Principal{ID: "scoped-key", Assurance: session.AssuranceMachine, TenantID: ""}, body)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"a non-admin principal with no tenant must remain unauthorized")
@@ -278,7 +279,7 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}
 
 	// 1. Dispatch (POST) as admin.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
@@ -320,7 +321,7 @@ func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
 
 	// Admin dispatches a run owned by the global/empty tenant.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}, map[string]interface{}{
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}, map[string]interface{}{
 			"target":  "id:steward-1",
 			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 			"shell":   "pwsh",
@@ -331,7 +332,7 @@ func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
 	runID := resp.Data.(map[string]interface{})["run_id"].(string)
 
 	// A tenant-scoped (non-admin) caller from a different tenant must get 404.
-	scoped := &Principal{ID: "tenant-b-key", IsAdmin: false, TenantID: "tenant-b"}
+	scoped := &Principal{ID: "tenant-b-key", Assurance: session.AssuranceMachine, TenantID: "tenant-b"}
 	getReq := withPrincipal(mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil), map[string]string{"run_id": runID}), scoped)
 	getRec := httptest.NewRecorder()
 	server.handleGetRun(getRec, getReq)
@@ -672,6 +673,64 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	otherExecKey := NewEphemeralTestKey(t, server, []string{"steward:execute-scripts"}, "other-tenant", 5*60*1000000000)
 	rec = deleteRun(t, server, otherExecKey, runID)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant DELETE must return 404")
+}
+
+// TestRunVisibleTo_AssuranceBoundary is a table-driven regression test for the
+// runVisibleTo helper (handlers_runs.go) confirming that the Assurance-based
+// isolation gate is byte-for-byte equivalent to the deleted IsAdmin check:
+//   - AssuranceBasic (admin) principal always sees the run regardless of tenant.
+//   - AssuranceMachine (API key / relay-grant) principal sees only same-tenant runs.
+//   - Relay-grant principals (AssuranceMachine) cannot see another tenant's run.
+func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
+	run := &controllerrun.RunRecord{RunID: "r1", TenantID: "tenant-a"}
+
+	cases := []struct {
+		name      string
+		principal *Principal
+		tenantID  string
+		wantVis   bool
+	}{
+		{
+			name:      "AssuranceBasic_admin_any_tenant",
+			principal: &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""},
+			tenantID:  "tenant-b",
+			wantVis:   true,
+		},
+		{
+			name:      "AssuranceMachine_same_tenant",
+			principal: &Principal{ID: "key-a", Assurance: session.AssuranceMachine, TenantID: "tenant-a"},
+			tenantID:  "tenant-a",
+			wantVis:   true,
+		},
+		{
+			name:      "AssuranceMachine_cross_tenant_hidden",
+			principal: &Principal{ID: "key-b", Assurance: session.AssuranceMachine, TenantID: "tenant-b"},
+			tenantID:  "tenant-b",
+			wantVis:   false,
+		},
+		{
+			// Defense-in-depth: relay-grant principal (AssuranceMachine, tenant-a scoped)
+			// must not see a tenant-b run even if the grant's tenantID were somehow wrong.
+			name: "relay_grant_cross_tenant_hidden",
+			principal: &Principal{
+				ID:        "relay:device-1:exec-001",
+				Assurance: session.AssuranceMachine,
+				TenantID:  "tenant-b", // mis-scoped grant scenario
+			},
+			tenantID: "tenant-b",
+			wantVis:  false, // run.TenantID=tenant-a ≠ tenantID=tenant-b
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := runVisibleTo(tc.principal, run, tc.tenantID)
+			assert.Equal(t, tc.wantVis, got,
+				"runVisibleTo(%+v, run{TenantID=%q}, tenantID=%q)",
+				tc.principal, run.TenantID, tc.tenantID)
+		})
+	}
 }
 
 // ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------

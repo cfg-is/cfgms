@@ -17,6 +17,7 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -110,7 +111,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	// against a victim tenant's fleet (Issue #2340).
 	tenantID := callerTenantID
 	if req.TenantID != "" && req.TenantID != callerTenantID {
-		if !principal.IsAdmin {
+		if principal.Assurance < session.AssuranceBasic {
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Cannot start a rollout for another tenant",
 				"CROSS_TENANT")
