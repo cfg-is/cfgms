@@ -53,6 +53,11 @@ service StewardTransport {
 
   // LogStream streams logs from steward to controller.
   rpc LogStream(stream LogEntry) returns (LogStreamResponse);
+
+  // TelemetryStream provides live process/service telemetry from steward to controller.
+  // The steward (client) sends TelemetrySnapshot frames and receives TelemetryRequest
+  // control messages. Sampling only runs while an inbound subscribe=true request is active.
+  rpc TelemetryStream(stream TelemetrySnapshot) returns (stream TelemetryRequest);
 }
 
 // PingRequest is a lightweight health check.

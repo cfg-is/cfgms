@@ -104,3 +104,48 @@ message LogStreamResponse {
   int64 entries_received = 1;
   bool acknowledged = 2;
 }
+
+// === Telemetry Stream ===
+
+// TelemetryRequest is sent by the controller (server) to the steward (client) to
+// control live telemetry sampling. subscribe=true starts sampling at interval_ms;
+// subscribe=false stops sampling.
+message TelemetryRequest {
+  string steward_id = 1;
+  bool subscribe = 2;
+  // interval_ms is the requested snapshot interval in milliseconds.
+  // The steward clamps values below 1000 ms to 1000 ms (defense in depth).
+  int32 interval_ms = 3;
+}
+
+// ProcessSnapshot is a point-in-time view of one running process,
+// mirroring features/steward/telemetry.ProcessSnapshot.
+message ProcessSnapshot {
+  string fragment_id = 1;   // ADR-017 typed entity id: "process:<name>"
+  int32 pid = 2;
+  string name = 3;
+  double cpu_percent = 4;
+  uint64 memory_bytes = 5;
+  uint64 disk_read_bytes = 6;
+  uint64 disk_write_bytes = 7;
+  uint64 net_rx_bytes = 8;  // reserved; always 0 (usermode-only collector)
+  uint64 net_tx_bytes = 9;  // reserved; always 0 (usermode-only collector)
+}
+
+// ServiceSnapshot is a point-in-time view of one installed service / systemd unit,
+// mirroring features/steward/telemetry.ServiceSnapshot.
+message ServiceSnapshot {
+  string fragment_id = 1;   // ADR-017 typed entity id: "service:<name>"
+  string name = 2;
+  string state = 3;
+}
+
+// TelemetrySnapshot is sent by the steward (client) to the controller (server).
+// It carries one point-in-time view of all running processes and services on the
+// steward host. Produced only while a subscribe=true TelemetryRequest is active.
+message TelemetrySnapshot {
+  string steward_id = 1;
+  repeated ProcessSnapshot processes = 2;
+  repeated ServiceSnapshot services = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
