@@ -164,7 +164,10 @@ func (s *DatabaseSessionTokenStore) Delete(ctx context.Context, id string) error
 	if err != nil {
 		return fmt.Errorf("database: session token delete failed: %w", err)
 	}
-	n, _ := result.RowsAffected()
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("database: session token delete: rows affected: %w", err)
+	}
 	if n == 0 {
 		return session.ErrSessionNotFound
 	}

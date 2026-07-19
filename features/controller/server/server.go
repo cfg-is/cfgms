@@ -1011,6 +1011,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				blobRoot = filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
 			} else if cfg.Storage.SQLitePath != "" {
 				blobRoot = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+			} else if cfg.DataDir != "" {
+				// Mirrors LoadWithPath: BlobStorage.Root defaults to <DataDir>/installers
+				// when neither FlatfileRoot nor SQLitePath is present (e.g. database provider).
+				blobRoot = filepath.Join(cfg.DataDir, "installers")
 			}
 		}
 		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("filesystem",

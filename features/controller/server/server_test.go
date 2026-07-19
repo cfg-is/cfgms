@@ -1203,8 +1203,33 @@ func TestInitializeSessionStore_ClusterMode_BadDSN(t *testing.T) {
 
 	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
 	require.NotNil(t, store, "cluster-mode Postgres failure must not block startup")
-
 	if c, ok := store.(io.Closer); ok {
 		t.Cleanup(func() { _ = c.Close() })
 	}
+
+	// Verify the fallback actually engaged via behaviour, not a concrete-type assertion
+	// (test files must not import pkg/storage/providers/*). The SQLitePath is configured,
+	// so the fallback yields the durable SQLite store, never MemStore.
+	_, isMem := store.(*session.MemStore)
+	assert.False(t, isMem, "cluster-mode Postgres failure with a configured SQLitePath must fall back to SQLite, not MemStore")
+
+	// The decisive proof that the unreachable DSN was NOT accepted: a store backed by the
+	// broken Postgres connection would fail every operation. A working round-trip through
+	// the session.Store contract confirms the store is the functional SQLite fallback.
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	sess := &session.Session{
+		ID:                "sess-baddsn-2775",
+		ConnectionName:    "conn-baddsn",
+		PrincipalID:       "admin-baddsn",
+		TenantID:          "root",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(t, store.Set(ctx, "hash-baddsn-2775", sess),
+		"fallback store must be operational; a broken-Postgres store would fail Set")
+	got, err := store.Get(ctx, "hash-baddsn-2775")
+	require.NoError(t, err, "fallback store must serve reads; a broken-Postgres store would fail Get")
+	assert.Equal(t, sess.ID, got.ID)
 }

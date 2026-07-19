@@ -266,6 +266,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 					},
 					Storage: storageConfig,
 				}
+				// Database provider has no FlatfileRoot or SQLitePath to derive a blob
+				// root from; supply a DataDir so the filesystem blob store can initialize.
+				if providerInfo.Name == "database" {
+					config.DataDir = t.TempDir()
+				}
 
 				server, err := New(config, logger)
 				if providerInfo.Name == "database" && !isDockerTestEnvironment() {
