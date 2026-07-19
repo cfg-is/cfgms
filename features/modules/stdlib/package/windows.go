@@ -128,25 +128,36 @@ func (m *wingetManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, m.bin, "list", "--name", name, "--accept-source-agreements")
+	// Positional query matches by id/name/moniker (the same resolution Install
+	// uses), so a package referenced by its winget Id (e.g. Microsoft.PowerShell)
+	// resolves — unlike `--name`, which only matches the display-name column.
+	cmd := exec.CommandContext(ctx, m.bin, "list", name, "--accept-source-agreements")
 	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// winget exits non-zero (0x8a150014) with this message when nothing
+		// installed matches the query. That is "absent" — the module maps
+		// ErrPackageNotFound to state: absent and installs — not a query failure.
+		if strings.Contains(string(output), "No installed package found") {
+			return "", ErrPackageNotFound
+		}
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
 	}
 
-	// Parse output to find version
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, name) {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				return parts[1], nil
+	// winget prints a table (Name  Id  Version  [Available]  Source). The query
+	// matches the Id column; the Version is the field immediately after it.
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if strings.EqualFold(f, name) && i+1 < len(fields) {
+				return fields[i+1], nil
 			}
 		}
 	}
 
-	return "", fmt.Errorf("version not found for package %s", name)
+	// Exited 0 but no row's Id matched the query exactly — treat as not installed
+	// so the module reconciles by installing rather than erroring out.
+	return "", ErrPackageNotFound
 }
 
 func (m *wingetManager) ListInstalled(ctx context.Context) (map[string]string, error) {

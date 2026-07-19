@@ -123,7 +123,10 @@ func (m *PackageModule) Get(ctx context.Context, resourceID string) (modules.Con
 	version, err := mgr.GetInstalledVersion(ctx, pkgName)
 	if err != nil {
 		if errors.Is(err, ErrPackageNotFound) {
-			return &Config{Name: pkgName, State: "absent", Providers: rawProviders}, nil
+			// Report the provider that determined "absent" too, so the selected
+			// package manager is visible on the Get/DNA surface even for a package
+			// that isn't installed yet.
+			return &Config{Name: pkgName, State: "absent", PackageManager: providerName, Providers: rawProviders}, nil
 		}
 		return nil, fmt.Errorf("failed to get package version: %w", err)
 	}
