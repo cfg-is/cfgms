@@ -109,12 +109,39 @@ func (s *emptyLogStream) RecvMsg(interface{}) error                         { re
 var _ grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse] = (*emptyLogStream)(nil)
 
 // ---------------------------------------------------------------------------
+// Additive-extension helpers (TestComposite_AdditiveExtension)
+// ---------------------------------------------------------------------------
+
+// testFooHandler is a throwaway handler representing a hypothetical 7th RPC
+// (standing in for Terminal/TelemetryStream from stories #2761/#2765).
+type testFooHandler struct{ called bool }
+
+// fooCompositeExt shows that adding a new data-plane RPC handler is purely
+// additive: embed compositeTransportServer, add one field, one setter, and one
+// delegation method — zero edits to newCompositeTransportServer, struct fields,
+// or any existing handler's setter or delegation method.
+type fooCompositeExt struct {
+	*compositeTransportServer
+	fooHandler *testFooHandler
+}
+
+func (c *fooCompositeExt) SetFooHandler(h *testFooHandler) { c.fooHandler = h }
+
+func (c *fooCompositeExt) callFoo() bool {
+	if c.fooHandler != nil {
+		c.fooHandler.called = true
+		return true
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 func TestComposite_RegisterDelegatesToCP(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	_, err := composite.Register(context.Background(), &controllerpb.RegisterRequest{})
 	require.NoError(t, err)
@@ -123,7 +150,7 @@ func TestComposite_RegisterDelegatesToCP(t *testing.T) {
 
 func TestComposite_PingDelegatesToCP(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	_, err := composite.Ping(context.Background(), &transportpb.PingRequest{})
 	require.NoError(t, err)
@@ -132,7 +159,7 @@ func TestComposite_PingDelegatesToCP(t *testing.T) {
 
 func TestComposite_ControlChannelDelegatesToCP(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	err := composite.ControlChannel(nil)
 	require.NoError(t, err)
@@ -141,7 +168,7 @@ func TestComposite_ControlChannelDelegatesToCP(t *testing.T) {
 
 func TestComposite_SyncDNA_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	err := composite.SyncDNA(&emptyDNAStream{})
 	require.Error(t, err, "SyncDNA with nil dnaHandler should return unimplemented error")
@@ -151,7 +178,8 @@ func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
 	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue(), nil)
-	composite := newCompositeTransportServer(cp, dnaHandler, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, logger)
+	composite.SetDNAHandler(dnaHandler)
 
 	// Empty stream with background context (no mTLS peer) → Unauthenticated from handler.
 	// This proves that dnaHandler.HandleGRPC is called, not the Unimplemented fallback.
@@ -163,7 +191,7 @@ func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 
 func TestComposite_BulkTransfer_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.Error(t, err, "BulkTransfer with nil bulkHandler should return unimplemented error")
@@ -173,7 +201,8 @@ func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
 	bulkHandler := controllerTransport.NewBulkHandler(logger, controllerTransport.NewTenantQueue())
-	composite := newCompositeTransportServer(cp, nil, bulkHandler, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, logger)
+	composite.SetBulkHandler(bulkHandler)
 
 	err := composite.BulkTransfer(&emptyBulkStream{})
 	require.NoError(t, err, "BulkTransfer with valid handler and empty stream must succeed")
@@ -181,7 +210,7 @@ func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 
 func TestComposite_SyncConfigWithoutHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	err := composite.SyncConfig(&transportpb.ConfigSyncRequest{}, nil)
 	require.Error(t, err, "SyncConfig without handler should return unimplemented error")
@@ -189,10 +218,47 @@ func TestComposite_SyncConfigWithoutHandler(t *testing.T) {
 
 func TestComposite_LogStream_NilHandler(t *testing.T) {
 	cp := newRecordingHandler()
-	composite := newCompositeTransportServer(cp, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, nil)
 
 	err := composite.LogStream(&emptyLogStream{})
 	require.Error(t, err, "LogStream with nil logStreamHandler should return unimplemented error")
 	assert.Contains(t, err.Error(), "not implemented",
 		"LogStream with nil handler must return Unimplemented")
+}
+
+// TestComposite_AdditiveExtension proves that adding a new data-plane handler
+// (as stories #2761/#2765 will do for Terminal/TelemetryStream) requires zero
+// edits to newCompositeTransportServer or any existing handler field, setter, or
+// delegation method. The fooCompositeExt type above demonstrates the additive
+// pattern: one new field + one new setter + one new delegation method.
+func TestComposite_AdditiveExtension(t *testing.T) {
+	cp := newRecordingHandler()
+
+	// 2-arg constructor — unchanged whether 1 or 10 optional handlers exist.
+	base := newCompositeTransportServer(cp, nil)
+
+	// All four existing setters work; no constructor signature edit required.
+	base.SetConfigHandler(nil)
+	base.SetDNAHandler(nil)
+	base.SetBulkHandler(nil)
+	base.SetLogStreamHandler(nil)
+
+	// Wire in the hypothetical 7th handler. Zero changes to the constructor or
+	// any of the four existing handlers' fields, setters, or delegation methods.
+	ext := &fooCompositeExt{compositeTransportServer: base}
+	fooH := &testFooHandler{}
+	ext.SetFooHandler(fooH)
+
+	// Existing CP delegation still works through the embedded composite.
+	_, err := ext.Register(context.Background(), &controllerpb.RegisterRequest{})
+	require.NoError(t, err)
+	assert.True(t, cp.called["Register"], "existing CP delegation is unaffected by the new handler")
+
+	// New handler routes correctly.
+	assert.True(t, ext.callFoo(), "new handler setter and delegation work correctly")
+	assert.True(t, fooH.called, "new handler was invoked")
+
+	// Nil-check: the fallthrough pattern holds without calling SetFooHandler.
+	ext2 := &fooCompositeExt{compositeTransportServer: newCompositeTransportServer(cp, nil)}
+	assert.False(t, ext2.callFoo(), "nil handler falls through correctly")
 }
