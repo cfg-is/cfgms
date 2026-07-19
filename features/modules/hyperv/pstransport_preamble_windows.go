@@ -174,6 +174,15 @@ function Cfgms-RemoveVM {
         Remove-VM -Name $Name -Force
     }
 }
+function Cfgms-RenameVM {
+    param([Parameter(Mandatory)][string]$OldName, [Parameter(Mandatory)][string]$NewName)
+    Rename-VM -Name $OldName -NewName $NewName -ErrorAction Stop
+    # If the VM was registered as a clustered role whose group is named after the
+    # old VM name, rename the group too so it tracks the VM. Standalone VMs (no
+    # matching cluster group) skip this silently.
+    $grp = Get-ClusterGroup -Name $OldName -ErrorAction SilentlyContinue
+    if ($grp) { $grp.Name = $NewName }
+}
 function Cfgms-StartVM      { param([Parameter(Mandatory)][string]$Name) Start-VM -Name $Name }
 function Cfgms-StopVM       { param([Parameter(Mandatory)][string]$Name) Stop-VM  -Name $Name -Force }
 

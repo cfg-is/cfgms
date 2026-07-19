@@ -51,6 +51,9 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 				optArg(psArgs, "Path", "Path"))
 	case psRemoveVM:
 		return t.run(ctx, "Cfgms-RemoveVM -Name "+quoteArg(psArgs, "Name"))
+	case psRenameVM:
+		return t.run(ctx, "Cfgms-RenameVM -OldName "+quoteArg(psArgs, "OldName")+
+			" -NewName "+quoteArg(psArgs, "NewName"))
 	case psStartVM:
 		return t.run(ctx, "Cfgms-StartVM -Name "+quoteArg(psArgs, "Name"))
 	case psStopVM:
