@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -110,7 +111,7 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 		return nil, "", false
 	}
 	tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" && !principal.IsAdmin {
+	if tenantID == "" && principal.Assurance < session.AssuranceBasic {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
@@ -122,7 +123,7 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 // owned by their tenant. Callers return 404 (not 403) on false to avoid leaking
 // cross-tenant run existence (Issue #1990).
 func runVisibleTo(principal *Principal, run *controllerrun.RunRecord, tenantID string) bool {
-	return principal.IsAdmin || run.TenantID == tenantID
+	return principal.Assurance >= session.AssuranceBasic || run.TenantID == tenantID
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.

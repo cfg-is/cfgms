@@ -101,7 +101,6 @@ func injectAdminPrincipal(r *http.Request, principalID string) *http.Request {
 	p := &Principal{
 		ID:        principalID,
 		Name:      "mtls-admin:" + principalID,
-		IsAdmin:   true,
 		Assurance: session.AssuranceStrong,
 	}
 	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
@@ -112,7 +111,6 @@ func injectNonAdminPrincipal(r *http.Request) *http.Request {
 	p := &Principal{
 		ID:          "api-key-user",
 		Name:        "apikey",
-		IsAdmin:     false,
 		Assurance:   session.AssuranceMachine,
 		Permissions: []string{"steward:list"},
 		TenantID:    "default",
@@ -349,8 +347,8 @@ func TestSessionTokenAuthMiddleware_ValidToken(t *testing.T) {
 	if capturedPrincipal == nil {
 		t.Fatal("principal not set in context")
 	}
-	if !capturedPrincipal.IsAdmin {
-		t.Error("session-token principal must have IsAdmin=true")
+	if capturedPrincipal.Assurance < session.AssuranceBasic {
+		t.Error("session-token principal must have Assurance >= AssuranceBasic")
 	}
 	if capturedPrincipal.ID != "carol" {
 		t.Errorf("principal ID = %q, want %q", capturedPrincipal.ID, "carol")
@@ -511,7 +509,6 @@ func injectAdminPrincipalWithTenant(r *http.Request, principalID, tenantID strin
 	p := &Principal{
 		ID:        principalID,
 		Name:      "mtls-admin:" + principalID,
-		IsAdmin:   true,
 		Assurance: session.AssuranceStrong,
 		TenantID:  tenantID,
 	}

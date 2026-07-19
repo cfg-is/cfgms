@@ -1389,6 +1389,148 @@ func mustOpenMemDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// ----------------------------------------------------------------------------
+// Dispatcher hardening tests — Issue #2781
+// ----------------------------------------------------------------------------
+
+// testGrantManager is a minimal in-process GrantManager for dispatcher hardening
+// tests. It records all CreateGrant calls so tests can assert on them.
+type testGrantManager struct {
+	mu     sync.Mutex
+	grants []grantRecord
+}
+
+type grantRecord struct {
+	deviceID    string
+	tenantID    string
+	executionID string
+	scope       []string
+}
+
+func (g *testGrantManager) CreateGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.grants = append(g.grants, grantRecord{deviceID: deviceID, tenantID: tenantID, executionID: executionID, scope: scope})
+	return nil
+}
+
+func (g *testGrantManager) ConsumeGrant(_ string) error { return nil }
+
+func (g *testGrantManager) createdGrants() []grantRecord {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]grantRecord, len(g.grants))
+	copy(out, g.grants)
+	return out
+}
+
+// minimalPrepared returns a PreparedExecution with empty content suitable for
+// sendCommand unit tests. Size and shell are valid; script content is a one-byte
+// no-op so the content-size guard does not fire.
+func minimalPrepared() *script.PreparedExecution {
+	return &script.PreparedExecution{
+		ExecutionID:   "exec-harden-1",
+		ScriptContent: "#",
+		Shell:         script.ShellBash,
+	}
+}
+
+// newHardenDispatcher creates a Dispatcher wired to a real (non-nil) grant manager
+// so the tenant_id validation path in sendCommand is exercised.
+func newHardenDispatcher(t *testing.T, gm GrantManager) *Dispatcher {
+	t.Helper()
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		PollInterval: 24 * time.Hour,
+		Logger:       logging.NewLogger("debug"),
+	})
+	require.NoError(t, err)
+	d.SetGrantManager(gm)
+	return d
+}
+
+// TestDispatcher_Harden_MissingTenantID_FailsClosed verifies Issue #2781's
+// dispatcher hardening: when a script's Metadata has required_api_scope set but
+// tenant_id is absent, sendCommand must return an explicit error rather than
+// silently calling CreateGrant with tenantID="".
+func TestDispatcher_Harden_MissingTenantID_FailsClosed(t *testing.T) {
+	gm := &testGrantManager{}
+	d := newHardenDispatcher(t, gm)
+
+	exec := &script.QueuedExecution{
+		ExecutionID: "exec-harden-missing",
+		ScriptID:    "s1",
+		ScriptRef:   "s1",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"required_api_scope": []interface{}{"steward:read-scripts"},
+			// tenant_id intentionally absent
+		},
+	}
+
+	err := d.sendCommand(context.Background(), "device-1", exec, minimalPrepared())
+	require.Error(t, err, "sendCommand must fail when tenant_id is missing from script metadata")
+	assert.Contains(t, err.Error(), "missing or invalid tenant_id")
+	assert.Empty(t, gm.createdGrants(), "CreateGrant must not be called when tenant_id is missing")
+}
+
+// TestDispatcher_Harden_WrongTypeTenantID_FailsClosed verifies that a non-string
+// tenant_id in script metadata is treated identically to a missing one — fail
+// closed, never silently create an unscoped grant.
+func TestDispatcher_Harden_WrongTypeTenantID_FailsClosed(t *testing.T) {
+	gm := &testGrantManager{}
+	d := newHardenDispatcher(t, gm)
+
+	exec := &script.QueuedExecution{
+		ExecutionID: "exec-harden-wrongtype",
+		ScriptID:    "s1",
+		ScriptRef:   "s1",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"required_api_scope": []interface{}{"steward:read-scripts"},
+			"tenant_id":          42, // int, not string
+		},
+	}
+
+	err := d.sendCommand(context.Background(), "device-1", exec, minimalPrepared())
+	require.Error(t, err, "sendCommand must fail when tenant_id has wrong type")
+	assert.Contains(t, err.Error(), "missing or invalid tenant_id")
+	assert.Empty(t, gm.createdGrants(), "CreateGrant must not be called for wrong-typed tenant_id")
+}
+
+// TestDispatcher_Harden_ValidTenantID_CreatesGrant verifies the positive path:
+// when tenant_id is a valid non-empty string, CreateGrant is called with exactly
+// that tenantID, and sendCommand succeeds.
+func TestDispatcher_Harden_ValidTenantID_CreatesGrant(t *testing.T) {
+	gm := &testGrantManager{}
+	d := newHardenDispatcher(t, gm)
+
+	exec := &script.QueuedExecution{
+		ExecutionID: "exec-harden-valid",
+		ScriptID:    "s1",
+		ScriptRef:   "s1",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"required_api_scope": []interface{}{"steward:read-scripts"},
+			"tenant_id":          "root/tenant-a",
+		},
+	}
+
+	err := d.sendCommand(context.Background(), "device-1", exec, minimalPrepared())
+	require.NoError(t, err, "sendCommand must succeed with a valid tenant_id")
+	grants := gm.createdGrants()
+	require.Len(t, grants, 1)
+	assert.Equal(t, "root/tenant-a", grants[0].tenantID)
+	assert.Equal(t, "device-1", grants[0].deviceID)
+	assert.Equal(t, "exec-harden-valid", grants[0].executionID)
+}
+
 // TestDispatcher_New_ValidationErrors verifies that New rejects nil config fields.
 func TestDispatcher_New_ValidationErrors(t *testing.T) {
 	cp := &testControlPlane{}

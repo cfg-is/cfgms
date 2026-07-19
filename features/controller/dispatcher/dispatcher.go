@@ -530,7 +530,10 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		params["required_api_scope"] = scope
 
 		if d.grantManager != nil {
-			tenantID, _ := exec.Metadata["tenant_id"].(string)
+			tenantID, ok := exec.Metadata["tenant_id"].(string)
+			if !ok || tenantID == "" {
+				return fmt.Errorf("create execution grant: missing or invalid tenant_id in script metadata")
+			}
 			ttl := exec.Timeout
 			if ttl <= 0 {
 				ttl = 15 * time.Minute // matches defaultScriptTimeoutSec in steward handler

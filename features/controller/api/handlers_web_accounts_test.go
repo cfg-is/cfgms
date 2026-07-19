@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -45,7 +46,7 @@ func deleteWebAccount(t *testing.T, server *Server, principal *Principal, userna
 }
 
 func testAdminPrincipal() *Principal {
-	return &Principal{ID: "test-mtls-admin", Name: "mtls-admin:test", IsAdmin: true}
+	return &Principal{ID: "test-mtls-admin", Name: "mtls-admin:test", Assurance: session.AssuranceBasic}
 }
 
 // dropWebAccountCache clears the in-memory web-account cache so the next lookup

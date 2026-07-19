@@ -29,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	loggingInterfaces "github.com/cfgis/cfgms/pkg/logging/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
@@ -49,7 +50,7 @@ func setupDecommissionServer(t *testing.T) (*Server, business.StewardStore) {
 // middleware) with a root-admin mTLS principal so we can exercise the handler in isolation.
 func deleteDecommissionSteward(server *Server, stewardID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/"+stewardID, nil)
-	req = withPrincipal(req, &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": stewardID})
 	rec := httptest.NewRecorder()
 	server.handleDecommissionSteward(rec, req)
@@ -103,7 +104,7 @@ func TestHandleDecommissionSteward_InvalidID(t *testing.T) {
 	server, _ := setupDecommissionServer(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/bad.id:here", nil)
-	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": "bad.id:here"})
 	rec := httptest.NewRecorder()
 	server.handleDecommissionSteward(rec, req)
@@ -120,7 +121,7 @@ func TestHandleDecommissionSteward_NilStore(t *testing.T) {
 	// stewardStore is nil in the default setup.
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/some-steward", nil)
-	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": "some-steward"})
 	rec := httptest.NewRecorder()
 	server.handleDecommissionSteward(rec, req)
@@ -156,7 +157,7 @@ func TestHandleDecommissionSteward_CrossTenant(t *testing.T) {
 
 	// Caller is scoped to "tenant-a"; steward belongs to "tenant-b".
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/s-cross-tenant", nil)
-	req = withPrincipal(req, &Principal{ID: "tenant-a-admin", IsAdmin: true, TenantID: "tenant-a"})
+	req = withPrincipal(req, &Principal{ID: "tenant-a-admin", Assurance: session.AssuranceBasic, TenantID: "tenant-a"})
 	req = withVars(req, map[string]string{"id": "s-cross-tenant"})
 	rec := httptest.NewRecorder()
 	server.handleDecommissionSteward(rec, req)
@@ -179,7 +180,7 @@ func TestHandleDecommissionSteward_AuditEmitted(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/s-audit-decomm", nil)
-	req = withPrincipal(req, &Principal{ID: "audit-admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "audit-admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": "s-audit-decomm"})
 	rec := httptest.NewRecorder()
 	server.handleDecommissionSteward(rec, req)
@@ -2102,7 +2103,7 @@ func postMoveSteward(server *Server, stewardID, newTenantID string) *httptest.Re
 	body := strings.NewReader(`{"new_tenant_id":"` + newTenantID + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+stewardID+"/move", body)
 	req.Header.Set("Content-Type", "application/json")
-	req = withPrincipal(req, &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": stewardID})
 	rec := httptest.NewRecorder()
 	server.handleMoveSteward(rec, req)
@@ -2334,7 +2335,7 @@ func TestHandleMoveSteward_InvalidStewardID(t *testing.T) {
 	body := strings.NewReader(`{"new_tenant_id":"dest"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/bad.id:here/move", body)
 	req.Header.Set("Content-Type", "application/json")
-	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": "bad.id:here"})
 	rec := httptest.NewRecorder()
 	server.handleMoveSteward(rec, req)
@@ -2352,7 +2353,7 @@ func TestHandleMoveSteward_MissingNewTenantID(t *testing.T) {
 	body := strings.NewReader(`{}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/some-steward/move", body)
 	req.Header.Set("Content-Type", "application/json")
-	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": "some-steward"})
 	rec := httptest.NewRecorder()
 	server.handleMoveSteward(rec, req)
@@ -2370,7 +2371,7 @@ func TestHandleMoveSteward_InvalidTenantIDFormat(t *testing.T) {
 	body := strings.NewReader(`{"new_tenant_id":"bad.tenant:id"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/some-steward/move", body)
 	req.Header.Set("Content-Type", "application/json")
-	req = withPrincipal(req, &Principal{ID: "admin", IsAdmin: true, TenantID: ""})
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
 	req = withVars(req, map[string]string{"id": "some-steward"})
 	rec := httptest.NewRecorder()
 	server.handleMoveSteward(rec, req)
@@ -2444,7 +2445,7 @@ func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverSource(t *testing.T) {
 	require.NoError(t, server.controllerService.RegisterSteward("s-auth-nosrc", "source-tenant", "addr", "registered"))
 
 	// dest-tenant is in scope but source is not
-	scopedPrincipal := &Principal{ID: "scoped-admin", IsAdmin: true, TenantID: "other-msp", CertSerial: "SN-001", CertFingerprint: "fp-001"}
+	scopedPrincipal := &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "other-msp", CertSerial: "SN-001", CertFingerprint: "fp-001"}
 	rec := postMoveStewardWithPrincipal(server, "s-auth-nosrc", "dest-tenant", scopedPrincipal)
 
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -2467,7 +2468,7 @@ func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverDestination(t *testing.T) 
 	require.NoError(t, server.controllerService.RegisterSteward("s-auth-nodst", "msp-a", "addr", "registered"))
 
 	// "other-msp" is not in "msp-a" scope
-	scopedPrincipal := &Principal{ID: "scoped-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-002", CertFingerprint: "fp-002"}
+	scopedPrincipal := &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-002", CertFingerprint: "fp-002"}
 	rec := postMoveStewardWithPrincipal(server, "s-auth-nodst", "other-msp", scopedPrincipal)
 
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -2514,7 +2515,7 @@ func TestHandleMoveSteward_ScopedAdmin_AuthorityOverBoth_AnchoredPrefix(t *testi
 	// now accepts slashes, this is valid. The tenant store won't have this exact path-style ID
 	// (the tenant manager uses flat IDs), so GetTenant returns not-found → 400 TENANT_NOT_FOUND.
 	// That means the AUTH check passed (no 403) and the failure is the subsequent tenant lookup.
-	scopedPrincipal := &Principal{ID: "msp-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-003", CertFingerprint: "fp-003"}
+	scopedPrincipal := &Principal{ID: "msp-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-003", CertFingerprint: "fp-003"}
 	rec := postMoveStewardWithPrincipal(server, "s-auth-both", "msp-a/child-dst", scopedPrincipal)
 
 	// The authorization check PASSES (both in scope), but the destination tenant isn't
@@ -2542,7 +2543,7 @@ func TestHandleMoveSteward_ScopedAdmin_ExactTenantMatch(t *testing.T) {
 	require.NoError(t, server.controllerService.RegisterSteward("s-auth-exact", "msp-a", "addr", "registered"))
 
 	// Caller has exact match on source; dest = "msp-a" is also exact match → self-move
-	scopedPrincipal := &Principal{ID: "msp-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-004", CertFingerprint: "fp-004"}
+	scopedPrincipal := &Principal{ID: "msp-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-004", CertFingerprint: "fp-004"}
 	rec := postMoveStewardWithPrincipal(server, "s-auth-exact", "msp-a", scopedPrincipal)
 
 	// Auth passes (exact match on both), self-move short-circuits → no_change
@@ -2567,7 +2568,7 @@ func TestHandleMoveSteward_UnscopedRootAdmin_Allowed(t *testing.T) {
 	})
 	require.NoError(t, server.controllerService.RegisterSteward("s-auth-root", "source-tenant", "addr", "registered"))
 
-	rootPrincipal := &Principal{ID: "root-admin", IsAdmin: true, TenantID: "", CertSerial: "SN-ROOT", CertFingerprint: "fp-root"}
+	rootPrincipal := &Principal{ID: "root-admin", Assurance: session.AssuranceStrong, TenantID: "", CertSerial: "SN-ROOT", CertFingerprint: "fp-root"}
 	rec := postMoveStewardWithPrincipal(server, "s-auth-root", "dest-tenant", rootPrincipal)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -2609,7 +2610,7 @@ func TestHandleMoveSteward_AuditOnSuccess(t *testing.T) {
 
 	rootPrincipal := &Principal{
 		ID:              "audit-admin",
-		IsAdmin:         true,
+		Assurance:       session.AssuranceStrong,
 		TenantID:        "",
 		CertSerial:      "SERIAL-OK",
 		CertFingerprint: "FPRINT-OK",
@@ -2672,7 +2673,7 @@ func TestHandleMoveSteward_AuditOnDenial(t *testing.T) {
 
 	scopedPrincipal := &Principal{
 		ID:              "scoped-deny-admin",
-		IsAdmin:         true,
+		Assurance:       session.AssuranceStrong,
 		TenantID:        "other-msp",
 		CertSerial:      "SERIAL-DENY",
 		CertFingerprint: "FPRINT-DENY",
@@ -2732,7 +2733,7 @@ func TestHandleMoveSteward_TenantPathWithSlash(t *testing.T) {
 
 	// Request with hierarchical new_tenant_id — format validation must pass.
 	// The tenant doesn't exist in the store, so we expect TENANT_NOT_FOUND (400), not INVALID_TENANT_ID (400).
-	scopedPrincipal := &Principal{ID: "msp-admin", IsAdmin: true, TenantID: "msp-a", CertSerial: "SN-007", CertFingerprint: "fp-007"}
+	scopedPrincipal := &Principal{ID: "msp-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-007", CertFingerprint: "fp-007"}
 	rec := postMoveStewardWithPrincipal(server, "s-slash-test", "msp-a/other-child", scopedPrincipal)
 
 	var errResp ErrorResponse

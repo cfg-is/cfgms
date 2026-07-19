@@ -499,7 +499,7 @@ func TestMTLSAuth_AdminMarker_Granted(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code, "admin cert must be granted access")
 	require.NotNil(t, capturedPrincipal)
-	assert.True(t, capturedPrincipal.IsAdmin, "principal from admin cert must have IsAdmin == true")
+	assert.Equal(t, session.AssuranceStrong, capturedPrincipal.Assurance, "principal from admin cert must have AssuranceStrong")
 	assert.NotEmpty(t, capturedPrincipal.CertSerial)
 	assert.NotEmpty(t, capturedPrincipal.CertFingerprint)
 	assert.False(t, capturedPrincipal.CertNotAfter.IsZero())
@@ -527,7 +527,7 @@ func TestMTLSAuth_NoMarker_FallsThrough(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code, "cert without marker + valid API key must succeed via API-key path")
 	require.NotNil(t, capturedPrincipal)
-	assert.False(t, capturedPrincipal.IsAdmin, "principal from API-key path must not be admin")
+	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance, "principal from API-key path must have AssuranceMachine")
 }
 
 // TestMTLSAuth_ConflictingCredentials_Rejected verifies that presenting an admin cert AND
@@ -590,14 +590,14 @@ func TestMTLSAuth_NoCert_FallsBackToAPIKey(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code, "no cert + valid API key must succeed")
 	require.NotNil(t, capturedPrincipal)
-	assert.False(t, capturedPrincipal.IsAdmin)
+	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance)
 }
 
 // TestHasPermission_AdminPrincipal verifies that hasPermission returns true for any
-// permissionID when the principal has IsAdmin == true.
+// permissionID when the principal has Assurance >= AssuranceBasic.
 func TestHasPermission_AdminPrincipal(t *testing.T) {
 	server := setupTestServer(t)
-	admin := &Principal{IsAdmin: true}
+	admin := &Principal{Assurance: session.AssuranceBasic}
 
 	assert.True(t, server.hasPermission(admin, "steward:read"))
 	assert.True(t, server.hasPermission(admin, "rbac:delete-role"))
@@ -610,7 +610,7 @@ func TestHasPermission_AdminPrincipal(t *testing.T) {
 func TestHasPermission_WildcardStringRejected(t *testing.T) {
 	server := setupTestServer(t)
 	wildcardPrincipal := &Principal{
-		IsAdmin:     false,
+		Assurance:   session.AssuranceMachine,
 		Permissions: []string{"*"},
 	}
 
@@ -761,7 +761,7 @@ func TestExtractAdminPrincipal_ChecksRevocation(t *testing.T) {
 	// Before revocation: extractAdminPrincipal must return a non-nil principal
 	principal := server.extractAdminPrincipal(req)
 	require.NotNil(t, principal, "admin-marked cert must be accepted before revocation")
-	assert.True(t, principal.IsAdmin)
+	assert.Equal(t, session.AssuranceStrong, principal.Assurance)
 
 	// Revoke the cert
 	require.NoError(t, certManager.Revoke(serial))
@@ -781,7 +781,7 @@ func TestExtractAdminPrincipal_NilCertManager_AllowsUnrevoked(t *testing.T) {
 	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
 	principal := server.extractAdminPrincipal(req)
 	require.NotNil(t, principal, "admin cert must be accepted when certManager is nil (no revocation checking)")
-	assert.True(t, principal.IsAdmin)
+	assert.Equal(t, session.AssuranceStrong, principal.Assurance)
 }
 
 // TestAuthMiddleware_SetsUserIDKey_APIKey verifies that the API-key auth path writes
@@ -1112,7 +1112,7 @@ func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
 	require.NotNil(t, capturedPrincipal, "Principal must be set in context")
 	assert.Equal(t, "alice", capturedPrincipal.ID)
 	assert.Equal(t, "tenant-a", capturedPrincipal.TenantID)
-	assert.True(t, capturedPrincipal.IsAdmin, "web session principal must have IsAdmin == true")
+	assert.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance, "web session principal must have AssuranceBasic")
 	assert.Equal(t, "web-session:alice", capturedPrincipal.Name)
 }
 

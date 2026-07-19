@@ -15,6 +15,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,13 +30,13 @@ func newTestBatchJobStoreForAPI() batchjob.BatchJobStore {
 // adminPrincipal returns a global-admin principal with no tenant scope,
 // mirroring the mTLS admin certificate path in authenticationMiddleware.
 func adminPrincipal() *Principal {
-	return &Principal{ID: "cfgms-admin", IsAdmin: true, TenantID: ""}
+	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""}
 }
 
-// tenantPrincipal returns a non-admin principal scoped to the given tenant,
+// tenantPrincipal returns a machine-assurance principal scoped to the given tenant,
 // mirroring an API-key caller authenticated by authenticationMiddleware.
 func tenantPrincipal(tenantID string) *Principal {
-	return &Principal{ID: "api-key-" + tenantID, IsAdmin: false, TenantID: tenantID}
+	return &Principal{ID: "api-key-" + tenantID, Assurance: session.AssuranceMachine, TenantID: tenantID}
 }
 
 // postCreateJobAs sends POST /api/v1/jobs as the given principal.
@@ -118,7 +119,7 @@ func TestHandleCreateJob_NonAdminEmptyTenant_Returns401(t *testing.T) {
 	server := setupTestServer(t)
 	server.batchJobStore = newTestBatchJobStoreForAPI()
 
-	nonAdminNoTenant := &Principal{ID: "bad-key", IsAdmin: false, TenantID: ""}
+	nonAdminNoTenant := &Principal{ID: "bad-key", Assurance: session.AssuranceMachine, TenantID: ""}
 	rec := postCreateJobAs(server, nonAdminNoTenant, `{"selector":"all","batch_size":3}`)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
@@ -338,7 +339,7 @@ func TestHandleGetJob_NonAdminEmptyTenant_Returns401(t *testing.T) {
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), seedJob))
 
-	nonAdminNoTenant := &Principal{ID: "bad-key", IsAdmin: false, TenantID: ""}
+	nonAdminNoTenant := &Principal{ID: "bad-key", Assurance: session.AssuranceMachine, TenantID: ""}
 	rec := getJobAs(server, nonAdminNoTenant, "job-any-tenant")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
@@ -439,6 +440,81 @@ func TestHandleGetJob_NilStore_Returns503(t *testing.T) {
 	// batchJobStore is nil by default.
 	rec := getJobWithTenant(server, "any-id", "tenant-a")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// ── Tenant isolation regression tests — Issue #2781 ──────────────────────────
+
+// TestJobsTenantIsolation_AssuranceBoundary is a table-driven regression test
+// verifying that the Assurance-based tenant-isolation gates in handlers_jobs.go
+// are byte-for-byte equivalent to the deleted IsAdmin-based checks:
+//   - AssuranceBasic (admin) principal gets global access regardless of the job's tenant.
+//   - AssuranceMachine (API key) principal is confined to its own tenant.
+func TestJobsTenantIsolation_AssuranceBoundary(t *testing.T) {
+	cases := []struct {
+		name       string
+		principal  *Principal
+		jobTenant  string
+		wantStatus int
+	}{
+		{
+			name:       "admin_AssuranceBasic_any_tenant",
+			principal:  &Principal{ID: "mTLS-admin", Assurance: session.AssuranceBasic, TenantID: ""},
+			jobTenant:  "tenant-z",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "machine_AssuranceMachine_same_tenant",
+			principal:  &Principal{ID: "api-key-a", Assurance: session.AssuranceMachine, TenantID: "tenant-a"},
+			jobTenant:  "tenant-a",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "machine_AssuranceMachine_cross_tenant_blocked",
+			principal:  &Principal{ID: "api-key-a", Assurance: session.AssuranceMachine, TenantID: "tenant-a"},
+			jobTenant:  "tenant-b",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// Relay-grant principals carry AssuranceMachine; this case confirms that even
+			// a relay-grant principal with tenant-a scoping cannot access tenant-b's jobs —
+			// the handler's Assurance check is the defense-in-depth barrier.
+			name: "relay_grant_AssuranceMachine_cross_tenant_blocked",
+			principal: &Principal{
+				ID:        "relay:device-1:exec-001",
+				Name:      "relay-script:device-1",
+				Assurance: session.AssuranceMachine,
+				TenantID:  "tenant-a",
+			},
+			jobTenant:  "tenant-b",
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server := setupTestServer(t)
+			store := newTestBatchJobStoreForAPI()
+			server.batchJobStore = store
+
+			jobID := "job-iso-" + tc.name
+			require.NoError(t, store.CreateBatchJob(context.Background(), &batchjob.BatchJob{
+				ID:       jobID,
+				TenantID: tc.jobTenant,
+				Selector: "all",
+				Config:   batchjob.BatchJobConfig{BatchSize: 1},
+				Status:   batchjob.BatchJobStatusPending,
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID, nil)
+			req = mux.SetURLVars(req, map[string]string{"id": jobID})
+			req = withPrincipal(req, tc.principal)
+			rec := httptest.NewRecorder()
+			server.handleGetJob(rec, req)
+
+			assert.Equal(t, tc.wantStatus, rec.Code, "principal %+v accessing job in %q", tc.principal, tc.jobTenant)
+		})
+	}
 }
 
 // ── log-injection sanitization (AC: CodeQL go/log-injection) ─────────────────

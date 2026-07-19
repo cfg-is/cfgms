@@ -32,8 +32,8 @@ type sessionCreateResponse struct {
 
 // handleSessionCreate handles POST /api/v1/sessions.
 // Authorization is enforced at the router level via requirePermission("session", "create"),
-// which requires AssuranceStrong (ADR-021, Issue #2780). The in-handler IsAdmin check
-// has been removed — the router gate is the sole authority.
+// which requires AssuranceStrong (ADR-021, Issue #2780). No in-handler assurance
+// re-check is needed — the router gate is the sole authority.
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {

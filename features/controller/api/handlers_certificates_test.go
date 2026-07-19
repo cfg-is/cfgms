@@ -332,11 +332,12 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 }
 
 // TestHandleRotateSigningCertRequiresAdminCert verifies that the rotate endpoint
-// returns 403 for any non-admin principal, even when rbacService is nil.
+// returns 403 for any sub-Strong-assurance principal, even when rbacService is nil.
 //
-// (a) API-key principal → 403 (issued by X-API-Key header, IsAdmin == false).
-// (b) rbacService == nil + non-admin cert (no admin marker) → 403.
-// The explicit IsAdmin guard must block both before any rotation logic runs.
+// (a) API-key principal → 403 (AssuranceMachine, does not meet AssuranceStrong bar).
+// (b) rbacService == nil + non-Strong-assurance cert → 403.
+// The defense-in-depth Assurance < AssuranceStrong guard must block both before any
+// rotation logic runs, mirroring the certificate:rotate permissionAssurance entry.
 func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 	server, _, _ := setupRotationTestServer(t)
 
@@ -349,15 +350,15 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		var errResp ErrorResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-		// Assurance gate (requirePermission) fires before the handler's own IsAdmin check:
+		// Assurance gate (requirePermission) fires before the handler's own Assurance check:
 		// Machine-assurance API keys get INSUFFICIENT_PERMISSIONS, not MTLS_REQUIRED (Issue #2780).
 		assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errResp.Error.Code)
 	})
 
 	t.Run("nil_rbac_non_admin_principal_rejected", func(t *testing.T) {
 		// Build a server with rbacService == nil to exercise the RBAC-nil bypass path.
-		// requirePermission skips the check when rbacService is nil; the explicit IsAdmin
-		// guard in the handler must catch non-admin principals before rotation is reached.
+		// requirePermission skips the check when rbacService is nil; the defense-in-depth
+		// Assurance < AssuranceStrong guard in the handler must be the sole gate.
 		t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
 		cfg := config.DefaultConfig()
 		cfg.Certificate.EnableCertManagement = false
@@ -381,9 +382,9 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 			_ = nilRBACServer.Close(closeCtx)
 		})
 
-		// Use an API-key principal (IsAdmin == false). With rbacService == nil,
-		// requirePermission skips the RBAC check — the explicit IsAdmin guard in the
-		// handler must be the sole gate.
+		// Use an API-key principal (AssuranceMachine). With rbacService == nil,
+		// requirePermission skips the RBAC check — the Assurance < AssuranceStrong guard
+		// in the handler must be the sole gate.
 		apiKey := NewTestKey(t, nilRBACServer, []string{"certificate:rotate"})
 		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
 		req.Header.Set("X-API-Key", apiKey)

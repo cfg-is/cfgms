@@ -10,6 +10,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // RotateSigningCertRequest is the optional JSON body for the rotate endpoint.
@@ -39,8 +40,10 @@ type RotateSigningCertResponse struct {
 }
 
 // handleRotateSigningCert handles POST /api/v1/certificates/signing/rotate.
-// Requires mTLS admin cert (IsAdmin=true); non-admin principals are rejected with 403
-// even when rbacService is nil, preventing the RBAC-nil bypass.
+// Requires AssuranceStrong (mTLS admin cert); weaker principals are rejected with 403
+// even when rbacService is nil, preventing the RBAC-nil bypass. certificate:rotate is
+// AssuranceStrong-gated in permissionAssurance — this guard mirrors that bar so the
+// defense holds even if rbacService is nil.
 func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
@@ -48,10 +51,10 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Explicit IsAdmin guard — must precede any RBAC or rotation logic.
+	// Defense-in-depth: mirror the AssuranceStrong bar for certificate:rotate.
 	// requirePermission skips checks when rbacService is nil (RBAC-nil bypass);
-	// a CA-key operation must NEVER be reachable by a non-admin principal.
-	if !principal.IsAdmin {
+	// a CA-key operation must NEVER be reachable by a sub-Strong-assurance principal.
+	if principal.Assurance < session.AssuranceStrong {
 		s.writeErrorResponse(w, http.StatusForbidden, "Admin certificate required", "FORBIDDEN")
 		return
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -842,7 +843,7 @@ func testRequirePermFn(resourceType, action string) func(http.Handler) http.Hand
 				_, _ = w.Write([]byte(`{"error":"authentication required"}`))
 				return
 			}
-			if p.IsAdmin {
+			if p.Assurance >= session.AssuranceBasic {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -862,7 +863,7 @@ func testRequirePermFn(resourceType, action string) func(http.Handler) http.Hand
 
 // withPermissions injects a non-admin principal carrying the listed permissions.
 func withPermissions(r *http.Request, perms ...string) *http.Request {
-	p := &Principal{ID: "test-key", IsAdmin: false, Permissions: perms}
+	p := &Principal{ID: "test-key", Assurance: session.AssuranceMachine, Permissions: perms}
 	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
 }
 

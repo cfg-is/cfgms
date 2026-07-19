@@ -23,6 +23,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
@@ -94,22 +95,22 @@ func doPublish(server *Server, version, platform, arch, tenantID, sigBase64 stri
 	return rec
 }
 
-// withScopedPrincipal injects a non-admin principal bound to tenantID plus the tenant
-// context value, mirroring authenticationMiddleware for an API-key request. An empty
-// tenantID models a non-admin caller with no tenant (a genuine auth failure).
+// withScopedPrincipal injects a machine-assurance principal bound to tenantID plus the
+// tenant context value, mirroring authenticationMiddleware for an API-key request. An
+// empty tenantID models a non-human caller with no tenant (a genuine auth failure).
 func withScopedPrincipal(req *http.Request, tenantID string) *http.Request {
-	p := &Principal{ID: "api-key:" + tenantID, IsAdmin: false, TenantID: tenantID}
+	p := &Principal{ID: "api-key:" + tenantID, Assurance: session.AssuranceMachine, TenantID: tenantID}
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 	return req.WithContext(ctx)
 }
 
-// withAdminPrincipal injects an admin mTLS principal (IsAdmin=true, empty tenant) plus
+// withAdminPrincipal injects an mTLS admin principal (AssuranceBasic, empty tenant) plus
 // the empty tenant context value, mirroring authenticationMiddleware for an mTLS admin
 // cert (middleware.go:173). This is the global-scope path that cannot be reached via an
 // X-API-Key request (Issue #1999).
 func withAdminPrincipal(req *http.Request) *http.Request {
-	p := &Principal{ID: "mtls-admin:cn", Name: "mtls-admin:cn", IsAdmin: true, TenantID: ""}
+	p := &Principal{ID: "mtls-admin:cn", Name: "mtls-admin:cn", Assurance: session.AssuranceBasic, TenantID: ""}
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, "")
 	return req.WithContext(ctx)

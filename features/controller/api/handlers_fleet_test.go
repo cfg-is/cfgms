@@ -13,6 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -468,9 +469,9 @@ func postResolveSelectorWithPrincipal(server *Server, body, tenantID string, isA
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 	}
 	if isAdmin {
-		ctx = context.WithValue(ctx, principalContextKey, &Principal{IsAdmin: true, TenantID: ""})
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{Assurance: session.AssuranceBasic, TenantID: ""})
 	} else {
-		ctx = context.WithValue(ctx, principalContextKey, &Principal{IsAdmin: false, TenantID: tenantID})
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{Assurance: session.AssuranceMachine, TenantID: tenantID})
 	}
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()

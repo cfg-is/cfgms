@@ -116,14 +116,13 @@ func (h *RelayHandler) handleRelayEvent(ctx context.Context, event *cpTypes.Even
 		return h.sendErrorResponse(ctx, deviceID, event.StewardID, executionID, seq, http.StatusForbidden)
 	}
 
-	// Construct scope-limited, non-admin Principal. TenantID comes from the grant
+	// Construct scope-limited Principal. TenantID comes from the grant
 	// (set at dispatch time from device registration) — not from the event body.
 	// AssuranceMachine is deliberate: it makes the relay-script principal fail every
 	// Assurance >= AssuranceBasic check by construction (ADR-021, Issue #2780).
 	principal := &Principal{
 		ID:          fmt.Sprintf("relay:%s:%s", deviceID, executionID),
 		Name:        fmt.Sprintf("relay-script:%s", deviceID),
-		IsAdmin:     false,
 		Assurance:   session.AssuranceMachine,
 		Permissions: grant.Scope,
 		TenantID:    grant.TenantID,
