@@ -134,6 +134,14 @@ func (p *SQLiteProvider) Available() (bool, error) {
 // difference between "WAL set up correctly" and "second opener crashes
 // at openAndInit" (the Linux CI failure mode in
 // TestSQLite_TwoProcesses_ConcurrentWrites_NoCorruption).
+//
+// WAL mode MUST NOT be set for in-memory (mode=memory / :memory:) databases.
+// modernc.org/sqlite v1.x deadlocks in OP_ParseSchema when WAL is combined
+// with cache=shared on a named in-memory database: the journal-mode
+// pragma acquires a schema write-lock that it never releases, causing any
+// concurrent openAndInit (or schema DDL) on the same named DB to spin
+// indefinitely. In-memory stores use a single connection anyway, so WAL
+// provides no benefit — omit it and let the default journal_mode=DELETE apply.
 func openDB(path string) (*sql.DB, error) {
 	// busy_timeout 15s (was 5s): TestSQLite_TwoProcesses_ConcurrentWrites
 	// occasionally failed on Windows CI runners with SQLITE_BUSY mid-loop
@@ -142,7 +150,18 @@ func openDB(path string) (*sql.DB, error) {
 	// real-world controller batch commits and gives Windows CI's I/O
 	// variance enough headroom without hiding genuine deadlocks (those
 	// would still surface after 15s).
-	const pragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+	const (
+		// fileBackedPragmas: WAL for concurrent read access on file-backed DBs.
+		fileBackedPragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+		// inMemoryPragmas: no journal_mode — modernc WAL+shared-cache deadlocks.
+		inMemoryPragmas = "_pragma=busy_timeout(15000)&_pragma=foreign_keys(on)"
+	)
+
+	inMemory := path == ":memory:" || strings.Contains(path, "mode=memory")
+	pragmas := fileBackedPragmas
+	if inMemory {
+		pragmas = inMemoryPragmas
+	}
 
 	var dsn string
 	switch {

@@ -3,6 +3,9 @@
 package authdefense
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -19,6 +22,18 @@ type statusCapture struct {
 func (sc *statusCapture) WriteHeader(code int) {
 	sc.code = code
 	sc.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker by delegating to the wrapped ResponseWriter.
+// This middleware is the outermost wrapper on the API chain, so without Hijack
+// support WebSocket upgrades (notably the terminal relay endpoint, Issue #2761)
+// fail with 500 because the gorilla upgrader cannot take over the connection.
+func (sc *statusCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := sc.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return hj.Hijack()
 }
 
 // Middleware returns an HTTP middleware that enforces the three-tier defense.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 
 	"google.golang.org/grpc"
@@ -291,24 +292,48 @@ func (m *relaySessionManager) CreateSession(ctx context.Context, req *terminal.S
 
 	// Dispatch COMMAND_TYPE_OPEN_TERMINAL to the target steward.
 	if m.commandPublisher != nil {
+		// Clamp terminal dimensions to int32 range before conversion; session.go
+		// already defaults <=0 to 80/24, so the lower bound is only a safety net.
+		var cols, rows int32
+		if req.Cols > 0 && req.Cols <= math.MaxInt32 {
+			cols = int32(req.Cols) //nolint:gosec // bounds-checked above
+		} else {
+			cols = 80
+		}
+		if req.Rows > 0 && req.Rows <= math.MaxInt32 {
+			rows = int32(req.Rows) //nolint:gosec // bounds-checked above
+		} else {
+			rows = 24
+		}
 		params := map[string]interface{}{
 			"session_id": session.ID,
 			"shell":      req.Shell,
-			"cols":       int32(req.Cols), //nolint:gosec // terminal dimensions are far below int32 max
-			"rows":       int32(req.Rows), //nolint:gosec // terminal dimensions are far below int32 max
+			"cols":       cols,
+			"rows":       rows,
 		}
 		if _, dispatchErr := m.commandPublisher.PublishCommand(
 			ctx, req.StewardID, controlplaneTypes.CommandOpenTerminal, params,
 		); dispatchErr != nil {
 			m.terminalHandler.unregister(session.ID)
-			_ = m.base.TerminateSession(ctx, session.ID)
+			// Roll back the base session. If teardown itself fails the session
+			// would otherwise leak in the base manager with no trace, so surface
+			// the inconsistency rather than discarding the error.
+			if termErr := m.base.TerminateSession(ctx, session.ID); termErr != nil && m.logger != nil {
+				m.logger.Warn("failed to terminate terminal session during dispatch rollback",
+					"session_id", logging.RedactedID(session.ID),
+					"steward_id", logging.SanitizeLogValue(req.StewardID),
+					"error", termErr)
+			}
 			return nil, fmt.Errorf("failed to dispatch open_terminal to steward %q: %w",
 				logging.SanitizeLogValue(req.StewardID), dispatchErr)
 		}
 	}
 
 	if m.auditManager != nil {
-		_ = m.auditManager.RecordEvent(ctx,
+		// Session recording is a documented compliance requirement (Issue #2761).
+		// A silent audit failure would make compliance gaps undetectable, so the
+		// error is logged even though it is intentionally non-fatal for the session.
+		if err := m.auditManager.RecordEvent(ctx,
 			audit.NewEventBuilder().
 				Tenant(req.TenantID).
 				Type(business.AuditEventSystemAccess).
@@ -321,7 +346,12 @@ func (m *relaySessionManager) CreateSession(ctx context.Context, req *terminal.S
 				Details(map[string]interface{}{
 					"shell": req.Shell,
 				}),
-		)
+		); err != nil && m.logger != nil {
+			m.logger.Warn("failed to record terminal.session.start audit event",
+				"session_id", logging.RedactedID(session.ID),
+				"steward_id", logging.SanitizeLogValue(req.StewardID),
+				"error", err)
+		}
 	}
 
 	if m.logger != nil {
@@ -343,7 +373,9 @@ func (m *relaySessionManager) TerminateSession(ctx context.Context, sessionID st
 		return err
 	}
 	if m.auditManager != nil {
-		_ = m.auditManager.RecordEvent(ctx,
+		// A missing end-of-session audit record is undetectable otherwise; log the
+		// failure so the compliance gap is observable in production (Issue #2761).
+		if err := m.auditManager.RecordEvent(ctx,
 			audit.NewEventBuilder().
 				Tenant(audit.SystemTenantID).
 				Type(business.AuditEventSystemAccess).
@@ -353,7 +385,11 @@ func (m *relaySessionManager) TerminateSession(ctx context.Context, sessionID st
 				Resource("session", sessionID, "").
 				Result(business.AuditResultSuccess).
 				Severity(business.AuditSeverityMedium),
-		)
+		); err != nil && m.logger != nil {
+			m.logger.Warn("failed to record terminal.session.end audit event",
+				"session_id", logging.RedactedID(sessionID),
+				"error", err)
+		}
 	}
 	return nil
 }

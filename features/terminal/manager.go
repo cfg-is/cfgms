@@ -111,8 +111,8 @@ func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionR
 
 	m.logger.Info("Session created",
 		"session_id", logging.RedactedID(session.ID),
-		"steward_id", session.StewardID,
-		"user_id", session.UserID,
+		"steward_id", logging.SanitizeLogValue(session.StewardID),
+		"user_id", logging.SanitizeLogValue(session.UserID),
 		"active_sessions", len(m.sessions))
 
 	return session, nil

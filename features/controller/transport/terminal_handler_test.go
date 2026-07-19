@@ -21,8 +21,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/audit"
+	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -263,6 +265,64 @@ func TestRelaySessionManagerOfflineSteward(t *testing.T) {
 	// No session must have been created in the base manager.
 	assert.Empty(t, baseMgr.GetActiveSessions(),
 		"base manager must have no active sessions after offline rejection")
+}
+
+// ---------------------------------------------------------------------------
+// Test: dispatch failure → rollback (unregister + terminate) + error propagated
+// ---------------------------------------------------------------------------
+
+// TestRelaySessionManagerDispatchFailureRollsBack verifies the error path added
+// to CreateSession: when PublishCommand fails to dispatch COMMAND_TYPE_OPEN_TERMINAL
+// to the steward, CreateSession must (1) return the dispatch error, (2) unregister
+// the pending relay, and (3) tear down the base session so nothing leaks.
+//
+// A real commands.Publisher is wired over a real gRPC control plane provider in
+// server mode whose connection registry is empty, so SendCommand returns a
+// genuine "steward not connected" error — no fakes or mocks.
+func TestRelaySessionManagerDispatchFailureRollsBack(t *testing.T) {
+	const stewardID = "steward-dispatch-fail"
+
+	baseMgr := newTestSessionManager(t)
+	th := NewTerminalHandler(logging.NewNoopLogger())
+
+	// Real control plane provider in server mode with an empty steward registry.
+	// SendCommand consults this registry and fails when the target is absent.
+	cp := cpgrpc.New(cpgrpc.ModeServer)
+	require.NoError(t, cp.Initialize(context.Background(), map[string]interface{}{
+		"grpc_server": grpc.NewServer(),
+		"registry":    registry.NewRegistry(),
+	}))
+	publisher, err := commands.New(&commands.Config{
+		ControlPlane: cp,
+		Logger:       logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	// nil connRegistry so the online pre-check is skipped and we exercise the
+	// dispatch path itself; the dispatch fails because cp's registry is empty.
+	rsm := NewRelaySessionManager(baseMgr, th, publisher, nil, nil, logging.NewNoopLogger())
+
+	_, err = rsm.CreateSession(context.Background(), &terminal.SessionRequest{
+		TenantID:  "test-tenant",
+		StewardID: stewardID,
+		UserID:    "test-user",
+		Shell:     "bash",
+		Cols:      80,
+		Rows:      24,
+	})
+	require.Error(t, err, "CreateSession must return an error when dispatch fails")
+	assert.Contains(t, err.Error(), "failed to dispatch open_terminal",
+		"the returned error must identify the dispatch failure")
+
+	// The pending relay must have been unregistered during rollback.
+	th.mu.RLock()
+	pending := len(th.pending)
+	th.mu.RUnlock()
+	assert.Equal(t, 0, pending, "pending relay must be unregistered after dispatch failure")
+
+	// The base session must have been torn down (no leak).
+	assert.Empty(t, baseMgr.GetActiveSessions(),
+		"base manager must have no active sessions after dispatch-failure rollback")
 }
 
 // ---------------------------------------------------------------------------

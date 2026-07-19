@@ -3,45 +3,53 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
-	"sync"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/terminal"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// capturingWSHandler is a hand-written test double for terminal.WebSocketHandler
-// (not a mock framework) that records whether it was invoked and what steward_id
-// it observed on the request query string. It lets these tests assert route
-// registration, RBAC gating, and mux path-variable injection without opening a
-// real WebSocket connection.
-type capturingWSHandler struct {
-	mu        sync.Mutex
-	called    bool
-	stewardID string
+// newRealTerminalWSHandler builds a real terminal.DefaultWebSocketHandler backed
+// by a real terminal.DefaultSessionManager (no mocks or fakes). The returned
+// session manager can be queried to observe what SetTerminalHandler's mux
+// path-variable injection actually delivered to the handler. Recording storage
+// is isolated in t.TempDir().
+func newRealTerminalWSHandler(t *testing.T) (terminal.WebSocketHandler, terminal.SessionManager) {
+	t.Helper()
+	sessionMgr, err := terminal.NewSessionManager(&terminal.Config{
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+	}, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if dsm, ok := sessionMgr.(*terminal.DefaultSessionManager); ok {
+			_ = dsm.Stop(context.Background())
+		}
+	})
+
+	// nil origin allowlist → same-origin only, which is satisfied when the test
+	// dials the httptest server with an Origin matching that server's host.
+	wsHandler, err := terminal.NewWebSocketHandler(sessionMgr, logging.NewNoopLogger(), nil)
+	require.NoError(t, err)
+	return wsHandler, sessionMgr
 }
 
-func (c *capturingWSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	c.mu.Lock()
-	c.called = true
-	c.stewardID = r.URL.Query().Get("steward_id")
-	c.mu.Unlock()
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(r.URL.Query().Get("steward_id")))
+// wsURL converts an httptest server's http(s):// URL into a ws(s):// dial URL,
+// appending the given path+query.
+func wsURL(serverURL, pathAndQuery string) string {
+	return "ws" + strings.TrimPrefix(serverURL, "http") + pathAndQuery
 }
-
-func (c *capturingWSHandler) observed() (bool, string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.called, c.stewardID
-}
-
-// Compile-time check: the double satisfies the interface SetTerminalHandler wants.
-var _ terminal.WebSocketHandler = (*capturingWSHandler)(nil)
 
 // TestServer_SetTerminalHandler_RegistersRoute_PostConstruction verifies that the
 // terminal WebSocket route is absent until SetTerminalHandler is called, then
@@ -56,11 +64,12 @@ func TestServer_SetTerminalHandler_RegistersRoute_PostConstruction(t *testing.T)
 	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"terminal route must be 404 before SetTerminalHandler")
 
-	// Wire a handler post-construction, exactly as production does.
-	server.SetTerminalHandler(&capturingWSHandler{})
+	// Wire a real handler post-construction, exactly as production does.
+	handler, _ := newRealTerminalWSHandler(t)
+	server.SetTerminalHandler(handler)
 
-	// Unauthenticated request must now return 401 (route present, auth enforced),
-	// not 404.
+	// Unauthenticated request must now return 401 (route present, auth enforced
+	// by the middleware before HandleWebSocket runs), not 404.
 	req = httptest.NewRequest("GET", "/api/v1/terminal/ws/steward-1", nil)
 	rec = httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -70,25 +79,31 @@ func TestServer_SetTerminalHandler_RegistersRoute_PostConstruction(t *testing.T)
 
 // TestServer_SetTerminalHandler_EnforcesPermissionGate verifies the
 // steward:terminal RBAC gate is applied to the terminal route. A caller with a
-// valid API key but without steward:terminal must receive 403; a caller with the
-// permission must pass the gate.
+// valid API key but without steward:terminal must receive 403 (returned by the
+// auth middleware before HandleWebSocket is invoked); a caller with the
+// permission must pass the gate and reach the real handler.
 func TestServer_SetTerminalHandler_EnforcesPermissionGate(t *testing.T) {
 	server := setupTestServer(t)
-	server.SetTerminalHandler(&capturingWSHandler{})
+	handler, _ := newRealTerminalWSHandler(t)
+	server.SetTerminalHandler(handler)
 
-	// Key without steward:terminal permission → 403.
+	// Key without steward:terminal permission → 403 (gate, before the handler).
 	noPermKey := NewTestKey(t, server, []string{"steward:read"})
 	req := httptest.NewRequest("GET", "/api/v1/terminal/ws/steward-1", nil)
 	req.Header.Set("X-API-Key", noPermKey)
+	req.Header.Set("Origin", "http://example.com") // matches httptest default host
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"terminal route must return 403 for caller without steward:terminal permission")
 
-	// Key with steward:terminal permission must pass the gate.
+	// Key with steward:terminal permission must pass the gate and reach the real
+	// handler. The request omits user_id, so the handler rejects it with 400 after
+	// the gate — the point being it is neither 403 (gate) nor 404 (route absent).
 	permKey := NewTestKey(t, server, []string{"steward:terminal"})
 	req = httptest.NewRequest("GET", "/api/v1/terminal/ws/steward-1", nil)
 	req.Header.Set("X-API-Key", permKey)
+	req.Header.Set("Origin", "http://example.com")
 	rec = httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
@@ -99,43 +114,76 @@ func TestServer_SetTerminalHandler_EnforcesPermissionGate(t *testing.T) {
 
 // TestServer_SetTerminalHandler_InjectsStewardIDPathVar verifies that the mux
 // {steward_id} path variable is injected into the query string so the pre-built
-// WebSocket handler can read it via r.URL.Query().Get("steward_id").
+// WebSocket handler observes it. It opens a real WebSocket connection through the
+// full server stack (auth + RBAC gate + mux injection + real handler) and asserts
+// that the session the real handler created carries the injected steward_id.
 func TestServer_SetTerminalHandler_InjectsStewardIDPathVar(t *testing.T) {
 	server := setupTestServer(t)
-	capture := &capturingWSHandler{}
-	server.SetTerminalHandler(capture)
+	handler, sessionMgr := newRealTerminalWSHandler(t)
+	server.SetTerminalHandler(handler)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
 
 	permKey := NewTestKey(t, server, []string{"steward:terminal"})
-	req := httptest.NewRequest("GET", "/api/v1/terminal/ws/steward-xyz", nil)
-	req.Header.Set("X-API-Key", permKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	header := http.Header{}
+	header.Set("X-API-Key", permKey)
+	header.Set("Origin", ts.URL) // same-origin as the httptest server
 
-	called, stewardID := capture.observed()
-	require.True(t, called, "authorized request must reach the wrapped WebSocket handler")
-	assert.Equal(t, "steward-xyz", stewardID,
-		"mux {steward_id} path variable must be injected into the query string")
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "steward-xyz", rec.Body.String(),
-		"wrapped handler must observe the injected steward_id")
+	conn, resp, err := websocket.DefaultDialer.Dial(
+		wsURL(ts.URL, "/api/v1/terminal/ws/steward-xyz?user_id=u1&shell=bash"),
+		header,
+	)
+	require.NoError(t, err, "authorized WebSocket dial must succeed")
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+	defer func() { _ = conn.Close() }()
+
+	// The real handler creates the session after the upgrade; poll until it
+	// appears, then assert it observed the injected {steward_id} path variable.
+	require.Eventually(t, func() bool {
+		return len(sessionMgr.GetActiveSessions()) == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"authorized request must reach the wrapped WebSocket handler and create a session")
+
+	sessions := sessionMgr.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "steward-xyz", sessions[0].StewardID,
+		"mux {steward_id} path variable must be injected so the handler creates the session for it")
 }
 
 // TestServer_SetTerminalHandler_ExplicitQueryNotOverwritten verifies that an
 // explicit steward_id in the query string is preserved (the injection only fills
-// an empty value).
+// an empty value). It dials a real WebSocket whose path steward_id differs from an
+// explicit query steward_id and asserts the created session used the query value.
 func TestServer_SetTerminalHandler_ExplicitQueryNotOverwritten(t *testing.T) {
 	server := setupTestServer(t)
-	capture := &capturingWSHandler{}
-	server.SetTerminalHandler(capture)
+	handler, sessionMgr := newRealTerminalWSHandler(t)
+	server.SetTerminalHandler(handler)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
 
 	permKey := NewTestKey(t, server, []string{"steward:terminal"})
-	req := httptest.NewRequest("GET", "/api/v1/terminal/ws/path-steward?steward_id=query-steward", nil)
-	req.Header.Set("X-API-Key", permKey)
-	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	header := http.Header{}
+	header.Set("X-API-Key", permKey)
+	header.Set("Origin", ts.URL)
 
-	_, stewardID := capture.observed()
-	assert.Equal(t, "query-steward", stewardID,
+	conn, resp, err := websocket.DefaultDialer.Dial(
+		wsURL(ts.URL, "/api/v1/terminal/ws/path-steward?steward_id=query-steward&user_id=u1&shell=bash"),
+		header,
+	)
+	require.NoError(t, err, "authorized WebSocket dial must succeed")
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+	defer func() { _ = conn.Close() }()
+
+	require.Eventually(t, func() bool {
+		return len(sessionMgr.GetActiveSessions()) == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"authorized request must reach the wrapped WebSocket handler and create a session")
+
+	sessions := sessionMgr.GetActiveSessions()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "query-steward", sessions[0].StewardID,
 		"an explicit steward_id query value must not be overwritten by the path variable")
 }
 

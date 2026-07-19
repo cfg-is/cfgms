@@ -116,7 +116,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	// Extract session parameters from query string
 	sessionReq, err := h.parseSessionRequest(r)
 	if err != nil {
-		h.logger.Warn("Invalid session request", "error", err, "remote_addr", r.RemoteAddr)
+		h.logger.Warn("Invalid session request", "error", err, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		http.Error(w, fmt.Sprintf("Invalid session request: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -141,16 +141,16 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	ctx := r.Context()
 	session, err := h.sessionManager.CreateSession(ctx, sessionReq)
 	if err != nil {
-		h.logger.Error("Failed to create terminal session", "error", err, "remote_addr", r.RemoteAddr)
+		h.logger.Error("Failed to create terminal session", "error", err, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		h.sendError(cw, fmt.Sprintf("Failed to create session: %v", err))
 		return
 	}
 
 	h.logger.Info("WebSocket terminal session established",
 		"session_id", logging.RedactedID(session.ID),
-		"steward_id", session.StewardID,
-		"user_id", session.UserID,
-		"remote_addr", r.RemoteAddr)
+		"steward_id", logging.SanitizeLogValue(session.StewardID),
+		"user_id", logging.SanitizeLogValue(session.UserID),
+		"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 
 	// Handle the WebSocket session
 	h.handleSession(ctx, cw, session)

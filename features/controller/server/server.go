@@ -1343,14 +1343,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	srv.terminalHandler = terminalH
 	if commandPublisher != nil && connRegistry != nil {
 		terminalRecordingPath := filepath.Join(resolveDNADataRoot(cfg), "terminal-recordings")
-		terminalMgr, terminalMgrErr := terminal.NewSessionManager(&terminal.Config{
-			RecordSessions:       true,
-			RecordingStoragePath: terminalRecordingPath,
-		}, logger)
+		// Use DefaultConfig() as the base so SessionTimeout and MaxSessions carry
+		// valid (positive) defaults; NewSessionManager validates both are > 0
+		// (manager.go:36,40). Overriding only the recording path preserves the
+		// established DefaultConfig() pattern used elsewhere in server.New().
+		terminalCfg := terminal.DefaultConfig()
+		terminalCfg.RecordSessions = true
+		terminalCfg.RecordingStoragePath = terminalRecordingPath
+		terminalMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, logger)
 		if terminalMgrErr != nil {
 			logger.Warn("Failed to initialize terminal session manager; terminal relay unavailable (Issue #2761)", "error", terminalMgrErr)
 		} else {
-			relaySM := controllerTransport.NewRelaySessionManager(terminalMgr, terminalH, commandPublisher, connRegistry, nil, logger)
+			relaySM := controllerTransport.NewRelaySessionManager(terminalMgr, terminalH, commandPublisher, connRegistry, auditManager, logger)
 			var terminalOrigins []string
 			if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
 				for _, o := range strings.Split(raw, ",") {

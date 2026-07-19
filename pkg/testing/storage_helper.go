@@ -23,17 +23,28 @@ import (
 var testStorageSeq int64
 
 // SetupTestStorage creates an OSS composite storage manager for testing.
-// Uses flatfile (config/audit/steward) and a named in-memory SQLite (business data).
+// Uses flatfile (config/audit/steward) and a private in-memory SQLite (business data).
 //
-// Named in-memory SQLite avoids file I/O entirely. On Windows CI, WAL mode's
-// FlushFileBuffers call blocks for minutes under load — switching to in-memory
-// eliminates that syscall while preserving per-call isolation (distinct names).
+// Private in-memory SQLite avoids file I/O entirely. On Windows CI, WAL mode's
+// FlushFileBuffers call blocks for minutes under load — in-memory eliminates that
+// syscall while preserving per-call isolation (distinct names).
+//
+// The DSN deliberately omits cache=shared. A shared-cache in-memory database is
+// registered with SQLite's single, process-wide shared-cache manager, so every
+// test's database contends on one global mutex during open/close — under a full
+// package run (many managers opening and finalizing concurrently with lingering
+// audit-drain goroutines) that serialization stalled test setup indefinitely
+// inside sqlite openDatabase (Issue #2761). The business-store bundle already
+// pins in-memory databases to a single, never-expiring connection
+// (providers/sqlite plugin.openDB), so shared cache is unnecessary for the
+// stores to observe the same data — a private database on one connection is both
+// correct and free of cross-test coupling.
 func SetupTestStorage(t *testing.T) *interfaces.StorageManager {
 	t.Helper()
 
 	flatfileRoot := t.TempDir()
 	seq := atomic.AddInt64(&testStorageSeq, 1)
-	sqlitePath := fmt.Sprintf("file:cfgms-test-%d?mode=memory&cache=shared", seq)
+	sqlitePath := fmt.Sprintf("file:cfgms-test-%d?mode=memory", seq)
 
 	storageManager, err := interfaces.CreateOSSStorageManager(flatfileRoot, sqlitePath)
 	if err != nil {

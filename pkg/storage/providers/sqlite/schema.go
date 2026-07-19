@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 const currentSchemaVersion = 2
@@ -123,9 +124,21 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
-// All DDL statements are executed inside a single transaction to reduce WAL
-// write cycles — particularly important on Windows where each individual
-// transaction requires a full file-lock round-trip via the WAL SHM mechanism.
+//
+// All DDL is executed as a single multi-statement Exec inside one transaction.
+// Two reasons:
+//   - WAL: one transaction instead of ~70 avoids a per-statement file-lock
+//     round-trip via the WAL SHM mechanism (matters most on Windows).
+//   - Cost under the race detector: each individual ExecContext drives a full
+//     prepare/parse/step cycle through the modernc SQLite parser (heavy on
+//     instrumented memcpy). Collapsing ~70 separate Exec calls into one halves
+//     schema-init time. Because SetupTestStorage builds a fresh in-memory schema
+//     for every test (hundreds per package), that per-init cost is multiplied
+//     across the whole suite; the api package test binary was tripping the 5m
+//     -race timeout purely on cumulative schema-init overhead (Issue #2761 QA).
+//
+// The statements are all CREATE TABLE / CREATE INDEX with IF NOT EXISTS, so they
+// are transaction-safe and idempotent whether the target DB is fresh or existing.
 func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillAuditEntries(ctx, db); err != nil {
 		return err
@@ -533,10 +546,12 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}()
 
-	for _, stmt := range statements {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("schema statement failed: %w\nSQL: %s", err, stmt)
-		}
+	// Single multi-statement Exec (modernc executes every ;-separated statement
+	// in order on the transaction's connection). See the function doc for why
+	// this is one Exec rather than a per-statement loop.
+	combined := strings.Join(statements, ";\n")
+	if _, err := tx.ExecContext(ctx, combined); err != nil {
+		return fmt.Errorf("schema initialization failed: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

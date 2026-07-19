@@ -4,6 +4,7 @@ package terminal
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 
 	"github.com/cfgis/cfgms/features/terminal/shell"
@@ -57,8 +58,19 @@ func (r *RelayExecutor) Resize(_ context.Context, cols, rows int) error {
 	if r.closed.Load() {
 		return nil
 	}
+	var c, row int32
+	if cols > 0 && cols <= math.MaxInt32 {
+		c = int32(cols) //nolint:gosec // bounds-checked above
+	} else {
+		c = 80
+	}
+	if rows > 0 && rows <= math.MaxInt32 {
+		row = int32(rows) //nolint:gosec // bounds-checked above
+	} else {
+		row = 24
+	}
 	select {
-	case r.resizeCh <- [2]int32{int32(cols), int32(rows)}: //nolint:gosec // terminal dimensions are far below int32 max
+	case r.resizeCh <- [2]int32{c, row}:
 	default:
 	}
 	return nil
