@@ -97,6 +97,20 @@ type hypervModule struct {
 	checkpointDesiredMu sync.RWMutex
 	checkpointDesired   map[string]interface{}
 
+	// vhdPathDesired maps a VM name to the authored `vhd_path` last seen for it,
+	// so getVM can echo the desired path back on the Get surface WHEN the VM's
+	// disk already lives in the desired home directory (#2776 follow-up). The
+	// module manages the VHD's home DIRECTORY (#2411 convergeStorageLocation keys
+	// on vmHomeDir), never the file's leaf name — a rename (Rename-VM) does not
+	// rename the VHD, and the module never renames disk files. Without the echo, a
+	// declared vhd_path whose leaf differs from the on-disk file (e.g. after a
+	// rename) drifts forever on a difference the module will not reconcile. Keyed
+	// by VM name + mutex-guarded for the same shared-instance reason as
+	// checkpointDesired; populated by setVM, echoed by getVM only when the home
+	// directory already matches (a wrong directory still drifts → storage move).
+	vhdPathDesiredMu sync.RWMutex
+	vhdPathDesired   map[string]string
+
 	// vswitches is the write-through vSwitch cache. Keys are the exact switch
 	// names admins specify (identical to the host-side names). Updated on
 	// transport success only.
@@ -240,6 +254,7 @@ func New(detector HypervDetector, opts ...HypervOption) modules.Module {
 		vms:               make(map[string]VMConfig),
 		vswitches:         make(map[string]VSwitchConfig),
 		checkpointDesired: make(map[string]interface{}),
+		vhdPathDesired:    make(map[string]string),
 		detector:          detector,
 		provisionStore:    NewMemProvisionStore(),
 		// Freshness window for the bulk cluster-owner read cache (Story #2577).
