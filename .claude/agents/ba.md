@@ -70,6 +70,7 @@ Every story MUST satisfy ALL of these criteria:
 - **≤2 module touch-points.** A story that edits files across more than 2 packages is too broad — split by package or by capability.
 - **Required tests are marked.** Tests that MUST be present to consider the story done are prefixed `[REQUIRED TEST]` in the AC list — agents have been observed treating unmarked test ACs as optional.
 - **Out of scope is explicit.** Every story has a `## Out of Scope` section calling out adjacent code the agent must NOT touch (e.g., `examples/` directory, README updates, refactors of nearby code). Agents that go out of scope cause acceptance-review kickbacks.
+- **Visual stories carry a design source.** Any story that touches the web UI (`web/src/**`, `.tsx`, component styles) or adds/changes a user-visible screen, view, component, or visual state MUST include a `## Design Source` section (see format below). A visual story with no design source cannot be promoted to Ready — the Tech Lead will Block it as founder-owned design work. Author the design source at decomposition; do not defer it.
 
 ## Story Body Format
 
@@ -126,6 +127,34 @@ genuinely no nearby code is at risk of being touched.>
 - `pkg/path/to/README.md` — <what to update>
 
 (Use "None" only if the story genuinely does not change product shape. See "Documentation & Tests Currency" rule below.)
+
+## Design Source
+
+(**Required for visual stories only** — a story that touches `web/src/**`, `.tsx`,
+component styles, or adds/changes a user-visible screen, view, component, or
+visual state. Omit this section entirely for non-visual stories; CLI output is
+not visual.)
+
+Name exactly one design source:
+
+- **Reference mockup** — `docs/design/mockups/<file>.html` (status **Reference**,
+  never Superseded) that covers this surface. The acceptance criteria must
+  require the built screen to match it. Example:
+  `docs/design/mockups/fleet-overview.html — build the table to match; both themes, Ready/Loading/Error/Empty states.`
+- **Reuse statement** — for a surface with **no new visual design** (e.g. a new
+  tab inside an existing layout, a table mirroring a shipped screen): "Reuses the
+  shipped app-shell chrome (#2496) / router (#2747) and existing components; no
+  new visual design. Follows `<concrete shipped screen/component>`."
+
+In **both** cases cite `docs/design/web-ui-design-tokens.css` as the source of
+truth — no free-hand colour, spacing, or type; semantic state tokens
+(converged / drift / error / queued). Identity and principles:
+`docs/design/web-ui-design-system.md`.
+
+If a genuinely new visual surface has **no Reference mockup yet**, still create
+the story, put "**Design source: PENDING founder mockup**" in this section, and
+flag it to the PO — the founder authors the mockup (founder-owned design) before
+the Tech Lead can promote it to Ready.
 
 ## Environment
 
