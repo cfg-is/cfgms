@@ -759,9 +759,12 @@ func (m *hypervModule) setCluster(ctx context.Context, resourceID string, config
 // single internal engine behind the hyperv.vm ha_role setting (#2372). It is
 // called only by registerClusteredRole (promote, state "present") and
 // demoteClusteredRole (demote, state "absent"); hyperv.cluster's operator
-// surface never reaches it. Gates mirror setCluster: scope cap (S5), transport,
-// CNO ownership (S1 — a non-owner audits a skip and returns nil; coordination,
-// not authorization). Membership mutations are idempotent: an existing member
+// surface never reaches it. Gates: scope cap (S5), transport, and HOST ownership
+// (S1 — a node that does not host the VM audits a skip and returns nil;
+// coordination, not authorization). Unlike setCluster (which is CNO-gated for
+// ownerless cluster-scoped work), work on an existing VM's role is gated on
+// hosting that VM: the register/demote cmdlets resolve the VM node-locally, so
+// only its host can act. Membership mutations are idempotent: an existing member
 // is not re-added, an absent member is not re-removed, and Add's
 // "already registered" error class is normalised to nil (post-failover
 // existence-check↔Add race).
@@ -787,24 +790,36 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 		return fmt.Errorf("hyperv: reconcile role membership %q/%q: %w", clusterName, role, ErrTransportNotConfigured)
 	}
 
-	// (3) CNO gate (S1). The helper audits the ownership decision and returns
-	// the role-owner map, which doubles as the existence oracle below.
-	ownsCNO, resourceOwners, err := m.clusterOwnershipHelper(ctx, clusterName)
+	// (3) Host-ownership gate. Reconciling the clustered-role membership of an
+	// EXISTING VM is gated on HOSTING that VM, not on CNO ownership. The register
+	// and demote cmdlets are node-local — psAddClusterVMRole resolves the VM via
+	// `Get-VM -Name` on the acting node before Add-ClusterVirtualMachineRole — so
+	// only the node that hosts the VM can perform the mutation, and only that node
+	// reaches this path (non-hosting members short-circuit as managed-elsewhere in
+	// getVM). The CNO gate is reserved for ownerless cluster tasks — creating a
+	// brand-new clustered VM that exists on no node (the vm.go create path,
+	// !vmExists && HARole) — where there is no host to serialise on. The ownership
+	// helper is still consulted for its role-owner map, which doubles as the
+	// existence oracle below.
+	_, resourceOwners, err := m.clusterOwnershipHelper(ctx, clusterName)
 	if err != nil {
 		return fmt.Errorf("hyperv: reconcile role membership %q/%q: %w", clusterName, role, err)
 	}
 
-	cnoOwner := m.readCNOOwner(ctx, clusterName)
-
-	if !ownsCNO {
-		// Non-owner: record an ownership-gated-skip and return nil.
+	_, hostsVM, hostErr := m.readVMState(ctx, role)
+	if hostErr != nil {
+		return fmt.Errorf("hyperv: reconcile role membership %q/%q: host-ownership probe: %w", clusterName, role, hostErr)
+	}
+	if !hostsVM {
+		// Not the host: the node that runs this VM owns its role reconcile and
+		// will converge it. Record a host-gated skip and return nil — coordination,
+		// not authorization.
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"cluster-set-skip", "cluster:"+clusterName, nil,
 			map[string]interface{}{
-				"owns_cno":  false,
-				"cno_owner": cnoOwner,
-				"skipped":   true,
-				"roles":     []string{role},
+				"hosts_vm": false,
+				"skipped":  true,
+				"roles":    []string{role},
 			}, nil)
 		return nil
 	}
@@ -828,7 +843,7 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 				"cluster-set-remove-noop", "cluster:"+clusterName,
 				map[string]interface{}{"role": role, "exists": false},
-				map[string]interface{}{"removed": false, "cno_owner": cnoOwner}, nil)
+				map[string]interface{}{"removed": false}, nil)
 			return nil
 		}
 		if _, rmErr := m.transport.ExecutePS(ctx, psRemoveClusterResource, map[string]string{"Name": role}); rmErr != nil {
@@ -841,7 +856,7 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"cluster-set-remove", "cluster:"+clusterName,
 			map[string]interface{}{"role": role, "exists": true},
-			map[string]interface{}{"removed": true, "cno_owner": cnoOwner}, nil)
+			map[string]interface{}{"removed": true}, nil)
 		// Membership changed — drop the Story #2577 read cache so the next probe
 		// sees the removed role.
 		m.invalidateClusterOwnersCache()
@@ -853,7 +868,7 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"cluster-set-noop", "cluster:"+clusterName,
 			map[string]interface{}{"role": role, "exists": true},
-			map[string]interface{}{"created": false, "cno_owner": cnoOwner}, nil)
+			map[string]interface{}{"created": false}, nil)
 		return nil
 	}
 	_, addErr := m.transport.ExecutePS(ctx, psAddClusterVMRole, map[string]string{
@@ -865,7 +880,7 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"cluster-set-create", "cluster:"+clusterName,
 			map[string]interface{}{"role": role, "exists": false},
-			map[string]interface{}{"created": true, "cno_owner": cnoOwner}, nil)
+			map[string]interface{}{"created": true}, nil)
 	case isAlreadyRegistered(addErr):
 		// Idempotency: an "already registered"/"already exists" error means a
 		// concurrent owner (or a stale existence read post-failover) created
@@ -873,7 +888,7 @@ func (m *hypervModule) reconcileRoleMembership(ctx context.Context, clusterName,
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"cluster-set-noop", "cluster:"+clusterName,
 			map[string]interface{}{"role": role, "exists": false},
-			map[string]interface{}{"created": false, "already_registered": true, "cno_owner": cnoOwner}, nil)
+			map[string]interface{}{"created": false, "already_registered": true}, nil)
 	default:
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"cluster-set-create", "cluster:"+clusterName,

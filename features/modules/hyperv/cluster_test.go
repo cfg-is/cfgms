@@ -706,10 +706,10 @@ func TestSetCluster_NonOwnerSkipsProperties(t *testing.T) {
 func TestRoleMembership_CNOOwner_Create(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
-			`{"owner":"NODE1"}`, // helper: CNO owner read → this node (NODE1) owns it
-			`{"owners":{}}`,     // helper: resource owners → role absent
-			`{"owner":"NODE1"}`, // engine: cnoOwner re-read
-			``,                  // Add-ClusterVirtualMachineRole → success (empty output)
+			`{"owner":"NODE1"}`,                      // helper: CNO owner read → this node (NODE1) owns it
+			`{"owners":{}}`,                          // helper: resource owners → role absent
+			hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+			``,                                       // Add-ClusterVirtualMachineRole → success (empty output)
 		},
 	}
 	m, store := clusterTestModule(t, transport) // m.nodeHostname == "NODE1", clusterName == "lab-hv"
@@ -803,9 +803,9 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 	t.Run("existence-check short-circuit", func(t *testing.T) {
 		transport := &testWinRMTransport{
 			perCallOutputs: []string{
-				`{"owner":"NODE1"}`,             // helper CNO owner (this node)
-				`{"owners":{"web-01":"NODE1"}}`, // role already exists
-				`{"owner":"NODE1"}`,             // cnoOwner re-read
+				`{"owner":"NODE1"}`,                      // helper CNO owner (this node)
+				`{"owners":{"web-01":"NODE1"}}`,          // role already exists
+				hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
 			},
 		}
 		m, _ := clusterTestModule(t, transport)
@@ -821,10 +821,10 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 	t.Run("already-registered error normalised", func(t *testing.T) {
 		transport := &testWinRMTransport{
 			perCallOutputs: []string{
-				`{"owner":"NODE1"}`, // helper CNO owner (this node)
-				`{"owners":{}}`,     // existence read: role absent
-				`{"owner":"NODE1"}`, // cnoOwner re-read
-				``,                  // Add call (output ignored; error supplied below)
+				`{"owner":"NODE1"}`,                      // helper CNO owner (this node)
+				`{"owners":{}}`,                          // existence read: role absent
+				hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+				``,                                       // Add call (output ignored; error supplied below)
 			},
 			perCallErrors: []error{
 				nil, nil, nil,
@@ -847,7 +847,7 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 			perCallOutputs: []string{
 				`{"owner":"NODE1"}`,
 				`{"owners":{}}`,
-				`{"owner":"NODE1"}`,
+				hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
 				``,
 			},
 			perCallErrors: []error{
@@ -872,9 +872,9 @@ func TestRoleMembership_Idempotent(t *testing.T) {
 func TestRoleMembership_DestructiveGate(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
-			`{"owner":"NODE1"}`,             // helper CNO owner (this node owns it)
-			`{"owners":{"web-01":"NODE1"}}`, // role present
-			`{"owner":"NODE1"}`,             // cnoOwner re-read
+			`{"owner":"NODE1"}`,                      // helper CNO owner (this node owns it)
+			`{"owners":{"web-01":"NODE1"}}`,          // role present
+			hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
 		},
 	}
 	m, _ := clusterTestModule(t, transport)
@@ -899,10 +899,10 @@ func TestRoleMembership_DestructiveGate(t *testing.T) {
 func TestRoleMembership_DriftNotAdopted(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
-			`{"owner":"NODE1"}`,            // helper CNO owner (this node)
-			`{"owners":{"db-99":"NODE1"}}`, // undeclared role db-99 present; declared web-01 absent
-			`{"owner":"NODE1"}`,            // cnoOwner re-read
-			``,                             // Add web-01 → success
+			`{"owner":"NODE1"}`,                      // helper CNO owner (this node)
+			`{"owners":{"db-99":"NODE1"}}`,           // undeclared role db-99 present; declared web-01 absent
+			hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+			``,                                       // Add web-01 → success
 		},
 	}
 	m, _ := clusterTestModule(t, transport)
@@ -939,10 +939,10 @@ func TestRoleMembership_DriftNotAdopted(t *testing.T) {
 func TestRoleMembership_Remove_Success(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
-			`{"owner":"NODE1"}`,             // helper CNO owner → this node (NODE1) owns it
-			`{"owners":{"web-01":"NODE1"}}`, // helper resource owners → role present
-			`{"owner":"NODE1"}`,             // setCluster cnoOwner re-read
-			``,                              // Remove-ClusterResource → success
+			`{"owner":"NODE1"}`,                      // helper CNO owner → this node (NODE1) owns it
+			`{"owners":{"web-01":"NODE1"}}`,          // helper resource owners → role present
+			hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+			``,                                       // Remove-ClusterResource → success
 		},
 	}
 	m, store := clusterTestModule(t, transport) // m.nodeHostname == "NODE1"
@@ -993,10 +993,10 @@ func TestRoleMembership_Remove_Success(t *testing.T) {
 func TestRoleMembership_Remove_TransportError(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
-			`{"owner":"NODE1"}`,             // helper CNO owner (this node owns it)
-			`{"owners":{"web-01":"NODE1"}}`, // role present
-			`{"owner":"NODE1"}`,             // cnoOwner re-read
-			``,                              // Remove call (error supplied below)
+			`{"owner":"NODE1"}`,                      // helper CNO owner (this node owns it)
+			`{"owners":{"web-01":"NODE1"}}`,          // role present
+			hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+			``,                                       // Remove call (error supplied below)
 		},
 		perCallErrors: []error{
 			nil, nil, nil,
@@ -1037,9 +1037,9 @@ func TestRoleMembership_Remove_TransportError(t *testing.T) {
 func TestRoleMembership_Remove_AlreadyGone(t *testing.T) {
 	transport := &testWinRMTransport{
 		perCallOutputs: []string{
-			`{"owner":"NODE1"}`, // helper CNO owner (this node owns it)
-			`{"owners":{}}`,     // resource owners → role already gone
-			`{"owner":"NODE1"}`, // cnoOwner re-read
+			`{"owner":"NODE1"}`,                      // helper CNO owner (this node owns it)
+			`{"owners":{}}`,                          // resource owners → role already gone
+			hostVMJSON("web-01", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
 		},
 	}
 	m, store := clusterTestModule(t, transport)
