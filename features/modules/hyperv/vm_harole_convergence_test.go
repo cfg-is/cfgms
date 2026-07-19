@@ -475,8 +475,8 @@ func TestSetVM_ClusterWideAbsentRole_OwnerCreates(t *testing.T) {
 		``,                  // Cfgms-SetVMHome: config-home move (#2411)
 		`{"owner":"NODE1"}`, // registerClusteredRole ownership helper: CNO owner
 		`{"owners":{}}`,     // registerClusteredRole ownership helper: role owners
-		`{"owner":"NODE1"}`, // registerClusteredRole audit cnoOwner re-read
-		``,                  // Add-ClusterVirtualMachineRole
+		hostVMJSON("ha-first-vm", "stopped", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+		``, // Add-ClusterVirtualMachineRole
 	}}
 	m := vmModuleWithTransport(transport, "t-2421")
 	m.clusterName = cluster
@@ -575,13 +575,13 @@ func TestSetVM_HARole_PromoteExistingVM(t *testing.T) {
 	const cluster = "lab-hv"
 
 	transport := &testWinRMTransport{perCallOutputs: []string{
-		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
-		`{"owners":{}}`,                        // getVM probe: not a member
-		`{"owners":{}}`,                        // #2422 lifecycle owner gate: role not yet registered → proceed (first-time promote)
-		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
-		`{"owners":{}}`,                        // ownership helper: role owners
-		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
-		``,                                     // Add-ClusterVirtualMachineRole
+		hostVMJSON(vmName, "stopped", 2, 4096),          // getVM: VM exists
+		`{"owners":{}}`,                                 // getVM probe: not a member
+		`{"owners":{}}`,                                 // #2422 lifecycle owner gate: role not yet registered → proceed (first-time promote)
+		`{"owner":"NODE1"}`,                             // ownership helper: CNO owner
+		`{"owners":{}}`,                                 // ownership helper: role owners
+		hostVMJSON("ha-promote-vm", "stopped", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+		``, // Add-ClusterVirtualMachineRole
 	}}
 	m := vmModuleWithTransport(transport, "t-ha")
 	m.clusterName = cluster
@@ -609,12 +609,12 @@ func TestSetVM_HARole_DemoteRemovesRoleOnly(t *testing.T) {
 	const cluster = "lab-hv"
 
 	transport := &testWinRMTransport{perCallOutputs: []string{
-		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
-		`{"owners":{"ha-demote-vm":"NODE1"}}`,  // getVM probe: member
-		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
-		`{"owners":{"ha-demote-vm":"NODE1"}}`,  // ownership helper: role owners
-		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
-		``,                                     // Remove-ClusterGroup
+		hostVMJSON(vmName, "stopped", 2, 4096),         // getVM: VM exists
+		`{"owners":{"ha-demote-vm":"NODE1"}}`,          // getVM probe: member
+		`{"owner":"NODE1"}`,                            // ownership helper: CNO owner
+		`{"owners":{"ha-demote-vm":"NODE1"}}`,          // ownership helper: role owners
+		hostVMJSON("ha-demote-vm", "stopped", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+		``, // Remove-ClusterGroup
 	}}
 	m := vmModuleWithTransport(transport, "t-ha")
 	m.clusterName = cluster
@@ -693,21 +693,26 @@ func TestSetVM_HARole_DemoteIdempotent(t *testing.T) {
 	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole))
 }
 
-// ─── AC3 (REQUIRED TEST): non-CNO-owner nodes no-op ────────────────────────────
+// ─── AC3 (REQUIRED TEST): promotion is host-gated, not CNO-gated ───────────────
 
-// TestSetVM_HARole_NonOwnerNoop: promote on a non-CNO-owner node performs no
-// membership mutation and returns nil — coordination, not authorization.
-func TestSetVM_HARole_NonOwnerNoop(t *testing.T) {
+// TestSetVM_HARole_HostPromotesEvenIfNonCNOOwner: promoting an EXISTING VM is
+// gated on HOST ownership, not CNO ownership. The node that hosts the VM
+// registers its clustered role even when another node owns the CNO — the
+// register cmdlet resolves the VM node-locally, so only its host can (and must)
+// act. Previously a non-CNO-owner silently no-op'd, which stranded any VM not
+// living on the CNO-owning node.
+func TestSetVM_HARole_HostPromotesEvenIfNonCNOOwner(t *testing.T) {
 	const vmName = "ha-nonowner-vm"
 	const cluster = "lab-hv"
 
 	transport := &testWinRMTransport{perCallOutputs: []string{
-		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists
+		hostVMJSON(vmName, "stopped", 2, 4096), // getVM: VM exists locally (this node hosts it)
 		`{"owners":{}}`,                        // getVM probe: not a member
 		`{"owners":{}}`,                        // #2422 lifecycle owner gate: role not registered → proceed (first-time promote)
-		`{"owner":"NODE2"}`,                    // ownership helper: another node owns CNO
+		`{"owner":"NODE2"}`,                    // ownership helper: ANOTHER node (NODE2) owns the CNO
 		`{"owners":{}}`,                        // ownership helper: role owners
-		`{"owner":"NODE2"}`,                    // audit cnoOwner re-read
+		hostVMJSON(vmName, "stopped", 2, 4096), // host-ownership probe (Get-VM): NODE1 hosts the VM → it promotes
+		``,                                     // Add-ClusterVirtualMachineRole
 	}}
 	m := vmModuleWithTransport(transport, "t-ha")
 	m.clusterName = cluster
@@ -722,8 +727,8 @@ func TestSetVM_HARole_NonOwnerNoop(t *testing.T) {
 		"ha_role":   map[string]interface{}{"cluster_name": cluster},
 	}))
 
-	assert.Equal(t, 0, countCmd(transport, psAddClusterVMRole),
-		"a non-owner node must not mutate cluster membership")
+	assert.Equal(t, 1, countCmd(transport, psAddClusterVMRole),
+		"the hosting node must promote its VM even when another node owns the CNO")
 }
 
 // ─── AC2 (REQUIRED TEST): source-provisioned VM registered by finalizing ──────
@@ -755,8 +760,8 @@ func TestFinalizeProvision_HARole_RegistersBeforeFinalizing(t *testing.T) {
 		``,                                     // Remove-Item (answer ISO)
 		`{"owner":"NODE1"}`,                    // ownership helper: CNO owner
 		`{"owners":{}}`,                        // ownership helper: role owners
-		`{"owner":"NODE1"}`,                    // audit cnoOwner re-read
-		``,                                     // Add-ClusterVirtualMachineRole
+		hostVMJSON("ha-src-vm", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+		``, // Add-ClusterVirtualMachineRole
 	}}
 	m := vmModuleWithTransport(transport, "t-ha")
 	m.clusterName = cluster
@@ -812,8 +817,8 @@ func TestFinalizeProvision_HARole_RegistrationFailureRetries(t *testing.T) {
 			``,                                     // Remove-Item (iso)
 			`{"owner":"NODE1"}`,                    // CNO owner
 			`{"owners":{}}`,                        // role owners
-			`{"owner":"NODE1"}`,                    // audit re-read
-			``,                                     // Add — errors below
+			hostVMJSON("ha-src-fail-vm", "running", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+			``, // Add — errors below
 		},
 		perCallErrors: []error{nil, nil, nil, nil, nil, nil, nil, nil, errors.New("cluster add failed")},
 	}

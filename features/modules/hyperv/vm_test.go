@@ -1445,8 +1445,8 @@ func TestSetVM_HARole_RegistersClusteredRole(t *testing.T) {
 			``,                  // Cfgms-SetVMHome: config-home move (#2411)
 			`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
 			`{"owners":{}}`,     // ownership helper: resource owners (role absent)
-			`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read
-			``,                  // Add-ClusterVirtualMachineRole: success
+			hostVMJSON("ha-map-vm", "stopped", 2, 4096), // host-ownership probe (Get-VM): VM present locally after create
+			``, // Add-ClusterVirtualMachineRole: success
 		}}
 		m := vmModuleWithTransport(transport, "t-ha")
 		m.clusterName = cluster
@@ -1555,8 +1555,8 @@ func TestSetVM_HARole_MapShapeRegistersClusteredRole(t *testing.T) {
 		``,                  // Cfgms-SetVMHome: config-home move (#2411)
 		`{"owner":"NODE1"}`, // ownership helper: CNO owner read (this node)
 		`{"owners":{}}`,     // ownership helper: resource owners (role absent)
-		`{"owner":"NODE1"}`, // setCluster: cnoOwner re-read
-		``,                  // Add-ClusterVirtualMachineRole: success
+		hostVMJSON("ha-map-vm", "stopped", 2, 4096), // host-ownership probe (Get-VM): VM local after create
+		``, // Add-ClusterVirtualMachineRole: success
 	}}
 	m := vmModuleWithTransport(transport, "t-ha")
 	m.clusterName = cluster

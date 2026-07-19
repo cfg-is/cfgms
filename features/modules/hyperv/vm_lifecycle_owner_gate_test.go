@@ -85,11 +85,11 @@ func TestApplyVMState_Owner_ConvergesNormally(t *testing.T) {
 		// call0: gate probe — role absent cluster-wide (no entry ⇒ do NOT skip).
 		// calls 1-4: registerClusteredRole on the CNO owner (this node).
 		transport := &testWinRMTransport{perCallOutputs: []string{
-			`{"owners":{}}`,     // gate: role not yet registered → local possession decides
-			`{"owner":"NODE1"}`, // reconcileRoleMembership: CNO owner
-			`{"owners":{}}`,     // reconcileRoleMembership: role owners
-			`{"owner":"NODE1"}`, // reconcileRoleMembership: audit cnoOwner re-read
-			``,                  // Add-ClusterVirtualMachineRole
+			`{"owners":{}}`,                        // gate: role not yet registered → local possession decides
+			`{"owner":"NODE1"}`,                    // reconcileRoleMembership: CNO owner
+			`{"owners":{}}`,                        // reconcileRoleMembership: role owners
+			hostVMJSON(vmName, "stopped", 2, 4096), // host-ownership probe (Get-VM): this node hosts the VM
+			``,                                     // Add-ClusterVirtualMachineRole
 		}}
 		m := vmModuleWithTransport(transport, "t-2422")
 		m.nodeHostname = "NODE1"
