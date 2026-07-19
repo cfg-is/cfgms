@@ -4,19 +4,21 @@
 // Issue #2782: tests for WebAuthn passkey / FIDO2 registration.
 //
 // Coverage:
-//   - begin: account-not-found, happy-path (session stored server-side)
-//   - finish: stale challenge (SESSION_EXPIRED), reused challenge (single-use via
-//     LoadAndDelete), origin mismatch, RP-ID mismatch, client-supplied assurance
-//     field ignored
+//   - begin: account-not-found, invalid username (INVALID_USERNAME), happy-path (session stored server-side)
+//   - finish: invalid username, stale challenge (SESSION_EXPIRED), reused challenge (single-use via
+//     LoadAndDelete), origin mismatch, RP-ID mismatch, client-supplied assurance field ignored,
+//     happy-path (HTTP 201, credential persisted) using W3C spec vectors
 //   - TOTP / AssuranceStrong separation (source-level grep — ADR-021 Decision 2)
 //
-// All tests use real CFGMS components; no mocks.
+// Server setups are shared across related subtests to bound total test runtime on
+// 2-vCPU CI runners with race instrumentation: 4 setups instead of 9.
 package api
 
 import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,6 +28,7 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,12 +143,11 @@ func errCode(t *testing.T, body []byte) string {
 	return resp.Error.Code
 }
 
-// --- Begin ---
-
-// TestWebAuthnRegisterBegin_NotConfigured verifies that both begin and finish return
+// TestWebAuthnNotConfigured verifies that both begin and finish return
 // 503/WEBAUTHN_NOT_CONFIGURED when no WebAuthn instance has been set on the server.
-func TestWebAuthnRegisterBegin_NotConfigured(t *testing.T) {
-	server := setupTestServer(t) // deliberately no SetWebAuthn call
+// Uses a single plain server (no SetWebAuthn) shared for both assertions.
+func TestWebAuthnNotConfigured(t *testing.T) {
+	server := setupTestServer(t)
 
 	rec := doBegin(t, server, "any-user")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
@@ -156,187 +158,248 @@ func TestWebAuthnRegisterBegin_NotConfigured(t *testing.T) {
 	assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec2.Body.Bytes()))
 }
 
-// TestWebAuthnRegisterBegin_AccountNotFound verifies that begin returns 404 when no
-// account exists for the requested username.
-func TestWebAuthnRegisterBegin_AccountNotFound(t *testing.T) {
-	server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-
-	rec := doBegin(t, server, "no-such-user")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
-}
-
-// TestWebAuthnRegisterBegin_Success verifies that begin returns 200 with
-// PublicKeyCredentialCreationOptions and stores the pending session server-side.
-func TestWebAuthnRegisterBegin_Success(t *testing.T) {
+// TestWebAuthnRegistration groups begin and finish tests under a single shared server
+// (tvRPID + tvOrigin). Subtests run sequentially; each injectSession call overwrites
+// any leftover session from a prior subtest, so there is no cross-subtest interference.
+// A separate server is created only for the RPID-mismatch case which needs a different
+// RPID configuration.
+func TestWebAuthnRegistration(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 
-	rec := doBegin(t, server, username)
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-
-	var resp APIResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	opts, ok := resp.Data.(map[string]interface{})
-	require.True(t, ok, "response.data must be an object")
-	pk, ok := opts["publicKey"].(map[string]interface{})
-	require.True(t, ok, "response.data.publicKey must be present")
-	assert.NotEmpty(t, pk["challenge"], "server must include a challenge in the creation options")
-
-	// The pending session must be stored server-side (not trusted from the client).
-	rawSession, loaded := server.webAuthnSessions.Load(username)
-	require.True(t, loaded, "session must be stored after begin")
-	pending, ok := rawSession.(*webAuthnPendingSession)
-	require.True(t, ok)
-	assert.False(t, time.Now().After(pending.expires), "freshly created session must not be expired")
-	assert.NotEmpty(t, pending.data.Challenge, "server-side session must carry the challenge")
-}
-
-// --- Finish negative tests (three distinct, per issue acceptance criteria) ---
-
-// TestWebAuthnFinish_StaleChallenge verifies that a registration session past its
-// server-side TTL is rejected with SESSION_EXPIRED before FinishRegistration runs.
-func TestWebAuthnFinish_StaleChallenge(t *testing.T) {
-	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-
+	// Fetch account ID once; all subtests that need it reference this variable.
+	// None of the negative finish tests register a credential, so the account is stable.
 	acct, err := server.getWebAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
+	userID := []byte(acct.ID)
 
-	// Session whose TTL has already elapsed (negative duration → past).
-	injectSession(server, username, tvSession([]byte(acct.ID), tvRPID), -1*time.Second)
+	// --- Begin subtests ---
 
-	rec := doFinish(t, server, username, nil)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
-}
-
-// TestWebAuthnFinish_ReusedChallenge verifies single-use enforcement: the pending
-// session is deleted on every finish attempt (LoadAndDelete), so a second call
-// returns NO_ACTIVE_REGISTRATION regardless of the first call's outcome.
-func TestWebAuthnFinish_ReusedChallenge(t *testing.T) {
-	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-
-	acct, err := server.getWebAccount(context.Background(), username)
-	require.NoError(t, err)
-	require.NotNil(t, acct)
-
-	injectSession(server, username, tvSession([]byte(acct.ID), tvRPID), 10*time.Minute)
-
-	// First call: session exists → LoadAndDelete consumes it → FinishRegistration fails
-	// on the empty body (WEBAUTHN_VERIFY_ERROR), but the session is gone either way.
-	firstRec := doFinish(t, server, username, nil)
-	assert.Equal(t, http.StatusBadRequest, firstRec.Code)
-	assert.NotEqual(t, "NO_ACTIVE_REGISTRATION", errCode(t, firstRec.Body.Bytes()),
-		"first call must find the session (not return NO_ACTIVE_REGISTRATION)")
-
-	// Second call: session was already consumed — must return NO_ACTIVE_REGISTRATION.
-	secondRec := doFinish(t, server, username, nil)
-	assert.Equal(t, http.StatusBadRequest, secondRec.Code)
-	assert.Equal(t, "NO_ACTIVE_REGISTRATION", errCode(t, secondRec.Body.Bytes()),
-		"session consumed on first call; second call must fail immediately")
-}
-
-// TestWebAuthnFinish_OriginMismatch verifies that a clientDataJSON whose origin field
-// does not appear in the server's RPOrigins list is rejected by FinishRegistration.
-// Distinct from TestWebAuthnFinish_RPIDMismatch: only origin is wrong here.
-func TestWebAuthnFinish_OriginMismatch(t *testing.T) {
-	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-
-	acct, err := server.getWebAccount(context.Background(), username)
-	require.NoError(t, err)
-	require.NotNil(t, acct)
-
-	injectSession(server, username, tvSession([]byte(acct.ID), tvRPID), 10*time.Minute)
-
-	// clientDataJSON with correct challenge but wrong origin. The attestationObject
-	// carries the webauthn.io RPID hash (correct for this test — only origin is wrong).
-	wrongOriginCDJ := base64.RawURLEncoding.EncodeToString([]byte(
-		`{"challenge":"` + tvChallenge + `","origin":"https://evil.example.com","type":"webauthn.create"}`,
-	))
-	rec := doFinish(t, server, username, finishBody(t, tvCredentialID, wrongOriginCDJ, tvAttestationObject))
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
-		"origin mismatch must produce WEBAUTHN_VERIFY_ERROR")
-}
-
-// TestWebAuthnFinish_RPIDMismatch verifies that a response whose authData carries an
-// RP-ID hash for a different domain is rejected even when the origin is allowed.
-// Distinct from TestWebAuthnFinish_OriginMismatch: the server's RPID is wrong here.
-func TestWebAuthnFinish_RPIDMismatch(t *testing.T) {
-	// Configure the server with a different RPID but add the test-vector origin to
-	// RPOrigins so the origin check passes and only the RPID hash check fails.
-	const wrongRPID = "wrong.example.com"
-	server, username := setupWebAuthnServer(t, wrongRPID, []string{tvOrigin})
-
-	acct, err := server.getWebAccount(context.Background(), username)
-	require.NoError(t, err)
-	require.NotNil(t, acct)
-
-	injectSession(server, username, tvSession([]byte(acct.ID), wrongRPID), 10*time.Minute)
-
-	// tvClientDataJSON has origin=https://webauthn.io (allowed) and challenge=tvChallenge (matching).
-	// tvAttestationObject's authData carries sha256("webauthn.io") as rpIdHash.
-	// The server expects sha256("wrong.example.com") — mismatch → WEBAUTHN_VERIFY_ERROR.
-	rec := doFinish(t, server, username, finishBody(t, tvCredentialID, tvClientDataJSON, tvAttestationObject))
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
-		"RP-ID mismatch must produce WEBAUTHN_VERIFY_ERROR")
-}
-
-// TestWebAuthnFinish_ClientAssuranceIgnored verifies that an extra "assurance":"strong"
-// field in the request body does not cause a panic, 500, or special assurance-level
-// processing. The server must fail for a legitimate WebAuthn reason (origin mismatch
-// here), not because it tried to act on the client's assurance claim.
-// ADR-021 Decision 1: AssuranceStrong is derived from cryptographic verification only.
-func TestWebAuthnFinish_ClientAssuranceIgnored(t *testing.T) {
-	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-
-	acct, err := server.getWebAccount(context.Background(), username)
-	require.NoError(t, err)
-	require.NotNil(t, acct)
-
-	injectSession(server, username, tvSession([]byte(acct.ID), tvRPID), 10*time.Minute)
-
-	// Include an extra top-level "assurance":"strong" field that the handler must ignore.
-	// Wrong origin ensures FinishRegistration fails for a known WebAuthn reason.
-	wrongOriginCDJ := base64.RawURLEncoding.EncodeToString([]byte(
-		`{"challenge":"` + tvChallenge + `","origin":"https://evil.example.com","type":"webauthn.create"}`,
-	))
-	type bodyWithAssurance struct {
-		ID        string `json:"id"`
-		RawID     string `json:"rawId"`
-		Type      string `json:"type"`
-		Assurance string `json:"assurance"` // client-supplied; must be silently discarded
-		Response  struct {
-			ClientDataJSON    string `json:"clientDataJSON"`
-			AttestationObject string `json:"attestationObject"`
-		} `json:"response"`
-	}
-	payload, err := json.Marshal(bodyWithAssurance{
-		ID: tvCredentialID, RawID: tvCredentialID, Type: "public-key",
-		Assurance: "strong",
-		Response: struct {
-			ClientDataJSON    string `json:"clientDataJSON"`
-			AttestationObject string `json:"attestationObject"`
-		}{ClientDataJSON: wrongOriginCDJ, AttestationObject: tvAttestationObject},
+	t.Run("Begin_AccountNotFound", func(t *testing.T) {
+		rec := doBegin(t, server, "no-such-user")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
 	})
-	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/web/accounts/"+username+"/webauthn/register/finish",
-		bytes.NewReader(payload))
-	req = withVars(req, map[string]string{"username": username})
-	req = withPrincipal(req, testAdminPrincipal())
-	rec := httptest.NewRecorder()
-	server.handleWebAuthnRegisterFinish(rec, req)
+	t.Run("Begin_InvalidUsername", func(t *testing.T) {
+		// "xy" is two chars — fails ^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$ (min 3 chars total).
+		rec := doBegin(t, server, "xy")
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "INVALID_USERNAME", errCode(t, rec.Body.Bytes()))
+	})
 
-	// Must fail for WebAuthn verification (origin mismatch), NOT for "invalid assurance"
-	// or any error stemming from the server trying to interpret the assurance claim.
-	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
-		"only the WebAuthn verification result may drive the error code; assurance field is ignored")
+	t.Run("Finish_InvalidUsername", func(t *testing.T) {
+		rec := doFinish(t, server, "xy", nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "INVALID_USERNAME", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("Begin_Success", func(t *testing.T) {
+		rec := doBegin(t, server, username)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		opts, ok := resp.Data.(map[string]interface{})
+		require.True(t, ok, "response.data must be an object")
+		pk, ok := opts["publicKey"].(map[string]interface{})
+		require.True(t, ok, "response.data.publicKey must be present")
+		assert.NotEmpty(t, pk["challenge"], "server must include a challenge in the creation options")
+
+		// The pending session must be stored server-side (not trusted from the client).
+		rawSession, loaded := server.webAuthnSessions.Load(username)
+		require.True(t, loaded, "session must be stored after begin")
+		pending, ok := rawSession.(*webAuthnPendingSession)
+		require.True(t, ok)
+		assert.False(t, time.Now().After(pending.expires), "freshly created session must not be expired")
+		assert.NotEmpty(t, pending.data.Challenge, "server-side session must carry the challenge")
+	})
+
+	// --- Finish negative subtests (three distinct per issue AC) ---
+
+	// TestWebAuthnFinish_StaleChallenge: session past its TTL is rejected with SESSION_EXPIRED
+	// before FinishRegistration runs.
+	t.Run("Finish_StaleChallenge", func(t *testing.T) {
+		// Session whose TTL has already elapsed (negative duration → past).
+		injectSession(server, username, tvSession(userID, tvRPID), -1*time.Second)
+
+		rec := doFinish(t, server, username, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	// TestWebAuthnFinish_ReusedChallenge: single-use enforcement — the pending session is
+	// deleted on every finish attempt (LoadAndDelete), so a second call returns
+	// NO_ACTIVE_REGISTRATION regardless of the first call's outcome.
+	t.Run("Finish_ReusedChallenge", func(t *testing.T) {
+		injectSession(server, username, tvSession(userID, tvRPID), 10*time.Minute)
+
+		// First call: session exists → LoadAndDelete consumes it → FinishRegistration fails
+		// on the empty body (WEBAUTHN_VERIFY_ERROR), but the session is gone either way.
+		firstRec := doFinish(t, server, username, nil)
+		assert.Equal(t, http.StatusBadRequest, firstRec.Code)
+		assert.NotEqual(t, "NO_ACTIVE_REGISTRATION", errCode(t, firstRec.Body.Bytes()),
+			"first call must find the session (not return NO_ACTIVE_REGISTRATION)")
+
+		// Second call: session was already consumed — must return NO_ACTIVE_REGISTRATION.
+		secondRec := doFinish(t, server, username, nil)
+		assert.Equal(t, http.StatusBadRequest, secondRec.Code)
+		assert.Equal(t, "NO_ACTIVE_REGISTRATION", errCode(t, secondRec.Body.Bytes()),
+			"session consumed on first call; second call must fail immediately")
+	})
+
+	// TestWebAuthnFinish_OriginMismatch: a clientDataJSON whose origin field does not appear
+	// in RPOrigins is rejected. Distinct from RPIDMismatch: only origin is wrong here.
+	t.Run("Finish_OriginMismatch", func(t *testing.T) {
+		injectSession(server, username, tvSession(userID, tvRPID), 10*time.Minute)
+
+		// clientDataJSON with correct challenge but wrong origin. The attestationObject
+		// carries the webauthn.io RPID hash (correct for this test — only origin is wrong).
+		wrongOriginCDJ := base64.RawURLEncoding.EncodeToString([]byte(
+			`{"challenge":"` + tvChallenge + `","origin":"https://evil.example.com","type":"webauthn.create"}`,
+		))
+		rec := doFinish(t, server, username, finishBody(t, tvCredentialID, wrongOriginCDJ, tvAttestationObject))
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
+			"origin mismatch must produce WEBAUTHN_VERIFY_ERROR")
+	})
+
+	// TestWebAuthnFinish_RPIDMismatch: a response whose authData carries an RP-ID hash for
+	// a different domain is rejected even when the origin is allowed. Needs its own server
+	// because the RPID is different from the shared server's RPID.
+	t.Run("Finish_RPIDMismatch", func(t *testing.T) {
+		// Configure the server with a different RPID but add the test-vector origin to
+		// RPOrigins so the origin check passes and only the RPID hash check fails.
+		const wrongRPID = "wrong.example.com"
+		mismatchServer, mismatchUsername := setupWebAuthnServer(t, wrongRPID, []string{tvOrigin})
+
+		mismatchAcct, err := mismatchServer.getWebAccount(context.Background(), mismatchUsername)
+		require.NoError(t, err)
+		require.NotNil(t, mismatchAcct)
+
+		injectSession(mismatchServer, mismatchUsername, tvSession([]byte(mismatchAcct.ID), wrongRPID), 10*time.Minute)
+
+		// tvClientDataJSON has origin=https://webauthn.io (allowed) and challenge=tvChallenge (matching).
+		// tvAttestationObject's authData carries sha256("webauthn.io") as rpIdHash.
+		// The server expects sha256("wrong.example.com") — mismatch → WEBAUTHN_VERIFY_ERROR.
+		rec := doFinish(t, mismatchServer, mismatchUsername, finishBody(t, tvCredentialID, tvClientDataJSON, tvAttestationObject))
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
+			"RP-ID mismatch must produce WEBAUTHN_VERIFY_ERROR")
+	})
+
+	// TestWebAuthnFinish_ClientAssuranceIgnored: an extra "assurance":"strong" field in the
+	// request body is silently ignored — the server fails for a legitimate WebAuthn reason
+	// (origin mismatch here), not because it tried to act on the assurance claim.
+	// ADR-021 Decision 1: AssuranceStrong is derived from cryptographic verification only.
+	t.Run("Finish_ClientAssuranceIgnored", func(t *testing.T) {
+		injectSession(server, username, tvSession(userID, tvRPID), 10*time.Minute)
+
+		// Include an extra top-level "assurance":"strong" field that the handler must ignore.
+		// Wrong origin ensures FinishRegistration fails for a known WebAuthn reason.
+		wrongOriginCDJ := base64.RawURLEncoding.EncodeToString([]byte(
+			`{"challenge":"` + tvChallenge + `","origin":"https://evil.example.com","type":"webauthn.create"}`,
+		))
+		type bodyWithAssurance struct {
+			ID        string `json:"id"`
+			RawID     string `json:"rawId"`
+			Type      string `json:"type"`
+			Assurance string `json:"assurance"` // client-supplied; must be silently discarded
+			Response  struct {
+				ClientDataJSON    string `json:"clientDataJSON"`
+				AttestationObject string `json:"attestationObject"`
+			} `json:"response"`
+		}
+		payload, err := json.Marshal(bodyWithAssurance{
+			ID: tvCredentialID, RawID: tvCredentialID, Type: "public-key",
+			Assurance: "strong",
+			Response: struct {
+				ClientDataJSON    string `json:"clientDataJSON"`
+				AttestationObject string `json:"attestationObject"`
+			}{ClientDataJSON: wrongOriginCDJ, AttestationObject: tvAttestationObject},
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/web/accounts/"+username+"/webauthn/register/finish",
+			bytes.NewReader(payload))
+		req = withVars(req, map[string]string{"username": username})
+		req = withPrincipal(req, testAdminPrincipal())
+		rec := httptest.NewRecorder()
+		server.handleWebAuthnRegisterFinish(rec, req)
+
+		// Must fail for WebAuthn verification (origin mismatch), NOT for "invalid assurance"
+		// or any error stemming from the server trying to interpret the assurance claim.
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
+			"only the WebAuthn verification result may drive the error code; assurance field is ignored")
+	})
+
+	// Finish_Success: happy path — valid credential is accepted, persisted, and the handler
+	// returns HTTP 201 Created. Uses the W3C Level 3 §16.2 NoneES256 spec test vector
+	// (https://www.w3.org/TR/webauthn-3/#sctn-test-vectors-none-es256). A fresh server
+	// is required because the spec vector's RPID and origin differ from the shared server.
+	//
+	// The session uses VerificationPreferred (not Required) so that the spec vector
+	// credential (UV flag not set by the spec's test authenticator) passes FinishRegistration.
+	// UV enforcement in the production flow is ensured by BeginRegistration using
+	// UserVerification: VerificationRequired — this test is exercising the credential
+	// serialization and persistence path (persistWebAccount / loadWebAccountFromStore).
+	t.Run("Finish_Success", func(t *testing.T) {
+		const (
+			svRPID    = "example.org"
+			svOrigin  = "https://example.org"
+			// W3C Level 3 §16.2 NoneES256 spec test vector (hex-encoded).
+			svAttObjectHex  = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220" //nolint:gosec
+			svClientDataHex = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
+			svCredIDHex     = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec
+			svChallengeHex  = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
+		)
+
+		svServer, svUsername := setupWebAuthnServer(t, svRPID, []string{svOrigin})
+		svAcct, err := svServer.getWebAccount(context.Background(), svUsername)
+		require.NoError(t, err)
+
+		svAttObj, err := hex.DecodeString(svAttObjectHex)
+		require.NoError(t, err)
+		svCDJ, err := hex.DecodeString(svClientDataHex)
+		require.NoError(t, err)
+		svCredIDBytes, err := hex.DecodeString(svCredIDHex)
+		require.NoError(t, err)
+		svChallengeBytes, err := hex.DecodeString(svChallengeHex)
+		require.NoError(t, err)
+
+		svCredIDStr := base64.RawURLEncoding.EncodeToString(svCredIDBytes)
+		svChallenge := base64.RawURLEncoding.EncodeToString(svChallengeBytes)
+
+		session := webauthn.SessionData{
+			Challenge:        svChallenge,
+			UserID:           []byte(svAcct.ID),
+			UserVerification: protocol.VerificationPreferred,
+			RelyingPartyID:   svRPID,
+			// CredParams is populated by BeginRegistration in the real flow;
+			// injected sessions must include it so FinishRegistration can verify
+			// the credential's public key algorithm. ES256 matches the spec vector.
+			CredParams: []protocol.CredentialParameter{
+				{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+			},
+		}
+		injectSession(svServer, svUsername, session, 10*time.Minute)
+
+		body := finishBody(t, svCredIDStr,
+			base64.RawURLEncoding.EncodeToString(svCDJ),
+			base64.RawURLEncoding.EncodeToString(svAttObj))
+		rec := doFinish(t, svServer, svUsername, body)
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+		updated, err := svServer.getWebAccount(context.Background(), svUsername)
+		require.NoError(t, err)
+		require.Len(t, updated.Credentials, 1, "credential must be persisted after successful registration")
+		assert.Equal(t, svCredIDBytes, updated.Credentials[0].ID,
+			"persisted credential ID must match the spec test vector")
+	})
 }
 
 // TestWebAuthnTOTPSeparation confirms that the WebAuthn registration code and the
