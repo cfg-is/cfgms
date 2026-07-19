@@ -485,13 +485,14 @@ func TestPermissionDenial(t *testing.T) {
 			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 		},
 		{
-			// POST /api/v1/api-keys is Tier-3: API keys get MTLS_REQUIRED regardless of permissions.
-			name:           "API key cannot access Tier-3 endpoint (api-key creation)",
+			// POST /api/v1/api-keys requires AssuranceStrong: API keys get INSUFFICIENT_PERMISSIONS
+			// because they are Machine-assurance (Issue #2780 replaces MTLS_REQUIRED gate).
+			name:           "API key cannot access strong-assurance endpoint (api-key creation)",
 			endpoint:       "/api/v1/api-keys",
 			method:         "POST",
 			permissions:    []string{"steward:list"},
 			expectedStatus: http.StatusForbidden,
-			expectedCode:   "MTLS_REQUIRED",
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 			body:           []byte(`{"name":"Test","permissions":["test"],"tenant_id":"test"}`),
 		},
 		{
@@ -1646,7 +1647,7 @@ func TestStartupScan_ContinuesOnListError(t *testing.T) {
 
 // TestStartupScan_WarnsOnPrivilegedAPIKey verifies that scanAPIKeysForPrivilegedAccess
 // emits a Warn entry containing key_id and overlapping_permissions when a stored API key
-// holds at least one Tier-3 permission (Issue #2226).
+// holds at least one strong-assurance permission (Issue #2226, updated Issue #2780).
 func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	server := setupTestServerWithLogger(t, capLog)
@@ -1656,7 +1657,7 @@ func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
 	capLog.entries = nil
 	capLog.mu.Unlock()
 
-	// Seed a key that holds the Tier-3 permission "api-key:create".
+	// Seed a key that holds the strong-assurance permission "api-key:create".
 	const keyID = "test-privileged-key-id"
 	const tenantID = "default"
 	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
@@ -1675,17 +1676,55 @@ func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
 	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
 	require.NoError(t, err)
 
-	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn entry for a key with Tier-3 permissions")
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn entry for a key with strong-assurance permissions")
 	assert.Equal(t, keyID, capLog.kvValue("key_id"),
 		"Warn entry must include the key_id of the over-privileged key")
 	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
 	assert.Contains(t, overlapping, "api-key:create",
-		"overlapping_permissions must name the Tier-3 permission held by the key")
+		"overlapping_permissions must name the strong-assurance permission held by the key")
+}
+
+// TestF4_StartupScan_WarnsOnClusterDrainNode is the F4 required test (Issue #2780).
+// It verifies that the startup scan fires for an API key holding "cluster:drain-node",
+// a permission added to permissionAssurance in Issue #2780 (not part of the former
+// Tier-3 set). The scan must flag it because its Min > AssuranceMachine.
+func TestF4_StartupScan_WarnsOnClusterDrainNode(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	const keyID = "test-cluster-drain-key-id"
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-cluster-drain-key",
+		Value:     "hash-cluster-drain-key",
+		TenantID:  "default",
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   "steward:read,cluster:drain-node",
+		},
+	})
+	require.NoError(t, err, "seeding cluster:drain-node key must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, capLog.hasLevel("WARN"),
+		"scan must emit a Warn entry for a key holding cluster:drain-node (Min: AssuranceStrong)")
+	assert.Equal(t, keyID, capLog.kvValue("key_id"),
+		"Warn entry must include the key_id of the over-privileged key")
+	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
+	assert.Contains(t, overlapping, "cluster:drain-node",
+		"overlapping_permissions must name cluster:drain-node as the violating permission")
 }
 
 // TestStartupScan_NoWarnForUnprivilegedKey verifies that scanAPIKeysForPrivilegedAccess
-// does not emit a Tier-3 over-privilege warning when the stored API key only holds
-// non-Tier-3 permissions (Issue #2226).
+// does not emit a strong-assurance over-privilege warning when the stored API key only
+// holds non-strong-assurance permissions (Issue #2226, updated Issue #2780).
 func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	server := setupTestServerWithLogger(t, capLog)

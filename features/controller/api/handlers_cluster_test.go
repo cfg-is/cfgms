@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/cluster"
+	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -32,9 +34,9 @@ func drainRequest(nodeID string) *http.Request {
 	return mux.SetURLVars(req, map[string]string{"id": nodeID})
 }
 
-// TestHandleClusterNodeDrain_NonAdminRejects403 is the required AC test:
-// non-admin principal (or nil) must receive HTTP 403 with no membership state change.
-func TestHandleClusterNodeDrain_NonAdminRejects403(t *testing.T) {
+// TestHandleClusterNodeDrain_NilPrincipalRejects403 verifies that a nil principal
+// (unauthenticated) is rejected 403 by the handler's nil check (always present).
+func TestHandleClusterNodeDrain_NilPrincipalRejects403(t *testing.T) {
 	srv, store := setupClusterTestServer(t)
 	require.NoError(t, store.Register(cluster.NodeRecord{
 		ID:           "node-1",
@@ -42,27 +44,38 @@ func TestHandleClusterNodeDrain_NonAdminRejects403(t *testing.T) {
 		RegisteredAt: time.Now(),
 	}))
 
-	t.Run("nil principal", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		srv.handleClusterNodeDrain(rec, drainRequest("node-1"))
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDrain(rec, drainRequest("node-1"))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 
-		got, err := store.GetNode("node-1")
-		require.NoError(t, err)
-		assert.Equal(t, cluster.StateActive, got.State, "state must not change on 403")
-		assert.False(t, srv.clusterDraining.Load(), "health gate must not be set on 403")
-	})
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateActive, got.State, "state must not change on 403")
+	assert.False(t, srv.clusterDraining.Load(), "health gate must not be set on 403")
+}
 
-	t.Run("non-admin principal", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		req := injectNonAdminPrincipal(drainRequest("node-1"))
-		srv.handleClusterNodeDrain(rec, req)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+// TestAssuranceGate_ClusterDrain_BasicAssuranceGetsStepUp verifies that a Basic-assurance
+// principal receives 401 step-up for cluster:drain-node via requirePermission directly
+// (assurance gate lives in requirePermission, not auth middleware; Issue #2780).
+func TestAssuranceGate_ClusterDrain_BasicAssuranceGetsStepUp(t *testing.T) {
+	srv, _ := setupClusterTestServer(t)
 
-		got, err := store.GetNode("node-1")
-		require.NoError(t, err)
-		assert.Equal(t, cluster.StateActive, got.State, "state must not change on 403")
-	})
+	basicPrincipal := &Principal{
+		ID:        "web-user",
+		Name:      "web-session:web-user",
+		IsAdmin:   true,
+		Assurance: session.AssuranceBasic,
+	}
+	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := srv.requirePermission("cluster", "drain-node")(probe)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/nodes/node-1/drain", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, basicPrincipal))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "Basic-assurance caller must get 401 step-up")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
 }
 
 // TestHandleClusterNodeDrain_AdminValidNode_Returns202 is the required AC test:
@@ -175,9 +188,9 @@ func setupClusterTestServerWithRegistry(t *testing.T) (*Server, *cluster.InMemor
 	return srv, store
 }
 
-// TestHandleClusterNodeDecommission_NonAdminRejects403 is the required AC test:
-// non-admin principal (or nil) must receive HTTP 403 with no membership state change.
-func TestHandleClusterNodeDecommission_NonAdminRejects403(t *testing.T) {
+// TestHandleClusterNodeDecommission_NilPrincipalRejects403 verifies that a nil
+// principal is rejected 403 by the handler's nil check.
+func TestHandleClusterNodeDecommission_NilPrincipalRejects403(t *testing.T) {
 	srv, store := setupClusterTestServer(t)
 	require.NoError(t, store.Register(cluster.NodeRecord{
 		ID:           "node-1",
@@ -185,26 +198,37 @@ func TestHandleClusterNodeDecommission_NonAdminRejects403(t *testing.T) {
 		RegisteredAt: time.Now(),
 	}))
 
-	t.Run("nil principal", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		srv.handleClusterNodeDecommission(rec, decommissionRequest("node-1"))
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDecommission(rec, decommissionRequest("node-1"))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 
-		got, err := store.GetNode("node-1")
-		require.NoError(t, err)
-		assert.Equal(t, cluster.StateDraining, got.State, "state must not change on 403")
-	})
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDraining, got.State, "state must not change on 403")
+}
 
-	t.Run("non-admin principal", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		req := injectNonAdminPrincipal(decommissionRequest("node-1"))
-		srv.handleClusterNodeDecommission(rec, req)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+// TestAssuranceGate_ClusterDecommission_BasicAssuranceGetsStepUp verifies that a
+// Basic-assurance principal receives 401 step-up for cluster:decommission-node via
+// requirePermission directly (Issue #2780).
+func TestAssuranceGate_ClusterDecommission_BasicAssuranceGetsStepUp(t *testing.T) {
+	srv, _ := setupClusterTestServer(t)
 
-		got, err := store.GetNode("node-1")
-		require.NoError(t, err)
-		assert.Equal(t, cluster.StateDraining, got.State, "state must not change on 403")
-	})
+	basicPrincipal := &Principal{
+		ID:        "web-user",
+		Name:      "web-session:web-user",
+		IsAdmin:   true,
+		Assurance: session.AssuranceBasic,
+	}
+	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := srv.requirePermission("cluster", "decommission-node")(probe)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/nodes/node-1/decommission", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, basicPrincipal))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "Basic-assurance caller must get 401 step-up")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
 }
 
 // TestHandleClusterNodeDecommission_NilMembershipStore_Returns503 verifies that

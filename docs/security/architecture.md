@@ -121,10 +121,11 @@ credential login (ADR-018, Addendum 1):
   map as cache only. Accounts survive controller restart. argon2id cost
   parameters are encoded in each stored hash so they can be raised without
   invalidating existing credentials.
-- **Provisioning:** Tier-3 only. `POST /api/v1/web/accounts` (create, and
+- **Provisioning:** AssuranceStrong only (ADR-021). `POST /api/v1/web/accounts` (create, and
   admin-driven password reset via upsert) and
   `DELETE /api/v1/web/accounts/{username}` require an admin mTLS certificate;
-  API-key and session-token callers receive `403 MTLS_REQUIRED`. Every
+  API-key callers receive `403 INSUFFICIENT_PERMISSIONS`; Basic-assurance session callers
+  receive `401` with a `WWW-Authenticate: CFGMS-StepUp` challenge. Every
   create/reset/delete emits an audit event with the sanitized username and the
   acting admin principal; the password value never appears in logs or error
   responses.
@@ -287,16 +288,17 @@ Audit payloads carry sanitized username, tenant, outcome. Credential material
 
 The controller REST API assigns every endpoint to one of four authentication tiers. The tier determines what credential strength is required to reach the handler — independently of which permissions the caller holds.
 
-| Tier | Name | Credential requirement |
-|------|------|------------------------|
-| 0 | Public | No authentication (health check, registration) |
-| 1 | Any | Any valid credential: mTLS admin cert **or** API key |
-| 2 | Elevated | Reserved for future use |
-| 3 | mTLS-Only | mTLS admin certificate required; API keys are rejected even when they carry the exact matching permission |
+**Identity assurance levels** (ADR-021, Issue #2780 — replaces the former Tier-3 / `requireTier(TierMTLSOnly)` gate):
 
-**Tier-3 discriminator:** The sole check is whether the request carries a valid mTLS admin certificate (`principal.IsAdmin`). The permission set of the caller is never consulted. An API key that holds every Tier-3 permission will still receive HTTP 403 `MTLS_REQUIRED`.
+| Level | Name | Credential type |
+|-------|------|-----------------|
+| 0 | Machine | API key |
+| 1 | Basic | cfg-CLI Bearer session (ADR-014) or web-session cookie (ADR-018) |
+| 2 | Strong | mTLS admin certificate |
 
-**Tier-3 endpoint surface** (Issue #1419):
+Routes that require elevated assurance are declared in `permissionAssurance` (`features/controller/api/assurance.go`). The `requirePermission` middleware enforces the check after authentication: a Machine-assurance principal holding the matching permission receives `403 INSUFFICIENT_PERMISSIONS`; a Basic-assurance principal receives `401` with a `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong"` challenge.
+
+**Strong-assurance endpoint surface** (`permissionAssurance` registry, `Min: AssuranceStrong`):
 
 | Permission | Endpoint |
 |------------|----------|
@@ -316,12 +318,18 @@ The controller REST API assigns every endpoint to one of four authentication tie
 | `tenant:create` | `POST /api/v1/tenants` |
 | `refresh:approve` | `POST /api/v1/stewards/refresh/{pending_id}/approve` |
 | `refresh:set-policy` | `PUT /api/v1/tenants/{tenant_path}/refresh-policy` |
+| `steward:move` | `POST /api/v1/stewards/{id}/move` |
+| `steward:decommission` | `DELETE /api/v1/stewards/{id}` |
 | `web-account:create` | `POST /api/v1/web/accounts` |
 | `web-account:delete` | `DELETE /api/v1/web/accounts/{username}` |
+| `cluster:drain-node` | `POST /api/v1/cluster/nodes/{id}/drain` |
+| `cluster:decommission-node` | `POST /api/v1/cluster/nodes/{id}/decommission` |
+| `session:create` | `POST /api/v1/sessions` |
+| `module:approve`, `module:reject`, `publisher-trust:add` | _(forward-declared; routes not yet wired)_ |
 
-The canonical source of truth for this list is `tier3Permissions` in `features/controller/api/auth_tiers.go`. The `TestTier3Enforcement_RouteSetMatchesCanonicalSet` test in `features/controller/api/tier_enforcement_test.go` asserts at test time that the wired route set exactly equals this map — any drift is a test failure.
+The canonical source of truth is `permissionAssurance` in `features/controller/api/assurance.go`. The `TestF2_AssuranceGate_ParityWithPermissionRegistry` test asserts at test time that the wired route set and the registry match — any drift is a test failure.
 
-**Rationale:** Endpoints in this tier can issue credentials, modify trust anchors, or alter the authorization model itself. Restricting them to mTLS provides a hardware-backed authentication guarantee that cannot be replicated by a compromised or stolen API key. Operators who need these capabilities must use an admin credential bundle (mTLS client certificate) rather than an API key.
+**Rationale:** Endpoints in this set can issue credentials, modify trust anchors, or alter the authorization model itself. Restricting them to `AssuranceStrong` provides a hardware-backed authentication guarantee that cannot be replicated by a compromised or stolen API key or web session. Operators who need these capabilities must authenticate with an admin credential bundle (mTLS client certificate).
 
 ## Security Best Practices
 

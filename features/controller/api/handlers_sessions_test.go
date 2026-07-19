@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -94,22 +95,25 @@ func (l *captureAllLogger) ErrorCtx(_ context.Context, msg string, kvs ...interf
 	l.record(msg, kvs...)
 }
 
-// injectAdminPrincipal returns a copy of r with an admin Principal set in context.
+// injectAdminPrincipal returns a copy of r with a Strong-assurance admin Principal set
+// in context (mTLS admin cert — AssuranceStrong, Issue #2780).
 func injectAdminPrincipal(r *http.Request, principalID string) *http.Request {
 	p := &Principal{
-		ID:      principalID,
-		Name:    "mtls-admin:" + principalID,
-		IsAdmin: true,
+		ID:        principalID,
+		Name:      "mtls-admin:" + principalID,
+		IsAdmin:   true,
+		Assurance: session.AssuranceStrong,
 	}
 	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
 }
 
-// injectNonAdminPrincipal returns a copy of r with a non-admin API-key Principal.
+// injectNonAdminPrincipal returns a copy of r with a Machine-assurance API-key Principal.
 func injectNonAdminPrincipal(r *http.Request) *http.Request {
 	p := &Principal{
 		ID:          "api-key-user",
 		Name:        "apikey",
 		IsAdmin:     false,
+		Assurance:   session.AssuranceMachine,
 		Permissions: []string{"steward:list"},
 		TenantID:    "default",
 	}
@@ -160,18 +164,70 @@ func TestHandleSessionCreate_AdminReturns201(t *testing.T) {
 	}
 }
 
-// TestHandleSessionCreate_NonAdminReturns403 verifies non-admin principals are rejected.
-func TestHandleSessionCreate_NonAdminReturns403(t *testing.T) {
+// TestRouterSessionCreate_BasicAssuranceReturns401 is a REQUIRED TEST (F3, Issue #2780):
+// a Basic-assurance (cfg-CLI Bearer session) principal calling POST /api/v1/sessions must
+// receive 401 step-up, not a silently-minted new Bearer session — closing the
+// self-perpetuating-compromise gap where a Basic-assurance session could previously mint
+// fresh long-lived credentials.
+//
+// Uses a real Bearer session token (not context injection) so the request goes through the
+// auth middleware and the assurance gate fires on the authenticated principal.
+func TestRouterSessionCreate_BasicAssuranceReturns401(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+
+	// Issue a real session token — the auth middleware will validate it and create a
+	// Basic-assurance principal (session.AssuranceBasic), matching the cfg-CLI Bearer path.
+	_, token, err := mgr.Issue(context.Background(), "web-user", "test-conn", "")
+	require.NoError(t, err, "must be able to issue a session token for the test")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(`{"connection_name":"test"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("Basic-assurance principal: status = %d, want 401 step-up; body: %s", rec.Code, rec.Body.String())
+	}
+	wwwAuth := rec.Header().Get("WWW-Authenticate")
+	if !strings.Contains(wwwAuth, "CFGMS-StepUp") {
+		t.Errorf("WWW-Authenticate = %q, want contains CFGMS-StepUp", wwwAuth)
+	}
+
+	var body struct {
+		Error             string `json:"error"`
+		RequiredAssurance string `json:"required_assurance"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Error != "step_up_required" {
+		t.Errorf("body.error = %q, want step_up_required", body.Error)
+	}
+	if body.RequiredAssurance == "" {
+		t.Error("body.required_assurance must not be empty")
+	}
+}
+
+// TestRouterSessionCreate_MachineAssuranceReturns403 verifies that an API-key principal
+// (AssuranceMachine) holding session:create gets a plain 403 — never the step-up challenge
+// that it cannot satisfy (F2 REQUIRED TEST, Issue #2780).
+//
+// Uses a real API key credential through the router so the auth middleware authenticates
+// the request and the assurance gate sees a genuine Machine-assurance principal.
+func TestRouterSessionCreate_MachineAssuranceReturns403(t *testing.T) {
 	srv, _, _ := setupTestServerWithSession(t)
+	apiKey := NewTestKey(t, srv, []string{"session:create"})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(`{}`))
-	req = injectNonAdminPrincipal(req)
+	req.Header.Set("X-API-Key", apiKey)
 	rec := httptest.NewRecorder()
-
-	srv.handleSessionCreate(rec, req)
+	srv.router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
+		t.Errorf("Machine-assurance principal: status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("API-key principal must not receive WWW-Authenticate step-up challenge")
 	}
 }
 
@@ -240,8 +296,11 @@ func TestHandleSessionRevoke_NotFound(t *testing.T) {
 	}
 }
 
-// TestHandleSessionRevoke_NonAdminReturns403 verifies non-admin principals cannot revoke sessions.
-func TestHandleSessionRevoke_NonAdminReturns403(t *testing.T) {
+// TestHandleSessionRevoke_AnyPrincipalCanReachHandler verifies that the in-handler
+// IsAdmin check has been removed (Issue #2780): authorization is now enforced at
+// the router level via requirePermission("session", "revoke"). A principal with the
+// session:revoke permission that reaches the handler will be able to revoke sessions.
+func TestHandleSessionRevoke_AnyPrincipalCanReachHandler(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithSession(t)
 
 	sess, _, err := mgr.Issue(context.Background(), "alice", "ctrl", "")
@@ -249,6 +308,7 @@ func TestHandleSessionRevoke_NonAdminReturns403(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
+	// Non-admin principal can now reach the revoke handler (router enforces permission).
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sess.ID, nil)
 	req = injectNonAdminPrincipal(req)
 	req = injectSessionMuxVars(req, map[string]string{"id": sess.ID})
@@ -256,8 +316,9 @@ func TestHandleSessionRevoke_NonAdminReturns403(t *testing.T) {
 
 	srv.handleSessionRevoke(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
+	// Handler succeeds — revocation is a safety action, not blocked by IsAdmin.
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (handler reached, revoke succeeded)", rec.Code)
 	}
 }
 
@@ -444,20 +505,25 @@ func TestHandleSessionCreate_NoSessionManager(t *testing.T) {
 	}
 }
 
-// injectAdminPrincipalWithTenant returns a request with an admin Principal scoped to a specific tenant.
+// injectAdminPrincipalWithTenant returns a request with a Strong-assurance admin Principal
+// scoped to a specific tenant (mTLS admin cert — AssuranceStrong, Issue #2780).
 func injectAdminPrincipalWithTenant(r *http.Request, principalID, tenantID string) *http.Request {
 	p := &Principal{
-		ID:       principalID,
-		Name:     "mtls-admin:" + principalID,
-		IsAdmin:  true,
-		TenantID: tenantID,
+		ID:        principalID,
+		Name:      "mtls-admin:" + principalID,
+		IsAdmin:   true,
+		Assurance: session.AssuranceStrong,
+		TenantID:  tenantID,
 	}
 	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
 }
 
-// TestHandleSessionList_NonAdminReturns403 verifies that a non-admin caller receives 403.
-func TestHandleSessionList_NonAdminReturns403(t *testing.T) {
-	srv, _, _ := setupTestServerWithSession(t)
+// TestHandleSessionList_AnyPrincipalCanReachHandler verifies that the in-handler
+// IsAdmin check has been removed (Issue #2780): authorization is now enforced at
+// the router level via requirePermission("session", "list"). A principal with the
+// session:list permission that reaches the handler will receive 503 (no session manager).
+func TestHandleSessionList_AnyPrincipalCanReachHandler(t *testing.T) {
+	srv := setupTestServer(t) // no session manager wired
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	req = injectNonAdminPrincipal(req)
@@ -465,8 +531,9 @@ func TestHandleSessionList_NonAdminReturns403(t *testing.T) {
 
 	srv.handleSessionList(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
+	// Handler no longer checks IsAdmin — it returns 503 when sessionManager is nil.
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (handler reached, no session manager)", rec.Code)
 	}
 }
 

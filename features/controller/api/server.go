@@ -418,7 +418,7 @@ func (s *Server) setupRouter() {
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authDefense.Middleware)   // Story #380: rate limiting before auth
 	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
-	api.Use(s.requireTier(TierAny))     // Issue #1419: explicit Tier-1 default for the api subrouter
+	// requireTier(TierAny) removed: it was a no-op passthrough (Issue #2780 migrates to assurance-based enforcement).
 	api.Use(s.validationMiddleware)
 	api.Use(s.csrfMiddleware) // Issue #2493: session-bound CSRF for unsafe cookie-auth methods
 	s.apiRouter = api         // saved so Set* methods can lazy-register routes after construction
@@ -462,9 +462,9 @@ func (s *Server) setupRouter() {
 	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/challenge", s.handleRefreshChallenge).Methods("POST", "OPTIONS")
 	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/complete", s.handleRefreshComplete).Methods("POST", "OPTIONS")
 
-	// --- Tier 1 (TierAny) — any valid credential: API key OR mTLS admin cert ---
-	// Default for all routes on the api subrouter. Tier-3 (TierMTLSOnly) endpoints are
-	// additionally wrapped with requireTier(TierMTLSOnly); see Issue #1419 story S3.
+	// All routes on the api subrouter require authentication (enforced by authenticationMiddleware).
+	// Routes whose permissions appear in permissionAssurance additionally enforce an assurance-level
+	// minimum via requirePermission — see assurance.go and Issue #2780 (ADR-021 migration).
 
 	// Cluster registry endpoints (Issue #2424): read-only view of cluster topology
 	// derived on demand from steward DNA attributes. Eventually consistent (up to one
@@ -482,8 +482,8 @@ func (s *Server) setupRouter() {
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
 	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
-	stewards.Handle("/{id}/move", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward)))).Methods("POST")              // Issue #2341: Tier-3 admin move-steward
-	stewards.Handle("/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward)))).Methods("DELETE") // Issue #2408: Tier-3 steward decommission
+	stewards.Handle("/{id}/move", s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward))).Methods("POST")              // Issue #2341, #2780: AssuranceStrong via permissionAssurance
+	stewards.Handle("/{id}", s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward))).Methods("DELETE") // Issue #2408, #2780: AssuranceStrong via permissionAssurance
 
 	// Configuration management endpoints
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
@@ -545,8 +545,8 @@ func (s *Server) setupRouter() {
 	// Certificate management endpoints
 	certs := api.PathPrefix("/certificates").Subrouter()
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
-	certs.Handle("/provision", s.requireTier(TierMTLSOnly)(s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate)))).Methods("POST")
-	certs.Handle("/signing/rotate", s.requireTier(TierMTLSOnly)(s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert)))).Methods("POST")
+	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
+	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
 
 	// RBAC management endpoints
 	rbac := api.PathPrefix("/rbac").Subrouter()
@@ -557,46 +557,49 @@ func (s *Server) setupRouter() {
 
 	// Roles
 	rbac.Handle("/roles", s.requirePermission("rbac", "list-roles")(http.HandlerFunc(s.handleListRoles))).Methods("GET")
-	rbac.Handle("/roles", s.requireTier(TierMTLSOnly)(s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole)))).Methods("POST")
+	rbac.Handle("/roles", s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole))).Methods("POST")
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "read-role")(http.HandlerFunc(s.handleGetRole))).Methods("GET")
-	rbac.Handle("/roles/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole)))).Methods("PUT")
-	rbac.Handle("/roles/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole)))).Methods("DELETE")
+	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
+	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
 
 	// API key management endpoints (for managing API keys themselves)
 	apiKeys := api.PathPrefix("/api-keys").Subrouter()
 	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
-	apiKeys.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey)))).Methods("POST")
+	apiKeys.Handle("", s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey))).Methods("POST")
 	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
-	apiKeys.Handle("/{id}", s.requireTier(TierMTLSOnly)(s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey)))).Methods("DELETE")
+	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
 
-	// Admin session endpoints (Issue #2232, #2368). POST requires an admin principal (IsAdmin==true);
-	// DELETE accepts either a valid session token or an admin mTLS cert; GET lists active sessions.
-	// All handlers check principal.IsAdmin internally — no tier-3 wrapper needed because
-	// session-token principals also have IsAdmin==true.
-	api.Handle("/sessions", http.HandlerFunc(s.handleSessionCreate)).Methods("POST")
-	api.Handle("/sessions", http.HandlerFunc(s.handleSessionList)).Methods("GET")
-	api.Handle("/sessions/{id}", http.HandlerFunc(s.handleSessionRevoke)).Methods("DELETE")
+	// Session management endpoints (Issue #2232, #2368, #2780).
+	// POST /sessions mints a new long-lived Bearer credential — requirePermission enforces
+	// session:create which is in permissionAssurance with Min: AssuranceStrong, closing the
+	// self-perpetuating-compromise gap (a web-session principal cannot mint new sessions).
+	// GET /sessions and DELETE /sessions/{id} are ordinary grant permissions (session:list /
+	// session:revoke) deliberately absent from permissionAssurance — revoking a session is
+	// a de-escalation action that must work even when the strong authenticator is unavailable.
+	api.Handle("/sessions", s.requirePermission("session", "create")(http.HandlerFunc(s.handleSessionCreate))).Methods("POST")
+	api.Handle("/sessions", s.requirePermission("session", "list")(http.HandlerFunc(s.handleSessionList))).Methods("GET")
+	api.Handle("/sessions/{id}", s.requirePermission("session", "revoke")(http.HandlerFunc(s.handleSessionRevoke))).Methods("DELETE")
 
 	// Registration token management endpoints (Story #264)
 	regTokens := api.PathPrefix("/registration/tokens").Subrouter()
 	regTokens.Handle("", s.requirePermission("registration", "list-tokens")(http.HandlerFunc(s.handleListRegistrationTokens))).Methods("GET")
-	regTokens.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken)))).Methods("POST")
+	regTokens.Handle("", s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken))).Methods("POST")
 	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
-	regTokens.Handle("/{token}", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken)))).Methods("DELETE")
-	regTokens.Handle("/{token}/revoke", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken)))).Methods("POST")
-	regTokens.Handle("/{tenant_id}/rotate", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken)))).Methods("POST")
+	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
+	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
+	regTokens.Handle("/{tenant_id}/rotate", s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken))).Methods("POST")
 
 	// Registration approval endpoints (Issue #1568)
 	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
-	api.Handle("/registration/{id}/approve", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration)))).Methods("POST")
+	api.Handle("/registration/{id}/approve", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveRegistration))).Methods("POST")
 	api.Handle("/registration/{id}/deny", s.requirePermission("registration", "deny")(http.HandlerFunc(s.handleDenyRegistration))).Methods("POST")
 
 	// Bulk registration approval and IP-trust management (Issue #1698)
-	api.Handle("/registration/approve-all", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations)))).Methods("POST")
-	api.Handle("/registration/approve-by-cidr", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR)))).Methods("POST")
-	api.Handle("/registration/ip-trust", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust)))).Methods("POST")
+	api.Handle("/registration/approve-all", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations))).Methods("POST")
+	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
+	api.Handle("/registration/ip-trust", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust))).Methods("POST")
 	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
-	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requireTier(TierMTLSOnly)(s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust)))).Methods("DELETE")
+	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")
 
 	// Monitoring endpoints
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
@@ -616,12 +619,14 @@ func (s *Server) setupRouter() {
 	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
 	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
 
-	// Cluster node lifecycle endpoints (Issue #2283, Issue #2288)
+	// Cluster node lifecycle endpoints (Issue #2283, #2288, #2780).
+	// cluster:drain-node and cluster:decommission-node are in permissionAssurance with
+	// Min: AssuranceStrong — requirePermission enforces the assurance gate.
 	clusterRouter := api.PathPrefix("/cluster").Subrouter()
 	clusterRouter.Handle("/nodes/{id}/drain",
-		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDrain))).Methods("POST")
+		s.requirePermission("cluster", "drain-node")(http.HandlerFunc(s.handleClusterNodeDrain))).Methods("POST")
 	clusterRouter.Handle("/nodes/{id}/decommission",
-		s.requireTier(TierMTLSOnly)(http.HandlerFunc(s.handleClusterNodeDecommission))).Methods("POST")
+		s.requirePermission("cluster", "decommission-node")(http.HandlerFunc(s.handleClusterNodeDecommission))).Methods("POST")
 
 	// Compliance reporting endpoints (Story #212)
 	// Steward-specific compliance endpoints
@@ -637,27 +642,27 @@ func (s *Server) setupRouter() {
 
 	// Tenant management endpoints (Issue #1396, Issue #1848)
 	tenants := api.PathPrefix("/tenants").Subrouter()
-	tenants.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant)))).Methods("POST")
+	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
 	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
 	tenants.Handle("/{id}/suspend",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleSuspendTenant))).Methods("POST")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
-	// Web-admin account provisioning endpoints (Issue #2490, #2733).
-	// GET /web/accounts — permission-gated only (reads are outside the Tier-3 surface; see Issue #2733).
-	// POST/DELETE /web/accounts — Tier-3 (admin mTLS only), mirroring the tenants-create registration.
+	// Web-admin account provisioning endpoints (Issue #2490, #2733, #2780).
+	// GET /web/accounts — permission-gated only (reads are outside the AssuranceStrong surface; see Issue #2733).
+	// POST/DELETE /web/accounts — AssuranceStrong via permissionAssurance, mirroring the tenants-create registration.
 	webAccounts := api.PathPrefix("/web/accounts").Subrouter()
 	webAccounts.Handle("", s.requirePermission("web-account", "list")(http.HandlerFunc(s.handleListWebAccounts))).Methods("GET")
-	webAccounts.Handle("", s.requireTier(TierMTLSOnly)(s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount)))).Methods("POST")
-	webAccounts.Handle("/{username}", s.requireTier(TierMTLSOnly)(s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount)))).Methods("DELETE")
+	webAccounts.Handle("", s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount))).Methods("POST")
+	webAccounts.Handle("/{username}", s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount))).Methods("DELETE")
 
 	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
 	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
 	api.Handle("/stewards/refresh/pending",
 		s.requirePermission("refresh", "list-pending")(http.HandlerFunc(s.handleListPendingRefreshes))).Methods("GET")
 	api.Handle("/stewards/refresh/{pending_id}/approve",
-		s.requireTier(TierMTLSOnly)(s.requirePermission("refresh", "approve")(http.HandlerFunc(s.handleApproveRefresh)))).Methods("POST")
+		s.requirePermission("refresh", "approve")(http.HandlerFunc(s.handleApproveRefresh))).Methods("POST")
 	api.Handle("/stewards/refresh/{pending_id}/reject",
 		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
 
@@ -666,7 +671,7 @@ func (s *Server) setupRouter() {
 	tenants.Handle("/{tenant_path:.+}/refresh-policy",
 		s.requirePermission("refresh", "get-policy")(http.HandlerFunc(s.handleGetRefreshPolicy))).Methods("GET")
 	tenants.Handle("/{tenant_path:.+}/refresh-policy",
-		s.requireTier(TierMTLSOnly)(s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy)))).Methods("PUT")
+		s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy))).Methods("PUT")
 
 	// Installer artifact management endpoints (Issue #1702).
 	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
@@ -1683,10 +1688,11 @@ func (s *Server) loadAPIKeysFromStore() error {
 	return nil
 }
 
-// Issue #2226: scanAPIKeysForPrivilegedAccess reports API keys that hold permissions in the
-// Tier-3 (mTLS-only) set. Those permissions are now unreachable via API key; operators should
-// revoke or reprovision the affected keys. The scan consumes tier3Permissions from auth_tiers.go
-// so the two sources can never drift.
+// Issue #2226, #2780: scanAPIKeysForPrivilegedAccess reports API keys that hold permissions
+// requiring assurance levels above AssuranceMachine. Those permissions are unreachable via
+// API key (requirePermission returns 403 without a step-up challenge); operators should
+// revoke or reprovision the affected keys. The scan consumes permissionAssurance from
+// assurance.go so the enforcement and the scan can never drift.
 func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
 	if s.secretStore == nil {
 		return nil
@@ -1703,14 +1709,14 @@ func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
 	for _, meta := range secrets {
 		var overlapping []string
 		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
-			if _, isT3 := tier3Permissions[p]; isT3 {
+			if req, found := permissionAssurance[p]; found && req.Min > session.AssuranceMachine {
 				overlapping = append(overlapping, p)
 			}
 		}
 		if len(overlapping) > 0 {
 			s.logger.Warn(
-				"API key holds permissions that overlap Tier-3 (mTLS-only) endpoints; "+
-					"these are now unreachable via API key — consider revoking this key",
+				"API key holds permissions requiring elevated assurance; "+
+					"unreachable via API key — consider revoking this key",
 				"key_id", logging.SanitizeLogValue(meta.Metadata["id"]),
 				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
 				"overlapping_permissions", logging.SanitizeLogValue(strings.Join(overlapping, ",")),

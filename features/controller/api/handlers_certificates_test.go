@@ -349,9 +349,9 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		var errResp ErrorResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-		// Tier-3 enforcement fires before the handler's own IsAdmin check, so the
-		// rejection comes from requireTier(TierMTLSOnly), not the handler.
-		assert.Equal(t, "MTLS_REQUIRED", errResp.Error.Code)
+		// Assurance gate (requirePermission) fires before the handler's own IsAdmin check:
+		// Machine-assurance API keys get INSUFFICIENT_PERMISSIONS, not MTLS_REQUIRED (Issue #2780).
+		assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errResp.Error.Code)
 	})
 
 	t.Run("nil_rbac_non_admin_principal_rejected", func(t *testing.T) {

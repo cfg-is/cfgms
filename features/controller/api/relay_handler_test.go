@@ -19,6 +19,7 @@ import (
 	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	_ "modernc.org/sqlite"
 )
 
@@ -341,6 +342,7 @@ func TestRelayHandler_AdminPrincipal_NeverConstructed(t *testing.T) {
 
 	require.NotNil(t, capturedPrincipal)
 	assert.False(t, capturedPrincipal.IsAdmin, "relay principal must never be admin")
+	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance, "relay principal must always be Machine assurance")
 	assert.Equal(t, "tenant-1", capturedPrincipal.TenantID)
 }
 

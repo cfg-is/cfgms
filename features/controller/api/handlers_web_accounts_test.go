@@ -159,10 +159,11 @@ func TestWebAccounts_PasswordResetChangesAcceptedCredential(t *testing.T) {
 		"permissions retained when reset omits them")
 }
 
-// TestWebAccounts_Tier3RejectsAPIKeyCaller verifies through the full router that an
-// API-key principal is rejected from both provisioning endpoints with 403
-// MTLS_REQUIRED — even when the key carries the matching web-account permissions.
-func TestWebAccounts_Tier3RejectsAPIKeyCaller(t *testing.T) {
+// TestWebAccounts_AssuranceGateRejectsAPIKeyCaller verifies through the full router that an
+// API-key principal (Machine-assurance) is rejected from both provisioning endpoints with 403
+// INSUFFICIENT_PERMISSIONS — even when the key carries the matching web-account permissions.
+// The assurance gate in requirePermission fires before the handler (Issue #2780).
+func TestWebAccounts_AssuranceGateRejectsAPIKeyCaller(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"web-account:create", "web-account:delete"})
 
@@ -187,7 +188,7 @@ func TestWebAccounts_Tier3RejectsAPIKeyCaller(t *testing.T) {
 			var errResp ErrorResponse
 			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 			require.NotNil(t, errResp.Error)
-			assert.Equal(t, "MTLS_REQUIRED", errResp.Error.Code)
+			assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errResp.Error.Code)
 		})
 	}
 }
