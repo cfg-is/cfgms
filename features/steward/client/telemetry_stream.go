@@ -23,21 +23,17 @@ import (
 // story #2765 on the controller side).
 const minTelemetryIntervalMs = 1000
 
-// SnapshotCollector is satisfied by [telemetry.Collector]. The interface is
-// defined here so tests can inject a counting fake without importing the
-// platform-specific collector package.
-type SnapshotCollector interface {
-	Snapshot(ctx context.Context) (telemetry.Telemetry, error)
-}
-
 // TelemetryStreamConfig holds configuration for [TelemetryStream].
 type TelemetryStreamConfig struct {
 	// Client is the gRPC client used to dial TelemetryStream.
 	Client transportpb.StewardTransportClient
 	// StewardID is stamped into every outbound TelemetrySnapshot.
 	StewardID string
-	// Collector provides point-in-time process/service snapshots.
-	Collector SnapshotCollector
+	// Collector provides point-in-time process/service snapshots. It is the
+	// real platform [telemetry.Collector] (obtained via [telemetry.NewCollector]);
+	// the field is the interface type so the steward's own host collector is
+	// injected without this package importing a specific platform build.
+	Collector telemetry.Collector
 	// Logger receives warnings about stream failures and reconnects.
 	Logger logging.Logger
 }
@@ -56,7 +52,7 @@ type TelemetryStreamConfig struct {
 type TelemetryStream struct {
 	client    transportpb.StewardTransportClient
 	stewardID string
-	collector SnapshotCollector
+	collector telemetry.Collector
 	logger    logging.Logger
 
 	mu        sync.Mutex
