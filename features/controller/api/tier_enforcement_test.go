@@ -6,9 +6,11 @@ package api
 // Replaces the former requireTier(TierMTLSOnly) tests with assurance-level equivalents.
 //
 // Testing strategy:
-//   - F2 parity (Part c): real API-key credentials → Machine-assurance gets 403, not step-up.
-//   - Basic-assurance step-up: test through requirePermission directly (mTLS and web-session
-//     credentials are unavailable in unit tests; the gate is in requirePermission, not auth middleware).
+//   - F2 parity Part (c): real API-key credentials → Machine-assurance gets 403, not step-up.
+//   - F2 parity Part (d): Basic-assurance step-up on every strong-assurance route via
+//     requirePermission directly (mTLS/web-session creds not available in unit tests).
+//   - F2 parity Part (e): Strong-assurance principal passes through assurance gate on every
+//     strong-assurance route via requirePermission directly.
 //   - Machine-assurance gets 403 (not step-up): requirePermission direct call.
 //   - Relay principal: requirePermission direct call.
 //   - Non-strong routes reachable: real API-key through router.
@@ -97,7 +99,7 @@ func allStrongAssurancePermissions() []string {
 }
 
 // TestF2_AssuranceGate_ParityWithPermissionRegistry is the F2 required test
-// (Issue #2780). It verifies three invariants:
+// (Issue #2780). It verifies five invariants:
 //
 //	(a) Every route in strongAssuranceRouteTable has its permission registered in
 //	    permissionAssurance with Min > AssuranceMachine.
@@ -108,6 +110,13 @@ func allStrongAssurancePermissions() []string {
 //	(c) Each route returns HTTP 403 (not 401 step-up) to a Machine-assurance API key
 //	    that holds the matching permission — proving the assurance gate fires and
 //	    correctly distinguishes Machine from Basic/Strong principals.
+//
+//	(d) Each route returns HTTP 401 + WWW-Authenticate: CFGMS-StepUp to a
+//	    Basic-assurance caller (web-session / cfg-Bearer) — verifying that the
+//	    step-up challenge fires for every migrated route, not just a sample.
+//
+//	(e) Each route accepts a Strong-assurance caller and reaches the handler —
+//	    verifying the assurance gate does not over-block legitimate mTLS admins.
 func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -148,7 +157,7 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 
 	for _, entry := range strongAssuranceRouteTable {
 		entry := entry
-		t.Run(entry.method+" "+entry.path, func(t *testing.T) {
+		t.Run("c_machine_403/"+entry.method+" "+entry.path, func(t *testing.T) {
 			req := httptest.NewRequest(entry.method, entry.path, nil)
 			req.Header.Set("X-API-Key", apiKey)
 			rec := httptest.NewRecorder()
@@ -158,6 +167,59 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 				"Machine-assurance API key must get 403 on strong-assurance route")
 			assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
 				"Machine-assurance 403 must not include a step-up challenge")
+		})
+	}
+
+	// Part (d): Basic-assurance caller must get 401 + CFGMS-StepUp on every
+	// strong-assurance route. Uses requirePermission directly since mTLS/web-session
+	// credentials are not available in unit tests; the gate is in requirePermission,
+	// not in the authentication middleware (ADR-021 Decision 6).
+	for _, entry := range strongAssuranceRouteTable {
+		entry := entry
+		t.Run("d_basic_gets_stepup/"+entry.method+" "+entry.path, func(t *testing.T) {
+			parts := strings.SplitN(entry.permission, ":", 2)
+			require.Len(t, parts, 2, "permission %q must be resource:action", entry.permission)
+			assertStepUpFromRequirePermission(t, server, parts[0], parts[1])
+		})
+	}
+
+	// Part (e): Strong-assurance caller must reach the inner handler (assurance gate
+	// must not block a legitimate mTLS admin). Uses requirePermission directly with a
+	// Strong-assurance + IsAdmin:true principal; IsAdmin short-circuits hasPermission
+	// so no explicit permission grant is needed.
+	strongPrincipal := &Principal{
+		ID:         "cert-admin",
+		Name:       "mtls-cert:cert-admin",
+		IsAdmin:    true,
+		Assurance:  session.AssuranceStrong,
+		CertSerial: "abc123",
+	}
+	for _, entry := range strongAssuranceRouteTable {
+		entry := entry
+		t.Run("e_strong_passes/"+entry.method+" "+entry.path, func(t *testing.T) {
+			parts := strings.SplitN(entry.permission, ":", 2)
+			require.Len(t, parts, 2, "permission %q must be resource:action", entry.permission)
+
+			handlerReached := false
+			probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handlerReached = true
+				w.WriteHeader(http.StatusOK)
+			})
+			handler := server.requirePermission(parts[0], parts[1])(probe)
+
+			req := httptest.NewRequest(entry.method, entry.path, nil)
+			req = req.WithContext(context.WithValue(req.Context(), principalContextKey, strongPrincipal))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.True(t, handlerReached,
+				"Strong-assurance admin must reach handler for %s", entry.permission)
+			assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+				"Strong-assurance admin must not get 401 step-up on %s", entry.permission)
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"Strong-assurance admin must not be blocked by assurance gate on %s", entry.permission)
+			assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+				"Strong-assurance pass-through must not set WWW-Authenticate on %s", entry.permission)
 		})
 	}
 }
