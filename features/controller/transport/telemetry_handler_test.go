@@ -228,7 +228,7 @@ func TestTelemetryHandler_LastBrowserUnsubscribeTriggersExactlyOneUnsubscribe(t 
 	isLast, sc, sd := h.removeSubscriber(stewardID, id1)
 	assert.False(t, isLast, "removing first of two subscribers must not be the last")
 
-	// Simulate the WS handler's defer: if isLast send unsubscribe.
+	// Replicate the WS handler's defer logic: if isLast, send unsubscribe.
 	if isLast && sc != nil {
 		select {
 		case sc <- &transportpb.TelemetryRequest{StewardId: stewardID, Subscribe: false}:
