@@ -342,7 +342,6 @@ func TestRelayHandler_AdminPrincipal_NeverConstructed(t *testing.T) {
 
 	require.NotNil(t, capturedPrincipal)
 	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance, "relay principal must always be Machine assurance")
-	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance, "relay principal must always be Machine assurance")
 	assert.Equal(t, "tenant-1", capturedPrincipal.TenantID)
 }
 

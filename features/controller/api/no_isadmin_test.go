@@ -104,9 +104,11 @@ func isDocsPath(line string) bool {
 		if c == ':' {
 			path := line[:i]
 			rel := filepath.ToSlash(path)
-			// Match both absolute paths containing /docs/ and relative paths starting with docs/
-			for j := 0; j < len(rel)-5; j++ {
-				if rel[j:j+5] == "/docs" {
+			// Require the full directory boundary: "/docs/" or a relative path starting "docs/".
+			// Checking "/docs/" (6 chars) avoids false positives from filenames like
+			// "features/config/docstore.go" which contain "/docs" without being in docs/.
+			for j := 0; j < len(rel)-6; j++ {
+				if rel[j:j+6] == "/docs/" {
 					return true
 				}
 			}
