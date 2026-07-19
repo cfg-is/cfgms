@@ -197,10 +197,14 @@ func (t *TelemetryStream) runStream(ctx context.Context, stop <-chan struct{}) e
 	for {
 		select {
 		case <-ctx.Done():
-			_ = stream.CloseSend()
+			if err := stream.CloseSend(); err != nil {
+				t.logger.Warn("TelemetryStream: CloseSend on context cancel", "error", err)
+			}
 			return nil
 		case <-stop:
-			_ = stream.CloseSend()
+			if err := stream.CloseSend(); err != nil {
+				t.logger.Warn("TelemetryStream: CloseSend on stop", "error", err)
+			}
 			return nil
 		case err := <-recvErr:
 			// EOF means the controller closed the stream gracefully.

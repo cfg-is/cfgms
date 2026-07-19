@@ -160,14 +160,16 @@ func newTelemetryTestEnv(t *testing.T, controlFn func(grpc.BidiStreamingServer[t
 func TestTelemetryStream_NoSnapshotBeforeSubscribe(t *testing.T) {
 	collector := &fakeCollector{}
 
-	// The server holds the stream open for a bit without sending a subscribe
-	// request, then closes it.
+	// done is closed by the test to signal the server to close the stream.
+	// Using a channel instead of time.Sleep so the assertion is deterministic.
+	done := make(chan struct{})
+
 	env := newTelemetryTestEnv(t, func(
 		stream grpc.BidiStreamingServer[transportpb.TelemetrySnapshot, transportpb.TelemetryRequest],
 	) error {
-		// Keep stream open long enough for the steward goroutine to be running.
-		time.Sleep(100 * time.Millisecond)
-		// No subscribe sent — just close.
+		// Hold the stream open until the test signals completion. No subscribe
+		// request is sent, so the steward's ticker is never started.
+		<-done
 		return nil
 	})
 
@@ -181,19 +183,22 @@ func TestTelemetryStream_NoSnapshotBeforeSubscribe(t *testing.T) {
 	defer cancel()
 	ts.Start(ctx)
 
-	// Wait for the stream to open.
+	// Wait for the stream to be established (server-side handler entered).
+	// Once ready, the steward is in its select loop with no active ticker —
+	// Snapshot() can only be called after a subscribe=true request, which we
+	// intentionally never send.
 	select {
 	case <-env.srv.ready:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for TelemetryStream connection")
 	}
 
-	// Wait for the server's control function to return (stream closed).
-	time.Sleep(200 * time.Millisecond)
-	ts.Close()
-
 	assert.Equal(t, int64(0), collector.CallCount(),
 		"Snapshot must not be called before a subscribe request")
+
+	// Signal the server handler to return (sends EOF to the steward), then stop.
+	close(done)
+	ts.Close()
 }
 
 // TestTelemetryStream_NoSnapshotAfterUnsubscribe proves that Snapshot() stops
