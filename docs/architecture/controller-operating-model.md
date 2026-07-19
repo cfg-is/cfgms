@@ -405,6 +405,17 @@ The controller replaces a steward's DNA wholesale on every `DNARefreshLoop` cycl
 - `GetAll(ctx) (map[string][]string, error)` — all entries
 - `TagsFor(stewardID) []string` — convenience accessor with no error return; logs failures
 
+### Session Token Store (Issue #2774)
+
+The session token store (`pkg/session` + `pkg/storage/providers/sqlite`) provides a durable backing store for `pkg/session.Manager`. At bootstrap the controller calls `initializeSessionStore` (`features/controller/server/server.go`) which selects the backing store based on `storage.sqlite_path`:
+
+- **SQLite configured** — `SQLiteSessionTokenStore` is opened at `cfg.Storage.SQLitePath` (a dedicated handle, separate from the shared business-store handle). Both the CLI session manager (ADR-014 defaults: idle 15m / absolute 8h / grace 30s) and the web session manager (idle 60m / absolute 12h / grace 30s) share this store. Sessions survive controller restarts and, with the multi-node store backend (separate story), cluster failovers.
+- **SQLite absent** — `session.NewMemStore()` is used. Sessions are operational but are lost when the controller process stops.
+
+Either way, `httpServer.SetDurableSessionStore(sessionStore)` is called on every startup path so `sessionManager` and `webSessionManager` are never nil, and `POST /api/v1/sessions` / `POST /api/v1/web/login` never return 503 SESSION_UNAVAILABLE.
+
+The security invariant is unchanged by the backing store: `session.Manager` always passes `session.HashToken(token)` to `Store.Set`/`Get` — the raw token value is never stored or logged.
+
 ### Steward Tracking
 
 For each steward, the controller tracks:
@@ -909,7 +920,7 @@ For the operator-facing CLI workflow (first connect, reconnect, session status, 
 - Token values are sanitized from all log output via `logging.SanitizeLogValue()`.
 - Session-token principals carry `IsAdmin=true` with the same tenant scope as the originating mTLS cert (typically empty for admin certs, meaning no tenant restriction).
 - Session tokens are length-distinguishable from API keys: session tokens are 43 chars (base64url without padding), API keys are 44 chars (base64url with padding). The middleware uses this length difference to route auth correctly.
-- A controller restart drops all sessions (re-auth required); durable session store is deferred to the SaaS cluster story (#2051).
+- Session durability follows `storage.sqlite_path`: when SQLite is configured, sessions survive a controller restart and the `cfg` CLI can reconnect without re-authenticating; when SQLite is absent, an in-memory store is used and sessions are lost on restart. The store selection happens at bootstrap (`initializeSessionStore`, story #2774) using the same config signal as the upgrade-store and tag-store fallback paths.
 - The `cfg` CLI stores the session token in the OS-native secret store (Windows Credential Manager, macOS Keychain, Linux Secret Service or kernel keyring) — never in a file on disk. The encrypted admin bundle stored alongside it is machine-bound and cannot be reused from another machine.
 
 ## Multi-Tenancy

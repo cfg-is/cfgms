@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -1039,4 +1041,123 @@ func assertUpgradeStoreFunctional(t *testing.T, ctx context.Context, store busin
 	require.NoError(t, err, "fallback store must serve reads")
 	assert.Equal(t, "upg-fallback-001", got.ID)
 	assert.Equal(t, business.UpgradeStatusDispatched, got.Status)
+}
+
+// TestInitializeSessionStore_SQLitePath verifies that a configured SQLite path yields a
+// durable, disk-backed session store rather than the in-memory fallback. The assertion is
+// behavioral (durability across a fresh store on the same path) plus a negative check on the
+// in-memory type, so the test does not need to import the concrete provider package
+// (pkg/storage/providers/sqlite is off the architecture import allowlist for this file).
+func TestInitializeSessionStore_SQLitePath(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{
+			SQLitePath: filepath.Join(tempDir, "sessions.db"),
+		},
+	}
+
+	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, store)
+
+	// A configured SQLite path must NOT yield the in-memory fallback.
+	_, isMem := store.(*session.MemStore)
+	assert.False(t, isMem, "expected durable SQLite-backed store, got *session.MemStore")
+
+	// Prove durability through the session.Store contract: a session written here must
+	// survive a fresh store opened on the same path. An in-memory store could not.
+	ctx := context.Background()
+	tokenHash := "hash-durable-2774"
+	now := time.Now().UTC().Truncate(time.Second)
+	sess := &session.Session{
+		ID:                "sess-durable-2774",
+		ConnectionName:    "conn-a",
+		PrincipalID:       "admin-a",
+		TenantID:          "root",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(t, store.Set(ctx, tokenHash, sess))
+
+	// Close the first handle to prove it is owned and releasable, and to let the second
+	// store own the file cleanly. The concrete durable store implements io.Closer.
+	closer, ok := store.(io.Closer)
+	require.True(t, ok, "durable store must implement io.Closer, got %T", store)
+	require.NoError(t, closer.Close(), "durable store must own and release its handle")
+
+	// Reopen on the same path and confirm the session persisted to disk.
+	reopened := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, reopened)
+	t.Cleanup(func() {
+		if c, isCloser := reopened.(io.Closer); isCloser {
+			_ = c.Close()
+		}
+	})
+
+	got, err := reopened.Get(ctx, tokenHash)
+	require.NoError(t, err, "session written before restart must survive on disk")
+	require.NotNil(t, got)
+	assert.Equal(t, sess.ID, got.ID)
+	assert.Equal(t, sess.PrincipalID, got.PrincipalID)
+	assert.Equal(t, sess.TenantID, got.TenantID)
+}
+
+// TestInitializeSessionStore_EmptyPath verifies that initializeSessionStore returns a
+// *session.MemStore when cfg.Storage.SQLitePath is empty.
+func TestInitializeSessionStore_EmptyPath(t *testing.T) {
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{
+			SQLitePath: "",
+		},
+	}
+
+	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, store)
+
+	_, ok := store.(*session.MemStore)
+	assert.True(t, ok, "expected *session.MemStore, got %T", store)
+
+	if memStore, cast := store.(*session.MemStore); cast {
+		memStore.Close()
+	}
+}
+
+// TestInitializeSessionStore_NilStorage verifies that initializeSessionStore returns
+// a *session.MemStore when cfg.Storage is nil.
+func TestInitializeSessionStore_NilStorage(t *testing.T) {
+	cfg := &config.Config{
+		Storage: nil,
+	}
+
+	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, store)
+
+	_, ok := store.(*session.MemStore)
+	assert.True(t, ok, "expected *session.MemStore on nil Storage, got %T", store)
+
+	if memStore, cast := store.(*session.MemStore); cast {
+		memStore.Close()
+	}
+}
+
+// TestInitializeSessionStore_BadPath verifies that initializeSessionStore falls back to
+// a *session.MemStore without panicking or returning an error when the SQLite path is
+// unwritable (open failure path).
+func TestInitializeSessionStore_BadPath(t *testing.T) {
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{
+			// Deliberately unwritable: directory that does not exist under a read-only root.
+			SQLitePath: "/nonexistent-readonly-dir/sessions.db",
+		},
+	}
+
+	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, store, "fallback must not be nil even on SQLite open failure")
+
+	_, ok := store.(*session.MemStore)
+	assert.True(t, ok, "expected *session.MemStore fallback on bad path, got %T", store)
+
+	if memStore, cast := store.(*session.MemStore); cast {
+		memStore.Close()
+	}
 }

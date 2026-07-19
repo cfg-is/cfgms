@@ -70,6 +70,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -126,6 +127,7 @@ type Server struct {
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
 	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
 	tagStore                *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
+	sessionStore            session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
@@ -1092,6 +1094,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	upgradeStore := initializeUpgradeStore(context.Background(), cfg, logger)
 	httpServer.SetUpgradeStore(upgradeStore)
 
+	// Issue #2774: Wire durable SQLite-backed session token store; falls back to
+	// in-memory when SQLite is not configured. SetDurableSessionStore wires both the
+	// CLI session manager (ADR-014 defaults) and the web session manager (60m/12h/30s)
+	// from a single shared store, so POST /api/v1/sessions and POST /api/v1/auth/login
+	// are operational on every startup path and never return 503 SESSION_UNAVAILABLE.
+	// The store is held in srv.sessionStore so Stop() can close the SQLite handle.
+	sessionStore := initializeSessionStore(context.Background(), cfg, logger)
+	httpServer.SetDurableSessionStore(sessionStore)
+
 	// Issue #2296: Wire batch job store and rolling-batch executor so that
 	// POST /api/v1/jobs and GET /api/v1/jobs/{id} are operational.
 	// The in-memory store is used for the OSS composite deployment; a durable
@@ -1182,6 +1193,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		storageManager:          storageManager,
 		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
 		tagStore:                tagStoreInstance, // Issue #2542: closed in Stop() to release SQLite handle on Windows
+		sessionStore:            sessionStore,     // Issue #2774: closed in Stop() to release SQLite handle on Windows
 		executionQueue:          executionQueue,   // Issue #1672
 		jobDispatcher:           jobDispatcher,    // Issue #1672
 		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
@@ -1924,6 +1936,21 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Close session store — releases the SQLite connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2774). MemStore.Close() has no error return while
+	// SQLiteSessionTokenStore.Close() does — use a type switch since the two concrete
+	// Close signatures do not unify into a shared interface.
+	if s.sessionStore != nil {
+		switch st := s.sessionStore.(type) {
+		case *session.MemStore:
+			st.Close()
+		case *sqliteprovider.SQLiteSessionTokenStore:
+			if err := st.Close(); err != nil {
+				s.logger.Warn("Failed to close session store", "error", err)
+			}
+		}
+	}
+
 	// Drain in-flight webhook-triggered syncs before closing storage (Issue #681).
 	// WaitForPendingSyncs must run before storageManager.Close() because webhook
 	// sync goroutines write to the config store.
@@ -2425,6 +2452,36 @@ func initializeTagStore(
 	}
 
 	logger.Info("Tag store initialized with SQLite backend (Issue #2542)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
+}
+
+// initializeSessionStore opens a SQLite-backed session.Store at cfg.Storage.SQLitePath
+// and returns it. Falls back to an in-memory store (logging a warning, no startup failure)
+// when SQLitePath is empty or the SQLite open fails — controller startup is never blocked
+// on session store availability, matching the degrade-gracefully pattern of
+// initializeUpgradeStore and initializeTagStore.
+//
+// The raw path is passed directly to CreateSessionTokenStore (no "file:" DSN prefix).
+// CreateSessionTokenStore calls openAndInit internally, which runs schema DDL — no
+// separate Initialize() call is required.
+func initializeSessionStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) session.Store {
+	_ = ctx // reserved for future use (consistent with initializeUpgradeStore)
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Session store: SQLite path not configured, using in-memory store (sessions will not survive restart)")
+		return session.NewMemStore(session.DefaultConfig(), time.Now)
+	}
+
+	store, err := (&sqliteprovider.SQLiteProvider{}).CreateSessionTokenStore(map[string]interface{}{"path": cfg.Storage.SQLitePath})
+	if err != nil {
+		logger.Warn("Session store: failed to open SQLite, falling back to in-memory store", "error", err)
+		return session.NewMemStore(session.DefaultConfig(), time.Now)
+	}
+
+	logger.Info("Session store initialized with SQLite backend (Issue #2774)", "sqlite_path", cfg.Storage.SQLitePath)
 	return store
 }
 

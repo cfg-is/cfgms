@@ -93,9 +93,8 @@ type Manager interface {
 // The key for Set/Get is SHA-256(token) encoded as hex — the controller never persists
 // the raw token. Delete removes by session ID. The durable implementation lives in
 // pkg/storage/providers/sqlite and enables sessions to survive controller restarts
-// (epic #2735, story #2736).
-//
-// The implementation lives in Story #4 of epic #2213.
+// (epic #2735, story #2736). The bootstrap wiring that selects durable vs. in-memory
+// store based on cfg.Storage.SQLitePath lives in story #2774.
 type Store interface {
 	Set(ctx context.Context, tokenHash string, session *Session) error
 	Get(ctx context.Context, tokenHash string) (*Session, error)
