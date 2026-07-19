@@ -3,6 +3,8 @@
 ## Overview
 The Terminal module provides secure remote terminal access to managed Stewards through a WebSocket-based proxy system. It integrates with the existing CFGMS architecture to enable real-time interactive shell access while maintaining security and audit compliance.
 
+**Controller relay is wired (Issue #2761).** The controller exposes a WebSocket endpoint at `GET /api/v1/terminal/ws/{steward_id}` (requires `steward:terminal` RBAC permission). On connect, the controller creates an RBAC-gated, recorded terminal session, dispatches `COMMAND_TYPE_OPEN_TERMINAL` to the target steward, and relays bytes between the browser WebSocket and the steward's `Terminal` gRPC stream (implemented by story #2760) for the life of the session. All sessions are recorded; `CFGMS_TERMINAL_ALLOWED_ORIGINS` controls the WebSocket origin allowlist.
+
 ## Architecture
 
 ### Component Design

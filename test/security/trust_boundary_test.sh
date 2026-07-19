@@ -426,8 +426,12 @@ test_phase2_lifecycle() {
     _pass "phase2 step a: create-draft returned non-empty item_id"
 
     # --- Step b: list-by-status Draft, item_id present with issue_num=null --
-    local found_in_draft=false
-    for attempt in 1 2 3 4 5; do
+    # The GitHub Projects V2 items connection is eventually consistent: a freshly
+    # created item is immediately visible via get-item (direct node lookup) but
+    # can lag in the paginated items list. Poll with bounded exponential backoff
+    # until it converges instead of a short fixed window.
+    local found_in_draft=false _delay=1
+    for attempt in 1 2 3 4 5 6 7 8; do
         local list_draft_out list_draft_rc=0
         list_draft_out=$(bash "$pq_script" list-by-status Draft 2>&1) || list_draft_rc=$?
         if [[ $list_draft_rc -eq 0 ]] && printf '%s' "$list_draft_out" | ITEM_ID="$item_id" python3 -c '
@@ -441,12 +445,13 @@ sys.exit(1)
 ' 2>/dev/null; then
             found_in_draft=true; break
         fi
-        sleep 1
+        sleep "$_delay"
+        (( _delay = _delay < 8 ? _delay * 2 : 8 ))
     done
     if $found_in_draft; then
         _pass "phase2 step b: item in Draft list with issue_num=null"
     else
-        _fail "phase2 step b: item not found in Draft list with issue_num=null after 5 retries"
+        _fail "phase2 step b: item not found in Draft list with issue_num=null after 8 retries"
         return
     fi
 
@@ -461,8 +466,9 @@ sys.exit(1)
     fi
 
     # --- Step d: list-by-status Ready, item_id present ----------------------
-    local found_ready=false
-    for attempt in 1 2 3 4 5; do
+    # Same eventual-consistency handling as step b (bounded exponential backoff).
+    local found_ready=false _delay=1
+    for attempt in 1 2 3 4 5 6 7 8; do
         local list_ready_out list_ready_rc=0
         list_ready_out=$(bash "$pq_script" list-by-status Ready 2>&1) || list_ready_rc=$?
         if [[ $list_ready_rc -eq 0 ]] && printf '%s' "$list_ready_out" | ITEM_ID="$item_id" python3 -c '
@@ -473,12 +479,13 @@ sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
 ' 2>/dev/null; then
             found_ready=true; break
         fi
-        sleep 1
+        sleep "$_delay"
+        (( _delay = _delay < 8 ? _delay * 2 : 8 ))
     done
     if $found_ready; then
         _pass "phase2 step d: item appears in Ready list"
     else
-        _fail "phase2 step d: item not found in Ready list after 5 retries"
+        _fail "phase2 step d: item not found in Ready list after 8 retries"
         return
     fi
 
@@ -519,8 +526,9 @@ sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
     fi
 
     # --- Step h: list-by-status Done, item_id present -----------------------
-    local found_done=false
-    for attempt in 1 2 3 4 5; do
+    # Same eventual-consistency handling as step b (bounded exponential backoff).
+    local found_done=false _delay=1
+    for attempt in 1 2 3 4 5 6 7 8; do
         local list_done_out list_done_rc=0
         list_done_out=$(bash "$pq_script" list-by-status Done 2>&1) || list_done_rc=$?
         if [[ $list_done_rc -eq 0 ]] && printf '%s' "$list_done_out" | ITEM_ID="$item_id" python3 -c '
@@ -531,12 +539,13 @@ sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
 ' 2>/dev/null; then
             found_done=true; break
         fi
-        sleep 1
+        sleep "$_delay"
+        (( _delay = _delay < 8 ? _delay * 2 : 8 ))
     done
     if $found_done; then
         _pass "phase2 step h: item appears in Done list"
     else
-        _fail "phase2 step h: item not found in Done list after 5 retries"
+        _fail "phase2 step h: item not found in Done list after 8 retries"
         return
     fi
 

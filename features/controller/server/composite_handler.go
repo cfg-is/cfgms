@@ -16,7 +16,8 @@ import (
 // handler. Control plane RPCs go to the CP handler; SyncConfig is handled
 // directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
 // by the bulk handler; LogStream by the log stream handler; TelemetryStream
-// by the telemetry handler. Future RPCs fall through to the Unimplemented base.
+// by the telemetry handler; Terminal by the terminal handler (Issue #2761).
+// Future RPCs fall through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
@@ -26,12 +27,13 @@ type compositeTransportServer struct {
 	bulkHandler      *controllerTransport.BulkHandler      // BulkTransfer (direct handling)
 	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
 	telemetryHandler *controllerTransport.TelemetryHandler // TelemetryStream (direct handling)
+	terminalHandler  *controllerTransport.TerminalHandler  // Terminal relay (Issue #2761)
 	logger           logging.Logger
 }
 
 // newCompositeTransportServer creates a composite handler with the always-required
 // CP handler and logger. Wire optional data-plane handlers via SetConfigHandler,
-// SetDNAHandler, SetBulkHandler, and SetLogStreamHandler before serving.
+// SetDNAHandler, SetBulkHandler, SetLogStreamHandler, and SetTerminalHandler before serving.
 func newCompositeTransportServer(
 	cpHandler transportpb.StewardTransportServer,
 	logger logging.Logger,
@@ -65,6 +67,11 @@ func (c *compositeTransportServer) SetLogStreamHandler(h *controllerTransport.Lo
 // SetTelemetryHandler sets the TelemetryStream handler. Call after newCompositeTransportServer.
 func (c *compositeTransportServer) SetTelemetryHandler(h *controllerTransport.TelemetryHandler) {
 	c.telemetryHandler = h
+}
+
+// SetTerminalHandler sets the Terminal relay handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetTerminalHandler(h *controllerTransport.TerminalHandler) {
+	c.terminalHandler = h
 }
 
 // --- Control Plane RPCs (delegated to CP handler) ---
@@ -132,4 +139,14 @@ func (c *compositeTransportServer) TelemetryStream(stream grpc.BidiStreamingServ
 		return c.telemetryHandler.HandleGRPC(stream)
 	}
 	return c.UnimplementedStewardTransportServer.TelemetryStream(stream)
+}
+
+// Terminal is handled by the terminal relay handler (Issue #2761). The steward
+// dials in with an initial TerminalData frame carrying its session_id; the
+// handler correlates to the pending WS session and runs the bidirectional relay.
+func (c *compositeTransportServer) Terminal(stream grpc.BidiStreamingServer[transportpb.TerminalData, transportpb.TerminalData]) error {
+	if c.terminalHandler != nil {
+		return c.terminalHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.Terminal(stream)
 }

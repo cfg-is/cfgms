@@ -53,6 +53,7 @@ import (
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/features/workflow"
 	workflownodes "github.com/cfgis/cfgms/features/workflow/nodes"
 	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
@@ -113,6 +114,7 @@ type Server struct {
 	dataPlaneProvider       dataplaneInterfaces.DataPlaneProvider
 	configHandler           *controllerTransport.ConfigHandler
 	logStreamHandler        *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
+	terminalHandler         *controllerTransport.TerminalHandler  // Issue #2761: Terminal relay handler
 	grpcServer              *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
 	quicListener            *quictransport.Listener               // Shared QUIC listener (Story #515)
 	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
@@ -1334,6 +1336,39 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// Issue #2761: Wire terminal WebSocket relay endpoint and gRPC terminal handler.
+	// The TerminalHandler correlates steward gRPC Terminal streams to pending WS sessions.
+	// Only wired when commandPublisher is available (requires a running control plane).
+	terminalH := controllerTransport.NewTerminalHandler(logger)
+	srv.terminalHandler = terminalH
+	if commandPublisher != nil && connRegistry != nil {
+		terminalRecordingPath := filepath.Join(resolveDNADataRoot(cfg), "terminal-recordings")
+		terminalMgr, terminalMgrErr := terminal.NewSessionManager(&terminal.Config{
+			RecordSessions:       true,
+			RecordingStoragePath: terminalRecordingPath,
+		}, logger)
+		if terminalMgrErr != nil {
+			logger.Warn("Failed to initialize terminal session manager; terminal relay unavailable (Issue #2761)", "error", terminalMgrErr)
+		} else {
+			relaySM := controllerTransport.NewRelaySessionManager(terminalMgr, terminalH, commandPublisher, connRegistry, nil, logger)
+			var terminalOrigins []string
+			if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
+				for _, o := range strings.Split(raw, ",") {
+					if trimmed := strings.TrimSpace(o); trimmed != "" {
+						terminalOrigins = append(terminalOrigins, trimmed)
+					}
+				}
+			}
+			wsHandler, wsErr := terminal.NewWebSocketHandler(relaySM, logger, terminalOrigins)
+			if wsErr != nil {
+				logger.Warn("Failed to create terminal WebSocket handler; terminal relay unavailable (Issue #2761)", "error", wsErr)
+			} else {
+				httpServer.SetTerminalHandler(wsHandler)
+				logger.Info("Terminal WebSocket relay wired (Issue #2761)")
+			}
+		}
+	}
+
 	return srv, nil
 }
 
@@ -1680,6 +1715,7 @@ func (s *Server) Start() error {
 		composite.SetBulkHandler(bulkHandler)
 		composite.SetLogStreamHandler(logStreamHandler)
 		composite.SetTelemetryHandler(telemetryHandler)
+		composite.SetTerminalHandler(s.terminalHandler)
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
 		// Wire telemetry WebSocket fan-out into the REST API (Issue #2765).
 		if s.httpServer != nil {

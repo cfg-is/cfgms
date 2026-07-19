@@ -39,6 +39,7 @@ import (
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
+	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -765,21 +766,9 @@ func (s *Server) setupRouter() {
 	// Raft status endpoint: requires HA read-status permission via API authentication
 	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
 
-	// TODO(#997): Wire terminal WebSocket handler when HTTP route is added (gated on epic #750).
-	// When the terminal route is registered, parse CFGMS_TERMINAL_ALLOWED_ORIGINS and pass the
-	// resulting slice to terminal.NewWebSocketHandler as the third argument. Parsing pattern
-	// mirrors CFGMS_ALLOWED_ORIGINS (comma-separated, strings.TrimSpace per entry, empty filtered):
-	//
-	//   var terminalOrigins []string
-	//   if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
-	//       for _, o := range strings.Split(raw, ",") {
-	//           if trimmed := strings.TrimSpace(o); trimmed != "" {
-	//               terminalOrigins = append(terminalOrigins, trimmed)
-	//           }
-	//       }
-	//   }
-	//   terminalHandler, err := terminal.NewWebSocketHandler(sessionManager, s.logger, terminalOrigins)
-	//   // then register: api.Handle("/terminal/ws/{steward_id}", ...).Methods("GET")
+	// Terminal WebSocket endpoint is registered lazily by SetTerminalHandler (Issue #2761).
+	// No route is pre-registered here; the endpoint only exists when a WebSocket handler
+	// is explicitly wired in after server creation.
 
 	// SPA catch-all: lowest-precedence handler for the embedded web UI (Issue #2494).
 	// All /api/* and /raft/* routes registered above take precedence via gorilla/mux
@@ -1121,6 +1110,45 @@ func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
 	if h != nil {
 		s.router.Handle("/api/v1/webhooks/git-push", h).Methods("POST")
 		s.logger.Info("git-sync webhook endpoint registered at /api/v1/webhooks/git-push")
+	}
+}
+
+// SetTerminalHandler registers the terminal WebSocket relay endpoint at
+// GET /api/v1/terminal/ws/{steward_id}. The steward_id path variable is
+// injected into the query string so the pre-built websocket handler can
+// read it via r.URL.Query().Get("steward_id") without modification.
+// Requires "steward" / "terminal" RBAC permission (Issue #2761).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetTerminalHandler(h terminal.WebSocketHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if h == nil {
+		return
+	}
+
+	// Inject the gorilla mux path variable into the query string so that
+	// terminal.DefaultWebSocketHandler.parseSessionRequest can read it.
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stewardID := mux.Vars(r)["steward_id"]; stewardID != "" {
+			q := r.URL.Query()
+			if q.Get("steward_id") == "" {
+				q.Set("steward_id", stewardID)
+				r2 := r.Clone(r.Context())
+				r2.URL.RawQuery = q.Encode()
+				r = r2
+			}
+		}
+		h.HandleWebSocket(w, r)
+	})
+
+	s.apiRouter.Handle(
+		"/terminal/ws/{steward_id}",
+		s.requirePermission("steward", "terminal")(wrapped),
+	).Methods("GET")
+
+	if s.logger != nil {
+		s.logger.Info("Terminal WebSocket endpoint registered at /api/v1/terminal/ws/{steward_id} (Issue #2761)")
 	}
 }
 

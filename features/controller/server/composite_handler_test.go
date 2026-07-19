@@ -108,6 +108,23 @@ func (s *emptyLogStream) RecvMsg(interface{}) error                         { re
 // Compile-time check.
 var _ grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse] = (*emptyLogStream)(nil)
 
+// emptyTerminalStream implements grpc.BidiStreamingServer[TerminalData, TerminalData].
+// Recv immediately returns EOF; its context carries no mTLS peer so the terminal
+// handler's peer-identity check fires (proving delegation, not the fallback).
+type emptyTerminalStream struct{}
+
+func (s *emptyTerminalStream) Recv() (*transportpb.TerminalData, error) { return nil, io.EOF }
+func (s *emptyTerminalStream) Send(*transportpb.TerminalData) error     { return nil }
+func (s *emptyTerminalStream) SetHeader(metadata.MD) error              { return nil }
+func (s *emptyTerminalStream) SendHeader(metadata.MD) error             { return nil }
+func (s *emptyTerminalStream) SetTrailer(metadata.MD)                   {}
+func (s *emptyTerminalStream) Context() context.Context                 { return context.Background() }
+func (s *emptyTerminalStream) SendMsg(interface{}) error                { return nil }
+func (s *emptyTerminalStream) RecvMsg(interface{}) error                { return nil }
+
+// Compile-time check.
+var _ grpc.BidiStreamingServer[transportpb.TerminalData, transportpb.TerminalData] = (*emptyTerminalStream)(nil)
+
 // ---------------------------------------------------------------------------
 // Additive-extension helpers (TestComposite_AdditiveExtension)
 // ---------------------------------------------------------------------------
@@ -226,6 +243,31 @@ func TestComposite_LogStream_NilHandler(t *testing.T) {
 		"LogStream with nil handler must return Unimplemented")
 }
 
+func TestComposite_Terminal_NilHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	composite := newCompositeTransportServer(cp, nil)
+
+	err := composite.Terminal(&emptyTerminalStream{})
+	require.Error(t, err, "Terminal with nil terminalHandler should return unimplemented error")
+	assert.Contains(t, err.Error(), "not implemented",
+		"Terminal with nil handler must return Unimplemented")
+}
+
+func TestComposite_Terminal_WithHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	terminalHandler := controllerTransport.NewTerminalHandler(logging.NewNoopLogger())
+	composite := newCompositeTransportServer(cp, nil)
+	composite.SetTerminalHandler(terminalHandler)
+
+	// Background context carries no mTLS peer, so the terminal handler rejects
+	// with Unauthenticated. That proves the RPC routed through the handler's
+	// HandleGRPC rather than the Unimplemented fallback.
+	err := composite.Terminal(&emptyTerminalStream{})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "not implemented",
+		"Terminal must route through terminalHandler, not the Unimplemented fallback")
+}
+
 // TestComposite_AdditiveExtension proves that adding a new data-plane handler
 // (as stories #2761/#2765 will do for Terminal/TelemetryStream) requires zero
 // edits to newCompositeTransportServer or any existing handler field, setter, or
@@ -237,14 +279,15 @@ func TestComposite_AdditiveExtension(t *testing.T) {
 	// 2-arg constructor — unchanged whether 1 or 10 optional handlers exist.
 	base := newCompositeTransportServer(cp, nil)
 
-	// All four existing setters work; no constructor signature edit required.
+	// All five existing setters work; no constructor signature edit required.
 	base.SetConfigHandler(nil)
 	base.SetDNAHandler(nil)
 	base.SetBulkHandler(nil)
 	base.SetLogStreamHandler(nil)
+	base.SetTerminalHandler(nil)
 
 	// Wire in the hypothetical 7th handler. Zero changes to the constructor or
-	// any of the four existing handlers' fields, setters, or delegation methods.
+	// any of the five existing handlers' fields, setters, or delegation methods.
 	ext := &fooCompositeExt{compositeTransportServer: base}
 	fooH := &testFooHandler{}
 	ext.SetFooHandler(fooH)

@@ -1160,9 +1160,13 @@ print(','.join(missing) if missing else 'ok')
             log_fail "project-queue.sh list-by-status: output is not a JSON array: $list_out"
         fi
 
-        # Retry until item is visible (accounts for GitHub API eventual consistency)
+        # Retry until item is visible. The GitHub Projects V2 items connection is
+        # eventually consistent — a newly created item is immediately visible via
+        # get-item but can lag in the paginated items list. Poll with bounded
+        # exponential backoff until it converges.
         found="no"
-        for attempt in 1 2 3 4 5; do
+        local _delay=1
+        for attempt in 1 2 3 4 5 6 7 8; do
             list_out=$(bash "$script" list-by-status Draft 2>&1) || true
             found=$(echo "$list_out" | python3 -c "
 import json, sys
@@ -1173,7 +1177,8 @@ except Exception:
     print('no')
 " 2>/dev/null) || found="no"
             [[ "$found" == "yes" ]] && break
-            sleep 1
+            sleep "$_delay"
+            (( _delay = _delay < 8 ? _delay * 2 : 8 ))
         done
 
         if [[ "$found" == "yes" ]]; then
@@ -1248,23 +1253,34 @@ print(d.get('fields',{}).get('Title',''))
     fi
 
     # ── AC 2: list-by-status Ready (item moved from Draft) ───────────────────
+    # The items connection is eventually consistent after a status update, so
+    # poll with bounded exponential backoff rather than a single shot (which was
+    # racy against GitHub Projects V2 replication lag).
     exit_code=0
-    local ready_list
-    ready_list=$(bash "$script" list-by-status Ready 2>&1) || exit_code=$?
+    local ready_list found_ready="no" _ready_delay=1
+    for attempt in 1 2 3 4 5 6 7 8; do
+        exit_code=0
+        ready_list=$(bash "$script" list-by-status Ready 2>&1) || exit_code=$?
+        if [[ $exit_code -eq 0 ]]; then
+            found_ready=$(echo "$ready_list" | python3 -c "
+import json, sys
+try:
+    items = json.load(sys.stdin)
+    print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null) || found_ready="no"
+            [[ "$found_ready" == "yes" ]] && break
+        fi
+        sleep "$_ready_delay"
+        (( _ready_delay = _ready_delay < 8 ? _ready_delay * 2 : 8 ))
+    done
     if [[ $exit_code -ne 0 ]]; then
         log_fail "project-queue.sh list-by-status Ready: failed (exit $exit_code): $ready_list"
+    elif [[ "$found_ready" == "yes" ]]; then
+        log_pass "project-queue.sh list-by-status Ready: item appears after status update (AC 2)"
     else
-        local found_ready
-        found_ready=$(echo "$ready_list" | python3 -c "
-import json, sys
-items = json.load(sys.stdin)
-print('yes' if any(i.get('item_id') == '$item_id' for i in items) else 'no')
-" 2>/dev/null) || found_ready="parse-error"
-        if [[ "$found_ready" == "yes" ]]; then
-            log_pass "project-queue.sh list-by-status Ready: item appears after status update (AC 2)"
-        else
-            log_fail "project-queue.sh list-by-status Ready: item $item_id not found in Ready list"
-        fi
+        log_fail "project-queue.sh list-by-status Ready: item $item_id not found in Ready list after retries"
     fi
 
     # ── add-issue: add a real cfgms issue to the project ─────────────────────
