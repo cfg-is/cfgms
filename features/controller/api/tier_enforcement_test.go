@@ -80,6 +80,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Module bundle approval (Issue #2728) — admin decision on code executed on every managed endpoint.
 	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/approve", "module:approve"},
 	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/reject", "module:reject"},
+	// WebAuthn passkey bootstrap and recovery (Issue #2783) — credential-removal surface.
+	{"POST", "/api/v1/web/accounts/test-user/webauthn/revoke/Y3JlZGVudGlhbC1pZC0x", "webauthn:revoke"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

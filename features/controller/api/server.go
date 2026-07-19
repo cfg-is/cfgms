@@ -670,6 +670,14 @@ func (s *Server) setupRouter() {
 	webAccounts.Handle("/{username}/webauthn/register/finish",
 		s.requirePermission("webauthn", "register")(http.HandlerFunc(s.handleWebAuthnRegisterFinish))).Methods("POST")
 
+	// WebAuthn credential management endpoints (Issue #2783: cfg CLI bootstrap).
+	// list: permission-gated only (read — outside the AssuranceStrong surface, per ADR-021).
+	// revoke: webauthn:revoke permission (AssuranceStrong — credential-removal surface).
+	webAccounts.Handle("/{username}/webauthn/credentials",
+		s.requirePermission("webauthn", "list")(http.HandlerFunc(s.handleWebAuthnListCredentials))).Methods("GET")
+	webAccounts.Handle("/{username}/webauthn/revoke/{credential_id}",
+		s.requirePermission("webauthn", "revoke")(http.HandlerFunc(s.handleWebAuthnRevokeCredential))).Methods("POST")
+
 	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
 	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
 	api.Handle("/stewards/refresh/pending",

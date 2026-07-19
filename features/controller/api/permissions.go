@@ -100,8 +100,10 @@ var knownPermissions = map[string]bool{
 	"web-account:list":   true,
 	"web-account:create": true,
 	"web-account:delete": true,
-	// WebAuthn passkey / FIDO2 registration (Issue #2782)
+	// WebAuthn passkey / FIDO2 registration and credential management (Issue #2782, #2783)
 	"webauthn:register": true,
+	"webauthn:list":     true,
+	"webauthn:revoke":   true,
 	// Workflow management (Issue #2725)
 	"workflow:list":    true,
 	"workflow:read":    true,
