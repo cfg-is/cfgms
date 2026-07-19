@@ -41,6 +41,7 @@ const (
 	CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT   CommandType = 9  // Issue #1817: controller pushes current signing cert on every steward connect
 	CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY CommandType = 10 // Issue #1943: controller pushes a new steward binary for self-upgrade
 	CommandType_COMMAND_TYPE_RELAY_RESPONSE      CommandType = 11 // Issue #1994: controller sends relay response back to steward relay goroutine
+	CommandType_COMMAND_TYPE_OPEN_TERMINAL       CommandType = 12 // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY
 )
 
 // Enum value maps for CommandType.
@@ -58,6 +59,7 @@ var (
 		9:  "COMMAND_TYPE_PUSH_SIGNING_CERT",
 		10: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
 		11: "COMMAND_TYPE_RELAY_RESPONSE",
+		12: "COMMAND_TYPE_OPEN_TERMINAL",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED":         0,
@@ -72,6 +74,7 @@ var (
 		"COMMAND_TYPE_PUSH_SIGNING_CERT":   9,
 		"COMMAND_TYPE_PUSH_STEWARD_BINARY": 10,
 		"COMMAND_TYPE_RELAY_RESPONSE":      11,
+		"COMMAND_TYPE_OPEN_TERMINAL":       12,
 	}
 )
 
@@ -870,7 +873,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\adetails\x18\x06 \x03(\v2&.cfgms.transport.Response.DetailsEntryR\adetails\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x8c\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xac\x03\n" +
 	"\vCommandType\x12\x1c\n" +
 	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18COMMAND_TYPE_SYNC_CONFIG\x10\x01\x12\x19\n" +
@@ -884,7 +887,8 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x1eCOMMAND_TYPE_PUSH_SIGNING_CERT\x10\t\x12$\n" +
 	" COMMAND_TYPE_PUSH_STEWARD_BINARY\x10\n" +
 	"\x12\x1f\n" +
-	"\x1bCOMMAND_TYPE_RELAY_RESPONSE\x10\v*\xf8\x03\n" +
+	"\x1bCOMMAND_TYPE_RELAY_RESPONSE\x10\v\x12\x1e\n" +
+	"\x1aCOMMAND_TYPE_OPEN_TERMINAL\x10\f*\xf8\x03\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +

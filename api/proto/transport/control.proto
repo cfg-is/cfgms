@@ -22,6 +22,9 @@ enum CommandType {
   COMMAND_TYPE_PUSH_SIGNING_CERT = 9; // Issue #1817: controller pushes current signing cert on every steward connect
   COMMAND_TYPE_PUSH_STEWARD_BINARY = 10; // Issue #1943: controller pushes a new steward binary for self-upgrade
   COMMAND_TYPE_RELAY_RESPONSE = 11;      // Issue #1994: controller sends relay response back to steward relay goroutine
+  // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY.
+  // Command.params keys: session_id (string), shell (string), cols (int32), rows (int32).
+  COMMAND_TYPE_OPEN_TERMINAL = 12;
 }
 
 // EventType enumerates the types of events a steward emits to a controller.
