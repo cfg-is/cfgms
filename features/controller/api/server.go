@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/config/rollback"
@@ -139,6 +140,8 @@ type Server struct {
 	closeOnce                      sync.Once                             // idempotent Close
 	roleConfigStore                cfgconfig.ConfigStore                 // Issue #2543: role-config storage under role-policies namespace
 	tagStore                       *tagstore.Store                       // Issue #2545: steward tag store for tag: selector support
+	webAuthn                       *webauthn.WebAuthn                    // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
+	webAuthnSessions               sync.Map                              // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -656,6 +659,14 @@ func (s *Server) setupRouter() {
 	webAccounts.Handle("", s.requirePermission("web-account", "list")(http.HandlerFunc(s.handleListWebAccounts))).Methods("GET")
 	webAccounts.Handle("", s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount))).Methods("POST")
 	webAccounts.Handle("/{username}", s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount))).Methods("DELETE")
+
+	// WebAuthn passkey / FIDO2 registration endpoints (Issue #2782).
+	// Both routes require webauthn:register permission (AssuranceStrong via permissionAssurance)
+	// — this is a credential-minting surface, consistent with session:create.
+	webAccounts.Handle("/{username}/webauthn/register/begin",
+		s.requirePermission("webauthn", "register")(http.HandlerFunc(s.handleWebAuthnRegisterBegin))).Methods("POST")
+	webAccounts.Handle("/{username}/webauthn/register/finish",
+		s.requirePermission("webauthn", "register")(http.HandlerFunc(s.handleWebAuthnRegisterFinish))).Methods("POST")
 
 	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
 	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
