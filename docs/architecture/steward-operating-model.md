@@ -492,6 +492,15 @@ Results are reported back to the controller. Ad-hoc scripts do not modify the cf
 
 The controller can establish an interactive terminal session through the steward for live troubleshooting. The steward provides a secure, authenticated shell session back to the administrator.
 
+### Live Telemetry Stream
+
+The controller can subscribe to a live feed of the steward's process and service
+telemetry via the `TelemetryStream` bidi RPC. While subscribed, the steward
+periodically calls `Snapshot()` (from `features/steward/telemetry`) and streams
+the result. No collection happens between subscriptions — see
+[Live Telemetry Snapshots](#live-telemetry-snapshots-2763--2764--epic-2738)
+above for the full specification.
+
 ### Orchestrated Operations
 
 The steward participates in multi-node operations coordinated by the controller (rolling updates, coordinated reboots, cluster-aware operations). The steward applies its own cfg — the controller determines sequencing and timing across devices. See the [controller operating model](controller-operating-model.md) for orchestration details.
@@ -525,7 +534,7 @@ When a rolling batch job runs, the `DnaRoleQuorumChecker` partitions the fleet s
 
 Stewards without a `cluster_role` are placed freely into available slots alongside role-bearing stewards, filling up to the requested batch size.
 
-### Live Telemetry Snapshots (#2763 / epic #2738)
+### Live Telemetry Snapshots (#2763 / #2764 / epic #2738)
 
 For the Web UI live-operations ("task manager") view, the steward exposes an
 on-demand, point-in-time snapshot of its **running processes** (per-process CPU%,
@@ -538,8 +547,8 @@ Key properties:
 
 - **On-demand, subscription-scoped.** The collector is a callable snapshot
   function that does **no work unless invoked** — no background goroutine, no
-  event stream. It runs only while a controller subscriber is attached (wired by
-  #2764); between calls it costs nothing.
+  event stream. It runs only while a controller subscriber is attached; between
+  calls it costs nothing.
 - **Usermode, in-process, no shell-out.** Linux reads `/proc` (process table) and
   the systemd D-Bus `Manager.ListUnits` (services); Windows uses the
   `NtQuerySystemInformation` process table and the Service Control Manager
@@ -559,6 +568,28 @@ Key properties:
 Per-process **network** byte accounting is structurally present in the wire format
 but not populated by this usermode collector — it requires kernel-assisted tracing
 (eBPF / the Windows Kernel-Network ETW provider), reserved for a future story.
+
+#### TelemetryStream RPC (#2764)
+
+The steward exposes live telemetry over the data-plane `TelemetryStream` bidi RPC
+(`rpc TelemetryStream(stream TelemetrySnapshot) returns (stream TelemetryRequest)`).
+The steward dials out and is the *sending* side — it emits `TelemetrySnapshot`
+frames and receives `TelemetryRequest` control messages from the controller.
+
+Subscription lifecycle (steward-side):
+
+1. The steward opens the stream and enters an idle receive loop.
+2. On an inbound `TelemetryRequest{subscribe: true, interval_ms: N}`, the steward
+   starts a ticker at `max(N, 1000)` ms and calls `Snapshot()` on each tick,
+   streaming the result to the controller.
+3. On an inbound `TelemetryRequest{subscribe: false}` or stream teardown, the
+   ticker is stopped. No further `Snapshot()` calls occur until the next
+   subscribe=true.
+
+The 1 s floor on `interval_ms` is enforced steward-side as defense in depth —
+the actual untrusted-input boundary is the controller-facing web API (story #2765).
+The stream reconnects with exponential back-off on failure (same pattern as
+`EventEmitter`/`LogStream`).
 
 ## Registration
 
