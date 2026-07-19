@@ -5,9 +5,81 @@ package package_module
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
+
+// wingetFrameworkPatterns are the MSIX framework package directory globs
+// winget.exe depends on (VCLibs, WinUI/Xaml). When winget is launched as
+// LocalSystem or a service account, the loader cannot resolve these
+// framework DLLs via the normal MSIX activation path, producing exit
+// -1073741515 (0xC0000135 STATUS_DLL_NOT_FOUND). Proven fix (CFG-AB-02):
+// prepend these directories to PATH before invoking winget.exe.
+var wingetFrameworkPatterns = []string{
+	"Microsoft.VCLibs.140.00.UWPDesktop_*_x64_*",
+	"Microsoft.UI.Xaml.2.*_x64_*",
+	"Microsoft.VCLibs.140.00_*_x64_*",
+}
+
+// wingetFrameworkDirs returns the framework package directories under
+// %ProgramFiles%\WindowsApps matching wingetFrameworkPatterns. All matches
+// are included — newest is not required since any present framework version
+// satisfies the loader.
+func wingetFrameworkDirs(programFiles string) []string {
+	var dirs []string
+	for _, pattern := range wingetFrameworkPatterns {
+		matches, err := filepath.Glob(filepath.Join(programFiles, "WindowsApps", pattern))
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, matches...)
+	}
+	return dirs
+}
+
+// wingetAugmentedEnv returns os.Environ() with the winget framework
+// dependency directories and the invoked binary's own directory prepended to
+// PATH. Every winget.exe invocation (the resolveWingetFullPath probe and
+// every wingetManager operation) uses this environment so the MSIX framework
+// DLLs resolve regardless of execution context (declared, predictable
+// behavior — a Microsoft-signed binary + declared framework paths — per the
+// threat model).
+func wingetAugmentedEnv(bin string) []string {
+	env := os.Environ()
+
+	var prepend []string
+	if programFiles := os.Getenv("ProgramFiles"); programFiles != "" {
+		prepend = append(prepend, wingetFrameworkDirs(programFiles)...)
+	}
+	if bin != "" {
+		if dir := filepath.Dir(bin); dir != "." {
+			prepend = append(prepend, dir)
+		}
+	}
+	if len(prepend) == 0 {
+		return env
+	}
+
+	sep := string(os.PathListSeparator)
+	newPath := strings.Join(prepend, sep)
+
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, e := range env {
+		if len(e) >= 5 && strings.EqualFold(e[:5], "PATH=") {
+			out = append(out, "PATH="+newPath+sep+e[5:])
+			replaced = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !replaced {
+		out = append(out, "PATH="+newPath)
+	}
+	return out
+}
 
 // wingetManager implements PackageManager for Windows Package Manager (winget)
 // bin is the winget invocation path: the bare command name when the
@@ -15,18 +87,21 @@ import (
 // qualified WindowsApps binary for SYSTEM/service contexts, which have no user
 // profile and therefore no alias (#2337 — the steward itself runs as
 // LocalSystem and needs the same resolution).
+// env is the augmented PATH (WindowsApps framework dirs + bin dir) every
+// invocation uses so the SYSTEM-context DLL resolution fix applies uniformly.
 type wingetManager struct {
 	bin string
+	env []string
 }
 
 func newWingetManager() PackageManager {
-	return &wingetManager{bin: "winget"}
+	return &wingetManager{bin: "winget", env: wingetAugmentedEnv("winget")}
 }
 
 // newWingetManagerWithPath returns a wingetManager that invokes the given
 // fully qualified winget.exe (see resolveWingetFullPath in factory.go).
 func newWingetManagerWithPath(bin string) PackageManager {
-	return &wingetManager{bin: bin}
+	return &wingetManager{bin: bin, env: wingetAugmentedEnv(bin)}
 }
 
 func (m *wingetManager) Install(ctx context.Context, name, version string) error {
@@ -34,6 +109,7 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "--version", version)
 	}
+	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -43,6 +119,7 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 
 func (m *wingetManager) Remove(ctx context.Context, name string) error {
 	cmd := exec.CommandContext(ctx, m.bin, "uninstall", "--accept-source-agreements", name)
+	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -52,6 +129,7 @@ func (m *wingetManager) Remove(ctx context.Context, name string) error {
 
 func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
 	cmd := exec.CommandContext(ctx, m.bin, "list", "--name", name, "--accept-source-agreements")
+	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
@@ -73,6 +151,7 @@ func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (s
 
 func (m *wingetManager) ListInstalled(ctx context.Context) (map[string]string, error) {
 	cmd := exec.CommandContext(ctx, m.bin, "list", "--accept-source-agreements")
+	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list installed packages: %w\nOutput: %s", err, string(output))
@@ -130,7 +209,9 @@ func (m *chocolateyManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "choco", "list", "--local-only", name)
+	// Chocolatey 2.x removed --local-only ("Invalid argument --local-only");
+	// `choco list` defaults to installed/local packages in 2.x.
+	cmd := exec.CommandContext(ctx, "choco", "list", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
@@ -151,7 +232,8 @@ func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string
 }
 
 func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]string, error) {
-	cmd := exec.CommandContext(ctx, "choco", "list", "--local-only")
+	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
+	cmd := exec.CommandContext(ctx, "choco", "list")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list installed packages: %w\nOutput: %s", err, string(output))
@@ -173,7 +255,8 @@ func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]strin
 }
 
 func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "choco", "list", "--local-only", "--exact", name)
+	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
+	cmd := exec.CommandContext(ctx, "choco", "list", "--exact", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("choco list failed: %v, output: %s", err, string(output))
@@ -193,7 +276,8 @@ func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string
 }
 
 func (m *chocolateyManager) IsInstalled(ctx context.Context, name string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "choco", "list", "--local-only", "--exact", name)
+	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
+	cmd := exec.CommandContext(ctx, "choco", "list", "--exact", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("choco list failed: %v, output: %s", err, string(output))

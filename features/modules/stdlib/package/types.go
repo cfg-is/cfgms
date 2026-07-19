@@ -38,13 +38,22 @@ type PackageManager interface {
 
 // Config represents the package configuration
 type Config struct {
-	Name           string   `yaml:"name"`
-	State          string   `yaml:"state"`
-	Version        string   `yaml:"version"` // "latest" or specific version, treated as MinVersion if update is true
-	Update         bool     `yaml:"update"`  // If true, will check for updates every config validation unless maintenance window is specified
-	Dependencies   []string `yaml:"dependencies"`
-	PackageManager string   `yaml:"package_manager"`
-	Maintenance    struct {
+	Name         string   `yaml:"name"`
+	State        string   `yaml:"state"`
+	Version      string   `yaml:"version"` // "latest" or specific version, treated as MinVersion if update is true
+	Update       bool     `yaml:"update"`  // If true, will check for updates every config validation unless maintenance window is specified
+	Dependencies []string `yaml:"dependencies"`
+	// PackageManager is the legacy singular provider selector, retained for
+	// back-compat. When Providers is empty and PackageManager is set, it is
+	// treated as Providers = [PackageManager] (see effectiveProviders).
+	PackageManager string `yaml:"package_manager"`
+	// Providers is the admin-declared ordered provider allowlist for this
+	// resource (e.g. ["winget"], ["apt"]). The module never falls back to a
+	// provider outside this list — see resolveProviders/selectManager in
+	// providers.go. Empty means "use the @defaults policy, else the platform
+	// built-in default."
+	Providers   []string `yaml:"providers,omitempty"`
+	Maintenance struct {
 		Window   string        `yaml:"window"`   // Optional: Reference to a named maintenance window
 		Schedule string        `yaml:"schedule"` // Optional: Inline schedule (cron format)
 		Duration time.Duration `yaml:"duration"` // Optional: Duration of the window
@@ -70,6 +79,9 @@ func (c *Config) AsMap() map[string]interface{} {
 	}
 	if c.PackageManager != "" {
 		result["package_manager"] = c.PackageManager
+	}
+	if len(c.Providers) > 0 {
+		result["providers"] = c.Providers
 	}
 
 	// Only include maintenance if it has values
@@ -124,11 +136,29 @@ func (c *Config) GetManagedFields() []string {
 	if c.PackageManager != "" {
 		fields = append(fields, "package_manager")
 	}
+	if len(c.Providers) > 0 {
+		fields = append(fields, "providers")
+	}
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		fields = append(fields, "maintenance")
 	}
 
 	return fields
+}
+
+// effectiveProviders returns the provider allowlist this Config declares:
+// Providers if set, else a single-item list derived from the legacy
+// PackageManager field for back-compat, else nil (meaning "no
+// resource-level preference — fall through to @defaults / platform
+// default").
+func (c *Config) effectiveProviders() []string {
+	if len(c.Providers) > 0 {
+		return c.Providers
+	}
+	if c.PackageManager != "" {
+		return []string{c.PackageManager}
+	}
+	return nil
 }
 
 // validate checks if the configuration is valid
@@ -203,10 +233,33 @@ func validateVersion(version string) bool {
 
 // PackageModule implements the Module interface for package management
 type PackageModule struct {
-	mu             sync.RWMutex
+	mu sync.RWMutex
+	// packageManager is a legacy directly-injected manager (NewPackageModule
+	// constructor, used by most existing tests). When set, it is used
+	// unconditionally for every resource and the provider allowlist
+	// machinery below is bypassed entirely.
 	packageManager PackageManager
 	// resolvedName is set by Configure from config.Name; Get falls back to resourceID when empty.
 	resolvedName string
+	// resolvedProviders is the raw `providers` list recorded by Configure
+	// (NOT back-compat-expanded from package_manager) so Get can echo back
+	// exactly what was authored — desired==observed, no false drift.
+	resolvedProviders []string
+	// resolvedPackageManager is the raw legacy `package_manager` field
+	// recorded by Configure, used only for back-compat provider selection
+	// (authoredProviders) in Get, never echoed as `providers`.
+	resolvedPackageManager string
+	// defaultProviders is the host-wide policy set via Set("@defaults", ...).
+	// Legitimately shared cross-resource state (guarded by mu), unlike
+	// per-resource fields above.
+	defaultProviders []string
+	// managerCache caches selected PackageManager instances by resolved
+	// provider-list key so repeated Get/Set calls don't re-probe.
+	managerCache map[string]PackageManager
+	// registry is the provider name -> probe/constructor table used for
+	// selection. nil means use defaultProviderRegistry (New() sets this
+	// explicitly; tests can inject a fake registry).
+	registry map[string]providerEntry
 	// Embed default logging support for automatic injection capability
 	modules.DefaultLoggingSupport
 }
