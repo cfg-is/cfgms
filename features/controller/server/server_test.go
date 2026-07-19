@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // testNonClusterProvider implements interfaces.StorageProvider with ClusterCapable() == false.
@@ -1043,8 +1043,11 @@ func assertUpgradeStoreFunctional(t *testing.T, ctx context.Context, store busin
 	assert.Equal(t, business.UpgradeStatusDispatched, got.Status)
 }
 
-// TestInitializeSessionStore_SQLitePath verifies that initializeSessionStore returns a
-// *sqliteprovider.SQLiteSessionTokenStore when cfg.Storage.SQLitePath is set.
+// TestInitializeSessionStore_SQLitePath verifies that a configured SQLite path yields a
+// durable, disk-backed session store rather than the in-memory fallback. The assertion is
+// behavioral (durability across a fresh store on the same path) plus a negative check on the
+// in-memory type, so the test does not need to import the concrete provider package
+// (pkg/storage/providers/sqlite is off the architecture import allowlist for this file).
 func TestInitializeSessionStore_SQLitePath(t *testing.T) {
 	tempDir := t.TempDir()
 	cfg := &config.Config{
@@ -1056,13 +1059,47 @@ func TestInitializeSessionStore_SQLitePath(t *testing.T) {
 	store := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
 	require.NotNil(t, store)
 
-	_, ok := store.(*sqliteprovider.SQLiteSessionTokenStore)
-	assert.True(t, ok, "expected *sqliteprovider.SQLiteSessionTokenStore, got %T", store)
+	// A configured SQLite path must NOT yield the in-memory fallback.
+	_, isMem := store.(*session.MemStore)
+	assert.False(t, isMem, "expected durable SQLite-backed store, got *session.MemStore")
 
-	// Close must succeed without error to prove SQLite handle is owned and releasable.
-	if sqliteStore, cast := store.(*sqliteprovider.SQLiteSessionTokenStore); cast {
-		assert.NoError(t, sqliteStore.Close())
+	// Prove durability through the session.Store contract: a session written here must
+	// survive a fresh store opened on the same path. An in-memory store could not.
+	ctx := context.Background()
+	tokenHash := "hash-durable-2774"
+	now := time.Now().UTC().Truncate(time.Second)
+	sess := &session.Session{
+		ID:                "sess-durable-2774",
+		ConnectionName:    "conn-a",
+		PrincipalID:       "admin-a",
+		TenantID:          "root",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
 	}
+	require.NoError(t, store.Set(ctx, tokenHash, sess))
+
+	// Close the first handle to prove it is owned and releasable, and to let the second
+	// store own the file cleanly. The concrete durable store implements io.Closer.
+	closer, ok := store.(io.Closer)
+	require.True(t, ok, "durable store must implement io.Closer, got %T", store)
+	require.NoError(t, closer.Close(), "durable store must own and release its handle")
+
+	// Reopen on the same path and confirm the session persisted to disk.
+	reopened := initializeSessionStore(context.Background(), cfg, logging.NewNoopLogger())
+	require.NotNil(t, reopened)
+	t.Cleanup(func() {
+		if c, isCloser := reopened.(io.Closer); isCloser {
+			_ = c.Close()
+		}
+	})
+
+	got, err := reopened.Get(ctx, tokenHash)
+	require.NoError(t, err, "session written before restart must survive on disk")
+	require.NotNil(t, got)
+	assert.Equal(t, sess.ID, got.ID)
+	assert.Equal(t, sess.PrincipalID, got.PrincipalID)
+	assert.Equal(t, sess.TenantID, got.TenantID)
 }
 
 // TestInitializeSessionStore_EmptyPath verifies that initializeSessionStore returns a
