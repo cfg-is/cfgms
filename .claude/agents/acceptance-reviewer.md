@@ -238,6 +238,14 @@ Classify each finding by severity:
 
 PASS requires BOTH: the Findings table is empty AND every Code-Reference Verification row is `Pass`. A single FAIL row blocks PASS regardless of how many findings there are. If both gates are clear, enqueue the PR for merge and clean up:
 
+> **Run the enqueue command BEFORE you compose the review comment, and copy its literal
+> output into the verdict line.** Writing "Auto-merged" in the review comment is *reporting*,
+> not *acting* — the PR does not move unless `po-act.sh enqueue` actually runs. A PASS verdict
+> whose enqueue step was skipped leaves the PR sitting CLEAN and green in nobody's queue, and
+> nothing downstream notices: the story stays open, the merge never happens, and the next cron
+> cycle has to catch it by hand. Do not describe this step in the past tense until you have the
+> `ENQUEUED:<PR>` line in front of you.
+
 ```bash
 # Enqueue for merge — uses retry + verify-after wrapping around `gh pr merge --squash`
 # so a transient GitHub enqueue rejection (CI re-run race, branch-protection cache
@@ -315,7 +323,7 @@ Example FAIL row (replace with real verification — every row above is an examp
 All checks passing / Check X failing
 
 ### Verdict
-[Auto-merged / Fix required — status set to Fix / Blocked — escalated to founder]
+[Enqueued — paste the literal `ENQUEUED:<PR>` line from `po-act.sh enqueue` here / Fix required — status set to Fix / Blocked — escalated to founder]
 REVIEW_EOF
 
 ./scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
@@ -333,5 +341,6 @@ If there are zero findings, the Findings table should say "None" and the Accepta
 - **Diff-blindness rule**: when an AC names existing code that must change, verify the post-change state by fetching the file from the PR's HEAD ref. Searching only `gh pr diff` will miss unchanged stubs (they're absent from the diff by definition).
 - The fix cycle gets exactly one attempt. First failure = `status Fix`. Second failure = `status Blocked`. No third attempt.
 - Merge enqueue uses `--squash` — merge queue handles the rest (rebase + re-validation + actual merge)
-- Clean up agent container/worktree on auto-merge — the agent infrastructure is no longer needed
+- **A PASS verdict is not self-executing.** The PR moves only when `po-act.sh enqueue` runs and prints `ENQUEUED:<PR>`. Never write the verdict as though the merge happened without that line in hand — a PASS that was never enqueued is indistinguishable, from the outside, from a review that never ran.
+- Clean up the agent container/worktree only after a confirmed `ENQUEUED:<PR>` — the agent infrastructure is no longer needed at that point
 - If the PR targets `main` instead of `develop`, this is a BLOCKING workflow violation. Report it and do not merge.
