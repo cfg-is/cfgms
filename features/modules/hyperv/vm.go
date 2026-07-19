@@ -215,6 +215,18 @@ type VMConfig struct {
 	// the live set violates the policy (drift → setVM reconcile). Observed/computed
 	// only — never authored, never round-trips through YAML.
 	checkpointsEcho interface{}
+
+	// vhdPathEcho, when non-empty, is the desired `vhd_path` that getVM echoes on
+	// the Get surface to signal the VM's disk already lives in the desired HOME
+	// DIRECTORY (#2776 follow-up). The module manages the VHD's home directory
+	// (#2411), never the file's leaf name — Rename-VM does not rename the disk, so
+	// after a rename the on-disk leaf (e.g. cfgms-ci-01.vhdx) differs from a
+	// declared vhd_path whose leaf tracks the new VM name (lab-01.vhdx). AsMap
+	// emits this echo under the managed `vhd_path` key so a directory-compliant VM
+	// matches desired (no drift); getVM leaves it empty when the disk is in the
+	// WRONG directory, so a genuine storage-location drift still surfaces and
+	// convergeStorageLocation moves it. Observed/computed only — never authored.
+	vhdPathEcho string
 }
 
 // ManagedElsewhere implements modules.ManagedElsewhere. It reports true (naming
@@ -595,6 +607,15 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 	if c.checkpointsEcho != nil {
 		m["checkpoints"] = c.checkpointsEcho
 	}
+	// Directory-compliant vhd_path echo (#2776 follow-up): when the disk already
+	// lives in the desired home directory, report the DESIRED path so a
+	// leaf-name-only difference (e.g. a VHD not renamed by Rename-VM) does not
+	// drift on something the module never reconciles. A wrong directory leaves the
+	// echo empty, so the observed (actual) path is reported and storage drift
+	// surfaces normally.
+	if c.vhdPathEcho != "" {
+		m["vhd_path"] = c.vhdPathEcho
+	}
 	if c.Source != nil {
 		m["source"] = map[string]interface{}{
 			"iso":       c.Source.ISO,
@@ -882,6 +903,22 @@ func (m *hypervModule) getVMLocal(ctx context.Context, vmName string) (*VMConfig
 		}
 	}
 
+	// Directory-compliant vhd_path echo (#2776 follow-up): when a desired vhd_path
+	// is known for this VM (recorded by a prior setVM) and the observed disk already
+	// lives in the SAME home directory, echo the desired path so a leaf-name-only
+	// difference — e.g. a VHD that Rename-VM left under the old name — does not drift
+	// on something the module never reconciles (it renames no disk files). A disk in
+	// a DIFFERENT directory leaves the echo empty, so storageLocationDrift still
+	// fires and convergeStorageLocation moves it. Until the first Set records the
+	// path the authored vhd_path drifts (no echo), which drives that first Set.
+	m.vhdPathDesiredMu.RLock()
+	desiredVHDPath := m.vhdPathDesired[vmName]
+	m.vhdPathDesiredMu.RUnlock()
+	if desiredVHDPath != "" && cfg.VHDPath != "" &&
+		sameWindowsPath(vmHomeDir(cfg.VHDPath), vmHomeDir(desiredVHDPath)) {
+		cfg.vhdPathEcho = desiredVHDPath
+	}
+
 	// Write-through: update cache on successful read
 	m.vmsMu.Lock()
 	m.vms[vmName] = *cfg
@@ -1036,6 +1073,19 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	}
 	m.checkpointDesired[vmName] = configMap["checkpoints"]
 	m.checkpointDesiredMu.Unlock()
+
+	// Record the authored `vhd_path` for this VM so getVM can echo it back when the
+	// disk is already in the desired home directory (#2776 follow-up) — the same
+	// keyed, mutex-guarded per-VM record as checkpointDesired, for the same
+	// shared-instance reason.
+	if vhd, ok := configMap["vhd_path"].(string); ok && vhd != "" {
+		m.vhdPathDesiredMu.Lock()
+		if m.vhdPathDesired == nil {
+			m.vhdPathDesired = make(map[string]string)
+		}
+		m.vhdPathDesired[vmName] = vhd
+		m.vhdPathDesiredMu.Unlock()
+	}
 
 	state, _ := configMap["state"].(string)
 
