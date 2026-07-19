@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import StewardAssetPage from './StewardAssetPage.tsx'
+import StewardAssetPage, { PanelContent, TABS } from './StewardAssetPage.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -91,9 +91,9 @@ describe('tab strip', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
-    for (const name of [/^Config/i, /^Shell/i, /^Live Activity/i]) {
-      const tab = screen.getByRole('tab', { name })
-      expect(within(tab).getByText(/soon/i)).toBeInTheDocument()
+    for (const tab of TABS.filter((t) => t.soon)) {
+      const tabEl = screen.getByRole('tab', { name: (n) => n.startsWith(tab.label) })
+      expect(within(tabEl).getByText(/soon/i)).toBeInTheDocument()
     }
   })
 
@@ -244,5 +244,35 @@ describe('navigation', () => {
     renderAssetPage('stw-99')
 
     expect(screen.getByText('stw-99')).toBeInTheDocument()
+  })
+})
+
+describe('panel resolution', () => {
+  it('renders each tab\'s own Panel when two entries each carry a distinct Panel', () => {
+    function AlphaPanel() {
+      return <div data-testid="alpha-panel">Alpha</div>
+    }
+    function BetaPanel() {
+      return <div data-testid="beta-panel">Beta</div>
+    }
+
+    const { rerender } = render(
+      <PanelContent spec={{ key: 'dna', label: 'Alpha', soon: false, Panel: AlphaPanel }} />,
+    )
+    expect(screen.getByTestId('alpha-panel')).toBeInTheDocument()
+    expect(screen.queryByTestId('beta-panel')).not.toBeInTheDocument()
+
+    rerender(
+      <PanelContent spec={{ key: 'config', label: 'Beta', soon: false, Panel: BetaPanel }} />,
+    )
+    expect(screen.getByTestId('beta-panel')).toBeInTheDocument()
+    expect(screen.queryByTestId('alpha-panel')).not.toBeInTheDocument()
+  })
+
+  it('falls back to SoonPanel when no Panel is set', () => {
+    render(
+      <PanelContent spec={{ key: 'shell', label: 'Shell', soon: true }} />,
+    )
+    expect(screen.getByText(/Shell is not yet available/i)).toBeInTheDocument()
   })
 })

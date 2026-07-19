@@ -18,7 +18,7 @@
  * broken aria-controls references in the DOM. Roving tabindex keeps Tab focus
  * on a single active tab; ArrowLeft/ArrowRight cycle between tabs.
  */
-import { useRef, useState } from 'react'
+import { type ComponentType, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import DnaDrawer from './DnaDrawer.tsx'
 
@@ -28,10 +28,11 @@ interface TabSpec {
   key: TabKey
   label: string
   soon: boolean
+  Panel?: ComponentType
 }
 
-const TABS: readonly TabSpec[] = [
-  { key: 'dna', label: 'DNA', soon: false },
+export const TABS: readonly TabSpec[] = [
+  { key: 'dna', label: 'DNA', soon: false, Panel: DnaDrawer },
   { key: 'config', label: 'Config', soon: true },
   { key: 'shell', label: 'Shell', soon: true },
   { key: 'live', label: 'Live Activity', soon: true },
@@ -46,6 +47,11 @@ function SoonPanel({ label }: { label: string }) {
   )
 }
 
+export function PanelContent({ spec }: { spec: TabSpec }) {
+  const Panel = spec.Panel
+  return Panel ? <Panel /> : <SoonPanel label={spec.label} />
+}
+
 export default function StewardAssetPage() {
   // useParams returns an already-decoded value from React Router — do not
   // call decodeURIComponent again or bare % chars in IDs throw URIError.
@@ -53,7 +59,7 @@ export default function StewardAssetPage() {
   const [activeTab, setActiveTab] = useState<TabKey>('dna')
   const tabRefs = useRef<Map<TabKey, HTMLButtonElement>>(new Map())
 
-  const activeSpec = TABS.find((t) => t.key === activeTab) ?? TABS[0]
+  const activeSpec = (TABS.find((t) => t.key === activeTab) ?? TABS[0])!
 
   function activateTab(key: TabKey) {
     setActiveTab(key)
@@ -116,11 +122,7 @@ export default function StewardAssetPage() {
         role="tabpanel"
         aria-labelledby={`asset-tab-${activeTab}`}
       >
-        {activeSpec?.soon ? (
-          <SoonPanel label={activeSpec.label} />
-        ) : (
-          <DnaDrawer />
-        )}
+        <PanelContent spec={activeSpec} />
       </div>
     </div>
   )
