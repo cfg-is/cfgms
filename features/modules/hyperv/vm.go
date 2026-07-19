@@ -145,7 +145,14 @@ type SourceConfig struct {
 // holds the FULL desired/observed set. Both are populated by FromYAML /
 // AsMap so a single switch_name string behaves exactly as before.
 type VMConfig struct {
-	Name        string             `yaml:"name"`
+	Name string `yaml:"name"`
+	// OldName, when set, enables declarative in-place rename (#2776). The module
+	// keys a VM by its name, so a bare Name change would create a NEW VM and
+	// orphan the old one. When Name is absent but a VM named OldName exists on
+	// this host, the module renames OldName → Name (and its cluster group +
+	// provisioning record) instead of creating. Idempotent: once Name exists,
+	// OldName is ignored, so leaving OldName in config after the rename is a no-op.
+	OldName     string             `yaml:"old_name,omitempty"`
 	MemoryMB    int64              `yaml:"memory_mb"`
 	CPUCount    int                `yaml:"cpu_count"`
 	VHDPath     string             `yaml:"vhd_path"`
@@ -407,6 +414,10 @@ func switchSetDiff(desired, current []string) (toConnect, toDisconnect []string)
 // Validate checks all VMConfig fields against their respective constraints.
 func (c *VMConfig) Validate() error {
 	if !vmNamePattern.MatchString(c.Name) {
+		return ErrInvalidVMName
+	}
+	// old_name (#2776), when set, must satisfy the same VM-name allowlist as Name.
+	if c.OldName != "" && !vmNamePattern.MatchString(c.OldName) {
 		return ErrInvalidVMName
 	}
 	// 0 means "accept the default" (Generation 2). 1 and 2 are explicitly valid
@@ -704,6 +715,12 @@ const psCreateVM = `$vmArgs = @{}; if ($Path) { $vmArgs['Path'] = $Path }; New-V
 // deletion — so a running VM is hard-powered-off first, then removed. A no-op
 // when the VM is already gone. $Name travels via ArgumentList.
 const psRemoveVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if ($vm) { if ($vm.State -ne 'Off') { Stop-VM -Name $Name -Force -TurnOff }; Remove-VM -Name $Name -Force }`
+
+// psRenameVM renames a VM object in place (#2776), and — if the VM is registered
+// as a clustered role whose group is named after the old VM name — renames that
+// cluster group too so the group name tracks the VM. A standalone VM (no matching
+// cluster group) skips the group rename. $OldName / $NewName travel via ArgumentList.
+const psRenameVM = `Rename-VM -Name $OldName -NewName $NewName -ErrorAction Stop; $grp = Get-ClusterGroup -Name $OldName -ErrorAction SilentlyContinue; if ($grp) { $grp.Name = $NewName }`
 
 // psConnectVMNic connects a NEW network adapter on the VM to the named switch.
 // Both $Name (host-side VM name) and $SwitchName travel via ArgumentList —
@@ -1082,6 +1099,10 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	if v, ok := configMap["vhd_path"].(string); ok {
 		cfg.VHDPath = v
 	}
+	// old_name (#2776): the previous VM name, for declarative in-place rename.
+	if v, ok := configMap["old_name"].(string); ok {
+		cfg.OldName = v
+	}
 	// switch_name (the user-facing key) accepts a single string OR a list of
 	// switch names. The desired config arrives here as a generic config map
 	// (config.AsMap), so parse BOTH shapes into the desired set — the
@@ -1164,6 +1185,28 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	if current.State != "absent" {
 		vmExists = true
 		currentVM = *current
+	}
+
+	// Declarative in-place rename (#2776): the desired VM `name` is absent but an
+	// `old_name` is declared. If a VM by that old_name exists on this host, rename
+	// it (module keys VMs by name, so a bare name change would create-new +
+	// orphan-old). Runs BEFORE the create/HA gates so a rename is preferred over a
+	// create. Idempotent: once `name` exists this is skipped on the next converge.
+	if !vmExists && cfg.OldName != "" && cfg.OldName != vmName {
+		renamed, rerr := m.renameFromOldName(ctx, cfg, vmName)
+		if rerr != nil {
+			return fmt.Errorf("hyperv: set VM %q: %w", vmName, rerr)
+		}
+		if renamed {
+			current, err = m.getVMLocal(ctx, vmName)
+			if err != nil {
+				return fmt.Errorf("hyperv: re-check VM %q after rename: %w", vmName, err)
+			}
+			if current.State != "absent" {
+				vmExists = true
+				currentVM = *current
+			}
+		}
 	}
 
 	// The host object name is the exact VM name — no namespacing.
@@ -1529,6 +1572,71 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	// policy self-heals identically to a plain-lifecycle VM. No-op when the policy
 	// is nil (observe-only).
 	return m.reconcileCheckpoints(ctx, hostName, cfg.CheckpointPolicy)
+}
+
+// renameFromOldName performs the #2776 declarative rename: when the desired VM
+// newName is absent on this host but cfg.OldName names an EXISTING local VM, it
+// renames that VM (and its cluster group, if any) to newName and migrates the
+// provisioning record. Returns (true, nil) when a rename occurred, or (false,
+// nil) when there is nothing to rename (the old-named VM is also absent — the
+// caller then creates newName fresh, so old_name on a first-ever provision is
+// harmless). VHD file relocation stays the separate concern of vhd_path + the
+// storage-location convergence (#2411); rename is name-only.
+func (m *hypervModule) renameFromOldName(ctx context.Context, cfg *VMConfig, newName string) (bool, error) {
+	oldName := cfg.OldName
+
+	old, err := m.getVMLocal(ctx, oldName)
+	if err != nil {
+		if errors.Is(err, ErrVMNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check old VM %q for rename: %w", oldName, err)
+	}
+	if old.State == "absent" {
+		return false, nil
+	}
+
+	if _, err := m.transport.ExecutePS(ctx, psRenameVM,
+		map[string]string{"OldName": oldName, "NewName": newName}); err != nil {
+		return false, fmt.Errorf("rename VM %q -> %q: %w", oldName, newName, err)
+	}
+
+	// Migrate the provisioning record (keyed by VM name) so the renamed VM is not
+	// treated as unprovisioned — which could otherwise trigger a rebuild.
+	m.renameProvisionRecord(ctx, cfg, oldName, newName)
+
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+		"vm-rename", "vm:"+newName, nil,
+		map[string]interface{}{
+			"old_name":  oldName,
+			"new_name":  newName,
+			"clustered": old.HARole != nil,
+		}, nil)
+	return true, nil
+}
+
+// renameProvisionRecord moves a provisioning record from oldName to newName.
+// Best-effort: a VM with no record (e.g. a non-source-provisioned VM) needs no
+// migration, and a store error is logged but does not fail the rename (the VM is
+// already renamed; a missing record only risks a benign re-provision decision the
+// existence gate still guards against).
+func (m *hypervModule) renameProvisionRecord(ctx context.Context, cfg *VMConfig, oldName, newName string) {
+	store := m.storeFor(cfg)
+	rec, err := store.GetProvision(ctx, oldName)
+	if err != nil || rec == nil {
+		return // no record to migrate
+	}
+	rec.VMName = newName
+	if err := store.SetProvision(ctx, rec); err != nil {
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: rename provisioning record failed",
+				"old_name", logging.SanitizeLogValue(oldName),
+				"new_name", logging.SanitizeLogValue(newName),
+				"error", err.Error())
+		}
+		return
+	}
+	_ = store.DeleteProvision(ctx, oldName)
 }
 
 // createVM issues New-VM with the desired generation and connects every
