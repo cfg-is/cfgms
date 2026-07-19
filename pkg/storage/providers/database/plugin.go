@@ -160,6 +160,23 @@ func (p *DatabaseProvider) CreateSessionStore(config map[string]interface{}) (bu
 	return store, nil
 }
 
+// CreateSessionTokenStore creates a PostgreSQL-backed pkg/session.Store for use by
+// session.Manager in cluster mode (Issue #2775). The store keys on the pre-hashed
+// SHA-256 hex token hash provided by session.Manager — the raw token is never stored.
+// config["dsn"] or the individual host/port/database/username/password/sslmode keys
+// are used to open the connection, matching the convention of CreateSessionStore.
+func (p *DatabaseProvider) CreateSessionTokenStore(config map[string]interface{}) (*DatabaseSessionTokenStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseSessionTokenStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database session token store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateStewardStore creates a PostgreSQL-backed StewardStore with tenant-scoped RLS.
 func (p *DatabaseProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
 	dsn, err := p.getDSN(config)

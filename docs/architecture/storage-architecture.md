@@ -430,7 +430,7 @@ Controllers in cluster mode require a storage backend that supports shared state
 
 | Provider | `ClusterCapable()` | Reason |
 |----------|--------------------|--------|
-| `pkg/storage/providers/database` (PostgreSQL) | `true` | Postgres handles concurrent writers from multiple controller nodes via its transaction and locking model; the same DSN is accessible from all nodes |
+| `pkg/storage/providers/database` (PostgreSQL) | `true` | Postgres handles concurrent writers from multiple controller nodes via its transaction and locking model; the same DSN is accessible from all nodes. Also backs `pkg/session.Store` (`DatabaseSessionTokenStore`) for cluster-wide `cfg`/web session token validation (Issue #2775). |
 | `pkg/storage/providers/flatfile` | `false` | Local filesystem — concurrent writes across nodes are not coordinated; last-writer-wins semantics are unsafe for multi-active cluster mode |
 | `pkg/storage/providers/sqlite` | `false` | Single-file SQLite is node-local; no cross-node access or coordination |
 

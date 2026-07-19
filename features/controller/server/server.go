@@ -77,6 +77,7 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
+	dbprovider "github.com/cfgis/cfgms/pkg/storage/providers/database"    // Postgres-backed stores; used by initializeSessionStore in cluster mode (Issue #2775)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
 	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory fallback stores (Issue #1948, #2296)
 	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider; provides SQLiteUpgradeStore (Issue #2464)
@@ -1936,15 +1937,19 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Close session store — releases the SQLite connection so temp-directory cleanup
+	// Close session store — releases the connection so temp-directory cleanup
 	// succeeds on Windows (Issue #2774). MemStore.Close() has no error return while
-	// SQLiteSessionTokenStore.Close() does — use a type switch since the two concrete
-	// Close signatures do not unify into a shared interface.
+	// SQLiteSessionTokenStore and DatabaseSessionTokenStore do — use a type switch
+	// since the concrete Close signatures do not unify into a shared interface.
 	if s.sessionStore != nil {
 		switch st := s.sessionStore.(type) {
 		case *session.MemStore:
 			st.Close()
 		case *sqliteprovider.SQLiteSessionTokenStore:
+			if err := st.Close(); err != nil {
+				s.logger.Warn("Failed to close session store", "error", err)
+			}
+		case *dbprovider.DatabaseSessionTokenStore:
 			if err := st.Close(); err != nil {
 				s.logger.Warn("Failed to close session store", "error", err)
 			}
@@ -2455,21 +2460,41 @@ func initializeTagStore(
 	return store
 }
 
-// initializeSessionStore opens a SQLite-backed session.Store at cfg.Storage.SQLitePath
-// and returns it. Falls back to an in-memory store (logging a warning, no startup failure)
-// when SQLitePath is empty or the SQLite open fails — controller startup is never blocked
-// on session store availability, matching the degrade-gracefully pattern of
-// initializeUpgradeStore and initializeTagStore.
+// initializeSessionStore selects and opens a session.Store.
 //
-// The raw path is passed directly to CreateSessionTokenStore (no "file:" DSN prefix).
-// CreateSessionTokenStore calls openAndInit internally, which runs schema DDL — no
-// separate Initialize() call is required.
+// Cluster mode (Issue #2775): when cfg.HA.IsClusterMode() is true and a cluster
+// Postgres DSN is configured, a Postgres-backed DatabaseSessionTokenStore is returned
+// so session tokens issued on one node are validated and revoked correctly across the
+// full cluster. Single-node deployments are unaffected.
+//
+// Single-node fallback: opens a SQLite-backed store at cfg.Storage.SQLitePath so
+// sessions survive controller restarts. Falls back to an in-memory store (with a
+// warning) when SQLitePath is empty or the SQLite open fails — startup is never blocked
+// on session store availability.
 func initializeSessionStore(
 	ctx context.Context,
 	cfg *config.Config,
 	logger logging.Logger,
 ) session.Store {
 	_ = ctx // reserved for future use (consistent with initializeUpgradeStore)
+
+	// Cluster mode: use the shared Postgres backend for cross-node session validation.
+	if cfg.HA.IsClusterMode() {
+		pgDSN := ""
+		if cfg.Storage != nil && cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		if pgDSN != "" {
+			store, err := (&dbprovider.DatabaseProvider{}).CreateSessionTokenStore(map[string]interface{}{"dsn": pgDSN})
+			if err != nil {
+				logger.Warn("Session store: failed to open Postgres cluster store, falling back to SQLite/mem", "error", err)
+			} else {
+				logger.Info("Session store initialized with Postgres backend for cluster mode (Issue #2775)")
+				return store
+			}
+		}
+	}
+
 	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
 		logger.Warn("Session store: SQLite path not configured, using in-memory store (sessions will not survive restart)")
 		return session.NewMemStore(session.DefaultConfig(), time.Now)

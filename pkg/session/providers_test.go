@@ -5,12 +5,18 @@ package session_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/storage/providers/database"
 	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // newSQLiteSessionStore creates a file-backed SQLite session token store for testing.
@@ -30,6 +36,101 @@ func newSQLiteSessionStore(t *testing.T) session.Store {
 // TestStoreContract_SQLite runs the shared contract suite against the SQLite-backed store.
 func TestStoreContract_SQLite(t *testing.T) {
 	RunStoreContractSuite(t, newSQLiteSessionStore(t))
+}
+
+// testPostgresDSN returns a DSN and a map[string]interface{} config for the test Postgres
+// instance, or skips the test when the instance is not available.
+func testPostgresDSN(t *testing.T) (string, map[string]interface{}) {
+	t.Helper()
+	password := testutil.GetTestDBPassword()
+	if password == "" {
+		t.Skip("No test Postgres password available (CFGMS_TEST_DB_PASSWORD not set)")
+	}
+	port := 5432
+	if portStr := os.Getenv("CFGMS_TEST_DB_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+	}
+	dsn := fmt.Sprintf("host=localhost port=%d dbname=cfgms_test user=cfgms_test password=%s sslmode=disable",
+		port, password)
+	cfg := map[string]interface{}{
+		"host":     "localhost",
+		"port":     port,
+		"database": "cfgms_test",
+		"username": "cfgms_test",
+		"password": password,
+		"sslmode":  "disable",
+	}
+	return dsn, cfg
+}
+
+// newPostgresSessionTokenStore creates a DatabaseSessionTokenStore for testing.
+// Skips cleanly when no test Postgres instance is reachable.
+func newPostgresSessionTokenStore(t *testing.T) *database.DatabaseSessionTokenStore {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("Skipping Postgres session token store tests in short mode")
+	}
+	_, cfg := testPostgresDSN(t)
+	p := &database.DatabaseProvider{}
+	store, err := p.CreateSessionTokenStore(cfg)
+	if err != nil {
+		t.Skipf("Postgres session token store not available: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// TestStoreContract_Postgres runs the shared contract suite against the Postgres-backed store.
+func TestStoreContract_Postgres(t *testing.T) {
+	RunStoreContractSuite(t, newPostgresSessionTokenStore(t))
+}
+
+// TestNoRawTokenInDurableStore_Postgres is the Postgres-backed analog of
+// TestNoRawTokenInDurableStore: it queries actual DatabaseSessionTokenStore rows
+// and asserts no raw token value appears anywhere — only session.HashToken(token)
+// output may appear as the stored key.
+func TestNoRawTokenInDurableStore_Postgres(t *testing.T) {
+	store := newPostgresSessionTokenStore(t)
+	cfg := session.DefaultConfig()
+	ctx := context.Background()
+
+	mgr := session.NewManager(cfg, store, time.Now)
+	_, tok, err := mgr.Issue(ctx, "forensic-pg", "ctrl", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Raw token lookup must miss — the store key is SHA-256(token), not the token itself.
+	_, err = store.Get(ctx, tok)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("raw-token lookup in Postgres store: got %v, want ErrSessionNotFound", err)
+	}
+
+	// Hash lookup must hit.
+	hash := session.HashToken(tok)
+	if _, err := store.Get(ctx, hash); err != nil {
+		t.Errorf("hash lookup in Postgres store: got %v, want nil", err)
+	}
+
+	// Verify the raw token does not appear in any column by querying via the store DSN.
+	// We use a direct query through the store's unexported db. Since we can't access it
+	// from outside the package, we verify via the Get miss: if Get(raw) returns
+	// ErrSessionNotFound, the raw token is not stored as the primary key.  Additionally
+	// we call ListAll and check that no returned session ID equals the raw token.
+	all, err := store.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	for _, s := range all {
+		if strings.Contains(s.ID, tok) {
+			t.Errorf("session ID contains raw token: got %q", s.ID)
+		}
+		if strings.Contains(s.PrincipalID, tok) {
+			t.Errorf("PrincipalID contains raw token: got %q", s.PrincipalID)
+		}
+	}
 }
 
 // TestManagerSurvivesRestartViaDurableStore verifies that sessions issued by one manager

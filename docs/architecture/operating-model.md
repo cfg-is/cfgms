@@ -366,7 +366,7 @@ Controller startup in `ha.mode: cluster` performs an early prerequisite gate bef
 
 | Backend | What it provides | How to configure |
 |---------|-----------------|------------------|
-| Postgres storage provider | Shared business-store state across all controller nodes (RBAC, tenants, sessions, registrations) | `storage.cluster.postgres_dsn` or `CFGMS_STORAGE_CLUSTER_POSTGRES_DSN` |
+| Postgres storage provider | Shared business-store state across all controller nodes (RBAC, tenants, sessions, registrations); also backs `pkg/session.Store` (`DatabaseSessionTokenStore`) so `cfg`/web session tokens issued on one node are validated and revoked on any peer node (Issue #2775) | `storage.cluster.postgres_dsn` or `CFGMS_STORAGE_CLUSTER_POSTGRES_DSN` |
 | S3-compatible blob store | Shared installer artifact repository so all nodes serve the same steward binaries | `CFGMS_S3_INSTALLER_BUCKET` (required); `CFGMS_S3_INSTALLER_REGION`, `CFGMS_S3_INSTALLER_ENDPOINT_URL` (optional) |
 
 ### Startup error messages
