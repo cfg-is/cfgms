@@ -31,12 +31,13 @@ type sessionCreateResponse struct {
 }
 
 // handleSessionCreate handles POST /api/v1/sessions.
-// Requires an admin mTLS principal (principal.IsAdmin == true).
-// Returns HTTP 201 with session metadata and a one-time bearer token.
+// Authorization is enforced at the router level via requirePermission("session", "create"),
+// which requires AssuranceStrong (ADR-021, Issue #2780). The in-handler IsAdmin check
+// has been removed — the router gate is the sole authority.
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil || !principal.IsAdmin {
-		s.writeErrorResponse(w, http.StatusForbidden, "Admin mTLS certificate required", "NOT_ADMIN")
+	if !ok || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
 	if s.sessionManager == nil {
@@ -94,13 +95,13 @@ type sessionListResponse struct {
 }
 
 // handleSessionList handles GET /api/v1/sessions.
-// Requires an admin principal (principal.IsAdmin == true).
+// Authorization is enforced at the router level via requirePermission("session", "list").
 // Tenant-scoped admins see only sessions whose TenantID matches their own;
 // global admins (TenantID == "") see every tenant's sessions.
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil || !principal.IsAdmin {
-		s.writeErrorResponse(w, http.StatusForbidden, "Admin mTLS certificate required", "NOT_ADMIN")
+	if !ok || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
 	if s.sessionManager == nil {
@@ -141,12 +142,12 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessionRevoke handles DELETE /api/v1/sessions/{id}.
-// Accepts either a valid session token or an admin mTLS cert as credentials.
+// Authorization is enforced at the router level via requirePermission("session", "revoke").
 // Returns HTTP 200 on success or HTTP 404 if the session does not exist.
 func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil || !principal.IsAdmin {
-		s.writeErrorResponse(w, http.StatusForbidden, "Admin credential required", "NOT_ADMIN")
+	if !ok || principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
 	if s.sessionManager == nil {

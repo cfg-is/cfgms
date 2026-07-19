@@ -140,7 +140,7 @@ Publisher public keys are baked into the steward binary at build time and cannot
 - Principle of least privilege enforced throughout
 - No implicit trust between system components
 
-For the controller REST API auth-tier policy (Tier-3 mTLS-only enforcement, the four-tier table, and the full Tier-3 endpoint list), see [Security Architecture — Auth-Tier Policy](security/architecture.md#auth-tier-policy).
+For the controller REST API identity assurance model (ADR-021: AssuranceStrong enforcement, assurance level table, and the full strong-assurance endpoint list), see [Security Architecture — Auth-Tier Policy](security/architecture.md#auth-tier-policy).
 
 ### Certificate Management
 

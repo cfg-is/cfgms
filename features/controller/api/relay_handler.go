@@ -21,6 +21,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // relayPrincipalKey is a private context key used by the relay handler to inject
@@ -117,10 +118,13 @@ func (h *RelayHandler) handleRelayEvent(ctx context.Context, event *cpTypes.Even
 
 	// Construct scope-limited, non-admin Principal. TenantID comes from the grant
 	// (set at dispatch time from device registration) — not from the event body.
+	// AssuranceMachine is deliberate: it makes the relay-script principal fail every
+	// Assurance >= AssuranceBasic check by construction (ADR-021, Issue #2780).
 	principal := &Principal{
 		ID:          fmt.Sprintf("relay:%s:%s", deviceID, executionID),
 		Name:        fmt.Sprintf("relay-script:%s", deviceID),
 		IsAdmin:     false,
+		Assurance:   session.AssuranceMachine,
 		Permissions: grant.Scope,
 		TenantID:    grant.TenantID,
 	}

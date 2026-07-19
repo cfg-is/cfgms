@@ -51,12 +51,19 @@ const (
 // a cfg-CLI Bearer session (ADR-014), or a web session cookie (ADR-018).
 // IsAdmin == true is set by three paths: mTLS admin cert, cfg-CLI Bearer session, and
 // web session cookie. API-key principals always have IsAdmin == false.
+//
+// Assurance is the identity assurance level (ADR-021 Decision 1); it is the primary
+// gating field for route authorization in requirePermission. IsAdmin is retained for
+// backwards compatibility with non-route readers (handlers_certificates.go etc.) — a
+// dependent follow-on story migrates and removes it.
 type Principal struct {
-	ID          string
-	Name        string
-	IsAdmin     bool
-	Permissions []string
-	TenantID    string
+	ID           string
+	Name         string
+	IsAdmin      bool
+	Assurance    session.AssuranceLevel
+	LastProvenAt time.Time // time of last strong-factor proof; set by mTLS path (others: follow-on story)
+	Permissions  []string
+	TenantID     string
 	// Cert-auth fields — non-empty only when IsAdmin == true (H3)
 	CertSerial      string
 	CertFingerprint string
@@ -170,9 +177,10 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	}
 	fpSum := sha256.Sum256(peerCert.Raw)
 	return &Principal{
-		ID:      peerCert.Subject.CommonName,
-		Name:    "mtls-admin:" + peerCert.Subject.CommonName,
-		IsAdmin: true,
+		ID:        peerCert.Subject.CommonName,
+		Name:      "mtls-admin:" + peerCert.Subject.CommonName,
+		IsAdmin:   true,
+		Assurance: session.AssuranceStrong,
 		// Admin principals have NO tenant scope. Earlier this was
 		// hardcoded to "default" which silently restricted every admin
 		// read to tenant "default" — `cfg steward list` returned 0
@@ -310,9 +318,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					}
 					// Build an admin Principal from session state.
 					sessionPrincipal := &Principal{
-						ID:      sess.PrincipalID,
-						Name:    "session:" + logging.SanitizeLogValue(sess.PrincipalID),
-						IsAdmin: true,
+						ID:        sess.PrincipalID,
+						Name:      "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						IsAdmin:   true,
+						Assurance: session.AssuranceBasic,
 						// TenantID mirrors the issuing admin cert; "" means no tenant scope
 						// (same semantics as extractAdminPrincipal for mTLS admin certs).
 						TenantID: sess.TenantID,
@@ -368,10 +377,11 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				}
 				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
 				webPrincipal := &Principal{
-					ID:       webSess.PrincipalID,
-					Name:     "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
-					IsAdmin:  true,
-					TenantID: webSess.TenantID,
+					ID:        webSess.PrincipalID,
+					Name:      "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+					IsAdmin:   true,
+					Assurance: session.AssuranceBasic,
+					TenantID:  webSess.TenantID,
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
@@ -429,6 +439,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			ID:          keyInfo.ID,
 			Name:        keyInfo.Name,
 			IsAdmin:     false,
+			Assurance:   session.AssuranceMachine,
 			Permissions: keyInfo.Permissions,
 			TenantID:    keyInfo.TenantID,
 		}
@@ -592,8 +603,45 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
+			// Assurance check (ADR-021 Decision 2): after confirming the principal
+			// holds the permission, verify the assurance level meets the minimum for
+			// this route. This replaces requireTier(TierMTLSOnly) entirely.
+			if req, found := permissionAssurance[permissionID]; found && principal.Assurance < req.Min {
+				decision := &AuthorizationDecision{
+					Granted:      false,
+					PermissionID: permissionID,
+					Resource:     resource,
+					Action:       action,
+					Decision:     "DENY",
+					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, req.Min, permissionID),
+					CheckedAt:    time.Now(),
+					SubjectID:    userID,
+					TenantID:     tenantID,
+				}
+				s.auditAuthorizationDecision(r, decision)
+
+				if principal.Assurance == session.AssuranceMachine {
+					// API-key principals can never step up; send a plain 403.
+					s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
+					return
+				}
+				// All other callers (AssuranceBasic+) receive a step-up challenge (ADR-021 Decision 6).
+				levelName := req.Min.String()
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(struct {
+					Error             string `json:"error"`
+					RequiredAssurance string `json:"required_assurance"`
+				}{
+					Error:             "step_up_required",
+					RequiredAssurance: levelName,
+				})
+				return
+			}
+
 			// Tenant isolation check for scoped (non-admin) API-key principals.
-			// Admin principals (TenantID == "") skip this check entirely.
+			// TODO(follow-on story): replace !principal.IsAdmin with Assurance-based check.
 			s.mu.RLock()
 			engine := s.isolationEngine
 			s.mu.RUnlock()
@@ -628,6 +676,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 
 			// Principal has required permission — grant access.
 			reason := "API key has required permission: " + permissionID
+			// TODO(follow-on story): replace IsAdmin check with Assurance-based audit reason.
 			if principal.IsAdmin {
 				reason = "Admin principal granted full access"
 			}
@@ -745,6 +794,7 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 	}
 
 	// H3: Include auth method and cert details in audit log.
+	// TODO(follow-on story): replace IsAdmin-based auth_method with Assurance-based discriminator.
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	if principal != nil && principal.IsAdmin {
 		auditFields["auth_method"] = "cert"
@@ -818,6 +868,8 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 // hasPermission checks whether principal has permissionID.
 // Admin principals (IsAdmin == true) short-circuit to true regardless of permissionID.
 // C1: "*" is treated as a literal permission name — it will not match any real permissionID.
+// TODO(follow-on story): replace IsAdmin short-circuit with Assurance-based check once
+// all non-route IsAdmin readers are migrated (middleware.go:600,631,651,749 and handlers).
 func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 	if principal == nil {
 		return false

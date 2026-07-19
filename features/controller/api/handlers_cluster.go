@@ -25,20 +25,14 @@ type clusterNodeDrainResponse struct {
 
 // handleClusterNodeDrain handles POST /api/v1/cluster/nodes/{id}/drain.
 //
-// Requires an admin mTLS principal. Non-admin and unauthenticated callers receive
-// HTTP 403 before any membership state is touched (defense-in-depth on top of the
-// TierMTLSOnly subrouter middleware).
+// Authorization is enforced at the router level via requirePermission("cluster", "drain-node"),
+// which requires AssuranceStrong (ADR-021, Issue #2780).
 //
 // On success returns HTTP 202 Accepted: {"node_id": "...", "state": "draining"}.
-// Story 6 will append handleClusterNodeDecommission below this function.
 func (s *Server) handleClusterNodeDrain(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.respondError(w, http.StatusForbidden, "authentication required")
-		return
-	}
-	if !principal.IsAdmin {
-		s.respondError(w, http.StatusForbidden, "admin mTLS certificate required")
 		return
 	}
 
@@ -82,9 +76,9 @@ type clusterNodeDecommissionResponse struct {
 
 // handleClusterNodeDecommission handles POST /api/v1/cluster/nodes/{id}/decommission.
 //
-// Requires an admin mTLS principal. Non-admin callers receive HTTP 403 before
-// any membership state is touched. The node must be in StateDraining; any
-// other state returns HTTP 409.
+// Authorization is enforced at the router level via requirePermission("cluster", "decommission-node"),
+// which requires AssuranceStrong (ADR-021, Issue #2780). The node must be in StateDraining;
+// any other state returns HTTP 409.
 //
 // The handler blocks until all active steward sessions on the local node drain
 // or defaultDecommissionTimeout elapses, then marks the node StateDecommissioned
@@ -93,10 +87,6 @@ func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Re
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.respondError(w, http.StatusForbidden, "authentication required")
-		return
-	}
-	if !principal.IsAdmin {
-		s.respondError(w, http.StatusForbidden, "admin mTLS certificate required")
 		return
 	}
 
