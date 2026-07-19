@@ -210,21 +210,18 @@ func (t *TelemetryStream) runStream(ctx context.Context, stop <-chan struct{}) e
 			}
 			return err
 		case req := <-recvCh:
-			if req.GetSubscribe() {
-				interval := clampTelemetryInterval(req.GetIntervalMs())
-				if ticker != nil {
-					ticker.Stop()
-				}
-				ticker = time.NewTicker(interval)
-				tickCh = ticker.C
-			} else {
-				if ticker != nil {
-					ticker.Stop()
-					ticker = nil
-					tickCh = nil
-				}
-			}
+			ticker, tickCh = applyTelemetryControl(req, ticker, tickCh)
 		case <-tickCh:
+			// Before collecting, check for a control message that arrived in
+			// the same scheduling window as this tick. Giving priority to
+			// subscribe/unsubscribe prevents emitting one extra snapshot when
+			// the controller's unsubscribe races with an already-queued tick.
+			select {
+			case req := <-recvCh:
+				ticker, tickCh = applyTelemetryControl(req, ticker, tickCh)
+				continue
+			default:
+			}
 			snap, err := t.collector.Snapshot(ctx)
 			if err != nil {
 				t.logger.Warn("TelemetryStream: Snapshot failed", "error", err)
@@ -236,6 +233,30 @@ func (t *TelemetryStream) runStream(ctx context.Context, stop <-chan struct{}) e
 			}
 		}
 	}
+}
+
+// applyTelemetryControl applies a TelemetryRequest to the current ticker state,
+// returning the updated (ticker, channel) pair. An unsubscribe request stops
+// the ticker and drains any pending tick to prevent a spurious snapshot from
+// being emitted after the controller signals unsubscribe.
+func applyTelemetryControl(req *transportpb.TelemetryRequest, cur *time.Ticker, curCh <-chan time.Time) (*time.Ticker, <-chan time.Time) {
+	if req.GetSubscribe() {
+		if cur != nil {
+			cur.Stop()
+		}
+		t := time.NewTicker(clampTelemetryInterval(req.GetIntervalMs()))
+		return t, t.C
+	}
+	if cur != nil {
+		cur.Stop()
+		// Drain any pending tick that fired before Stop() to prevent a
+		// snapshot from being emitted after the controller sends unsubscribe.
+		select {
+		case <-curCh:
+		default:
+		}
+	}
+	return nil, nil
 }
 
 // clampTelemetryInterval returns the requested interval clamped to

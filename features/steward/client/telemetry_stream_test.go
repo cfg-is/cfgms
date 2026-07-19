@@ -5,8 +5,10 @@ package client_test
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,6 +156,27 @@ func newTelemetryTestEnv(t *testing.T, controlFn func(grpc.BidiStreamingServer[t
 }
 
 // ---------------------------------------------------------------------------
+// Platform helpers
+// ---------------------------------------------------------------------------
+
+// skipIfCollectorUnsupported probes c and skips t if the platform has no real
+// telemetry implementation. Tests that require actual snapshot frames over the
+// stream must call this before setting up stream infrastructure: on platforms
+// where telemetry.NewCollector() returns stubCollector (currently macOS and any
+// non-Linux/non-Windows target), Snapshot always returns ErrPlatformNotSupported
+// so no frames would ever arrive and the tests would time out rather than fail
+// cleanly. The same collector is then passed to NewTelemetryStream so the probe
+// call (which primes the Linux CPU-delta baseline) is not wasted.
+func skipIfCollectorUnsupported(t *testing.T, c telemetry.Collector) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Snapshot(ctx); errors.Is(err, telemetry.ErrPlatformNotSupported) {
+		t.Skipf("telemetry collection not implemented on %s; test requires a platform with a real collector", runtime.GOOS)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -220,6 +243,9 @@ func TestTelemetryStream_NoSnapshotBeforeSubscribe(t *testing.T) {
 // TestTelemetryStream_NoSnapshotAfterUnsubscribe proves that Snapshot() stops
 // being called after the controller sends subscribe=false.
 func TestTelemetryStream_NoSnapshotAfterUnsubscribe(t *testing.T) {
+	col := telemetry.NewCollector()
+	skipIfCollectorUnsupported(t, col)
+
 	// duringSub counts frames received while subscribed; snapshotsSentAfterUnsub
 	// counts frames received after the unsubscribe.
 	var (
@@ -292,7 +318,7 @@ func TestTelemetryStream_NoSnapshotAfterUnsubscribe(t *testing.T) {
 	ts := client.NewTelemetryStream(client.TelemetryStreamConfig{
 		Client:    env.client,
 		StewardID: "steward-unsub",
-		Collector: telemetry.NewCollector(),
+		Collector: col,
 		Logger:    logging.NewNoopLogger(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -331,6 +357,9 @@ func TestTelemetryStream_NoSnapshotAfterUnsubscribe(t *testing.T) {
 // TelemetrySnapshot frames stream out at approximately the clamped interval,
 // carrying real snapshots collected from the host.
 func TestTelemetryStream_SnapshotsAtRequestedInterval(t *testing.T) {
+	col := telemetry.NewCollector()
+	skipIfCollectorUnsupported(t, col)
+
 	// received collects frames from the steward; serverDone is closed by the
 	// server once it has enough samples.
 	received := make(chan *transportpb.TelemetrySnapshot, 32)
@@ -366,7 +395,7 @@ func TestTelemetryStream_SnapshotsAtRequestedInterval(t *testing.T) {
 	ts := client.NewTelemetryStream(client.TelemetryStreamConfig{
 		Client:    env.client,
 		StewardID: "steward-interval",
-		Collector: telemetry.NewCollector(),
+		Collector: col,
 		Logger:    logging.NewNoopLogger(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -405,6 +434,9 @@ func TestTelemetryStream_SnapshotsAtRequestedInterval(t *testing.T) {
 // TestTelemetryStream_IntervalClamping proves that an unreasonably small
 // interval_ms is clamped to the 1 s floor rather than accepted as-is.
 func TestTelemetryStream_IntervalClamping(t *testing.T) {
+	col := telemetry.NewCollector()
+	skipIfCollectorUnsupported(t, col)
+
 	// Record the timestamps of the first two snapshots so we can verify
 	// the actual cadence was ≥ 1 s.
 	var (
@@ -439,7 +471,7 @@ func TestTelemetryStream_IntervalClamping(t *testing.T) {
 	ts := client.NewTelemetryStream(client.TelemetryStreamConfig{
 		Client:    env.client,
 		StewardID: "steward-clamp",
-		Collector: telemetry.NewCollector(),
+		Collector: col,
 		Logger:    logging.NewNoopLogger(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -483,9 +515,110 @@ func TestTelemetryStream_Close_BeforeStart(t *testing.T) {
 	}
 }
 
+// TestTelemetryStream_ReconnectsOnStreamError exercises the reconnect branch of
+// streamLoop: when runStream returns a non-nil error (here, the controller
+// terminates the first stream mid-flight with a non-EOF status), streamLoop must
+// log, back off, and reopen the RPC. This mirrors the EventEmitter's
+// TestEventEmitter_ReconnectsOnStreamError, which kills the server mid-stream and
+// verifies reconnection. Reconnection is proven by the server handler being
+// entered a second time; on platforms with a real collector we further prove the
+// reconnected stream resumes sampling by driving a subscribe and receiving a
+// snapshot over the new stream. The test is platform-independent for the
+// reconnect assertion because the error/back-off/retry branch does not depend on
+// the collector.
+func TestTelemetryStream_ReconnectsOnStreamError(t *testing.T) {
+	col := telemetry.NewCollector()
+
+	// Probe the collector once (without skipping): the reconnect assertion holds
+	// on every platform; only the post-reconnect snapshot check needs a real
+	// collector. The probe also primes the Linux CPU-delta baseline.
+	collectorSupported := func() bool {
+		pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer pcancel()
+		_, err := col.Snapshot(pctx)
+		return !errors.Is(err, telemetry.ErrPlatformNotSupported)
+	}()
+
+	var invocations atomic.Int64
+	// reconnected is closed the first time the server handler is entered on a
+	// second stream — i.e. after streamLoop has traversed its error branch.
+	reconnected := make(chan struct{})
+	var reconnectOnce sync.Once
+	// snapshotAfterReconnect is closed once a snapshot flows over the reconnected
+	// stream (only used when the platform has a real collector).
+	snapshotAfterReconnect := make(chan struct{})
+	var snapOnce sync.Once
+
+	env := newTelemetryTestEnv(t, func(
+		stream grpc.BidiStreamingServer[transportpb.TelemetrySnapshot, transportpb.TelemetryRequest],
+	) error {
+		if invocations.Add(1) == 1 {
+			// First connection: fail mid-stream. Returning a non-nil error from
+			// the handler surfaces at the client's Recv as a non-EOF status
+			// error, so runStream returns it and streamLoop takes the reconnect
+			// branch (log → emitterBackoff → retry).
+			return errors.New("simulated controller drop")
+		}
+		// Second connection: streamLoop reconnected after the error.
+		reconnectOnce.Do(func() { close(reconnected) })
+		if collectorSupported {
+			// Prove the reconnected stream is fully functional: subscribe and
+			// confirm a real snapshot flows over the new stream.
+			if err := stream.Send(&transportpb.TelemetryRequest{
+				StewardId:  "steward-reconnect",
+				Subscribe:  true,
+				IntervalMs: 1000,
+			}); err != nil {
+				return err
+			}
+			if _, err := stream.Recv(); err != nil {
+				return err
+			}
+			snapOnce.Do(func() { close(snapshotAfterReconnect) })
+		}
+		// Hold the reconnected stream open until the client tears it down.
+		<-stream.Context().Done()
+		return nil
+	})
+
+	ts := client.NewTelemetryStream(client.TelemetryStreamConfig{
+		Client:    env.client,
+		StewardID: "steward-reconnect",
+		Collector: col,
+		Logger:    logging.NewNoopLogger(),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ts.Start(ctx)
+
+	// The first attempt uses emitterBackoff(0) == 1 s before reconnecting.
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout: streamLoop did not reconnect after a non-nil runStream error")
+	}
+
+	if collectorSupported {
+		select {
+		case <-snapshotAfterReconnect:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout: reconnected stream did not resume sampling")
+		}
+	}
+
+	cancel()
+	ts.Close()
+
+	assert.GreaterOrEqual(t, invocations.Load(), int64(2),
+		"streamLoop must reopen the TelemetryStream RPC after a stream error")
+}
+
 // TestTelemetryStream_NoSnapshotOnStreamClose proves that closing the stream
 // (without a subscribe=false) also stops sampling.
 func TestTelemetryStream_NoSnapshotOnStreamClose(t *testing.T) {
+	col := telemetry.NewCollector()
+	skipIfCollectorUnsupported(t, col)
+
 	// got counts frames received while subscribed. firstSnap is closed once the
 	// steward has produced its first snapshot (proving sampling started).
 	var got atomic.Int64
@@ -515,7 +648,7 @@ func TestTelemetryStream_NoSnapshotOnStreamClose(t *testing.T) {
 	ts := client.NewTelemetryStream(client.TelemetryStreamConfig{
 		Client:    env.client,
 		StewardID: "steward-close",
-		Collector: telemetry.NewCollector(),
+		Collector: col,
 		Logger:    logging.NewNoopLogger(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
