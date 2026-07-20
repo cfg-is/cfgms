@@ -122,9 +122,12 @@ func (m *PackageModule) Get(ctx context.Context, resourceID string) (modules.Con
 
 	if pkgName == metaDefaultsName {
 		return &Config{
-			Name:      metaDefaultsName,
-			State:     "present",
-			Providers: append([]string(nil), m.defaultProviders...),
+			Name:                  metaDefaultsName,
+			State:                 "present",
+			Providers:             append([]string(nil), m.defaultProviders...),
+			ChocoSource:           m.chocoSource,
+			ChocoSourceName:       m.chocoSourceName,
+			ChocoBootstrapPackage: m.chocoBootstrapPackage,
 		}, nil
 	}
 
@@ -178,7 +181,23 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 		if config == nil {
 			return ErrInvalidConfig
 		}
-		m.defaultProviders = extractProviders(config.AsMap())
+		configMap := config.AsMap()
+		m.defaultProviders = extractProviders(configMap)
+		if v, ok := configMap["choco_source"].(string); ok {
+			m.chocoSource = v
+		} else {
+			m.chocoSource = ""
+		}
+		if v, ok := configMap["choco_source_name"].(string); ok {
+			m.chocoSourceName = v
+		} else {
+			m.chocoSourceName = ""
+		}
+		if v, ok := configMap["choco_bootstrap_package"].(string); ok {
+			m.chocoBootstrapPackage = v
+		} else {
+			m.chocoBootstrapPackage = ""
+		}
 		return nil
 	}
 

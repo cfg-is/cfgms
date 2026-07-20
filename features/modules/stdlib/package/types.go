@@ -52,8 +52,23 @@ type Config struct {
 	// provider outside this list — see resolveProviders/selectManager in
 	// providers.go. Empty means "use the @defaults policy, else the platform
 	// built-in default."
-	Providers   []string `yaml:"providers,omitempty"`
-	Maintenance struct {
+	Providers []string `yaml:"providers,omitempty"`
+	// ChocoSource is the org-hosted chocolatey feed (URL or filesystem path)
+	// used as the sole source once chocolatey is selected as a provider —
+	// chocolatey is bootstrapped from and configured to use ONLY this source,
+	// never community.chocolatey.org. Set via the "@defaults" meta-resource
+	// (host policy); required for chocolatey to be usable at all.
+	ChocoSource string `yaml:"choco_source,omitempty"`
+	// ChocoSourceName is the local source name chocolatey registers the org
+	// feed under (`choco source add -n <name>`). Defaults to "org" when unset
+	// — see PackageModule.effectiveChocoSourceName.
+	ChocoSourceName string `yaml:"choco_source_name,omitempty"`
+	// ChocoBootstrapPackage is the path/URL to chocolatey.nupkg used to
+	// bootstrap chocolatey itself when it isn't yet installed. Defaults to
+	// "<ChocoSource>/chocolatey.nupkg" (path- or URL-joined) when unset — see
+	// resolveBootstrapPackageSource.
+	ChocoBootstrapPackage string `yaml:"choco_bootstrap_package,omitempty"`
+	Maintenance           struct {
 		Window   string        `yaml:"window"`   // Optional: Reference to a named maintenance window
 		Schedule string        `yaml:"schedule"` // Optional: Inline schedule (cron format)
 		Duration time.Duration `yaml:"duration"` // Optional: Duration of the window
@@ -86,6 +101,15 @@ func (c *Config) AsMap() map[string]interface{} {
 	}
 	if len(c.Providers) > 0 {
 		result["providers"] = stringsToIfaces(c.Providers)
+	}
+	if c.ChocoSource != "" {
+		result["choco_source"] = c.ChocoSource
+	}
+	if c.ChocoSourceName != "" {
+		result["choco_source_name"] = c.ChocoSourceName
+	}
+	if c.ChocoBootstrapPackage != "" {
+		result["choco_bootstrap_package"] = c.ChocoBootstrapPackage
 	}
 
 	// Only include maintenance if it has values
@@ -142,6 +166,15 @@ func (c *Config) GetManagedFields() []string {
 	}
 	if len(c.Providers) > 0 {
 		fields = append(fields, "providers")
+	}
+	if c.ChocoSource != "" {
+		fields = append(fields, "choco_source")
+	}
+	if c.ChocoSourceName != "" {
+		fields = append(fields, "choco_source_name")
+	}
+	if c.ChocoBootstrapPackage != "" {
+		fields = append(fields, "choco_bootstrap_package")
 	}
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		fields = append(fields, "maintenance")
@@ -265,6 +298,30 @@ type PackageModule struct {
 	// Legitimately shared cross-resource state (guarded by mu), unlike
 	// per-resource fields above.
 	defaultProviders []string
+	// chocoSource / chocoSourceName / chocoBootstrapPackage are the host-wide
+	// chocolatey policy set via Set("@defaults", ...), guarded by mu like
+	// defaultProviders above. chocoSource is the org feed (URL or filesystem
+	// path); chocolatey is bootstrapped from and configured to use ONLY this
+	// source (never community.chocolatey.org). See
+	// providers.go:chocoAvailable/bootstrapChoco.
+	chocoSource           string
+	chocoSourceName       string
+	chocoBootstrapPackage string
+	// chocoExeExists reports whether chocolatey is already installed at the
+	// well-known path (chocoExePath). nil means use the real filesystem check
+	// (chocoInstalled's default); tests override it so bootstrap-selection
+	// logic doesn't depend on the test host's real chocolatey state.
+	chocoExeExists func() bool
+	// chocoBootstrap, when non-nil, entirely replaces the real bootstrap
+	// implementation (bootstrapChocoReal) — used by tests to assert bootstrap
+	// is invoked (and with what host state) without extracting a real nupkg
+	// or spawning powershell.exe.
+	chocoBootstrap func(ctx context.Context) error
+	// runCommand executes an external command for chocolatey bootstrap/source
+	// configuration. nil means use execCommandRunner (os/exec); tests inject
+	// a fake recording runner so command argument vectors can be asserted
+	// without spawning real processes.
+	runCommand commandRunner
 	// managerCache caches selected PackageManager instances by resolved
 	// provider-list key so repeated Get/Set calls don't re-probe.
 	managerCache map[string]PackageManager

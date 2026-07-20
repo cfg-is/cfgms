@@ -4,6 +4,7 @@ package package_module
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -90,28 +91,34 @@ func TestPackageModule_ResolveProviders(t *testing.T) {
 // tried, unknown provider names are rejected, and a provider outside the
 // declared list is never silently substituted in.
 func TestPackageModule_SelectManager(t *testing.T) {
+	// These generic ordering tests deliberately use "apt" rather than "choco"
+	// as the second provider: "choco" now has special selection semantics
+	// (chocoAvailable — see TestPackageModule_ChocoSelection below) that
+	// don't apply to a fakeRegistry-injected entry, so using it here would
+	// either coincidentally pass (masking the real behavior) or spuriously
+	// fail depending on the test host's real chocolatey install state.
 	t.Run("first available wins", func(t *testing.T) {
-		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": true, "choco": true})}
-		mgr, name, err := m.selectManager(context.Background(), []string{"winget", "choco"})
+		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": true, "apt": true})}
+		mgr, name, err := m.selectManager(context.Background(), []string{"winget", "apt"})
 		require.NoError(t, err)
 		assert.Equal(t, "winget", name)
 		assert.Equal(t, "winget", mgr.Name())
 	})
 
 	t.Run("unavailable first is skipped to the next available", func(t *testing.T) {
-		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": false, "choco": true})}
-		mgr, name, err := m.selectManager(context.Background(), []string{"winget", "choco"})
+		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": false, "apt": true})}
+		mgr, name, err := m.selectManager(context.Background(), []string{"winget", "apt"})
 		require.NoError(t, err)
-		assert.Equal(t, "choco", name)
-		assert.Equal(t, "choco", mgr.Name())
+		assert.Equal(t, "apt", name)
+		assert.Equal(t, "apt", mgr.Name())
 	})
 
 	t.Run("none available returns an explicit error naming the tried list", func(t *testing.T) {
-		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": false, "choco": false})}
-		_, _, err := m.selectManager(context.Background(), []string{"winget", "choco"})
+		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": false, "apt": false})}
+		_, _, err := m.selectManager(context.Background(), []string{"winget", "apt"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "winget")
-		assert.Contains(t, err.Error(), "choco")
+		assert.Contains(t, err.Error(), "apt")
 	})
 
 	t.Run("unknown provider name is rejected with a clear error", func(t *testing.T) {
@@ -122,11 +129,11 @@ func TestPackageModule_SelectManager(t *testing.T) {
 	})
 
 	t.Run("never selects a provider outside the declared list", func(t *testing.T) {
-		// choco is available in the registry but not in the resource's list —
+		// apt is available in the registry but not in the resource's list —
 		// selection must fail rather than silently falling back to it.
-		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": false, "choco": true})}
+		m := &PackageModule{registry: fakeRegistry(map[string]bool{"winget": false, "apt": true})}
 		_, _, err := m.selectManager(context.Background(), []string{"winget"})
-		require.Error(t, err, "must not silently fall back to choco, which isn't in the declared list")
+		require.Error(t, err, "must not silently fall back to apt, which isn't in the declared list")
 		assert.Contains(t, err.Error(), "winget")
 	})
 
@@ -136,6 +143,83 @@ func TestPackageModule_SelectManager(t *testing.T) {
 		_, _, err := m.selectManager(context.Background(), []string{"not-a-real-provider"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not-a-real-provider")
+	})
+}
+
+// TestPackageModule_ChocoSelection exercises the choco-specific selection
+// path (chocoAvailable in providers.go) against the real defaultProviderRegistry:
+// chocolatey is never assumed present, is never bootstrapped from the
+// community feed, and selection surfaces a clear, actionable error rather
+// than silently skipping to a different provider when it's requested but
+// unconfigured.
+func TestPackageModule_ChocoSelection(t *testing.T) {
+	t.Run("already installed selects without bootstrapping", func(t *testing.T) {
+		m := &PackageModule{
+			chocoExeExists: func() bool { return true },
+			chocoBootstrap: func(ctx context.Context) error {
+				t.Fatal("must not bootstrap when chocolatey is already installed")
+				return nil
+			},
+		}
+		mgr, name, err := m.selectManager(context.Background(), []string{"choco"})
+		require.NoError(t, err)
+		assert.Equal(t, "choco", name)
+		assert.Equal(t, "choco", mgr.Name())
+	})
+
+	t.Run("not installed and no choco_source configured is an explicit error, never a silent skip", func(t *testing.T) {
+		m := &PackageModule{chocoExeExists: func() bool { return false }}
+		_, _, err := m.selectManager(context.Background(), []string{"choco"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not installed")
+		assert.Contains(t, err.Error(), "choco_source")
+	})
+
+	t.Run("choco_source configured takes the bootstrap path", func(t *testing.T) {
+		bootstrapCalled := false
+		m := &PackageModule{
+			chocoSource:    `C:\ClusterStorage\CSV01\choco-source`,
+			chocoExeExists: func() bool { return false },
+			chocoBootstrap: func(ctx context.Context) error {
+				bootstrapCalled = true
+				return nil
+			},
+		}
+		mgr, name, err := m.selectManager(context.Background(), []string{"choco"})
+		require.NoError(t, err)
+		assert.True(t, bootstrapCalled, "bootstrap must be invoked when choco_source is configured and chocolatey isn't installed")
+		assert.Equal(t, "choco", name)
+		assert.Equal(t, "choco", mgr.Name())
+	})
+
+	t.Run("bootstrap failure surfaces as a selection error naming the source", func(t *testing.T) {
+		m := &PackageModule{
+			chocoSource:    "https://feed.internal.example/choco",
+			chocoExeExists: func() bool { return false },
+			chocoBootstrap: func(ctx context.Context) error {
+				return fmt.Errorf("nupkg not found")
+			},
+		}
+		_, _, err := m.selectManager(context.Background(), []string{"choco"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "https://feed.internal.example/choco")
+		assert.Contains(t, err.Error(), "nupkg not found")
+	})
+
+	t.Run("never falls back to a different provider outside the declared list on bootstrap failure", func(t *testing.T) {
+		// Even though winget-style generic fallback exists elsewhere in
+		// selectManager, a choco-specific failure must not silently resolve
+		// to some other provider not in this resource's own declared list.
+		m := &PackageModule{
+			chocoSource:    "https://feed.internal.example/choco",
+			chocoExeExists: func() bool { return false },
+			chocoBootstrap: func(ctx context.Context) error {
+				return fmt.Errorf("boom")
+			},
+		}
+		_, name, err := m.selectManager(context.Background(), []string{"choco"})
+		require.Error(t, err)
+		assert.Empty(t, name)
 	})
 }
 
@@ -201,6 +285,71 @@ providers:
 	assert.Equal(t, metaDefaultsName, gotCfg.Name)
 	assert.Equal(t, "present", gotCfg.State)
 	assert.Equal(t, []string{"choco", "winget"}, gotCfg.Providers)
+}
+
+// TestPackageModule_MetaDefaults_ChocoPolicy verifies the @defaults
+// meta-resource records the chocolatey host policy (choco_source,
+// choco_source_name, choco_bootstrap_package) and echoes it back verbatim on
+// Get, so the resource converges with no drift.
+func TestPackageModule_MetaDefaults_ChocoPolicy(t *testing.T) {
+	m := &PackageModule{registry: defaultProviderRegistry}
+	ctx := context.Background()
+
+	cfg := createConfigFromYAML(`
+name: "@defaults"
+state: present
+providers:
+  - choco
+choco_source: "C:\\ClusterStorage\\CSV01\\choco-source"
+choco_source_name: "org"
+choco_bootstrap_package: "C:\\ClusterStorage\\CSV01\\choco-source\\chocolatey.nupkg"
+`)
+	require.NoError(t, m.Set(ctx, metaDefaultsName, cfg))
+	assert.Equal(t, `C:\ClusterStorage\CSV01\choco-source`, m.chocoSource)
+	assert.Equal(t, "org", m.chocoSourceName)
+	assert.Equal(t, `C:\ClusterStorage\CSV01\choco-source\chocolatey.nupkg`, m.chocoBootstrapPackage)
+
+	got, err := m.Get(ctx, metaDefaultsName)
+	require.NoError(t, err)
+	gotCfg, ok := got.(*Config)
+	require.True(t, ok)
+	assert.Equal(t, `C:\ClusterStorage\CSV01\choco-source`, gotCfg.ChocoSource)
+	assert.Equal(t, "org", gotCfg.ChocoSourceName)
+	assert.Equal(t, `C:\ClusterStorage\CSV01\choco-source\chocolatey.nupkg`, gotCfg.ChocoBootstrapPackage)
+
+	// desired == observed on every AsMap key the authored config declared —
+	// no false drift on the choco policy fields (mirrors how `providers` is
+	// echoed; see TestPackageModule_ProvidersEcho_NoDrift).
+	desired := cfg.AsMap()
+	observed := got.AsMap()
+	for _, field := range []string{"choco_source", "choco_source_name", "choco_bootstrap_package"} {
+		assert.Contains(t, cfg.GetManagedFields(), field)
+		assert.Equal(t, desired[field], observed[field], "field %s must echo verbatim", field)
+	}
+}
+
+// TestPackageModule_MetaDefaults_ChocoPolicy_Unset verifies that when the
+// choco policy fields are never authored, Get does not invent them on the
+// observed side (empty string fields are omitted from AsMap, same as every
+// other optional Config field).
+func TestPackageModule_MetaDefaults_ChocoPolicy_Unset(t *testing.T) {
+	m := &PackageModule{registry: defaultProviderRegistry}
+	ctx := context.Background()
+
+	cfg := createConfigFromYAML(`
+name: "@defaults"
+state: present
+providers:
+  - winget
+`)
+	require.NoError(t, m.Set(ctx, metaDefaultsName, cfg))
+
+	got, err := m.Get(ctx, metaDefaultsName)
+	require.NoError(t, err)
+	observed := got.AsMap()
+	assert.NotContains(t, observed, "choco_source")
+	assert.NotContains(t, observed, "choco_source_name")
+	assert.NotContains(t, observed, "choco_bootstrap_package")
 }
 
 // TestPackageModule_MetaDefaults_NoPackageOp verifies @defaults never

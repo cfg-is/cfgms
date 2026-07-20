@@ -122,12 +122,50 @@ func (m *PackageModule) selectManager(ctx context.Context, providers []string) (
 	}
 
 	for _, name := range providers {
+		if name == "choco" {
+			mgr, ok, err := m.chocoAvailable(ctx)
+			if err != nil {
+				return nil, "", err
+			}
+			if ok {
+				return mgr, name, nil
+			}
+			continue
+		}
 		if reg[name].probe(ctx) {
 			return reg[name].constructor(), name, nil
 		}
 	}
 
 	return nil, "", fmt.Errorf("no available package provider among %v", providers)
+}
+
+// chocoAvailable determines whether chocolatey can satisfy this selection:
+// already installed, or bootstrappable from the configured host-wide
+// choco_source. It NEVER falls back to the community feed — if chocolatey
+// isn't installed and no choco_source is configured, it returns a clear,
+// actionable error immediately (rather than silently falling through to the
+// generic "no available provider" message, which would look identical to
+// "choco just wasn't available" and hide the real fix). Callers must hold
+// m.mu (same contract as selectManager).
+func (m *PackageModule) chocoAvailable(ctx context.Context) (PackageManager, bool, error) {
+	if m.chocoInstalled() {
+		return newChocolateyManagerWithSource(m.effectiveChocoSourceName()), true, nil
+	}
+
+	if m.chocoSource == "" {
+		return nil, false, fmt.Errorf("chocolatey selected but not installed and no choco_source configured to bootstrap from")
+	}
+
+	if logger, ok := m.GetLogger(); ok {
+		logger.Info("chocolatey not installed, bootstrapping from configured choco_source", "choco_source", m.chocoSource)
+	}
+
+	if err := m.bootstrapChoco(ctx); err != nil {
+		return nil, false, fmt.Errorf("failed to bootstrap chocolatey from %s: %w", m.chocoSource, err)
+	}
+
+	return newChocolateyManagerWithSource(m.effectiveChocoSourceName()), true, nil
 }
 
 // extractProviders reads the raw `providers` list from a module ConfigState's

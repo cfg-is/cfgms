@@ -214,18 +214,43 @@ func (m *wingetManager) IsValidManager(name string) bool {
 	return name == "winget"
 }
 
-// chocolateyManager implements PackageManager for Chocolatey
-type chocolateyManager struct{}
+// chocolateyManager implements PackageManager for Chocolatey.
+// sourceName, when set, is passed as `--source <sourceName>` on every
+// operation so packages are resolved only against the configured org source
+// (`choco source add -n <sourceName> ...` — see PackageModule.bootstrapChoco
+// / configureChocoSource), never the community feed. Empty sourceName is the
+// legacy/unconfigured shape (newChocolateyManager), retained for the case
+// where chocolatey was pre-installed and pre-configured outside CFGMS.
+type chocolateyManager struct {
+	sourceName string
+}
 
 func newChocolateyManager() PackageManager {
 	return &chocolateyManager{}
 }
 
-func (m *chocolateyManager) Install(ctx context.Context, name, version string) error {
-	cmd := exec.CommandContext(ctx, "choco", "install", "-y", name)
-	if version != "latest" {
-		cmd.Args = append(cmd.Args, "--version", version)
+// newChocolateyManagerWithSource returns a chocolateyManager that passes
+// `--source <sourceName>` on every operation, restricting package resolution
+// to the configured org source.
+func newChocolateyManagerWithSource(sourceName string) PackageManager {
+	return &chocolateyManager{sourceName: sourceName}
+}
+
+// sourceArgs returns the `--source <sourceName>` argument pair when a source
+// name is configured, else nil.
+func (m *chocolateyManager) sourceArgs() []string {
+	if m.sourceName == "" {
+		return nil
 	}
+	return []string{"--source", m.sourceName}
+}
+
+func (m *chocolateyManager) Install(ctx context.Context, name, version string) error {
+	args := append([]string{"install", "-y", "--no-progress", name}, m.sourceArgs()...)
+	if version != "latest" {
+		args = append(args, "--version", version)
+	}
+	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -234,7 +259,8 @@ func (m *chocolateyManager) Install(ctx context.Context, name, version string) e
 }
 
 func (m *chocolateyManager) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "choco", "uninstall", "-y", name)
+	args := append([]string{"uninstall", "-y", name}, m.sourceArgs()...)
+	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -244,29 +270,31 @@ func (m *chocolateyManager) Remove(ctx context.Context, name string) error {
 
 func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
 	// Chocolatey 2.x removed --local-only ("Invalid argument --local-only");
-	// `choco list` defaults to installed/local packages in 2.x.
-	cmd := exec.CommandContext(ctx, "choco", "list", name)
+	// `choco list` defaults to installed/local packages in 2.x. This is a query
+	// of what is INSTALLED, so it must NOT carry --source: `choco list --source`
+	// searches the feed for AVAILABLE packages, which would report a not-installed
+	// package as present.
+	cmd := exec.CommandContext(ctx, "choco", "list", name, "--exact", "--limit-output")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
 	}
 
-	// Parse output to find version
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, name) {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				return parts[1], nil
-			}
+	// --limit-output emits `name|version` per installed package (machine-readable).
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "|")
+		if len(fields) >= 2 && strings.EqualFold(fields[0], name) {
+			return fields[1], nil
 		}
 	}
 
-	return "", fmt.Errorf("version not found for package %s", name)
+	// Not present in the installed list → absent. The module maps ErrPackageNotFound
+	// to state: absent and installs, rather than erroring out.
+	return "", ErrPackageNotFound
 }
 
 func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]string, error) {
-	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
+	// Installed query — no --source (see GetInstalledVersion).
 	cmd := exec.CommandContext(ctx, "choco", "list")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -290,7 +318,8 @@ func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]strin
 
 func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string, error) {
 	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
-	cmd := exec.CommandContext(ctx, "choco", "list", "--exact", name)
+	args := append([]string{"list", "--exact", name}, m.sourceArgs()...)
+	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("choco list failed: %v, output: %s", err, string(output))
@@ -311,7 +340,8 @@ func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string
 
 func (m *chocolateyManager) IsInstalled(ctx context.Context, name string) (bool, error) {
 	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
-	cmd := exec.CommandContext(ctx, "choco", "list", "--exact", name)
+	args := append([]string{"list", "--exact", name}, m.sourceArgs()...)
+	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("choco list failed: %v, output: %s", err, string(output))
@@ -320,7 +350,8 @@ func (m *chocolateyManager) IsInstalled(ctx context.Context, name string) (bool,
 }
 
 func (m *chocolateyManager) Update(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "choco", "upgrade", "-y", name)
+	args := append([]string{"upgrade", "-y", name}, m.sourceArgs()...)
+	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("choco upgrade failed: %v, output: %s", err, string(output))
