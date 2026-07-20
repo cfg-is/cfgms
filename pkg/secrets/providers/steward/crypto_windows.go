@@ -15,7 +15,7 @@ import (
 
 // DPAPI flags
 const (
-	cryptprotectUIForbidden = 0x1
+	cryptprotectUIForbidden  = 0x1
 	cryptprotectLocalMachine = 0x4
 )
 

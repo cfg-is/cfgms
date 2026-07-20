@@ -69,11 +69,11 @@ const (
 // type, not a mock.
 type e2eConfig struct{ m map[string]interface{} }
 
-func (c e2eConfig) AsMap() map[string]interface{}     { return c.m }
-func (c e2eConfig) ToYAML() ([]byte, error)           { return nil, nil }
-func (c e2eConfig) FromYAML([]byte) error             { return nil }
-func (c e2eConfig) Validate() error                   { return nil }
-func (c e2eConfig) GetManagedFields() []string        { return nil }
+func (c e2eConfig) AsMap() map[string]interface{} { return c.m }
+func (c e2eConfig) ToYAML() ([]byte, error)       { return nil, nil }
+func (c e2eConfig) FromYAML([]byte) error         { return nil }
+func (c e2eConfig) Validate() error               { return nil }
+func (c e2eConfig) GetManagedFields() []string    { return nil }
 
 // The e2eSecretStore type used here is the shared in-memory SecretStore double
 // defined in provision_debian_test.go (#2046); both the Linux preseed and the

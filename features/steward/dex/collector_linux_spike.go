@@ -134,7 +134,9 @@ type cnMsg struct {
 }
 
 // procEventHdr mirrors the fixed header of struct proc_event:
-//   what(4) + cpu(4) + timestamp_ns(8, aligned to 8)
+//
+//	what(4) + cpu(4) + timestamp_ns(8, aligned to 8)
+//
 // Total: 16 bytes.
 type procEventHdr struct {
 	What        uint32
@@ -217,11 +219,11 @@ type LinuxSpikeReport struct {
 type LinuxCollector struct {
 	cfg        LinuxSpikeConfig
 	sink       *Sink
-	total      atomic.Int64  // events successfully written to sink
-	dropped    atomic.Int64  // events dropped (ENOBUFS / ring exhaustion)
-	sinkErrors atomic.Int64  // sink write failures
+	total      atomic.Int64 // events successfully written to sink
+	dropped    atomic.Int64 // events dropped (ENOBUFS / ring exhaustion)
+	sinkErrors atomic.Int64 // sink write failures
 
-	mu           sync.Mutex
+	mu            sync.Mutex
 	sourcesActive []string
 
 	// started is closed by Run once all collection goroutines have been
@@ -677,10 +679,10 @@ func (c *LinuxCollector) decodeProcEvent(buf []byte) {
 		}
 		attr := attributePID(int(fi.ChildPid))
 		fields = map[string]any{
-			"event":       "fork",
-			"parent_pid":  fi.ParentPid,
-			"child_pid":   fi.ChildPid,
-			"ts_ns":       hdr.TimestampNs,
+			"event":      "fork",
+			"parent_pid": fi.ParentPid,
+			"child_pid":  fi.ChildPid,
+			"ts_ns":      hdr.TimestampNs,
 		}
 		mergeAttribution(fields, attr)
 
@@ -694,9 +696,9 @@ func (c *LinuxCollector) decodeProcEvent(buf []byte) {
 		}
 		attr := attributePID(int(ei.ProcessPid))
 		fields = map[string]any{
-			"event":   "exec",
-			"pid":     ei.ProcessPid,
-			"ts_ns":   hdr.TimestampNs,
+			"event": "exec",
+			"pid":   ei.ProcessPid,
+			"ts_ns": hdr.TimestampNs,
 		}
 		mergeAttribution(fields, attr)
 
@@ -899,11 +901,11 @@ func (c *LinuxCollector) runDiskStatsReader(ctx context.Context) {
 					continue
 				}
 				fields := map[string]any{
-					"dev":            dev,
-					"read_sectors":   deltaReadSec,
-					"write_sectors":  deltaWriteSec,
-					"read_ms":        deltaReadMs,
-					"write_ms":       deltaWriteMs,
+					"dev":           dev,
+					"read_sectors":  deltaReadSec,
+					"write_sectors": deltaWriteSec,
+					"read_ms":       deltaReadMs,
+					"write_ms":      deltaWriteMs,
 				}
 				if err := c.sink.WriteEvent(SignalLinuxDiskIO, fields); err != nil {
 					c.sinkErrors.Add(1)
@@ -918,8 +920,9 @@ func (c *LinuxCollector) runDiskStatsReader(ctx context.Context) {
 
 // readDiskStats parses /proc/diskstats into a map keyed by device name.
 // Field layout (1-indexed in kernel docs, 0-indexed here after major/minor/name):
-//   0=reads_completed, 1=reads_merged, 2=sectors_read, 3=time_reading_ms,
-//   4=writes_completed, 5=writes_merged, 6=sectors_written, 7=time_writing_ms, ...
+//
+//	0=reads_completed, 1=reads_merged, 2=sectors_read, 3=time_reading_ms,
+//	4=writes_completed, 5=writes_merged, 6=sectors_written, 7=time_writing_ms, ...
 func readDiskStats() map[string]diskStatRow {
 	data, err := os.ReadFile("/proc/diskstats")
 	if err != nil {
@@ -1076,10 +1079,10 @@ func (c *LinuxCollector) runThermalReader(ctx context.Context) {
 			}
 
 			fields := map[string]any{
-				"zone":       zone,
-				"type":       zoneType,
-				"temp_mc":    milliC,      // milli-Celsius
-				"temp_c":     float64(milliC) / 1000.0,
+				"zone":    zone,
+				"type":    zoneType,
+				"temp_mc": milliC, // milli-Celsius
+				"temp_c":  float64(milliC) / 1000.0,
 			}
 			if err := c.sink.WriteEvent(SignalLinuxThermal, fields); err != nil {
 				c.sinkErrors.Add(1)
@@ -1155,9 +1158,10 @@ func attributePID(pid int) procAttribution {
 // extractContainerID parses a cgroup v2 path for a Docker/containerd container ID.
 // Returns "" for host or non-container paths.
 // Example paths:
-//   /docker/abc123def456...   → "abc123def456..."
-//   /system.slice/docker-abc123.scope → "abc123"
-//   /                          → ""
+//
+//	/docker/abc123def456...   → "abc123def456..."
+//	/system.slice/docker-abc123.scope → "abc123"
+//	/                          → ""
 func extractContainerID(cgroupPath string) string {
 	parts := strings.Split(strings.Trim(cgroupPath, "/"), "/")
 	for _, part := range parts {

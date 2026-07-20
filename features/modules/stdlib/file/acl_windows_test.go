@@ -30,7 +30,7 @@ func TestMaskToAccessString(t *testing.T) {
 		{windows.GENERIC_WRITE, "Write"},
 		{windows.GENERIC_READ, "Read"},
 		// File-specific expanded constants — stored by Windows, returned by GetNamedSecurityInfo
-		{fileACLFullControl, "FullControl"},      // 0x001F01FF (FILE_ALL_ACCESS)
+		{fileACLFullControl, "FullControl"},       // 0x001F01FF (FILE_ALL_ACCESS)
 		{fileACLReadAndExecute, "ReadAndExecute"}, // 0x001200A9
 		{fileACLModify, "Modify"},                 // 0x001201BF
 		{fileACLWrite, "Write"},                   // 0x00120116

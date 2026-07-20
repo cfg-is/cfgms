@@ -25,8 +25,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	migratesecrets "github.com/cfgis/cfgms/pkg/migrate/secrets"
 	"github.com/cfgis/cfgms/pkg/cert"
+	migratesecrets "github.com/cfgis/cfgms/pkg/migrate/secrets"
 	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 

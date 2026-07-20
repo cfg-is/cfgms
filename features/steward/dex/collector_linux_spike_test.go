@@ -418,8 +418,9 @@ func TestLinuxSpikeReportJSONRoundtrip(t *testing.T) {
 //
 // Gated on LINUX_SPIKE_LONGRUN=1 so it doesn't run in standard CI
 // (which times out after 30s). Run explicitly for the feasibility report:
-//   LINUX_SPIKE_LONGRUN=1 go test -tags spike -v -run TestLinuxCollectorStability \
-//     -timeout 900s ./features/steward/dex/
+//
+//	LINUX_SPIKE_LONGRUN=1 go test -tags spike -v -run TestLinuxCollectorStability \
+//	  -timeout 900s ./features/steward/dex/
 func TestLinuxCollectorStability(t *testing.T) {
 	if os.Getenv("LINUX_SPIKE_LONGRUN") != "1" {
 		t.Skip("set LINUX_SPIKE_LONGRUN=1 to run the sustained stability window (10 min)")
