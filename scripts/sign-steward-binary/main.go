@@ -29,6 +29,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/cfgis/cfgms/pkg/modules/trust"
@@ -44,7 +45,7 @@ func main() {
 	}
 }
 
-func run(args []string, out *os.File) error {
+func run(args []string, out io.Writer) error {
 	if len(args) != 4 {
 		return fmt.Errorf("usage: sign-steward-binary <binary> <version> <platform> <arch>\n" +
 			"  e.g. sign-steward-binary cfgms-steward.exe v0.9.41 windows amd64")
