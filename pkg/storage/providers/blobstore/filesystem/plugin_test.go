@@ -30,6 +30,28 @@ func testKey(name string) blob.BlobKey {
 	}
 }
 
+// TestFilesystemBlobStore_PreservesSignatureLabels verifies the steward-binary
+// signature/publisher labels survive a GetBlob round-trip, so the public GET handler
+// can serve them as headers (#2836).
+func TestFilesystemBlobStore_PreservesSignatureLabels(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	labels := map[string]string{
+		"signature": "cVBzcy1zaWduYXR1cmUtYnl0ZXM",
+		"publisher": "cfgms",
+	}
+	key := testKey("steward.bin")
+	require.NoError(t, s.PutBlob(ctx, key, bytes.NewReader([]byte("bin")), blob.BlobMeta{Labels: labels}))
+
+	rc, gotMeta, err := s.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+
+	assert.Equal(t, "cVBzcy1zaWduYXR1cmUtYnl0ZXM", gotMeta.Labels["signature"])
+	assert.Equal(t, "cfgms", gotMeta.Labels["publisher"])
+}
+
 // TestFilesystemBlobStore_PutGetBlob verifies a basic roundtrip.
 func TestFilesystemBlobStore_PutGetBlob(t *testing.T) {
 	s := newTestStore(t)
