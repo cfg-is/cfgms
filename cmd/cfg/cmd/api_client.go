@@ -20,11 +20,12 @@ import (
 
 // APIClient provides HTTP client functionality for communicating with the controller API
 type APIClient struct {
-	baseURL        string
-	apiKey         string
-	httpClient     *http.Client
-	onTokenRenewed func(newToken string) error
-	onUnauthorized func() (*APIClient, error)
+	baseURL          string
+	apiKey           string
+	httpClient       *http.Client
+	onTokenRenewed   func(newToken string) error
+	onUnauthorized   func() (*APIClient, error)
+	onStepUpRequired func(wwwAuthenticate string) (presenceToken string, err error)
 }
 
 // APIClientConfig contains configuration for creating an API client
@@ -48,6 +49,20 @@ type APIClientConfig struct {
 	// message "session expired or revoked — falling back to bundle auth" is
 	// printed to stderr.
 	OnUnauthorized func() (*APIClient, error)
+
+	// OnStepUpRequired is called when the server returns 401 with
+	// WWW-Authenticate: CFGMS-StepUp, indicating that the current assurance level
+	// is insufficient for the requested action. This is distinct from a plain
+	// session-expired 401 (no CFGMS-StepUp header), which routes to OnUnauthorized.
+	//
+	// The callback receives the full WWW-Authenticate header value. It should:
+	//   - Return a non-empty presence token on success (causes the original request
+	//     to be retried with X-Presence-Token).
+	//   - Return an error when the step-up cannot be completed (e.g., non-interactive
+	//     environment, unsupported assurance elevation).
+	//
+	// Nil = 401 with CFGMS-StepUp header is returned to the caller unchanged.
+	OnStepUpRequired func(wwwAuthenticate string) (presenceToken string, err error)
 }
 
 // APITokenCreateRequest represents the request body for creating a registration token
@@ -116,10 +131,11 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 	}
 
 	return &APIClient{
-		baseURL:        cfg.BaseURL,
-		apiKey:         cfg.APIKey,
-		onTokenRenewed: cfg.OnTokenRenewed,
-		onUnauthorized: cfg.OnUnauthorized,
+		baseURL:          cfg.BaseURL,
+		apiKey:           cfg.APIKey,
+		onTokenRenewed:   cfg.OnTokenRenewed,
+		onUnauthorized:   cfg.OnUnauthorized,
+		onStepUpRequired: cfg.OnStepUpRequired,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -450,12 +466,13 @@ func (c *APIClient) doRequestWithContentType(ctx context.Context, method, path s
 			return nil, fmt.Errorf("failed to buffer request body: %w", err)
 		}
 	}
-	return c.execRequest(ctx, method, path, bodyBytes, contentType, true)
+	return c.execRequest(ctx, method, path, bodyBytes, contentType, true, "")
 }
 
 // execRequest is the inner send-and-receive loop shared by doRequestWithContentType
 // and the 401-fallback retry path. allowFallback prevents infinite recursion.
-func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBytes []byte, contentType string, allowFallback bool) (*http.Response, error) {
+// presenceToken, when non-empty, is attached as X-Presence-Token (step-up retry path).
+func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBytes []byte, contentType string, allowFallback bool, presenceToken string) (*http.Response, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base URL: %w", err)
@@ -498,6 +515,9 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	if presenceToken != "" {
+		req.Header.Set("X-Presence-Token", presenceToken)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -509,14 +529,34 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 		_ = c.onTokenRenewed(newToken) // best-effort; never fail the request
 	}
 
-	// 401 fallback: when the session token has been revoked or expired server-side,
-	// transparently retry with a bundle-auth client if one is available.
-	if allowFallback && resp.StatusCode == http.StatusUnauthorized && c.onUnauthorized != nil {
-		fallbackClient, fallbackErr := c.onUnauthorized()
-		if fallbackErr == nil && fallbackClient != nil {
-			_ = resp.Body.Close()
-			fmt.Fprintln(os.Stderr, "session expired or revoked — falling back to bundle auth")
-			return fallbackClient.execRequest(ctx, method, path, bodyBytes, contentType, false)
+	if allowFallback && resp.StatusCode == http.StatusUnauthorized {
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		if strings.HasPrefix(wwwAuth, "CFGMS-StepUp") {
+			// Step-up challenge: distinct from a session-expired 401. Only the presence
+			// of the CFGMS-StepUp scheme in WWW-Authenticate routes here; plain 401s
+			// (session expired/revoked) route to onUnauthorized below.
+			if c.onStepUpRequired != nil {
+				_ = resp.Body.Close()
+				token, stepUpErr := c.onStepUpRequired(wwwAuth)
+				if stepUpErr != nil {
+					return nil, stepUpErr
+				}
+				if token != "" {
+					return c.execRequest(ctx, method, path, bodyBytes, contentType, false, token)
+				}
+				return nil, fmt.Errorf("step-up required")
+			}
+			return resp, nil
+		}
+		// Ordinary 401 (no CFGMS-StepUp header): session expired or revoked.
+		// Transparently retry with a bundle-auth client if one is available.
+		if c.onUnauthorized != nil {
+			fallbackClient, fallbackErr := c.onUnauthorized()
+			if fallbackErr == nil && fallbackClient != nil {
+				_ = resp.Body.Close()
+				fmt.Fprintln(os.Stderr, "session expired or revoked — falling back to bundle auth")
+				return fallbackClient.execRequest(ctx, method, path, bodyBytes, contentType, false, "")
+			}
 		}
 	}
 
@@ -1095,6 +1135,57 @@ func (c *APIClient) WebAuthnFinishRegistration(ctx context.Context, username, la
 		return nil, fmt.Errorf("failed to decode finish response: %w", err)
 	}
 	return &result, nil
+}
+
+// WebAuthnPresenceBegin calls POST /api/v1/webauthn/presence/begin to start a
+// presence assertion ceremony. Returns the raw PublicKeyCredentialRequestOptions JSON
+// (the data field from the APIResponse envelope). The caller passes this JSON to the
+// browser's navigator.credentials.get() to produce an authenticator assertion.
+func (c *APIClient) WebAuthnPresenceBegin(ctx context.Context) (json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/webauthn/presence/begin", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode presence begin response: %w", err)
+	}
+	return envelope.Data, nil
+}
+
+// WebAuthnPresenceFinish calls POST /api/v1/webauthn/presence/finish with the
+// authenticator assertion response JSON from the browser's navigator.credentials.get()
+// result. Returns the single-use presence token to attach as X-Presence-Token on the
+// guarded action request. The token is valid for presenceTokenTTL (30 s) server-side.
+func (c *APIClient) WebAuthnPresenceFinish(ctx context.Context, assertionResponseJSON []byte) (string, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/webauthn/presence/finish", bytes.NewReader(assertionResponseJSON))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", c.parseError(resp)
+	}
+
+	var result struct {
+		PresenceToken string `json:"presence_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode presence finish response: %w", err)
+	}
+	if result.PresenceToken == "" {
+		return "", fmt.Errorf("server returned empty presence token")
+	}
+	return result.PresenceToken, nil
 }
 
 // WebAuthnRevokeCredential calls POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}
