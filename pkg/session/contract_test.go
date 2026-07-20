@@ -304,6 +304,92 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 			t.Errorf("after Delete, Get hashNew: got %v, want ErrSessionNotFound", err)
 		}
 	})
+
+	// ContinuityFieldsRoundTrip verifies that all four device-continuity fields
+	// (Assurance, CredentialID, BoundIP, LastProvenAt) survive a Set → Get round-trip
+	// with non-zero / non-nil values. This exercises the nullable-column deserialization
+	// branches in SQLite and Postgres stores that are never reached by makeTestSession
+	// (which always leaves these fields at their zero defaults).
+	t.Run("ContinuityFieldsRoundTrip", func(t *testing.T) {
+		tok, err := session.GenerateToken()
+		if err != nil {
+			t.Fatalf("GenerateToken: %v", err)
+		}
+		hash := session.HashToken(tok)
+		now := time.Now().UTC().Truncate(time.Second)
+		credID := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04}
+
+		sess := &session.Session{
+			ID:                "sc-continuity",
+			PrincipalID:       "carol",
+			ConnectionName:    "ctrl",
+			TenantID:          "tenant-continuity",
+			IssuedAt:          now,
+			LastActivity:      now,
+			AbsoluteExpiresAt: now.Add(cfg.AbsoluteTimeout),
+			Assurance:         session.AssuranceStrong,
+			CredentialID:      credID,
+			BoundIP:           "198.51.100.42",
+			LastProvenAt:      now,
+		}
+
+		if err := store.Set(ctx, hash, sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		got, err := store.Get(ctx, hash)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Assurance != session.AssuranceStrong {
+			t.Errorf("Assurance: got %v, want AssuranceStrong", got.Assurance)
+		}
+		if got.BoundIP != "198.51.100.42" {
+			t.Errorf("BoundIP: got %q, want %q", got.BoundIP, "198.51.100.42")
+		}
+		if got.LastProvenAt.IsZero() {
+			t.Error("LastProvenAt: got zero, want non-zero")
+		}
+		if !got.LastProvenAt.Equal(now) {
+			t.Errorf("LastProvenAt: got %v, want %v", got.LastProvenAt, now)
+		}
+		if len(got.CredentialID) != len(credID) {
+			t.Errorf("CredentialID length: got %d, want %d", len(got.CredentialID), len(credID))
+		} else {
+			for i, b := range credID {
+				if got.CredentialID[i] != b {
+					t.Errorf("CredentialID[%d]: got 0x%02x, want 0x%02x", i, got.CredentialID[i], b)
+				}
+			}
+		}
+
+		// ListAll must also return the continuity fields intact.
+		all, err := store.ListAll(ctx)
+		if err != nil {
+			t.Fatalf("ListAll: %v", err)
+		}
+		var found *session.Session
+		for _, s := range all {
+			if s.ID == "sc-continuity" {
+				found = s
+				break
+			}
+		}
+		if found == nil {
+			t.Fatal("ListAll: sc-continuity session not found")
+		}
+		if found.Assurance != session.AssuranceStrong {
+			t.Errorf("ListAll Assurance: got %v, want AssuranceStrong", found.Assurance)
+		}
+		if found.BoundIP != "198.51.100.42" {
+			t.Errorf("ListAll BoundIP: got %q, want %q", found.BoundIP, "198.51.100.42")
+		}
+		if found.LastProvenAt.IsZero() {
+			t.Error("ListAll LastProvenAt: got zero, want non-zero")
+		}
+		if len(found.CredentialID) != len(credID) {
+			t.Errorf("ListAll CredentialID length: got %d, want %d", len(found.CredentialID), len(credID))
+		}
+	})
 }
 
 // TestStoreContract_MemStore runs the shared contract suite against the in-memory MemStore.
