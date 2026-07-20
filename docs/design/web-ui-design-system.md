@@ -139,6 +139,12 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
   the `soon` badge and a short label; they do not throw or navigate.
   Back-navigation is a breadcrumb `Fleet / {hostname}` above the `<h1>`;
   the browser's own back button and the link both return to `/`.
+- **Sortable data table** (Story #2766; convention established in `FleetTable.tsx`) —
+  click any `<th>` to sort by that column; a second click on the same header reverses
+  direction. Sort state is `{ key: string; direction: 1 | -1 }` (from `FleetTable.tsx`)
+  where `direction=1` is ascending and `direction=-1` is descending. The active column
+  carries `aria-sort="ascending"|"descending"` on the `<th>` (no attribute when inactive)
+  and a `sort` CSS class. All sort interactions remain client-side — no re-fetch on sort.
 
 ---
 
