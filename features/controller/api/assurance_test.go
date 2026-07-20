@@ -60,12 +60,13 @@ func TestPermissionAssurance_FormerTier3SetPresent(t *testing.T) {
 }
 
 // TestPermissionAssurance_NewPermissionsPresent verifies that the new permissions
-// introduced in Issue #2780 are present in the registry with the correct requirements.
+// introduced in Issue #2780 and #2784 are present in the registry with the correct requirements.
 func TestPermissionAssurance_NewPermissionsPresent(t *testing.T) {
 	newPerms := map[string]session.AssuranceLevel{
 		"cluster:drain-node":        session.AssuranceStrong,
 		"cluster:decommission-node": session.AssuranceStrong,
 		"session:create":            session.AssuranceStrong,
+		"webauthn:assert-presence":  session.AssuranceStrong, // Issue #2784: presence-ceremony endpoint
 	}
 	for perm, wantMin := range newPerms {
 		req, found := permissionAssurance[perm]

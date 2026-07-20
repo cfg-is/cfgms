@@ -352,9 +352,9 @@ func TestWebAuthnRegistration(t *testing.T) {
 			svRPID   = "example.org"
 			svOrigin = "https://example.org"
 			// W3C Level 3 §16.2 NoneES256 spec test vector (hex-encoded).
-			svAttObjectHex  = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220" //nolint:gosec
+			svAttObjectHex  = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220" //nolint:gosec // W3C Level 3 §16.2 spec test vector, not a real credential secret
 			svClientDataHex = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
-			svCredIDHex     = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec
+			svCredIDHex     = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec // W3C Level 3 §16.2 spec test vector credential ID, not a real credential secret
 			svChallengeHex  = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
 		)
 
@@ -535,6 +535,171 @@ func TestWebAuthnRevokeCredential(t *testing.T) {
 		rec := doRevokeCredential(t, server, secondUsername, lastCredIDParam)
 		assert.Equal(t, http.StatusNoContent, rec.Code,
 			"server must permit last-credential revocation; the guard lives in the CLI")
+	})
+}
+
+// --- Issue #2784: presence ceremony handler error-path tests ---
+
+// doPresenceBegin calls handlePresenceBegin directly. Pass nil principal to omit
+// the principal from the request context, exercising the 401 path.
+func doPresenceBegin(t *testing.T, server *Server, principal *Principal) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/begin", nil)
+	if principal != nil {
+		req = withPrincipal(req, principal)
+	}
+	rec := httptest.NewRecorder()
+	server.handlePresenceBegin(rec, req)
+	return rec
+}
+
+// doPresenceFinish calls handlePresenceFinish directly with an empty body.
+// Pass nil principal to omit the principal from the request context.
+func doPresenceFinish(t *testing.T, server *Server, principal *Principal) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/finish", bytes.NewReader(nil))
+	if principal != nil {
+		req = withPrincipal(req, principal)
+	}
+	rec := httptest.NewRecorder()
+	server.handlePresenceFinish(rec, req)
+	return rec
+}
+
+// injectPresenceSession stores a pending presence session directly into the server,
+// bypassing handlePresenceBegin. Keyed by principalID (not a URL path variable).
+func injectPresenceSession(s *Server, principalID string, sd webauthn.SessionData, ttl time.Duration) {
+	s.webAuthnPresenceSessions.Store(principalID, &webAuthnPendingSession{
+		data:    sd,
+		expires: time.Now().Add(ttl),
+	})
+}
+
+// TestWebAuthnPresenceBegin covers handlePresenceBegin, including the success path.
+// BeginLogin only derives an assertion challenge from the account's registered credential
+// IDs and stores server-side session data — it does not touch hardware. Hardware
+// verification happens in FinishLogin (exercised in TestWebAuthnPresenceFinish). The
+// happy path is therefore fully testable here with a synthetic injected credential.
+func TestWebAuthnPresenceBegin(t *testing.T) {
+	t.Run("Success_200_IssuesChallengeAndStoresSession", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+		// BeginLogin needs at least one registered credential ID. Inject one
+		// synthetically to reach the success branch without a real ceremony.
+		credID := []byte("presence-begin-cred-id")
+		injectCredential(t, server, username, credID)
+
+		// Principal ID must match the web-account username so getWebAccount resolves it.
+		principal := &Principal{ID: username, Name: username}
+		rec := doPresenceBegin(t, server, principal)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		// Response must carry a non-empty assertion challenge.
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		opts, ok := resp.Data.(map[string]interface{})
+		require.True(t, ok, "response.data must be an object")
+		pk, ok := opts["publicKey"].(map[string]interface{})
+		require.True(t, ok, "response.data.publicKey must be present")
+		assert.NotEmpty(t, pk["challenge"], "BeginLogin must issue an assertion challenge")
+
+		// Security-critical (ADR-021 Decision 4): the challenge must demand user
+		// verification. A regression to "preferred"/"discouraged" — or dropping the
+		// option — silently defeats the presence guarantee, so assert it explicitly.
+		assert.Equal(t, "required", pk["userVerification"],
+			"presence ceremony must require user verification (WithUserVerification(VerificationRequired))")
+
+		// A single-use, time-bounded presence session must be stored keyed by principal ID.
+		raw, ok := server.webAuthnPresenceSessions.Load(principal.ID)
+		require.True(t, ok, "a presence session must be stored after begin")
+		pending, ok := raw.(*webAuthnPendingSession)
+		require.True(t, ok, "stored value must be a *webAuthnPendingSession")
+		assert.False(t, time.Now().After(pending.expires), "freshly created session must not be expired")
+		assert.NotEmpty(t, pending.data.Challenge, "server-side session must retain the challenge for FinishLogin")
+	})
+
+	t.Run("Not_Configured_503", func(t *testing.T) {
+		server := setupTestServer(t)
+		rec := doPresenceBegin(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("No_Principal_401", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		rec := doPresenceBegin(t, server, nil) // no principal in context
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "AUTHENTICATION_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("AccountNotFound_404", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// testAdminPrincipal has ID="test-mtls-admin"; no web account exists with that name.
+		rec := doPresenceBegin(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("NoCredentials_409", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// A freshly-created account has zero credentials. The principal ID must equal
+		// the web-account username so getWebAccount(ctx, principal.ID) finds it.
+		principal := &Principal{ID: username, Name: username}
+		rec := doPresenceBegin(t, server, principal)
+		assert.Equal(t, http.StatusConflict, rec.Code)
+		assert.Equal(t, "NO_CREDENTIALS", errCode(t, rec.Body.Bytes()))
+	})
+}
+
+// TestWebAuthnPresenceFinish covers handlePresenceFinish error paths (Issue #2784).
+// The success path (assertion verified + presence token minted) requires a real
+// authenticator ceremony and is covered by the integration test suite.
+func TestWebAuthnPresenceFinish(t *testing.T) {
+	t.Run("Not_Configured_503", func(t *testing.T) {
+		server := setupTestServer(t)
+		rec := doPresenceFinish(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("No_Principal_401", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		rec := doPresenceFinish(t, server, nil) // no principal in context
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "AUTHENTICATION_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("AccountNotFound_404", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// testAdminPrincipal has ID="test-mtls-admin"; no web account with that name.
+		rec := doPresenceFinish(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("NoActiveSession_400", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// Account exists but begin was never called — no presence session stored.
+		principal := &Principal{ID: username, Name: username}
+		rec := doPresenceFinish(t, server, principal)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "NO_ACTIVE_PRESENCE_SESSION", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("SessionExpired_400", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		principal := &Principal{ID: username, Name: username}
+
+		acct, err := server.getWebAccount(context.Background(), username)
+		require.NoError(t, err)
+		require.NotNil(t, acct)
+
+		// Inject a presence session whose TTL has already elapsed.
+		injectPresenceSession(server, username, tvSession([]byte(acct.ID), tvRPID), -1*time.Second)
+
+		rec := doPresenceFinish(t, server, principal)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
 	})
 }
 

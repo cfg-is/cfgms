@@ -46,7 +46,21 @@ const (
 	// webSessionIDContextKey carries the session ID of a cookie-authenticated
 	// web session. Set alongside cookieAuthContextKey (Issue #2493: CSRF token lookup).
 	webSessionIDContextKey contextKey = "web_session_id"
+
+	// presenceTokenHeader is the HTTP request header that carries a short-lived,
+	// single-use presence token minted by POST /api/v1/webauthn/presence/finish.
+	// RequireUserPresence-gated routes consume this token via requirePermission.
+	// ADR-021 Decision 4: presence must be proven fresh per action, not per session.
+	presenceTokenHeader = "X-Presence-Token"
 )
+
+// hashPresenceToken returns the hex-encoded SHA-256 digest of the raw token value.
+// Presence tokens are stored by hash (not plaintext) so the sync.Map is safe to
+// inspect under a debugger or profiler without revealing usable token material.
+func hashPresenceToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
 
 // Principal represents an authenticated entity — either an mTLS admin cert, an API key,
 // a cfg-CLI Bearer session (ADR-014), or a web session cookie (ADR-018).
@@ -660,6 +674,96 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					RequiredAssurance: levelName,
 				})
 				return
+			}
+
+			// User-presence check (ADR-021 Decision 4): a fresh per-action WebAuthn assertion
+			// is required for catastrophic permissions (RequireUserPresence: true in permissionAssurance).
+			// This runs only after the assurance check above has confirmed the principal holds at least
+			// req.Min assurance, so AssuranceMachine principals are already rejected above (they never
+			// reach this branch). The presence token was minted by POST /api/v1/webauthn/presence/finish
+			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
+			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
+			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
+			if req, found := permissionAssurance[permissionID]; found && req.RequireUserPresence {
+				levelName := req.Min.String()
+
+				presenceToken := r.Header.Get(presenceTokenHeader)
+				if presenceToken == "" {
+					// No presence token: step-up challenge including presence="required" (ADR-021 Decision 6).
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(struct {
+						Error             string `json:"error"`
+						RequiredAssurance string `json:"required_assurance"`
+						PresenceRequired  bool   `json:"presence_required"`
+					}{
+						Error:             "step_up_required",
+						RequiredAssurance: levelName,
+						PresenceRequired:  true,
+					})
+					return
+				}
+
+				// Validate and atomically consume the token (single-use via LoadAndDelete).
+				tokenHash := hashPresenceToken(presenceToken)
+				raw, tokenFound := s.presenceTokens.LoadAndDelete(tokenHash)
+				if !tokenFound {
+					// Token not found (already used, never issued, or tampered).
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_invalid",
+						PresenceRequired: true,
+					})
+					return
+				}
+				record, _ := raw.(*presenceTokenRecord)
+				if record == nil || time.Now().After(record.expires) {
+					// Expired token (already removed from map above).
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_expired",
+						PresenceRequired: true,
+					})
+					return
+				}
+				// Bind the presence proof to the acting principal (ADR-021 Decision 4):
+				// the token is only valid for the principal that ran the WebAuthn ceremony.
+				// A proof performed by principal A must never satisfy the gate for principal
+				// B's catastrophic action. The token was already consumed by LoadAndDelete,
+				// so a mismatch cannot be retried with the same token.
+				if record.principalID != principal.ID {
+					s.logger.Warn("Presence token principal mismatch",
+						"token_principal_id", logging.SanitizeLogValue(record.principalID),
+						"request_principal_id", logging.SanitizeLogValue(principal.ID),
+						"permission_id", permissionID,
+					)
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_principal_mismatch",
+						PresenceRequired: true,
+					})
+					return
+				}
+				s.logger.Debug("Presence token accepted",
+					"principal_id", logging.SanitizeLogValue(principal.ID),
+					"permission_id", permissionID,
+				)
 			}
 
 			// Tenant isolation check for tenant-scoped (non-global) principals.

@@ -2,6 +2,7 @@
 // Copyright 2026 Jordan Ritz
 //
 // Issue #2782: WebAuthn passkey / FIDO2 registration — type definitions.
+// Issue #2784: presence-token types and constants.
 package api
 
 import "time"
@@ -51,4 +52,29 @@ type WebAuthnCredentialInfo struct {
 type WebAuthnListResponse struct {
 	Username    string                   `json:"username"`
 	Credentials []WebAuthnCredentialInfo `json:"credentials"`
+}
+
+// presenceTokenTTL is the maximum age of a minted presence token. Tokens older than
+// this are rejected even if they haven't been consumed yet. The short window enforces
+// ADR-021 Decision 4: "fresh per action, not per session."
+const presenceTokenTTL = 30 * time.Second
+
+// presenceTokenRecord is a single entry in the server's presenceTokens sync.Map.
+// It is keyed by the SHA-256 hex hash of the raw token value. The token itself is
+// never stored — only the hash — to limit exposure if the map were somehow dumped.
+//
+// Single-use contract: the entry is deleted via LoadAndDelete at first use. Expiry is
+// enforced independently so that unconsumed tokens are refused after presenceTokenTTL
+// even if they were not loaded (client may never send the request).
+type presenceTokenRecord struct {
+	principalID string
+	expires     time.Time
+}
+
+// WebAuthnPresenceFinishResponse is returned by POST /api/v1/webauthn/presence/finish
+// when the assertion is successfully verified. The token must be attached as the
+// X-Presence-Token header on the guarded request within presenceTokenTTL seconds.
+type WebAuthnPresenceFinishResponse struct {
+	PresenceToken string `json:"presence_token"`
+	ExpiresIn     int    `json:"expires_in_seconds"` // informational; server enforces TTL
 }

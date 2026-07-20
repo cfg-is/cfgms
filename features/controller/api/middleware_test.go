@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -1476,6 +1477,221 @@ func TestBearerSession_AssurancePropagatedToPrincipal(t *testing.T) {
 		assert.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance,
 			"IP-change downgrade must be reflected in Principal Assurance")
 	})
+}
+
+// mintPresenceToken injects a presence token directly into the server's presenceTokens map,
+// bypassing the WebAuthn ceremony. For use in middleware tests only — the WebAuthn hardware
+// ceremony is not available in unit tests; this creates the token that
+// handlePresenceFinish would mint after a successful assertion.
+func mintPresenceToken(t *testing.T, s *Server, principalID string) string {
+	t.Helper()
+	tokenBytes := make([]byte, 32)
+	_, err := rand.Read(tokenBytes)
+	require.NoError(t, err)
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	tokenHash := hashPresenceToken(token)
+	s.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+		principalID: principalID,
+		expires:     time.Now().Add(presenceTokenTTL),
+	})
+	t.Cleanup(func() { s.presenceTokens.Delete(tokenHash) })
+	return token
+}
+
+// --- User-presence enforcement tests (Issue #2784, ADR-021 Decision 4) ---
+//
+// Testing strategy: synthetic test-only route registered inline via wrapWithAuth, using a
+// temporary "test:presence-required" entry in permissionAssurance. No server.go route is
+// modified — the test exercises requirePermission directly, consistent with the F2 parity
+// pattern used throughout this file. Real WebAuthn hardware is unavailable in unit tests;
+// mintPresenceToken injects the token that handlePresenceFinish would otherwise mint.
+
+// withPresencePermission temporarily adds "test:presence-required" to permissionAssurance
+// with RequireUserPresence=true and removes it on test cleanup.
+func withPresencePermission(t *testing.T) {
+	t.Helper()
+	const perm = "test:presence-required"
+	permissionAssurance[perm] = Requirement{
+		Min:                 session.AssuranceStrong,
+		RequireUserPresence: true,
+	}
+	t.Cleanup(func() { delete(permissionAssurance, perm) })
+}
+
+// TestRequirePermission_UserPresence_NoToken verifies that an AssuranceStrong session
+// WITHOUT a presence token is rejected with 401 and WWW-Authenticate carrying presence="required".
+//
+// [REQUIRED TEST] ADR-021 Decision 4: continuity alone is insufficient — a present human
+// gesture is needed for catastrophic operations, regardless of session assurance level.
+func TestRequirePermission_UserPresence_NoToken(t *testing.T) {
+	withPresencePermission(t)
+
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t) // AssuranceStrong via mTLS
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"AssuranceStrong session without presence token must be rejected with 401")
+
+	wwwAuth := rec.Header().Get("WWW-Authenticate")
+	assert.Contains(t, wwwAuth, `presence="required"`,
+		`WWW-Authenticate must carry presence="required"`)
+	assert.Contains(t, wwwAuth, "CFGMS-StepUp",
+		"WWW-Authenticate must use CFGMS-StepUp scheme")
+	assert.Contains(t, wwwAuth, `required="strong"`,
+		`WWW-Authenticate must specify required="strong"`)
+
+	assert.Contains(t, rec.Body.String(), "step_up_required",
+		"response body must carry step_up_required error code")
+	assert.Contains(t, rec.Body.String(), "true",
+		"response body must indicate presence_required")
+}
+
+// TestRequirePermission_UserPresence_ValidTokenAdmitted verifies that an AssuranceStrong
+// session WITH a valid, fresh, single-use presence token is admitted (200), and that
+// presenting the same token a second time is rejected (single-use enforcement).
+//
+// [REQUIRED TEST] ADR-021 Decision 4: the presence token is consumed on first use.
+func TestRequirePermission_UserPresence_ValidTokenAdmitted(t *testing.T) {
+	withPresencePermission(t)
+
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t) // AssuranceStrong via mTLS
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	token := mintPresenceToken(t, server, "test-admin")
+
+	// First use: must be admitted.
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code, "valid presence token must be admitted (first use)")
+
+	// Second use of the SAME token: must be rejected — token was consumed on first use.
+	req2 := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req2.Header.Set(presenceTokenHeader, token)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusUnauthorized, rec2.Code,
+		"same presence token must be rejected on second use (single-use enforcement)")
+	assert.Contains(t, rec2.Header().Get("WWW-Authenticate"), `presence="required"`,
+		"second-use rejection must carry presence=\"required\" in WWW-Authenticate")
+}
+
+// TestRequirePermission_UserPresence_PrincipalMismatchRejected verifies that a presence
+// token minted for principal A does NOT satisfy the presence gate for principal B's request.
+// The token is bound to the principal that ran the WebAuthn ceremony (record.principalID),
+// and requirePermission must reject a mismatched acting principal with a step-up 401.
+//
+// [REQUIRED TEST] ADR-021 Decision 4: the *acting* principal must have proved fresh presence.
+// A presence proof by another principal must never satisfy a catastrophic action's gate.
+func TestRequirePermission_UserPresence_PrincipalMismatchRejected(t *testing.T) {
+	withPresencePermission(t)
+
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t) // principal.ID == "test-admin"
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Token minted for a DIFFERENT principal ("other-admin") than the acting cert principal.
+	token := mintPresenceToken(t, server, "other-admin")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"presence token bound to a different principal must be rejected with 401")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`,
+		`principal-mismatch rejection must carry presence="required" in WWW-Authenticate`)
+	assert.Contains(t, rec.Body.String(), "presence_token_principal_mismatch",
+		"response body must carry presence_token_principal_mismatch error code")
+
+	// The mismatched token must have been consumed (single-use) — the acting principal
+	// cannot retry, and neither can the legitimate owner replay it.
+	_, stillPresent := server.presenceTokens.Load(hashPresenceToken(token))
+	assert.False(t, stillPresent, "mismatched token must be consumed on the rejected attempt")
+}
+
+// TestRequirePermission_UserPresence_MachinePrincipalGets403 verifies that an API-key
+// principal (AssuranceMachine) against a RequireUserPresence permission receives a plain 403,
+// not a step-up challenge. Automation cannot self-elevate (ADR-021 Decision 8).
+//
+// [REQUIRED TEST] ADR-021 Decision 8: machine principals are permanently excluded from
+// presence-gated routes; the response must be 403 INSUFFICIENT_PERMISSIONS, never 401.
+func TestRequirePermission_UserPresence_MachinePrincipalGets403(t *testing.T) {
+	withPresencePermission(t)
+
+	server := setupTestServer(t)
+
+	// Grant the API key the permission explicitly so it clears hasPermission,
+	// reaching the assurance check which then rejects it with 403.
+	machineKey := NewTestKey(t, server, []string{"test:presence-required"})
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/test/presence-action", nil)
+	req.Header.Set("X-API-Key", machineKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"AssuranceMachine against RequireUserPresence permission must get 403, not 401 step-up")
+	assert.Contains(t, rec.Body.String(), "INSUFFICIENT_PERMISSIONS",
+		"response must carry INSUFFICIENT_PERMISSIONS, not a step-up error code")
+	assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+		"machine 403 must NOT carry a WWW-Authenticate step-up challenge")
+}
+
+// TestRequirePermission_UserPresence_ExpiredToken verifies that a presence token
+// whose TTL has elapsed is rejected with 401 and error "presence_token_expired".
+// The token hash is removed from presenceTokens on LoadAndDelete so no cleanup is needed.
+func TestRequirePermission_UserPresence_ExpiredToken(t *testing.T) {
+	withPresencePermission(t)
+
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Inject a token whose TTL has already elapsed.
+	tokenBytes := make([]byte, 32)
+	_, err := rand.Read(tokenBytes)
+	require.NoError(t, err)
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	tokenHash := hashPresenceToken(token)
+	server.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+		principalID: "test-admin",
+		expires:     time.Now().Add(-1 * time.Second), // already elapsed
+	})
+	// LoadAndDelete in requirePermission will remove the entry on first access;
+	// this cleanup handles the case where the test is skipped before that.
+	t.Cleanup(func() { server.presenceTokens.Delete(tokenHash) })
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"expired presence token must be rejected with 401")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`)
+	assert.Contains(t, rec.Body.String(), "presence_token_expired",
+		"response body must carry presence_token_expired error code")
 }
 
 // TestWebSessionCookie_AssurancePropagatedToPrincipal verifies that the cookie auth path
