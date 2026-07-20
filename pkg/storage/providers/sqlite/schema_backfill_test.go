@@ -261,3 +261,154 @@ func TestBackfillStewardColumns_FreshDB(t *testing.T) {
 	}
 	assert.True(t, hasIndex(t, db, "stewards", "idx_stewards_device_id"), "device_id index on fresh DB")
 }
+
+// sessionTokenContinuityColumns are the four device-continuity columns added in Issue #2788.
+var sessionTokenContinuityColumns = []string{"assurance", "bound_ip", "last_proven_at", "credential_id"}
+
+// legacySessionTokenRecordsSchema is the session_token_records DDL from Issue #2775, before
+// the four device-continuity columns (Issue #2788) were added. Used to simulate a
+// pre-#2788 deployment upgrading in place.
+const legacySessionTokenRecordsSchema = `CREATE TABLE IF NOT EXISTS session_token_records (
+	token_hash            TEXT PRIMARY KEY,
+	session_id            TEXT NOT NULL,
+	principal_id          TEXT NOT NULL,
+	connection_name       TEXT NOT NULL,
+	tenant_id             TEXT NOT NULL,
+	issued_at             TEXT NOT NULL,
+	last_activity         TEXT NOT NULL,
+	absolute_expires_at   TEXT NOT NULL,
+	hash_expires_at       TEXT
+)`
+
+// TestBackfillSessionTokenRecords_LegacyRecords verifies that initializeSchema adds the
+// four device-continuity columns to a pre-existing session_token_records table that lacks
+// them, and that a pre-existing human-session row receives assurance=1 (AssuranceBasic).
+func TestBackfillSessionTokenRecords_LegacyRecords(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	// Seed a legacy-shape table without the four continuity columns.
+	_, err := db.ExecContext(ctx, legacySessionTokenRecordsSchema)
+	require.NoError(t, err, "seed legacy session_token_records schema")
+
+	// Insert a pre-#2788 human-session row so we can prove the assurance default applies.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO session_token_records
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at)
+		VALUES ('legacy-hash', 'legacy-sess', 'admin', 'ctrl', 'tenant-1',
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T08:00:00Z')`)
+	require.NoError(t, err, "seed legacy row")
+
+	for _, col := range sessionTokenContinuityColumns {
+		assert.False(t, hasColumn(t, db, "session_token_records", col), "pre-condition: %s absent before back-fill", col)
+	}
+
+	// First invocation — should back-fill the four missing columns.
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	for _, col := range sessionTokenContinuityColumns {
+		assert.True(t, hasColumn(t, db, "session_token_records", col), "%s present after back-fill", col)
+	}
+
+	// The pre-existing human-session row must default to assurance=1 (AssuranceBasic)
+	// and empty bound_ip, with the nullable columns left NULL.
+	var assurance int
+	var boundIP string
+	var lastProven, credentialID sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT assurance, bound_ip, last_proven_at, credential_id
+		FROM session_token_records WHERE token_hash='legacy-hash'`).
+		Scan(&assurance, &boundIP, &lastProven, &credentialID))
+	assert.Equal(t, 1, assurance, "legacy row must default to assurance=1 (AssuranceBasic)")
+	assert.Equal(t, "", boundIP, "legacy row must default to empty bound_ip")
+	assert.False(t, lastProven.Valid, "legacy row last_proven_at must be NULL")
+	assert.False(t, credentialID.Valid, "legacy row credential_id must be NULL")
+}
+
+// TestBackfillSessionTokenRecords_Idempotent verifies that calling initializeSchema a second
+// time on an already-migrated session_token_records table succeeds and existing rows survive.
+func TestBackfillSessionTokenRecords_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	// Seed legacy table and migrate once.
+	_, err := db.ExecContext(ctx, legacySessionTokenRecordsSchema)
+	require.NoError(t, err, "seed legacy session_token_records schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	// Insert a row to prove it survives the second pass.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO session_token_records
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at)
+		VALUES ('survive-hash', 'survive-sess', 'admin', 'ctrl', 'tenant-1',
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T08:00:00Z')`)
+	require.NoError(t, err, "insert test row")
+
+	// Second invocation must also succeed and leave rows intact.
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	for _, col := range sessionTokenContinuityColumns {
+		assert.True(t, hasColumn(t, db, "session_token_records", col), "%s still present after second pass", col)
+	}
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_token_records WHERE token_hash='survive-hash'`).Scan(&count))
+	assert.Equal(t, 1, count, "row must survive second initializeSchema")
+}
+
+// TestBackfillSessionTokenRecords_FreshDB verifies that a fresh database initializes cleanly
+// with all four continuity columns present from the CREATE TABLE statement.
+func TestBackfillSessionTokenRecords_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	for _, col := range sessionTokenContinuityColumns {
+		assert.True(t, hasColumn(t, db, "session_token_records", col), "%s present on fresh DB", col)
+	}
+	assert.True(t, hasIndex(t, db, "session_token_records", "idx_session_token_records_session_id"),
+		"session_id index present on fresh DB")
+}
+
+// TestBackfillSessionTokenRecords_ProbeFailure verifies that a tableExists failure propagates
+// from backfillSessionTokenRecords rather than silently succeeding.
+func TestBackfillSessionTokenRecords_ProbeFailure(t *testing.T) {
+	ctx := context.Background()
+
+	// Open and immediately close the DB so all subsequent operations fail.
+	db, err := openDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = backfillSessionTokenRecords(ctx, db)
+	require.Error(t, err, "closed DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill probe failed", "error must identify the probe stage")
+}
+
+// TestBackfillSessionTokenRecords_AlterFailure verifies that an ALTER TABLE failure on a
+// read-only database propagates instead of being silently ignored.
+func TestBackfillSessionTokenRecords_AlterFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "readonly-sessiontokens.db")
+
+	// Create a file DB and seed the legacy table (no continuity columns).
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(context.Background(), legacySessionTokenRecordsSchema)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	// Re-open in read-only mode — reads succeed but writes (ALTER) fail.
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillSessionTokenRecords(context.Background(), roDB)
+	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill", "error must identify the back-fill stage")
+}
