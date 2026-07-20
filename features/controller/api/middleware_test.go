@@ -1383,3 +1383,186 @@ func TestWebSessionCookie_InvalidToken_Returns401(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "unknown cookie token must return 401")
 	assert.Contains(t, rec.Body.String(), "INVALID_SESSION_TOKEN")
 }
+
+// --- Session assurance propagation tests (ADR-021 Decision 3/5, Issue #2788) ---
+// The Bearer and cookie paths read sess.Assurance from the session returned by Manager.Validate
+// instead of hardcoding AssuranceBasic. These tests verify that both the upgrade path
+// (AssuranceStrong propagated to Principal) and the downgrade path (IP-change downgrade
+// reflected in Principal) are correctly wired through the middleware.
+
+// setupBearerSessionWithAssurance issues a session via mgrWrite, writes AssuranceStrong state
+// directly to the shared store (simulating a WebAuthn assertion handler), and returns the token.
+// mgrRead (cold cache) must be set as the server's sessionManager before making requests.
+func setupBearerSessionWithAssurance(t *testing.T, store *session.MemStore, mgrWrite session.Manager, boundIP string) string {
+	t.Helper()
+	sess, token, err := mgrWrite.Issue(context.Background(), "admin", "cfg-cli", "tenant-1")
+	require.NoError(t, err)
+	sess.Assurance = session.AssuranceStrong
+	sess.BoundIP = boundIP
+	sess.LastProvenAt = time.Now()
+	require.NoError(t, store.Set(context.Background(), session.HashToken(token), sess))
+	return token
+}
+
+// TestBearerSession_AssurancePropagatedToPrincipal verifies that authenticationMiddleware reads
+// sess.Assurance from Manager.Validate (ADR-021 Decision 3/5) and not a hardcoded value.
+//
+// (a) An AssuranceStrong session with a matching source IP must yield a Principal
+// with Assurance == AssuranceStrong.
+// (b) An AssuranceStrong session whose BoundIP differs from the request source IP is
+// downgraded by Manager.Validate to AssuranceBasic; the Principal must reflect that downgrade.
+func TestBearerSession_AssurancePropagatedToPrincipal(t *testing.T) {
+	// httptest.NewRequest sets RemoteAddr = "192.0.2.1:1234"; SplitHostPort → "192.0.2.1".
+	const httptestIP = "192.0.2.1"
+
+	t.Run("AssuranceStrong propagated when source IP matches bound IP", func(t *testing.T) {
+		cfg := session.DefaultConfig()
+		store := session.NewMemStore(cfg, time.Now)
+		t.Cleanup(store.Close)
+		mgrWrite := session.NewManager(cfg, store, time.Now)
+		mgrRead := session.NewManager(cfg, store, time.Now)
+
+		srv := setupTestServer(t)
+		srv.SetSessionManager(mgrRead)
+
+		token := setupBearerSessionWithAssurance(t, store, mgrWrite, httptestIP)
+
+		var capturedPrincipal *Principal
+		handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NotNil(t, capturedPrincipal)
+		assert.Equal(t, session.AssuranceStrong, capturedPrincipal.Assurance,
+			"AssuranceStrong session with matching IP must yield Principal with AssuranceStrong")
+	})
+
+	t.Run("IP-change downgrade reflected as AssuranceBasic in Principal", func(t *testing.T) {
+		cfg := session.DefaultConfig()
+		store := session.NewMemStore(cfg, time.Now)
+		t.Cleanup(store.Close)
+		mgrWrite := session.NewManager(cfg, store, time.Now)
+		mgrRead := session.NewManager(cfg, store, time.Now)
+
+		srv := setupTestServer(t)
+		srv.SetSessionManager(mgrRead)
+
+		// BoundIP differs from httptest.NewRequest RemoteAddr so Manager.Validate downgrades.
+		token := setupBearerSessionWithAssurance(t, store, mgrWrite, "10.0.0.1")
+
+		var capturedPrincipal *Principal
+		handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		// RemoteAddr = "192.0.2.1:1234" → sourceIP "192.0.2.1" ≠ BoundIP "10.0.0.1"
+		// → Manager.Validate downgrades session to AssuranceBasic (ADR-021 Decision 5).
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"downgraded session must remain valid — not killed (ADR-021 Decision 5)")
+		require.NotNil(t, capturedPrincipal)
+		assert.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance,
+			"IP-change downgrade must be reflected in Principal Assurance")
+	})
+}
+
+// TestWebSessionCookie_AssurancePropagatedToPrincipal verifies that the cookie auth path
+// reads sess.Assurance from Manager.Validate (ADR-021 Decision 3/5) and not a hardcoded value.
+//
+// (a) An AssuranceStrong web session with matching source IP must yield a Principal
+// with Assurance == AssuranceStrong.
+// (b) An AssuranceStrong web session whose BoundIP differs from the request source IP is
+// downgraded by Manager.Validate; the Principal must reflect AssuranceBasic.
+func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
+	const httptestIP = "192.0.2.1"
+
+	webCfg := session.Config{
+		IdleTimeout:           60 * time.Minute,
+		AbsoluteTimeout:       12 * time.Hour,
+		GraceWindow:           30 * time.Second,
+		SilentReproofInterval: 5 * time.Minute,
+	}
+
+	t.Run("AssuranceStrong propagated when source IP matches bound IP", func(t *testing.T) {
+		store := session.NewMemStore(webCfg, time.Now)
+		t.Cleanup(store.Close)
+		mgrWrite := session.NewManager(webCfg, store, time.Now)
+		mgrRead := session.NewManager(webCfg, store, time.Now)
+
+		srv := setupTestServer(t)
+		srv.SetWebSessionManager(mgrRead)
+
+		// Issue via mgrWrite and elevate to AssuranceStrong in the shared store.
+		webSess, token, err := mgrWrite.Issue(context.Background(), "alice", "web-login", "tenant-a")
+		require.NoError(t, err)
+		webSess.Assurance = session.AssuranceStrong
+		webSess.BoundIP = httptestIP
+		webSess.LastProvenAt = time.Now()
+		require.NoError(t, store.Set(context.Background(), session.HashToken(token), webSess))
+
+		var capturedPrincipal *Principal
+		handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: token})
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NotNil(t, capturedPrincipal)
+		assert.Equal(t, session.AssuranceStrong, capturedPrincipal.Assurance,
+			"AssuranceStrong web session with matching IP must yield Principal with AssuranceStrong")
+	})
+
+	t.Run("IP-change downgrade reflected as AssuranceBasic in Principal", func(t *testing.T) {
+		store := session.NewMemStore(webCfg, time.Now)
+		t.Cleanup(store.Close)
+		mgrWrite := session.NewManager(webCfg, store, time.Now)
+		mgrRead := session.NewManager(webCfg, store, time.Now)
+
+		srv := setupTestServer(t)
+		srv.SetWebSessionManager(mgrRead)
+
+		// BoundIP differs from httptest RemoteAddr so Validate downgrades.
+		webSess, token, err := mgrWrite.Issue(context.Background(), "alice", "web-login", "tenant-a")
+		require.NoError(t, err)
+		webSess.Assurance = session.AssuranceStrong
+		webSess.BoundIP = "10.0.0.1"
+		webSess.LastProvenAt = time.Now()
+		require.NoError(t, store.Set(context.Background(), session.HashToken(token), webSess))
+
+		var capturedPrincipal *Principal
+		handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: token})
+		// RemoteAddr "192.0.2.1:1234" → sourceIP "192.0.2.1" ≠ BoundIP "10.0.0.1"
+		// → Manager.Validate downgrades web session to AssuranceBasic.
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"downgraded web session must remain valid (ADR-021 Decision 5)")
+		require.NotNil(t, capturedPrincipal)
+		assert.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance,
+			"IP-change downgrade must be reflected in web session Principal Assurance")
+	})
+}
