@@ -17,7 +17,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // jobExecutor is the minimal interface satisfied by *batchjob.RollingBatchExecutor.
@@ -97,9 +96,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	// Scope to the caller's subtree. An explicit selector prefix must be within
 	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
-	// Admin callers (empty tenantID) are unrestricted.
+	// Global-scope callers (empty tenantID) are unrestricted.
 	if parsedTenantPath != "" {
-		if principal.Assurance < session.AssuranceBasic && tenantID != "" &&
+		if !principal.GlobalScope && tenantID != "" &&
 			parsedTenantPath != tenantID &&
 			!strings.HasPrefix(parsedTenantPath, tenantID+"/") {
 			s.writeErrorResponse(w, http.StatusForbidden,
@@ -107,7 +106,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if principal.Assurance < session.AssuranceBasic {
+	} else if !principal.GlobalScope {
 		filter.TenantSubtree = tenantID
 	}
 
@@ -208,7 +207,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if principal.Assurance < session.AssuranceBasic && job.TenantID != tenantID {
+	if !principal.GlobalScope && job.TenantID != tenantID {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}

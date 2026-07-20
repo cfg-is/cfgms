@@ -927,6 +927,16 @@ For the operator-facing CLI workflow (first connect, reconnect, session status, 
 
 The controller enforces strict tenant isolation across all operations.
 
+### Principal Fields: Assurance vs. GlobalScope
+
+Every authenticated `Principal` carries two independent fields that govern different access decisions:
+
+- **`Assurance`** — the identity assurance level (ADR-021). Governs which operations the principal may perform: `AssuranceMachine` (API key, relay-script), `AssuranceBasic` (cfg-Bearer session, web session), `AssuranceStrong` (mTLS cert). Auth-strength-gated routes (certificate provisioning, RBAC management, etc.) check this field.
+
+- **`GlobalScope`** — whether the principal has cross-tenant visibility (`true`) or is confined to its own tenant subtree (`false`). Today all human-authenticated principals (mTLS cert, cfg-Bearer session, web session) have `GlobalScope=true`; all machine principals (API key, relay-script) have `GlobalScope=false`.
+
+These signals are **orthogonal**: a future tenant-scoped web account type would have `Assurance=AssuranceBasic` but `GlobalScope=false` and would be tenant-confined despite its assurance level. A strongly-authenticated but tenant-scoped service account would have `Assurance=AssuranceStrong` but `GlobalScope=false` — it could perform strongly-authenticated operations but only within its own tenant. Do not collapse these two signals back into one; see ADR-021 Context §"It is load-bearing on an unwritten assumption" for the failure mode this separation forecloses.
+
 ### Tenant Model
 
 CFGMS uses a **recursive parent-child tenant model**. Every tenant has a unique identifier and an optional parent identifier. There are no fixed hierarchy levels — "MSP → Client → Group → Device" is a common convention, but the system supports arbitrary depth.

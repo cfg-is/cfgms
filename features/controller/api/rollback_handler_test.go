@@ -70,8 +70,9 @@ func scopedPrincipalExtractor(tenantID string) func(*http.Request) *Principal {
 func adminPrincipalExtractor() func(*http.Request) *Principal {
 	return func(_ *http.Request) *Principal {
 		return &Principal{
-			ID:        "admin-cert-cn",
-			Assurance: session.AssuranceBasic,
+			ID:          "admin-cert-cn",
+			Assurance:   session.AssuranceBasic,
+			GlobalScope: true,
 		}
 	}
 }

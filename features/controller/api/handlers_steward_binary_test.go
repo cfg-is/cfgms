@@ -105,12 +105,12 @@ func withScopedPrincipal(req *http.Request, tenantID string) *http.Request {
 	return req.WithContext(ctx)
 }
 
-// withAdminPrincipal injects an mTLS admin principal (AssuranceBasic, empty tenant) plus
-// the empty tenant context value, mirroring authenticationMiddleware for an mTLS admin
-// cert (middleware.go:173). This is the global-scope path that cannot be reached via an
-// X-API-Key request (Issue #1999).
+// withAdminPrincipal injects an mTLS admin principal (AssuranceBasic, GlobalScope=true,
+// empty tenant) plus the empty tenant context value, mirroring authenticationMiddleware
+// for an mTLS admin cert (middleware.go). This is the global-scope path that cannot be
+// reached via an X-API-Key request (Issue #1999, #2787).
 func withAdminPrincipal(req *http.Request) *http.Request {
-	p := &Principal{ID: "mtls-admin:cn", Name: "mtls-admin:cn", Assurance: session.AssuranceBasic, TenantID: ""}
+	p := &Principal{ID: "mtls-admin:cn", Name: "mtls-admin:cn", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, "")
 	return req.WithContext(ctx)

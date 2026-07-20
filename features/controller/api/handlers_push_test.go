@@ -1192,7 +1192,7 @@ func TestGetConfigPush_AssuranceBoundary(t *testing.T) {
 	}{
 		{
 			name:       "AssuranceBasic_admin_any_tenant",
-			principal:  &Principal{ID: "mtls-admin", Assurance: session.AssuranceBasic, TenantID: ""},
+			principal:  &Principal{ID: "mtls-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""},
 			callerTID:  "",
 			wantStatus: http.StatusOK,
 		},

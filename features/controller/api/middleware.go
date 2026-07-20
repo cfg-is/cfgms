@@ -50,14 +50,25 @@ const (
 // Principal represents an authenticated entity — either an mTLS admin cert, an API key,
 // a cfg-CLI Bearer session (ADR-014), or a web session cookie (ADR-018).
 //
-// Assurance is the identity assurance level (ADR-021 Decision 1). It is the authoritative
-// gating field: Assurance >= AssuranceBasic covers the three human-authenticated paths
-// (mTLS admin cert, cfg-CLI Bearer session, web session cookie); AssuranceMachine covers
-// API-key principals.
+// Assurance is the identity assurance level (ADR-021 Decision 1). It governs auth-strength
+// gating: Assurance >= AssuranceBasic covers the three human-authenticated paths (mTLS admin
+// cert, cfg-CLI Bearer session, web session cookie); AssuranceMachine covers API-key principals.
+//
+// GlobalScope is a separate, orthogonal axis that controls tenant visibility (Issue #2787).
+// It is true for principals that have cross-tenant (fleet-wide) read access and false for
+// principals confined to their own tenant subtree. Today every human-authenticated principal
+// has GlobalScope=true and every machine-authenticated principal has GlobalScope=false —
+// these happen to correlate, but they model different questions. A future tenant-scoped web
+// account type (Assurance=AssuranceBasic, GlobalScope=false) would be confined by GlobalScope
+// regardless of its assurance level; a strongly-authenticated but tenant-scoped service account
+// (Assurance=AssuranceStrong, GlobalScope=false) would pass AssuranceStrong-gated routes but
+// still be confined to its tenant. The two signals MUST NOT be collapsed back into one.
+// See ADR-021 Context §"It is load-bearing on an unwritten assumption".
 type Principal struct {
 	ID           string
 	Name         string
 	Assurance    session.AssuranceLevel
+	GlobalScope  bool      // true → cross-tenant visibility; false → confined to TenantID subtree
 	LastProvenAt time.Time // time of last strong-factor proof; set by mTLS path (others: follow-on story)
 	Permissions  []string
 	TenantID     string
@@ -174,9 +185,10 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	}
 	fpSum := sha256.Sum256(peerCert.Raw)
 	return &Principal{
-		ID:        peerCert.Subject.CommonName,
-		Name:      "mtls-admin:" + peerCert.Subject.CommonName,
-		Assurance: session.AssuranceStrong,
+		ID:          peerCert.Subject.CommonName,
+		Name:        "mtls-admin:" + peerCert.Subject.CommonName,
+		Assurance:   session.AssuranceStrong,
+		GlobalScope: true,
 		// Admin principals have NO tenant scope. Earlier this was
 		// hardcoded to "default" which silently restricted every admin
 		// read to tenant "default" — `cfg steward list` returned 0
@@ -314,9 +326,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					}
 					// Build a Principal from session state.
 					sessionPrincipal := &Principal{
-						ID:        sess.PrincipalID,
-						Name:      "session:" + logging.SanitizeLogValue(sess.PrincipalID),
-						Assurance: session.AssuranceBasic,
+						ID:          sess.PrincipalID,
+						Name:        "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						Assurance:   session.AssuranceBasic,
+						GlobalScope: true,
 						// TenantID mirrors the issuing admin cert; "" means no tenant scope
 						// (same semantics as extractAdminPrincipal for mTLS admin certs).
 						TenantID: sess.TenantID,
@@ -372,10 +385,11 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				}
 				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
 				webPrincipal := &Principal{
-					ID:        webSess.PrincipalID,
-					Name:      "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
-					Assurance: session.AssuranceBasic,
-					TenantID:  webSess.TenantID,
+					ID:          webSess.PrincipalID,
+					Name:        "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+					Assurance:   session.AssuranceBasic,
+					GlobalScope: true,
+					TenantID:    webSess.TenantID,
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
@@ -433,6 +447,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			ID:          keyInfo.ID,
 			Name:        keyInfo.Name,
 			Assurance:   session.AssuranceMachine,
+			GlobalScope: false,
 			Permissions: keyInfo.Permissions,
 			TenantID:    keyInfo.TenantID,
 		}
@@ -633,11 +648,11 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				return
 			}
 
-			// Tenant isolation check for API-key (machine-assurance) principals.
+			// Tenant isolation check for tenant-scoped (non-global) principals.
 			s.mu.RLock()
 			engine := s.isolationEngine
 			s.mu.RUnlock()
-			if engine != nil && principal.Assurance < session.AssuranceBasic && principal.TenantID != "" {
+			if engine != nil && !principal.GlobalScope && principal.TenantID != "" {
 				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
 				if targetTenant != "" && targetTenant != principal.TenantID {
 					isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
