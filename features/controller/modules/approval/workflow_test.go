@@ -223,3 +223,56 @@ func TestApprovalWorkflow_Evaluate_NilBundle(t *testing.T) {
 	assert.Equal(t, approval.Reject, decision)
 	assert.Error(t, err)
 }
+
+// TestApprovalWorkflow_RejectPending_TransitionsToRejected verifies that
+// an admin can reject a bundle in pending state.
+func TestApprovalWorkflow_RejectPending_TransitionsToRejected(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "unknown-vendor")
+	b := makeSignedBundle(t, keys, "tool", "1.0.0")
+
+	require.NoError(t, c.Put(b))
+	addr := b.ContentAddress()
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status)
+
+	require.NoError(t, wf.RejectPending(addr))
+
+	status, err = c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, status)
+}
+
+// TestApprovalWorkflow_RejectPending_AlreadyApproved returns ErrNotQueued.
+func TestApprovalWorkflow_RejectPending_AlreadyApproved(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	b := makeSignedBundle(t, keys, "mod", "1.0.0")
+	require.NoError(t, c.Put(b))
+	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusApproved))
+
+	err := wf.RejectPending(b.ContentAddress())
+	assert.ErrorIs(t, err, approval.ErrNotQueued)
+}
+
+// TestApprovalWorkflow_RejectPending_AlreadyRejected returns ErrNotQueued.
+func TestApprovalWorkflow_RejectPending_AlreadyRejected(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	b := makeSignedBundle(t, keys, "mod", "2.0.0")
+	require.NoError(t, c.Put(b))
+	require.NoError(t, c.SetApprovalStatus(b.ContentAddress(), cache.ApprovalStatusRejected))
+
+	err := wf.RejectPending(b.ContentAddress())
+	assert.ErrorIs(t, err, approval.ErrNotQueued)
+}
+
+// TestApprovalWorkflow_RejectPending_NotFound returns ErrBundleNotFound.
+func TestApprovalWorkflow_RejectPending_NotFound(t *testing.T) {
+	wf, _ := makeWorkflow(t)
+	addr := bundle.ContentAddress{Publisher: "cfgms", Name: "missing", Version: "1.0.0", ContentHash: "nohash"}
+	err := wf.RejectPending(addr)
+	assert.ErrorIs(t, err, cache.ErrBundleNotFound)
+}

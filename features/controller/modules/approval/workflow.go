@@ -91,6 +91,20 @@ func (w *ApprovalWorkflow) Approve(addr bundle.ContentAddress) error {
 	return w.cache.SetApprovalStatus(addr, cache.ApprovalStatusApproved)
 }
 
+// RejectPending transitions a queued (pending) cache entry to rejected by admin decision.
+// Returns ErrNotQueued if the entry is not in pending state.
+// Returns cache.ErrBundleNotFound if no entry exists for addr.
+func (w *ApprovalWorkflow) RejectPending(addr bundle.ContentAddress) error {
+	status, err := w.cache.GetApprovalStatus(addr)
+	if err != nil {
+		return fmt.Errorf("get approval status: %w", err)
+	}
+	if status != cache.ApprovalStatusPending {
+		return fmt.Errorf("%w: current status is %q", ErrNotQueued, status)
+	}
+	return w.cache.SetApprovalStatus(addr, cache.ApprovalStatusRejected)
+}
+
 // EvaluateAndStore evaluates b, stores it in the cache, and persists the decision as
 // the initial approval status. It is a convenience method that combines Evaluate +
 // cache.Put + cache.SetApprovalStatus into a single atomic-ish operation.

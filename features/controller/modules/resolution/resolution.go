@@ -33,6 +33,14 @@ type BundleApprover interface {
 	EvaluateAndStore(b *bundle.Bundle, store trust.TrustStore) (approval.ApprovalDecision, error)
 }
 
+// BundleReviewer exposes the human-decision methods for queued module bundles.
+// Approve and RejectPending are authenticated admin actions distinct from the
+// push-time auto-evaluation path (BundleApprover.EvaluateAndStore).
+type BundleReviewer interface {
+	Approve(addr bundle.ContentAddress) error
+	RejectPending(addr bundle.ContentAddress) error
+}
+
 // ResolveCfgRequiredModules verifies that every module listed in required is
 // present and approved in the controller cache before a cfg file is deployed.
 //

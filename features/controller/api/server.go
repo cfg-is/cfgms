@@ -113,6 +113,7 @@ type Server struct {
 	moduleBundleResolver           resolution.BundleResolver             // Issue #1884: git source resolver for uncached modules
 	moduleBundleApprover           resolution.BundleApprover             // Issue #1884: approval workflow for newly resolved modules
 	moduleTrustStore               trust.TrustStore                      // Issue #1884: publisher trust store consulted during approval
+	moduleBundleReviewer           resolution.BundleReviewer             // Issue #2728: human approve/reject for queued module bundles
 	stewardBinaryTrustStore        trust.TrustStore                      // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
 	testAutoApproveStewardBinaries bool                                  // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
 	upgradeStore                   business.UpgradeStore                 // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
@@ -756,6 +757,18 @@ func (s *Server) setupRouter() {
 	rollout.Handle("/{rollout_id}/halt",
 		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleHaltRollout))).Methods("POST")
 
+	// Module bundle approval endpoints (Issue #2728).
+	// GET /modules/approvals — permission-gated only (reads are outside the AssuranceStrong
+	// surface; module:list-approvals is absent from permissionAssurance by design).
+	// POST .../approve and POST .../reject — AssuranceStrong via permissionAssurance.
+	moduleApprovals := api.PathPrefix("/modules/approvals").Subrouter()
+	moduleApprovals.Handle("",
+		s.requirePermission("module", "list-approvals")(http.HandlerFunc(s.handleListModuleApprovals))).Methods("GET")
+	moduleApprovals.Handle("/{address}/approve",
+		s.requirePermission("module", "approve")(http.HandlerFunc(s.handleApproveModuleBundle))).Methods("POST")
+	moduleApprovals.Handle("/{address}/reject",
+		s.requirePermission("module", "reject")(http.HandlerFunc(s.handleRejectModuleBundle))).Methods("POST")
+
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
 	// handler is explicitly wired in after server creation.
@@ -1375,6 +1388,15 @@ func (s *Server) SetModuleResolution(
 	s.moduleBundleResolver = resolver
 	s.moduleBundleApprover = approver
 	s.moduleTrustStore = store
+}
+
+// SetModuleBundleReviewer wires the human-decision interface for module bundle approval.
+// When nil (default), POST .../approve and POST .../reject return 503.
+// Call after New() but before Start().
+func (s *Server) SetModuleBundleReviewer(r resolution.BundleReviewer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moduleBundleReviewer = r
 }
 
 // getHTTPListenAddr determines the HTTP listen address with the
