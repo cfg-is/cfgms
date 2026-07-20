@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,16 @@ const MaxBinarySizeBytes = 200 * 1024 * 1024
 // ErrDowngradeDenied is returned when the upgrade version is not newer than
 // the running version and allow_downgrade is not enabled. (Issue #1943)
 var ErrDowngradeDenied = errors.New("downgrade denied: target version is not newer than running version")
+
+// errUpgradeHTTPStatus wraps a non-200 status from the binary download so the
+// self-fetch tenant fallback can distinguish 404 (try next tenant) from other
+// failures. (Issue #2833)
+var errUpgradeHTTPStatus = errors.New("unexpected http status")
+
+// errSelfFetchNotConfigured is returned by the self-fetch path when no controller
+// HTTPS base URL is configured, so the steward degrades safe to awaiting a push
+// rather than treating it as a hard error. (Issue #2833)
+var errSelfFetchNotConfigured = errors.New("self-fetch: controller HTTPS base URL not configured")
 
 // stewardBinaryVersionRe validates version strings before using them in paths
 // or commands. Accepts "v1.2.3" and "v1.2.3-pre.release" forms. (Issue #2260)
@@ -177,35 +188,53 @@ func (c *TransportClient) handlePushStewardBinary(ctx context.Context, cmd *cpTy
 	seq := upgradeSeq.Add(1)
 	tmpPath := filepath.Join(upgradesDir, fmt.Sprintf("upgrade-%d.bin", seq))
 
-	recomputedSHA256, sizeBytes, dlErr := c.downloadBinaryForUpgrade(ctx, params.DownloadURL, tmpPath)
+	recomputedSHA256, sizeBytes, _, dlErr := c.downloadBinaryForUpgrade(ctx, params.DownloadURL, tmpPath)
 	if dlErr != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("push_steward_binary: download failed: %w", dlErr)
 	}
 
+	// Steps 6-13: verify, revoke-check, stage, and swap. Shared with the self-fetch
+	// path (Issue #2833) so both directions apply identical verification and swap logic.
+	if err := c.finalizeStewardBinaryUpgrade(ctx, tmpPath, recomputedSHA256, sizeBytes, params); err != nil {
+		return fmt.Errorf("push_steward_binary: %w", err)
+	}
+	return nil
+}
+
+// finalizeStewardBinaryUpgrade performs the shared post-download pipeline for both the
+// controller-pushed and self-fetched upgrade paths (Issue #2833): SHA-256 integrity
+// check, independent publisher-signature verification, revocation check, progress
+// events, launcher swap, staged-binary recording, and the launcher self-exit. The
+// binary is already downloaded to tmpPath with its locally recomputed digest in
+// recomputedSHA256. On any verification failure tmpPath is removed and the steward
+// stays on its current version. params carries the coordinates the CALLER derived —
+// for self-fetch these are the steward's own requested version and detected
+// platform/arch, never controller-supplied values.
+func (c *TransportClient) finalizeStewardBinaryUpgrade(ctx context.Context, tmpPath, recomputedSHA256 string, sizeBytes int64, params *pushStewardBinaryParams) error {
 	// Step 6: SHA-256 check.
 	if !strings.EqualFold(recomputedSHA256, params.SHA256) {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("push_steward_binary: sha256 mismatch: expected %q computed %q",
+		return fmt.Errorf("sha256 mismatch: expected %q computed %q",
 			params.SHA256, recomputedSHA256)
 	}
 
-	// Step 7: Publisher signature verification.
+	// Step 7: Publisher signature verification over the version-bound composite.
 	if err := c.verifyBinarySignature(recomputedSHA256, params); err != nil {
 		_ = os.Remove(tmpPath)
-		c.logger.Warn("push_steward_binary: signature verification failed",
+		c.logger.Warn("upgrade: signature verification failed",
 			"version", logging.SanitizeLogValue(params.Version),
 			"publisher", logging.SanitizeLogValue(params.Publisher),
 			"error", err.Error())
-		return fmt.Errorf("push_steward_binary: signature verification failed: %w", err)
+		return fmt.Errorf("signature verification failed: %w", err)
 	}
 
 	// Step 8: Revocation check.
 	if c.isVersionRevoked(params.Version) {
 		_ = os.Remove(tmpPath)
-		c.logger.Warn("push_steward_binary: version is revoked",
+		c.logger.Warn("upgrade: version is revoked",
 			"version", logging.SanitizeLogValue(params.Version))
-		return fmt.Errorf("push_steward_binary: version %q is in the revoked list",
+		return fmt.Errorf("version %q is in the revoked list",
 			params.Version)
 	}
 
@@ -384,6 +413,169 @@ func (c *TransportClient) scheduleGracefulShutdownAfterSwap() {
 	}()
 }
 
+// selfFetchDesiredVersion pulls, verifies, stages, and swaps to desiredVersion when no
+// controller push has staged it (Issue #2833). It is the hands-off half of
+// desired_version convergence: with the binary published on the controller, declaring a
+// desired_version is enough — no push required.
+//
+// Security invariants (see #2833 / #2834):
+//   - The composite verify coordinates (version, platform, arch) come ONLY from the
+//     steward's own requested desiredVersion and detected runtime.GOOS/GOARCH — never
+//     from a controller-supplied header or body — so a compromised controller cannot
+//     replay an old, genuinely-signed binary at a new version's URL.
+//   - The content hash fed to the signature check is the digest recomputed locally over
+//     the downloaded bytes, not the X-CFGMS-SHA256 header.
+//   - The trust anchor is the build-time-baked CFGMSPublisherIdentity. The
+//     X-CFGMS-Publisher header is only a hint: it can never select a verification key,
+//     and a value disagreeing with the baked-in identity is rejected outright.
+//   - The download URL is https-only and host-pinned to the controller transport host,
+//     so no cross-host fetch (SSRF) is possible.
+//
+// Any failure degrades safe: the temp file is removed, the steward stays on its current
+// version, and the next convergence cycle retries.
+func (c *TransportClient) selfFetchDesiredVersion(ctx context.Context, desiredVersion string) error {
+	c.mu.RLock()
+	baseURL := c.controllerHTTPSBaseURL
+	certStoreDir := c.certStoreDir
+	ownTenant := c.tenantID
+	c.mu.RUnlock()
+
+	if baseURL == "" {
+		return errSelfFetchNotConfigured
+	}
+	if certStoreDir == "" {
+		return fmt.Errorf("self-fetch: cert store dir not configured")
+	}
+
+	// Coordinates are the steward's own — NEVER controller-supplied.
+	platform := runtime.GOOS
+	arch := runtime.GOARCH
+	if !isSupportedInstallerPlatform(platform) || !isSupportedInstallerArch(arch) {
+		return fmt.Errorf("self-fetch: unsupported platform/arch %q/%q", platform, arch)
+	}
+
+	// Parse and host-pin the base once: scheme must be https and the host must match the
+	// controller transport endpoint, so a misconfigured or hostile base cannot redirect
+	// the fetch to another host.
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("self-fetch: cannot parse controller HTTPS base %q: %w", baseURL, err)
+	}
+	if base.Scheme != "https" {
+		return fmt.Errorf("self-fetch: controller HTTPS base scheme must be https, got %q", base.Scheme)
+	}
+	controllerHost := c.controllerEndpointHost()
+	if base.Hostname() != controllerHost {
+		return fmt.Errorf("self-fetch: HTTPS base host %q does not match controller endpoint host %q",
+			base.Hostname(), controllerHost)
+	}
+
+	upgradesDir := filepath.Join(certStoreDir, "upgrades")
+	if err := os.MkdirAll(upgradesDir, 0o700); err != nil {
+		return fmt.Errorf("self-fetch: create upgrades dir: %w", err)
+	}
+
+	// Tenant resolution: own tenant first (a per-tenant override), then "default"
+	// (the fleet-wide binary an MSP/root admin publishes). The steward only ever
+	// requests tenants it is registered under.
+	tenants := []string{ownTenant}
+	if ownTenant != "default" {
+		tenants = append(tenants, "default")
+	}
+
+	seq := upgradeSeq.Add(1)
+	tmpPath := filepath.Join(upgradesDir, fmt.Sprintf("upgrade-%d.bin", seq))
+
+	var (
+		recomputedSHA string
+		sizeBytes     int64
+		headers       http.Header
+		fetchURL      string
+		fetched       bool
+	)
+	for _, tenant := range tenants {
+		u := *base
+		u.Path = fmt.Sprintf("/api/v1/public/steward-binaries/%s/%s/%s", desiredVersion, platform, arch)
+		u.RawQuery = url.Values{"tenant": {tenant}}.Encode()
+		fetchURL = u.String()
+
+		sha, size, hdrs, dlErr := c.downloadBinaryForUpgrade(ctx, fetchURL, tmpPath)
+		if dlErr == nil {
+			recomputedSHA, sizeBytes, headers, fetched = sha, size, hdrs, true
+			break
+		}
+		// A 404 under this tenant just means "not published here" — try the next.
+		if errors.Is(dlErr, errUpgradeHTTPStatus) && strings.Contains(dlErr.Error(), fmt.Sprintf("%d", http.StatusNotFound)) {
+			c.logger.Info("self-fetch: binary not found under tenant, trying next",
+				"version", logging.SanitizeLogValue(desiredVersion),
+				"tenant", logging.SanitizeLogValue(tenant))
+			continue
+		}
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-fetch: download failed: %w", dlErr)
+	}
+	if !fetched {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-fetch: %s not found for %s/%s under any tenant", desiredVersion, platform, arch)
+	}
+
+	// The X-CFGMS-Publisher header is a hint only. Reject if it disagrees with the
+	// baked-in identity; never use it to select a verification key.
+	expectedPublisher := trust.CFGMSPublisherIdentity().Name
+	if hdrPub := headers.Get("X-CFGMS-Publisher"); hdrPub != "" && hdrPub != expectedPublisher {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-fetch: publisher header %q does not match expected %q", hdrPub, expectedPublisher)
+	}
+
+	sigB64 := headers.Get("X-CFGMS-Signature")
+	if sigB64 == "" {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-fetch: response missing X-CFGMS-Signature header")
+	}
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-fetch: decode signature header: %w", err)
+	}
+
+	// Coordinates below are all steward-derived (desiredVersion, platform, arch) or the
+	// locally recomputed digest — the signature header is the only controller-supplied
+	// value, and it must verify against the baked-in publisher over the composite.
+	params := &pushStewardBinaryParams{
+		Version:         desiredVersion,
+		DownloadURL:     fetchURL,
+		SHA256:          headers.Get("X-CFGMS-SHA256"),
+		Platform:        platform,
+		Arch:            arch,
+		Publisher:       expectedPublisher,
+		BundleSignature: sigBytes,
+	}
+	if params.SHA256 == "" {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("self-fetch: response missing X-CFGMS-SHA256 header")
+	}
+
+	c.logger.Info("self-fetch: binary downloaded; verifying and staging",
+		"version", logging.SanitizeLogValue(desiredVersion),
+		"platform", platform, "arch", arch)
+
+	if err := c.finalizeStewardBinaryUpgrade(ctx, tmpPath, recomputedSHA, sizeBytes, params); err != nil {
+		return fmt.Errorf("self-fetch: %w", err)
+	}
+	return nil
+}
+
+// isSupportedInstallerPlatform / isSupportedInstallerArch mirror the controller's
+// validPlatforms / validArchs allow-lists (handlers_installer.go) so the steward never
+// constructs a fetch URL for a platform/arch the controller would reject.
+func isSupportedInstallerPlatform(p string) bool {
+	return p == "windows" || p == "linux" || p == "darwin"
+}
+
+func isSupportedInstallerArch(a string) bool {
+	return a == "amd64" || a == "arm64"
+}
+
 // controllerEndpointHost extracts the host component from c.transportAddress.
 // transportAddress is host:port; returns just the host.
 func (c *TransportClient) controllerEndpointHost() string {
@@ -398,21 +590,25 @@ func (c *TransportClient) controllerEndpointHost() string {
 
 // downloadBinaryForUpgrade downloads the binary at rawURL to dstPath with mode 0600.
 // It enforces MaxBinarySizeBytes via Content-Length check and io.LimitedReader.
-// Returns the hex SHA-256 of the downloaded content and the byte count.
-func (c *TransportClient) downloadBinaryForUpgrade(ctx context.Context, rawURL, dstPath string) (hexSHA256 string, sizeBytes int64, err error) {
+// Returns the hex SHA-256 of the downloaded content, the byte count, and the
+// response headers (so the self-fetch path can read X-CFGMS-SHA256 / -Signature /
+// -Publisher, which the pushed path carries out-of-band in the command instead).
+// A non-200 status is surfaced as errUpgradeHTTPStatus wrapping the code so the
+// self-fetch tenant fallback can distinguish 404 from other failures.
+func (c *TransportClient) downloadBinaryForUpgrade(ctx context.Context, rawURL, dstPath string) (hexSHA256 string, sizeBytes int64, respHeaders http.Header, err error) {
 	httpClient, err := c.buildHTTPClientForUpgrade()
 	if err != nil {
-		return "", 0, fmt.Errorf("build http client: %w", err)
+		return "", 0, nil, fmt.Errorf("build http client: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil) //#nosec G107 -- URL is host-pinned before this call
 	if err != nil {
-		return "", 0, fmt.Errorf("build request: %w", err)
+		return "", 0, nil, fmt.Errorf("build request: %w", err)
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("http get: %w", err)
+		return "", 0, nil, fmt.Errorf("http get: %w", err)
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil && err == nil {
@@ -421,18 +617,18 @@ func (c *TransportClient) downloadBinaryForUpgrade(ctx context.Context, rawURL, 
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("http get: unexpected status %d", resp.StatusCode)
+		return "", 0, resp.Header, fmt.Errorf("%w: %d", errUpgradeHTTPStatus, resp.StatusCode)
 	}
 
 	// Step 3: size cap via Content-Length header.
 	if cl := resp.ContentLength; cl > MaxBinarySizeBytes {
-		return "", 0, fmt.Errorf("Content-Length %d exceeds MaxBinarySizeBytes %d", cl, MaxBinarySizeBytes)
+		return "", 0, resp.Header, fmt.Errorf("Content-Length %d exceeds MaxBinarySizeBytes %d", cl, MaxBinarySizeBytes)
 	}
 
 	// Create temp file with 0600 — only the steward process may read it.
 	f, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //#nosec G304 -- dstPath is built from certStoreDir + seq
 	if err != nil {
-		return "", 0, fmt.Errorf("create temp file: %w", err)
+		return "", 0, resp.Header, fmt.Errorf("create temp file: %w", err)
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil && err == nil {
@@ -446,13 +642,13 @@ func (c *TransportClient) downloadBinaryForUpgrade(ctx context.Context, rawURL, 
 
 	written, err := io.Copy(f, tee)
 	if err != nil {
-		return "", 0, fmt.Errorf("write temp file: %w", err)
+		return "", 0, resp.Header, fmt.Errorf("write temp file: %w", err)
 	}
 	if limited.N == 0 {
-		return "", 0, fmt.Errorf("body exceeds MaxBinarySizeBytes %d; download aborted", MaxBinarySizeBytes)
+		return "", 0, resp.Header, fmt.Errorf("body exceeds MaxBinarySizeBytes %d; download aborted", MaxBinarySizeBytes)
 	}
 
-	return hex.EncodeToString(hasher.Sum(nil)), written, nil
+	return hex.EncodeToString(hasher.Sum(nil)), written, resp.Header, nil
 }
 
 // buildHTTPClientForUpgrade creates an *http.Client that authenticates using the
