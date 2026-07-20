@@ -235,12 +235,17 @@ func (h *TerminalHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportpb
 //  4. Dispatches COMMAND_TYPE_OPEN_TERMINAL to the steward.
 //  5. Records terminal.session.start / terminal.session.end audit events when
 //     auditManager is non-nil (Issue #2761: RBAC-gated, recorded sessions).
+//
+// When authManager is non-nil (AC 2, Issue #2761), TerminateSession routes
+// through AuthenticatedTerminalManager for session token cleanup, session
+// monitor removal, and audit logging instead of the relay's own audit path.
 type relaySessionManager struct {
 	base             terminal.SessionManager
 	terminalHandler  *TerminalHandler
 	commandPublisher *commands.Publisher
 	connRegistry     registry.Registry
 	auditManager     *audit.Manager
+	authManager      *terminal.AuthenticatedTerminalManager
 	logger           logging.Logger
 }
 
@@ -248,13 +253,16 @@ type relaySessionManager struct {
 // WebSocket handler. All session creation side-effects described on
 // relaySessionManager are applied atomically from the caller's perspective.
 // auditManager may be nil — when non-nil, session.start / session.end audit
-// events are recorded.
+// events are recorded. authManager may be nil; when non-nil it takes over
+// TerminateSession for session token cleanup and security audit logging
+// (Issue #2761 AC 2: AuthenticatedTerminalManager constructed and used).
 func NewRelaySessionManager(
 	base terminal.SessionManager,
 	terminalHandler *TerminalHandler,
 	commandPublisher *commands.Publisher,
 	connRegistry registry.Registry,
 	auditManager *audit.Manager,
+	authManager *terminal.AuthenticatedTerminalManager,
 	logger logging.Logger,
 ) terminal.SessionManager {
 	return &relaySessionManager{
@@ -263,6 +271,7 @@ func NewRelaySessionManager(
 		commandPublisher: commandPublisher,
 		connRegistry:     connRegistry,
 		auditManager:     auditManager,
+		authManager:      authManager,
 		logger:           logger,
 	}
 }
@@ -369,6 +378,16 @@ func (m *relaySessionManager) GetSession(sessionID string) (*terminal.Session, e
 
 func (m *relaySessionManager) TerminateSession(ctx context.Context, sessionID string) error {
 	m.terminalHandler.unregister(sessionID)
+
+	// When AuthenticatedTerminalManager is wired (Issue #2761 AC 2), route
+	// termination through it: it handles base session teardown, session token
+	// invalidation, session monitor removal, and session.end audit logging.
+	// This avoids double-auditing since authManager.TerminateSession records
+	// terminal.session.end internally via its own auditManager.
+	if m.authManager != nil {
+		return m.authManager.TerminateSession(ctx, sessionID, "relay_terminated")
+	}
+
 	if err := m.base.TerminateSession(ctx, sessionID); err != nil {
 		return err
 	}

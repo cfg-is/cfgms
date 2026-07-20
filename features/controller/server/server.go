@@ -1354,7 +1354,26 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if terminalMgrErr != nil {
 			logger.Warn("Failed to initialize terminal session manager; terminal relay unavailable (Issue #2761)", "error", terminalMgrErr)
 		} else {
-			relaySM := controllerTransport.NewRelaySessionManager(terminalMgr, terminalH, commandPublisher, connRegistry, auditManager, logger)
+			// Construct AuthenticatedTerminalManager (Issue #2761 AC 2) wrapping the
+			// base session manager. Browser WebSocket clients cannot provide mTLS
+			// client certificates, so mTLS and cert requirements are disabled and the
+			// ATM is used for session lifecycle management (session token cleanup,
+			// session monitor removal, and session.end audit on termination) rather
+			// than AuthenticateAndCreateSession; RBAC is enforced at the HTTP layer
+			// via requirePermission("steward","terminal").
+			authCfg := terminal.DefaultAuthConfig()
+			authCfg.RequireMTLS = false
+			authCfg.ClientCertRequired = false
+			authCfg.IPBindingEnabled = false
+			authCfg.TLSFingerprintCheck = false
+			authMgr, authMgrErr := terminal.NewAuthenticatedTerminalManager(
+				terminalMgr, rbacManager, nil, auditManager, authCfg,
+			)
+			if authMgrErr != nil {
+				logger.Warn("Failed to create AuthenticatedTerminalManager; terminal relay continues without it (Issue #2761)", "error", authMgrErr)
+				authMgr = nil
+			}
+			relaySM := controllerTransport.NewRelaySessionManager(terminalMgr, terminalH, commandPublisher, connRegistry, auditManager, authMgr, logger)
 			var terminalOrigins []string
 			if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
 				for _, o := range strings.Split(raw, ",") {

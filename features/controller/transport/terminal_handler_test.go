@@ -241,7 +241,7 @@ func TestRelaySessionManagerOfflineSteward(t *testing.T) {
 	// An empty registry has no registered connections.
 	reg := registry.NewRegistry()
 
-	rsm := NewRelaySessionManager(baseMgr, th, nil, reg, nil, logging.NewNoopLogger())
+	rsm := NewRelaySessionManager(baseMgr, th, nil, reg, nil, nil, logging.NewNoopLogger())
 
 	ctx := context.Background()
 	_, err := rsm.CreateSession(ctx, &terminal.SessionRequest{
@@ -300,7 +300,7 @@ func TestRelaySessionManagerDispatchFailureRollsBack(t *testing.T) {
 
 	// nil connRegistry so the online pre-check is skipped and we exercise the
 	// dispatch path itself; the dispatch fails because cp's registry is empty.
-	rsm := NewRelaySessionManager(baseMgr, th, publisher, nil, nil, logging.NewNoopLogger())
+	rsm := NewRelaySessionManager(baseMgr, th, publisher, nil, nil, nil, logging.NewNoopLogger())
 
 	_, err = rsm.CreateSession(context.Background(), &terminal.SessionRequest{
 		TenantID:  "test-tenant",
@@ -335,7 +335,7 @@ func TestRelaySessionManagerDispatchFailureRollsBack(t *testing.T) {
 func TestTerminalWebSocketBadOriginRejected(t *testing.T) {
 	baseMgr := newTestSessionManager(t)
 	th := NewTerminalHandler(logging.NewNoopLogger())
-	rsm := NewRelaySessionManager(baseMgr, th, nil, nil, nil, logging.NewNoopLogger())
+	rsm := NewRelaySessionManager(baseMgr, th, nil, nil, nil, nil, logging.NewNoopLogger())
 
 	// No origin allowlist — only same-origin connections are accepted.
 	wsHandler, err := terminal.NewWebSocketHandler(rsm, logging.NewNoopLogger(), nil)
@@ -403,7 +403,7 @@ func TestRelaySessionManagerAuditAndRecording(t *testing.T) {
 	th := NewTerminalHandler(logging.NewNoopLogger())
 	// nil registry → skips online check (test convenience only).
 	// nil commandPublisher → skips dispatch (test convenience only).
-	rsm := NewRelaySessionManager(baseMgr, th, nil, nil, auditMgr, logging.NewNoopLogger())
+	rsm := NewRelaySessionManager(baseMgr, th, nil, nil, auditMgr, nil, logging.NewNoopLogger())
 
 	ctx := context.Background()
 	session, err := rsm.CreateSession(ctx, &terminal.SessionRequest{
