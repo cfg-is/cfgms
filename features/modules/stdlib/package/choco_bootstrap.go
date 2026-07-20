@@ -91,7 +91,7 @@ func fetchBytes(ctx context.Context, src string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to download bootstrap package from %s: %w", src, err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("failed to download bootstrap package from %s: HTTP %d", src, resp.StatusCode)
 		}
@@ -143,16 +143,20 @@ func extractZipFile(f *zip.File, destPath string) error {
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
-	_, err = io.Copy(out, rc)
-	return err
+	if _, err := io.Copy(out, rc); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// Return the Close error so a failed flush of the extracted file surfaces
+	// rather than being silently dropped by a deferred close.
+	return out.Close()
 }
 
 // runner returns the commandRunner this module uses: the injected test seam
@@ -258,7 +262,7 @@ func (m *PackageModule) bootstrapChocoReal(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir for chocolatey bootstrap: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	if err := extractZip(data, tmpDir); err != nil {
 		return fmt.Errorf("failed to extract chocolatey bootstrap package: %w", err)

@@ -94,10 +94,6 @@ type wingetManager struct {
 	env []string
 }
 
-func newWingetManager() PackageManager {
-	return &wingetManager{bin: "winget", env: wingetAugmentedEnv("winget")}
-}
-
 // newWingetManagerWithPath returns a wingetManager that invokes the given
 // fully qualified winget.exe (see resolveWingetFullPath in factory.go).
 func newWingetManagerWithPath(bin string) PackageManager {
