@@ -54,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # which needs >=22 — a web/.nvmrc bump past Claude Code's supported range would
 # need checking here since this Node also runs Claude Code.)
 COPY web/.nvmrc /tmp/nvmrc
-RUN NODE_MAJOR="$(tr -dc '0-9' < /tmp/nvmrc)" \
+RUN NODE_MAJOR="$(cut -d. -f1 < /tmp/nvmrc)" \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -f /tmp/nvmrc \
