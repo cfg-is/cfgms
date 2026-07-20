@@ -2,12 +2,15 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * StewardAssetPage suite (Story #2723): tab switching, inert-placeholder
- * rendering for Config/Shell/Live Activity, and DNA-tab content parity
- * with the pre-router DnaDrawer behavior.
+ * StewardAssetPage suite (Story #2723 + #2766): tab switching, inert-placeholder
+ * rendering for Config/Shell, DNA-tab content parity with the pre-router
+ * DnaDrawer behavior, and live tab mounts LiveActivityTab (Story #2766).
  *
  * The component reads :id from the route param; tests use MemoryRouter to
  * provide the steward ID without a real browser.
+ *
+ * WebSocket is stubbed so the LiveActivityTab panel does not attempt real
+ * network connections when the live tab is activated in tests.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
@@ -16,9 +19,23 @@ import StewardAssetPage, { PanelContent, TABS } from './StewardAssetPage.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
 
+// Minimal WebSocket stub — keeps LiveActivityPanel from throwing when the
+// live tab mounts during StewardAssetPage tests.
+class StubWebSocket {
+  readyState: number = WebSocket.CONNECTING
+  onopen: (() => void) | null = null
+  onclose: ((ev: { code: number }) => void) | null = null
+  onmessage: ((ev: { data: string }) => void) | null = null
+  onerror: (() => void) | null = null
+  close() {
+    this.readyState = WebSocket.CLOSED
+  }
+}
+
 beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('WebSocket', StubWebSocket)
 })
 
 afterEach(() => {
@@ -87,7 +104,7 @@ describe('tab strip', () => {
     )
   })
 
-  it('inert tabs (Config, Shell, Live Activity) carry the soon badge text', () => {
+  it('inert tabs (Config, Shell) carry the soon badge text', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
@@ -122,12 +139,23 @@ describe('tab strip', () => {
     expect(screen.getByRole('tabpanel').textContent).toContain('Shell')
   })
 
-  it('clicking Live Activity shows a coming-soon placeholder', () => {
+  it('clicking Live Activity mounts LiveActivityTab (not a SoonPanel)', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
     fireEvent.click(screen.getByRole('tab', { name: /^Live Activity/i }))
-    expect(screen.getByRole('tabpanel').textContent).toContain('Live Activity')
+
+    // LiveActivityTab renders a loading indicator, not the "soon" placeholder.
+    expect(screen.getByTestId('live-loading')).toBeInTheDocument()
+    expect(screen.queryByText(/Live Activity is not yet available/i)).not.toBeInTheDocument()
+  })
+
+  it('Live Activity tab has no soon badge', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    const liveTab = screen.getByRole('tab', { name: /^Live Activity/i })
+    expect(within(liveTab).queryByText(/soon/i)).not.toBeInTheDocument()
   })
 
   it('clicking back to DNA after an inert tab restores DNA content', async () => {

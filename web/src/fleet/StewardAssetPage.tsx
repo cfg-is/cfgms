@@ -21,6 +21,7 @@
 import { type ComponentType, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import DnaDrawer from './DnaDrawer.tsx'
+import LiveActivityTab from './LiveActivityTab.tsx'
 
 type TabKey = 'dna' | 'config' | 'shell' | 'live'
 
@@ -31,11 +32,16 @@ interface TabSpec {
   Panel?: ComponentType
 }
 
+function LiveActivityPanel() {
+  const { id: stewardId = '' } = useParams<{ id: string }>()
+  return <LiveActivityTab stewardId={stewardId} />
+}
+
 export const TABS: readonly TabSpec[] = [
   { key: 'dna', label: 'DNA', soon: false, Panel: DnaDrawer },
   { key: 'config', label: 'Config', soon: true },
   { key: 'shell', label: 'Shell', soon: true },
-  { key: 'live', label: 'Live Activity', soon: true },
+  { key: 'live', label: 'Live Activity', soon: false, Panel: LiveActivityPanel },
 ]
 
 function SoonPanel({ label }: { label: string }) {
