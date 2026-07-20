@@ -40,15 +40,23 @@ func createDockerTestStorageConfig(t *testing.T, provider string) *config.Storag
 	t.Helper()
 	switch provider {
 	case "database":
+		// session_hmac_key is required by DatabaseSessionStore; the constructor fails
+		// closed with no silent insecure fallback when it is absent. Use the env-override
+		// so CI can inject a real key; fall back to a fixed test-only key for local dev.
+		hmacKey := os.Getenv("CFGMS_TEST_SESSION_HMAC_KEY")
+		if hmacKey == "" {
+			hmacKey = "test-hmac-key-for-server-security-tests-only"
+		}
 		return &config.StorageConfig{
 			Provider: "database",
 			Config: map[string]interface{}{
-				"host":     os.Getenv("CFGMS_TEST_DB_HOST"),
-				"port":     5433,
-				"database": "cfgms_test",
-				"username": "cfgms_test",
-				"password": os.Getenv("CFGMS_TEST_DB_PASSWORD"),
-				"sslmode":  "disable",
+				"host":             os.Getenv("CFGMS_TEST_DB_HOST"),
+				"port":             5433,
+				"database":         "cfgms_test",
+				"username":         "cfgms_test",
+				"password":         os.Getenv("CFGMS_TEST_DB_PASSWORD"),
+				"sslmode":          "disable",
+				"session_hmac_key": hmacKey,
 			},
 		}
 	default:
@@ -257,6 +265,11 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 						EnableCertManagement: false,
 					},
 					Storage: storageConfig,
+				}
+				// Database provider has no FlatfileRoot or SQLitePath to derive a blob
+				// root from; supply a DataDir so the filesystem blob store can initialize.
+				if providerInfo.Name == "database" {
+					config.DataDir = t.TempDir()
 				}
 
 				server, err := New(config, logger)

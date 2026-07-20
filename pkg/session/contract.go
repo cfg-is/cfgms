@@ -91,10 +91,18 @@ type Manager interface {
 
 // Store is the backing store for the session Manager (ADR-014 §2).
 // The key for Set/Get is SHA-256(token) encoded as hex — the controller never persists
-// the raw token. Delete removes by session ID. The durable implementation lives in
-// pkg/storage/providers/sqlite and enables sessions to survive controller restarts
-// (epic #2735, story #2736). The bootstrap wiring that selects durable vs. in-memory
-// store based on cfg.Storage.SQLitePath lives in story #2774.
+// the raw token. Delete removes by session ID.
+//
+// Implementations:
+//   - pkg/session.MemStore — in-memory; sessions lost on restart (dev/test default).
+//   - pkg/storage/providers/sqlite.SQLiteSessionTokenStore — SQLite; survives restarts
+//     for single-node deployments (epic #2735, story #2736).
+//   - pkg/storage/providers/database.DatabaseSessionTokenStore — Postgres; shared across
+//     all controller nodes in cluster mode so a token issued on node A validates on node B
+//     (epic #2735, story #2775). Selected automatically when cfg.HA.IsClusterMode() is true.
+//
+// Bootstrap wiring (store selection based on deployment mode) lives in
+// features/controller/server.initializeSessionStore (stories #2774 and #2775).
 type Store interface {
 	Set(ctx context.Context, tokenHash string, session *Session) error
 	Get(ctx context.Context, tokenHash string) (*Session, error)

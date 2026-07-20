@@ -1000,6 +1000,61 @@ func (s DatabaseSchemas) CreateCommandTransitionsTable(ctx context.Context, db *
 	return nil
 }
 
+// CreateSessionTokenStoreTable creates the session_token_store table (Issue #2775).
+// This backs DatabaseSessionTokenStore (pkg/session.Store), not the business.SessionStore
+// that uses the `sessions` table.
+func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS session_token_store (
+			token_hash          TEXT NOT NULL PRIMARY KEY,
+			session_id          TEXT NOT NULL,
+			principal_id        TEXT NOT NULL,
+			connection_name     TEXT NOT NULL,
+			tenant_id           TEXT NOT NULL,
+			issued_at           TIMESTAMP WITH TIME ZONE NOT NULL,
+			last_activity       TIMESTAMP WITH TIME ZONE NOT NULL,
+			absolute_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			hash_expires_at     TIMESTAMP WITH TIME ZONE
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create session_token_store table: %w", err)
+	}
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_session_token_store_session_id    ON session_token_store(session_id);",
+		"CREATE INDEX IF NOT EXISTS idx_session_token_store_tenant_id     ON session_token_store(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_session_token_store_hash_expires  ON session_token_store(hash_expires_at);",
+		"CREATE INDEX IF NOT EXISTS idx_session_token_store_abs_expires   ON session_token_store(absolute_expires_at);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create session_token_store index: %w", err)
+		}
+	}
+	rls := []string{
+		`ALTER TABLE session_token_store ENABLE ROW LEVEL SECURITY;`,
+		`ALTER TABLE session_token_store FORCE ROW LEVEL SECURITY;`,
+		`DROP POLICY IF EXISTS rls_read   ON session_token_store;`,
+		`DROP POLICY IF EXISTS rls_write  ON session_token_store;`,
+		`DROP POLICY IF EXISTS rls_update ON session_token_store;`,
+		`DROP POLICY IF EXISTS rls_delete ON session_token_store;`,
+		`CREATE POLICY rls_read ON session_token_store FOR SELECT USING (
+			current_setting('app.current_tenant', true) = ''
+			OR tenant_id = current_setting('app.current_tenant', true)
+		);`,
+		`CREATE POLICY rls_write ON session_token_store FOR INSERT WITH CHECK (
+			tenant_id = current_setting('app.current_tenant', true)
+		);`,
+		`CREATE POLICY rls_update ON session_token_store FOR UPDATE USING (TRUE);`,
+		`CREATE POLICY rls_delete ON session_token_store FOR DELETE USING (TRUE);`,
+	}
+	for _, stmt := range rls {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to configure session_token_store RLS: %w", err)
+		}
+	}
+	return nil
+}
+
 // DropAllTables drops all tables (for testing or clean reinstall)
 func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 	// Drop in reverse dependency order (foreign keys need to be dropped first)
@@ -1023,6 +1078,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS command_records;",
 		"DROP TABLE IF EXISTS steward_records;",
 		"DROP TABLE IF EXISTS sessions;",
+		"DROP TABLE IF EXISTS session_token_store;",
 	}
 
 	for _, query := range dropQueries {
