@@ -74,6 +74,9 @@ func (m *manager) Issue(ctx context.Context, principalID, connectionName, tenant
 		IssuedAt:          now,
 		LastActivity:      now,
 		AbsoluteExpiresAt: now.Add(m.cfg.AbsoluteTimeout),
+		// All Manager-issued sessions are human sessions. Assurance starts at Basic;
+		// it is upgraded to Strong by a successful WebAuthn assertion (later story).
+		Assurance: AssuranceBasic,
 	}
 	ms := &managedSession{
 		session:     sess,
@@ -165,6 +168,7 @@ func (m *manager) Validate(ctx context.Context, token string) (*Session, error) 
 	if now.After(ms.session.AbsoluteExpiresAt) {
 		return nil, ErrSessionExpired
 	}
+	needsSync := false
 	if hash == ms.prevHash {
 		// Prior-token path: only grace-window check; idle TTL is on the new token.
 		if !ms.prevExpiry.IsZero() && now.After(ms.prevExpiry) {
@@ -176,7 +180,43 @@ func (m *manager) Validate(ctx context.Context, token string) (*Session, error) 
 			return nil, ErrSessionExpired
 		}
 		ms.session.LastActivity = now
-		_ = m.store.Set(ctx, hash, ms.session) // best-effort sync to durable store
+		needsSync = true
+	}
+
+	// Device-continuity check (ADR-021 Decision 3/5, Issue #2788).
+	// Only AssuranceStrong sessions have continuity state to lose; AssuranceBasic
+	// sessions are never downgraded further by this logic.
+	if ms.session.Assurance == AssuranceStrong {
+		currentIP := SourceIPFromContext(ctx)
+		downgrade := false
+
+		// Decision 5: a source-IP change is an immediate downgrade — never hard-lock.
+		// Compare against BoundIP (last proof), not session issuance IP.
+		if currentIP != "" && ms.session.BoundIP != "" && currentIP != ms.session.BoundIP {
+			downgrade = true
+		}
+
+		// Re-proof cadence: if LastProvenAt is set and the silent-proof interval has
+		// elapsed, attempt silent re-proof. Since no WebAuthn assertion is present in
+		// this Validate call (the assertion path is a later story), the "attempt"
+		// always falls back to AssuranceBasic. When CredentialID is nil, proof is
+		// structurally impossible regardless of the timer.
+		if !downgrade && m.cfg.SilentReproofInterval > 0 && !ms.session.LastProvenAt.IsZero() {
+			if now.Sub(ms.session.LastProvenAt) > m.cfg.SilentReproofInterval {
+				downgrade = true
+			}
+		}
+
+		if downgrade {
+			ms.session.Assurance = AssuranceBasic
+			ms.session.LastProvenAt = time.Time{}
+			needsSync = true
+		}
+	}
+
+	if needsSync {
+		// best-effort sync to durable store (persists LastActivity and/or downgrade)
+		_ = m.store.Set(ctx, hash, ms.session)
 	}
 	out := *ms.session
 	return &out, nil

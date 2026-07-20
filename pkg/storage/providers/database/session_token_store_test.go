@@ -4,6 +4,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -291,6 +292,103 @@ func TestDatabaseSessionTokenStore_NoRawTokenInStoredRows(t *testing.T) {
 		assert.Equal(t, expected, tokenHash, "stored hash must be SHA-256(token)")
 	}
 	require.NoError(t, rows.Err())
+}
+
+// legacySessionTokenStoreSchema is the session_token_store DDL from Issue #2775, before the
+// four device-continuity columns (Issue #2788) were added. Used to simulate a pre-#2788
+// deployment whose live table must be upgraded in place by BackfillSessionTokenStoreContinuity.
+const legacySessionTokenStoreSchema = `
+	CREATE TABLE session_token_store (
+		token_hash          TEXT NOT NULL PRIMARY KEY,
+		session_id          TEXT NOT NULL,
+		principal_id        TEXT NOT NULL,
+		connection_name     TEXT NOT NULL,
+		tenant_id           TEXT NOT NULL,
+		issued_at           TIMESTAMP WITH TIME ZONE NOT NULL,
+		last_activity       TIMESTAMP WITH TIME ZONE NOT NULL,
+		absolute_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+		hash_expires_at     TIMESTAMP WITH TIME ZONE
+	);`
+
+// pgColumnExists reports whether the named column is present on session_token_store.
+func pgColumnExists(ctx context.Context, t *testing.T, db *sql.DB, column string) bool {
+	t.Helper()
+	var exists bool
+	err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'session_token_store' AND column_name = $1
+		)`, column).Scan(&exists)
+	require.NoError(t, err)
+	return exists
+}
+
+// TestBackfillSessionTokenStoreContinuity_UpgradePath exercises the true pre-#2788 upgrade
+// scenario: a live session_token_store table created without the four continuity columns,
+// carrying an existing human-session row. BackfillSessionTokenStoreContinuity must add all
+// four columns, default the existing row to assurance=1 / empty bound_ip, leave the nullable
+// columns NULL, and be safe to run a second time.
+func TestBackfillSessionTokenStoreContinuity_UpgradePath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database tests in short mode")
+	}
+	db := getTestDB(t) // skips if postgres not reachable
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	// Start from a clean slate, then create the legacy-shaped table.
+	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store") })
+
+	_, err = db.ExecContext(ctx, legacySessionTokenStoreSchema)
+	require.NoError(t, err, "create legacy session_token_store table")
+
+	// Seed a pre-#2788 human-session row.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO session_token_store
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at)
+		VALUES ('legacy-hash', 'legacy-sess', 'admin', 'ctrl', 'tenant-1',
+			now(), now(), now() + interval '8 hours')`)
+	require.NoError(t, err, "seed legacy row")
+
+	continuityCols := []string{"assurance", "bound_ip", "last_proven_at", "credential_id"}
+	for _, col := range continuityCols {
+		assert.False(t, pgColumnExists(ctx, t, db, col), "pre-condition: %s absent before back-fill", col)
+	}
+
+	schemas := NewDatabaseSchemas()
+
+	// First back-fill — must add all four columns.
+	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "first back-fill")
+	for _, col := range continuityCols {
+		assert.True(t, pgColumnExists(ctx, t, db, col), "%s present after back-fill", col)
+	}
+
+	// The pre-existing human-session row must default to assurance=1 / empty bound_ip,
+	// with the nullable columns left NULL.
+	var assurance int
+	var boundIP string
+	var lastProven, credentialID sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT assurance, bound_ip, last_proven_at, credential_id::text
+		FROM session_token_store WHERE token_hash='legacy-hash'`).
+		Scan(&assurance, &boundIP, &lastProven, &credentialID))
+	assert.Equal(t, 1, assurance, "legacy row must default to assurance=1 (AssuranceBasic)")
+	assert.Equal(t, "", boundIP, "legacy row must default to empty bound_ip")
+	assert.False(t, lastProven.Valid, "legacy row last_proven_at must be NULL")
+	assert.False(t, credentialID.Valid, "legacy row credential_id must be NULL")
+
+	// Second back-fill must be a no-op and must not error (idempotency).
+	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "second back-fill (idempotency)")
+	for _, col := range continuityCols {
+		assert.True(t, pgColumnExists(ctx, t, db, col), "%s still present after second back-fill", col)
+	}
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_token_store WHERE token_hash='legacy-hash'`).Scan(&count))
+	assert.Equal(t, 1, count, "legacy row must survive the idempotent second back-fill")
 }
 
 // TestDatabaseProvider_CreateSessionTokenStore verifies the plugin factory constructs

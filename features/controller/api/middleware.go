@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -305,7 +306,11 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// base64.RawURLEncoding of 32 bytes = 43 chars (no padding).
 				const sessionTokenLen = 43
 				if len(bearerToken) == sessionTokenLen {
-					sess, err := s.sessionManager.Validate(r.Context(), bearerToken)
+					// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
+					// SplitHostPort extracts just the host; errors are ignored (empty host → no detection).
+					sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+					validateCtx := session.WithSourceIP(r.Context(), sourceIP)
+					sess, err := s.sessionManager.Validate(validateCtx, bearerToken)
 					if err != nil {
 						switch {
 						case errors.Is(err, session.ErrSessionRevoked):
@@ -320,16 +325,19 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// Renew the session to reset idle TTL; set X-Session-Token when
 					// a new token is issued (empty string = prior-token grace path,
 					// no new token to publish). The raw new token is never logged.
-					_, newToken, renewErr := s.sessionManager.Renew(r.Context(), bearerToken)
+					_, newToken, renewErr := s.sessionManager.Renew(validateCtx, bearerToken)
 					if renewErr == nil && newToken != "" {
 						w.Header().Set("X-Session-Token", newToken)
 					}
-					// Build a Principal from session state.
+					// Build a Principal from session state. Assurance is read directly from
+					// the session so that IP-change downgrades (ADR-021 Decision 5) and future
+					// WebAuthn upgrades are reflected on every request rather than fixed at issuance.
 					sessionPrincipal := &Principal{
-						ID:          sess.PrincipalID,
-						Name:        "session:" + logging.SanitizeLogValue(sess.PrincipalID),
-						Assurance:   session.AssuranceBasic,
-						GlobalScope: true,
+						ID:           sess.PrincipalID,
+						Name:         "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						Assurance:    sess.Assurance,
+						LastProvenAt: sess.LastProvenAt,
+						GlobalScope:  true,
 						// TenantID mirrors the issuing admin cert; "" means no tenant scope
 						// (same semantics as extractAdminPrincipal for mTLS admin certs).
 						TenantID: sess.TenantID,
@@ -351,7 +359,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		// is present, ensuring existing Bearer/API-key/mTLS clients are byte-identical.
 		if s.webSessionManager != nil && !hasHeaderCredentials(r) {
 			if cookie, cookieErr := r.Cookie("cfgms_session"); cookieErr == nil {
-				webSess, webErr := s.webSessionManager.Validate(r.Context(), cookie.Value)
+				// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
+				webSourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+				webValidateCtx := session.WithSourceIP(r.Context(), webSourceIP)
+				webSess, webErr := s.webSessionManager.Validate(webValidateCtx, cookie.Value)
 				if webErr != nil {
 					switch {
 					case errors.Is(webErr, session.ErrSessionRevoked):
@@ -372,7 +383,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// If revocation races Validate→Renew within nanoseconds, the request still
 				// proceeds; the next request will be rejected by Validate. If stricter
 				// atomicity is needed, merge Validate and Renew into a single operation.
-				_, newToken, renewErr := s.webSessionManager.Renew(r.Context(), cookie.Value)
+				_, newToken, renewErr := s.webSessionManager.Renew(webValidateCtx, cookie.Value)
 				if renewErr == nil && newToken != "" {
 					http.SetCookie(w, &http.Cookie{
 						Name:     "cfgms_session",
@@ -384,12 +395,15 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					})
 				}
 				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
+				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
+				// and future WebAuthn upgrades are reflected on every request (ADR-021 Decision 3/5).
 				webPrincipal := &Principal{
-					ID:          webSess.PrincipalID,
-					Name:        "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
-					Assurance:   session.AssuranceBasic,
-					GlobalScope: true,
-					TenantID:    webSess.TenantID,
+					ID:           webSess.PrincipalID,
+					Name:         "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+					Assurance:    webSess.Assurance,
+					LastProvenAt: webSess.LastProvenAt,
+					GlobalScope:  true,
+					TenantID:     webSess.TenantID,
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))

@@ -121,6 +121,45 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillSessionTokenRecords adds the device-continuity columns to a pre-existing
+// session_token_records table (Issue #2788). Fresh databases (table absent) are skipped.
+// Column-existence is checked via PRAGMA before each ALTER TABLE so the pass is idempotent.
+//
+// The assurance column defaults to 1 (AssuranceBasic) because every pre-existing row
+// in session_token_records belongs to a human session (mTLS admin or web session) —
+// API-key principals never write to this table.
+func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "session_token_records")
+	if err != nil {
+		return fmt.Errorf("sqlite: session_token_records back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"assurance", `ALTER TABLE session_token_records ADD COLUMN assurance      INTEGER NOT NULL DEFAULT 1`},
+		{"bound_ip", `ALTER TABLE session_token_records ADD COLUMN bound_ip       TEXT    NOT NULL DEFAULT ''`},
+		{"last_proven_at", `ALTER TABLE session_token_records ADD COLUMN last_proven_at TEXT`},
+		{"credential_id", `ALTER TABLE session_token_records ADD COLUMN credential_id  BLOB`},
+	} {
+		present, err := columnExists(ctx, db, "session_token_records", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: session_token_records back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: session_token_records back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -131,6 +170,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillStewardColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillSessionTokenRecords(ctx, db); err != nil {
 		return err
 	}
 
@@ -517,7 +559,11 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			issued_at             TEXT NOT NULL,
 			last_activity         TEXT NOT NULL,
 			absolute_expires_at   TEXT NOT NULL,
-			hash_expires_at       TEXT
+			hash_expires_at       TEXT,
+			assurance             INTEGER NOT NULL DEFAULT 1,
+			bound_ip              TEXT    NOT NULL DEFAULT '',
+			last_proven_at        TEXT,
+			credential_id         BLOB
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_token_records_session_id ON session_token_records(session_id)`,
 	}

@@ -66,6 +66,8 @@ func NewDatabaseSessionTokenStore(dsn string, config map[string]interface{}) (*D
 
 // initializeSchema creates the session_token_store table under a Postgres advisory lock
 // so concurrent controller nodes starting in parallel do not race on DDL.
+// BackfillSessionTokenStoreContinuity is called after CREATE to add device-continuity
+// columns (Issue #2788) on existing deployments; ADD COLUMN IF NOT EXISTS makes it idempotent.
 func (s *DatabaseSessionTokenStore) initializeSchema() error {
 	ctx := context.Background()
 	const lockID = 12345678
@@ -73,7 +75,11 @@ func (s *DatabaseSessionTokenStore) initializeSchema() error {
 		return fmt.Errorf("failed to acquire session token store schema lock: %w", err)
 	}
 	defer func() { _, _ = s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", lockID) }()
-	return NewDatabaseSchemas().CreateSessionTokenStoreTable(ctx, s.db)
+	schemas := NewDatabaseSchemas()
+	if err := schemas.CreateSessionTokenStoreTable(ctx, s.db); err != nil {
+		return err
+	}
+	return schemas.BackfillSessionTokenStoreContinuity(ctx, s.db)
 }
 
 // Close releases the database connection pool.
@@ -100,11 +106,21 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		return fmt.Errorf("database: session token set: failed to set tenant context: %w", err)
 	}
 
+	var lastProvenAt interface{}
+	if !sess.LastProvenAt.IsZero() {
+		lastProvenAt = sess.LastProvenAt.UTC()
+	}
+	var credentialID interface{}
+	if len(sess.CredentialID) > 0 {
+		credentialID = sess.CredentialID
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO session_token_store
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
-			 issued_at, last_activity, absolute_expires_at, hash_expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)
+			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
+			 assurance, bound_ip, last_proven_at, credential_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12)
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = EXCLUDED.session_id,
 			principal_id        = EXCLUDED.principal_id,
@@ -112,7 +128,11 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 			tenant_id           = EXCLUDED.tenant_id,
 			issued_at           = EXCLUDED.issued_at,
 			last_activity       = EXCLUDED.last_activity,
-			absolute_expires_at = EXCLUDED.absolute_expires_at`,
+			absolute_expires_at = EXCLUDED.absolute_expires_at,
+			assurance           = EXCLUDED.assurance,
+			bound_ip            = EXCLUDED.bound_ip,
+			last_proven_at      = EXCLUDED.last_proven_at,
+			credential_id       = EXCLUDED.credential_id`,
 		tokenHash,
 		sess.ID,
 		sess.PrincipalID,
@@ -121,6 +141,10 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		sess.IssuedAt.UTC(),
 		sess.LastActivity.UTC(),
 		sess.AbsoluteExpiresAt.UTC(),
+		int(sess.Assurance),
+		sess.BoundIP,
+		lastProvenAt,
+		credentialID,
 	)
 	if err != nil {
 		return fmt.Errorf("database: session token set failed: %w", err)
@@ -132,9 +156,13 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 // Returns ErrSessionNotFound when the hash is absent or when hash_expires_at has passed.
 func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (*session.Session, error) {
 	var sess session.Session
+	var assurance int
+	var lastProvenAt sql.NullTime
+	var credentialID []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
-		       issued_at, last_activity, absolute_expires_at
+		       issued_at, last_activity, absolute_expires_at,
+		       assurance, bound_ip, last_proven_at, credential_id
 		FROM session_token_store
 		WHERE token_hash = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())`,
@@ -142,6 +170,7 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -152,6 +181,13 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	sess.IssuedAt = sess.IssuedAt.UTC()
 	sess.LastActivity = sess.LastActivity.UTC()
 	sess.AbsoluteExpiresAt = sess.AbsoluteExpiresAt.UTC()
+	sess.Assurance = session.AssuranceLevel(assurance)
+	if lastProvenAt.Valid {
+		sess.LastProvenAt = lastProvenAt.Time.UTC()
+	}
+	if len(credentialID) > 0 {
+		sess.CredentialID = credentialID
+	}
 	return &sess, nil
 }
 
@@ -180,7 +216,8 @@ func (s *DatabaseSessionTokenStore) Delete(ctx context.Context, id string) error
 func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
-		       issued_at, last_activity, absolute_expires_at
+		       issued_at, last_activity, absolute_expires_at,
+		       assurance, bound_ip, last_proven_at, credential_id
 		FROM session_token_store
 		WHERE hash_expires_at IS NULL OR hash_expires_at > NOW()
 		ORDER BY issued_at`)
@@ -194,9 +231,13 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 	for rows.Next() {
 		var tokenHash string
 		var sess session.Session
+		var assurance int
+		var lastProvenAt sql.NullTime
+		var credentialID []byte
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID,
 		); err != nil {
 			return nil, fmt.Errorf("database: session token list scan failed: %w", err)
 		}
@@ -207,6 +248,13 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 		sess.IssuedAt = sess.IssuedAt.UTC()
 		sess.LastActivity = sess.LastActivity.UTC()
 		sess.AbsoluteExpiresAt = sess.AbsoluteExpiresAt.UTC()
+		sess.Assurance = session.AssuranceLevel(assurance)
+		if lastProvenAt.Valid {
+			sess.LastProvenAt = lastProvenAt.Time.UTC()
+		}
+		if len(credentialID) > 0 {
+			sess.CredentialID = credentialID
+		}
 		cp := sess
 		sessions = append(sessions, &cp)
 	}

@@ -1003,6 +1003,10 @@ func (s DatabaseSchemas) CreateCommandTransitionsTable(ctx context.Context, db *
 // CreateSessionTokenStoreTable creates the session_token_store table (Issue #2775).
 // This backs DatabaseSessionTokenStore (pkg/session.Store), not the business.SessionStore
 // that uses the `sessions` table.
+//
+// Device-continuity columns (Issue #2788) are included in the initial CREATE so that
+// fresh deployments get the full schema; the corresponding migration (006) uses
+// ADD COLUMN IF NOT EXISTS for rolling upgrades of existing deployments.
 func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *sql.DB) error {
 	ddl := `
 		CREATE TABLE IF NOT EXISTS session_token_store (
@@ -1014,7 +1018,11 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 			issued_at           TIMESTAMP WITH TIME ZONE NOT NULL,
 			last_activity       TIMESTAMP WITH TIME ZONE NOT NULL,
 			absolute_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-			hash_expires_at     TIMESTAMP WITH TIME ZONE
+			hash_expires_at     TIMESTAMP WITH TIME ZONE,
+			assurance           INTEGER NOT NULL DEFAULT 1,
+			bound_ip            TEXT    NOT NULL DEFAULT '',
+			last_proven_at      TIMESTAMP WITH TIME ZONE,
+			credential_id       BYTEA
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create session_token_store table: %w", err)
@@ -1050,6 +1058,24 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 	for _, stmt := range rls {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to configure session_token_store RLS: %w", err)
+		}
+	}
+	return nil
+}
+
+// BackfillSessionTokenStoreContinuity adds the device-continuity columns to an existing
+// session_token_store table (Issue #2788, migration 006). Safe to call on a table that
+// already has these columns — ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
+func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context, db *sql.DB) error {
+	alters := []string{
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS assurance      INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS bound_ip       TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS last_proven_at TIMESTAMP WITH TIME ZONE`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS credential_id  BYTEA`,
+	}
+	for _, stmt := range alters {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to backfill session_token_store continuity columns: %w", err)
 		}
 	}
 	return nil
