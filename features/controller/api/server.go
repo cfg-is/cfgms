@@ -142,6 +142,7 @@ type Server struct {
 	tagStore                       *tagstore.Store                       // Issue #2545: steward tag store for tag: selector support
 	webAuthn                       *webauthn.WebAuthn                    // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions               sync.Map                              // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
+	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -1298,6 +1299,60 @@ func (s *Server) SetStewardEventLoggingManager(m *logging.LoggingManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stewardEventLoggingManager = m
+}
+
+// SetTelemetryHandler wires the telemetry fan-out WebSocket handler and lazily
+// registers GET /api/v1/telemetry/ws/{id} behind the steward:telemetry permission
+// gate with cross-tenant isolation (Issue #2765). The wrapper enforces the same
+// tenant-ancestry check as handleGetStewardDNA: a scoped API-key principal can only
+// subscribe to stewards in its own tenant subtree; 404 is returned for out-of-scope
+// stewards. Call after New() and before Start().
+func (s *Server) SetTelemetryHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.telemetryHandler = h
+	if h == nil {
+		return
+	}
+	s.apiRouter.Handle(
+		"/telemetry/ws/{id}",
+		s.requirePermission("steward", "telemetry")(s.tenantScopedTelemetryWrapper(h)),
+	).Methods("GET")
+	s.logger.Info("Telemetry WebSocket endpoint registered at /api/v1/telemetry/ws/{id}")
+}
+
+// tenantScopedTelemetryWrapper wraps a WebSocket handler with cross-tenant isolation.
+// It replicates the steward-scoping logic from handleGetStewardDNA so that a scoped
+// API-key principal cannot subscribe to telemetry for stewards outside its tenant tree.
+// The {id} path variable carries the steward ID, consistent with other steward routes.
+func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		stewardID := vars["id"]
+		if stewardID == "" {
+			s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+			return
+		}
+		callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+		info, exists := s.controllerService.GetStewardInfo(stewardID)
+		if callerTenant != "" {
+			stewardTenant := ""
+			if exists {
+				stewardTenant = info.TenantID
+			}
+			sameTenant := stewardTenant == callerTenant
+			ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+			if !exists || (!sameTenant && !ancestorTenant) {
+				// 404 instead of 403 to avoid disclosing steward existence across tenants.
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+				return
+			}
+		} else if !exists {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // SetModuleResolution wires the controller-side module resolution dependencies

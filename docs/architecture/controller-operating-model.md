@@ -1083,6 +1083,7 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Workflows** | Create, trigger, monitor workflows |
 | **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |
 | **Modules** | List cached modules, approve queued bundles |
+| **Live telemetry** | `GET /api/v1/telemetry/ws/{steward_id}` — WebSocket endpoint that fans steward telemetry snapshots (process/service) to browser subscribers in real time. Requires `steward:telemetry` permission. The controller subscribes upstream to the steward (via `TelemetryRequest{subscribe=true}`) on the first browser connection and unsubscribes on the last browser disconnect, preserving the "collect only while watched" property. |
 
 ### Steward List Pagination
 
