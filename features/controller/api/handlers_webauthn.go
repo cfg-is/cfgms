@@ -422,9 +422,10 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 //   - Single-use: the presence token is consumed on first use by requirePermission.
 //   - Short TTL: presenceTokenTTL (30 s) bounds the window for a hijacked session to
 //     replay a presence proof — even if the session continuity is intact.
-//   - Scope: the token is scoped to the principal ID that ran the ceremony; a different
-//     principal's request carrying this token is still admitted (the principalID field
-//     in the record is informational, not a gate — the gate is single-use + TTL).
+//   - Scope: the token is bound to the principal ID that ran the ceremony. requirePermission
+//     rejects the token with a step-up 401 if the acting principal differs from
+//     record.principalID (ADR-021 Decision 4) — presence proved by principal A can never
+//     satisfy the gate for principal B's action. The gate is single-use + TTL + principal binding.
 //
 // Cross-reference: #2728/#2732 implementers consume permissionAssurance["module:approve"]
 // and ["module:reject"] — the presence mechanism built here is what gates those routes.

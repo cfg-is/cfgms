@@ -737,6 +737,29 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					})
 					return
 				}
+				// Bind the presence proof to the acting principal (ADR-021 Decision 4):
+				// the token is only valid for the principal that ran the WebAuthn ceremony.
+				// A proof performed by principal A must never satisfy the gate for principal
+				// B's catastrophic action. The token was already consumed by LoadAndDelete,
+				// so a mismatch cannot be retried with the same token.
+				if record.principalID != principal.ID {
+					s.logger.Warn("Presence token principal mismatch",
+						"token_principal_id", logging.SanitizeLogValue(record.principalID),
+						"request_principal_id", logging.SanitizeLogValue(principal.ID),
+						"permission_id", permissionID,
+					)
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_principal_mismatch",
+						PresenceRequired: true,
+					})
+					return
+				}
 				s.logger.Debug("Presence token accepted",
 					"principal_id", logging.SanitizeLogValue(principal.ID),
 					"permission_id", permissionID,

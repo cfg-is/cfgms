@@ -1481,7 +1481,7 @@ func TestBearerSession_AssurancePropagatedToPrincipal(t *testing.T) {
 
 // mintPresenceToken injects a presence token directly into the server's presenceTokens map,
 // bypassing the WebAuthn ceremony. For use in middleware tests only — the WebAuthn hardware
-// ceremony is not available in unit tests; this function simulates the token that
+// ceremony is not available in unit tests; this creates the token that
 // handlePresenceFinish would mint after a successful assertion.
 func mintPresenceToken(t *testing.T, s *Server, principalID string) string {
 	t.Helper()
@@ -1585,6 +1585,43 @@ func TestRequirePermission_UserPresence_ValidTokenAdmitted(t *testing.T) {
 		"same presence token must be rejected on second use (single-use enforcement)")
 	assert.Contains(t, rec2.Header().Get("WWW-Authenticate"), `presence="required"`,
 		"second-use rejection must carry presence=\"required\" in WWW-Authenticate")
+}
+
+// TestRequirePermission_UserPresence_PrincipalMismatchRejected verifies that a presence
+// token minted for principal A does NOT satisfy the presence gate for principal B's request.
+// The token is bound to the principal that ran the WebAuthn ceremony (record.principalID),
+// and requirePermission must reject a mismatched acting principal with a step-up 401.
+//
+// [REQUIRED TEST] ADR-021 Decision 4: the *acting* principal must have proved fresh presence.
+// A presence proof by another principal must never satisfy a catastrophic action's gate.
+func TestRequirePermission_UserPresence_PrincipalMismatchRejected(t *testing.T) {
+	withPresencePermission(t)
+
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t) // principal.ID == "test-admin"
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Token minted for a DIFFERENT principal ("other-admin") than the acting cert principal.
+	token := mintPresenceToken(t, server, "other-admin")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"presence token bound to a different principal must be rejected with 401")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`,
+		`principal-mismatch rejection must carry presence="required" in WWW-Authenticate`)
+	assert.Contains(t, rec.Body.String(), "presence_token_principal_mismatch",
+		"response body must carry presence_token_principal_mismatch error code")
+
+	// The mismatched token must have been consumed (single-use) — the acting principal
+	// cannot retry, and neither can the legitimate owner replay it.
+	_, stillPresent := server.presenceTokens.Load(hashPresenceToken(token))
+	assert.False(t, stillPresent, "mismatched token must be consumed on the rejected attempt")
 }
 
 // TestRequirePermission_UserPresence_MachinePrincipalGets403 verifies that an API-key
