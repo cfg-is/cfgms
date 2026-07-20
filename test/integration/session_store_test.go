@@ -108,10 +108,10 @@ func newTestCertManager(t *testing.T, certPath string) *cert.Manager {
 	mgr, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath: certPath,
 		CAConfig: &cert.CAConfig{
-			Organization:       "CFGMS Session Store Integration Test CA",
-			Country:            "US",
-			ValidityDays:       1,
-			KeySize:            2048,
+			Organization: "CFGMS Session Store Integration Test CA",
+			Country:      "US",
+			ValidityDays: 1,
+			KeySize:      2048,
 		},
 		LoadExistingCA:       false,
 		RenewalThresholdDays: 1,

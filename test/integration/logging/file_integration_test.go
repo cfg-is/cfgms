@@ -1,8 +1,8 @@
 //go:build integration
+// +build integration
 
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// +build integration
 
 package logging_test
 

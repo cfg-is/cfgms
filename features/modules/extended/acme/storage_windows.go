@@ -21,16 +21,16 @@ import (
 
 // Windows CryptoAPI constants
 const (
-	certStoreProvSystem        = 10         // CERT_STORE_PROV_SYSTEM_W
+	certStoreProvSystem         = 10         // CERT_STORE_PROV_SYSTEM_W
 	certSystemStoreLocalMachine = 0x00020000 // CERT_SYSTEM_STORE_LOCAL_MACHINE
 	certSystemStoreCurrentUser  = 0x00010000 // CERT_SYSTEM_STORE_CURRENT_USER
-	certFindSubjectStr         = 0x00080007 // CERT_FIND_SUBJECT_STR_W
+	certFindSubjectStr          = 0x00080007 // CERT_FIND_SUBJECT_STR_W
 	certStoreAddReplaceExisting = 3          // CERT_STORE_ADD_REPLACE_EXISTING
-	cryptExportable            = 0x00000001  // CRYPT_EXPORTABLE
-	cryptMachineKeyset         = 0x00000020  // CRYPT_MACHINE_KEYSET
-	pkcs12AllowOverwriteKey    = 0x00004000  // PKCS12_ALLOW_OVERWRITE_KEY
+	cryptExportable             = 0x00000001 // CRYPT_EXPORTABLE
+	cryptMachineKeyset          = 0x00000020 // CRYPT_MACHINE_KEYSET
+	pkcs12AllowOverwriteKey     = 0x00004000 // PKCS12_ALLOW_OVERWRITE_KEY
 
-	x509ASNEncoding = 0x00000001 // X509_ASN_ENCODING
+	x509ASNEncoding  = 0x00000001 // X509_ASN_ENCODING
 	pkcs7ASNEncoding = 0x00010000 // PKCS_7_ASN_ENCODING
 	encodingType     = x509ASNEncoding | pkcs7ASNEncoding
 )
