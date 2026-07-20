@@ -171,21 +171,31 @@ func TestHandleListModuleApprovals_ReachableByNonMTLSAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// makeApproveRequest builds a request for POST .../approve with the address as a mux var.
-func makeApproveRequest(t *testing.T, addressParam string, principal *Principal) *http.Request {
+// makeApproveRequest builds a request for POST .../approve with the address as a mux var
+// and injects a fresh single-use presence token (Issue #2784: module:approve requires
+// RequireUserPresence enforcement).
+func makeApproveRequest(t *testing.T, s *Server, addressParam string, principal *Principal) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/"+addressParam+"/approve", nil)
 	req = mux.SetURLVars(req, map[string]string{"address": addressParam})
 	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	// Inject a presence token so requirePermission's RequireUserPresence check passes.
+	token := mintPresenceToken(t, s, principal.ID)
+	req.Header.Set(presenceTokenHeader, token)
 	return req
 }
 
-// makeRejectRequest builds a request for POST .../reject with the address as a mux var.
-func makeRejectRequest(t *testing.T, addressParam string, principal *Principal) *http.Request {
+// makeRejectRequest builds a request for POST .../reject with the address as a mux var
+// and injects a fresh single-use presence token (Issue #2784: module:reject requires
+// RequireUserPresence enforcement).
+func makeRejectRequest(t *testing.T, s *Server, addressParam string, principal *Principal) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/"+addressParam+"/reject", nil)
 	req = mux.SetURLVars(req, map[string]string{"address": addressParam})
 	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	// Inject a presence token so requirePermission's RequireUserPresence check passes.
+	token := mintPresenceToken(t, s, principal.ID)
+	req.Header.Set(presenceTokenHeader, token)
 	return req
 }
 
@@ -197,7 +207,7 @@ func TestHandleApproveModuleBundle_Success(t *testing.T) {
 	addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
 	addressParam := formatModuleAddress(addr)
 
-	req := makeApproveRequest(t, addressParam, moduleTestStrongPrincipal())
+	req := makeApproveRequest(t, server, addressParam, moduleTestStrongPrincipal())
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
@@ -218,7 +228,7 @@ func TestHandleRejectModuleBundle_Success(t *testing.T) {
 	addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
 	addressParam := formatModuleAddress(addr)
 
-	req := makeRejectRequest(t, addressParam, moduleTestStrongPrincipal())
+	req := makeRejectRequest(t, server, addressParam, moduleTestStrongPrincipal())
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
@@ -241,7 +251,7 @@ func TestHandleRejectModuleBundle_NonPending(t *testing.T) {
 	require.NoError(t, mc.SetApprovalStatus(addr, cache.ApprovalStatusApproved))
 
 	addressParam := formatModuleAddress(addr)
-	req := makeRejectRequest(t, addressParam, moduleTestStrongPrincipal())
+	req := makeRejectRequest(t, server, addressParam, moduleTestStrongPrincipal())
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
@@ -268,7 +278,7 @@ func TestHandleApproveModuleBundle_NotFound(t *testing.T) {
 		ContentHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	}
 	addressParam := formatModuleAddress(missing)
-	req := makeApproveRequest(t, addressParam, moduleTestStrongPrincipal())
+	req := makeApproveRequest(t, server, addressParam, moduleTestStrongPrincipal())
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
@@ -320,6 +330,9 @@ func TestHandleApproveModuleBundle_InvalidAddressFormat(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/not-valid-address/approve", nil)
 	req = mux.SetURLVars(req, map[string]string{"address": "not-valid-address"})
 	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, moduleTestStrongPrincipal()))
+	// Inject presence token so the RequireUserPresence gate passes (Issue #2784).
+	presToken := mintPresenceToken(t, server, moduleTestStrongPrincipal().ID)
+	req.Header.Set(presenceTokenHeader, presToken)
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
@@ -360,7 +373,7 @@ func TestHandleApproveModuleBundle_NilReviewerReturns503(t *testing.T) {
 	}
 	addressParam := formatModuleAddress(addr)
 
-	req := makeApproveRequest(t, addressParam, moduleTestStrongPrincipal())
+	req := makeApproveRequest(t, server, addressParam, moduleTestStrongPrincipal())
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
@@ -381,7 +394,7 @@ func TestHandleRejectModuleBundle_NilReviewerReturns503(t *testing.T) {
 	}
 	addressParam := formatModuleAddress(addr)
 
-	req := makeRejectRequest(t, addressParam, moduleTestStrongPrincipal())
+	req := makeRejectRequest(t, server, addressParam, moduleTestStrongPrincipal())
 	rec := httptest.NewRecorder()
 
 	handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))

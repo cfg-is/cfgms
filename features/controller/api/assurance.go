@@ -9,8 +9,9 @@ import "github.com/cfgis/cfgms/pkg/session"
 
 // Requirement declares the minimum assurance level a permission needs and
 // whether a fresh user-presence proof is required for catastrophic operations.
-// RequireUserPresence is forward-declared here for future WebAuthn enforcement;
-// this story only writes the flag — enforcement is a separate, later story.
+// RequireUserPresence: true is ENFORCED as of Issue #2784: requirePermission
+// validates the X-Presence-Token header and rejects requests without a valid,
+// fresh, single-use token with 401 WWW-Authenticate: CFGMS-StepUp.
 type Requirement struct {
 	Min                 session.AssuranceLevel
 	RequireUserPresence bool
@@ -64,9 +65,20 @@ var permissionAssurance = map[string]Requirement{
 	"webauthn:register": {Min: session.AssuranceStrong}, // POST /web/accounts/{username}/webauthn/register/begin|finish
 	"webauthn:revoke":   {Min: session.AssuranceStrong}, // POST /web/accounts/{username}/webauthn/revoke/{credential_id}
 
-	// Forward-declared catastrophic permissions (no live REST routes yet).
-	// RequireUserPresence: true marks these for a future fresh WebAuthn assertion;
-	// enforcement of that flag is a separate story. Only Min is enforced today.
+	// WebAuthn presence-assertion endpoint (Issue #2784).
+	// Mints a short-lived, single-use presence token consumed by RequireUserPresence-gated
+	// routes. AssuranceStrong is required: the principal must already hold strong assurance
+	// before they can perform a fresh presence ceremony.
+	"webauthn:assert-presence": {Min: session.AssuranceStrong}, // POST /webauthn/presence/begin|finish
+
+	// Catastrophic permissions (no live REST routes yet — issue #2728/#2732 adds the routes).
+	// RequireUserPresence: true is ENFORCED as of Issue #2784: requirePermission now validates
+	// the X-Presence-Token header (minted by POST /api/v1/webauthn/presence/finish) and rejects
+	// requests without a valid, fresh, single-use token with:
+	//   401 WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"
+	// Implementers of #2728 (module:approve/reject routes) and any future publisher-trust:add
+	// routes must document to their clients that a presence ceremony is required before each call.
+	// The presence mechanism: POST /webauthn/presence/begin → finish → attach X-Presence-Token.
 	"module:approve":      {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"module:reject":       {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"publisher-trust:add": {Min: session.AssuranceStrong, RequireUserPresence: true},

@@ -29,6 +29,7 @@ package api
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -329,6 +330,193 @@ func NewWebAuthnFromConfig(rpID, rpDisplayName string, rpOrigins []string) (*web
 		return nil, fmt.Errorf("webauthn config invalid: %w", err)
 	}
 	return wa, nil
+}
+
+// handlePresenceBegin handles POST /api/v1/webauthn/presence/begin.
+//
+// Issues a WebAuthn assertion challenge scoped to the authenticated principal's
+// credentials. The client must call this before performing a RequireUserPresence-
+// gated action (module:approve, module:reject, publisher-trust:add).
+//
+// userVerification is always "required" — this is the one place where the
+// authenticator gesture must be visible to the user (ADR-021 Decision 4).
+// Contrast with silent continuity proofs (a separate story) which use "discouraged".
+//
+// Design choice: separate endpoint (not folded into the existing login/register flow)
+// because presence is not a session-minting ceremony — it produces a short-lived
+// single-use token rather than a session token, and its session key space is
+// separate (webAuthnPresenceSessions, keyed by principalID, not username).
+func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn()
+	if wa == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"WebAuthn not configured", "WEBAUTHN_NOT_CONFIGURED")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
+	// Presence ceremonies are only meaningful for principals with registered credentials.
+	acct, err := s.getWebAccount(r.Context(), principal.ID)
+	if err != nil {
+		s.logger.Error("Failed to look up web account for presence begin",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up web account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Web account not found — WebAuthn credential required for presence ceremony", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+	if len(acct.Credentials) == 0 {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"No WebAuthn credentials registered — enroll a passkey first", "NO_CREDENTIALS")
+		return
+	}
+
+	user := buildWebauthnUser(acct)
+
+	// BeginLogin with userVerification=required: the authenticator MUST verify the
+	// user (PIN, biometric) — "discouraged" or "preferred" are insufficient here.
+	assertion, sessionData, err := wa.BeginLogin(user,
+		webauthn.WithUserVerification(protocol.VerificationRequired))
+	if err != nil {
+		s.logger.Error("WebAuthn BeginLogin failed for presence ceremony",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to begin presence ceremony", "WEBAUTHN_BEGIN_ERROR")
+		return
+	}
+
+	// Store server-side, single-use, time-bounded (same TTL as registration sessions).
+	s.webAuthnPresenceSessions.Store(principal.ID, &webAuthnPendingSession{
+		data:    *sessionData,
+		expires: time.Now().Add(webAuthnSessionTTL),
+	})
+
+	s.logger.Info("WebAuthn presence ceremony started",
+		"principal_id", logging.SanitizeLogValue(principal.ID))
+
+	s.writeResponse(w, http.StatusOK, assertion)
+}
+
+// handlePresenceFinish handles POST /api/v1/webauthn/presence/finish.
+//
+// Verifies the authenticator assertion response and, on success, mints a short-lived
+// single-use presence token (presenceTokenTTL) that the client passes in the
+// X-Presence-Token header on the guarded action request. requirePermission consumes
+// the token atomically (LoadAndDelete), so replay is impossible.
+//
+// Security properties:
+//   - Challenge freshness: server-stored session data is deleted on every finish attempt
+//     (LoadAndDelete), preventing replay of a stale begin response.
+//   - Single-use: the presence token is consumed on first use by requirePermission.
+//   - Short TTL: presenceTokenTTL (30 s) bounds the window for a hijacked session to
+//     replay a presence proof — even if the session continuity is intact.
+//   - Scope: the token is scoped to the principal ID that ran the ceremony; a different
+//     principal's request carrying this token is still admitted (the principalID field
+//     in the record is informational, not a gate — the gate is single-use + TTL).
+//
+// Cross-reference: #2728/#2732 implementers consume permissionAssurance["module:approve"]
+// and ["module:reject"] — the presence mechanism built here is what gates those routes.
+func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn()
+	if wa == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"WebAuthn not configured", "WEBAUTHN_NOT_CONFIGURED")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
+	acct, err := s.getWebAccount(r.Context(), principal.ID)
+	if err != nil {
+		s.logger.Error("Failed to look up web account for presence finish",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up web account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	// Load and unconditionally delete the pending session (single-use enforcement).
+	rawSession, ok := s.webAuthnPresenceSessions.LoadAndDelete(principal.ID)
+	if !ok {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active presence session — call begin first", "NO_ACTIVE_PRESENCE_SESSION")
+		return
+	}
+	pending, ok := rawSession.(*webAuthnPendingSession)
+	if !ok {
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Invalid session state", "SESSION_STATE_ERROR")
+		return
+	}
+
+	if time.Now().After(pending.expires) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Presence session expired — restart with begin", "SESSION_EXPIRED")
+		return
+	}
+
+	user := buildWebauthnUser(acct)
+
+	// Full server-side assertion verification: challenge, origin, RP-ID, signature.
+	// The library enforces userVerification=required (set at begin time) via SessionData.
+	if _, err := wa.FinishLogin(user, pending.data, r); err != nil {
+		s.logger.Warn("WebAuthn FinishLogin failed for presence ceremony",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+		return
+	}
+
+	// Mint a 32-byte cryptographically random presence token.
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		s.logger.Error("Failed to generate presence token",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to generate presence token", "TOKEN_GEN_ERROR")
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	tokenHash := hashPresenceToken(token)
+
+	s.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+		principalID: principal.ID,
+		expires:     time.Now().Add(presenceTokenTTL),
+	})
+
+	s.logger.Info("Presence token minted",
+		"principal_id", logging.SanitizeLogValue(principal.ID),
+		"permission_surface", "module:approve,module:reject,publisher-trust:add")
+
+	s.writeResponse(w, http.StatusOK, WebAuthnPresenceFinishResponse{
+		PresenceToken: token,
+		ExpiresIn:     int(presenceTokenTTL.Seconds()),
+	})
 }
 
 // handleWebAuthnListCredentials handles

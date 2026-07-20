@@ -82,6 +82,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/reject", "module:reject"},
 	// WebAuthn passkey bootstrap and recovery (Issue #2783) — credential-removal surface.
 	{"POST", "/api/v1/web/accounts/test-user/webauthn/revoke/Y3JlZGVudGlhbC1pZC0x", "webauthn:revoke"},
+	// WebAuthn presence ceremony (Issue #2784) — gates RequireUserPresence-gated actions.
+	{"POST", "/api/v1/webauthn/presence/begin", "webauthn:assert-presence"},
+	{"POST", "/api/v1/webauthn/presence/finish", "webauthn:assert-presence"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
@@ -193,6 +196,11 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	// must not block a legitimate mTLS admin). Uses requirePermission directly with a
 	// Strong-assurance + IsAdmin:true principal; IsAdmin short-circuits hasPermission
 	// so no explicit permission grant is needed.
+	//
+	// For RequireUserPresence permissions (Issue #2784): a valid presence token is
+	// minted and attached to the request — the assurance gate allows through, and the
+	// presence check is satisfied. This tests that the gates compose correctly rather
+	// than blocking legitimate admins who have completed the presence ceremony.
 	strongPrincipal := &Principal{
 		ID:         "cert-admin",
 		Name:       "mtls-cert:cert-admin",
@@ -214,6 +222,15 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 
 			req := httptest.NewRequest(entry.method, entry.path, nil)
 			req = req.WithContext(context.WithValue(req.Context(), principalContextKey, strongPrincipal))
+
+			// Inject a presence token for permissions that require a fresh user gesture
+			// (RequireUserPresence: true in permissionAssurance). Without a token these routes
+			// return 401; with one they pass through to the handler.
+			if permReq, found := permissionAssurance[entry.permission]; found && permReq.RequireUserPresence {
+				token := mintPresenceToken(t, server, strongPrincipal.ID)
+				req.Header.Set(presenceTokenHeader, token)
+			}
+
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 

@@ -143,6 +143,8 @@ type Server struct {
 	tagStore                       *tagstore.Store                       // Issue #2545: steward tag store for tag: selector support
 	webAuthn                       *webauthn.WebAuthn                    // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions               sync.Map                              // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
+	webAuthnPresenceSessions       sync.Map                              // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
+	presenceTokens                 sync.Map                              // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 }
 
@@ -677,6 +679,19 @@ func (s *Server) setupRouter() {
 		s.requirePermission("webauthn", "list")(http.HandlerFunc(s.handleWebAuthnListCredentials))).Methods("GET")
 	webAccounts.Handle("/{username}/webauthn/revoke/{credential_id}",
 		s.requirePermission("webauthn", "revoke")(http.HandlerFunc(s.handleWebAuthnRevokeCredential))).Methods("POST")
+
+	// WebAuthn presence-assertion endpoints (Issue #2784: step-up challenge + presence enforcement).
+	// These endpoints implement the fresh user-presence gesture (ADR-021 Decision 4) required by
+	// permissions with RequireUserPresence=true (module:approve, module:reject, publisher-trust:add).
+	// The principal must already hold AssuranceStrong (webauthn:assert-presence is in permissionAssurance).
+	// On success, finish mints a short-lived (presenceTokenTTL), single-use token returned to the client;
+	// the client attaches it via X-Presence-Token header on the guarded request.
+	// Cross-reference: #2728/#2732 implementers consume permissionAssurance entries for module:approve/reject.
+	webAuthnRouter := api.PathPrefix("/webauthn").Subrouter()
+	webAuthnRouter.Handle("/presence/begin",
+		s.requirePermission("webauthn", "assert-presence")(http.HandlerFunc(s.handlePresenceBegin))).Methods("POST")
+	webAuthnRouter.Handle("/presence/finish",
+		s.requirePermission("webauthn", "assert-presence")(http.HandlerFunc(s.handlePresenceFinish))).Methods("POST")
 
 	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
 	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.

@@ -538,6 +538,132 @@ func TestWebAuthnRevokeCredential(t *testing.T) {
 	})
 }
 
+// --- Issue #2784: presence ceremony handler error-path tests ---
+
+// doPresenceBegin calls handlePresenceBegin directly. Pass nil principal to omit
+// the principal from the request context, exercising the 401 path.
+func doPresenceBegin(t *testing.T, server *Server, principal *Principal) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/begin", nil)
+	if principal != nil {
+		req = withPrincipal(req, principal)
+	}
+	rec := httptest.NewRecorder()
+	server.handlePresenceBegin(rec, req)
+	return rec
+}
+
+// doPresenceFinish calls handlePresenceFinish directly with an empty body.
+// Pass nil principal to omit the principal from the request context.
+func doPresenceFinish(t *testing.T, server *Server, principal *Principal) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/finish", bytes.NewReader(nil))
+	if principal != nil {
+		req = withPrincipal(req, principal)
+	}
+	rec := httptest.NewRecorder()
+	server.handlePresenceFinish(rec, req)
+	return rec
+}
+
+// injectPresenceSession stores a pending presence session directly into the server,
+// bypassing handlePresenceBegin. Keyed by principalID (not a URL path variable).
+func injectPresenceSession(s *Server, principalID string, sd webauthn.SessionData, ttl time.Duration) {
+	s.webAuthnPresenceSessions.Store(principalID, &webAuthnPendingSession{
+		data:    sd,
+		expires: time.Now().Add(ttl),
+	})
+}
+
+// TestWebAuthnPresenceBegin covers handlePresenceBegin error paths (Issue #2784).
+// The success path (assertion challenge issued and session stored) requires a real
+// authenticator ceremony and is covered by the integration test suite.
+func TestWebAuthnPresenceBegin(t *testing.T) {
+	t.Run("Not_Configured_503", func(t *testing.T) {
+		server := setupTestServer(t)
+		rec := doPresenceBegin(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("No_Principal_401", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		rec := doPresenceBegin(t, server, nil) // no principal in context
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "AUTHENTICATION_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("AccountNotFound_404", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// testAdminPrincipal has ID="test-mtls-admin"; no web account exists with that name.
+		rec := doPresenceBegin(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("NoCredentials_409", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// A freshly-created account has zero credentials. The principal ID must equal
+		// the web-account username so getWebAccount(ctx, principal.ID) finds it.
+		principal := &Principal{ID: username, Name: username}
+		rec := doPresenceBegin(t, server, principal)
+		assert.Equal(t, http.StatusConflict, rec.Code)
+		assert.Equal(t, "NO_CREDENTIALS", errCode(t, rec.Body.Bytes()))
+	})
+}
+
+// TestWebAuthnPresenceFinish covers handlePresenceFinish error paths (Issue #2784).
+// The success path (assertion verified + presence token minted) requires a real
+// authenticator ceremony and is covered by the integration test suite.
+func TestWebAuthnPresenceFinish(t *testing.T) {
+	t.Run("Not_Configured_503", func(t *testing.T) {
+		server := setupTestServer(t)
+		rec := doPresenceFinish(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("No_Principal_401", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		rec := doPresenceFinish(t, server, nil) // no principal in context
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "AUTHENTICATION_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("AccountNotFound_404", func(t *testing.T) {
+		server, _ := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// testAdminPrincipal has ID="test-mtls-admin"; no web account with that name.
+		rec := doPresenceFinish(t, server, testAdminPrincipal())
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("NoActiveSession_400", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		// Account exists but begin was never called — no presence session stored.
+		principal := &Principal{ID: username, Name: username}
+		rec := doPresenceFinish(t, server, principal)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "NO_ACTIVE_PRESENCE_SESSION", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("SessionExpired_400", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		principal := &Principal{ID: username, Name: username}
+
+		acct, err := server.getWebAccount(context.Background(), username)
+		require.NoError(t, err)
+		require.NotNil(t, acct)
+
+		// Inject a presence session whose TTL has already elapsed.
+		injectPresenceSession(server, username, tvSession([]byte(acct.ID), tvRPID), -1*time.Second)
+
+		rec := doPresenceFinish(t, server, principal)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
+	})
+}
+
 // TestWebAuthnTOTPSeparation confirms that the WebAuthn registration code and the
 // permission-assurance registry contain no reference to TOTP. ADR-021 Decision 2:
 // TOTP must never satisfy AssuranceStrong; these subsystems must remain unconnected.
