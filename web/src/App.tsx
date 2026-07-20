@@ -5,11 +5,12 @@
  * App root: router + auth provider + route guard around the authenticated
  * app shell (Story #2496).
  *
- * Route table (Story #2723, #2727, #2730, #2731, Issue #2733):
+ * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733):
  *   /                → AppShell layout → FleetOverview
  *   /stewards/:id    → AppShell layout → StewardAssetPage
  *   /audit           → AppShell layout → AuditView
  *   /config          → AppShell layout → ConfigListView
+ *   /modules         → AppShell layout → ModuleReviewQueue
  *   /workflows       → AppShell layout → WorkflowListView
  *   /accounts        → AppShell layout → AccountsView
  *
@@ -28,6 +29,7 @@ import AuditView from './audit/AuditView.tsx'
 import ConfigListView from './config/ConfigListView.tsx'
 import WorkflowListView from './workflow/WorkflowListView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
+import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
 
 function App() {
   return (
@@ -39,6 +41,7 @@ function App() {
             <Route path="stewards/:id" element={<StewardAssetPage />} />
             <Route path="audit" element={<AuditView />} />
             <Route path="config" element={<ConfigListView />} />
+            <Route path="modules" element={<ModuleReviewQueue />} />
             <Route path="workflows" element={<WorkflowListView />} />
             <Route path="accounts" element={<AccountsView />} />
           </Route>

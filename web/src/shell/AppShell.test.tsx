@@ -55,21 +55,22 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet, Config, Workflows, Audit, and Accounts as links', () => {
+  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Audit, and Accounts as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /modules/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
 
-  it('marks only Modules as soon; Config, Fleet, Workflows, Audit, and Accounts are real links', () => {
+  it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732)', () => {
     renderShell()
-    // Only 1 soon-tagged item remains (Modules); Config, Workflows, Audit, Accounts are real links
-    expect(screen.getAllByText(/soon/i)).toHaveLength(1)
-    // Config, Workflows, Audit, and Accounts are NavLinks, not soon anchors
+    expect(screen.queryAllByText(/soon/i)).toHaveLength(0)
+    expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /modules/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
