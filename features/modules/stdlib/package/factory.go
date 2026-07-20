@@ -18,17 +18,13 @@ import (
 func NewPackageManager(ctx context.Context) (PackageManager, error) {
 	switch runtime.GOOS {
 	case "windows":
-		// Check if winget is available on PATH (interactive users get the
-		// app-execution alias).
-		if _, err := exec.CommandContext(ctx, "winget", "--version").Output(); err == nil {
-			return newWingetManager(), nil
-		}
-		// SYSTEM/service contexts (the steward runs as LocalSystem; CI runner
-		// services run as NETWORK SERVICE) have no user profile and therefore
-		// no winget app-execution alias — resolve the packaged binary directly
-		// from WindowsApps: a declared path to a Microsoft-signed binary
-		// (predictable admin tooling per the threat model).
-		if bin, ok := resolveWingetFullPath(ctx); ok {
+		// resolveWinget checks the PATH app-execution alias (interactive
+		// users) then the packaged WindowsApps binary for SYSTEM/service
+		// contexts (the steward runs as LocalSystem; CI runner services run
+		// as NETWORK SERVICE, neither has a user profile / alias) — a
+		// declared path to a Microsoft-signed binary (predictable admin
+		// tooling per the threat model).
+		if bin, ok := resolveWinget(ctx); ok {
 			return newWingetManagerWithPath(bin), nil
 		}
 		// Check if chocolatey is available
@@ -65,17 +61,34 @@ func NewPackageManager(ctx context.Context) (PackageManager, error) {
 	}
 }
 
+// resolveWinget locates a working winget.exe invocation path: the bare
+// command first (PATH app-execution alias, interactive users), then the
+// packaged WindowsApps binary (SYSTEM/service contexts). Used by the
+// provider registry's winget probe/constructor and by NewPackageManager.
+func resolveWinget(ctx context.Context) (string, bool) {
+	cmd := exec.CommandContext(ctx, "winget", "--version")
+	cmd.Env = wingetAugmentedEnv("winget")
+	if _, err := cmd.Output(); err == nil {
+		return "winget", true
+	}
+	return resolveWingetFullPath(ctx)
+}
+
 // resolveWingetFullPath locates the packaged winget.exe under the WindowsApps
 // store for contexts where the per-user app-execution alias is unavailable
 // (SYSTEM, service accounts). Candidates are probed newest-first with a
-// --version execution so a stale leftover package directory is never selected.
+// --version execution (using the augmented PATH so the MSIX framework DLLs
+// resolve — see wingetAugmentedEnv) so a stale leftover package directory is
+// never selected.
 func resolveWingetFullPath(ctx context.Context) (string, bool) {
 	programFiles := os.Getenv("ProgramFiles")
 	if programFiles == "" {
 		return "", false
 	}
 	for _, bin := range wingetCandidates(programFiles) {
-		if _, err := exec.CommandContext(ctx, bin, "--version").Output(); err == nil {
+		cmd := exec.CommandContext(ctx, bin, "--version")
+		cmd.Env = wingetAugmentedEnv(bin)
+		if _, err := cmd.Output(); err == nil {
 			return bin, true
 		}
 	}

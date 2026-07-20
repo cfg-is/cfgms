@@ -30,6 +30,15 @@ func newTestPackageManager() *testPackageManager {
 	}
 }
 
+// newTestPackageManagerNamed returns a testPackageManager reporting the
+// given Name(), for exercising provider-registry selection (which cares
+// which provider was picked) without depending on real OS package managers.
+func newTestPackageManagerNamed(name string) *testPackageManager {
+	mgr := newTestPackageManager()
+	mgr.managerName = name
+	return mgr
+}
+
 func (m *testPackageManager) Install(ctx context.Context, name string, version string) error {
 	if m.operationDelay > 0 {
 		select {
