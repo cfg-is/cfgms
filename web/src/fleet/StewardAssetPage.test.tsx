@@ -35,7 +35,6 @@ class StubWebSocket {
 beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
-  // @ts-expect-error intentional stub
   vi.stubGlobal('WebSocket', StubWebSocket)
 })
 
