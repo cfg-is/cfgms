@@ -575,10 +575,49 @@ func injectPresenceSession(s *Server, principalID string, sd webauthn.SessionDat
 	})
 }
 
-// TestWebAuthnPresenceBegin covers handlePresenceBegin error paths (Issue #2784).
-// The success path (assertion challenge issued and session stored) requires a real
-// authenticator ceremony and is covered by the integration test suite.
+// TestWebAuthnPresenceBegin covers handlePresenceBegin, including the success path.
+// BeginLogin only derives an assertion challenge from the account's registered credential
+// IDs and stores server-side session data — it does not touch hardware. Hardware
+// verification happens in FinishLogin (exercised in TestWebAuthnPresenceFinish). The
+// happy path is therefore fully testable here with a synthetic injected credential.
 func TestWebAuthnPresenceBegin(t *testing.T) {
+	t.Run("Success_200_IssuesChallengeAndStoresSession", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+		// BeginLogin needs at least one registered credential ID. Inject one
+		// synthetically to reach the success branch without a real ceremony.
+		credID := []byte("presence-begin-cred-id")
+		injectCredential(t, server, username, credID)
+
+		// Principal ID must match the web-account username so getWebAccount resolves it.
+		principal := &Principal{ID: username, Name: username}
+		rec := doPresenceBegin(t, server, principal)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		// Response must carry a non-empty assertion challenge.
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		opts, ok := resp.Data.(map[string]interface{})
+		require.True(t, ok, "response.data must be an object")
+		pk, ok := opts["publicKey"].(map[string]interface{})
+		require.True(t, ok, "response.data.publicKey must be present")
+		assert.NotEmpty(t, pk["challenge"], "BeginLogin must issue an assertion challenge")
+
+		// Security-critical (ADR-021 Decision 4): the challenge must demand user
+		// verification. A regression to "preferred"/"discouraged" — or dropping the
+		// option — silently defeats the presence guarantee, so assert it explicitly.
+		assert.Equal(t, "required", pk["userVerification"],
+			"presence ceremony must require user verification (WithUserVerification(VerificationRequired))")
+
+		// A single-use, time-bounded presence session must be stored keyed by principal ID.
+		raw, ok := server.webAuthnPresenceSessions.Load(principal.ID)
+		require.True(t, ok, "a presence session must be stored after begin")
+		pending, ok := raw.(*webAuthnPendingSession)
+		require.True(t, ok, "stored value must be a *webAuthnPendingSession")
+		assert.False(t, time.Now().After(pending.expires), "freshly created session must not be expired")
+		assert.NotEmpty(t, pending.data.Challenge, "server-side session must retain the challenge for FinishLogin")
+	})
+
 	t.Run("Not_Configured_503", func(t *testing.T) {
 		server := setupTestServer(t)
 		rec := doPresenceBegin(t, server, testAdminPrincipal())
