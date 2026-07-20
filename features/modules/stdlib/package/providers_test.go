@@ -349,7 +349,10 @@ providers:
 	require.NoError(t, err)
 	gotCfg := got.(*Config)
 	assert.Equal(t, "present", gotCfg.State)
-	assert.Equal(t, "1.2.3", gotCfg.Version)
+	// The config declares `version: latest` (update off), so Get echoes "latest"
+	// for the installed package rather than the concrete version — an installed
+	// unpinned package is compliant and must not drift. (See echoVersion.)
+	assert.Equal(t, "latest", gotCfg.Version)
 	assert.Equal(t, "test-provider", gotCfg.PackageManager)
 	assert.Equal(t, 1, probeCalls)
 

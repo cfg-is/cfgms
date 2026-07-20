@@ -78,7 +78,30 @@ func (m *PackageModule) Configure(config modules.ConfigState) error {
 	} else {
 		m.resolvedPackageManager = ""
 	}
+	if ver, ok := configMap["version"].(string); ok {
+		m.resolvedVersion = ver
+	} else {
+		m.resolvedVersion = ""
+	}
+	if upd, ok := configMap["update"].(bool); ok {
+		m.resolvedUpdate = upd
+	} else {
+		m.resolvedUpdate = false
+	}
 	return nil
+}
+
+// echoVersion returns the version to report on Get for an installed package.
+// When the desired version is "latest" and update is off, an installed package
+// is compliant regardless of its concrete version, so echo "latest" back to
+// avoid a permanent drift ("latest" never equals a concrete version). A pinned
+// concrete desired version is not echoed — the actual installed version is
+// reported so a mismatch drifts and triggers install/upgrade. Callers hold m.mu.
+func (m *PackageModule) echoVersion(installed string) string {
+	if m.resolvedVersion == "latest" && !m.resolvedUpdate {
+		return "latest"
+	}
+	return installed
 }
 
 // Get returns the current state of a package.
@@ -134,7 +157,7 @@ func (m *PackageModule) Get(ctx context.Context, resourceID string) (modules.Con
 	return &Config{
 		Name:           pkgName,
 		State:          "present",
-		Version:        version,
+		Version:        m.echoVersion(version),
 		PackageManager: providerName,
 		Providers:      rawProviders,
 	}, nil

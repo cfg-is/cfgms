@@ -241,6 +241,14 @@ type PackageModule struct {
 	packageManager PackageManager
 	// resolvedName is set by Configure from config.Name; Get falls back to resourceID when empty.
 	resolvedName string
+	// resolvedVersion / resolvedUpdate are the desired `version` and `update`
+	// recorded by Configure. When the desired version is "latest" and update is
+	// off, Get echoes "latest" for an installed package so it does not drift
+	// forever against the concrete installed version (an installed-but-unpinned
+	// package is compliant). A pinned concrete version is reported as-is so a
+	// mismatch still drifts and triggers the install/upgrade.
+	resolvedVersion string
+	resolvedUpdate  bool
 	// resolvedProviders is the raw `providers` list recorded by Configure
 	// (NOT back-compat-expanded from package_manager) so Get can echo back
 	// exactly what was authored — desired==observed, no false drift.
