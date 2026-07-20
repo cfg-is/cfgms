@@ -62,12 +62,18 @@ func setupStewardBinaryServer(t *testing.T) (*Server, stewardBinaryTestFixture) 
 	return server, fix
 }
 
-// signContent signs the SHA-256 hex of content with the fixture private key and returns
-// URL-safe base64 (no padding) signature bytes, as expected by the endpoint.
-func (f stewardBinaryTestFixture) signContent(content []byte) string {
+// signContent signs the canonical (contentHash, version, platform, arch) composite with
+// the fixture private key and returns URL-safe base64 (no padding) signature bytes, as
+// expected by the endpoint. Binding the release coordinates means a signature minted for
+// one version/platform/arch cannot be replayed to publish another (Issue #2834).
+func (f stewardBinaryTestFixture) signContent(content []byte, version, platform, arch string) string {
 	sum := sha256.Sum256(content)
 	hash := hex.EncodeToString(sum[:])
-	sig := ed25519.Sign(f.priv, []byte(hash))
+	msg, err := trust.StewardBinaryMessage(hash, version, platform, arch)
+	if err != nil {
+		panic(err)
+	}
+	sig := ed25519.Sign(f.priv, []byte(msg))
 	return base64.RawURLEncoding.EncodeToString(sig)
 }
 
@@ -157,6 +163,34 @@ func TestPublishEndpoint_RejectsInvalidSignature(t *testing.T) {
 	assert.Contains(t, body, "SIGNATURE_VERIFICATION_FAILED")
 }
 
+// TestPublishEndpoint_RejectsVersionBindingMismatch verifies that a signature minted for
+// one set of release coordinates cannot be replayed to publish a different version,
+// platform, or arch. This is the publish-side half of the rollback defense (Issue #2834):
+// the stored signature always covers the key the blob lands under, so a later GET cannot
+// serve bytes whose signature was issued for some other release.
+func TestPublishEndpoint_RejectsVersionBindingMismatch(t *testing.T) {
+	content := []byte("steward binary signed for v1.0.0/linux/amd64")
+
+	cases := map[string][3]string{
+		"version substituted":  {"v2.0.0", "linux", "amd64"},
+		"platform substituted": {"v1.0.0", "darwin", "amd64"},
+		"arch substituted":     {"v1.0.0", "linux", "arm64"},
+	}
+	for name, coords := range cases {
+		t.Run(name, func(t *testing.T) {
+			server, fix := setupStewardBinaryServer(t)
+			// Authentic signature, but bound to v1.0.0/linux/amd64.
+			sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
+
+			rec := doPublish(server, coords[0], coords[1], coords[2], "test-tenant", sigBase64, content)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"signature bound to different coordinates must be rejected")
+			assert.Contains(t, rec.Body.String(), "SIGNATURE_VERIFICATION_FAILED")
+		})
+	}
+}
+
 // TestPublishEndpoint_RejectsCrossTenantPublish verifies that a caller without
 // installer:publish:steward permission receives 403. This demonstrates tenant-namespace
 // isolation: a key scoped to tenant-b (without the required permission) cannot publish
@@ -176,7 +210,7 @@ func TestPublishEndpoint_RejectsCrossTenantPublish(t *testing.T) {
 	defer ts.Close()
 
 	content := []byte("steward binary content for tenant-b test")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	q := url.Values{}
 	q.Set("signature", sigBase64)
@@ -198,7 +232,7 @@ func TestPublishEndpoint_DuplicatePublishReturns409(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	content := []byte("steward binary content")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	// First publish — must succeed.
 	rec1 := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
@@ -216,7 +250,7 @@ func TestPublishEndpoint_DuplicatePublishReturns409(t *testing.T) {
 func TestPublishEndpoint_ValidatesPlatformAndArch(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("binary")
-	sig := fix.signContent(content)
+	sig := fix.signContent(content, "v1.0.0", "solaris", "amd64")
 
 	t.Run("rejects unknown platform", func(t *testing.T) {
 		rec := doPublish(server, "v1.0.0", "solaris", "amd64", "test-tenant", sig, content)
@@ -238,7 +272,7 @@ func TestHandlePublishStewardBinary_ValidInput(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	content := []byte("cfgms-steward binary content")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v0.5.12", "linux", "amd64")
 
 	rec := doPublish(server, "v0.5.12", "linux", "amd64", "test-tenant", sigBase64, content)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -264,14 +298,14 @@ func TestHandlePublishStewardBinary_ForceOverwrite(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	content := []byte("original binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	rec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
 	require.Equal(t, http.StatusOK, rec.Code, "first publish must succeed")
 
 	// Overwrite with --force.
 	newContent := []byte("updated binary")
-	newSig := fix.signContent(newContent)
+	newSig := fix.signContent(newContent, "v1.0.0", "linux", "amd64")
 	q := url.Values{}
 	q.Set("signature", newSig)
 	q.Set("force", "true")
@@ -290,7 +324,7 @@ func TestHandlePublishStewardBinary_ForceOverwrite(t *testing.T) {
 func TestHandlePublishStewardBinary_InvalidVersion(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "1.0.0", "linux", "amd64")
 
 	rec := doPublish(server, "1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -301,7 +335,7 @@ func TestHandlePublishStewardBinary_InvalidVersion(t *testing.T) {
 func TestHandlePublishStewardBinary_InvalidPlatform(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "solaris", "amd64")
 
 	rec := doPublish(server, "v1.0.0", "solaris", "amd64", "test-tenant", sigBase64, content)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -312,7 +346,7 @@ func TestHandlePublishStewardBinary_InvalidPlatform(t *testing.T) {
 func TestHandlePublishStewardBinary_NoTenant(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/installer/steward-binaries/v1.0.0/linux/amd64?signature="+sigBase64,
@@ -346,7 +380,7 @@ func TestHandleGetStewardBinary_ReturnsStream(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	content := []byte("cfgms-steward-binary-content-for-get-test")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.2.3", "darwin", "arm64")
 
 	// Publish first.
 	rec := doPublish(server, "v1.2.3", "darwin", "arm64", "get-tenant", sigBase64, content)
@@ -374,7 +408,7 @@ func TestHandleGetStewardBinary_TenantIsolation(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	content := []byte("tenant-a binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	// Publish under tenant-a.
 	rec := doPublish(server, "v1.0.0", "linux", "amd64", "tenant-a", sigBase64, content)
@@ -437,7 +471,7 @@ func TestHandlePublishStewardBinary_LabelsStoredCorrectly(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	content := []byte("binary for label test")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v2.0.0", "windows", "amd64")
 
 	// Inject an operator identity so published_by is non-empty.
 	q2 := url.Values{}
@@ -523,7 +557,7 @@ func getWithPrincipal(server *Server, principalReq func(*http.Request) *http.Req
 func TestPublish_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("admin-published steward binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	rec := publishWithPrincipal(server, withAdminPrincipal, "v1.0.0", "linux", "amd64", sigBase64, content)
 
@@ -537,7 +571,7 @@ func TestPublish_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
 func TestPublish_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("scoped-but-tenantless binary")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	emptyScoped := func(req *http.Request) *http.Request { return withScopedPrincipal(req, "") }
 	rec := publishWithPrincipal(server, emptyScoped, "v1.0.0", "linux", "amd64", sigBase64, content)
@@ -551,7 +585,7 @@ func TestPublish_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 func TestGetStewardBinary_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 	content := []byte("admin binary for get")
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v1.2.3", "darwin", "arm64")
 
 	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v1.2.3", "darwin", "arm64", sigBase64, content)
 	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())

@@ -509,8 +509,13 @@ func (c *TransportClient) buildHTTPClientForUpgrade() (*http.Client, error) {
 }
 
 // verifyBinarySignature constructs an ephemeral trust store and calls
-// trust.VerifyBundleSignature. In tests, c.upgradePublisherTrustStore may
+// trust.VerifyStewardBinarySignature. In tests, c.upgradePublisherTrustStore may
 // override the default CFGMSPublisherIdentity() store.
+//
+// The signature is verified over the canonical (content hash, version, platform, arch)
+// message, so a genuinely signed binary for one release cannot be replayed as another
+// (Issue #2834). hexSHA256 MUST be the digest recomputed locally over the received
+// bytes — never a value echoed by the serving controller.
 func (c *TransportClient) verifyBinarySignature(hexSHA256 string, params *pushStewardBinaryParams) error {
 	c.mu.RLock()
 	overrideStore := c.upgradePublisherTrustStore
@@ -525,13 +530,12 @@ func (c *TransportClient) verifyBinarySignature(hexSHA256 string, params *pushSt
 		store = ts
 	}
 
-	b := bundle.Bundle{ContentHash: hexSHA256}
 	sig := bundle.BundleSignature{
 		Publisher: params.Publisher,
 		Algorithm: "ed25519",
 		Signature: params.BundleSignature,
 	}
-	return trust.VerifyBundleSignature(&b, sig, store)
+	return trust.VerifyStewardBinarySignature(hexSHA256, params.Version, params.Platform, params.Arch, sig, store)
 }
 
 // isVersionRevoked checks whether v is in the cached revoked versions list.

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // testUpgradePrivKey returns the zero-seed Ed25519 private key for E2E upgrade signing.
@@ -28,13 +30,16 @@ func testUpgradePrivKey() ed25519.PrivateKey {
 }
 
 // signUploadContent signs binary content using the test Ed25519 key.
-// The message is the UTF-8 encoding of the SHA-256 hex digest, matching
-// trust.VerifyBundleSignature's message derivation. Returns a URL-safe base64
-// (no padding) encoded signature suitable for the ?signature= query parameter.
-func signUploadContent(content []byte) string {
+// The message is the canonical (contentHash, version, platform, arch) composite from
+// trust.StewardBinaryMessage, matching trust.VerifyStewardBinarySignature's derivation
+// (Issue #2834). Returns a URL-safe base64 (no padding) encoded signature suitable for
+// the ?signature= query parameter.
+func signUploadContent(t *testing.T, content []byte, version, platform, arch string) string {
+	t.Helper()
 	sum := sha256.Sum256(content)
-	msg := []byte(hex.EncodeToString(sum[:]))
-	sig := ed25519.Sign(testUpgradePrivKey(), msg)
+	msg, err := trust.StewardBinaryMessage(hex.EncodeToString(sum[:]), version, platform, arch)
+	require.NoError(t, err)
+	sig := ed25519.Sign(testUpgradePrivKey(), []byte(msg))
 	return base64.RawURLEncoding.EncodeToString(sig)
 }
 
@@ -43,7 +48,7 @@ func signUploadContent(content []byte) string {
 // Set force=true to overwrite an existing entry without 409. Returns HTTP status code.
 func publishStewardBin(t *testing.T, client *http.Client, version string, content []byte, force bool) int {
 	t.Helper()
-	sig := signUploadContent(content)
+	sig := signUploadContent(t, content, version, "linux", "amd64")
 	u := fmt.Sprintf("%s/api/v1/installer/steward-binaries/%s/linux/amd64?signature=%s",
 		fleetControllerHTTP, version, sig)
 	if force {
