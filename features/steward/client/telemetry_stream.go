@@ -227,6 +227,23 @@ func (t *TelemetryStream) runStream(ctx context.Context, stop <-chan struct{}) e
 				t.logger.Warn("TelemetryStream: Snapshot failed", "error", err)
 				continue
 			}
+			// Check again for a control message that arrived while Snapshot()
+			// was in flight. On slow platforms (e.g. cold Windows CI), Snapshot()
+			// can take hundreds of milliseconds — long enough for the controller's
+			// unsubscribe to arrive and be queued in recvCh during the collection.
+			// If unsubscribe arrived, suppress this result; the controller has
+			// signalled it no longer wants snapshots. This is a production-contract
+			// fix: "stop" means stop, even for an already-started collection.
+			select {
+			case req := <-recvCh:
+				ticker, tickCh = applyTelemetryControl(req, ticker, tickCh)
+				if ticker == nil {
+					// Unsubscribe arrived during collection: drop the stale result.
+					continue
+				}
+				// Re-subscribe arrived during collection: fall through to send.
+			default:
+			}
 			pb := telemetryToProto(snap, t.stewardID)
 			if sendErr := stream.Send(pb); sendErr != nil {
 				return sendErr
