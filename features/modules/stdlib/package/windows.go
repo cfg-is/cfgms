@@ -109,11 +109,13 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 	// the install fully headless (`--silent --disable-interactivity`). Scope is
 	// intentionally NOT pinned to machine: a hard `--scope machine` makes winget
 	// reject any package that doesn't publish a machine-tagged installer
-	// (0x8A15002B, "no applicable installer"). NOTE: winget install as SYSTEM is
-	// not reliable for every package — some MSIs reject the service-account
-	// context (0x80070057); machine-wide installs on a steward are better served
-	// by a machine-scoped provider (chocolatey with an org source). winget's
-	// strength here is query/discovery; see the package-provider allowlist.
+	// (0x8A15002B, "no applicable installer"). winget install as SYSTEM works well
+	// for MSI/EXE-installer packages (verified live: 7zip.7zip installs cleanly as
+	// nt authority\system). The one class it CANNOT install is MSIX/AppX — the
+	// Local System account may not register AppX packages (0x80070057), a Windows
+	// restriction, not a winget flaw. Packages whose winget manifest is MSIX-only
+	// (e.g. Microsoft.PowerShell) therefore need a machine-scoped provider such as
+	// chocolatey; that is what the per-resource provider allowlist is for.
 	cmd := exec.CommandContext(ctx, m.bin, "install",
 		"--silent", "--disable-interactivity",
 		"--accept-source-agreements", "--accept-package-agreements", name)
