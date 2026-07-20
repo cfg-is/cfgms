@@ -109,6 +109,10 @@ var knownPermissions = map[string]bool{
 	"workflow:cancel":  true,
 	// Trigger management (Issue #2725)
 	"trigger:manage": true,
+	// Module bundle approval management (Issue #2728)
+	"module:list-approvals": true,
+	"module:approve":        true,
+	"module:reject":         true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

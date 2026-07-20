@@ -77,13 +77,14 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// WebAuthn passkey / FIDO2 registration (Issue #2782) — credential-minting surface.
 	{"POST", "/api/v1/web/accounts/test-user/webauthn/register/begin", "webauthn:register"},
 	{"POST", "/api/v1/web/accounts/test-user/webauthn/register/finish", "webauthn:register"},
+	// Module bundle approval (Issue #2728) — admin decision on code executed on every managed endpoint.
+	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/approve", "module:approve"},
+	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/reject", "module:reject"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
 // that have no REST routes yet — forward-declared for future stories.
 var knownFuturePermissions = map[string]bool{
-	"module:approve":      true,
-	"module:reject":       true,
 	"publisher-trust:add": true,
 }
 

@@ -118,6 +118,14 @@ When the controller receives a bundle request (from a steward or a fleet deploym
 
 Approval state lives at the controller. Stewards do not maintain their own approval queue. A steward that receives a bundle from the controller can trust that the controller-side approval check has already passed (for `controller` mode) or re-verify the signature independently (for `strict` mode).
 
+The human-in-the-loop approval step is exposed via a REST surface:
+
+- `GET /api/v1/modules/approvals` — lists bundles currently in the pending queue.
+- `POST /api/v1/modules/approvals/{address}/approve` — records a human approve decision; requires AssuranceStrong (`module:approve`).
+- `POST /api/v1/modules/approvals/{address}/reject` — records a human reject decision; requires AssuranceStrong (`module:reject`).
+
+Both mutating endpoints are audited and gated behind the AssuranceStrong assurance level (mTLS admin cert or a strong-factor authenticated session). API-key principals cannot call them. The read endpoint (`module:list-approvals`) follows the existing pattern for read-only routes and does not require elevated assurance.
+
 ### Stdlib governance
 
 The CFGMS standard library modules follow **the same module contract** as third-party modules: same `module.yaml` structure, same bundle format, same signing requirement. The only distinction is that stdlib modules are the **installer payload** — they are distributed with CFGMS itself, and their publisher keys are the CFGMS build keys already compiled into the steward binary.
