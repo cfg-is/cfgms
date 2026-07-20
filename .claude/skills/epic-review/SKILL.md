@@ -187,7 +187,14 @@ EOF
 # Remediation is repo-artifact dev work → a PRIVATE project draft under the epic,
 # never a public issue. create-story returns CREATED_DRAFT:<item_id> at Draft
 # status (Tech Lead validates before it becomes Ready/dispatchable).
-/workspace/scripts/pipeline-helper.sh create-story <epic_num> \
+#
+# Resolve the helper from the repo root so this works in BOTH the container
+# (repo at /workspace) and a host session (repo elsewhere). Do NOT hardcode
+# /workspace — on the host that path does not exist, so this branch dies with
+# "No such file or directory" and the epic's remediation is silently never
+# drafted. Same rule as pipeline-sweep's Phase 2.
+HELPER="$(git rev-parse --show-toplevel)/scripts/pipeline-helper.sh"
+"$HELPER" create-story <epic_num> \
   "remediation: <shortened epic title> — <one-line gap>" \
   /tmp/epic-remediation-<N>.md
 ```
