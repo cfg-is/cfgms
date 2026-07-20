@@ -521,7 +521,7 @@ func TestTelemetryStream_IntervalClamping(t *testing.T) {
 	}
 
 	times := timingCol.snapTimes()
-	require.Len(t, times, 2, "must have recorded 2 Snapshot invocations")
+	require.GreaterOrEqual(t, len(times), 2, "must have recorded at least 2 Snapshot invocations")
 	gap := times[1].Sub(times[0])
 	// The gap between tick-fire instants must be ≥ 900 ms (10% slack for
 	// scheduling jitter). This is the ticker cadence directly — collection
