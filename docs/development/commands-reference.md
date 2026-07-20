@@ -812,3 +812,118 @@ web-server
 | `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
 | `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
+
+## cfg webauthn — Passkey Bootstrap and Recovery (Issue #2783)
+
+Manage WebAuthn passkeys for browser-based controller login. All subcommands require
+a valid admin bundle (mTLS certificate) — Bearer session tokens are rejected. This
+is an ADR-021 §7 invariant: the cert-authenticated path is the only path for passkey
+bootstrap and recovery, preventing a password/email-based downgrade attack.
+
+**Authentication requirement:** The admin bundle must be discoverable via one of:
+- `--bundle <path>` flag
+- `CFGMS_ADMIN_BUNDLE` environment variable
+- `~/.config/cfgms/admin.bundle.yaml` (user config dir)
+- `/etc/cfgms/admin.bundle.yaml` (system path)
+
+Run `cfg connect` to generate and install an admin bundle.
+
+### cfg webauthn register
+
+Registers a new WebAuthn passkey for a web account. Opens the system browser to
+complete the authenticator ceremony; the browser must be able to reach the controller's
+configured RPID origin.
+
+```
+cfg webauthn register --username <user> [--label <name>] [--bundle <path>]
+```
+
+Example:
+
+```
+cfg webauthn register --username alice --label "YubiKey 5C"
+# Requesting WebAuthn registration challenge from controller...
+# Opening browser at http://127.0.0.1:52341/register
+# ...
+# Passkey registered successfully!
+#   Username:      alice
+#   Label:         YubiKey 5C
+#   Registered at: 2026-07-19T22:00:00Z
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--username` | — | Account username (required) |
+| `--label` | — | Human-readable label for the credential |
+| `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
+| `--api-url` | bundle URL | Override controller URL |
+| `--timeout` | 5m | Browser ceremony timeout |
+
+### cfg webauthn list
+
+Lists all WebAuthn credentials registered to an account.
+
+```
+cfg webauthn list --username <user> [--bundle <path>] [--json]
+```
+
+Example:
+
+```
+cfg webauthn list --username alice
+# WebAuthn credentials for alice (2):
+#
+#   [1] ID:    6xrtBhJQW6QU4t...
+#       Label: YubiKey 5C
+#       Registered: 2026-07-01T00:00:00Z
+#
+#   [2] ID:    Y3JlZGVudGlhb...
+#       Registered: 2026-07-10T00:00:00Z
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--username` | — | Account username (required) |
+| `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
+| `--api-url` | bundle URL | Override controller URL |
+| `--json` | false | Output as JSON |
+
+### cfg webauthn revoke
+
+Removes a WebAuthn credential from an account. Requires `--force` when revoking the
+last credential (the mTLS admin certificate remains valid for CLI access regardless
+of WebAuthn credential count, per ADR-021 §7).
+
+```
+cfg webauthn revoke <credential-id> --username <user> [--force] [--bundle <path>]
+```
+
+Example (non-last credential):
+
+```
+cfg webauthn revoke Y3JlZGVudGlhbC1pZC0x --username alice
+# Credential revoked: Y3JlZGVudGlhbC1pZC0x
+```
+
+Example (last credential, requires `--force`):
+
+```
+cfg webauthn revoke Y3JlZGVudGlhbC1pZC0x --username alice --force
+# Warning: revoking the last WebAuthn credential for alice.
+# Browser login will require a new passkey registration via 'cfg webauthn register'.
+#
+# Credential revoked: Y3JlZGVudGlhbC1pZC0x
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--username` | — | Account username (required) |
+| `--force` | false | Required when revoking the last credential |
+| `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
+| `--api-url` | bundle URL | Override controller URL |

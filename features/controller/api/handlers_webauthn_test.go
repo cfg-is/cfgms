@@ -402,6 +402,142 @@ func TestWebAuthnRegistration(t *testing.T) {
 	})
 }
 
+// --- Issue #2783: list and revoke endpoint tests ---
+
+// doListCredentials calls handleWebAuthnListCredentials directly.
+func doListCredentials(t *testing.T, server *Server, username string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/credentials", username), nil)
+	req = withVars(req, map[string]string{"username": username})
+	req = withPrincipal(req, testAdminPrincipal())
+	rec := httptest.NewRecorder()
+	server.handleWebAuthnListCredentials(rec, req)
+	return rec
+}
+
+// doRevokeCredential calls handleWebAuthnRevokeCredential directly.
+func doRevokeCredential(t *testing.T, server *Server, username, credIDParam string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/revoke/%s", username, credIDParam), nil)
+	req = withVars(req, map[string]string{"username": username, "credential_id": credIDParam})
+	req = withPrincipal(req, testAdminPrincipal())
+	rec := httptest.NewRecorder()
+	server.handleWebAuthnRevokeCredential(rec, req)
+	return rec
+}
+
+// injectCredential adds a synthetic WebAuthn credential directly to a web account,
+// bypassing the full registration ceremony.
+func injectCredential(t *testing.T, server *Server, username string, credID []byte) {
+	t.Helper()
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct, "account %q must exist before injecting a credential", username)
+	acct.Credentials = append(acct.Credentials, WebAuthnCredential{
+		ID:           credID,
+		Label:        "injected-test-credential",
+		RegisteredAt: time.Now(),
+	})
+	require.NoError(t, server.persistWebAccount(context.Background(), acct, "test-injector"))
+}
+
+// TestWebAuthnListCredentials verifies handleWebAuthnListCredentials (Issue #2783).
+func TestWebAuthnListCredentials(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+	t.Run("empty list when no credentials registered", func(t *testing.T) {
+		rec := doListCredentials(t, server, username)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var envelope struct {
+			Data WebAuthnListResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+		assert.Equal(t, username, envelope.Data.Username)
+		assert.Empty(t, envelope.Data.Credentials, "newly-created account has no credentials")
+	})
+
+	credID := []byte("test-credential-id-bytes")
+	injectCredential(t, server, username, credID)
+
+	t.Run("lists injected credential with base64url ID", func(t *testing.T) {
+		rec := doListCredentials(t, server, username)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var envelope struct {
+			Data WebAuthnListResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+		require.Len(t, envelope.Data.Credentials, 1)
+		assert.Equal(t, base64.RawURLEncoding.EncodeToString(credID), envelope.Data.Credentials[0].ID)
+	})
+
+	t.Run("account not found returns 404", func(t *testing.T) {
+		rec := doListCredentials(t, server, "no-such-user")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("invalid username returns 400", func(t *testing.T) {
+		// Use a placeholder URL path; inject the invalid username via withVars so
+		// httptest.NewRequest doesn't panic on the special characters.
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/v1/web/accounts/placeholder/webauthn/credentials", nil)
+		req = withVars(req, map[string]string{"username": "bad user!"})
+		req = withPrincipal(req, testAdminPrincipal())
+		rec := httptest.NewRecorder()
+		server.handleWebAuthnListCredentials(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+}
+
+// TestWebAuthnRevokeCredential verifies handleWebAuthnRevokeCredential (Issue #2783).
+func TestWebAuthnRevokeCredential(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+	credID := []byte("revokable-credential-id")
+	credIDParam := base64.RawURLEncoding.EncodeToString(credID)
+	injectCredential(t, server, username, credID)
+
+	t.Run("revokes existing credential and returns 204", func(t *testing.T) {
+		rec := doRevokeCredential(t, server, username, credIDParam)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+		// Verify the credential is gone.
+		acct, err := server.getWebAccount(context.Background(), username)
+		require.NoError(t, err)
+		assert.Empty(t, acct.Credentials, "credential must be removed after revocation")
+	})
+
+	t.Run("credential already revoked returns 404", func(t *testing.T) {
+		rec := doRevokeCredential(t, server, username, credIDParam)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("invalid base64url credential_id returns 400", func(t *testing.T) {
+		rec := doRevokeCredential(t, server, username, "not!!valid$$base64")
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("account not found returns 404", func(t *testing.T) {
+		rec := doRevokeCredential(t, server, "no-such-user", credIDParam)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("server permits last-credential revocation (guard is in CLI)", func(t *testing.T) {
+		// Re-inject the credential for a fresh test.
+		_, secondUsername := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		lastCredID := []byte("last-credential")
+		lastCredIDParam := base64.RawURLEncoding.EncodeToString(lastCredID)
+		injectCredential(t, server, secondUsername, lastCredID)
+
+		rec := doRevokeCredential(t, server, secondUsername, lastCredIDParam)
+		assert.Equal(t, http.StatusNoContent, rec.Code,
+			"server must permit last-credential revocation; the guard lives in the CLI")
+	})
+}
+
 // TestWebAuthnTOTPSeparation confirms that the WebAuthn registration code and the
 // permission-assurance registry contain no reference to TOTP. ADR-021 Decision 2:
 // TOTP must never satisfy AssuranceStrong; these subsystems must remain unconnected.

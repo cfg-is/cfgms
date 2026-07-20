@@ -992,3 +992,124 @@ func (c *APIClient) RevokeSession(ctx context.Context, sessionID string) error {
 	}
 	return nil
 }
+
+// --- WebAuthn credential management (Issue #2783) ---
+
+// APIWebAuthnCredentialInfo is the CLI-side view of a registered WebAuthn credential.
+type APIWebAuthnCredentialInfo struct {
+	ID           string   `json:"id"`
+	Label        string   `json:"label,omitempty"`
+	Transport    []string `json:"transport,omitempty"`
+	RegisteredAt string   `json:"registered_at"`
+}
+
+// APIWebAuthnListResponse is the response from GET /api/v1/web/accounts/{username}/webauthn/credentials.
+type APIWebAuthnListResponse struct {
+	Username    string                      `json:"username"`
+	Credentials []APIWebAuthnCredentialInfo `json:"credentials"`
+}
+
+// APIWebAuthnRegisterFinishResponse is the response from POST .../webauthn/register/finish.
+type APIWebAuthnRegisterFinishResponse struct {
+	CredentialID []byte `json:"credential_id"`
+	Label        string `json:"label,omitempty"`
+	RegisteredAt string `json:"registered_at"`
+}
+
+// WebAuthnListCredentials calls GET /api/v1/web/accounts/{username}/webauthn/credentials
+// and returns the list of registered credentials for that account.
+func (c *APIClient) WebAuthnListCredentials(ctx context.Context, username string) (*APIWebAuthnListResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/web/accounts/"+url.PathEscape(username)+"/webauthn/credentials", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIWebAuthnListResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode credential list: %w", err)
+	}
+	return &result, nil
+}
+
+// WebAuthnBeginRegistration calls POST /api/v1/web/accounts/{username}/webauthn/register/begin
+// and returns the raw PublicKeyCredentialCreationOptions JSON (the data field from the
+// APIResponse envelope). The caller passes this JSON to the browser's navigator.credentials.create().
+func (c *APIClient) WebAuthnBeginRegistration(ctx context.Context, username string) (json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/web/accounts/"+url.PathEscape(username)+"/webauthn/register/begin", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return envelope.Data, nil
+}
+
+// WebAuthnFinishRegistration calls POST /api/v1/web/accounts/{username}/webauthn/register/finish
+// with the authenticator response JSON from the browser's navigator.credentials.create() result.
+// label is attached as a query parameter. Returns the registered credential metadata.
+func (c *APIClient) WebAuthnFinishRegistration(ctx context.Context, username, label string, credResponseJSON []byte) (*APIWebAuthnRegisterFinishResponse, error) {
+	path := "/api/v1/web/accounts/" + url.PathEscape(username) + "/webauthn/register/finish"
+	if label != "" {
+		path += "?label=" + url.QueryEscape(label)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", path, bytes.NewReader(credResponseJSON))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	var result APIWebAuthnRegisterFinishResponse
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode finish response: %w", err)
+	}
+	return &result, nil
+}
+
+// WebAuthnRevokeCredential calls POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}
+// to remove the specified credential from the account. credential_id must be the base64url-encoded
+// credential ID (as returned by WebAuthnListCredentials).
+func (c *APIClient) WebAuthnRevokeCredential(ctx context.Context, username, credentialID string) error {
+	path := "/api/v1/web/accounts/" + url.PathEscape(username) + "/webauthn/revoke/" + url.PathEscape(credentialID)
+	resp, err := c.doRequest(ctx, "POST", path, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return c.parseError(resp)
+	}
+	return nil
+}

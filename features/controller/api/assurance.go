@@ -57,10 +57,12 @@ var permissionAssurance = map[string]Requirement{
 	// (a lost/stolen device needs revocation to succeed, not fail for assurance).
 	"session:create": {Min: session.AssuranceStrong}, // POST /sessions — mints long-lived Bearer token
 
-	// WebAuthn passkey / FIDO2 registration (Issue #2782).
-	// Credential-minting surface — gated at AssuranceStrong, consistent with
-	// session:create and web-account:create (both also mint long-lived credentials).
+	// WebAuthn passkey / FIDO2 registration and revocation (Issue #2782, #2783).
+	// Credential-minting and credential-removal surfaces — both gated at AssuranceStrong,
+	// consistent with session:create and web-account:create. List (webauthn:list) is read-only
+	// and is intentionally absent from this map (reads are outside the elevated surface).
 	"webauthn:register": {Min: session.AssuranceStrong}, // POST /web/accounts/{username}/webauthn/register/begin|finish
+	"webauthn:revoke":   {Min: session.AssuranceStrong}, // POST /web/accounts/{username}/webauthn/revoke/{credential_id}
 
 	// Forward-declared catastrophic permissions (no live REST routes yet).
 	// RequireUserPresence: true marks these for a future fresh WebAuthn assertion;

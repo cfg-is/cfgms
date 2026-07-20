@@ -36,3 +36,19 @@ type WebAuthnRegisterFinishResponse struct {
 	Label        string    `json:"label,omitempty"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
+
+// WebAuthnCredentialInfo is the public view of a registered credential, returned
+// by the list endpoint. The public key bytes are omitted — credential ID, label,
+// transport hints, and registration timestamp are sufficient for display and revocation.
+type WebAuthnCredentialInfo struct {
+	ID           string    `json:"id"` // base64url-encoded credential ID
+	Label        string    `json:"label,omitempty"`
+	Transport    []string  `json:"transport,omitempty"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
+// WebAuthnListResponse is returned by GET /api/v1/web/accounts/{username}/webauthn/credentials.
+type WebAuthnListResponse struct {
+	Username    string                   `json:"username"`
+	Credentials []WebAuthnCredentialInfo `json:"credentials"`
+}

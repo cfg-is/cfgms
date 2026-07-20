@@ -2,15 +2,24 @@
 // Copyright 2026 Jordan Ritz
 //
 // Issue #2782: WebAuthn passkey / FIDO2 registration endpoints.
+// Issue #2783: WebAuthn credential list and revoke endpoints (cfg CLI bootstrap).
 //
-// Two routes (both require webauthn:register permission, AssuranceStrong via
-// permissionAssurance — credential-minting surface, consistent with session:create):
+// Routes (register: webauthn:register permission, AssuranceStrong;
 //
-//	POST /api/v1/web/accounts/{username}/webauthn/register/begin
-//	     Returns PublicKeyCredentialCreationOptions (the WebAuthn challenge).
+//	        list:     webauthn:list permission, no assurance requirement;
+//	        revoke:   webauthn:revoke permission, AssuranceStrong):
 //
-//	POST /api/v1/web/accounts/{username}/webauthn/register/finish
-//	     Verifies the authenticator response, persists the credential.
+//		POST /api/v1/web/accounts/{username}/webauthn/register/begin
+//		     Returns PublicKeyCredentialCreationOptions (the WebAuthn challenge).
+//
+//		POST /api/v1/web/accounts/{username}/webauthn/register/finish
+//		     Verifies the authenticator response, persists the credential.
+//
+//		GET  /api/v1/web/accounts/{username}/webauthn/credentials
+//		     Lists registered credentials for the account (public metadata only).
+//
+//		POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}
+//		     Removes a specific credential. credential_id is base64url-encoded.
 //
 // Server-side verification enforces: challenge freshness (5-min TTL, server-stored),
 // single-use (session deleted on every finish attempt), origin match, RP-ID match,
@@ -19,6 +28,8 @@
 package api
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"time"
@@ -318,4 +329,135 @@ func NewWebAuthnFromConfig(rpID, rpDisplayName string, rpOrigins []string) (*web
 		return nil, fmt.Errorf("webauthn config invalid: %w", err)
 	}
 	return wa, nil
+}
+
+// handleWebAuthnListCredentials handles
+// GET /api/v1/web/accounts/{username}/webauthn/credentials.
+//
+// Returns public metadata for all WebAuthn credentials registered to the account.
+// The public key bytes are omitted from the response — only the credential ID,
+// label, transport hints, and registration timestamp are returned (sufficient for
+// display and for identifying a credential to revoke).
+func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Request) {
+	username := mux.Vars(r)["username"]
+	if err := validateWebUsername(username); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
+		return
+	}
+
+	acct, err := s.getWebAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up web account for credential list",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up web account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	infos := make([]WebAuthnCredentialInfo, 0, len(acct.Credentials))
+	for _, c := range acct.Credentials {
+		infos = append(infos, WebAuthnCredentialInfo{
+			ID:           base64.RawURLEncoding.EncodeToString(c.ID),
+			Label:        c.Label,
+			Transport:    c.Transport,
+			RegisteredAt: c.RegisteredAt,
+		})
+	}
+
+	s.writeResponse(w, http.StatusOK, WebAuthnListResponse{
+		Username:    username,
+		Credentials: infos,
+	})
+}
+
+// handleWebAuthnRevokeCredential handles
+// POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}.
+//
+// Removes the named credential from the account. credential_id is the base64url-encoded
+// credential ID as returned by the list endpoint. Returns 404 when the credential is not
+// found on the account; returns 204 on success.
+//
+// Self-lockout guard: this endpoint does NOT enforce the "last credential" check —
+// that is a deliberate UX guard in the cfg CLI (which requires --force for the last
+// credential). The server permits removal even of the last credential, because the admin's
+// mTLS cert remains valid regardless of WebAuthn credential count (ADR-021 §7).
+func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+	if err := validateWebUsername(username); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
+		return
+	}
+
+	credIDParam := vars["credential_id"]
+	if credIDParam == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "credential_id is required", "INVALID_CREDENTIAL_ID")
+		return
+	}
+	credIDBytes, err := base64.RawURLEncoding.DecodeString(credIDParam)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "credential_id must be base64url encoded", "INVALID_CREDENTIAL_ID")
+		return
+	}
+
+	acct, err := s.getWebAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up web account for credential revoke",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up web account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	// Find the credential by byte-equal ID comparison.
+	found := false
+	remaining := make([]WebAuthnCredential, 0, len(acct.Credentials))
+	for _, c := range acct.Credentials {
+		if bytes.Equal(c.ID, credIDBytes) {
+			found = true
+			continue
+		}
+		remaining = append(remaining, c)
+	}
+	if !found {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Credential not found on this account", "CREDENTIAL_NOT_FOUND")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	actingPrincipalID := ""
+	if principal != nil {
+		actingPrincipalID = principal.ID
+	}
+
+	updatedAcct := *acct
+	updatedAcct.Credentials = remaining
+	if err := s.persistWebAccount(r.Context(), &updatedAcct, actingPrincipalID); err != nil {
+		s.logger.Error("Failed to persist credential revocation",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to persist credential revocation", "STORE_ERROR")
+		return
+	}
+	s.cacheWebAccount(&updatedAcct)
+
+	s.logger.Info("WebAuthn credential revoked",
+		"username", logging.SanitizeLogValue(username),
+		"acting_principal", logging.SanitizeLogValue(actingPrincipalID))
+
+	w.WriteHeader(http.StatusNoContent)
 }
