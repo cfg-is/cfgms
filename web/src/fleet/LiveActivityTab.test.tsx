@@ -41,7 +41,7 @@ class FakeWebSocket {
     this.onopen?.(new Event('open'))
   }
 
-  send(_: string) {
+  send() {
     // browser → server direction; ignored in these tests
   }
 
