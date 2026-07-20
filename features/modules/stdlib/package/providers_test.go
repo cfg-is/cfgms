@@ -267,8 +267,11 @@ providers:
 	got, err := m.Get(ctx, "nginx")
 	require.NoError(t, err)
 
-	assert.Equal(t, []string{"apt", "dnf"}, got.AsMap()["providers"],
-		"observed providers must echo the authored list verbatim")
+	// AsMap emits []interface{} (not []string) so it matches the desired config,
+	// which decodes JSON/YAML arrays as []interface{} — otherwise the comparator's
+	// reflect.DeepEqual type check would flag a false drift on every cycle.
+	assert.Equal(t, []interface{}{"apt", "dnf"}, got.AsMap()["providers"],
+		"observed providers must echo the authored list verbatim (as []interface{})")
 	// The drift comparator only compares fields the AUTHORED config declares
 	// as managed (see resolved_module_drift note); Get additionally reports
 	// PackageManager (the selected provider) even when not authored — that's
