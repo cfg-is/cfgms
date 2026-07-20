@@ -125,7 +125,17 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
+		out := string(output)
+		// winget install on an already-installed package tries to upgrade it and
+		// returns non-zero (0x8A15002B, UPDATE_NOT_APPLICABLE) when it is already
+		// current. That is compliant, not a failure — normalise to success so a
+		// present package does not report a perpetual install error.
+		if strings.Contains(out, "No available upgrade") ||
+			strings.Contains(out, "No newer package versions are available") ||
+			strings.Contains(out, "already installed and current") {
+			return nil
+		}
+		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, out)
 	}
 	return nil
 }

@@ -74,14 +74,18 @@ func (c *Config) AsMap() map[string]interface{} {
 	if c.Update {
 		result["update"] = c.Update
 	}
+	// Emit string lists as []interface{}: the desired config decodes from JSON/YAML
+	// with []interface{} slices, and the drift comparator's reflect.DeepEqual
+	// treats []string and []interface{} as different types — so a []string here
+	// would drift forever against an identical []interface{} desired.
 	if len(c.Dependencies) > 0 {
-		result["dependencies"] = c.Dependencies
+		result["dependencies"] = stringsToIfaces(c.Dependencies)
 	}
 	if c.PackageManager != "" {
 		result["package_manager"] = c.PackageManager
 	}
 	if len(c.Providers) > 0 {
-		result["providers"] = c.Providers
+		result["providers"] = stringsToIfaces(c.Providers)
 	}
 
 	// Only include maintenance if it has values

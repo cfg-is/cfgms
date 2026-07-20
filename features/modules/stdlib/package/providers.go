@@ -159,6 +159,18 @@ func extractProviders(configMap map[string]interface{}) []string {
 	}
 }
 
+// stringsToIfaces converts a []string to []interface{} so AsMap emits string
+// lists in the same shape the desired config decodes to (JSON/YAML arrays are
+// []interface{}), keeping the drift comparator's reflect.DeepEqual from treating
+// an otherwise-identical list as changed purely on element type.
+func stringsToIfaces(in []string) []interface{} {
+	out := make([]interface{}, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
 // authoredProviders returns the resource's own provider allowlist as
 // recorded by Configure: the raw `providers` list if authored, else the
 // back-compat single-item list derived from `package_manager`, else nil.
