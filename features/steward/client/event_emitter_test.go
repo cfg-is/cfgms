@@ -4,6 +4,7 @@ package client_test
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"sync"
@@ -13,13 +14,61 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/steward/client"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// emitterMTLSCreds generates a CA plus server and client certificates using the
+// central pkg/cert.Manager provider and returns the paired transport
+// credentials. This mirrors the mTLS pattern in telemetry_stream_test.go so the
+// emitter tests exercise the same mutual-TLS path used in production for
+// internal gRPC communication — no insecure transport.
+func emitterMTLSCreds(t *testing.T) (serverCreds, clientCreds credentials.TransportCredentials) {
+	t.Helper()
+
+	mgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Test",
+			Country:      "US",
+			ValidityDays: 1,
+		},
+	})
+	require.NoError(t, err)
+
+	caPEM, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+
+	serverCert, err := mgr.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "localhost",
+		DNSNames:     []string{"localhost"},
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+
+	serverTLS, err := cert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caPEM, tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+
+	clientCert, err := mgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-test",
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+
+	clientTLS, err := cert.CreateClientTLSConfig(
+		clientCert.CertificatePEM, clientCert.PrivateKeyPEM, caPEM, "localhost", tls.VersionTLS13,
+	)
+	require.NoError(t, err)
+
+	return credentials.NewTLS(serverTLS), credentials.NewTLS(clientTLS)
+}
 
 // ---------------------------------------------------------------------------
 // Test LogStream gRPC server
@@ -35,6 +84,9 @@ type testLogStreamServer struct {
 	// tests can synchronize on the stream actually being open instead of
 	// sleeping for an arbitrary duration.
 	ready chan struct{}
+	// received, when non-nil, is closed when the first entry arrives so
+	// tests can synchronize on actual entry receipt before stopping the server.
+	received chan struct{}
 }
 
 func (s *testLogStreamServer) LogStream(
@@ -59,6 +111,13 @@ func (s *testLogStreamServer) LogStream(
 		}
 		s.mu.Lock()
 		s.entries = append(s.entries, entry)
+		if s.received != nil {
+			select {
+			case <-s.received: // already closed
+			default:
+				close(s.received)
+			}
+		}
 		s.mu.Unlock()
 	}
 	return stream.SendAndClose(&transportpb.LogStreamResponse{
@@ -91,19 +150,31 @@ type emitterTestEnv struct {
 func newEmitterTestEnv(t *testing.T) *emitterTestEnv {
 	t.Helper()
 
+	serverCreds, clientCreds := emitterMTLSCreds(t)
+
 	srv := &testLogStreamServer{ready: make(chan struct{})}
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(grpc.Creds(serverCreds))
 	transportpb.RegisterStewardTransportServer(grpcSrv, srv)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	go func() { _ = grpcSrv.Serve(lis) }()
-	t.Cleanup(grpcSrv.GracefulStop)
+	// Forward the Serve error to the test goroutine. GracefulStop causes Serve
+	// to return nil, so a non-nil error here means the server exited
+	// unexpectedly — surface it instead of swallowing it behind opaque
+	// downstream transport failures.
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- grpcSrv.Serve(lis) }()
+	t.Cleanup(func() {
+		grpcSrv.GracefulStop()
+		if err := <-serveErr; err != nil {
+			t.Errorf("gRPC test server exited with error: %v", err)
+		}
+	})
 
 	conn, err := grpc.NewClient(
 		lis.Addr().String(),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(clientCreds),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
@@ -213,17 +284,36 @@ func TestEventEmitter_NonBlockingEnqueue_DropsWhenFull(t *testing.T) {
 // TestEventEmitter_ReconnectsOnStreamError verifies that the send goroutine
 // reconnects after a stream failure and delivers buffered entries.
 func TestEventEmitter_ReconnectsOnStreamError(t *testing.T) {
+	serverCreds, clientCreds := emitterMTLSCreds(t)
+
 	// First server: accepts one stream then stops (simulates a controller restart).
-	srv1 := &testLogStreamServer{ready: make(chan struct{})}
-	grpcSrv1 := grpc.NewServer()
+	srv1 := &testLogStreamServer{ready: make(chan struct{}), received: make(chan struct{})}
+	grpcSrv1 := grpc.NewServer(grpc.Creds(serverCreds))
 	transportpb.RegisterStewardTransportServer(grpcSrv1, srv1)
 	lis1, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	go func() { _ = grpcSrv1.Serve(lis1) }()
+
+	// Capture the Serve error. Stop() (called mid-test below) fires the server's
+	// quit signal, so Serve returns nil on a clean shutdown; a non-nil value
+	// means the server died unexpectedly and would otherwise be masked behind an
+	// opaque reconnect/connection error in the emitter.
+	serveErr1 := make(chan error, 1)
+	go func() { serveErr1 <- grpcSrv1.Serve(lis1) }()
+	t.Cleanup(func() {
+		// Stop the server before reading serveErr1 so the cleanup never
+		// deadlocks: if a t.Fatal earlier in the test unwinds the goroutine
+		// before grpcSrv1.Stop() runs in the test body, Serve(lis1) would
+		// still be running and never write to serveErr1. Stop() is idempotent,
+		// so calling it here is safe even after an in-test Stop().
+		grpcSrv1.Stop()
+		if err := <-serveErr1; err != nil {
+			t.Errorf("gRPC test server exited with error: %v", err)
+		}
+	})
 
 	conn1, err := grpc.NewClient(
 		lis1.Addr().String(),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(clientCreds),
 	)
 	require.NoError(t, err)
 
@@ -251,7 +341,13 @@ func TestEventEmitter_ReconnectsOnStreamError(t *testing.T) {
 		t.Fatal("timeout waiting for first stream connection")
 	}
 	emitter.Enqueue(&transportpb.LogEntry{Message: "before-error", CorrelationId: "r1"})
-	time.Sleep(20 * time.Millisecond) // small delay to allow send before kill
+	// Wait until the server has received at least one entry before stopping it.
+	// This replaces a fixed sleep that was too short on cold Windows runners.
+	select {
+	case <-srv1.received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first entry to reach server before stop")
+	}
 	grpcSrv1.Stop()
 	_ = conn1.Close()
 
