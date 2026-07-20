@@ -431,18 +431,53 @@ func TestTelemetryStream_SnapshotsAtRequestedInterval(t *testing.T) {
 	}
 }
 
+// timingCollector wraps a real telemetry.Collector and records time.Now() at the
+// instant each Snapshot call is entered — which happens immediately after the
+// ticker fires in the send loop (telemetry_stream.go: `case <-tickCh:` →
+// `t.collector.Snapshot(ctx)`). The real collection still runs and its result is
+// returned unchanged; this is pure instrumentation of the real component, not a
+// substitute for it. Using these timestamps instead of server-side recv times
+// removes Snapshot collection latency from the measured gap so the assertion
+// directly proves ticker cadence.
+type timingCollector struct {
+	inner telemetry.Collector
+	mu    sync.Mutex
+	snaps []time.Time
+}
+
+func (tc *timingCollector) Snapshot(ctx context.Context) (telemetry.Telemetry, error) {
+	tc.mu.Lock()
+	tc.snaps = append(tc.snaps, time.Now())
+	tc.mu.Unlock()
+	return tc.inner.Snapshot(ctx)
+}
+
+func (tc *timingCollector) snapTimes() []time.Time {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	out := make([]time.Time, len(tc.snaps))
+	copy(out, tc.snaps)
+	return out
+}
+
 // TestTelemetryStream_IntervalClamping proves that an unreasonably small
 // interval_ms is clamped to the 1 s floor rather than accepted as-is.
+//
+// The assertion measures send-side tick-fire instants (via timingCollector) rather
+// than server-side recv times. Server-side recv timestamps include Snapshot
+// collection latency, so the inter-frame gap equals tickInterval + (C₂ − C₁).
+// On a cold Windows CI runner the first Snapshot call (cold COM/SCM init) can be
+// hundreds of milliseconds slower than the second, making C₁ − C₂ positive and
+// the measured gap read below 900 ms even though the ticker itself is perfectly
+// regular. Measuring tick-fire instants eliminates the collection-latency
+// differential from the quantity under test.
 func TestTelemetryStream_IntervalClamping(t *testing.T) {
 	col := telemetry.NewCollector()
 	skipIfCollectorUnsupported(t, col)
 
-	// Record the timestamps of the first two snapshots so we can verify
-	// the actual cadence was ≥ 1 s.
-	var (
-		recvMu    sync.Mutex
-		recvTimes []time.Time
-	)
+	// timingCol wraps the real collector. It records time.Now() when each
+	// Snapshot() is entered (tick-fire proxy) then delegates to the real collector.
+	timingCol := &timingCollector{inner: col}
 
 	serverDone := make(chan struct{})
 	env := newTelemetryTestEnv(t, func(
@@ -457,13 +492,13 @@ func TestTelemetryStream_IntervalClamping(t *testing.T) {
 		}); err != nil {
 			return err
 		}
+		// Recv twice to confirm two full tick cycles have completed. By the time
+		// stream.Recv() returns for the Nth frame, timingCol has already recorded
+		// the Nth tick-fire timestamp (recording happens before Send on the client).
 		for i := 0; i < 2; i++ {
 			if _, err := stream.Recv(); err != nil {
 				return err
 			}
-			recvMu.Lock()
-			recvTimes = append(recvTimes, time.Now())
-			recvMu.Unlock()
 		}
 		return nil
 	})
@@ -471,7 +506,7 @@ func TestTelemetryStream_IntervalClamping(t *testing.T) {
 	ts := client.NewTelemetryStream(client.TelemetryStreamConfig{
 		Client:    env.client,
 		StewardID: "steward-clamp",
-		Collector: col,
+		Collector: timingCol,
 		Logger:    logging.NewNoopLogger(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -485,13 +520,12 @@ func TestTelemetryStream_IntervalClamping(t *testing.T) {
 		t.Fatal("timeout waiting for clamping test to complete")
 	}
 
-	recvMu.Lock()
-	times := recvTimes
-	recvMu.Unlock()
-
-	require.Len(t, times, 2, "must have received 2 snapshots")
+	times := timingCol.snapTimes()
+	require.Len(t, times, 2, "must have recorded 2 Snapshot invocations")
 	gap := times[1].Sub(times[0])
-	// The gap should be ≥ 900 ms (allowing 10% slack for scheduling jitter).
+	// The gap between tick-fire instants must be ≥ 900 ms (10% slack for
+	// scheduling jitter). This is the ticker cadence directly — collection
+	// latency is not part of this measurement.
 	assert.GreaterOrEqual(t, gap, 900*time.Millisecond,
 		"interval must be clamped to ≥1 s even when interval_ms=1 was requested")
 }
