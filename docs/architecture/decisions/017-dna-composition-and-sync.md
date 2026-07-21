@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
-**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX)
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022)
 **Issue:** (to be assigned at decomposition)
 **Epic:** (controller-baseline-DNA / DNA-composition epic — to be filed)
 
@@ -187,8 +187,10 @@ Read everything — even managed objects — from osquery.
 
 **Flat-DNA-surface consumers to re-home on the fragment model.** Two shipped
 consumers read/write today's flat attribute map directly and must be migrated
-onto fragments when the DNA-composition epic is decomposed (epic #2418, ADR
-Alignment item 1): the steward-side ChangeEvent→DNA attribute bridge
+onto fragments when the DNA-composition epic is decomposed (that epic is not
+yet filed; the rework obligation is recorded as *ADR Alignment* item 1 in epic
+#2418 — the cluster.cfg cascade epic those consumers shipped under): the
+steward-side ChangeEvent→DNA attribute bridge
 (#2423/#2435 — module Monitor engine events surfaced as DNA attributes) and the
 controller-side cluster-registry parser (#2424 — cluster membership parsed from
 steward DNA attributes). Both are attribute-key contracts on the flat surface;
@@ -249,4 +251,28 @@ The single commitment this rider adds: that telemetry is **addressed to the same
 - **Invariants held.** Hash determinism (A1.1 keeps metadata out of the hash), single-authority atomicity (unchanged), telemetry exclusion (A1.4 keeps signals out of DNA). The rider adds around the fragment, not inside it — partial-sync validation is untouched.
 - **Wire additions are additive.** The provenance envelope (A1.1) is additive metadata on the `commonpb.DNA` type; manifest and aggregate root are unchanged.
 - **Controller storage is the real new work** (A1.3): fragment-addressable storage becomes version-addressable. This is the load-bearing change and must be scoped explicitly in the DNA-composition epic.
-- **A companion storage-shape ADR is likely needed** for the Tier-2 topology graph (property-graph store) and the temporal query surface — flagged in roadmap.md, to be drafted separately. This rider guarantees only the **identity + history substrate** those build on.
+- **A companion storage-shape ADR is likely needed** for the Tier-2 topology graph (property-graph store) and the temporal query surface — flagged in roadmap.md, to be drafted separately. This rider guarantees only the **identity + history substrate** those build on. *(The model/contract companion has since landed as [ADR-022](022-entity-graph-model-and-access-contract.md); the storage-shape ADR remains open and inherits ADR-022 §10's constraints.)*
+
+---
+
+## Amendment 2 (2026-07-21) — Fleet-global addressing is the `eid` (ADR-022)
+
+**Status:** Accepted (2026-07-21, recorded on acceptance of [ADR-022](022-entity-graph-model-and-access-contract.md))
+
+[ADR-022](022-entity-graph-model-and-access-contract.md) §1 defines the fleet-global entity
+identity as `eid = authority_segment [ "/" fragment_id ]` (a bare authority segment names the
+asset as a whole). This supersedes, **in part**, two Amendment 1 statements:
+
+- **A1.2** "no separate node-identity scheme": the single shared identity survives, but its
+  fleet-global form is the two-part `eid`. `fragment_id` alone is not unique across a fleet;
+  it remains valid **host-local shorthand** only where the authority is implied by transport
+  context (a steward's own DNA sync, where the mTLS peer identity supplies the authority
+  segment).
+- **A1.4** "signals are addressed to a `fragment_id`": emitters of fleet-scoped data — DEX
+  signals, topology-graph edges — carry the full `eid`.
+
+Nothing else changes: the fragment model, hash determinism, authority resolution, partial-sync
+validation, provenance envelope, and versioned history are untouched. The join-for-free property
+A1.2 exists for is preserved in substance — DNA, graph nodes, and DEX signals still join on one
+shared identity; ADR-022 §1 is authoritative for the grammar, the authority-type registry, and
+the eid-constructor enforcement point.
