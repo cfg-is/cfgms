@@ -379,6 +379,29 @@ test_project_queue_integration() {
 }
 
 # ===========================================================================
+# Helper: privacy boundary check for phase 2 step i.
+#
+# Calls _pass or _fail based on whether `gh issue list` can be queried and
+# whether it finds any matching issues. Keeping this as a named function
+# makes it testable in isolation (see test_phase2_step_i_fail_open_regression).
+# ===========================================================================
+_check_phase2_privacy_boundary() {
+    local search_title="$1"
+    local issues_out issues_rc=0 issues_count=0
+    issues_out=$(gh issue list --repo cfg-is/cfgms --search "$search_title" 2>/dev/null) || issues_rc=$?
+    if [[ $issues_rc -ne 0 ]]; then
+        _fail "phase2 step i: could not verify privacy boundary — gh issue list failed (rc=${issues_rc})"
+        return
+    fi
+    issues_count=$(printf '%s' "$issues_out" | grep -c "$search_title" 2>/dev/null || true)
+    if [[ "$issues_count" -eq 0 ]]; then
+        _pass "phase2 step i: privacy boundary — no GitHub issue created for draft item"
+    else
+        _fail "phase2 step i: privacy boundary violated — found GitHub issue matching ${search_title}"
+    fi
+}
+
+# ===========================================================================
 # INTEGRATION TEST: Phase 2 full no-issue project item lifecycle E2E smoke
 #
 # Agent-container launch is NOT tested here. Docker runtime is unavailable
@@ -407,8 +430,19 @@ test_phase2_lifecycle() {
     title="phase2-lifecycle-smoke-${timestamp}"
     printf 'Phase 2 lifecycle smoke test body — %s\n' "$title" > "$body_file"
 
-    # Cleanup: fires on RETURN regardless of pass/fail
-    trap '[[ -n "${body_file:-}" ]] && rm -f "$body_file" 2>/dev/null || true; [[ -n "${item_id:-}" ]] && bash "${pq_script}" delete-item "$item_id" >/dev/null 2>&1 || true' RETURN
+    # Cleanup: fires on RETURN regardless of pass/fail.
+    # A failed delete-item is reported loudly so the leaked item_id can be
+    # removed by hand — a silent || true here would leave fixtures on the live
+    # board with no signal, which has caused real false-positive pipeline picks.
+    trap '
+        [[ -n "${body_file:-}" ]] && rm -f "$body_file" 2>/dev/null || true
+        if [[ -n "${item_id:-}" ]]; then
+            if ! bash "${pq_script}" delete-item "${item_id}" >/dev/null 2>&1; then
+                echo "WARNING: fixture item ${item_id} could not be deleted from project board — remove it manually" >&2
+                _fail "phase2 cleanup: delete-item ${item_id} failed — fixture may be leaking on live board"
+            fi
+        fi
+    ' RETURN
 
     # --- Step a: create-draft -----------------------------------------------
     local create_out create_rc=0
@@ -541,13 +575,61 @@ sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
     fi
 
     # --- Step i: privacy boundary — no GitHub issue created -----------------
-    local issues_out issues_count=0
-    issues_out=$(gh issue list --repo cfg-is/cfgms --search "phase2-lifecycle-smoke" 2>&1) || true
-    issues_count=$(printf '%s' "$issues_out" | grep -c "phase2-lifecycle-smoke" 2>/dev/null || true)
-    if [[ "$issues_count" -eq 0 ]]; then
-        _pass "phase2 step i: privacy boundary — no GitHub issue created for draft item"
+    _check_phase2_privacy_boundary "phase2-lifecycle-smoke"
+}
+
+# ===========================================================================
+# REGRESSION TEST: phase2 step i fails open — failing gh must yield FAIL
+#
+# This test is the regression guard for Issue #2867. It proves that when the
+# `gh issue list` query itself fails (e.g. rate limit, network error, revoked
+# token), the privacy boundary check reports a FAIL rather than a spurious PASS.
+#
+# The defect: 2>&1 folded stderr into issues_out, and || true discarded the
+# exit status, so a failing gh with no stdout would produce issues_count=0 and
+# _pass the check — a false green on a security gate.
+# ===========================================================================
+test_phase2_step_i_fail_open_regression() {
+    log_test "Regression: phase2 step i — failing gh query yields FAIL, not PASS (Issue #2867)"
+
+    local stub_dir
+    stub_dir=$(mktemp -d)
+    trap 'rm -rf "$stub_dir"' RETURN
+
+    # Stub gh that exits non-zero and writes only to stderr (no stdout).
+    # Models API rate limit / network failure / revoked token scenarios.
+    cat > "$stub_dir/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+echo "gh: error: HTTP 401: Unauthorized (Bad credentials)" >&2
+exit 1
+GHSTUB
+    chmod +x "$stub_dir/gh"
+
+    # Run the privacy boundary helper in a subshell so it cannot mutate the
+    # outer FAILURES/TESTS_RUN globals. Redefine _pass/_fail to emit tagged
+    # lines that the outer test can inspect.
+    local subshell_out subshell_rc=0
+    subshell_out=$(
+        _pass() { printf 'VERDICT:PASS:%s\n' "$1"; }
+        _fail() { printf 'VERDICT:FAIL:%s\n' "$1"; }
+        PATH="$stub_dir:$PATH" _check_phase2_privacy_boundary "phase2-lifecycle-smoke-regression-stub"
+    ) || subshell_rc=$?
+
+    if [[ $subshell_rc -ne 0 ]]; then
+        _fail "regression: step i subshell exited non-zero ($subshell_rc) — output: $subshell_out"
+        return
+    fi
+
+    if printf '%s' "$subshell_out" | grep -q "^VERDICT:FAIL:"; then
+        _pass "regression: failing gh query yields FAIL verdict (not PASS) — defect from issue #2867 fixed"
     else
-        _fail "phase2 step i: privacy boundary violated — found GitHub issue matching phase2-lifecycle-smoke"
+        _fail "regression: failing gh query should have produced FAIL verdict but got: $subshell_out"
+    fi
+
+    if printf '%s' "$subshell_out" | grep -q "^VERDICT:PASS:"; then
+        _fail "regression: spurious PASS emitted when gh query failed — defect from issue #2867 still present"
+    else
+        _pass "regression: no spurious PASS on failing gh query"
     fi
 }
 
@@ -568,6 +650,7 @@ test_error_path_project_queue_failure
 test_regression_comment_render_absent_from_entrypoint
 test_project_queue_integration
 test_phase2_lifecycle
+test_phase2_step_i_fail_open_regression
 
 echo ""
 echo "📊 Results: $TESTS_PASSED/$TESTS_RUN passed"
