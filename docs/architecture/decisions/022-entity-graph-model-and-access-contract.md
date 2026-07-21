@@ -1,6 +1,6 @@
 # ADR-022: Entity Graph — logical model and access contract
 
-**Status:** Draft (2026-07-21, rev 2 — post adversarial BA + Tech Lead review)
+**Status:** Accepted (2026-07-21)
 **Date:** 2026-07-21
 **Issue:** (to be assigned at decomposition)
 **Epic:** (entity-graph / troubleshooting-cockpit backend epic — to be filed)
@@ -128,8 +128,8 @@ device-id (today's DNA-ID-mismatch path, `features/steward/steward.go:375`) — 
 is a new eid joined to the old by correlation (§3), and the temporal reads accept a
 collapse-group option (§9) so "what changed on this machine over 30 days" survives a reimage.
 
-**Relationship to ADR-017 (proposed Amendment 2).** This clause deliberately changes two
-Amendment 1 statements and must be recorded as ADR-017 Amendment 2 when this ADR is accepted:
+**Relationship to ADR-017 (Amendment 2).** This clause deliberately changes two
+Amendment 1 statements, recorded as ADR-017 Amendment 2 on this ADR's acceptance:
 A1.2's "no separate node-identity scheme" and A1.4's "signals are addressed to a `fragment_id`"
 become: **fleet-global addressing is the `eid`; a bare `fragment_id` is host-local shorthand**,
 valid only where the authority is implied by the transport context (a steward's own DNA sync).
@@ -537,7 +537,7 @@ health coloring; timeline without ticket events) rather than blocking the screen
   concern.
 - Audit records keep their own store and rules; audit `resource_id` values should converge on
   `eid` format opportunistically, not as a migration.
-- ADR-017 gains Amendment 2 (§1) at acceptance of this ADR — a recorded supersession, not a
+- ADR-017 carries Amendment 2 (§1) as of this ADR's acceptance — a recorded supersession, not a
   silent drift.
 
 ---
@@ -602,8 +602,8 @@ construction (§9 restriction, §10 constraints) — **rejected**.
   identity declarations
 - [ADR-017](017-dna-composition-and-sync.md) + Amendment 1 — fragment model, authority resolver,
   typed entity id, provenance envelope, versioned history; names this ADR as its companion.
-  §1 here proposes **Amendment 2** (eid supersedes bare `fragment_id` for fleet-global
-  addressing) to be recorded on acceptance
+  §1 here defines **Amendment 2** (eid supersedes bare `fragment_id` for fleet-global
+  addressing), recorded in ADR-017
 - [ADR-003](003-storage-data-taxonomy.md) — storage data taxonomy the `case_store` and provider
   compose with
 - [ADR-021](021-identity-assurance-levels.md) — step-up model the cockpit's REST surface rides

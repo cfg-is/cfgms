@@ -449,7 +449,7 @@ The twin and DEX share the same foundations and ship as **layers threaded across
 
 **Tier 2 — first visible surfaces** (Web-UI window, ~v0.10.x). `twin` `dex` `web`
 - [ ] Temporal query surface — "what was true at time T", diff two points, correlate a change with its effect
-- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Gated on a to-draft storage-shape ADR** (property graph + temporal store ≠ git+SOPS KV) — drafted inline (per the ADR practice), companion to ADR-017 Amendment 1 which guarantees only the identity + history substrate this builds on
+- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Model + access contract decided in [ADR-022](../architecture/decisions/022-entity-graph-model-and-access-contract.md)** (Entity Graph — companion to ADR-017 Amendment 1, records Amendment 2); remaining gate is the **storage-shape ADR** (physical backend), which inherits ADR-022 §10's constraints
 - [ ] Unified entity query API — "every entity of type X related to Z" (the model surface the Web UI renders)
 - [ ] DEX collection v0 + single-device **experience timeline** — per-process/service streams (asset-page views) + "pull up Bob's machine"
 
@@ -502,7 +502,7 @@ Applied going forward (backlog + future work); pure hygiene/infra (CI, refactors
 
 Founder-captured todos awaiting placement in a versioned milestone. Each carries enough context to decompose later; suggested homes are notes, not commitments.
 
-> **Design status:** the module and DNA items below are now designed in **[ADR-016](../architecture/decisions/016-steward-module-foundation.md)** (steward module foundation) and **[ADR-017](../architecture/decisions/017-dna-composition-and-sync.md)** (DNA composition & sync), both *Proposed*. Those ADRs are authoritative for the specifics; the entries here are the roadmap placeholders. Sequencing settled during design: **module foundation → OSquery → baseline DNA → asset page**, with OSquery deliberately *before* baseline DNA so DNA is built on osquery rather than reinventing it.
+> **Design status:** the module and DNA items below are now designed in **[ADR-016](../architecture/decisions/016-steward-module-foundation.md)** (steward module foundation) and **[ADR-017](../architecture/decisions/017-dna-composition-and-sync.md)** (DNA composition & sync), both *Accepted 2026-07-08*. Those ADRs are authoritative for the specifics; the entries here are the roadmap placeholders. Sequencing settled during design: **module foundation → OSquery → baseline DNA → asset page**, with OSquery deliberately *before* baseline DNA so DNA is built on osquery rather than reinventing it.
 >
 > **Twin/DEX foundation:** the module → OSquery → baseline-DNA → asset-page chain below **is** the Tier-1/Tier-2 foundation of the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) in Future Features. Entries are tagged with their downstream consumer(s) and tier so the foundation work is built for its end-state, not as isolated plumbing.
 
