@@ -89,6 +89,33 @@ func TestToProtoFromProto_Secrets(t *testing.T) {
 	assert.Equal(t, "steward", restored.Steward.Secrets.Provider)
 }
 
+// TestToProtoFromProto_DesiredVersion verifies the controller-declared
+// desired_version survives a ToProto→FromProto round-trip. Regression guard for
+// the steward-side converter dropping Upgrade.DesiredVersion, which silently
+// disabled version auto-convergence and self-fetch on every delivered config
+// (Issues #2260 / #2833).
+func TestToProtoFromProto_DesiredVersion(t *testing.T) {
+	original := &StewardConfig{
+		Steward: StewardSettings{
+			ID:            "upgrade-steward",
+			Mode:          ModeStandalone,
+			Upgrade:       UpgradeConfig{DesiredVersion: "v0.9.44"},
+			Logging:       LoggingConfig{Level: "info", Format: "text"},
+			ErrorHandling: ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
+		},
+	}
+
+	proto, err := ToProto(original)
+	require.NoError(t, err)
+	assert.Equal(t, "v0.9.44", proto.Steward.DesiredVersion,
+		"ToProto must serialise desired_version into the proto steward block")
+
+	restored, err := FromProto(proto)
+	require.NoError(t, err)
+	assert.Equal(t, "v0.9.44", restored.Steward.Upgrade.DesiredVersion,
+		"FromProto must restore desired_version so delivered config drives version convergence")
+}
+
 // TestToProtoFromProto_ConvergeInterval verifies ConvergeInterval survives a round-trip.
 func TestToProtoFromProto_ConvergeInterval(t *testing.T) {
 	original := &StewardConfig{

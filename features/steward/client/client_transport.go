@@ -1149,6 +1149,16 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 		c.logger.Info("DNA update after config apply skipped", "error", pubErr)
 	}
 
+	// Version auto-convergence on config delivery. syncConfigNow is the config-change
+	// entry point (on-connect pull + the sync_config command); the scheduled loop's
+	// TriggerConvergence is the only other caller of triggerVersionConvergence. Without
+	// this call, a freshly delivered desired_version would not be acted on until the
+	// next scheduled convergence tick — up to converge_interval later. Running it here
+	// makes "declare desired_version -> steward self-fetches and swaps" converge as soon
+	// as the new config lands. Idempotent: a no-op when desired_version is absent, equals
+	// the running version, or is already staged. (Issue #2833)
+	c.triggerVersionConvergence(ctx, goConfig.Steward.Upgrade.DesiredVersion, goConfig.Steward.Upgrade.AllowDowngrade)
+
 	return nil
 }
 
