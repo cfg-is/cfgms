@@ -449,7 +449,7 @@ The twin and DEX share the same foundations and ship as **layers threaded across
 
 **Tier 2 — first visible surfaces** (Web-UI window, ~v0.10.x). `twin` `dex` `web`
 - [ ] Temporal query surface — "what was true at time T", diff two points, correlate a change with its effect
-- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Model + access contract decided in [ADR-022](../architecture/decisions/022-entity-graph-model-and-access-contract.md)** (Entity Graph — companion to ADR-017 Amendment 1, records Amendment 2); remaining gate is the **storage-shape ADR** (physical backend), which inherits ADR-022 §10's constraints
+- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Fully designed:** model + access contract in [ADR-022](../architecture/decisions/022-entity-graph-model-and-access-contract.md) (Entity Graph — companion to ADR-017 Amendment 1, records Amendment 2), storage shape in [ADR-023](../architecture/decisions/023-entity-graph-storage-shape.md) (relational observation-log store; subsumes DNA fragment history). Design gates cleared — remaining sequence is epic work: OSquery → DNA-composition → entity-graph foundation
 - [ ] Unified entity query API — "every entity of type X related to Z" (the model surface the Web UI renders)
 - [ ] DEX collection v0 + single-device **experience timeline** — per-process/service streams (asset-page views) + "pull up Bob's machine"
 

@@ -1,6 +1,6 @@
 # ADR-023: Entity Graph storage shape — relational observation-log store
 
-**Status:** Draft (2026-07-21)
+**Status:** Accepted (2026-07-21)
 **Date:** 2026-07-21
 **Issue:** (to be assigned at decomposition)
 **Epic:** (entity-graph foundation epic — to be filed; storage stories ride it)
