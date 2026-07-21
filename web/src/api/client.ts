@@ -16,6 +16,9 @@
  *    expiry or revocation) — a central listener drops the app to the login
  *    screen in its "session expired" state (ADR-018 §4). Login and logout
  *    requests are exempt: a 401 there is not an expired session.
+ *  - A 401 with WWW-Authenticate: CFGMS-StepUp is NOT a session expiry —
+ *    it is a step-up challenge (ADR-021 Decision 6). The onStepUpRequired
+ *    listener handles it; the session-expired listener is NOT fired.
  */
 
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
@@ -41,16 +44,49 @@ let sessionExpiredListener: SessionExpiredListener | null = null
 
 /**
  * Register the central session-expired handler (or clear it with null).
- * The AuthProvider owns this; it fires on any 401 from apiFetch.
+ * The AuthProvider owns this; it fires on any plain 401 from apiFetch
+ * (i.e. a 401 without WWW-Authenticate: CFGMS-StepUp).
  */
 export function onSessionExpired(listener: SessionExpiredListener | null): void {
   sessionExpiredListener = listener
 }
 
 /**
+ * Context carried to the step-up listener on a CFGMS-StepUp 401.
+ * Includes the original request so the modal can retry it after a successful
+ * assertion ceremony (ADR-021 Decision 6).
+ */
+export interface StepUpRequest {
+  /** Original fetch path. */
+  path: string
+  /** Original fetch init (method, headers, body). */
+  init: RequestInit
+  /** True when WWW-Authenticate: CFGMS-StepUp includes presence="required". */
+  presenceRequired: boolean
+}
+
+/**
+ * The listener receives the original request and returns a Promise that resolves
+ * with the retry Response on success, or null on cancel / assertion failure.
+ * Returning null causes apiFetch to return the original 401 response without
+ * firing the session-expired listener (the operator stays signed in).
+ */
+type StepUpRequiredListener = (req: StepUpRequest) => Promise<Response | null>
+let stepUpRequiredListener: StepUpRequiredListener | null = null
+
+/**
+ * Register the central step-up handler (or clear it with null).
+ * The AuthProvider owns this (Story #2786).
+ */
+export function onStepUpRequired(listener: StepUpRequiredListener | null): void {
+  stepUpRequiredListener = listener
+}
+
+/**
  * Fetch wrapper for all cookie-authenticated API calls.
  * Same-origin credentials, automatic CSRF header on unsafe methods,
- * central 401 → session-expired handling.
+ * central 401 → session-expired handling, and CFGMS-StepUp 401 → step-up
+ * listener dispatch (Story #2786, ADR-021 Decision 6).
  */
 export async function apiFetch(
   path: string,
@@ -70,6 +106,25 @@ export async function apiFetch(
     credentials: 'same-origin',
   })
   if (response.status === 401) {
+    const wwwAuth = response.headers.get('WWW-Authenticate') ?? ''
+    if (wwwAuth.startsWith('CFGMS-StepUp')) {
+      // Step-up challenge: NEVER fire session-expired regardless of listener state.
+      // A CFGMS-StepUp 401 means the operator's session is intact but needs a
+      // higher assurance proof — the operator is NOT signed out (ADR-021 Decision 6).
+      if (stepUpRequiredListener !== null) {
+        const retryResponse = await stepUpRequiredListener({
+          path,
+          init,
+          presenceRequired: wwwAuth.includes('presence="required"'),
+        })
+        // Listener resolves with the retry response (success) or null (cancel/failure).
+        // On null: return the original 401 — caller sees the failure; session stays intact.
+        return retryResponse ?? response
+      }
+      // No listener registered: return the 401 without firing session-expired.
+      return response
+    }
+    // Plain 401 (no step-up header): session is gone.
     sessionExpiredListener?.()
   }
   return response
