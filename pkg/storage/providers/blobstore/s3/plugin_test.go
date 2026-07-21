@@ -168,6 +168,28 @@ func testS3Key(name string) blob.BlobKey {
 	}
 }
 
+// TestS3BlobStore_PreservesSignatureLabels verifies the steward-binary signature/publisher
+// labels survive a GetBlob round-trip through the S3 sidecar, so the public GET handler can
+// serve them as headers in a production (non-filesystem) deployment (#2836).
+func TestS3BlobStore_PreservesSignatureLabels(t *testing.T) {
+	store := newTestS3Store(t)
+	ctx := context.Background()
+
+	labels := map[string]string{
+		"signature": "cVBzcy1zaWduYXR1cmUtYnl0ZXM",
+		"publisher": "cfgms",
+	}
+	key := testS3Key("steward.bin")
+	require.NoError(t, store.PutBlob(ctx, key, bytes.NewReader([]byte("bin")), blob.BlobMeta{Labels: labels}))
+
+	rc, gotMeta, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+
+	assert.Equal(t, "cVBzcy1zaWduYXR1cmUtYnl0ZXM", gotMeta.Labels["signature"])
+	assert.Equal(t, "cfgms", gotMeta.Labels["publisher"])
+}
+
 // TestS3BlobStore_PutGetBlob verifies a basic roundtrip.
 func TestS3BlobStore_PutGetBlob(t *testing.T) {
 	store := newTestS3Store(t)

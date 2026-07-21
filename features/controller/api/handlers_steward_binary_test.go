@@ -191,6 +191,69 @@ func TestPublishEndpoint_RejectsVersionBindingMismatch(t *testing.T) {
 	}
 }
 
+// TestGetStewardBinaryPublic_ServesSignatureHeaders is the #2836 round-trip: publish a
+// binary, GET it via the public endpoint, and assert the publisher signature and identity
+// are served as headers alongside the SHA-256, equal to the persisted values — so a
+// self-fetching steward (#2833) can verify the publisher independently.
+func TestGetStewardBinaryPublic_ServesSignatureHeaders(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+
+	content := []byte("steward binary for public-header round-trip")
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
+
+	pubRec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
+	require.Equal(t, http.StatusOK, pubRec.Code, "publish must succeed: %s", pubRec.Body.String())
+
+	getRec := doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", "test-tenant")
+	require.Equal(t, http.StatusOK, getRec.Code, "public GET must succeed: %s", getRec.Body.String())
+
+	assert.Equal(t, sigBase64, getRec.Header().Get("X-CFGMS-Signature"),
+		"X-CFGMS-Signature must equal the persisted (base64url) publisher signature")
+	assert.Equal(t, "cfgms", getRec.Header().Get("X-CFGMS-Publisher"),
+		"X-CFGMS-Publisher must equal the persisted publisher identity")
+	assert.NotEmpty(t, getRec.Header().Get("X-CFGMS-SHA256"),
+		"existing X-CFGMS-SHA256 header must still be served")
+	assert.Equal(t, content, getRec.Body.Bytes(), "public GET must return the exact bytes")
+}
+
+// TestGetStewardBinaryPublic_DoesNotLeakSensitiveLabels guards the security invariant that
+// header emission reads the two signature keys individually and never ranges over the
+// blob's Labels map. The same map on this UNAUTHENTICATED endpoint also holds the operator
+// identity (published_by) and internal tenant IDs (publisher_tenant, signature_digest); a
+// blanket label→header copy would disclose them to any anonymous caller.
+func TestGetStewardBinaryPublic_DoesNotLeakSensitiveLabels(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+
+	content := []byte("steward binary for label-leak guard")
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
+
+	pubRec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
+	require.Equal(t, http.StatusOK, pubRec.Code, "publish must succeed: %s", pubRec.Body.String())
+
+	getRec := doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", "test-tenant")
+	require.Equal(t, http.StatusOK, getRec.Code, "public GET must succeed: %s", getRec.Body.String())
+
+	// None of the sensitive labels may surface as a response header, under any casing or the
+	// hypothetical X-CFGMS-<label> form a range-over-Labels implementation would produce.
+	for _, sensitive := range []string{"published_by", "publisher_tenant", "signature_digest"} {
+		for _, name := range []string{
+			sensitive,
+			"X-CFGMS-" + sensitive,
+			"X-Cfgms-" + sensitive,
+		} {
+			assert.Empty(t, getRec.Header().Get(name),
+				"sensitive label %q must not be served as header %q", sensitive, name)
+		}
+	}
+	// And the whole header set must not contain the operator identity value anywhere.
+	for k, vals := range getRec.Header() {
+		for _, v := range vals {
+			assert.NotContains(t, v, "cfgms-admin",
+				"operator identity must not leak via header %q", k)
+		}
+	}
+}
+
 // TestPublishEndpoint_RejectsCrossTenantPublish verifies that a caller without
 // installer:publish:steward permission receives 403. This demonstrates tenant-namespace
 // isolation: a key scoped to tenant-b (without the required permission) cannot publish
