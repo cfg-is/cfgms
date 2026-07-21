@@ -299,7 +299,7 @@ func TestHandlePushStewardBinary_RejectsOversizedBinary(t *testing.T) {
 	// Call downloadBinaryForUpgrade directly to test the size cap without
 	// going through the full handler (which requires https).
 	tmpPath := filepath.Join(certStoreDir, "oversized-test.bin")
-	_, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
+	_, _, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
 	require.Error(t, err, "oversized binary must be rejected")
 	assert.Contains(t, err.Error(), "MaxBinarySizeBytes",
 		"error message must mention MaxBinarySizeBytes")
@@ -405,7 +405,7 @@ func TestHandlePushStewardBinary_TempFilePermissions(t *testing.T) {
 	require.NoError(t, os.MkdirAll(upgradesDir, 0o700))
 	tmpPath := filepath.Join(upgradesDir, "test-perm.bin")
 
-	_, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
+	_, _, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
 	require.NoError(t, err, "download must succeed for permissions test")
 
 	// Check directory permission.

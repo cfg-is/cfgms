@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -847,6 +848,27 @@ func logLevelFromEnv() string {
 	}
 }
 
+// resolveControllerHTTPSBaseURL returns the controller HTTPS REST base URL used by the
+// desired_version self-fetch path (Issue #2833), read from CFGMS_CONTROLLER_HTTPS_URL.
+// Distinct from the QUIC transport address the steward connects on. Returns "" when
+// unset or malformed (not https) — the steward then degrades safe to awaiting a
+// controller push rather than self-fetching. The steward host-pins this URL's host to
+// the transport host before any fetch, so a stray value can never redirect the download.
+func resolveControllerHTTPSBaseURL(logger logging.Logger) string {
+	raw := strings.TrimSpace(os.Getenv("CFGMS_CONTROLLER_HTTPS_URL"))
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		logger.Warn("CFGMS_CONTROLLER_HTTPS_URL is set but not a valid https URL; self-fetch disabled",
+			"value", logging.SanitizeLogValue(raw))
+		return ""
+	}
+	// Normalize to scheme://host[:port] with no path/query.
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+}
+
 // buildHTTPConfig constructs an HTTPConfig from environment variables and the provided arguments.
 func buildHTTPConfig(controllerURL string, timeout time.Duration, logger logging.Logger) *registration.HTTPConfig {
 	return buildHTTPConfigWithPlatformPath(controllerURL, timeout, defaultPlatformCACertPath(), logger)
@@ -1277,6 +1299,7 @@ func connectWithApprovedRegistration(
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               reg.TransportAddress,
+		ControllerHTTPSBaseURL:      resolveControllerHTTPSBaseURL(logger),
 		RegistrationToken:           token,
 		CACertPEM:                   reg.CACert,
 		ClientCertPEM:               reg.ClientCert,
@@ -1424,6 +1447,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               id.TransportAddress,
+		ControllerHTTPSBaseURL:      resolveControllerHTTPSBaseURL(logger),
 		RegistrationToken:           token,
 		CACertPEM:                   id.CACertPEM,
 		ServerCertPEM:               id.ServerCertPEM,

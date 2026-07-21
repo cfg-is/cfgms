@@ -68,6 +68,11 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 	}
 	stewardSettings.ScriptSigning = protoSS
 
+	// Upgrade: carry the controller-declared target binary version. Mirrors the
+	// controller-side stewardtypes.ToProto so a config round-trips desired_version.
+	// The proto has no allow_downgrade field, so AllowDowngrade is not serialised here.
+	stewardSettings.DesiredVersion = config.Steward.Upgrade.DesiredVersion
+
 	// Convert resources
 	resources := make([]*controller.ResourceConfig, len(config.Resources))
 	for i, res := range config.Resources {
@@ -102,6 +107,16 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 			ID:          proto.Steward.Id,
 			Mode:        OperationMode(proto.Steward.Mode),
 			ModulePaths: proto.Steward.ModulePaths,
+			// Upgrade.DesiredVersion carries the controller-declared target binary
+			// version so version auto-convergence (Issue #2260) and steward self-fetch
+			// (Issue #2833) act on it. Without this, every delivered config silently
+			// dropped desired_version here on the steward and convergence never fired.
+			// Mirrors the controller-side stewardtypes.FromProto. The proto has no
+			// allow_downgrade field, so AllowDowngrade is sourced from the local
+			// steward.cfg, not from the delivered config.
+			Upgrade: UpgradeConfig{
+				DesiredVersion: proto.Steward.DesiredVersion,
+			},
 		},
 		Modules: proto.Modules,
 	}

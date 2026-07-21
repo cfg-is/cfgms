@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -69,6 +70,10 @@ type TransportClient struct {
 
 	// Transport address (gRPC-over-QUIC, from registration response)
 	transportAddress string
+
+	// controllerHTTPSBaseURL is the controller HTTPS REST base for the desired_version
+	// self-fetch path (Issue #2833). Empty disables self-fetch (degrade safe).
+	controllerHTTPSBaseURL string
 
 	// Control plane provider (gRPC, Story #516)
 	controlPlane controlplaneInterfaces.ControlPlaneProvider
@@ -304,6 +309,15 @@ type TransportConfig struct {
 	// Received from the registration response as transport_address.
 	ControllerURL string
 
+	// ControllerHTTPSBaseURL is the controller's HTTPS REST base (e.g.
+	// "https://controller:9080"), used by the desired_version self-fetch path to
+	// construct the installer download URL (Issue #2833). Distinct from ControllerURL,
+	// which is the QUIC transport address. Sourced from steward config/env
+	// (CFGMS_CONTROLLER_HTTPS_URL); when empty the steward cannot self-fetch and
+	// degrades safe to awaiting a controller push. Its host is pinned to the transport
+	// host before any fetch, so it can never point at another host.
+	ControllerHTTPSBaseURL string
+
 	// RegistrationToken for initial registration
 	RegistrationToken string
 
@@ -460,6 +474,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		dnaRefreshInterval:         dnaRefreshInterval,
 		dnaCollector:               cfg.DNACollector,
 		transportAddress:           cfg.ControllerURL,
+		controllerHTTPSBaseURL:     cfg.ControllerHTTPSBaseURL,
 		certPath:                   cfg.TLSCertPath,
 		caCertPEM:                  cfg.CACertPEM,
 		serverCertPEM:              cfg.ServerCertPEM,
@@ -1134,6 +1149,16 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 		c.logger.Info("DNA update after config apply skipped", "error", pubErr)
 	}
 
+	// Version auto-convergence on config delivery. syncConfigNow is the config-change
+	// entry point (on-connect pull + the sync_config command); the scheduled loop's
+	// TriggerConvergence is the only other caller of triggerVersionConvergence. Without
+	// this call, a freshly delivered desired_version would not be acted on until the
+	// next scheduled convergence tick — up to converge_interval later. Running it here
+	// makes "declare desired_version -> steward self-fetches and swaps" converge as soon
+	// as the new config lands. Idempotent: a no-op when desired_version is absent, equals
+	// the running version, or is already staged. (Issue #2833)
+	c.triggerVersionConvergence(ctx, goConfig.Steward.Upgrade.DesiredVersion, goConfig.Steward.Upgrade.AllowDowngrade)
+
 	return nil
 }
 
@@ -1529,10 +1554,23 @@ func (c *TransportClient) triggerVersionConvergence(ctx context.Context, desired
 	}
 
 	if stagedVersion != desiredVersion || stagedPath == "" {
-		c.logger.Info("Version convergence: desired_version differs from running; awaiting controller binary push",
-			"desired_version", logging.SanitizeLogValue(desiredVersion),
-			"running_version", runningVersion,
-			"staged_version", logging.SanitizeLogValue(stagedVersion))
+		// Nothing staged for the desired version. Try to self-fetch it from the
+		// controller (Issue #2833) so declaring a desired_version converges hands-off,
+		// with no controller push required. selfFetchDesiredVersion verifies, stages,
+		// and swaps on success; on any failure it degrades safe and we retry next cycle.
+		if err := c.selfFetchDesiredVersion(ctx, desiredVersion); err != nil {
+			if errors.Is(err, errSelfFetchNotConfigured) {
+				c.logger.Info("Version convergence: desired_version differs from running; self-fetch not configured, awaiting controller binary push",
+					"desired_version", logging.SanitizeLogValue(desiredVersion),
+					"running_version", runningVersion,
+					"staged_version", logging.SanitizeLogValue(stagedVersion))
+			} else {
+				c.logger.Warn("Version convergence: self-fetch failed; awaiting controller binary push or next retry",
+					"desired_version", logging.SanitizeLogValue(desiredVersion),
+					"running_version", runningVersion,
+					"error", err.Error())
+			}
+		}
 		return
 	}
 
