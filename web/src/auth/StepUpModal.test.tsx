@@ -46,7 +46,7 @@ function makePublicKeyCredential(id = 'cred-id-b64u'): PublicKeyCredential {
     } as AuthenticatorAssertionResponse,
     getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
     authenticatorAttachment: null,
-    toJSON: () => ({}) as PublicKeyCredentialJSON,
+    toJSON: () => ({}),
   } as unknown as PublicKeyCredential
 }
 

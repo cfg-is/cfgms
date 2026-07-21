@@ -162,7 +162,7 @@ describe('apiFetch', () => {
       }),
     )
     await apiFetch('/api/v1/stewards', { method: 'GET' })
-    const [req] = stepUp.mock.calls[0] as [{ path: string; init: RequestInit }]
+    const [req] = stepUp.mock.calls[0]! as unknown as [{ path: string; init: RequestInit }]
     expect(req.path).toBe('/api/v1/stewards')
     expect(req.init).toEqual({ method: 'GET' })
   })

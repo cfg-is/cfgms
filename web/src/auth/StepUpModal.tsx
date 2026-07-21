@@ -46,7 +46,7 @@ function readSessionCsrf(): string | null {
 
 // ── base64url helpers ────────────────────────────────────────────────────────
 
-function b64uToBytes(b64u: string): Uint8Array {
+function b64uToBytes(b64u: string): Uint8Array<ArrayBuffer> {
   const padded = b64u + '='.repeat((4 - (b64u.length % 4)) % 4)
   const base64 = padded.replace(/-/g, '+').replace(/_/g, '/')
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
@@ -162,8 +162,8 @@ export default function StepUpModal({
         e.preventDefault()
         return
       }
-      const first = btns[0]
-      const last = btns[btns.length - 1]
+      const first = btns[0]!
+      const last = btns[btns.length - 1]!
       if (e.shiftKey && document.activeElement === first) {
         e.preventDefault()
         last.focus()
