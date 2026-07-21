@@ -1163,7 +1163,7 @@ func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
 	content := []byte("cfgms-steward-binary-e2e-admin")
 	fix := newStewardBinaryFixture(t)
 	server.stewardBinaryTrustStore = fix.store
-	sigBase64 := fix.signContent(content)
+	sigBase64 := fix.signContent(content, "v0.5.12", "linux", "amd64")
 	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v0.5.12", "linux", "amd64", sigBase64, content)
 	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())
 

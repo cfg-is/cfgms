@@ -60,20 +60,38 @@ func TestHelperProcess(t *testing.T) {
 	if mf := os.Getenv("FAKE_STEWARD_RECORD_MANAGED_FILE"); mf != "" {
 		_ = os.WriteFile(mf, []byte(os.Getenv(version.EnvStewardLauncherManaged)), 0o600)
 	}
-	// FAKE_STEWARD_STAGE_VERSION simulates StageBinary: "<root>:<version>:<binary_name>".
-	// When set, the fake-steward advances state.json to the given version before exiting,
-	// mimicking the steward's upgrade handler calling WriteCurrent after staging a binary.
-	// This is idempotent: WriteCurrent is a no-op when current already equals the target.
+	// FAKE_STEWARD_STAGE_VERSION advances state.json to the given version before
+	// exiting, mimicking the steward's upgrade handler calling WriteCurrent after
+	// staging a binary. The install root and binary name arrive in their own env
+	// vars (FAKE_STEWARD_STAGE_ROOT / FAKE_STEWARD_STAGE_BINARY) rather than being
+	// packed into one colon-delimited value: a Windows root such as
+	// "C:\\Program Files\\CFGMS" contains a colon, so a single-string ":"-split
+	// mis-parses the path and writes state.json to the wrong place. Separate vars
+	// are unambiguous on every platform. WriteCurrent is idempotent: a no-op when
+	// current already equals the target.
 	if sv := os.Getenv("FAKE_STEWARD_STAGE_VERSION"); sv != "" {
-		parts := strings.SplitN(sv, ":", 3)
-		if len(parts) == 3 {
-			wl := Layout{Root: parts[0], StewardBinaryName: parts[2]}
-			_ = wl.WriteCurrent(parts[1])
+		wl := Layout{
+			Root:              os.Getenv("FAKE_STEWARD_STAGE_ROOT"),
+			StewardBinaryName: os.Getenv("FAKE_STEWARD_STAGE_BINARY"),
 		}
+		_ = wl.WriteCurrent(sv)
 	}
 	if sleepMs := os.Getenv("FAKE_STEWARD_SLEEP_MS"); sleepMs != "" {
 		if n, err := strconv.Atoi(sleepMs); err == nil && n > 0 {
 			time.Sleep(time.Duration(n) * time.Millisecond)
+		}
+	}
+	// FAKE_STEWARD_RENAME_SELF makes the fake steward rename its own on-disk
+	// binary out of the way just before exiting, forcing the launcher's
+	// post-exec computeBinaryHash to fail (file not found) deterministically on
+	// every platform. This is the cross-platform stand-in for "the binary became
+	// unreadable after a successful exec": chmod-to-000 achieves that on POSIX
+	// but is a no-op on Windows (an exec'd image is always readable there).
+	// Renaming a running executable is permitted on both POSIX and Windows;
+	// deleting it is not (the image stays locked on Windows), so we rename.
+	if os.Getenv("FAKE_STEWARD_RENAME_SELF") == "1" {
+		if exe, err := os.Executable(); err == nil {
+			_ = os.Rename(exe, exe+".moved")
 		}
 	}
 	if exitMarker := os.Getenv("FAKE_STEWARD_EXIT_MARKER_FILE"); exitMarker != "" {
@@ -884,7 +902,9 @@ func TestSupervise_UpgradeSelfExit_AdvancesToNewVersion(t *testing.T) {
 	// All children run WriteCurrent("v2"): v1 advances state.json to v2; v2's
 	// call is a no-op (current already == v2). Both exit cleanly with code 0.
 	envForChild(t, map[string]string{
-		"FAKE_STEWARD_STAGE_VERSION": l.Root + ":v2:" + l.StewardBinaryName,
+		"FAKE_STEWARD_STAGE_ROOT":    l.Root,
+		"FAKE_STEWARD_STAGE_VERSION": "v2",
+		"FAKE_STEWARD_STAGE_BINARY":  l.StewardBinaryName,
 		"FAKE_STEWARD_SLEEP_MS":      "0",
 		"FAKE_STEWARD_EXIT_CODE":     "0",
 	})
@@ -1342,10 +1362,11 @@ func TestSupervise_HashFailureAfterCleanRun_SkipsKnownGoodUpdate(t *testing.T) {
 // launcher cannot confirm the binary is the proven one — isKnownGood stays false
 // and probation rules apply (rollback fires).
 //
-// Scenario: v1 is known-good; v1 starts, writes a marker, then sleeps. The test
-// goroutine chmod-s the binary to 0o000 after the child is running. When the child
-// exits with code 1 (failed startup), computeBinaryHash fails → isKnownGood=false
-// → rollback to v0 instead of restart-in-place.
+// Scenario: v1 is known-good; v1 starts, then renames its own binary out of the
+// way before exiting with code 1 (failed startup). When the launcher computes the
+// post-exec hash the binary is gone, so computeBinaryHash fails → isKnownGood=false
+// → rollback to v0 instead of restart-in-place. The self-rename forces the hash
+// failure deterministically on every platform (chmod-to-000 is a no-op on Windows).
 func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing.T) {
 	l := newLayout(t)
 	installFakeSteward(t, l, "v0")
@@ -1359,20 +1380,15 @@ func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing
 	// State: current=v1, previous=v0. Mark v1 known-good.
 	premarkKnownGood(t, l, "v1")
 
-	markerFile := filepath.Join(t.TempDir(), "started")
-	// Child sleeps long enough for the test to chmod the binary, then exits
-	// with code 1 (simulating a crashed steward). The clock will report 0 for
-	// ranFor (always inside startup window), making this look like a fast exit.
+	// Child renames its own binary away before exiting with code 1 (simulating a
+	// crashed steward whose binary is no longer where the launcher hashes it). The
+	// clock reports 0 for ranFor (always inside startup window), making this look
+	// like a fast exit.
 	envForChild(t, map[string]string{
 		"FAKE_STEWARD_EXIT_CODE":   "1",
-		"FAKE_STEWARD_SLEEP_MS":    "300",
-		"FAKE_STEWARD_MARKER_FILE": markerFile,
+		"FAKE_STEWARD_SLEEP_MS":    "0",
+		"FAKE_STEWARD_RENAME_SELF": "1",
 	})
-
-	exe, exeErr := l.StewardExeFor("v1")
-	if exeErr != nil {
-		t.Fatalf("StewardExeFor v1: %v", exeErr)
-	}
 
 	s := &Supervisor{
 		Layout:            l,
@@ -1388,15 +1404,6 @@ func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- s.Supervise(ctx) }()
-
-	// Wait for v1 to start, then make its binary unreadable.
-	if !waitForFile(markerFile, 5*time.Second) {
-		t.Fatal("child never started (marker absent within 5s)")
-	}
-	if chErr := os.Chmod(exe, 0o000); chErr != nil {
-		t.Fatalf("chmod 000 v1 binary: %v", chErr)
-	}
-	t.Cleanup(func() { _ = os.Chmod(exe, 0o755) })
 
 	// Supervise must return an error: v1 rolls back to v0 (hash failure → not
 	// known-good → probation), then v0 also fails and budget is exhausted.

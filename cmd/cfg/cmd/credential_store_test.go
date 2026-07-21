@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -112,7 +113,9 @@ func TestCredentialStore_DirectoryCreatedAt0700(t *testing.T) {
 	info, err := os.Stat(credDir)
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())
-	if os.Getenv("GOOS") != "windows" {
+	// POSIX permission bits are not meaningful on Windows (ACL-based); only
+	// assert the mode where the underlying filesystem honors 0700.
+	if runtime.GOOS != "windows" {
 		assert.Equal(t, os.FileMode(0700), info.Mode().Perm(),
 			"credentials directory must be created at mode 0700")
 	}
@@ -129,7 +132,9 @@ func TestCredentialStore_EncFileCreatedAt0600(t *testing.T) {
 
 	info, err := os.Stat(filepath.Join(tmpDir, "ctrl.enc"))
 	require.NoError(t, err)
-	if os.Getenv("GOOS") != "windows" {
+	// POSIX permission bits are not meaningful on Windows (ACL-based); only
+	// assert the mode where the underlying filesystem honors 0600.
+	if runtime.GOOS != "windows" {
 		assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
 			".enc file must be created at mode 0600")
 	}

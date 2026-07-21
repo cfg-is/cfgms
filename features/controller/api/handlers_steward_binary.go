@@ -148,14 +148,18 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	sum := sha256.Sum256(body)
 	contentHash := hex.EncodeToString(sum[:])
 
-	// Verify the publisher signature. The Ed25519 message is the UTF-8 bytes of contentHash.
-	b := bundle.Bundle{ContentHash: contentHash}
+	// Verify the publisher signature over the canonical (content hash, version,
+	// platform, arch) message. Binding the release coordinates means a signature
+	// issued for one version/platform/arch cannot be replayed to publish a
+	// different one (Issue #2834). version/platform/arch are the route vars
+	// validated above, so the stored signature always covers the key it lands under.
 	sig := bundle.BundleSignature{
 		Publisher: "cfgms",
 		Algorithm: "ed25519",
 		Signature: sigBytes,
 	}
-	if verifyErr := trust.VerifyBundleSignature(&b, sig, s.stewardBinaryTrust()); verifyErr != nil {
+	if verifyErr := trust.VerifyStewardBinarySignature(
+		contentHash, version, platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Signature verification failed: "+verifyErr.Error(),
 			"SIGNATURE_VERIFICATION_FAILED")

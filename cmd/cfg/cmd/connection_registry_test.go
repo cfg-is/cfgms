@@ -5,6 +5,7 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,12 @@ func TestConnectionRegistry_FilePermissions(t *testing.T) {
 		ControllerURL: "https://ctrl.example.com:9090",
 		AdminIdentity: "admin@example.com",
 	}))
+
+	// POSIX permission bits are not meaningful on Windows (ACL-based); only
+	// assert the modes where the underlying filesystem honors 0700/0600.
+	if runtime.GOOS == "windows" {
+		return
+	}
 
 	// Config directory must be 0700
 	cfgmsDir := dir + "/cfgms"

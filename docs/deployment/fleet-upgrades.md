@@ -4,36 +4,72 @@ This document describes the operator workflow for upgrading steward binaries acr
 
 ## Overview
 
-The upgrade workflow has four steps:
+The upgrade workflow has five steps:
 
-1. **Publish** — upload the steward binary to the controller's blob store.
-2. **Approve** — approve the published blob before dispatch (separate approval step).
-3. **Dispatch** — send the upgrade command to matching stewards.
-4. **Monitor or rollback** — check per-steward status, and roll back if needed.
+1. **Sign** — produce the publisher signature over the binary.
+2. **Publish** — upload the steward binary and its signature to the controller's blob store.
+3. **Approve** — approve the published blob before dispatch (separate approval step).
+4. **Dispatch** — send the upgrade command to matching stewards.
+5. **Monitor or rollback** — check per-steward status, and roll back if needed.
 
-## Step 1: Publish the steward binary
+## Step 1: Sign the steward binary
 
-Use `cfg installer publish` to upload a new steward binary to the controller:
+Unsigned uploads are rejected. The publisher signature covers a canonical
+`content_hash|version|platform|arch` message, so a signature is valid **only** for the
+exact version, platform, and arch it was minted for:
 
 ```
-cfg installer publish steward \
+go run ./scripts/sign-steward-binary /path/to/steward-linux-amd64 v0.5.12 linux amd64
+```
+
+This writes `<binary>.sig` and prints the content hash and the URL-safe base64 signature.
+
+By default it signs with the zero-seed **dev** publisher key, which only dev/lab
+controllers trust. To sign for a fleet that trusts a real publisher identity, supply the
+32-byte Ed25519 seed as standard base64 in `CFGMS_PUBLISHER_SEED`.
+
+> **Why the coordinates are signed.** A content-hash-only signature lets a compromised
+> controller serve a genuinely signed *older, vulnerable* binary at a *newer* version's
+> URL: the signature verifies, the SHA-256 matches, and the downgrade guard is bypassed
+> because the version is controller-attested rather than signed. Binding the coordinates
+> closes that rollback path (Issue #2834).
+
+## Step 2: Publish the steward binary
+
+Use `cfg installer publish` to upload the binary and its signature:
+
+```
+cfg installer publish \
+  --kind steward \
   --version v0.5.12 \
   --platform linux \
   --arch amd64 \
-  --file /path/to/steward-linux-amd64
+  --binary /path/to/steward-linux-amd64 \
+  --signature /path/to/steward-linux-amd64.sig
 ```
+
+The version, platform, and arch **must** match the values the binary was signed for, or
+the controller rejects the upload with `SIGNATURE_VERIFICATION_FAILED`. Add `--force` to
+overwrite an existing binary at the same coordinates.
 
 The command prints the blob ID on success. The blob starts in `published` state
 and must be approved before it can be dispatched.
 
-## Step 2: Approve the binary (separate approval step)
+### Migrating binaries signed before coordinate binding
+
+Binaries signed under the previous content-hash-only scheme no longer verify. Re-sign and
+re-publish (with `--force`) every steward binary the fleet may still converge to **before**
+rolling out a controller/steward build that enforces the new scheme — otherwise every
+upgrade fails closed until the re-publish completes.
+
+## Step 3: Approve the binary (separate approval step)
 
 Approval is performed via the controller API or admin tooling. A blob in
 `published` state cannot be dispatched — dispatch returns 403 until the blob
 transitions to `approved`. See the controller administration guide for the
 approval workflow.
 
-## Step 3: Dispatch the upgrade
+## Step 4: Dispatch the upgrade
 
 Use `cfg steward upgrade` to dispatch the upgrade to stewards matching a selector:
 
@@ -92,7 +128,7 @@ steward-3901879957445270929           committed
 
 Exit code is 1 if any steward reaches `failed` or `rolled_back` state.
 
-## Step 4a: Check upgrade status
+## Step 5a: Check upgrade status
 
 Use `cfg steward upgrade status` to check per-steward upgrade progress:
 
@@ -135,7 +171,7 @@ steward-1780659937223058807            v0.5.12   committed  2026-06-09T10:00:00Z
 steward-2890769947334169918            v0.5.11   committed  2026-06-08T14:30:00Z
 ```
 
-## Step 4b: Roll back an upgrade
+## Step 5b: Roll back an upgrade
 
 Use `cfg steward upgrade rollback` to roll back a dispatched upgrade:
 
