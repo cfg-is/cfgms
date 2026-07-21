@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-07-08
+**Last Updated**: 2026-07-21
 
 ## Versioning Strategy
 
@@ -311,26 +311,68 @@ Controller nodes managed by stewards — clean separation of node management fro
 
 Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock. New issue to be filed when ready.
 
-#### v0.10.0 - Web Interface Foundation
+#### v0.10.0 - Web Interface Foundation ✅ COMPLETED
 
-**Deferred from v0.9.x** — now tracked as Epic #2343 (Controller REST APIs; 5 of 6 stories complete):
-- [ ] Workflow management REST API (endpoint coverage + reference docs delivered via #2369/#2374; final story #2373 — route-registration fix — queued Ready)
+**Controller REST APIs** — Epic #2343, closed:
+- [x] Workflow management REST API (endpoint coverage + reference docs via #2369/#2374; route registration made handler-order-independent in #2373)
 - [x] Config broadcast push API (Issue #2366 - selector targeting + push-status read)
 - [x] Session/connection monitoring API (Issues #2367, #2368 - transport + admin-session read APIs)
 
-**Web Interface** — tracked as Epic #2344 (framework, session-token auth, controller-served fleet overview; story decomposition gated on the inline web-session ADR + founder design checkpoint):
-- [ ] Web UI framework and authentication
-- [ ] Dashboard with fleet overview
-- [ ] Configuration management interface
-- [ ] User and role management
-- [ ] Workflow Management
-- [ ] Basic reporting and visualization
+**Web Interface** — Epic #2344, closed. Controller-served React+TS SPA with session-token auth
+(ADR-018), app shell, tenant switcher, global search, and seven live routes: fleet overview (`/`),
+asset page (`/stewards/:id`), `/config`, `/modules`, `/workflows`, `/accounts`, `/audit`.
+- [x] Web UI framework and authentication
+- [x] Dashboard with fleet overview
+- [x] Configuration management interface (list, editor, push, rollback)
+- [x] User and role management (accounts create/delete; roles read-only)
+- [x] Workflow Management (workflow + trigger CRUD, execution view)
+
+"Basic reporting and visualization" was scoped into this milestone but never started — no
+reporting surface exists in the SPA. It is **carried forward into v0.10.1 as Epic #2860** rather
+than counted here.
+
+#### v0.10.1 - Web UI operational build-out
+
+The foundation shipped a usable *viewer*. A 2026-07-21 gap analysis against the live controller
+REST surface found the backend substantially ahead of the UI: most day-to-day operator actions
+have working endpoints the SPA never calls. These four epics close the gap to a console an
+operator can run daily. Ordered by how much each unblocks basic operation.
+
+- [ ] Epic #2857 — **Enrollment & fleet operations**: registration console (tokens, approvals,
+      IP-trust, installer artifacts), steward row and bulk actions (tag, move-tenant,
+      decommission, refresh, logs, modules), auth session probe on mount. Predominantly UI
+      against live APIs. *Without this a device cannot be onboarded from the web UI at all, and
+      the fleet table offers no action on any row.*
+- [ ] Epic #2858 — **Tenant & access administration**: tenant list/update/delete API + tenant
+      tree UI, account update API + edit/password/disable UI, role write surfaces and
+      subject↔role binding, certificate lifecycle. Needs real API work — the tenant surface is
+      genuinely incomplete server-side, so no tenant tree can be rendered today.
+- [ ] Epic #2859 — **Operator completeness**: config create + structured diff + per-steward push
+      results, workflow step authoring beyond a raw-JSON textarea, execute-with-parameters,
+      per-step logs, trigger schedule/webhook configuration, script and job execution surface,
+      audit detail and export.
+- [ ] Epic #2860 — **Visibility surfaces**: reports dashboard, compliance views, monitoring
+      surfaces, alert center with acknowledge/silence, and the design-system chart and stat-tile
+      conventions later surfaces inherit. Also fixes the dead `POST /api/v1/webhooks/git-push`
+      route (registered after the SPA catch-all, so it 404s).
+
+**Design gate:** net-new surfaces (registration console, tenant administration, certificate
+lifecycle, reports dashboard) require a reference mockup or an explicit "reuses app shell +
+design tokens" declaration before any story reaches Ready. Every UI PR holds for founder
+rendered-review — no auto-merge.
+
+**Running alongside:** Epic #2738 (remote shell + live steward telemetry) — the asset page's
+Shell and Config tabs are inert placeholders until it lands.
 
 #### v0.10.5 - Security Maturation & Web Frontend Security
 
 **Goal**: Enhance security posture with advanced tooling and prepare web interface security foundations
 
-**Backend Security Enhancements**:
+Engineering scope is tracked as **Epic #2861**. A 2026-07-21 verification pass found most of the
+web-frontend block already delivered during the Web UI Foundation work — the remaining
+engineering gaps are narrower than this section originally assumed.
+
+**Backend Security Enhancements** (untouched):
 
 - [ ] OpenSSF Scorecard optimization (target score: 9.0+)
 - [ ] Go native fuzzing integration for critical packages
@@ -338,14 +380,15 @@ Original Issue #390 scope, now deferred until after the Hyper-V dev-infra unlock
 - [ ] Evaluate and integrate SonarCloud (if beneficial beyond staticcheck)
 - [ ] Security testing automation improvements
 
-**Web Frontend Security Preparation**:
+**Web Frontend Security** — mostly delivered:
 
-- [ ] Evaluate web application security scanners (OWASP ZAP, Burp Suite Community)
-- [ ] Plan Content Security Policy (CSP) implementation
-- [ ] Evaluate frontend dependency scanning tools (npm audit, Snyk for JavaScript)
-- [ ] Plan XSS/CSRF protection strategies
-- [ ] Evaluate SAST tools for frontend code (ESLint security plugins, semgrep for JavaScript)
-- [ ] Document web security requirements and tooling strategy
+- [x] Content Security Policy — strict CSP on all SPA responses (`features/controller/api/spa.go`): `default-src 'self'`, `frame-ancestors 'none'`, `base-uri 'none'`, `object-src 'none'`
+- [x] XSS/CSRF protection — session-bound double-submit CSRF on unsafe methods, `SameSite=Strict` + HttpOnly + Secure session cookie, pre-session CSRF endpoint (ADR-018, Issue #2493)
+- [x] Frontend dependency scanning — `npm audit --audit-level=high` gated in `frontend-ci.yml`
+- [x] Frontend SAST — `eslint-plugin-security` in the lint gate
+- [ ] Dependabot coverage for `web/` — `.github/dependabot.yml` declares `gomod`, `github-actions` and `docker` only; npm dependencies receive no automated bump PRs
+- [ ] CodeQL for TypeScript — `codeql-analysis.yml` runs `language: [ 'go' ]`; the SPA gets no semantic analysis
+- [ ] DAST — evaluate an OWASP ZAP baseline (or equivalent) against a containerised controller
 
 **Security Policy & Process**:
 
@@ -449,7 +492,7 @@ The twin and DEX share the same foundations and ship as **layers threaded across
 
 **Tier 2 — first visible surfaces** (Web-UI window, ~v0.10.x). `twin` `dex` `web`
 - [ ] Temporal query surface — "what was true at time T", diff two points, correlate a change with its effect
-- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Fully designed:** model + access contract in [ADR-022](../architecture/decisions/022-entity-graph-model-and-access-contract.md) (Entity Graph — companion to ADR-017 Amendment 1, records Amendment 2), storage shape in [ADR-023](../architecture/decisions/023-entity-graph-storage-shape.md) (relational observation-log store; subsumes DNA fragment history). Design gates cleared — remaining sequence is epic work: OSquery → DNA-composition → entity-graph foundation
+- [ ] **Relationship / topology graph** — `runs-on`, `depends-on`, `connects-to`, `serves`, `member-of` edges over typed entities; enables blast-radius, impact, root-cause. **Fully designed:** model + access contract in [ADR-022](../architecture/decisions/022-entity-graph-model-and-access-contract.md) (Entity Graph — companion to ADR-017 Amendment 1, records Amendment 2), storage shape in [ADR-023](../architecture/decisions/023-entity-graph-storage-shape.md) (relational observation-log store; subsumes DNA fragment history). Design gates cleared — remaining sequence is epic work: OSquery (#2855) → DNA-composition (#2852) → Entity Graph store foundation (#2851) → Entity Graph population (#2853) → troubleshooting cockpit MVP (#2854). All five filed, none decomposed as of 2026-07-21
 - [ ] Unified entity query API — "every entity of type X related to Z" (the model surface the Web UI renders)
 - [ ] DEX collection v0 + single-device **experience timeline** — per-process/service streams (asset-page views) + "pull up Bob's machine"
 
@@ -502,19 +545,23 @@ Applied going forward (backlog + future work); pure hygiene/infra (CI, refactors
 
 Founder-captured todos awaiting placement in a versioned milestone. Each carries enough context to decompose later; suggested homes are notes, not commitments.
 
+**Status 2026-07-21: every entry below is now placed.** The module-foundation work shipped under
+Epic #2460 (closed); the remaining four are filed epics awaiting decomposition. Entries are kept
+for the design context they carry — the epic body is authoritative for scope.
+
 > **Design status:** the module and DNA items below are now designed in **[ADR-016](../architecture/decisions/016-steward-module-foundation.md)** (steward module foundation) and **[ADR-017](../architecture/decisions/017-dna-composition-and-sync.md)** (DNA composition & sync), both *Accepted 2026-07-08*. Those ADRs are authoritative for the specifics; the entries here are the roadmap placeholders. Sequencing settled during design: **module foundation → OSquery → baseline DNA → asset page**, with OSquery deliberately *before* baseline DNA so DNA is built on osquery rather than reinventing it.
 >
 > **Twin/DEX foundation:** the module → OSquery → baseline-DNA → asset-page chain below **is** the Tier-1/Tier-2 foundation of the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) in Future Features. Entries are tagged with their downstream consumer(s) and tier so the foundation work is built for its end-state, not as isolated plumbing.
 
-- [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* these live views are **telemetry, not DNA** (ADR-017 excludes ephemeral state from the hashed DNA); live service read/control also overlaps the `service` module's desired-state enforcement — clarify the boundary. *Suggested home:* Web UI backend APIs (Epic #2343) + Web UI Foundation (Epic #2344), plus a steward monitoring/streaming capability epic. *Latest of the group — depends on Web UI Foundation.* · **Tags:** `dex`, `twin`, `web` · **Tier 2** — this is DEX collection v0 (the endpoint experience-signal seed).
+- [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* these live views are **telemetry, not DNA** (ADR-017 excludes ephemeral state from the hashed DNA); live service read/control also overlaps the `service` module's desired-state enforcement — clarify the boundary. *Filed as:* **Epic #2738** (Web UI live operations — remote shell + live steward telemetry), decomposed. The read side shipped early: the asset page's Live Activity tab streams the process table and service list over `/api/v1/telemetry/ws/{id}`; the control side (kill process, start/stop/restart service) and the Shell tab remain. · **Tags:** `dex`, `twin`, `web` · **Tier 2** — this is DEX collection v0 (the endpoint experience-signal seed).
 
-- [ ] **Full OSquery support** — Integrate osquery as the **unmanaged-host-fact** data source for DNA plus ad-hoc fleet queries. Per ADR-017, osquery feeds DNA only through a **curated stable-fact allowlist** (`host:*` fragments, observe-only) — never its dynamic tables — and the specific query list is gated on the stdlib set being confirmed (ADR-016). Decisions remaining: bundled vs. host-detected binary, scheduling, security envelope. *Suggested home:* its own OSquery-integration epic, sequenced **before** baseline DNA. · **Tags:** `twin`, `cms` · **Tier 1–2** — host-fact source feeds both baseline DNA and later twin *discovery of the undeclared*.
+- [ ] **Full OSquery support** — Integrate osquery as the **unmanaged-host-fact** data source for DNA plus ad-hoc fleet queries. Per ADR-017, osquery feeds DNA only through a **curated stable-fact allowlist** (`host:*` fragments, observe-only) — never its dynamic tables — and the specific query list is gated on the stdlib set being confirmed (ADR-016). Decisions remaining: bundled vs. host-detected binary, scheduling, security envelope. *Filed as:* **Epic #2855** (OSquery integration — observe-only host facts via curated allowlist + ad-hoc fleet queries), awaiting decomposition; sequenced **before** baseline DNA. · **Tags:** `twin`, `cms` · **Tier 1–2** — host-fact source feeds both baseline DNA and later twin *discovery of the undeclared*.
 
-- [ ] **Define & build the standard-library steward modules** — **Decided in ADR-016:** a closed **10-module** stdlib set — `file`, `service`, `package`, `script`, `firewall`, `patch`, **`user`, `cert_trust`, `time`, `hostname`**. Six exist (patch needs a `module.yaml` + stub resolution); **four are net-new cross-platform builds** (`user`, `cert_trust`, `time`, `hostname`). Also adds the `Get`→canonical-DNA-fragment contract, atomic object-level ownership declaration, and a stdlib completeness gate. *This is a build epic, not an audit* — likely splits into (a) reorg + contract + gate + `patch`, and (b) the four new modules. *Suggested home:* near-term module foundation. · **Tags:** `cms` · **Tier 1** — module `Get`→canonical-DNA-fragment contract is the substrate all twin/DEX state hangs on.
+- [ ] **Define & build the standard-library steward modules** — **Decided in ADR-016:** a closed **10-module** stdlib set — `file`, `service`, `package`, `script`, `firewall`, `patch`, **`user`, `cert_trust`, `time`, `hostname`**. Six exist (patch needs a `module.yaml` + stub resolution); **four are net-new cross-platform builds** (`user`, `cert_trust`, `time`, `hostname`). Also adds the `Get`→canonical-DNA-fragment contract, atomic object-level ownership declaration, and a stdlib completeness gate. *This is a build epic, not an audit* — likely splits into (a) reorg + contract + gate + `patch`, and (b) the four new modules. *Filed as:* **Epic #2460** (Steward module foundation — stdlib set, stdlib/extended split, DNA-fragment contract), **closed**. · **Tags:** `cms` · **Tier 1** — module `Get`→canonical-DNA-fragment contract is the substrate all twin/DEX state hangs on.
 
-- [ ] **Split non-stdlib modules into an on-demand directory** — **Decided in ADR-016:** `features/modules/stdlib/` (installer payload) ↔ `features/modules/extended/` (CFGMS-authored, non-stdlib, pulled on demand per ADR-006), with a build-enforced installer-payload boundary. Registry/scheduled_task/network/mount/sysctl/env are the excluded-from-stdlib candidates that live under `extended/` when built. *Suggested home:* same module-foundation epic as the stdlib work above. · **Tags:** `cms` · **Tier 1**.
+- [ ] **Split non-stdlib modules into an on-demand directory** — **Decided in ADR-016:** `features/modules/stdlib/` (installer payload) ↔ `features/modules/extended/` (CFGMS-authored, non-stdlib, pulled on demand per ADR-006), with a build-enforced installer-payload boundary. Registry/scheduled_task/network/mount/sysctl/env are the excluded-from-stdlib candidates that live under `extended/` when built. *Filed as:* **Epic #2460**, **closed** — same module-foundation epic as the stdlib work above. · **Tags:** `cms` · **Tier 1**.
 
-- [ ] **Controller baseline DNA per steward** — **Designed in ADR-017:** DNA becomes a fragment set (managed fragments from module `Get`, observe-only host facts from osquery), with object-canonical ids, a module-preempts-osquery authority resolver, a two-level per-fragment + aggregate-root hash, and delta-based partial-sync validation. *Suggested home:* DNA-composition epic, **downstream of both** the module foundation and OSquery. · **Tags:** `twin`, `dex`, `cms` · **Tier 1 — carries the twin/DEX data-model commitments.** This epic must land the four bake-in-now decisions or they become expensive retrofits: (1) per-fragment `{source, observed_at, authority, confidence}` provenance; (2) stable **typed entity id** per managed object; (3) controller **retains versioned fragment history** (per-entity state queryable over time — restores the DNA "memory" that current-state-only sync would discard); (4) DEX signals attach to the typed device/app entity as an extensible, timestamped, provenanced attribute set. See the [tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) for how these unlock Tier 2/3.
+- [ ] **Controller baseline DNA per steward** — **Designed in ADR-017:** DNA becomes a fragment set (managed fragments from module `Get`, observe-only host facts from osquery), with object-canonical ids, a module-preempts-osquery authority resolver, a two-level per-fragment + aggregate-root hash, and delta-based partial-sync validation. *Filed as:* **Epic #2852** (DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph), awaiting decomposition; **downstream of both** the module foundation and OSquery. · **Tags:** `twin`, `dex`, `cms` · **Tier 1 — carries the twin/DEX data-model commitments.** This epic must land the four bake-in-now decisions or they become expensive retrofits: (1) per-fragment `{source, observed_at, authority, confidence}` provenance; (2) stable **typed entity id** per managed object; (3) controller **retains versioned fragment history** (per-entity state queryable over time — restores the DNA "memory" that current-state-only sync would discard); (4) DEX signals attach to the typed device/app entity as an extensible, timestamped, provenanced attribute set. See the [tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) for how these unlock Tier 2/3.
 
 ## Architectural Concepts
 
@@ -564,8 +611,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.2
-- **Last Updated**: 2026-07-08
+- **Document Version**: 4.3
+- **Last Updated**: 2026-07-21
 
 ### Related Documentation
 
