@@ -521,6 +521,38 @@ func TestS3BlobStore_PathTraversal(t *testing.T) {
 	})
 }
 
+// TestS3BlobStore_LabelsPreservation_SignatureAndPublisher verifies that a GetBlob
+// round-trip through the S3 provider preserves the signature and publisher labels
+// that handlePublishStewardBinary stores. (Issue #2836 AC)
+func TestS3BlobStore_LabelsPreservation_SignatureAndPublisher(t *testing.T) {
+	store := newTestS3Store(t)
+	ctx := context.Background()
+
+	labels := map[string]string{
+		"signature":        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"publisher":        "cfgms",
+		"published_by":     "admin@example.com",
+		"publisher_tenant": "tenant-x",
+		"signature_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+	key := blob.BlobKey{TenantID: "tenant-a", Namespace: "steward-binaries", Name: "v1.0.0-linux-amd64"}
+	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("binary content")), blob.BlobMeta{
+		ContentType: "application/octet-stream",
+		Labels:      labels,
+	})
+	require.NoError(t, err)
+
+	rc, meta, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	_, err = io.ReadAll(rc)
+	require.NoError(t, err)
+
+	assert.Equal(t, labels["signature"], meta.Labels["signature"], "S3 provider must preserve signature label through GetBlob")
+	assert.Equal(t, labels["publisher"], meta.Labels["publisher"], "S3 provider must preserve publisher label through GetBlob")
+	assert.Equal(t, labels, meta.Labels, "S3 provider must preserve all labels through GetBlob")
+}
+
 // TestS3BlobStore_ListBlobs_SidecarError verifies that ListBlobs returns an error
 // when fetchSidecar fails with a non-not-found error (e.g., parse failure).
 // Orphaned blobs (missing sidecar) are silently skipped; unexpected errors surface.

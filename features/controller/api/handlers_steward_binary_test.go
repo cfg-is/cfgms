@@ -608,3 +608,201 @@ func TestGetStewardBinary_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, getRec.Code)
 	assert.Contains(t, getRec.Body.String(), "AUTHENTICATION_REQUIRED")
 }
+
+// --- Public endpoint tests (Issue #2836) ---
+
+// doGetPublic calls handleGetStewardBinaryPublic with the required tenant query parameter.
+// No authentication principal is set — the public endpoint is unauthenticated.
+func doGetPublic(server *Server, version, platform, arch, tenantID string) *httptest.ResponseRecorder {
+	q := url.Values{}
+	q.Set("tenant", tenantID)
+	rawURL := "/api/v1/public/steward-binaries/" + version + "/" + platform + "/" + arch + "?" + q.Encode()
+	req := httptest.NewRequest(http.MethodGet, rawURL, nil)
+	req = mux.SetURLVars(req, map[string]string{
+		"version":  version,
+		"platform": platform,
+		"arch":     arch,
+	})
+	rec := httptest.NewRecorder()
+	server.handleGetStewardBinaryPublic(rec, req)
+	return rec
+}
+
+// TestGetStewardBinaryPublic_SignatureRoundTrip publishes a binary, GETs it via the public
+// endpoint, and asserts that X-CFGMS-Signature/X-CFGMS-Publisher/X-CFGMS-SHA256 are all
+// present and equal to the values persisted during publish. (Issue #2836 AC)
+func TestGetStewardBinaryPublic_SignatureRoundTrip(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+
+	content := []byte("steward binary for public endpoint round-trip test")
+	sigBase64 := fix.signContent(content)
+
+	pubRec := doPublish(server, "v1.2.3", "linux", "amd64", "round-trip-tenant", sigBase64, content)
+	require.Equal(t, http.StatusOK, pubRec.Code, "publish must succeed: %s", pubRec.Body.String())
+
+	// Fetch stored metadata to compare against response headers.
+	rc, storedMeta, err := server.blobStore.GetBlob(context.Background(), blob.BlobKey{
+		TenantID:  "round-trip-tenant",
+		Namespace: "steward-binaries",
+		Name:      "v1.2.3-linux-amd64",
+	})
+	require.NoError(t, err)
+	_, _ = io.ReadAll(rc)
+	_ = rc.Close()
+
+	getRec := doGetPublic(server, "v1.2.3", "linux", "amd64", "round-trip-tenant")
+	require.Equal(t, http.StatusOK, getRec.Code, "public GET must succeed: %s", getRec.Body.String())
+
+	h := getRec.Header()
+	assert.Equal(t, storedMeta.Checksum, h.Get("X-CFGMS-SHA256"), "X-CFGMS-SHA256 must match stored checksum")
+	assert.Equal(t, storedMeta.Labels["signature"], h.Get("X-CFGMS-Signature"), "X-CFGMS-Signature must match stored signature label")
+	assert.Equal(t, storedMeta.Labels["publisher"], h.Get("X-CFGMS-Publisher"), "X-CFGMS-Publisher must match stored publisher label")
+
+	// Sanity: all three values must be non-empty.
+	assert.NotEmpty(t, h.Get("X-CFGMS-SHA256"))
+	assert.NotEmpty(t, h.Get("X-CFGMS-Signature"))
+	assert.Equal(t, "cfgms", h.Get("X-CFGMS-Publisher"))
+}
+
+// TestGetStewardBinaryPublic_NoLabelLeakage verifies that the public GET response does not
+// expose the internal blob labels published_by, publisher_tenant, or signature_digest as
+// response headers. Guards against a range-over-Labels implementation leaking operator
+// identity and internal tenant IDs to unauthenticated callers. (Issue #2836 AC)
+func TestGetStewardBinaryPublic_NoLabelLeakage(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+
+	content := []byte("steward binary for label leakage test")
+	sigBase64 := fix.signContent(content)
+
+	// Inject an operator identity so published_by is populated.
+	q := url.Values{}
+	q.Set("signature", sigBase64)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/installer/steward-binaries/v1.0.0/linux/amd64?"+q.Encode(),
+		bytes.NewReader(content))
+	req = withScopedPrincipal(req, "leak-test-tenant")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.UserIDKey, "operator@example.com"))
+	req = mux.SetURLVars(req, map[string]string{"version": "v1.0.0", "platform": "linux", "arch": "amd64"})
+	pubRec := httptest.NewRecorder()
+	server.handlePublishStewardBinary(pubRec, req)
+	require.Equal(t, http.StatusOK, pubRec.Code, "publish must succeed: %s", pubRec.Body.String())
+
+	getRec := doGetPublic(server, "v1.0.0", "linux", "amd64", "leak-test-tenant")
+	require.Equal(t, http.StatusOK, getRec.Code)
+
+	// Internal labels must not appear as response headers.
+	h := getRec.Header()
+	assert.Empty(t, h.Get("X-CFGMS-Published-By"), "published_by must not leak as X-CFGMS-Published-By")
+	assert.Empty(t, h.Get("X-CFGMS-Publisher-Tenant"), "publisher_tenant must not leak as X-CFGMS-Publisher-Tenant")
+	assert.Empty(t, h.Get("X-CFGMS-Signature-Digest"), "signature_digest must not leak as X-CFGMS-Signature-Digest")
+}
+
+// TestGetStewardBinaryPublic_LabelsPreservation_Filesystem verifies that a GetBlob round-trip
+// through the filesystem blob provider preserves the signature and publisher labels that
+// handlePublishStewardBinary stores. (Issue #2836 AC)
+func TestGetStewardBinaryPublic_LabelsPreservation_Filesystem(t *testing.T) {
+	store := newFSBlobStore(t)
+	ctx := context.Background()
+
+	labels := map[string]string{
+		"signature":        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"publisher":        "cfgms",
+		"published_by":     "admin@example.com",
+		"publisher_tenant": "tenant-x",
+		"signature_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+	key := blob.BlobKey{TenantID: "test-tenant", Namespace: "steward-binaries", Name: "v1.0.0-linux-amd64"}
+	err := store.PutBlob(ctx, key, bytes.NewReader([]byte("binary content")), blob.BlobMeta{
+		ContentType: "application/octet-stream",
+		Labels:      labels,
+	})
+	require.NoError(t, err)
+
+	rc, meta, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(rc)
+	_ = rc.Close()
+
+	assert.Equal(t, labels["signature"], meta.Labels["signature"], "filesystem provider must preserve signature label through GetBlob")
+	assert.Equal(t, labels["publisher"], meta.Labels["publisher"], "filesystem provider must preserve publisher label through GetBlob")
+}
+
+// doGetPublicRaw calls handleGetStewardBinaryPublic without forcing a tenant query
+// parameter, so callers can exercise the MISSING_TENANT branch. When tenantID is empty
+// the tenant query parameter is omitted entirely.
+func doGetPublicRaw(server *Server, version, platform, arch, tenantID string) *httptest.ResponseRecorder {
+	rawURL := "/api/v1/public/steward-binaries/" + version + "/" + platform + "/" + arch
+	if tenantID != "" {
+		q := url.Values{}
+		q.Set("tenant", tenantID)
+		rawURL += "?" + q.Encode()
+	}
+	req := httptest.NewRequest(http.MethodGet, rawURL, nil)
+	req = mux.SetURLVars(req, map[string]string{
+		"version":  version,
+		"platform": platform,
+		"arch":     arch,
+	})
+	rec := httptest.NewRecorder()
+	server.handleGetStewardBinaryPublic(rec, req)
+	return rec
+}
+
+// TestHandleGetStewardBinaryPublic_NoBlobStore verifies the public GET handler returns
+// 503 SERVICE_UNAVAILABLE when no blob store is wired. Analog of
+// TestHandleGetStewardBinary_NoBlobStore for the unauthenticated endpoint. (Issue #2836)
+func TestHandleGetStewardBinaryPublic_NoBlobStore(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := doGetPublicRaw(server, "v1.0.0", "linux", "amd64", "test-tenant")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "SERVICE_UNAVAILABLE")
+}
+
+// TestHandleGetStewardBinaryPublic_MissingTenant verifies the public GET handler returns
+// 400 MISSING_TENANT when the required tenant query parameter is absent. This branch has
+// no analog on the authenticated endpoint (which derives tenant from the principal) and
+// must be covered directly. (Issue #2836)
+func TestHandleGetStewardBinaryPublic_MissingTenant(t *testing.T) {
+	server, _ := setupStewardBinaryServer(t)
+
+	rec := doGetPublicRaw(server, "v1.0.0", "linux", "amd64", "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "MISSING_TENANT")
+}
+
+// TestHandleGetStewardBinaryPublic_ErrorPaths verifies the public GET handler validation
+// branches for version, platform, and arch. Analog of TestHandleGetStewardBinary_ErrorPaths
+// for the unauthenticated endpoint. (Issue #2836)
+func TestHandleGetStewardBinaryPublic_ErrorPaths(t *testing.T) {
+	server, _ := setupStewardBinaryServer(t)
+
+	t.Run("invalid version returns 400", func(t *testing.T) {
+		rec := doGetPublicRaw(server, "1.0.0", "linux", "amd64", "test-tenant")
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "INVALID_VERSION")
+	})
+
+	t.Run("invalid platform returns 400", func(t *testing.T) {
+		rec := doGetPublicRaw(server, "v1.0.0", "solaris", "amd64", "test-tenant")
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "INVALID_PLATFORM")
+	})
+
+	t.Run("invalid arch returns 400", func(t *testing.T) {
+		rec := doGetPublicRaw(server, "v1.0.0", "linux", "ppc64", "test-tenant")
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "INVALID_ARCH")
+	})
+}
+
+// TestHandleGetStewardBinaryPublic_Returns404WhenAbsent verifies the public GET handler
+// returns 404 BINARY_NOT_FOUND for a missing binary. Analog of
+// TestHandleGetStewardBinary_Returns404WhenAbsent for the unauthenticated endpoint. (Issue #2836)
+func TestHandleGetStewardBinaryPublic_Returns404WhenAbsent(t *testing.T) {
+	server, _ := setupStewardBinaryServer(t)
+
+	rec := doGetPublicRaw(server, "v9.9.9", "linux", "amd64", "test-tenant")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "BINARY_NOT_FOUND")
+}

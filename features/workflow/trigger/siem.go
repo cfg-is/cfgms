@@ -87,14 +87,24 @@ func (sp *SIEMProcessor) Start(ctx context.Context) error {
 		"buffer_size", sp.bufferSize,
 		"cleanup_interval", sp.cleanupInterval.String())
 
+	// Recreate stopChan so that a processor which was previously stopped (which
+	// closes stopChan) can be started again with a fresh signal channel.
+	sp.stopChan = make(chan struct{})
 	sp.logBuffer = make(chan LogEntry, sp.bufferSize)
 	sp.running = true
 
+	// Capture the freshly created channels as locals and hand them to the
+	// worker goroutines. The goroutines must not read sp.logBuffer / sp.stopChan
+	// directly: a subsequent Start would reassign those fields under the mutex
+	// while these goroutines read them without the lock, which is a data race.
+	logBuffer := sp.logBuffer
+	stopChan := sp.stopChan
+
 	// Start log processing goroutine
-	go sp.processLogEntries(ctx)
+	go sp.processLogEntries(ctx, logBuffer, stopChan)
 
 	// Start cleanup goroutine
-	go sp.cleanupAggregationData(ctx)
+	go sp.cleanupAggregationData(ctx, stopChan)
 
 	logger.InfoCtx(ctx, "SIEM processor started successfully")
 	return nil
@@ -237,8 +247,10 @@ func (sp *SIEMProcessor) ProcessLogEntry(ctx context.Context, logEntry map[strin
 	}
 }
 
-// processLogEntries processes log entries from the buffer
-func (sp *SIEMProcessor) processLogEntries(ctx context.Context) {
+// processLogEntries processes log entries from the buffer. The logBuffer and stopChan
+// channels are passed in by Start rather than read from the receiver so that a subsequent
+// Start reassigning sp.logBuffer / sp.stopChan cannot race with this goroutine.
+func (sp *SIEMProcessor) processLogEntries(ctx context.Context, logBuffer <-chan LogEntry, stopChan <-chan struct{}) {
 	tenantID := logging.ExtractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
@@ -249,10 +261,10 @@ func (sp *SIEMProcessor) processLogEntries(ctx context.Context) {
 		case <-ctx.Done():
 			logger.InfoCtx(ctx, "Log entry processing stopped due to context cancellation")
 			return
-		case <-sp.stopChan:
+		case <-stopChan:
 			logger.InfoCtx(ctx, "Log entry processing stopped due to stop signal")
 			return
-		case entry, ok := <-sp.logBuffer:
+		case entry, ok := <-logBuffer:
 			if !ok {
 				logger.InfoCtx(ctx, "Log buffer closed, stopping processing")
 				return
@@ -743,8 +755,10 @@ func (sp *SIEMProcessor) resetAggregationWindow(triggerID string) {
 	aggData.LastUpdated = time.Now()
 }
 
-// cleanupAggregationData periodically cleans up old aggregation data
-func (sp *SIEMProcessor) cleanupAggregationData(ctx context.Context) {
+// cleanupAggregationData periodically cleans up old aggregation data. stopChan is passed
+// in by Start rather than read from the receiver so a subsequent Start reassigning
+// sp.stopChan cannot race with this goroutine.
+func (sp *SIEMProcessor) cleanupAggregationData(ctx context.Context, stopChan <-chan struct{}) {
 	ticker := time.NewTicker(sp.cleanupInterval)
 	defer ticker.Stop()
 
@@ -755,7 +769,7 @@ func (sp *SIEMProcessor) cleanupAggregationData(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-sp.stopChan:
+		case <-stopChan:
 			return
 		case <-ticker.C:
 			sp.performCleanup(ctx, logger)

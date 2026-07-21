@@ -398,6 +398,15 @@ func (s *Server) handleGetStewardBinaryPublic(w http.ResponseWriter, r *http.Req
 	if meta.Checksum != "" {
 		w.Header().Set("X-CFGMS-SHA256", meta.Checksum)
 	}
+	// Read only the two safe-to-expose labels individually. Never range over meta.Labels
+	// to set headers — the same map holds published_by, publisher_tenant, and
+	// signature_digest which must not be served to unauthenticated callers.
+	if sig := meta.Labels["signature"]; sig != "" {
+		w.Header().Set("X-CFGMS-Signature", sig)
+	}
+	if pub := meta.Labels["publisher"]; pub != "" {
+		w.Header().Set("X-CFGMS-Publisher", pub)
+	}
 	w.WriteHeader(http.StatusOK)
 	if _, copyErr := io.Copy(w, rc); copyErr != nil {
 		s.logger.Warn("Failed to stream steward binary to client (public)", "error", copyErr)
