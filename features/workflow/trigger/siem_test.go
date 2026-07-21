@@ -58,6 +58,49 @@ func TestSIEMProcessor_StartStop(t *testing.T) {
 	assert.Contains(t, err.Error(), "SIEM processor is not running")
 }
 
+// TestSIEMProcessor_RestartRecreatesStopChan proves Start installs a fresh stopChan on
+// every start, so a processor that was stopped (which closes stopChan) can be started
+// again with worker goroutines that do NOT immediately exit on a stale, already-closed
+// stopChan. Without the recreate, a restarted processor's workers select the closed
+// stopChan on their first loop and return, silently doing no work.
+//
+// Regression guard salvaged from closed PR #2849 (the header work there duplicated #2836,
+// but this SIEM fix was unique and unmerged).
+func TestSIEMProcessor_RestartRecreatesStopChan(t *testing.T) {
+	processor := NewSIEMProcessor(&MockTriggerManager{}, &MockWorkflowTrigger{})
+	ctx := context.Background()
+
+	require.NoError(t, processor.Start(ctx))
+	require.NoError(t, processor.Stop(ctx))
+
+	// Restart: Start must install a fresh, open stopChan.
+	require.NoError(t, processor.Start(ctx))
+	select {
+	case <-processor.stopChan:
+		t.Fatal("stopChan is closed after restart; Start must recreate it so restarted workers do not exit immediately")
+	default:
+		// open, as required
+	}
+	require.NoError(t, processor.Stop(ctx))
+}
+
+// TestSIEMProcessor_StartStopRestartRaceFree exercises repeated start/stop restart cycles
+// so the -race detector catches any lock-free read of sp.logBuffer / sp.stopChan by the
+// worker goroutines while a subsequent Start reassigns those fields under the mutex. The
+// fix hands the freshly created channels to the goroutines as locals; the worker loops
+// must never read the receiver fields. Run with `-race` for this to have teeth.
+func TestSIEMProcessor_StartStopRestartRaceFree(t *testing.T) {
+	processor := NewSIEMProcessor(&MockTriggerManager{}, &MockWorkflowTrigger{})
+	processor.cleanupInterval = time.Millisecond // frequent cleanup ticks widen the race window
+	ctx := context.Background()
+
+	for i := 0; i < 8; i++ {
+		require.NoError(t, processor.Start(ctx))
+		time.Sleep(2 * time.Millisecond) // let both worker goroutines enter their select loops
+		require.NoError(t, processor.Stop(ctx))
+	}
+}
+
 func TestSIEMProcessor_RegisterSIEMTrigger(t *testing.T) {
 	mockTriggerManager := &MockTriggerManager{}
 	mockWorkflowTrigger := &MockWorkflowTrigger{}
