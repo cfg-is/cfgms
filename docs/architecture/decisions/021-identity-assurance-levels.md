@@ -486,3 +486,29 @@ These do not block decomposition and are config, not design:
    is invisible to the operator, so it can be aggressive at no UX cost. When silent
    proof is impossible (no credential available on this device), fall back to
    `AssuranceBasic` and step up on the next sensitive action.
+
+---
+
+## Per-tenant tightening of `permissionAssurance` (Issue #2845)
+
+The `permissionAssurance` map in `features/controller/api` is a global registry —
+the same floor applies to every tenant. Operators may need stricter floors for
+specific tenants (e.g. a managed tenant with elevated security requirements).
+
+**Storage substrate (Issue #2845):** `business.AssurancePolicyStore`, defined in
+`pkg/storage/interfaces/business`, stores a set of `AssurancePolicyOverride`
+entries per tenant. Each entry carries a `PermissionID`, an optional `MinOverride`
+(`*int`, mirroring `session.AssuranceLevel` values: 0=Machine, 1=Basic, 2=Strong),
+and a `RequireUserPresence` flag. The store is wired for the `database`
+(PostgreSQL) and `sqlite` providers only — the `git`/SOPS config-storage path is
+untouched, matching the precedent set by `RefreshPolicyStore`.
+
+`SetPolicy` replaces the tenant's **entire** override set in one call (full-replace
+/ PUT semantics). `GetPolicy` returns `{TenantID: id, Overrides: nil}` without
+error when no record exists — absence and "no override" are equivalent.
+
+**Resolution (follow-on story):** A follow-on story resolves the per-tenant
+overrides root→leaf against the global `permissionAssurance` map so that
+`requirePermission` and `scanAPIKeysForPrivilegedAccess` enforce the stricter of
+the global floor and any ancestor-chain override. Until that story lands,
+`permissionAssurance` is the sole source of truth.

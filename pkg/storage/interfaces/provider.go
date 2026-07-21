@@ -48,8 +48,9 @@ type BusinessStoreBundle struct {
 	Push                business.PushStore
 	PendingRegistration business.PendingRegistrationStore
 	IPTrust             business.IPTrustStore
-	PendingRefresh      business.PendingRefreshStore // Issue #2098: registration-refresh approval queue
-	RefreshPolicy       business.RefreshPolicyStore  // Issue #2098: per-tenant refresh policy
+	PendingRefresh      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
+	RefreshPolicy       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
+	AssurancePolicy     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -66,6 +67,13 @@ type BusinessStoreOpener interface {
 type RefreshStoreCreator interface {
 	CreateRefreshPolicyStore(config map[string]interface{}) (business.RefreshPolicyStore, error)
 	CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error)
+}
+
+// AssuranceStoreCreator is an optional StorageProvider extension for backends that
+// support per-tenant assurance-policy overrides (Issue #2845, ADR-021).
+// Backends that do not implement this interface leave the store nil in the manager.
+type AssuranceStoreCreator interface {
+	CreateAssurancePolicyStore(config map[string]interface{}) (business.AssurancePolicyStore, error)
 }
 
 // StorageProvider defines the interface that all storage backends must implement.
@@ -542,8 +550,9 @@ type StorageManager struct {
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
-	pendingRefreshStore      business.PendingRefreshStore // Issue #2098: registration-refresh approval queue
-	refreshPolicyStore       business.RefreshPolicyStore  // Issue #2098: per-tenant refresh policy
+	pendingRefreshStore      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
+	refreshPolicyStore       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
+	assurancePolicyStore     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -658,6 +667,17 @@ func (sm *StorageManager) SetRefreshPolicyStore(s business.RefreshPolicyStore) {
 	sm.refreshPolicyStore = s
 }
 
+// GetAssurancePolicyStore returns the per-tenant assurance-policy override store (Issue #2845).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetAssurancePolicyStore() business.AssurancePolicyStore {
+	return sm.assurancePolicyStore
+}
+
+// SetAssurancePolicyStore wires the per-tenant assurance-policy store after construction.
+func (sm *StorageManager) SetAssurancePolicyStore(s business.AssurancePolicyStore) {
+	sm.assurancePolicyStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -704,6 +724,7 @@ func (sm *StorageManager) Close() error {
 		sm.ipTrustStore,
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
+		sm.assurancePolicyStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -907,6 +928,16 @@ func CreateClusterStorageManager(pgConnStr string, _ map[string]interface{}) (*S
 			sm.SetPendingRefreshStore(pendingRefreshStore)
 		}
 	}
+	// Wire assurance policy store if the provider implements AssuranceStoreCreator (Issue #2845).
+	if asc, ok := provider.(AssuranceStoreCreator); ok {
+		assurancePolicyStore, err := asc.CreateAssurancePolicyStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create assurance policy store: %w", err)
+		}
+		if assurancePolicyStore != nil {
+			sm.SetAssurancePolicyStore(assurancePolicyStore)
+		}
+	}
 	return sm, nil
 }
 
@@ -971,6 +1002,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sm.SetIPTrustStore(ipTrustStore)
 		sm.SetPendingRefreshStore(bundle.PendingRefresh)
 		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
+		sm.SetAssurancePolicyStore(bundle.AssurancePolicy)
 		return sm, nil
 	}
 
