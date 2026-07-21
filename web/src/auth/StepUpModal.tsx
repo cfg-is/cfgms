@@ -323,15 +323,20 @@ export default function StepUpModal({
 
         <div className="step-up-body">
           <div className="step-up-icon" aria-hidden="true">
-            {/* Passkey / key icon (matches mockup .mic) */}
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M7.5 13.5a3.5 3.5 0 113.5-3.5M11 10h9l-2 2 2 2-3 3"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+            {/* Passkey / key icon (Lucide "key", ISC — a recognizable key). */}
+            <svg
+              width="26"
+              height="26"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="7.5" cy="15.5" r="5.5" />
+              <path d="m21 2-9.6 9.6" />
+              <path d="m15.5 7.5 3 3L22 7l-3-3" />
             </svg>
           </div>
 
@@ -376,15 +381,15 @@ export default function StepUpModal({
                   height="16"
                   viewBox="0 0 24 24"
                   fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                   aria-hidden="true"
                 >
-                  <path
-                    d="M7.5 13.5a3.5 3.5 0 113.5-3.5M11 10h9l-2 2 2 2-3 3"
-                    stroke="currentColor"
-                    strokeWidth="1.7"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                  <circle cx="7.5" cy="15.5" r="5.5" />
+                  <path d="m21 2-9.6 9.6" />
+                  <path d="m15.5 7.5 3 3L22 7l-3-3" />
                 </svg>
                 Verify with passkey
               </button>
