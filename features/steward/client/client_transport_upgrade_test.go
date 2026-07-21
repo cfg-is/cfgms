@@ -18,6 +18,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -105,6 +106,11 @@ func computeSHA256(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
 }
+
+// roundTripFunc is an http.RoundTripper backed by a function literal.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // noopSwap is a launcherSwapFunc that always succeeds.
 func noopSwap(_ context.Context, _, _, _ string) error { return nil }
@@ -1352,4 +1358,227 @@ func TestUpgradeCommandRegistered(t *testing.T) {
 	assert.Equal(t, cpTypes.EventType("steward.upgrade.swapped"), cpTypes.EventStewardUpgradeSwapped)
 	assert.Equal(t, cpTypes.EventType("steward.upgrade.committed"), cpTypes.EventStewardUpgradeCommitted)
 	assert.Equal(t, cpTypes.EventType("steward.upgrade.rolled_back"), cpTypes.EventStewardUpgradeRolledBack)
+}
+
+// ---- Self-fetch fail-closed matrix (AC 6, Issue #2833) ---------------------
+
+// selfFetchTestClient builds a TransportClient wired for selfFetchForUpgrade tests.
+func selfFetchTestClient(
+	t *testing.T,
+	httpsBase string,
+	controllerHost string,
+	trustStore trust.TrustStore,
+) *TransportClient {
+	t.Helper()
+	c := &TransportClient{
+		stewardID:                  "test-steward",
+		tenantID:                   "test-tenant",
+		transportAddress:           controllerHost + ":4433",
+		controllerHTTPSBaseURL:     httpsBase,
+		certStoreDir:               t.TempDir(),
+		upgradePublisherTrustStore: trustStore,
+		heartbeatStop:              make(chan struct{}),
+		convergenceStop:            make(chan struct{}),
+		logger:                     newTestLogger(t),
+		launcherManaged:            false,
+	}
+	return c
+}
+
+// selfFetchComposite returns the version-bound composite string that must be signed.
+func selfFetchComposite(hexSHA256, ver, platform, arch string) string {
+	return hexSHA256 + "|" + ver + "|" + platform + "|" + arch
+}
+
+// TestSelfFetch_FailClosedMatrix is a table-driven test verifying that
+// selfFetchForUpgrade rejects every unsafe download and never stages an
+// unverified binary. (AC 6, Issue #2833)
+func TestSelfFetch_FailClosedMatrix(t *testing.T) {
+	const desiredVersion = "v99.20.0"
+	const oldVersion = "v1.0.0"
+
+	content := []byte("steward binary for fail-closed matrix")
+	hexSHA256 := computeSHA256(content)
+
+	platform, arch := runtime.GOOS, runtime.GOARCH
+	if platform != "windows" && platform != "darwin" {
+		platform = "linux"
+	}
+	if arch != "arm64" {
+		arch = "amd64"
+	}
+
+	correctComposite := selfFetchComposite(hexSHA256, desiredVersion, platform, arch)
+
+	// Build a legitimate publisher for cases that need a valid key.
+	ts, sign := testPublisher(t, "cfgms")
+	validSig := sign(correctComposite)
+	validSigB64 := base64.StdEncoding.EncodeToString(validSig)
+
+	// Old-version signature (authentic, but for oldVersion not desiredVersion).
+	oldComposite := selfFetchComposite(hexSHA256, oldVersion, platform, arch)
+	oldVersionSig := sign(oldComposite)
+	oldVersionSigB64 := base64.StdEncoding.EncodeToString(oldVersionSig)
+
+	// Tampered: sign a different hash so the signature won't verify against the real content.
+	tamperedSig := sign(selfFetchComposite("deadbeef00000000", desiredVersion, platform, arch))
+	tamperedSigB64 := base64.StdEncoding.EncodeToString(tamperedSig)
+
+	type testCase struct {
+		name          string
+		setupServer   func(t *testing.T) *httptest.Server
+		setupClient   func(t *testing.T, c *TransportClient, srv *httptest.Server)
+		trustStore    trust.TrustStore // nil → use baked-in (placeholder key in dev builds)
+		wantErrSubstr string
+	}
+
+	cases := []testCase{
+		{
+			name: "tampered_binary_wrong_signature",
+			setupServer: func(t *testing.T) *httptest.Server {
+				return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("X-CFGMS-SHA256", hexSHA256)
+					w.Header().Set("X-CFGMS-Publisher", "cfgms")
+					w.Header().Set("X-CFGMS-Signature", tamperedSigB64)
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(content)
+				}))
+			},
+			setupClient: func(t *testing.T, c *TransportClient, srv *httptest.Server) {
+				c.mu.Lock()
+				c.upgradeHTTPClient = srv.Client()
+				c.mu.Unlock()
+			},
+			trustStore:    ts,
+			wantErrSubstr: "signature verification failed",
+		},
+		{
+			name: "valid_signature_attacker_publisher_header",
+			// Server returns the correct binary + correct signature, but lies about publisher.
+			// The header X-CFGMS-Publisher: attacker must NOT select a verification key —
+			// the baked-in identity is the only trust anchor.
+			setupServer: func(t *testing.T) *httptest.Server {
+				return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("X-CFGMS-SHA256", hexSHA256)
+					w.Header().Set("X-CFGMS-Publisher", "attacker")  // wrong publisher name
+					w.Header().Set("X-CFGMS-Signature", validSigB64) // valid sig but for "cfgms"
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(content)
+				}))
+			},
+			setupClient: func(t *testing.T, c *TransportClient, srv *httptest.Server) {
+				c.mu.Lock()
+				c.upgradeHTTPClient = srv.Client()
+				c.mu.Unlock()
+			},
+			trustStore:    ts,
+			wantErrSubstr: "signature verification failed",
+		},
+		{
+			name: "placeholder_key_build_rejects_all",
+			// No override trust store → uses CFGMSPublisherIdentity() (all-zero placeholder in dev builds).
+			// isUnsafePublisherKey rejects the all-zero key → ErrUntrustedPublisherKey.
+			setupServer: func(t *testing.T) *httptest.Server {
+				return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("X-CFGMS-SHA256", hexSHA256)
+					w.Header().Set("X-CFGMS-Publisher", "cfgms")
+					w.Header().Set("X-CFGMS-Signature", validSigB64)
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(content)
+				}))
+			},
+			setupClient: func(t *testing.T, c *TransportClient, srv *httptest.Server) {
+				c.mu.Lock()
+				c.upgradeHTTPClient = srv.Client()
+				c.upgradePublisherTrustStore = nil // use baked-in placeholder
+				c.mu.Unlock()
+			},
+			trustStore:    nil,
+			wantErrSubstr: "signature verification failed",
+		},
+		{
+			name: "non_https_url",
+			setupServer: func(t *testing.T) *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(content)
+				}))
+			},
+			setupClient: func(t *testing.T, c *TransportClient, srv *httptest.Server) {
+				// Override base URL to use http (non-TLS).
+				c.mu.Lock()
+				c.controllerHTTPSBaseURL = srv.URL // srv.URL starts with "http://"
+				c.mu.Unlock()
+			},
+			trustStore:    ts,
+			wantErrSubstr: "https",
+		},
+		{
+			name: "off_host_https_url",
+			setupServer: func(t *testing.T) *httptest.Server {
+				return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+			},
+			setupClient: func(t *testing.T, c *TransportClient, srv *httptest.Server) {
+				// HTTPS base URL points to a different host than the QUIC transport address.
+				c.mu.Lock()
+				c.controllerHTTPSBaseURL = "https://evil.example.com"
+				c.mu.Unlock()
+			},
+			trustStore:    ts,
+			wantErrSubstr: "does not match controller endpoint host",
+		},
+		{
+			name: "compromised_controller_rollback",
+			// A compromised controller serves oldVersion binary + authentic old-version signature
+			// at the desiredVersion (v99.20.0) URL. Every controller-supplied field (headers,
+			// body) claims this is an old binary — but the steward composes the verify message
+			// from its own requested desiredVersion, so the sig is invalid and it rejects.
+			setupServer: func(t *testing.T) *httptest.Server {
+				return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// Server lies: claims oldVersion's SHA256 in the header (same content
+					// hash since content is unchanged, but the composite includes oldVersion).
+					w.Header().Set("X-CFGMS-SHA256", hexSHA256)
+					w.Header().Set("X-CFGMS-Publisher", "cfgms")
+					// Signature was made for composite(hexSHA256|oldVersion|platform|arch), NOT for desiredVersion.
+					w.Header().Set("X-CFGMS-Signature", oldVersionSigB64)
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(content) // same binary bytes (old version)
+				}))
+			},
+			setupClient: func(t *testing.T, c *TransportClient, srv *httptest.Server) {
+				c.mu.Lock()
+				c.upgradeHTTPClient = srv.Client()
+				c.mu.Unlock()
+			},
+			trustStore:    ts,
+			wantErrSubstr: "signature verification failed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.setupServer(t)
+			defer srv.Close()
+
+			c := selfFetchTestClient(t, srv.URL, "127.0.0.1", tc.trustStore)
+			tc.setupClient(t, c, srv)
+
+			_, err := c.selfFetchForUpgrade(context.Background(), desiredVersion, "test-tenant")
+			require.Error(t, err, "selfFetchForUpgrade must return an error for case %q", tc.name)
+			assert.Contains(t, err.Error(), tc.wantErrSubstr,
+				"error must mention %q for case %q", tc.wantErrSubstr, tc.name)
+
+			// Binary must NOT be staged.
+			c.mu.RLock()
+			staged := c.lastStagedVersion
+			c.mu.RUnlock()
+			assert.Empty(t, staged, "lastStagedVersion must remain empty after rejection for case %q", tc.name)
+		})
+	}
 }

@@ -1275,8 +1275,15 @@ func connectWithApprovedRegistration(
 	// after InitializeConfigExecutor creates it (Issue #2435).
 	dnaAdapter := newDNACollectorAdapter(logger, nil)
 
+	// CFGMS_CONTROLLER_HTTPS_BASE_URL enables steward self-fetch upgrades (Issue #2833).
+	// When set, the steward pulls its own binary from the controller instead of waiting
+	// for a controller-initiated push_steward_binary command. Must use https scheme and
+	// match the controller endpoint hostname.
+	controllerHTTPSBaseURL := os.Getenv("CFGMS_CONTROLLER_HTTPS_BASE_URL")
+
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               reg.TransportAddress,
+		ControllerHTTPSBaseURL:      controllerHTTPSBaseURL,
 		RegistrationToken:           token,
 		CACertPEM:                   reg.CACert,
 		ClientCertPEM:               reg.ClientCert,
@@ -1424,6 +1431,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
 		ControllerURL:               id.TransportAddress,
+		ControllerHTTPSBaseURL:      os.Getenv("CFGMS_CONTROLLER_HTTPS_BASE_URL"),
 		RegistrationToken:           token,
 		CACertPEM:                   id.CACertPEM,
 		ServerCertPEM:               id.ServerCertPEM,

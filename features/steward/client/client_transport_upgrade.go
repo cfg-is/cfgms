@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -615,4 +616,294 @@ func parseSemver(v string) []int {
 		nums[i] = n
 	}
 	return nums
+}
+
+// ---- Self-fetch upgrade (Issue #2833) ----------------------------------------
+
+// errSelfFetchBinaryNotFound is returned by selfFetchDownload when the controller
+// responds with HTTP 404. Callers use this to implement the own-tenant → default
+// tenant fallback without treating 404 as a hard error.
+var errSelfFetchBinaryNotFound = errors.New("binary not found on controller (404)")
+
+// mapRuntimePlatformArch maps runtime.GOOS and runtime.GOARCH to the controller's
+// vocabulary (matching validPlatforms/validArchs in handlers_installer.go: windows,
+// darwin, linux; amd64, arm64).
+func mapRuntimePlatformArch() (platform, arch string) {
+	switch runtime.GOOS {
+	case "windows":
+		platform = "windows"
+	case "darwin":
+		platform = "darwin"
+	default:
+		platform = "linux"
+	}
+	switch runtime.GOARCH {
+	case "arm64":
+		arch = "arm64"
+	default:
+		arch = "amd64"
+	}
+	return
+}
+
+// buildSelfFetchURL constructs the self-fetch URL for handleGetStewardBinaryPublic.
+// baseURL must have its trailing slash already trimmed.
+func buildSelfFetchURL(baseURL, ver, platform, arch, tenantID string) string {
+	return fmt.Sprintf("%s/api/v1/public/steward-binaries/%s/%s/%s?tenant=%s",
+		baseURL,
+		url.PathEscape(ver),
+		url.PathEscape(platform),
+		url.PathEscape(arch),
+		url.QueryEscape(tenantID),
+	)
+}
+
+// selfFetchDownload GETs rawURL, saves the body to dstPath, and returns:
+//   - recomputed hex SHA-256 of downloaded bytes (recomputedSHA256)
+//   - X-CFGMS-SHA256 response header value (serverSHA256; may be empty)
+//   - X-CFGMS-Publisher response header value (publisher; may be empty)
+//   - base64-decoded X-CFGMS-Signature response header bytes (bundleSig; nil if absent)
+//   - number of bytes written
+//
+// Returns errSelfFetchBinaryNotFound on HTTP 404.
+// rawURL must be host-pinned and scheme-validated by the caller.
+func (c *TransportClient) selfFetchDownload(ctx context.Context, rawURL, dstPath string) (
+	recomputedSHA256, serverSHA256, publisher string, bundleSig []byte, sizeBytes int64, err error,
+) {
+	httpClient, err := c.buildHTTPClientForUpgrade()
+	if err != nil {
+		return "", "", "", nil, 0, fmt.Errorf("build http client: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil) //#nosec G107 -- URL is host-pinned before this call
+	if err != nil {
+		return "", "", "", nil, 0, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", "", "", nil, 0, fmt.Errorf("http get: %w", err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", "", "", nil, 0, errSelfFetchBinaryNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", nil, 0, fmt.Errorf("http get: unexpected status %d", resp.StatusCode)
+	}
+
+	// Read security-relevant response headers.
+	serverSHA256 = resp.Header.Get("X-CFGMS-SHA256")
+	publisher = resp.Header.Get("X-CFGMS-Publisher")
+	if sigB64 := resp.Header.Get("X-CFGMS-Signature"); sigB64 != "" {
+		decoded, decErr := base64.StdEncoding.DecodeString(sigB64)
+		if decErr != nil {
+			return "", "", "", nil, 0, fmt.Errorf("decode X-CFGMS-Signature header: %w", decErr)
+		}
+		bundleSig = decoded
+	}
+
+	// Size cap via Content-Length header.
+	if cl := resp.ContentLength; cl > MaxBinarySizeBytes {
+		return "", "", "", nil, 0, fmt.Errorf("Content-Length %d exceeds MaxBinarySizeBytes %d", cl, MaxBinarySizeBytes)
+	}
+
+	f, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //#nosec G304 -- dstPath is built from certStoreDir+seq
+	if err != nil {
+		return "", "", "", nil, 0, fmt.Errorf("create temp file: %w", err)
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+
+	hasher := sha256.New()
+	limited := &io.LimitedReader{R: resp.Body, N: MaxBinarySizeBytes + 1}
+	tee := io.TeeReader(limited, hasher)
+
+	written, copyErr := io.Copy(f, tee)
+	if copyErr != nil {
+		return "", "", "", nil, 0, fmt.Errorf("write temp file: %w", copyErr)
+	}
+	if limited.N == 0 {
+		return "", "", "", nil, 0, fmt.Errorf("body exceeds MaxBinarySizeBytes %d; download aborted", MaxBinarySizeBytes)
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), serverSHA256, publisher, bundleSig, written, nil
+}
+
+// verifyBinarySignatureForSelfFetch verifies the Ed25519 publisher signature for the
+// self-fetch path using a version-bound composite message.
+//
+// Composite: recomputedSHA256 + "|" + version + "|" + platform + "|" + arch
+//
+// The composite values (version, platform, arch) are the steward's own requested
+// desired_version and detected runtime.GOOS/GOARCH — never any controller-supplied field.
+// This is the rollback defence from Issue #2834: a compromised controller that serves an
+// old binary cannot reuse the old version's authentic signature because the steward
+// composes the verify message from the NEW requested version, not from any header.
+//
+// The trust anchor is always the baked-in CFGMSPublisherIdentity() (or the test-only
+// upgradePublisherTrustStore override). The publisher header value is used solely as a
+// lookup key; if it does not match the baked-in identity name the lookup returns
+// ErrPublisherNotTrusted, proving the header is not a trust anchor.
+func (c *TransportClient) verifyBinarySignatureForSelfFetch(
+	recomputedSHA256, ver, platform, arch, publisher string, bundleSig []byte,
+) error {
+	if publisher == "" {
+		return fmt.Errorf("self-fetch: X-CFGMS-Publisher response header is absent")
+	}
+	if len(bundleSig) == 0 {
+		return fmt.Errorf("self-fetch: X-CFGMS-Signature response header is absent")
+	}
+
+	c.mu.RLock()
+	overrideStore := c.upgradePublisherTrustStore
+	c.mu.RUnlock()
+
+	var store trust.TrustStore
+	if overrideStore != nil {
+		store = overrideStore
+	} else {
+		ts := trust.NewInMemoryTrustStore()
+		_ = ts.AddPublisher(trust.CFGMSPublisherIdentity())
+		store = ts
+	}
+
+	// Version-bound composite: Version/Platform/Arch are the steward's own values.
+	composite := recomputedSHA256 + "|" + ver + "|" + platform + "|" + arch
+
+	b := bundle.Bundle{ContentHash: composite}
+	sig := bundle.BundleSignature{
+		Publisher: publisher,
+		Algorithm: "ed25519",
+		Signature: bundleSig,
+	}
+	return trust.VerifyBundleSignature(&b, sig, store)
+}
+
+// selfFetchForUpgrade downloads, verifies, and stages the desired steward binary
+// from the controller. It tries tenantID first, then "default" on 404.
+//
+// On success it updates c.lastStagedVersion / c.lastStagedBinaryPath and returns
+// the staged binary path. On any failure it removes the temp file and returns an
+// error; the caller logs and retries on the next convergence cycle.
+func (c *TransportClient) selfFetchForUpgrade(ctx context.Context, desiredVersion, tenantID string) (string, error) {
+	c.mu.RLock()
+	certStoreDir := c.certStoreDir
+	httpsBase := c.controllerHTTPSBaseURL
+	c.mu.RUnlock()
+
+	if certStoreDir == "" {
+		return "", fmt.Errorf("self-fetch: cert store dir not configured")
+	}
+
+	// Validate HTTPS base URL: scheme and host-pin.
+	baseURL, err := url.Parse(httpsBase)
+	if err != nil {
+		return "", fmt.Errorf("self-fetch: cannot parse HTTPS base URL: %w", err)
+	}
+	if baseURL.Scheme != "https" {
+		return "", fmt.Errorf("self-fetch: HTTPS base URL scheme must be https, got %q", baseURL.Scheme)
+	}
+	controllerHost := c.controllerEndpointHost()
+	fetchHost := baseURL.Hostname()
+	if fetchHost != controllerHost {
+		return "", fmt.Errorf("self-fetch: HTTPS base URL host %q does not match controller endpoint host %q",
+			fetchHost, controllerHost)
+	}
+
+	platform, arch := mapRuntimePlatformArch()
+
+	upgradesDir := filepath.Join(certStoreDir, "upgrades")
+	if mkErr := os.MkdirAll(upgradesDir, 0o700); mkErr != nil {
+		return "", fmt.Errorf("self-fetch: create upgrades dir: %w", mkErr)
+	}
+
+	seq := upgradeSeq.Add(1)
+	tmpPath := filepath.Join(upgradesDir, fmt.Sprintf("upgrade-%d.bin", seq))
+
+	// Try own tenant, then "default" on 404.
+	tenants := []string{tenantID}
+	if tenantID != "default" {
+		tenants = append(tenants, "default")
+	}
+
+	trimmedBase := strings.TrimRight(httpsBase, "/")
+	var lastErr error
+	for _, tenant := range tenants {
+		fetchURL := buildSelfFetchURL(trimmedBase, desiredVersion, platform, arch, tenant)
+
+		c.logger.Info("Version convergence: self-fetch: trying tenant",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"tenant", logging.SanitizeLogValue(tenant))
+
+		hexSHA256, serverSHA256, publisher, bundleSig, sizeBytes, dlErr := c.selfFetchDownload(ctx, fetchURL, tmpPath)
+		if dlErr != nil {
+			if errors.Is(dlErr, errSelfFetchBinaryNotFound) {
+				c.logger.Info("Version convergence: self-fetch: binary not found for tenant; trying next",
+					"desired_version", logging.SanitizeLogValue(desiredVersion),
+					"tenant", logging.SanitizeLogValue(tenant))
+				lastErr = dlErr
+				_ = os.Remove(tmpPath)
+				continue
+			}
+			lastErr = fmt.Errorf("download: %w", dlErr)
+			_ = os.Remove(tmpPath)
+			break
+		}
+
+		// SHA-256 consistency check. The recomputed digest is the authoritative value;
+		// the header is informational. Security comes from the publisher signature below.
+		if serverSHA256 != "" && !strings.EqualFold(hexSHA256, serverSHA256) {
+			lastErr = fmt.Errorf("self-fetch: sha256 mismatch: server header %q vs recomputed %q",
+				serverSHA256, hexSHA256)
+			_ = os.Remove(tmpPath)
+			break
+		}
+
+		// Publisher signature verify (version-bound composite). The trust anchor is the
+		// baked-in CFGMSPublisherIdentity(); X-CFGMS-Publisher is only a lookup key.
+		if verErr := c.verifyBinarySignatureForSelfFetch(hexSHA256, desiredVersion, platform, arch, publisher, bundleSig); verErr != nil {
+			c.logger.Warn("Version convergence: self-fetch: signature verification failed",
+				"desired_version", logging.SanitizeLogValue(desiredVersion),
+				"publisher", logging.SanitizeLogValue(publisher),
+				"error", verErr)
+			lastErr = fmt.Errorf("self-fetch: signature verification failed: %w", verErr)
+			_ = os.Remove(tmpPath)
+			break
+		}
+
+		// Revocation check.
+		if c.isVersionRevoked(desiredVersion) {
+			c.logger.Warn("Version convergence: self-fetch: version is revoked",
+				"desired_version", logging.SanitizeLogValue(desiredVersion))
+			lastErr = fmt.Errorf("self-fetch: version %q is in the revoked list", desiredVersion)
+			_ = os.Remove(tmpPath)
+			break
+		}
+
+		// Stage the verified binary.
+		c.mu.Lock()
+		c.lastStagedVersion = desiredVersion
+		c.lastStagedBinaryPath = tmpPath
+		c.mu.Unlock()
+
+		c.logger.Info("Version convergence: self-fetch: binary staged",
+			"desired_version", logging.SanitizeLogValue(desiredVersion),
+			"size_bytes", sizeBytes,
+			"tenant", logging.SanitizeLogValue(tenant))
+		return tmpPath, nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("self-fetch: all tenants returned 404")
+	}
+	return "", lastErr
 }

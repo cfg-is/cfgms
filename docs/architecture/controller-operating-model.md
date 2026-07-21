@@ -502,7 +502,7 @@ The controller can send commands to stewards over the gRPC control plane service
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
-### Steward Auto-Upgrade via `desired_version` (Issue #2260)
+### Steward Auto-Upgrade via `desired_version` (Issues #2260, #2833)
 
 Operators pin the steward version fleet-wide or per-tenant via the `steward.upgrade` cfg block:
 
@@ -517,9 +517,25 @@ steward:
 
 **How a steward converges to `desired_version`:**
 
-1. The controller pushes a new steward binary to the endpoint via the `push_steward_binary` data-plane command. The steward downloads, verifies, and stages the binary under `{Root}/versions/{version}/{binaryName}`, then invokes the launcher's `swap` sub-command. On success, the staged version and path are recorded internally (`lastStagedVersion` / `lastStagedBinaryPath`).
-2. On every cfg-convergence cycle (`TriggerConvergence`), the steward reads `desired_version` from its last received cfg. If it differs from the running version, the steward re-invokes the launcher swap against the already-staged binary without downloading again.
+1. On every cfg-convergence cycle (`TriggerConvergence`), the steward reads `desired_version` from its last received cfg. If it differs from the running version and the desired binary is **not already staged**, the steward self-fetches it from the controller (see Self-pull path below).
+2. If the desired binary **is already staged** (from a prior self-fetch or a controller `push_steward_binary` command), the steward re-invokes the launcher's `swap` sub-command against the staged binary without downloading again.
 3. If `allow_downgrade` is `false` (the default) and `desired_version` is older than the running version, the swap is blocked. Set `allow_downgrade: true` to permit explicit rollbacks.
+
+**Self-pull path (Issue #2833):**
+
+When `CFGMS_CONTROLLER_HTTPS_BASE_URL` is set on the steward, `TriggerConvergence` self-fetches the desired binary rather than waiting for a controller-initiated `push_steward_binary` command:
+
+1. The steward constructs the fetch URL: `{CFGMS_CONTROLLER_HTTPS_BASE_URL}/api/v1/public/steward-binaries/{version}/{platform}/{arch}?tenant={tenantID}`. Platform and arch are detected at runtime from `runtime.GOOS`/`runtime.GOARCH`.
+2. **Tenant resolution:** the steward tries its own registered tenant first; on HTTP 404 it retries under the `default` tenant. A root/MSP admin can publish a binary under `default` to update the whole fleet, while individual tenants can override for their own stewards only.
+3. **SHA-256 consistency check:** the recomputed digest of the downloaded bytes is compared against the `X-CFGMS-SHA256` response header. Security depends on the publisher signature below, not on this header value.
+4. **Independent publisher signature verify:** the steward verifies the `X-CFGMS-Signature` response header against the baked-in `CFGMSPublisherIdentity` (Ed25519 key injected at build time). The signed message is a **version-bound composite**: `sha256(content)|version|platform|arch`, where `version`/`platform`/`arch` come from the steward's own requested `desired_version` and detected runtime values — never from any controller-supplied header. This closes the rollback attack surface: a compromised controller that serves an old binary with its authentic old-version signature cannot forge a composite matching the steward's requested new version. `X-CFGMS-Publisher` is used only as a lookup key in the trust store; it is not a trust anchor.
+5. **Revocation check** and the downgrade guard apply exactly as on the push path.
+6. On success, the binary is staged at `{certStoreDir}/upgrades/upgrade-{seq}.bin` and the launcher swap is invoked immediately.
+7. **Degrade safe:** any failure (network error, SHA-256 mismatch, signature mismatch, version-binding mismatch, both tenants 404, revoked version) logs a warning and retries on the next convergence cycle. The steward never swaps an unverified binary.
+
+**Host-pin and HTTPS enforcement:** the fetch URL host must match the controller endpoint host (same hostname as the QUIC transport address). Non-HTTPS URLs and cross-host URLs are rejected before any download is attempted.
+
+**Controller-push fallback:** when `CFGMS_CONTROLLER_HTTPS_BASE_URL` is not configured, the steward falls back to the legacy model: it logs and waits for a `push_steward_binary` command. No self-fetch is attempted.
 
 **Downgrade guard:**
 - Blocked unless `allow_downgrade` is `true` in either the running cfg or the controller-synced config cache (`upgradeAllowDowngrade`).

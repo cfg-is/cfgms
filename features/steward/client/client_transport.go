@@ -187,6 +187,11 @@ type TransportClient struct {
 	// downloads binaries to a subdirectory here. (Issue #1943)
 	certStoreDir string
 
+	// controllerHTTPSBaseURL is the controller's HTTPS REST API base URL used
+	// for steward self-fetch upgrades (Issue #2833). Sourced from
+	// CFGMS_CONTROLLER_HTTPS_BASE_URL. When empty, self-fetch is disabled.
+	controllerHTTPSBaseURL string
+
 	// revokedVersions is the controller-supplied list of revoked steward versions.
 	// Protected by revokedVersionsMu. Updated via SetRevokedVersions. (Issue #1943)
 	revokedVersionsMu sync.RWMutex
@@ -383,6 +388,15 @@ type TransportConfig struct {
 	// handler returns an error. (Issue #1943)
 	CertStoreDir string
 
+	// ControllerHTTPSBaseURL is the controller's HTTPS base URL for the REST API
+	// (e.g., "https://controller.example.com"). Required for steward self-fetch
+	// upgrade (Issue #2833). When empty, self-fetch is disabled and the steward
+	// falls back to awaiting a controller-initiated push_steward_binary command.
+	// Sourced from the CFGMS_CONTROLLER_HTTPS_BASE_URL environment variable in
+	// cmd/steward/main.go. Must use the https scheme; the host must match the
+	// controller endpoint host (same as the QUIC transport address host).
+	ControllerHTTPSBaseURL string
+
 	// UpgradeAllowDowngrade, when true, permits the upgrade handler to install a
 	// steward version older than or equal to the currently running version.
 	// Mirrors steward.cfg upgrade.allow_downgrade. (Issue #1943)
@@ -472,6 +486,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		identityPersistFunc:        cfg.IdentityPersistFunc,
 		secretStore:                cfg.SecretStore,
 		certStoreDir:               cfg.CertStoreDir,
+		controllerHTTPSBaseURL:     cfg.ControllerHTTPSBaseURL,
 		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
 		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
 		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
@@ -1529,11 +1544,34 @@ func (c *TransportClient) triggerVersionConvergence(ctx context.Context, desired
 	}
 
 	if stagedVersion != desiredVersion || stagedPath == "" {
-		c.logger.Info("Version convergence: desired_version differs from running; awaiting controller binary push",
+		// Attempt self-fetch when an HTTPS base URL is configured; otherwise fall
+		// back to the legacy model of awaiting a controller push_steward_binary.
+		c.mu.RLock()
+		httpsBase := c.controllerHTTPSBaseURL
+		tid := c.tenantID
+		c.mu.RUnlock()
+
+		if httpsBase == "" {
+			c.logger.Info("Version convergence: binary not staged; no HTTPS base URL configured; awaiting controller push",
+				"desired_version", logging.SanitizeLogValue(desiredVersion),
+				"running_version", runningVersion,
+				"staged_version", logging.SanitizeLogValue(stagedVersion))
+			return
+		}
+
+		c.logger.Info("Version convergence: binary not staged; attempting self-fetch from controller",
 			"desired_version", logging.SanitizeLogValue(desiredVersion),
-			"running_version", runningVersion,
-			"staged_version", logging.SanitizeLogValue(stagedVersion))
-		return
+			"running_version", runningVersion)
+
+		fetchedPath, fetchErr := c.selfFetchForUpgrade(ctx, desiredVersion, tid)
+		if fetchErr != nil {
+			c.logger.Warn("Version convergence: self-fetch failed; will retry next cycle",
+				"desired_version", logging.SanitizeLogValue(desiredVersion),
+				"error", fetchErr)
+			return
+		}
+		stagedPath = fetchedPath
+		// Fall through to launcher swap below.
 	}
 
 	lPath := lPathOverride
