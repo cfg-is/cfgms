@@ -431,9 +431,11 @@ This ADR's model is buildable only on top of work that is defined but **not yet 
 1. **ADR-017 fragment model + fragment-addressed versioned history** (the DNA-composition /
    baseline-DNA epic). Today `commonpb.DNA` is still the flat map and `DNARecord` versions whole
    flat snapshots — per-eid state, history, and drift all presuppose fragments. That epic is a
-   hard predecessor of the entity-graph epic. *Bookkeeping flag:* ADR-017's reference section
-   names it epic #2418, but #2418 on the roadmap is a Hyper-V cfg story — the epic number
-   collision needs resolving at decomposition (do not dispatch against #2418 as-is).
+   hard predecessor of the entity-graph epic — and **it is not yet filed**. The predecessor
+   chain per the roadmap is: module foundation (epic #2460, closed) → **OSquery integration
+   epic (unfiled)** → **DNA-composition / baseline-DNA epic (unfiled)** → this. (ADR-017's
+   mention of epic #2418 is a citation of the rework obligation recorded in that Hyper-V
+   epic's *ADR Alignment* item 1, not the DNA epic's number.)
 2. **ADR-016 module `owns:`/fragment emission** — the identity declarations collectors report
    under.
 3. **Collector refactors** (Consequences, Negative 1) — the graph is only as populated as its

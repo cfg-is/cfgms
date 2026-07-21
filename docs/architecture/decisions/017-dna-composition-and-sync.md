@@ -187,8 +187,10 @@ Read everything — even managed objects — from osquery.
 
 **Flat-DNA-surface consumers to re-home on the fragment model.** Two shipped
 consumers read/write today's flat attribute map directly and must be migrated
-onto fragments when the DNA-composition epic is decomposed (epic #2418, ADR
-Alignment item 1): the steward-side ChangeEvent→DNA attribute bridge
+onto fragments when the DNA-composition epic is decomposed (that epic is not
+yet filed; the rework obligation is recorded as *ADR Alignment* item 1 in epic
+#2418 — the cluster.cfg cascade epic those consumers shipped under): the
+steward-side ChangeEvent→DNA attribute bridge
 (#2423/#2435 — module Monitor engine events surfaced as DNA attributes) and the
 controller-side cluster-registry parser (#2424 — cluster membership parsed from
 steward DNA attributes). Both are attribute-key contracts on the flat surface;
