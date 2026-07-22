@@ -43,11 +43,11 @@ import (
 // - Retention policy enforcement
 // - Storage optimization
 type Manager struct {
-	logger     logging.Logger
-	config     *Config
-	storage    Backend
-	compressor Compressor
-	indexer    Indexer
+	logger        logging.Logger
+	config        *Config
+	storage       Backend
+	compressor    Compressor
+	indexer       Indexer
 	pruneWg       sync.WaitGroup
 	maintenanceWg sync.WaitGroup
 	doneCh        chan struct{}
