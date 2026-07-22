@@ -234,6 +234,19 @@ func (p *DatabaseProvider) CreateRefreshPolicyStore(config map[string]interface{
 	return store, nil
 }
 
+// CreateAssurancePolicyStore creates a PostgreSQL-backed AssurancePolicyStore (Issue #2845).
+func (p *DatabaseProvider) CreateAssurancePolicyStore(config map[string]interface{}) (business.AssurancePolicyStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseAssurancePolicyStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database assurance policy store: %w", err)
+	}
+	return store, nil
+}
+
 // CreatePendingRefreshStore creates a PostgreSQL-backed PendingRefreshStore (Issue #2329).
 func (p *DatabaseProvider) CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error) {
 	dsn, err := p.getDSN(config)

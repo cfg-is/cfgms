@@ -361,6 +361,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		PendingRegistration: &SQLitePendingRegistrationStore{db: db},
 		PendingRefresh:      &SQLitePendingRefreshStore{db: db},
 		RefreshPolicy:       &SQLiteRefreshPolicyStore{db: db},
+		AssurancePolicy:     &SQLiteAssurancePolicyStore{db: db},
 	}, nil
 }
 

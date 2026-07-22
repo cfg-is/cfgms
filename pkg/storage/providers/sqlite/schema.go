@@ -515,6 +515,17 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			max_dormancy_days INTEGER
 		)`,
 
+		// Per-tenant assurance-policy overrides (ADR-021, Issue #2845).
+		// Each row holds one per-permission override. Absent rows mean global defaults apply.
+		`CREATE TABLE IF NOT EXISTS assurance_policy_overrides (
+			tenant_id             TEXT NOT NULL,
+			permission_id         TEXT NOT NULL,
+			min_override          INTEGER,
+			require_user_presence INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (tenant_id, permission_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_assurance_policy_overrides_tenant_id ON assurance_policy_overrides(tenant_id)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

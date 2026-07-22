@@ -741,6 +741,33 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateAssurancePolicyOverridesTable(ctx, db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// CreateAssurancePolicyOverridesTable creates the assurance_policy_overrides table (Issue #2845).
+// Each row holds one per-permission override for a tenant. SetPolicy replaces
+// the full set for a tenant transactionally (delete-then-insert).
+func (s DatabaseSchemas) CreateAssurancePolicyOverridesTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS assurance_policy_overrides (
+			tenant_id             TEXT NOT NULL,
+			permission_id         TEXT NOT NULL,
+			min_override          INTEGER,
+			require_user_presence BOOLEAN NOT NULL DEFAULT FALSE,
+			PRIMARY KEY (tenant_id, permission_id)
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create assurance_policy_overrides table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CREATE INDEX IF NOT EXISTS idx_assurance_policy_overrides_tenant_id ON assurance_policy_overrides(tenant_id);",
+	); err != nil {
+		return fmt.Errorf("failed to create assurance_policy_overrides index: %w", err)
+	}
 	return nil
 }
 
@@ -1098,6 +1125,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key
 		"DROP TABLE IF EXISTS rbac_permissions;",
+		"DROP TABLE IF EXISTS assurance_policy_overrides;",
 		"DROP TABLE IF EXISTS pending_refresh_requests;",
 		"DROP TABLE IF EXISTS refresh_policies;",
 		"DROP TABLE IF EXISTS command_transitions;",
