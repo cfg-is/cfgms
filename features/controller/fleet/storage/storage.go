@@ -25,6 +25,7 @@ package storage
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -47,10 +48,11 @@ type Manager struct {
 	storage    Backend
 	compressor Compressor
 	indexer    Indexer
-	pruneWg    sync.WaitGroup
-	doneCh     chan struct{}
-	closeOnce  sync.Once
-	closeErr   error
+	pruneWg       sync.WaitGroup
+	maintenanceWg sync.WaitGroup
+	doneCh        chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // Config defines the configuration for DNA storage management.
@@ -190,6 +192,7 @@ func NewManager(config *Config, logger logging.Logger) (*Manager, error) {
 	}
 
 	// Start background maintenance tasks
+	manager.maintenanceWg.Add(1)
 	go manager.startMaintenanceTasks()
 
 	logger.Info("DNA storage manager initialized",
@@ -468,25 +471,29 @@ func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
 		m.logger.Info("Shutting down DNA storage manager")
 
-		// Signal the maintenance goroutine to stop.
+		// Signal the maintenance goroutine to stop, then wait for it to exit so
+		// that runMaintenance cannot access the storage after we close it below.
 		close(m.doneCh)
+		m.maintenanceWg.Wait()
 
 		// Wait for any in-flight per-device prune goroutines so that all database
 		// transactions are committed before we tear down the connection pool.
 		m.pruneWg.Wait()
 
-		// Close components in order
+		var errs []error
 		if err := m.indexer.Close(); err != nil {
 			m.logger.Error("Failed to close indexer", "error", err)
+			errs = append(errs, err)
 		}
-
 		if err := m.compressor.Close(); err != nil {
 			m.logger.Error("Failed to close compressor", "error", err)
+			errs = append(errs, err)
 		}
-
 		if err := m.storage.Close(); err != nil {
 			m.logger.Error("Failed to close storage backend", "error", err)
+			errs = append(errs, err)
 		}
+		m.closeErr = errors.Join(errs...)
 	})
 
 	return m.closeErr
@@ -656,6 +663,7 @@ func (m *Manager) filterAttributes(dna *commonpb.DNA, attributes []string) *comm
 }
 
 func (m *Manager) startMaintenanceTasks() {
+	defer m.maintenanceWg.Done()
 	ticker := time.NewTicker(m.config.FlushInterval)
 	defer ticker.Stop()
 
