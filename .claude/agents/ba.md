@@ -202,6 +202,46 @@ windows
 - [ ] `make test-complete` passes
 ```
 
+### File-conflict-only dependencies — last resort
+
+A shared file touched by two logically-independent stories is **not**, by itself, sufficient
+grounds for a dependency line. Before adding any file-conflict-only dependency:
+
+**Step 1 — Check the sanctioned seams (epic #2790).** These three seams let independent stories
+add to the same logical extension point without serializing on a shared file:
+
+- **Data-plane RPC handler registry** — `features/controller/server/composite_handler.go`'s
+  `Set<X>Handler` setters (`SetConfigHandler`, `SetDNAHandler`, `SetBulkHandler`,
+  `SetLogStreamHandler`, `SetTelemetryHandler`). Each feature story calls the setter it needs;
+  the stories can run in parallel without touching each other's files.
+- **REST route registrar** — `features/controller/api/route_registry.go`'s `RegisterRoutes`.
+  Feature packages call `RegisterRoutes` from their own package `init()` — no edits to a shared
+  route block required; the stories can run in parallel.
+- **Asset-page tab registration** — `web/src/fleet/StewardAssetPage.tsx`'s `TabSpec.Panel`
+  field. Each tab story adds its own `{ key, label, Panel: MyComponent }` entry to the `TABS`
+  array; the stories can run in parallel.
+
+If both stories touch one of these seams, **omit the dependency line** — both can run in parallel
+by each adding their own entry.
+
+**Step 2 — If not a seam, label and justify.** For a genuinely un-seamed shared file (no
+self-registration seam exists yet), a file-conflict-only dependency is legitimate — but it must
+be labeled in the story body so a later epic can retire it once a seam is added. Use this note
+format directly in the `## Dependencies` section:
+
+```
+> Concurrent-edit note: both stories touch `<path/to/shared/file.go>`. No self-registration
+> seam exists yet for this extension point. This is a file-conflict-only dependency, not a
+> design dependency — the stories are logically independent and can be parallelized once a
+> seam is added.
+```
+
+**Worked example:** Before epic #2790, stories #2765/#2761 (route block in `server.go`) and
+#2766/#2762 (`TABS` array in `StewardAssetPage.tsx`) carried concurrent-edit notes exactly like
+this. Epic #2790 added the three seams above, which retired those serialization constraints.
+A file-conflict-only dependency with no seam-retirement path is a sign a future epic should
+establish one; flag it in the note.
+
 Mark every AC that requires a specific test with `[REQUIRED TEST]`. Acceptance
 review treats `[REQUIRED TEST]` items as hard gates — missing them blocks
 auto-merge. Issue #899 shipped without the cross-tenant isolation test
