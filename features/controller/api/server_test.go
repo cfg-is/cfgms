@@ -146,6 +146,85 @@ func setupTestServer(t *testing.T) *Server {
 	return server
 }
 
+// setupRouteTestServer creates a lightweight test server for route-walking and
+// route-dispatch tests that do not exercise permission checks.
+//
+// It deliberately skips rbacManager.Initialize() — loading the 32 default
+// permissions plus default roles into SQLite adds latency that is irrelevant
+// for tests that only verify routing. Under -race on a 2-vCPU CI runner those
+// SQLite writes are the bottleneck (same wall that Issue #2591 documented for
+// argon2id). Route tests require only that:
+//
+//	a) routes are registered (happens in setupRouter(), not Initialize), and
+//	b) requirePermission returns 401 for unauthenticated requests, which it
+//	   does as long as s.rbacService != nil — no permissions need to be loaded.
+func setupRouteTestServer(t *testing.T) *Server {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	// Do NOT call rbacManager.Initialize() here — route tests don't need
+	// default permissions loaded; they only need a non-nil rbacManager so
+	// requirePermission short-circuits with 401 (no principal in context).
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	server, err := New(
+		cfg,
+		logger,
+		controllerService,
+		configService,
+		nil, // No cert provisioning for route tests
+		rbacService,
+		nil, // No cert manager for route tests
+		tenantManager,
+		rbacManager,
+		nil, // No system monitor
+		nil, // No HA manager
+		nil, // No registration token store
+		"",  // No signer cert serial
+		nil, // No health collector
+		auditMgr,
+		nil, // No command publisher
+		nil, // No push store
+		nil, // No blob store
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
+
+	return server
+}
+
 // NewEphemeralTestKey creates a short-lived API key for test scenarios
 func NewEphemeralTestKey(t *testing.T, server *Server, permissions []string, tenantID string, ttl time.Duration) string {
 	t.Helper()
