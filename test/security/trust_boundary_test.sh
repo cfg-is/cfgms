@@ -28,6 +28,7 @@ ENTRYPOINT="$REPO_ROOT/.devcontainer/entrypoint.sh"
 
 TESTS_RUN=0
 TESTS_PASSED=0
+TESTS_SKIPPED=0
 FAILURES=()
 
 # SENTINEL: injected into mock gh's issue-comment response.
@@ -197,7 +198,7 @@ log_test() {
 log_skip() {
     echo "    ~ SKIP: $1"
     TESTS_RUN=$((TESTS_RUN + 1))
-    TESTS_PASSED=$((TESTS_PASSED + 1))
+    TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
 # ===========================================================================
@@ -207,9 +208,13 @@ test_structural_compose_issue_prompt() {
     echo ""
     echo "--- Structural: compose_issue_prompt body has no ac_render_issue_comments ---"
 
-    local count
-    count=$(awk '/^compose_issue_prompt/,/^}/' "$ENTRYPOINT" \
-        | grep -c "ac_render_issue_comments" || true)
+    local body count
+    body=$(awk '/^compose_issue_prompt/,/^}/' "$ENTRYPOINT")
+    if [[ -z "$body" ]]; then
+        _fail "compose_issue_prompt structural: awk range matched nothing — function may have been renamed or reformatted"
+        return
+    fi
+    count=$(printf '%s' "$body" | grep -c "ac_render_issue_comments" 2>/dev/null || true)
     assert_eq "$count" "0" \
         "compose_issue_prompt body: zero ac_render_issue_comments calls (AC 2 structural)"
 }
@@ -221,11 +226,72 @@ test_structural_compose_branch_prompt() {
     echo ""
     echo "--- Structural: compose_branch_prompt body has no ac_render_issue_comments ---"
 
-    local count
-    count=$(awk '/^compose_branch_prompt/,/^}/' "$ENTRYPOINT" \
-        | grep -c "ac_render_issue_comments" || true)
+    local body count
+    body=$(awk '/^compose_branch_prompt/,/^}/' "$ENTRYPOINT")
+    if [[ -z "$body" ]]; then
+        _fail "compose_branch_prompt structural: awk range matched nothing — function may have been renamed or reformatted"
+        return
+    fi
+    count=$(printf '%s' "$body" | grep -c "ac_render_issue_comments" 2>/dev/null || true)
     assert_eq "$count" "0" \
         "compose_branch_prompt body: zero ac_render_issue_comments calls (AC 2 structural)"
+}
+
+# ===========================================================================
+# REGRESSION TEST (AC2): structural check must fail when compose_issue_prompt is
+# renamed while its body still calls ac_render_issue_comments.
+#
+# Old code: awk range never opened → count=0 → vacuous pass (the defect).
+# Fixed code: empty awk range → _fail (the desired behavior).
+# ===========================================================================
+test_structural_renamed_function_regression() {
+    echo ""
+    echo "--- Regression: structural check fails when compose_issue_prompt is renamed (AC2) ---"
+
+    local fixture
+    fixture=$(mktemp)
+    trap 'rm -f "$fixture"' RETURN
+
+    # Fixture: function renamed so /^compose_issue_prompt/,/^}/ never opens,
+    # but body still calls ac_render_issue_comments — rename-disarms-guard defect.
+    cat > "$fixture" <<'FIXTURE'
+#!/usr/bin/env bash
+assemble_issue_prompt() {
+    local issue_num="$1"
+    ac_render_issue_comments "$issue_num"
+    echo "prompt content"
+}
+FIXTURE
+
+    local subshell_out subshell_rc=0
+    subshell_out=$(
+        _pass() { printf 'VERDICT:PASS:%s\n' "$1"; }
+        _fail() { printf 'VERDICT:FAIL:%s\n' "$1"; }
+
+        body=$(awk '/^compose_issue_prompt/,/^}/' "$fixture")
+        if [[ -z "$body" ]]; then
+            _fail "compose_issue_prompt structural: awk range matched nothing — function may have been renamed or reformatted"
+        else
+            count=$(printf '%s' "$body" | grep -c "ac_render_issue_comments" 2>/dev/null || true)
+            if [[ "$count" == "0" ]]; then
+                _pass "compose_issue_prompt body: zero ac_render_issue_comments calls"
+            else
+                _fail "compose_issue_prompt body: found $count ac_render_issue_comments calls"
+            fi
+        fi
+    ) || subshell_rc=$?
+
+    if printf '%s' "$subshell_out" | grep -q "^VERDICT:FAIL:"; then
+        _pass "regression AC2: structural check fails when compose_issue_prompt is renamed — guard prevents vacuous pass"
+    else
+        _fail "regression AC2: structural check should FAIL when compose_issue_prompt is renamed, got: $subshell_out"
+    fi
+
+    if printf '%s' "$subshell_out" | grep -q "^VERDICT:PASS:"; then
+        _fail "regression AC2: spurious PASS emitted when compose_issue_prompt is renamed — guard was bypassed"
+    else
+        _pass "regression AC2: no spurious PASS when compose_issue_prompt is renamed"
+    fi
 }
 
 # ===========================================================================
@@ -387,13 +453,18 @@ test_project_queue_integration() {
 # ===========================================================================
 _check_phase2_privacy_boundary() {
     local search_title="$1"
-    local issues_out issues_rc=0 issues_count=0
-    issues_out=$(gh issue list --repo cfg-is/cfgms --search "$search_title" 2>/dev/null) || issues_rc=$?
+    local issues_out issues_rc=0 issues_count=""
+    issues_out=$(gh issue list --repo cfg-is/cfgms --search "$search_title" --state all 2>/dev/null) || issues_rc=$?
     if [[ $issues_rc -ne 0 ]]; then
         _fail "phase2 step i: could not verify privacy boundary — gh issue list failed (rc=${issues_rc})"
         return
     fi
     issues_count=$(printf '%s' "$issues_out" | grep -c "$search_title" 2>/dev/null || true)
+    # Numeric guard: [[ "" -eq 0 ]] is true in bash; reject non-numeric counts explicitly
+    if ! [[ "$issues_count" =~ ^[0-9]+$ ]]; then
+        _fail "phase2 step i: could not verify privacy boundary — non-numeric issues_count: '${issues_count}'"
+        return
+    fi
     if [[ "$issues_count" -eq 0 ]]; then
         _pass "phase2 step i: privacy boundary — no GitHub issue created for draft item"
     else
@@ -634,6 +705,60 @@ GHSTUB
 }
 
 # ===========================================================================
+# REGRESSION TEST (AC7): log_skip must not count as passed; an all-skipped run
+# must not print "All trust boundary tests passed".
+# ===========================================================================
+test_skip_tracking_and_verdict_regression() {
+    log_test "Regression: skip counter tracking and unauthenticated-run verdict (AC7)"
+
+    # Part 1: log_skip must increment TESTS_SKIPPED, not TESTS_PASSED
+    local counter_out
+    counter_out=$(
+        TESTS_RUN=0
+        TESTS_PASSED=0
+        TESTS_SKIPPED=0
+        FAILURES=()
+        log_skip "gh auth status failed — skipping integration test"
+        printf 'RUN=%s PASSED=%s SKIPPED=%s\n' "$TESTS_RUN" "$TESTS_PASSED" "$TESTS_SKIPPED"
+    )
+
+    if printf '%s' "$counter_out" | grep -q "PASSED=0" && printf '%s' "$counter_out" | grep -q "SKIPPED=1"; then
+        _pass "regression AC7: log_skip increments TESTS_SKIPPED only (TESTS_PASSED unchanged)"
+    else
+        _fail "regression AC7: log_skip counter tracking wrong — got: $counter_out"
+    fi
+
+    # Part 2: an all-skipped run must not emit "All trust boundary tests passed"
+    local verdict_out
+    verdict_out=$(
+        TESTS_PASSED=0
+        TESTS_SKIPPED=2
+        FAILURES=()
+
+        # Replicate the summary verdict logic from the main section below
+        if [[ ${#FAILURES[@]} -gt 0 ]]; then
+            echo "FAIL_PATH"
+        elif [[ $TESTS_SKIPPED -gt 0 ]]; then
+            echo "⚠️  $TESTS_SKIPPED trust boundary assertion(s) skipped — requires GitHub credentials (gh auth status)"
+        else
+            echo "✅ All trust boundary tests passed"
+        fi
+    )
+
+    if ! printf '%s' "$verdict_out" | grep -q "All trust boundary tests passed"; then
+        _pass "regression AC7: all-skipped run does not print 'All trust boundary tests passed'"
+    else
+        _fail "regression AC7: all-skipped run incorrectly prints 'All trust boundary tests passed'"
+    fi
+
+    if printf '%s' "$verdict_out" | grep -q "skipped"; then
+        _pass "regression AC7: all-skipped run reports skips distinctly"
+    else
+        _fail "regression AC7: all-skipped run did not report skips distinctly — got: $verdict_out"
+    fi
+}
+
+# ===========================================================================
 # Main
 # ===========================================================================
 echo "🔐 Trust Boundary Regression Test Suite"
@@ -643,6 +768,7 @@ echo "Entrypoint: $ENTRYPOINT"
 
 test_structural_compose_issue_prompt
 test_structural_compose_branch_prompt
+test_structural_renamed_function_regression
 test_structural_agent_specs
 test_behavioral_issue_mode
 test_behavioral_branch_mode
@@ -651,18 +777,22 @@ test_regression_comment_render_absent_from_entrypoint
 test_project_queue_integration
 test_phase2_lifecycle
 test_phase2_step_i_fail_open_regression
+test_skip_tracking_and_verdict_regression
 
 echo ""
-echo "📊 Results: $TESTS_PASSED/$TESTS_RUN passed"
+echo "📊 Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_SKIPPED skipped"
 echo ""
 
-if [[ ${#FAILURES[@]} -eq 0 ]]; then
-    echo "✅ All trust boundary tests passed"
-    exit 0
-else
+if [[ ${#FAILURES[@]} -gt 0 ]]; then
     echo "❌ ${#FAILURES[@]} test(s) failed:"
     for f in "${FAILURES[@]}"; do
         echo "  - $f"
     done
     exit 1
+elif [[ $TESTS_SKIPPED -gt 0 ]]; then
+    echo "⚠️  $TESTS_SKIPPED trust boundary assertion(s) skipped — requires GitHub credentials (gh auth status)"
+    exit 0
+else
+    echo "✅ All trust boundary tests passed"
+    exit 0
 fi
