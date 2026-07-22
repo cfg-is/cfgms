@@ -473,61 +473,12 @@ func (s *Server) setupRouter() {
 	// Routes whose permissions appear in permissionAssurance additionally enforce an assurance-level
 	// minimum via requirePermission — see assurance.go and Issue #2780 (ADR-021 migration).
 
-	// Cluster registry endpoints (Issue #2424): read-only view of cluster topology
-	// derived on demand from steward DNA attributes. Eventually consistent (up to one
-	// DNARefreshInterval, default 30 min) — see docs/api/rest-api.md for details.
-	// Reconciliation endpoint (Issue #2704): compares declared vs actual cluster state.
-	clusters := api.PathPrefix("/clusters").Subrouter()
-	clusters.Handle("", s.requirePermission("cluster", "list")(http.HandlerFunc(s.handleListClusters))).Methods("GET")
-	clusters.Handle("/{name}", s.requirePermission("cluster", "read")(http.HandlerFunc(s.handleGetCluster))).Methods("GET")
-	clusters.Handle("/{name}/reconciliation", s.requirePermission("cluster", "read")(http.HandlerFunc(s.handleClusterReconciliation))).Methods("GET")
-
-	// Steward management endpoints (require API key authentication)
-	stewards := api.PathPrefix("/stewards").Subrouter()
-	stewards.Handle("", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleListStewards))).Methods("GET")
-	stewards.Handle("/{id}", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetSteward))).Methods("GET")
-	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
-	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
-	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
-	stewards.Handle("/{id}/move", s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward))).Methods("POST")              // Issue #2341, #2780: AssuranceStrong via permissionAssurance
-	stewards.Handle("/{id}", s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward))).Methods("DELETE") // Issue #2408, #2780: AssuranceStrong via permissionAssurance
-
-	// Configuration management endpoints
-	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
-	stewards.Handle("/{id}/config", s.requirePermission("steward", "write-config")(http.HandlerFunc(s.handleUpdateStewardConfig))).Methods("PUT")
-	stewards.Handle("/{id}/config", s.requirePermission("steward", "delete-config")(http.HandlerFunc(s.handleDeleteStewardConfig))).Methods("DELETE")
-	stewards.Handle("/{id}/config/validate", s.requirePermission("steward", "validate-config")(http.HandlerFunc(s.handleValidateConfig))).Methods("POST")
-	stewards.Handle("/{id}/config/effective", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetEffectiveConfig))).Methods("GET")
-
-	// Connection monitoring endpoints (Issue #2367)
-	stewards.Handle("/connections/all", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleListAllConnections))).Methods("GET")
-	stewards.Handle("/{id}/connection", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleGetStewardConnection))).Methods("GET")
-
-	// QUIC connection management endpoints
-	// Script management endpoints
-	stewards.Handle("/{id}/scripts/executions", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecutions))).Methods("GET")
-	stewards.Handle("/{id}/scripts/executions/{execution_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptExecution))).Methods("GET")
-	stewards.Handle("/{id}/scripts/executions/{execution_id}/retry", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostScriptRetry))).Methods("POST")
-	stewards.Handle("/{id}/scripts/metrics", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptMetrics))).Methods("GET")
-	stewards.Handle("/{id}/scripts/status", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetScriptStatus))).Methods("GET")
-
-	// Script library endpoints (Issue #1670)
-	scripts := api.PathPrefix("/scripts").Subrouter()
-	scripts.Handle("", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleListScripts))).Methods("GET")
-	scripts.Handle("/{id}", s.requirePermission("script", "admin")(http.HandlerFunc(s.handleGetScriptLibraryItem))).Methods("GET")
-	scripts.Handle("/{id}/privilege", s.requirePermission("script", "admin")(http.HandlerFunc(s.handlePutScriptPrivilege))).Methods("PUT")
-
-	// Steward tag management endpoints (Issue #2545)
-	stewards.Handle("/{id}/tags", s.requirePermission("steward", "tag:read")(http.HandlerFunc(s.handleListStewardTags))).Methods("GET")
-	stewards.Handle("/{id}/tags", s.requirePermission("steward", "tag:write")(http.HandlerFunc(s.handleAddStewardTags))).Methods("POST")
-	stewards.Handle("/{id}/tags", s.requirePermission("steward", "tag:write")(http.HandlerFunc(s.handleDeleteStewardTags))).Methods("DELETE")
-
-	// Role config endpoints (Issue #2543)
-	roles := api.PathPrefix("/roles").Subrouter()
-	roles.Handle("", s.requirePermission("role", "read")(http.HandlerFunc(s.handleListRoleConfigs))).Methods("GET")
-	roles.Handle("", s.requirePermission("role", "write")(http.HandlerFunc(s.handleCreateRoleConfig))).Methods("POST")
-	roles.Handle("/{name}", s.requirePermission("role", "read")(http.HandlerFunc(s.handleGetRoleConfig))).Methods("GET")
-	roles.Handle("/{name}", s.requirePermission("role", "write")(http.HandlerFunc(s.handleDeleteRoleConfig))).Methods("DELETE")
+	// Feature route registrars — each named-subrouter block is self-registered from its own
+	// routes_*.go file via package init(). Adding a new endpoint only requires a new file;
+	// no edit to this function body is needed (Issue #2796).
+	for _, register := range routeRegistrars {
+		register(s, api)
+	}
 
 	// Audit log readback endpoint (Issue #2190)
 	api.Handle("/audit/entries", s.requirePermission("audit", "list")(http.HandlerFunc(s.handleListAuditEntries))).Methods("GET")
@@ -537,44 +488,6 @@ func (s *Server) setupRouter() {
 
 	// Configuration deployments endpoint (Issue #1598)
 	api.Handle("/configs/{id}/deployments", s.requirePermission("config", "list-deployments")(http.HandlerFunc(s.handleGetConfigDeployments))).Methods("GET")
-
-	// Fleet selector resolve endpoint (Issue #1640)
-	fleetRouter := api.PathPrefix("/fleet").Subrouter()
-	fleetRouter.Handle("/resolve", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleResolveSelector))).Methods("POST")
-	// Fleet health aggregate endpoint (Issue #2729)
-	fleetRouter.Handle("/health", s.requirePermission("steward", "list")(http.HandlerFunc(s.handleFleetHealth))).Methods("GET")
-
-	// Configuration push endpoint (Issue #1318) and push-status read (Issue #2366)
-	cfgPush := api.PathPrefix("/config").Subrouter()
-	cfgPush.Handle("/push", s.requirePermission("config", "push")(http.HandlerFunc(s.handleConfigPush))).Methods("POST")
-	cfgPush.Handle("/push/{id}", s.requirePermission("config", "push")(http.HandlerFunc(s.handleGetConfigPush))).Methods("GET")
-
-	// Certificate management endpoints
-	certs := api.PathPrefix("/certificates").Subrouter()
-	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
-	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
-	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
-
-	// RBAC management endpoints
-	rbac := api.PathPrefix("/rbac").Subrouter()
-
-	// Permissions
-	rbac.Handle("/permissions", s.requirePermission("rbac", "list-permissions")(http.HandlerFunc(s.handleListPermissions))).Methods("GET")
-	rbac.Handle("/permissions/{id}", s.requirePermission("rbac", "read-permission")(http.HandlerFunc(s.handleGetPermission))).Methods("GET")
-
-	// Roles
-	rbac.Handle("/roles", s.requirePermission("rbac", "list-roles")(http.HandlerFunc(s.handleListRoles))).Methods("GET")
-	rbac.Handle("/roles", s.requirePermission("rbac", "create-role")(http.HandlerFunc(s.handleCreateRole))).Methods("POST")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "read-role")(http.HandlerFunc(s.handleGetRole))).Methods("GET")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
-	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
-
-	// API key management endpoints (for managing API keys themselves)
-	apiKeys := api.PathPrefix("/api-keys").Subrouter()
-	apiKeys.Handle("", s.requirePermission("api-key", "list")(http.HandlerFunc(s.handleListAPIKeys))).Methods("GET")
-	apiKeys.Handle("", s.requirePermission("api-key", "create")(http.HandlerFunc(s.handleCreateAPIKey))).Methods("POST")
-	apiKeys.Handle("/{id}", s.requirePermission("api-key", "read")(http.HandlerFunc(s.handleGetAPIKey))).Methods("GET")
-	apiKeys.Handle("/{id}", s.requirePermission("api-key", "delete")(http.HandlerFunc(s.handleDeleteAPIKey))).Methods("DELETE")
 
 	// Session management endpoints (Issue #2232, #2368, #2780).
 	// POST /sessions mints a new long-lived Bearer credential — requirePermission enforces
@@ -586,15 +499,6 @@ func (s *Server) setupRouter() {
 	api.Handle("/sessions", s.requirePermission("session", "create")(http.HandlerFunc(s.handleSessionCreate))).Methods("POST")
 	api.Handle("/sessions", s.requirePermission("session", "list")(http.HandlerFunc(s.handleSessionList))).Methods("GET")
 	api.Handle("/sessions/{id}", s.requirePermission("session", "revoke")(http.HandlerFunc(s.handleSessionRevoke))).Methods("DELETE")
-
-	// Registration token management endpoints (Story #264)
-	regTokens := api.PathPrefix("/registration/tokens").Subrouter()
-	regTokens.Handle("", s.requirePermission("registration", "list-tokens")(http.HandlerFunc(s.handleListRegistrationTokens))).Methods("GET")
-	regTokens.Handle("", s.requirePermission("registration", "create-token")(http.HandlerFunc(s.handleCreateRegistrationToken))).Methods("POST")
-	regTokens.Handle("/{token}", s.requirePermission("registration", "read-token")(http.HandlerFunc(s.handleGetRegistrationToken))).Methods("GET")
-	regTokens.Handle("/{token}", s.requirePermission("registration", "delete-token")(http.HandlerFunc(s.handleDeleteRegistrationToken))).Methods("DELETE")
-	regTokens.Handle("/{token}/revoke", s.requirePermission("registration", "revoke-token")(http.HandlerFunc(s.handleRevokeRegistrationToken))).Methods("POST")
-	regTokens.Handle("/{tenant_id}/rotate", s.requirePermission("registration", "rotate-token")(http.HandlerFunc(s.handleRotateRegistrationToken))).Methods("POST")
 
 	// Registration approval endpoints (Issue #1568)
 	api.Handle("/registration/pending", s.requirePermission("registration", "list-pending")(http.HandlerFunc(s.handleListPendingRegistrations))).Methods("GET")
@@ -608,91 +512,6 @@ func (s *Server) setupRouter() {
 	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
 	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")
 
-	// Monitoring endpoints
-	monitoring := api.PathPrefix("/monitoring").Subrouter()
-	monitoring.Handle("/health", s.requirePermission("monitoring", "read-health")(http.HandlerFunc(s.handleSystemHealth))).Methods("GET")
-	monitoring.Handle("/metrics", s.requirePermission("monitoring", "read-metrics")(http.HandlerFunc(s.handleSystemMetrics))).Methods("GET")
-	monitoring.Handle("/config", s.requirePermission("monitoring", "read-config")(http.HandlerFunc(s.handleMonitoringConfig))).Methods("GET")
-
-	// Platform monitoring endpoints
-	monitoring.Handle("/anomalies", s.requirePermission("monitoring", "read-anomalies")(http.HandlerFunc(s.handleMonitoringAnomalies))).Methods("GET")
-	monitoring.Handle("/components/{component}/health", s.requirePermission("monitoring", "read-component-health")(http.HandlerFunc(s.handleMonitoringComponentHealth))).Methods("GET")
-	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
-
-	// High Availability (HA) endpoints
-	ha := api.PathPrefix("/ha").Subrouter()
-	ha.Handle("/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleHAStatus))).Methods("GET")
-	ha.Handle("/cluster", s.requirePermission("ha", "read-cluster")(http.HandlerFunc(s.handleHACluster))).Methods("GET")
-	ha.Handle("/leader", s.requirePermission("ha", "read-leader")(http.HandlerFunc(s.handleHALeader))).Methods("GET")
-	ha.Handle("/nodes", s.requirePermission("ha", "read-nodes")(http.HandlerFunc(s.handleHANodes))).Methods("GET")
-
-	// Cluster node lifecycle endpoints (Issue #2283, #2288, #2780).
-	// cluster:drain-node and cluster:decommission-node are in permissionAssurance with
-	// Min: AssuranceStrong — requirePermission enforces the assurance gate.
-	clusterRouter := api.PathPrefix("/cluster").Subrouter()
-	clusterRouter.Handle("/nodes/{id}/drain",
-		s.requirePermission("cluster", "drain-node")(http.HandlerFunc(s.handleClusterNodeDrain))).Methods("POST")
-	clusterRouter.Handle("/nodes/{id}/decommission",
-		s.requirePermission("cluster", "decommission-node")(http.HandlerFunc(s.handleClusterNodeDecommission))).Methods("POST")
-
-	// Compliance reporting endpoints (Story #212)
-	// Steward-specific compliance endpoints
-	stewards.Handle("/{id}/compliance", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardCompliance))).Methods("GET")
-	stewards.Handle("/{id}/compliance/report", s.requirePermission("steward", "read-compliance")(http.HandlerFunc(s.handleGetStewardComplianceReport))).Methods("GET")
-
-	// Module inventory endpoint (Issue #1949)
-	stewards.Handle("/{id}/modules", s.requirePermission("steward", "read-modules")(http.HandlerFunc(s.handleGetStewardModules))).Methods("GET")
-
-	// System-wide compliance endpoints
-	compliance := api.PathPrefix("/compliance").Subrouter()
-	compliance.Handle("/summary", s.requirePermission("compliance", "read-summary")(http.HandlerFunc(s.handleGetComplianceSummary))).Methods("GET")
-
-	// Tenant management endpoints (Issue #1396, Issue #1848)
-	tenants := api.PathPrefix("/tenants").Subrouter()
-	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
-	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
-	tenants.Handle("/{id}/suspend",
-		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleSuspendTenant))).Methods("POST")
-	tenants.Handle("/{id}/config-source/test",
-		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
-
-	// Web-admin account provisioning endpoints (Issue #2490, #2733, #2780).
-	// GET /web/accounts — permission-gated only (reads are outside the AssuranceStrong surface; see Issue #2733).
-	// POST/DELETE /web/accounts — AssuranceStrong via permissionAssurance, mirroring the tenants-create registration.
-	webAccounts := api.PathPrefix("/web/accounts").Subrouter()
-	webAccounts.Handle("", s.requirePermission("web-account", "list")(http.HandlerFunc(s.handleListWebAccounts))).Methods("GET")
-	webAccounts.Handle("", s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount))).Methods("POST")
-	webAccounts.Handle("/{username}", s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount))).Methods("DELETE")
-
-	// WebAuthn passkey / FIDO2 registration endpoints (Issue #2782).
-	// Both routes require webauthn:register permission (AssuranceStrong via permissionAssurance)
-	// — this is a credential-minting surface, consistent with session:create.
-	webAccounts.Handle("/{username}/webauthn/register/begin",
-		s.requirePermission("webauthn", "register")(http.HandlerFunc(s.handleWebAuthnRegisterBegin))).Methods("POST")
-	webAccounts.Handle("/{username}/webauthn/register/finish",
-		s.requirePermission("webauthn", "register")(http.HandlerFunc(s.handleWebAuthnRegisterFinish))).Methods("POST")
-
-	// WebAuthn credential management endpoints (Issue #2783: cfg CLI bootstrap).
-	// list: permission-gated only (read — outside the AssuranceStrong surface, per ADR-021).
-	// revoke: webauthn:revoke permission (AssuranceStrong — credential-removal surface).
-	webAccounts.Handle("/{username}/webauthn/credentials",
-		s.requirePermission("webauthn", "list")(http.HandlerFunc(s.handleWebAuthnListCredentials))).Methods("GET")
-	webAccounts.Handle("/{username}/webauthn/revoke/{credential_id}",
-		s.requirePermission("webauthn", "revoke")(http.HandlerFunc(s.handleWebAuthnRevokeCredential))).Methods("POST")
-
-	// WebAuthn presence-assertion endpoints (Issue #2784: step-up challenge + presence enforcement).
-	// These endpoints implement the fresh user-presence gesture (ADR-021 Decision 4) required by
-	// permissions with RequireUserPresence=true (module:approve, module:reject, publisher-trust:add).
-	// The principal must already hold AssuranceStrong (webauthn:assert-presence is in permissionAssurance).
-	// On success, finish mints a short-lived (presenceTokenTTL), single-use token returned to the client;
-	// the client attaches it via X-Presence-Token header on the guarded request.
-	// Cross-reference: #2728/#2732 implementers consume permissionAssurance entries for module:approve/reject.
-	webAuthnRouter := api.PathPrefix("/webauthn").Subrouter()
-	webAuthnRouter.Handle("/presence/begin",
-		s.requirePermission("webauthn", "assert-presence")(http.HandlerFunc(s.handlePresenceBegin))).Methods("POST")
-	webAuthnRouter.Handle("/presence/finish",
-		s.requirePermission("webauthn", "assert-presence")(http.HandlerFunc(s.handlePresenceFinish))).Methods("POST")
-
 	// Refresh approval queue endpoints (Issue #2097). Registered on the api subrouter
 	// (not the stewards subrouter) so they are not confused with /{id} parameterized routes.
 	api.Handle("/stewards/refresh/pending",
@@ -701,39 +520,6 @@ func (s *Server) setupRouter() {
 		s.requirePermission("refresh", "approve")(http.HandlerFunc(s.handleApproveRefresh))).Methods("POST")
 	api.Handle("/stewards/refresh/{pending_id}/reject",
 		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
-
-	// Per-tenant refresh policy endpoints (Issue #2097).
-	// {tenant_path:.+} allows '/' in the path variable for hierarchical tenant IDs.
-	tenants.Handle("/{tenant_path:.+}/refresh-policy",
-		s.requirePermission("refresh", "get-policy")(http.HandlerFunc(s.handleGetRefreshPolicy))).Methods("GET")
-	tenants.Handle("/{tenant_path:.+}/refresh-policy",
-		s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy))).Methods("PUT")
-
-	// Installer artifact management endpoints (Issue #1702).
-	// Always registered — handlers return 503 when blobStore is nil (nil-safe by design).
-	installer := api.PathPrefix("/installer/artifacts").Subrouter()
-	installer.Handle("", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleListInstallerArtifacts))).Methods("GET")
-	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "upload")(http.HandlerFunc(s.handleUploadInstallerArtifact))).Methods("PUT")
-	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetInstallerArtifact))).Methods("GET")
-	installer.Handle("/{platform}/{arch}", s.requirePermission("installer", "delete")(http.HandlerFunc(s.handleDeleteInstallerArtifact))).Methods("DELETE")
-
-	// Steward binary publish/get endpoints (Issue #1944).
-	// Distinct from the installer artifact namespace; blobs live under "steward-binaries".
-	stewardBinaries := api.PathPrefix("/installer/steward-binaries").Subrouter()
-	stewardBinaries.Handle("/{version}/{platform}/{arch}",
-		s.requirePermission("installer", "publish:steward")(http.HandlerFunc(s.handlePublishStewardBinary))).Methods("POST")
-	stewardBinaries.Handle("/{version}/{platform}/{arch}",
-		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetStewardBinary))).Methods("GET")
-
-	// Steward upgrade dispatch endpoints (Issue #1945).
-	// Always registered — handlers return 503 when upgradeStore is nil (nil-safe by design).
-	stewardUpgrade := api.PathPrefix("/stewards/upgrade").Subrouter()
-	stewardUpgrade.Handle("",
-		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleDispatchUpgrade))).Methods("POST")
-	stewardUpgrade.Handle("/{upgrade_id}",
-		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleUpgradeStatus))).Methods("GET")
-	stewardUpgrade.Handle("/{upgrade_id}/rollback",
-		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleUpgradeRollback))).Methods("POST")
 
 	// Web login / CSRF / logout endpoints (Issue #2493, ADR-018 §3,4).
 	// Registered on the BASE router (TierPublic pattern) and explicitly wrapped in
@@ -754,43 +540,6 @@ func (s *Server) setupRouter() {
 	// The binary's Ed25519 signature authenticates content at the steward side.
 	// Steward mTLS certs lack the admin marker required by the authenticated GET endpoint.
 	s.router.HandleFunc("/api/v1/public/steward-binaries/{version}/{platform}/{arch}", s.handleGetStewardBinaryPublic).Methods("GET")
-
-	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
-	// run manager is not wired (transport-disabled deployments).
-	runs := api.PathPrefix("/runs").Subrouter()
-	runs.Handle("/script", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunScript))).Methods("POST")
-	runs.Handle("/command", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunCommand))).Methods("POST")
-	runs.Handle("/{run_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRun))).Methods("GET")
-	runs.Handle("/{run_id}/jobs", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRunJobs))).Methods("GET")
-	runs.Handle("/{run_id}", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handleDeleteRun))).Methods("DELETE")
-
-	// Batch job endpoints (Issue #2296). Always registered — returns 503 when
-	// batchJobStore is nil (nil-safe by design).
-	jobs := api.PathPrefix("/jobs").Subrouter()
-	jobs.Handle("", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleCreateJob))).Methods("POST")
-	jobs.Handle("/{id}", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleGetJob))).Methods("GET")
-
-	// Rollout endpoints (Issue #2340). Always registered — handlers return 503 when
-	// rolloutStore is nil (nil-safe by design).
-	rollout := api.PathPrefix("/rollout").Subrouter()
-	rollout.Handle("",
-		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleStartRollout))).Methods("POST")
-	rollout.Handle("/{rollout_id}",
-		s.requirePermission("installer", "read")(http.HandlerFunc(s.handleGetRollout))).Methods("GET")
-	rollout.Handle("/{rollout_id}/halt",
-		s.requirePermission("installer", "dispatch:steward")(http.HandlerFunc(s.handleHaltRollout))).Methods("POST")
-
-	// Module bundle approval endpoints (Issue #2728).
-	// GET /modules/approvals — permission-gated only (reads are outside the AssuranceStrong
-	// surface; module:list-approvals is absent from permissionAssurance by design).
-	// POST .../approve and POST .../reject — AssuranceStrong via permissionAssurance.
-	moduleApprovals := api.PathPrefix("/modules/approvals").Subrouter()
-	moduleApprovals.Handle("",
-		s.requirePermission("module", "list-approvals")(http.HandlerFunc(s.handleListModuleApprovals))).Methods("GET")
-	moduleApprovals.Handle("/{address}/approve",
-		s.requirePermission("module", "approve")(http.HandlerFunc(s.handleApproveModuleBundle))).Methods("POST")
-	moduleApprovals.Handle("/{address}/reject",
-		s.requirePermission("module", "reject")(http.HandlerFunc(s.handleRejectModuleBundle))).Methods("POST")
 
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
