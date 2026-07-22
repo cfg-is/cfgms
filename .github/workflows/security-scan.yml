@@ -95,8 +95,15 @@ jobs:
         trivy fs . --format sarif --output sarif-results/trivy.sarif --scanners vuln,secret,misconfig
         trivy_exit_code=$?
         
-        # Also run regular scan for status checking
-        if trivy fs . --scanners vuln,secret,misconfig --severity CRITICAL,HIGH --exit-code 1; then
+        # Also run regular scan for status checking.
+        # UNKNOWN is included deliberately (Issue #2885): advisories sourced from
+        # the Go vulnerability database (vuln.go.dev) carry no CVSS score, so Trivy
+        # assigns them severity UNKNOWN. Filtering on CRITICAL,HIGH alone silently
+        # dropped CVE-2026-46600 (golang.org/x/net) and CVE-2026-56852
+        # (golang.org/x/text) from this gate for four days while the non-blocking
+        # container scans reported them. LOW and MEDIUM remain excluded: they are a
+        # separate policy question and would change the failure rate of this gate.
+        if trivy fs . --scanners vuln,secret,misconfig --severity UNKNOWN,CRITICAL,HIGH --exit-code 1; then
           echo "status=passed" >> $GITHUB_OUTPUT
           echo "issues-found=false" >> $GITHUB_OUTPUT
         else
