@@ -141,6 +141,9 @@ func resolveSessionOrBundleClient(apiURL string) (*APIClient, error) {
 		caCertPEM = []byte(rec.CACertPEM)
 	}
 
+	// Capture client by reference so the step-up handler can use it after creation.
+	// The closure is not invoked until after NewAPIClient returns, so client is always set.
+	var client *APIClient
 	cfg := &APIClientConfig{
 		BaseURL:   rec.ControllerURL,
 		APIKey:    rec.Token,
@@ -151,8 +154,12 @@ func resolveSessionOrBundleClient(apiURL string) (*APIClient, error) {
 		OnUnauthorized: func() (*APIClient, error) {
 			return resolveBundleClient("") // let bundle supply the URL
 		},
+		OnStepUpRequired: func(wwwAuthenticate string) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuthenticate)
+		},
 	}
-	return NewAPIClient(cfg)
+	client, err = NewAPIClient(cfg)
+	return client, err
 }
 
 // findBundlePath walks the bundle lookup chain and returns the first path that exists.

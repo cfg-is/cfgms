@@ -480,6 +480,38 @@ If issues persist after following this guide:
 
 3. **Check existing issues**: https://github.com/cfg-is/cfgms/issues
 
+## Step-Up Authentication Errors (cfg CLI)
+
+When `cfg` commands fail with the error:
+
+```
+step-up required: <level> assurance needed for this action; re-run interactively or use an mTLS-authenticated session
+```
+
+This is an expected, informational error — not a bug. It means the requested action
+requires an elevated identity assurance level (ADR-021) that the current session does
+not hold.
+
+**Resolution options:**
+
+1. **Re-run interactively** — if running from a script or CI, run the same command
+   in an interactive terminal. When `stdin` is a TTY and the server sends
+   `presence="required"`, `cfg` will open a browser for a security key ceremony and
+   retry the request automatically.
+
+2. **Use an mTLS session** — `cfg` commands authenticated via an admin bundle (mTLS
+   certificate) are always at `AssuranceStrong` and will not be challenged by
+   assurance-level step-ups. Run `cfg connect` to set up an admin bundle.
+
+3. **Elevate via web UI** — log in to the controller web UI with your passkey;
+   this elevates the web session to `AssuranceStrong`. CLI commands using a
+   Bearer session token (from `cfg connect --session`) may also benefit if the
+   same session is shared.
+
+**In CI/CD pipelines:** use an admin bundle (mTLS certificate) for all mutating
+commands. Bearer session tokens are appropriate for read-only queries but may be
+challenged for high-privilege actions.
+
 ## References
 
 - **E2E Testing Guide**: [docs/testing/e2e-testing-guide.md](../testing/e2e-testing-guide.md)

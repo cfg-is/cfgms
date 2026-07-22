@@ -927,3 +927,43 @@ cfg webauthn revoke Y3JlZGVudGlhbC1pZC0x --username alice --force
 | `--force` | false | Required when revoking the last credential |
 | `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
 | `--api-url` | bundle URL | Override controller URL |
+
+## Step-Up Authentication (ADR-021 Decision 6)
+
+Certain mutating admin commands require an elevated assurance level or a fresh
+user-presence assertion. When `cfg` receives a `401 WWW-Authenticate: CFGMS-StepUp`
+response, it distinguishes two cases:
+
+### Interactive terminal
+
+When running interactively (stdin is a TTY):
+
+- **Presence required** (`presence="required"` in the header): `cfg` opens the
+  system browser to a local relay page and prompts for a security key touch. After
+  the WebAuthn assertion completes, the original request is automatically retried
+  with `X-Presence-Token`. No flags or re-invocation are needed.
+
+- **Assurance too low** (no `presence="required"`): `cfg` fails with an actionable
+  message directing the operator to use an mTLS-authenticated session or log in via
+  the web UI to elevate the session. The in-flight session assurance level cannot be
+  upgraded programmatically.
+
+### Non-interactive (CI, scripts)
+
+When stdin is not a TTY, `cfg` fails immediately with:
+
+```
+step-up required: <level> assurance needed for this action; re-run interactively or use an mTLS-authenticated session
+```
+
+`cfg` never blocks waiting for input it cannot receive. Scripts that call mutating
+admin commands should use an mTLS-authenticated session (admin bundle) or run the
+command interactively to handle step-up challenges.
+
+**Detecting the error in scripts:** The exit code is non-zero and the error text
+contains `"step-up required"`. Example:
+
+```bash
+cfg module approve acme/linux abc123 2>&1 | grep "step-up required" && \
+  echo "Re-run interactively or use an mTLS bundle"
+```
