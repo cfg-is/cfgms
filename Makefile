@@ -386,7 +386,16 @@ test: fix-git-bare
 	@if [ "$$GITHUB_ACTIONS" != "true" ]; then go clean -testcache; fi
 	@echo "🧪 Testing OSS Build..."
 	@echo "  Testing framework (excluding modules and long-running tests)..."
-	@go test -race -short -timeout=5m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+#	-timeout is a HANG DETECTOR, not a performance budget (Issue #2887). It applies
+#	per test binary (per package), so it scales with package size, not test health:
+#	when it fires, Go panics and dumps every goroutine stack so a deadlocked test is
+#	diagnosable instead of hanging CI forever. 10m is Go's own default. The outer
+#	bound on a genuine hang is `timeout-minutes: 15` on the unit-tests job in
+#	.github/workflows/test-suite.yml. Do not tighten this to track how long the
+#	suite currently takes — that turns a hang detector into a false ceiling that
+#	any growing package eventually crosses (features/controller/api did, at 863
+#	tests, with a 2.46s slowest test and a 0.130s median).
+	@go test -race -short -timeout=10m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
 	@echo "  Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
