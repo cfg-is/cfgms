@@ -169,7 +169,7 @@ test_mode: false
 			errType: ErrRebootRequired,
 		},
 		{
-			name:       "Valid maintenance window",
+			name:       "Declared maintenance window rejected at Set",
 			resourceID: "system",
 			config: createConfigFromYAML(`
 patch_type: security
@@ -178,11 +178,8 @@ test_mode: true
 maintenance:
   window: sunday_3am
 `),
-			validateFunc: func(t *testing.T, m modules.Module, manager *InMemoryPatchManager) {
-				state, err := m.Get(context.Background(), "system")
-				assert.NoError(t, err)
-				assert.NotNil(t, state)
-			},
+			wantErr: true,
+			errType: ErrMaintenanceWindowUnsupported,
 		},
 		{
 			name:       "Platform-specific options",
@@ -438,7 +435,7 @@ func TestConfig_Validation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Valid config with maintenance window",
+			name: "Declared maintenance.window is rejected",
 			config: &Config{
 				PatchType:  "all",
 				AutoReboot: true,
@@ -452,7 +449,8 @@ func TestConfig_Validation(t *testing.T) {
 					Window: "sunday_3am",
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errType: ErrMaintenanceWindowUnsupported,
 		},
 		{
 			name: "Invalid patch type",

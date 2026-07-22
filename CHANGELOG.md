@@ -158,7 +158,7 @@ Consolidation + AGPL governance release. Bundles the v0.9.0–v0.9.5 work that h
 - Patch type policies (Critical: 7 days, Important: 14 days)
 - Major version upgrade support (Win 10->11, 23H2->24H2)
 - Windows Update COM API integration (no WSUS dependency)
-- Generic maintenance windows honored by all reboot operations
+- Patch configs declaring maintenance.window or maintenance.schedule are rejected at validation with a clear error (reboot windows are not yet implemented)
 
 #### Performance Monitoring
 - Endpoint performance metrics (CPU, memory, disk, network)

@@ -4,7 +4,6 @@ package patch
 
 import (
 	"context"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +22,6 @@ var (
 		"critical":       true,
 		"feature-update": true,
 	}
-
-	// Maintenance window format validation (e.g., "sunday_3am", "daily_2am", "monthly_first_sunday_3am")
-	maintenanceWindowRegex = regexp.MustCompile(`^(daily|weekly|monthly)_.*|^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)_.*|^[a-zA-Z0-9_]+$`)
 )
 
 // PatchManager defines the interface for OS patch management operations
@@ -230,11 +226,11 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Validate maintenance window format if specified
-	if c.Maintenance.Window != "" {
-		if !maintenanceWindowRegex.MatchString(c.Maintenance.Window) {
-			return ErrInvalidMaintenanceWindow
-		}
+	// Reject maintenance.window and maintenance.schedule: reboot windows are not yet
+	// implemented. Accepting and silently ignoring these fields would cause endpoints
+	// to patch and reboot outside the declared window with no error or log line.
+	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
+		return ErrMaintenanceWindowUnsupported
 	}
 
 	// Validate patch IDs format
