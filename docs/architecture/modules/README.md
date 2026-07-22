@@ -53,6 +53,7 @@ Every `module.yaml` must include the following fields:
 | `executors` | list | yes | Exactly one executor: `steward`, `outpost`, or `controller` |
 | `kind` | — | derived | Derived from `executors[0]`; never set in YAML (see below) |
 | `behavioral_envelope` | object | no | Runtime behavior declaration for security auditing |
+| `observe_when` | list | no | Activation predicate for read-only DNA observation (ADR-024). Absent = never auto-pulled for DNA. |
 
 ### Executor values and derived `kind`
 
@@ -127,6 +128,29 @@ Adding `required_fields` to a stdlib `module.yaml` therefore changes what the
 guard enforces with no change to `dna_integrity.go`. The hand-coded Go literal
 from issue #2617 has been retired; the module manifests are now the authoritative
 source.
+
+### `observe_when` declaration (ADR-024)
+
+The optional `observe_when` list is a module-level activation predicate for **read-only DNA observation**. It decides whether a steward auto-pulls this module to observe its whole domain **even when no resource of this module is declared** — and, equivalently, whether this module's state belongs in DNA at all.
+
+```yaml
+# module.yaml — observe activation example
+observe_when:
+  - fact: windows_feature
+    contains: hyperv
+```
+
+**Semantics (full contract in [ADR-024](../decisions/024-module-observation-vs-convergence.md)):**
+
+- **Observation ≠ convergence.** A module reports everything it can observe across its whole `<module>.*` domain (best-effort, silently continuing on absence); it *converges* only the resource instances declared in config. `observe_when` governs observation; declarations govern convergence.
+- **Present** → the controller may direct the steward to pull this module and run it in read-only observe mode when the predicate matches the box's baseline DNA. The predicate is a dumb fact-match (`fact` + `equals`/`contains`), not an expression language. It is **module-level** — a module bundle observes its entire domain in one pass (e.g. `hyperv` covers both `hyperv.vm` and `hyperv.cluster`; they are resource *types*, not separate modules).
+- **Absent** → the steward never auto-pulls this module for DNA. There is no separate "none" value.
+- **DNA vs config/drift.** DNA is observed inventory + fleet-queryable facts config does not already determine. A module carries `observe_when` iff its domain is bounded and inventory-worthy (`service`, `package`, `user`, `hyperv`, …); its whole-domain `Get` *is* its DNA. Content-bearing / unbounded-domain modules (`file`/directory, future registry-value) carry **no** `observe_when` — their declared resources live in **config + drift only**, never enumerated into DNA. The execution primitive `script` has no observation domain and carries none.
+- **Read-only guarantee.** An observe-eligible module's observe path runs only enumeration + `Get` (never `Set`), and its `behavioral_envelope` for that path must declare no writes — verified by `conformance.AssertObserveReadOnly` and auditable from the manifest.
+
+Resolution is controller-mediated: the steward reports baseline DNA, the controller matches every module's `observe_when` and returns the module set to pull. The steward needs no capability→module map.
+
+**Evaluating a module for `observe_when`:** existing modules are being tagged as part of the ADR-024 epic; new modules must make a considered declaration (or deliberate omission).
 
 ### `Get` canonical fragment contract (ADR-016 clause 4)
 
