@@ -399,7 +399,7 @@ func TestIndependentRegistrars(t *testing.T) {
 		sub.Handle("/status", handlerB).Methods("GET")
 	})
 
-	// Simulate what setupRouter's loop does with two independently-registered features.
+	// Mirrors what setupRouter's loop does with two independently-registered features.
 	for _, reg := range []RouteRegistrarFunc{registrarA, registrarB} {
 		reg(nil, api)
 	}
