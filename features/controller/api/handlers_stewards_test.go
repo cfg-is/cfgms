@@ -803,6 +803,142 @@ func TestHandleGetSteward_NilRegistry(t *testing.T) {
 	assert.Equal(t, "disconnected", resp.Data.ConnectionState)
 }
 
+// TestHandleGetSteward_CrossTenant_Returns404 verifies that a principal scoped to one
+// tenant receives 404 (not 403) for a steward in an unrelated tenant, so the response
+// is indistinguishable from a nonexistent steward ID (AC1, AC5).
+func TestHandleGetSteward_CrossTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Steward lives in "root/msp-b"; caller is scoped to "root/msp-a".
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "msp-b-host", "os": "linux",
+	}, "root/msp-b")
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	// AC5: must be identical to a nonexistent steward — same status, message, and code.
+	reqNonexistent := httptest.NewRequest("GET", "/api/v1/stewards/this-id-does-not-exist", nil)
+	reqNonexistent.Header.Set("X-API-Key", callerKey)
+	recNonexistent := httptest.NewRecorder()
+	server.router.ServeHTTP(recNonexistent, reqNonexistent)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant get must return 404, not 403")
+	assert.Equal(t, recNonexistent.Code, rec.Code, "status must match nonexistent-ID response")
+
+	var errResp, errRespNonexistent ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	require.NoError(t, json.NewDecoder(recNonexistent.Body).Decode(&errRespNonexistent))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+	assert.Equal(t, errRespNonexistent.Error.Code, errResp.Error.Code,
+		"error code must match nonexistent-ID response")
+	assert.Equal(t, errRespNonexistent.Error.Message, errResp.Error.Message,
+		"error message must match nonexistent-ID response")
+}
+
+// TestHandleGetSteward_SameTenant_Returns200 verifies that a principal scoped to a
+// tenant can read a steward belonging to that same tenant (AC2).
+func TestHandleGetSteward_SameTenant_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "msp-a-host", "os": "linux",
+	}, "root/msp-a")
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+}
+
+// TestHandleGetSteward_DescendantTenant_Returns200 verifies that a principal scoped to
+// a parent tenant can read a steward in a descendant tenant (AC2).
+func TestHandleGetSteward_DescendantTenant_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Steward is in "root/msp-a/client-1"; caller is scoped to "root/msp-a".
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "client-1-host", "os": "linux",
+	}, "root/msp-a/client-1")
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+}
+
+// TestHandleGetSteward_UnscopedAdmin_Returns200 verifies that a principal with an empty
+// tenant context (unscoped / root admin) receives 200 for a steward in any tenant (AC3).
+func TestHandleGetSteward_UnscopedAdmin_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Register steward under an arbitrary tenant.
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "any-tenant-host", "os": "linux",
+	}, "some-tenant")
+
+	// Call handler directly with empty TenantID — the unscoped admin path.
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req = withTenant(req, "")
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleGetSteward(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, stewardID, resp.Data.ID)
+}
+
+// TestHandleGetSteward_SiblingPrefixTenant_Returns404 verifies that a principal scoped
+// to "root/msp-a" cannot read a steward in "root/msp-alpha" (AC4). A bare HasPrefix
+// check without the "/" separator would incorrectly allow this.
+func TestHandleGetSteward_SiblingPrefixTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Steward lives in "root/msp-alpha"; caller is scoped to "root/msp-a".
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "msp-alpha-host", "os": "linux",
+	}, "root/msp-alpha")
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"sibling-prefix tenant must return 404 (AC4: root/msp-a must not match root/msp-alpha)")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
 // TestHandleStewardAuthRefresh_UnknownSteward_Returns404 verifies that POSTing to
 // /api/v1/stewards/{id}/auth/refresh with an unregistered steward ID returns 404.
 func TestHandleStewardAuthRefresh_UnknownSteward_Returns404(t *testing.T) {

@@ -78,12 +78,17 @@ func run(args []string, out io.Writer) error {
 		return fmt.Errorf("write signature: %w", err)
 	}
 
-	fmt.Fprintf(out, "pub=%s\n", base64.StdEncoding.EncodeToString(pub))
-	fmt.Fprintf(out, "sha256=%s\n", contentHash)
-	fmt.Fprintf(out, "message=%s\n", message)
 	// URL-safe base64 is what `cfg installer publish --signature` expects.
-	fmt.Fprintf(out, "signature=%s\n", base64.RawURLEncoding.EncodeToString(sig))
-	fmt.Fprintf(out, "wrote %s (%d bytes)\n", sigPath, len(sig))
+	if _, err := fmt.Fprintf(out,
+		"pub=%s\nsha256=%s\nmessage=%s\nsignature=%s\nwrote %s (%d bytes)\n",
+		base64.StdEncoding.EncodeToString(pub),
+		contentHash,
+		message,
+		base64.RawURLEncoding.EncodeToString(sig),
+		sigPath, len(sig),
+	); err != nil {
+		return fmt.Errorf("write output: %w", err)
+	}
 	return nil
 }
 
