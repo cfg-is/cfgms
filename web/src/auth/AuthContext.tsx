@@ -6,10 +6,16 @@
  *
  * The signed-in principal lives in React context ONLY — never in web
  * storage (enforced by a source-scan test), never in a cookie readable by
- * JS. Session
- * presence is inferred from API responses; a page reload starts signedOut
- * and the first authenticated screen's data call re-establishes or expires
- * the session naturally.
+ * JS. Session presence is inferred from API responses; a page reload starts
+ * signedOut and the first authenticated screen's data call re-establishes
+ * or expires the session naturally.
+ *
+ * Step-up (Story #2786, ADR-021 Decision 6): when apiFetch receives a 401 +
+ * WWW-Authenticate: CFGMS-StepUp, the onStepUpRequired listener fires and
+ * the AuthProvider renders a StepUpModal over the current view. The operator's
+ * AuthStatus stays 'signedIn' throughout — this is not a session expiry.
+ * On successful assertion the original request is retried; on cancel/failure
+ * the operator returns to the prior view still signed in.
  */
 import {
   createContext,
@@ -20,8 +26,15 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { loginRequest, logoutRequest, onSessionExpired } from '../api/client.ts'
+import {
+  loginRequest,
+  logoutRequest,
+  onSessionExpired,
+  onStepUpRequired,
+  type StepUpRequest,
+} from '../api/client.ts'
 import Login from '../pages/Login.tsx'
+import StepUpModal from './StepUpModal.tsx'
 
 export interface Principal {
   username: string
@@ -30,8 +43,11 @@ export interface Principal {
 /**
  * signedOut — fresh visit (mockup "signin" state)
  * invalid   — last login attempt was rejected (mockup "invalid" state)
- * expired   — a 401 dropped the session (mockup "expired" state)
+ * expired   — a plain 401 dropped the session (mockup "expired" state)
  * signedIn  — authenticated
+ *
+ * Step-up is NOT a new AuthStatus value: the operator remains 'signedIn'
+ * while the step-up modal is visible, because their existing session is intact.
  */
 export type AuthStatus = 'signedOut' | 'invalid' | 'expired' | 'signedIn'
 
@@ -45,16 +61,31 @@ export interface AuthValue {
 
 const AuthContext = createContext<AuthValue | null>(null)
 
+interface StepUpState {
+  request: StepUpRequest
+  resolve: (response: Response | null) => void
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('signedOut')
   const [principal, setPrincipal] = useState<Principal | null>(null)
+  const [stepUpState, setStepUpState] = useState<StepUpState | null>(null)
 
   useEffect(() => {
     onSessionExpired(() => {
       setPrincipal(null)
       setStatus('expired')
     })
-    return () => onSessionExpired(null)
+    onStepUpRequired(
+      (req) =>
+        new Promise<Response | null>((resolve) => {
+          setStepUpState({ request: req, resolve })
+        }),
+    )
+    return () => {
+      onSessionExpired(null)
+      onStepUpRequired(null)
+    }
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
@@ -80,7 +111,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [status, principal, login, logout],
   )
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  function handleStepUpSuccess(response: Response) {
+    const state = stepUpState
+    setStepUpState(null)
+    state?.resolve(response)
+  }
+
+  function handleStepUpCancel() {
+    const state = stepUpState
+    setStepUpState(null)
+    state?.resolve(null)
+  }
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      {stepUpState !== null && (
+        <StepUpModal
+          request={stepUpState.request}
+          principalUsername={principal?.username ?? null}
+          onSuccess={handleStepUpSuccess}
+          onCancel={handleStepUpCancel}
+        />
+      )}
+    </AuthContext.Provider>
+  )
 }
 
 export function useAuth(): AuthValue {

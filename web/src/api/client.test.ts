@@ -6,6 +6,7 @@ import {
   loginRequest,
   logoutRequest,
   onSessionExpired,
+  onStepUpRequired,
 } from './client.ts'
 
 function clearCookies() {
@@ -32,6 +33,7 @@ describe('apiFetch', () => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
     onSessionExpired(null)
+    onStepUpRequired(null)
   })
 
   afterEach(() => {
@@ -87,6 +89,129 @@ describe('apiFetch', () => {
     await apiFetch('/api/v1/stewards')
     fetchMock.mockResolvedValueOnce(jsonResponse(403))
     await apiFetch('/api/v1/things', { method: 'POST' })
+    expect(expired).not.toHaveBeenCalled()
+  })
+
+  // ── Step-up detection (Story #2786) ──────────────────────────────────────
+
+  it('CFGMS-StepUp 401 fires onStepUpRequired, not onSessionExpired', async () => {
+    const expired = vi.fn()
+    const stepUp = vi.fn(async () => null)
+    onSessionExpired(expired)
+    onStepUpRequired(stepUp)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'step_up_required' }), {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+        },
+      }),
+    )
+    await apiFetch('/api/v1/stewards')
+    expect(stepUp).toHaveBeenCalledTimes(1)
+    expect(expired).not.toHaveBeenCalled()
+  })
+
+  it('CFGMS-StepUp with presence="required" sets presenceRequired=true in the payload', async () => {
+    const stepUp = vi.fn(async () => null)
+    onStepUpRequired(stepUp)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate':
+            'CFGMS-StepUp realm="cfgms", required="strong", presence="required"',
+        },
+      }),
+    )
+    await apiFetch('/api/v1/modules/approvals/cfgms:test:1.0.0:AAAA/approve', {
+      method: 'POST',
+    })
+    expect(stepUp).toHaveBeenCalledWith(
+      expect.objectContaining({ presenceRequired: true }),
+    )
+  })
+
+  it('CFGMS-StepUp without presence="required" sets presenceRequired=false', async () => {
+    const stepUp = vi.fn(async () => null)
+    onStepUpRequired(stepUp)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+        },
+      }),
+    )
+    await apiFetch('/api/v1/stewards')
+    expect(stepUp).toHaveBeenCalledWith(
+      expect.objectContaining({ presenceRequired: false }),
+    )
+  })
+
+  it('step-up listener receives the original path and init', async () => {
+    const stepUp = vi.fn(async () => null)
+    onStepUpRequired(stepUp)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+        },
+      }),
+    )
+    await apiFetch('/api/v1/stewards', { method: 'GET' })
+    const [req] = stepUp.mock.calls[0]! as unknown as [{ path: string; init: RequestInit }]
+    expect(req.path).toBe('/api/v1/stewards')
+    expect(req.init).toEqual({ method: 'GET' })
+  })
+
+  it('when step-up listener returns a Response, apiFetch returns it', async () => {
+    const successResponse = jsonResponse(200, { ok: true })
+    onStepUpRequired(async () => successResponse)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+        },
+      }),
+    )
+    const result = await apiFetch('/api/v1/stewards')
+    expect(result.status).toBe(200)
+  })
+
+  it('when step-up listener returns null, apiFetch returns the original 401 without session-expired', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    onStepUpRequired(async () => null)
+    const original401 = new Response(JSON.stringify({}), {
+      status: 401,
+      headers: {
+        'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+      },
+    })
+    fetchMock.mockResolvedValue(original401)
+    const result = await apiFetch('/api/v1/stewards')
+    expect(result.status).toBe(401)
+    expect(expired).not.toHaveBeenCalled()
+  })
+
+  it('CFGMS-StepUp 401 with no step-up listener does NOT fire session-expired', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    // No step-up listener registered (onStepUpRequired(null) from beforeEach).
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+        },
+      }),
+    )
+    const result = await apiFetch('/api/v1/stewards')
+    expect(result.status).toBe(401)
     expect(expired).not.toHaveBeenCalled()
   })
 })

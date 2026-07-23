@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<!--
+  StepUpModal visual reference — both required AC-5 states side by side.
+  Open this file in a browser, take a screenshot of each labelled section,
+  and attach both to PR #2847 before merging.
+
+  State A (left)  — "waiting-for-gesture": the running phase, shown after the
+                    user clicks "Verify with passkey" while navigator.credentials.get()
+                    is in progress. The action button is disabled with a spinner;
+                    the Cancel button is also disabled while the gesture is pending.
+
+  State B (right) — "failed/cancelled": the error phase shown after the WebAuthn
+                    gesture is cancelled or the assertion fails. An inline alert
+                    names the failure reason; "Try again" restarts the ceremony.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StepUpModal states — PR #2847 screenshot reference</title>
+  <style>
+    /* ── Design tokens (verbatim from docs/design/web-ui-design-tokens.css) ── */
+    :root {
+      --bg-primary:   #f7f4ef;
+      --bg-surface:   #ffffff;
+      --bg-elevated:  #f0ebe4;
+      --bg-sunk:      #f0ebe4;
+      --border:       #d4cfc4;
+      --text-primary:   #6b5a4a;
+      --text-secondary: #7a6a5a;
+      --text-faint:     #8f7d66;
+      --accent:         #4a6b7c;
+      --accent-ink:     #ffffff;
+      --state-crit:     #b56a5a;
+      --state-crit-bg:  #f2e5e3;
+      --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+      --text-xs:   10px;
+      --text-sm:   11.5px;
+      --text-md:   14px;
+      --text-lg:   16px;
+      --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+      --space-4: 16px; --space-5: 20px;
+      --radius-sm: 7px;
+      --radius:    9px;
+      --radius-lg: 13px;
+      --shadow: 0 18px 50px -22px rgba(60, 45, 30, 0.40);
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--font-sans);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+
+    /* ── Page layout ── */
+    .page-header {
+      text-align: center;
+      padding: 24px 24px 8px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-faint);
+    }
+    .states {
+      display: flex;
+      gap: 0;
+      min-height: 100vh;
+    }
+    .state-panel {
+      flex: 1;
+      display: grid;
+      place-items: center;
+      padding: 32px 24px 48px;
+      position: relative;
+    }
+    .state-panel:first-child {
+      background: rgba(0,0,0,0.55);
+    }
+    .state-panel:last-child {
+      background: rgba(0,0,0,0.55);
+    }
+    .state-label {
+      position: absolute;
+      top: 12px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: rgba(255,255,255,0.7);
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Modal card (from StepUpModal.css) ── */
+    .step-up-overlay {
+      position: relative;
+      width: 100%;
+      max-width: 400px;
+    }
+    .step-up-modal {
+      width: 100%;
+      max-width: 400px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+    .step-up-titlebar {
+      display: flex;
+      align-items: center;
+      padding: 10px 13px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border);
+    }
+    .step-up-title {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      color: var(--text-faint);
+      margin: 0 auto;
+      letter-spacing: 0.02em;
+    }
+    .step-up-body {
+      padding: 26px 26px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-4);
+      align-items: center;
+      text-align: center;
+    }
+    .step-up-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: var(--bg-sunk);
+      color: var(--accent);
+      display: grid;
+      place-items: center;
+      flex: none;
+    }
+    .step-up-heading {
+      margin: 0;
+      font-size: var(--text-lg);
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .step-up-desc {
+      margin: 0;
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+      max-width: 290px;
+      line-height: 1.5;
+    }
+    .step-up-desc b {
+      color: var(--text-faint);
+      font-family: var(--font-mono);
+    }
+    .step-up-error {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-2);
+      font-size: 12.5px;
+      color: var(--state-crit);
+      background: var(--state-crit-bg);
+      border: 1px solid var(--state-crit);
+      border-radius: var(--radius);
+      padding: 9px 12px;
+      width: 100%;
+      text-align: left;
+      box-sizing: border-box;
+    }
+    .step-up-err-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      flex: none;
+      margin-top: 4px;
+    }
+    .step-up-actions {
+      width: 100%;
+    }
+    .step-up-btn {
+      appearance: none;
+      border: 0;
+      width: 100%;
+      padding: var(--space-3);
+      border-radius: var(--radius);
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-family: var(--font-sans);
+      font-size: var(--text-md);
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      box-sizing: border-box;
+    }
+    .step-up-btn:disabled {
+      cursor: default;
+      opacity: 0.7;
+    }
+    .step-up-spin {
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: step-up-sp 0.7s linear infinite;
+      flex: none;
+    }
+    @keyframes step-up-sp {
+      to { transform: rotate(360deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .step-up-spin { animation: none; }
+    }
+    .step-up-cancel {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      font-family: var(--font-sans);
+      font-size: var(--text-sm);
+      font-weight: 600;
+      cursor: pointer;
+      padding: var(--space-1) var(--space-2);
+      border-radius: var(--radius-sm);
+    }
+    .step-up-cancel:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <div class="page-header">StepUpModal · PR #2847 · two required screenshot states</div>
+
+  <div class="states">
+
+    <!-- ── State A: waiting-for-gesture (running phase) ── -->
+    <div class="state-panel">
+      <div class="state-label">A — waiting-for-gesture (running phase)</div>
+      <div class="step-up-overlay">
+        <div class="step-up-modal" role="dialog" aria-modal="true" aria-labelledby="title-a">
+          <div class="step-up-titlebar">
+            <span class="step-up-title">cfgms · secure session</span>
+          </div>
+          <div class="step-up-body">
+            <div class="step-up-icon" aria-hidden="true">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="7.5" cy="15.5" r="5.5"/>
+                <path d="m21 2-9.6 9.6"/>
+                <path d="m15.5 7.5 3 3L22 7l-3-3"/>
+              </svg>
+            </div>
+            <h3 id="title-a" class="step-up-heading">Verify it&rsquo;s you</h3>
+            <p class="step-up-desc">
+              Action requires verification as
+              <b class="step-up-title">admin@acme-corp.example</b>.
+              Use your passkey or security key to continue.
+            </p>
+            <div class="step-up-actions">
+              <!-- running phase: spinner, button disabled -->
+              <button type="button" class="step-up-btn" disabled>
+                <span class="step-up-spin" aria-hidden="true"></span>
+                <span>Waiting for gesture…</span>
+              </button>
+            </div>
+            <!-- cancel is disabled during the gesture -->
+            <button type="button" class="step-up-cancel" disabled>
+              Cancel — action not completed
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── State B: failed/cancelled (error phase) ── -->
+    <div class="state-panel">
+      <div class="state-label">B — failed/cancelled (error phase)</div>
+      <div class="step-up-overlay">
+        <div class="step-up-modal" role="dialog" aria-modal="true" aria-labelledby="title-b">
+          <div class="step-up-titlebar">
+            <span class="step-up-title">cfgms · secure session</span>
+          </div>
+          <div class="step-up-body">
+            <div class="step-up-icon" aria-hidden="true">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="7.5" cy="15.5" r="5.5"/>
+                <path d="m21 2-9.6 9.6"/>
+                <path d="m15.5 7.5 3 3L22 7l-3-3"/>
+              </svg>
+            </div>
+            <h3 id="title-b" class="step-up-heading">Verify it&rsquo;s you</h3>
+            <p class="step-up-desc">
+              Action requires verification as
+              <b class="step-up-title">admin@acme-corp.example</b>.
+              Use your passkey or security key to continue.
+            </p>
+            <!-- error alert shown in error phase -->
+            <div class="step-up-error" role="alert">
+              <span class="step-up-err-dot" aria-hidden="true"></span>
+              Verification cancelled — click Cancel to go back, or try again.
+            </div>
+            <div class="step-up-actions">
+              <!-- error phase: "Try again" button -->
+              <button type="button" class="step-up-btn">
+                Try again
+              </button>
+            </div>
+            <button type="button" class="step-up-cancel">
+              Cancel — action not completed
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>
