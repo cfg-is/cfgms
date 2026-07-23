@@ -337,3 +337,108 @@ func TestDedupErrorPathIsClean(t *testing.T) {
 	// ErrNotFound is a valid non-nil sentinel; confirm it is not accidentally nil.
 	require.NotNil(t, ErrNotFound, "ErrNotFound must be a non-nil sentinel error")
 }
+
+func TestEscapeLIKE(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"host:abc", "host:abc"},
+		{"host:server%01", `host:server\%01`},
+		{"host:server_01", `host:server\_01`},
+		{`host:back\slash`, `host:back\\slash`},
+		{`100%_done`, `100\%\_done`},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, escapeLIKE(tc.in), "input: %q", tc.in)
+	}
+}
+
+// TestLIKEWildcardInEID_CollapseAsOf verifies that an EID containing SQL LIKE
+// metacharacters (%, _) does not produce spurious group members during temporal BFS.
+// Without LIKE escaping, pattern 'same-as|host:server%01|%' (where % is a wildcard)
+// would match 'same-as|host:server01|host:wildcard-peer', wrongly including those
+// entities in the group for host:server%01.
+func TestLIKEWildcardInEID_CollapseAsOf(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// decoy: host:server01 — an EID that an unescaped LIKE pattern for host:server%01
+	// would spuriously match (% wildcard matches empty string, so server%01 matches server01).
+	decoy := "host:server01"
+	peer := "host:wildcard-peer"
+	subject := "host:server%01"
+
+	for _, e := range []string{decoy, peer, subject} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				obs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": "root",
+				}),
+			},
+		}))
+	}
+
+	// Create a same-as edge between decoy and peer — NOT involving the test subject.
+	edgeSubject := "same-as|" + decoy + "|" + peer
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "operator:test",
+		Observations: []types.Observation{
+			obs(edgeSubject, "operator:test", types.ObservationKindState, now, map[string]interface{}{}),
+		},
+	}))
+
+	testEID := mustEID(t, subject)
+	members, err := p.resolveGroupMembersAsOf(ctx, testEID, now.Add(time.Second))
+	require.NoError(t, err)
+	// The subject has no same-as edges; only itself should be returned.
+	require.Len(t, members, 1, "subject with %% in EID must not match decoy's edges via unescaped LIKE")
+	require.Equal(t, subject, members[0].String())
+}
+
+// TestLIKEWildcardInEID_Timeline verifies that GetTimeline does not include
+// same-as-change events from edges unrelated to the queried subject when the
+// subject EID contains SQL LIKE metacharacters.
+func TestLIKEWildcardInEID_Timeline(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	decoy := "host:server01"
+	peer := "host:wildcard-peer2"
+	subject := "host:server%01"
+
+	for _, e := range []string{decoy, peer, subject} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				obs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": "root",
+				}),
+			},
+		}))
+	}
+
+	// Same-as edge between decoy and peer — not involving subject.
+	edgeSubject := "same-as|" + decoy + "|" + peer
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "operator:test",
+		Observations: []types.Observation{
+			obs(edgeSubject, "operator:test", types.ObservationKindState, now, map[string]interface{}{}),
+		},
+	}))
+
+	testEID := mustEID(t, subject)
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{testEID}, interfaces.TimeRange{
+		From: now.Add(-time.Second),
+		To:   now.Add(time.Minute),
+	})
+	require.NoError(t, err)
+
+	// Only state-change events for subject itself should be present — no spurious
+	// same-as-change events from the decoy's edge.
+	for _, ev := range events {
+		require.NotEqual(t, "same-as-change", ev.Kind,
+			"no same-as-change events expected for a subject with no same-as edges")
+	}
+}

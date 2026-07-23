@@ -69,6 +69,13 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("DriftLifecycleTransition", func(t *testing.T) { testEGDriftLifecycle(t, factory) })             // AC 4
 	t.Run("DriftProjectionRebuildRecovery", func(t *testing.T) { testEGDriftRebuildRecovery(t, factory) }) // AC 4 + AC 7
 	t.Run("DesiredStateIsolation", func(t *testing.T) { testEGDesiredStateIsolation(t, factory) })         // AC 5 (isolation)
+	// Story-6: temporal reads + same-as collapse-group (Issue #2876)
+	t.Run("HistoryDiffCorrectness", func(t *testing.T) { testEGHistoryDiffCorrectness(t, factory) })         // AC 1
+	t.Run("TimelineMultiSubject", func(t *testing.T) { testEGTimelineMultiSubject(t, factory) })             // AC 2
+	t.Run("CollapseGroupTenantCut", func(t *testing.T) { testEGCollapseGroupTenantCut(t, factory) })         // AC 3 REQUIRED
+	t.Run("MovedEntityHistoricalScan", func(t *testing.T) { testEGMovedEntityHistoricalScan(t, factory) })   // AC 4 REQUIRED
+	t.Run("CollapseGroupConflictsRetained", func(t *testing.T) { testEGCollapseGroupConflicts(t, factory) }) // AC 5
+	t.Run("CollapseGroupMultiMember", func(t *testing.T) { testEGCollapseGroupMultiMember(t, factory) })     // AC 6
 }
 
 // --- Contract test helpers ---
@@ -604,7 +611,7 @@ func testEGOptsNoOp(t *testing.T, factory EntityGraphProviderFactory) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, view)
-	assert.Nil(t, view.CollapseGroup, "CollapseGroup opt is a pass-through no-op in this round")
+	assert.Nil(t, view.CollapseGroup, "entity with no same-as edges has a single-member group: CollapseGroup is nil")
 }
 
 // egReportEdge ingests a single-observation edge batch, failing on error.
@@ -1313,6 +1320,372 @@ func testEGDriftLifecycle(t *testing.T, factory EntityGraphProviderFactory) {
 		Actor:      "ops-bot",
 	})
 	require.Error(t, err, "unknown lifecycle transition must return an error")
+}
+
+// --- Story-6: temporal reads + same-as collapse-group (Issue #2876) ---
+
+// testEGHistoryDiffCorrectness verifies that GetHistory returns all observations
+// in sequence order and that Diff computes the correct attribute delta between two
+// as-of states (AC1).
+func testEGHistoryDiffCorrectness(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	eid := egEID(t, "host:hd-auth/host1")
+	subject := eid.String()
+
+	t0 := time.Now().UTC().Truncate(time.Second)
+	t1 := t0.Add(time.Second)
+	t2 := t0.Add(2 * time.Second)
+	t3 := t0.Add(3 * time.Second)
+	t4 := t0.Add(4 * time.Second)
+
+	// Three observations with different payloads; different hashes prevent dedup.
+	for i, rec := range []struct {
+		at       time.Time
+		hostname string
+	}{{t1, "server-v1"}, {t2, "server-v2"}, {t3, "server-v3"}} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{{
+				Source:     "observer:scan",
+				ObservedAt: rec.at,
+				RecordedAt: rec.at,
+				Subject:    subject,
+				Kind:       types.ObservationKindState,
+				Confidence: types.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   "host",
+					"hostname":      rec.hostname,
+					"owning_tenant": "root/hd-tenant",
+				},
+			}},
+		}), "report obs %d", i)
+	}
+
+	// GetHistory over [t0, t4] must return all 3 records in ascending order.
+	history, err := p.GetHistory(ctx, eid, interfaces.TimeRange{From: t0, To: t4})
+	require.NoError(t, err)
+	require.Len(t, history, 3, "GetHistory must return all 3 observations")
+	assert.Equal(t, "server-v1", history[0].Observation.Payload["hostname"])
+	assert.Equal(t, "server-v2", history[1].Observation.Payload["hostname"])
+	assert.Equal(t, "server-v3", history[2].Observation.Payload["hostname"])
+
+	// Diff between t1 and t3 must report the hostname change.
+	diff, err := p.Diff(ctx, eid, interfaces.TimeRange{From: t1, To: t3})
+	require.NoError(t, err)
+	require.NotNil(t, diff)
+
+	var hostnameChange *interfaces.AttributeChange
+	for i := range diff.Changes {
+		if diff.Changes[i].Attribute == "hostname" {
+			hostnameChange = &diff.Changes[i]
+		}
+	}
+	require.NotNil(t, hostnameChange, "Diff must report the hostname change")
+	assert.Equal(t, "server-v1", hostnameChange.Before, "Before value must be server-v1")
+	assert.Equal(t, "server-v3", hostnameChange.After, "After value must be server-v3")
+}
+
+// testEGTimelineMultiSubject verifies that GetTimeline returns a merged,
+// time-ordered state-change stream across multiple subjects (AC2).
+func testEGTimelineMultiSubject(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	eid1 := egEID(t, "host:tl-auth/host1")
+	eid2 := egEID(t, "host:tl-auth/host2")
+
+	t0 := time.Now().UTC().Truncate(time.Second)
+	t1 := t0.Add(time.Second)
+	t2 := t0.Add(2 * time.Second)
+	t3 := t0.Add(3 * time.Second)
+	t4 := t0.Add(4 * time.Second)
+	t5 := t0.Add(5 * time.Second)
+
+	for _, item := range []struct {
+		eid      interfaces.EIDRef
+		at       time.Time
+		hostname string
+	}{
+		{eid1, t1, "host1-v1"},
+		{eid2, t2, "host2-v1"},
+		{eid1, t3, "host1-v2"},
+		{eid2, t4, "host2-v2"},
+	} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{{
+				Source:     "observer:scan",
+				ObservedAt: item.at,
+				RecordedAt: item.at,
+				Subject:    item.eid.String(),
+				Kind:       types.ObservationKindState,
+				Confidence: types.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   "host",
+					"hostname":      item.hostname,
+					"owning_tenant": "root/tl-tenant",
+				},
+			}},
+		}))
+	}
+
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{eid1, eid2}, interfaces.TimeRange{From: t0, To: t5})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(events), 4, "timeline must include at least 4 state-change events")
+
+	// Events must be in non-decreasing time order.
+	for i := 1; i < len(events); i++ {
+		assert.False(t, events[i].OccurredAt.Before(events[i-1].OccurredAt),
+			"timeline events must be time-ordered (index %d < %d)", i-1, i)
+	}
+	// All entity state events carry kind "state-change".
+	for _, e := range events {
+		if e.Kind != "state-change" && e.Kind != "same-as-change" {
+			t.Errorf("unexpected timeline event kind %q", e.Kind)
+		}
+	}
+}
+
+// testEGCollapseGroupTenantCut verifies that the tenant cut is applied BEFORE
+// the collapse-group merge — a member in an out-of-subtree tenant is excluded
+// entirely (AC3, REQUIRED TEST).
+func testEGCollapseGroupTenantCut(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	memberA := egEID(t, "host:cgtc-auth/member-a")
+	memberB := egEID(t, "host:cgtc-auth/member-b")
+	memberC := egEID(t, "host:cgtc-auth/member-c") // lives in a different tenant
+
+	egReport(ctx, t, p, "operator-assertion:admin", memberA.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/tenant-a",
+		"hostname": "member-a-host", "attr_only_a": "val-a",
+	})
+	egReport(ctx, t, p, "operator-assertion:admin", memberB.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/tenant-a",
+		"hostname": "member-b-host", "attr_only_b": "val-b",
+	})
+	egReport(ctx, t, p, "operator-assertion:admin", memberC.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/tenant-b",
+		"hostname": "member-c-host", "attr_only_c": "val-c",
+	})
+
+	// A—B—C: same-as group connecting all three.
+	egReportEdge(ctx, t, p, "operator-assertion:admin", memberA.String(), memberB.String(), "same-as")
+	egReportEdge(ctx, t, p, "operator-assertion:admin", memberB.String(), memberC.String(), "same-as")
+
+	// Query from tenant-a: A and B are visible, C is not.
+	view, err := p.GetEntity(ctx, memberA, interfaces.GetEntityOpts{
+		CollapseGroup: true,
+		TenantFilter:  "root/tenant-a",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	require.NotNil(t, view.CollapseGroup, "A and B are both in tenant-a: collapsed view must be non-nil")
+
+	// memberC must be absent from the group (tenant cut).
+	for _, m := range view.CollapseGroup.Members {
+		assert.NotEqual(t, memberC.String(), m.String(),
+			"out-of-subtree memberC must be excluded by the tenant cut")
+	}
+
+	// memberC's unique attribute must NOT appear in the merged view.
+	_, hasAttrC := view.CollapseGroup.Merged["attr_only_c"]
+	assert.False(t, hasAttrC, "attr_only_c from out-of-tenant memberC must not appear in merged view")
+
+	// memberA and memberB's attributes must both appear.
+	assert.Equal(t, "val-a", view.CollapseGroup.Merged["attr_only_a"],
+		"memberA's attribute must be in merged view")
+	assert.Equal(t, "val-b", view.CollapseGroup.Merged["attr_only_b"],
+		"memberB's attribute must be in merged view")
+}
+
+// testEGMovedEntityHistoricalScan verifies that GetHistory, Diff, and GetTimeline
+// return rows from ALL epochs of a moved entity — authorization is resolved once
+// via the current owning tenant, never per-row via the frozen ingest-time
+// tenant_path column (AC4, REQUIRED TEST).
+func testEGMovedEntityHistoricalScan(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	eid := egEID(t, "host:mehs-auth/host1")
+	subject := eid.String()
+
+	t0 := time.Now().UTC().Truncate(time.Second)
+	t1 := t0.Add(time.Second)
+	t2 := t0.Add(2 * time.Second)
+	t3 := t0.Add(3 * time.Second)
+
+	// Record entity under tenant-A.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:mover",
+		Observations: []types.Observation{{
+			Source:     "enforcing-module:mover",
+			Subject:    subject,
+			ObservedAt: t1,
+			RecordedAt: t1,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"entity_kind":   "host",
+				"owning_tenant": "root/tenant-a",
+				"hostname":      "moved-host",
+			},
+		}},
+	}))
+
+	// Move entity to tenant-B (different payload → different hash → new log row).
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:mover",
+		Observations: []types.Observation{{
+			Source:     "enforcing-module:mover",
+			Subject:    subject,
+			ObservedAt: t2,
+			RecordedAt: t2,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"entity_kind":   "host",
+				"owning_tenant": "root/tenant-b",
+				"hostname":      "moved-host",
+			},
+		}},
+	}))
+
+	// GetHistory must return BOTH rows — pre-move (tenant_path=a) and post-move (tenant_path=b).
+	// An implementation that filters per-row by tenant_path would omit one of them.
+	history, err := p.GetHistory(ctx, eid, interfaces.TimeRange{From: t0, To: t3})
+	require.NoError(t, err)
+	require.Len(t, history, 2, "GetHistory must return both pre- and post-move rows")
+
+	assert.Equal(t, "root/tenant-a", history[0].Observation.Payload["owning_tenant"],
+		"first row must carry tenant-a's path as ingest-time provenance")
+	assert.Equal(t, "root/tenant-b", history[1].Observation.Payload["owning_tenant"],
+		"second row must carry tenant-b's path as ingest-time provenance")
+
+	// Diff over [t1, t2] must show the owning_tenant change.
+	diff, err := p.Diff(ctx, eid, interfaces.TimeRange{From: t1, To: t2})
+	require.NoError(t, err)
+	require.NotNil(t, diff)
+
+	var tenantChange *interfaces.AttributeChange
+	for i := range diff.Changes {
+		if diff.Changes[i].Attribute == "owning_tenant" {
+			tenantChange = &diff.Changes[i]
+		}
+	}
+	require.NotNil(t, tenantChange, "Diff must show owning_tenant change across the move")
+	assert.Equal(t, "root/tenant-a", tenantChange.Before)
+	assert.Equal(t, "root/tenant-b", tenantChange.After)
+
+	// GetTimeline must include events from both epochs.
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{eid}, interfaces.TimeRange{From: t0, To: t3})
+	require.NoError(t, err)
+	require.Len(t, events, 2, "GetTimeline must include one event per observation epoch")
+
+	// Entity is now accessible only under tenant-b (current-ownership check).
+	_, errA := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/tenant-a"})
+	assert.Error(t, errA, "entity must not be visible to former owning tenant after move")
+
+	_, errB := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/tenant-b"})
+	assert.NoError(t, errB, "entity must be visible to current owning tenant")
+}
+
+// testEGCollapseGroupConflicts verifies that losing attribute values are retained
+// in CollapseGroupView.Conflicts and are not silently discarded (AC5).
+func testEGCollapseGroupConflicts(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	memberA := egEID(t, "host:cgcon-auth/member-a")
+	memberB := egEID(t, "host:cgcon-auth/member-b")
+
+	// Higher-precedence source (enforcing-module) asserts hostname="correct-name".
+	egReport(ctx, t, p, "enforcing-module:winner", memberA.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/con-tenant",
+		"hostname": "correct-name",
+	})
+	// Lower-precedence source (correlator-inference) asserts hostname="wrong-name".
+	egReport(ctx, t, p, "correlator-inference:loser", memberB.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/con-tenant",
+		"hostname": "wrong-name",
+	})
+
+	egReportEdge(ctx, t, p, "operator-assertion:admin", memberA.String(), memberB.String(), "same-as")
+
+	view, err := p.GetEntity(ctx, memberA, interfaces.GetEntityOpts{
+		CollapseGroup: true,
+		TenantFilter:  "root/con-tenant",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	require.NotNil(t, view.CollapseGroup, "CollapseGroup must be non-nil for a 2-member group")
+
+	// Winning value is in Merged.
+	assert.Equal(t, "correct-name", view.CollapseGroup.Merged["hostname"],
+		"enforcing-module must win the hostname attribute")
+
+	// Losing value must be retained in Conflicts, not discarded.
+	hostnameConflicts := view.CollapseGroup.Conflicts["hostname"]
+	require.NotEmpty(t, hostnameConflicts, "losing hostname value must be in Conflicts")
+	conflictValues := make([]interface{}, len(hostnameConflicts))
+	for i, c := range hostnameConflicts {
+		conflictValues[i] = c.Value
+	}
+	assert.Contains(t, conflictValues, "wrong-name",
+		"the losing value must be accessible per-member in Conflicts")
+}
+
+// testEGCollapseGroupMultiMember verifies that CollapseGroup opts now resolves
+// real multi-member same-as groups — GetEntity returns a non-nil CollapseGroupView
+// with merged attributes from all visible same-as group members (AC6).
+func testEGCollapseGroupMultiMember(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	memberA := egEID(t, "host:cgmm-auth/member-a")
+	memberB := egEID(t, "host:cgmm-auth/member-b")
+
+	egReport(ctx, t, p, "observer:scan", memberA.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/mm-tenant",
+		"hostname": "member-a", "attr_a": "val-a",
+	})
+	egReport(ctx, t, p, "observer:scan", memberB.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/mm-tenant",
+		"hostname": "member-b", "attr_b": "val-b",
+	})
+
+	egReportEdge(ctx, t, p, "operator-assertion:admin", memberA.String(), memberB.String(), "same-as")
+
+	// Without CollapseGroup flag: no group view.
+	viewNoCollapse, err := p.GetEntity(ctx, memberA, interfaces.GetEntityOpts{TenantFilter: "root/mm-tenant"})
+	require.NoError(t, err)
+	require.NotNil(t, viewNoCollapse)
+	assert.Nil(t, viewNoCollapse.CollapseGroup, "CollapseGroup must be nil when flag is false")
+
+	// With CollapseGroup=true: non-nil group view with merged attributes.
+	view, err := p.GetEntity(ctx, memberA, interfaces.GetEntityOpts{
+		CollapseGroup: true,
+		TenantFilter:  "root/mm-tenant",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	require.NotNil(t, view.CollapseGroup, "CollapseGroup must be non-nil for a 2-member same-as group")
+	assert.Len(t, view.CollapseGroup.Members, 2, "group must have 2 members")
+
+	// Both members' non-conflicting attributes must appear in the merged view.
+	assert.Equal(t, "val-a", view.CollapseGroup.Merged["attr_a"],
+		"memberA's unique attribute must be in merged view")
+	assert.Equal(t, "val-b", view.CollapseGroup.Merged["attr_b"],
+		"memberB's unique attribute must be in merged view")
 }
 
 // --- Compile-time assertion ---

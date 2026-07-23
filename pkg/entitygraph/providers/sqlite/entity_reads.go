@@ -35,9 +35,14 @@ func tenantVisible(owningTenant, tenantFilter string) bool {
 
 // GetEntity returns the current entity state, provenance, and freshness,
 // applying the caller's tenant cut and source-precedence attribute merge.
+// When opts.AsOf is set the state is projected from the observation log at that
+// time. When opts.CollapseGroup is set the same-as group is resolved, a tenant
+// cut is applied before the merge, and a CollapseGroupView is populated.
 func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interfaces.EIDRef, opts interfaces.GetEntityOpts) (*types.EntityView, error) {
 	subject := eid.String()
 
+	// Always look up current-state index for kind and owning_tenant — the sole
+	// access-control axis (ADR-023 §111-119).
 	var entityKind, owningTenant string
 	err := p.db.QueryRowContext(ctx,
 		`SELECT entity_kind, owning_tenant FROM eg_entity_index WHERE subject = ?`,
@@ -50,64 +55,38 @@ func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interface
 		return nil, fmt.Errorf("entitygraph/sqlite: lookup index: %w", err)
 	}
 
-	// Apply the tenant cut. A filtered-out entity is indistinguishable from a
-	// missing one to the caller.
+	// Apply the tenant cut. A filtered-out entity is indistinguishable from missing.
 	if !tenantVisible(owningTenant, opts.TenantFilter) {
 		return nil, fmt.Errorf("entitygraph/sqlite: entity %s: %w", subject, ErrNotFound)
 	}
 
-	rows, err := p.db.QueryContext(ctx,
-		`SELECT c.source, c.source_class, c.kind, c.confidence, c.observed_at, c.recorded_at, c.payload_hash, p.payload
-		 FROM eg_entity_current c
-		 JOIN eg_payload_content p ON p.payload_hash = c.payload_hash
-		 WHERE c.subject = ? AND c.kind != 'desired-state'`,
-		subject,
-	)
+	// Load per-source current state from the projection table (fast path) or
+	// reconstructed from the log (temporal as-of path).
+	var entityRows []currentEntityRow
+	if opts.AsOf != nil {
+		entityRows, err = p.loadEntityRowsAsOf(ctx, subject, *opts.AsOf)
+	} else {
+		entityRows, err = p.loadEntityRowsCurrent(ctx, subject)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("entitygraph/sqlite: load sources: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var (
-		entries      []sourceEntry
-		observations []types.Observation
-	)
-	for rows.Next() {
-		var source, sourceClass, kind, confidence, observedAt, recordedAt, hash, payloadJSON string
-		if err := rows.Scan(&source, &sourceClass, &kind, &confidence, &observedAt, &recordedAt, &hash, &payloadJSON); err != nil {
-			return nil, fmt.Errorf("entitygraph/sqlite: scan source: %w", err)
-		}
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-			return nil, fmt.Errorf("entitygraph/sqlite: decode payload: %w", err)
-		}
-		oa, _ := time.Parse(time.RFC3339Nano, observedAt)
-		ra, _ := time.Parse(time.RFC3339Nano, recordedAt)
-		entries = append(entries, sourceEntry{
-			source:      source,
-			sourceClass: sourceClass,
-			observedAt:  oa,
-			payloadHash: hash,
-			payload:     payload,
-		})
-		observations = append(observations, types.Observation{
-			Source:     source,
-			ObservedAt: oa,
-			RecordedAt: ra,
-			Subject:    subject,
-			Kind:       types.ObservationKind(kind),
-			Confidence: types.Confidence(confidence),
-			Payload:    payload,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("entitygraph/sqlite: iterate sources: %w", err)
-	}
-
-	// The index row exists, so there must be at least one current source; guard
-	// defensively rather than index into an empty slice.
-	if len(entries) == 0 {
+	if len(entityRows) == 0 {
 		return nil, fmt.Errorf("entitygraph/sqlite: entity %s: %w", subject, ErrNotFound)
+	}
+
+	entries := entityRowsToEntries(entityRows)
+	observations := make([]types.Observation, len(entityRows))
+	for i, r := range entityRows {
+		observations[i] = types.Observation{
+			Source:     r.source,
+			ObservedAt: r.observedAt,
+			RecordedAt: r.recordedAt,
+			Subject:    subject,
+			Kind:       types.ObservationKind(r.kind),
+			Confidence: types.Confidence(r.confidence),
+			Payload:    r.payload,
+		}
 	}
 
 	winIdx := winningSourceIdx(entries)
@@ -125,9 +104,17 @@ func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interface
 			ObservedAt: observations[winIdx].ObservedAt,
 			RecordedAt: observations[winIdx].RecordedAt,
 		},
-		// CollapseGroup is wired by STORY-6; a pass-through no-op here.
-		CollapseGroup: nil,
 	}
+
+	// Wire collapse-group resolution when requested (ADR-022 §3).
+	if opts.CollapseGroup {
+		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, opts.TenantFilter)
+		if err != nil {
+			return nil, fmt.Errorf("entitygraph/sqlite: resolve collapse group: %w", err)
+		}
+		view.CollapseGroup = cg
+	}
+
 	return view, nil
 }
 
@@ -427,19 +414,4 @@ func (p *SQLiteEntityGraphProvider) GetHistory(ctx context.Context, eid interfac
 		return nil, fmt.Errorf("entitygraph/sqlite: iterate history: %w", err)
 	}
 	return records, nil
-}
-
-// Diff is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) Diff(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) (*interfaces.StateDiff, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// GetTimeline is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) GetTimeline(_ context.Context, _ []interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.TimelineEvent, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// Watch is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) Watch(_ context.Context, _ interfaces.WatchFilter, _ string) (<-chan interfaces.WatchEvent, error) {
-	return nil, interfaces.ErrNotImplemented
 }

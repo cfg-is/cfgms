@@ -127,3 +127,17 @@ func TestParseEdgeSubject_Database(t *testing.T) {
 	_, _, _, err = parseEdgeSubject("two|parts")
 	require.Error(t, err)
 }
+
+func TestEscapeLIKE_Database(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"host:abc", "host:abc"},
+		{"host:server%01", `host:server\%01`},
+		{"host:server_01", `host:server\_01`},
+		{`host:back\slash`, `host:back\\slash`},
+		{`100%_done`, `100\%\_done`},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, escapeLIKE(tc.in), "input: %q", tc.in)
+	}
+}
