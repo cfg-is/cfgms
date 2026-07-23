@@ -80,7 +80,7 @@ function renderAssetPage(stewardId = 'stw-001') {
 }
 
 describe('tab strip', () => {
-  it('renders all four tabs: DNA, Config, Shell, Live Activity', () => {
+  it('renders all tabs: DNA, Config, Shell, Logs, Modules, Live Activity', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
@@ -89,6 +89,8 @@ describe('tab strip', () => {
     expect(screen.getByRole('tab', { name: /^DNA/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /^Config/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /^Shell/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /^Logs/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /^Modules/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /^Live Activity/i })).toBeInTheDocument()
   })
 
@@ -137,6 +139,42 @@ describe('tab strip', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /^Shell/i }))
     expect(screen.getByRole('tabpanel').textContent).toContain('Shell')
+  })
+
+  it('clicking Logs tab mounts LogsPanel (shows loading state, not a SoonPanel)', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    fireEvent.click(screen.getByRole('tab', { name: /^Logs/i }))
+
+    expect(screen.getByTestId('logs-loading')).toBeInTheDocument()
+    expect(screen.queryByText(/Logs is not yet available/i)).not.toBeInTheDocument()
+  })
+
+  it('Logs tab has no soon badge', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    const logsTab = screen.getByRole('tab', { name: /^Logs/i })
+    expect(within(logsTab).queryByText(/soon/i)).not.toBeInTheDocument()
+  })
+
+  it('clicking Modules tab mounts ModulesPanel (shows loading state, not a SoonPanel)', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    fireEvent.click(screen.getByRole('tab', { name: /^Modules/i }))
+
+    expect(screen.getByTestId('modules-loading')).toBeInTheDocument()
+    expect(screen.queryByText(/Modules is not yet available/i)).not.toBeInTheDocument()
+  })
+
+  it('Modules tab has no soon badge', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    const modulesTab = screen.getByRole('tab', { name: /^Modules/i })
+    expect(within(modulesTab).queryByText(/soon/i)).not.toBeInTheDocument()
   })
 
   it('clicking Live Activity mounts LiveActivityTab (not a SoonPanel)', () => {
