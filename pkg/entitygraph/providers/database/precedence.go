@@ -11,6 +11,17 @@ import (
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
+// tenantVisible reports whether an entity currently owned by owningTenant is
+// visible to a caller scoped to tenantFilter. An empty filter sees everything;
+// otherwise the owning tenant must equal the filter or be nested under it.
+// This is the sole access-control axis (ADR-023 §111-119).
+func tenantVisible(owningTenant, tenantFilter string) bool {
+	if tenantFilter == "" {
+		return true
+	}
+	return owningTenant == tenantFilter || strings.HasPrefix(owningTenant, tenantFilter+"/")
+}
+
 // resolveSourceClass derives the source class from a source identity string.
 // Sources are conventionally "<class>:<name>" (e.g. "enforcing-module:hyperv");
 // the prefix before the first ':' is matched against the known source classes.

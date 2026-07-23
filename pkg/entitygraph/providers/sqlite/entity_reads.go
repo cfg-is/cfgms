@@ -22,13 +22,15 @@ const defaultPageSize = 100
 
 // tenantVisible reports whether an entity owned by owningTenant is visible to a
 // caller scoped to tenantFilter. An empty filter sees everything; otherwise the
-// owning tenant must equal the filter or be nested under it (prefix match).
-// This is the sole access-control axis (ADR-023 §111-119).
+// owning tenant must equal the filter or be a strict descendant separated by
+// '/'. The separator is required to avoid matching a sibling tenant whose name
+// merely shares a common prefix (e.g. filter "root/msp-a" must NOT match
+// owningTenant "root/msp-ab"). This is the sole access-control axis (ADR-023 §111-119).
 func tenantVisible(owningTenant, tenantFilter string) bool {
 	if tenantFilter == "" {
 		return true
 	}
-	return owningTenant == tenantFilter || strings.HasPrefix(owningTenant, tenantFilter)
+	return owningTenant == tenantFilter || strings.HasPrefix(owningTenant, tenantFilter+"/")
 }
 
 // GetEntity returns the current entity state, provenance, and freshness,
@@ -141,8 +143,9 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 		args = append(args, filter.Kind)
 	}
 	if filter.TenantFilter != "" {
+		// Use filter+"/" to avoid matching sibling tenants that share a name prefix.
 		conds = append(conds, "(owning_tenant = ? OR owning_tenant LIKE ?)")
-		args = append(args, filter.TenantFilter, filter.TenantFilter+"%")
+		args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
 	}
 
 	where := ""

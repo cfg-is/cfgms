@@ -5,7 +5,6 @@ package sqlite
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -151,6 +150,19 @@ func TestTenantFilter(t *testing.T) {
 
 	_, err = p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/msp-b"})
 	require.ErrorIs(t, err, ErrNotFound, "other tenant subtree is invisible")
+
+	// Prefix-collision guard: "root/msp-a" must not match "root/msp-a-other" or "root/msp-ab".
+	eid2 := mustEID(t, "host:prefix-tenant")
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(eid2.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": "root/msp-ab",
+			}),
+		},
+	}))
+	_, err = p.GetEntity(ctx, eid2, interfaces.GetEntityOpts{TenantFilter: "root/msp-a"})
+	require.ErrorIs(t, err, ErrNotFound, "sibling tenant sharing a name prefix must not be visible")
 }
 
 func TestQueryEntitiesPaging(t *testing.T) {
@@ -276,5 +288,6 @@ func TestDedupErrorPathIsClean(t *testing.T) {
 	// Guard: an empty batch is a no-op, not an error.
 	p := newTestProvider(t)
 	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{}))
-	require.False(t, errors.Is(nil, ErrNotFound))
+	// ErrNotFound is a valid non-nil sentinel; confirm it is not accidentally nil.
+	require.NotNil(t, ErrNotFound, "ErrNotFound must be a non-nil sentinel error")
 }

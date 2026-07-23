@@ -5,6 +5,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,13 +30,35 @@ type currentRow struct {
 }
 
 // GetEntity returns the merged current state, provenance, and freshness for an
-// entity. The mandatory tenant filter in opts restricts visible source rows to
-// the caller's tenant subtree. Returns errNotFound when the entity has no
-// visible current state.
+// entity. Visibility is governed by eg_entity_index.owning_tenant (the
+// current-ownership projection), not by the ingest-time tenant_path columns
+// on individual source rows (ADR-023 §111-119).
 func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfaces.EIDRef, opts interfaces.GetEntityOpts) (*types.EntityView, error) {
 	subject := eid.String()
 
-	rows, err := p.queryCurrentRows(ctx, subject, opts.TenantFilter, opts.AsOf)
+	// Apply the tenant cut via the current-ownership index — the only
+	// access-control axis. A filtered-out entity is indistinguishable from a
+	// missing one to the caller, regardless of ingest-time tenant_path values.
+	if opts.TenantFilter != "" {
+		var owningTenant string
+		err := p.db.QueryRowContext(ctx,
+			`SELECT owning_tenant FROM eg_entity_index WHERE subject = $1`, subject,
+		).Scan(&owningTenant)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("entitygraph/database: lookup entity index: %w", err)
+		}
+		if !tenantVisible(owningTenant, opts.TenantFilter) {
+			return nil, errNotFound
+		}
+	}
+
+	// Fetch all per-source current rows without tenant filtering — visibility
+	// has already been confirmed via the index lookup above, so all source
+	// rows for the subject are accessible to the authorized caller.
+	rows, err := p.queryCurrentRows(ctx, subject, "", opts.AsOf)
 	if err != nil {
 		return nil, err
 	}
@@ -265,9 +288,14 @@ func (p *DatabaseEntityGraphProvider) ResolveIdentity(ctx context.Context, claim
 		if mac == "" {
 			continue
 		}
-		conds = append(conds, fmt.Sprintf("mac_addrs LIKE $%d", n))
-		args = append(args, "%"+mac+"%")
-		n++
+		// mac_addrs is a comma-joined list; match as a delimited token to avoid
+		// unanchored substring collisions (e.g. "00:11" matching "00:11:22:33:44:55").
+		conds = append(conds, fmt.Sprintf(
+			"(mac_addrs = $%d OR mac_addrs LIKE $%d OR mac_addrs LIKE $%d OR mac_addrs LIKE $%d)",
+			n, n+1, n+2, n+3,
+		))
+		args = append(args, mac, mac+",%", "%,"+mac, "%,"+mac+",%")
+		n += 4
 	}
 
 	if len(conds) == 0 {

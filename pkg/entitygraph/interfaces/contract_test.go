@@ -268,8 +268,8 @@ func testEGMovedEntity(t *testing.T, factory EntityGraphProviderFactory) {
 }
 
 // testEGRebuild verifies that RebuildProjections leaves entity reads unchanged
-// (AC 7). Providers that do not implement RebuildProjections are skipped via the
-// type assertion so the shared harness stays provider-agnostic.
+// (AC 7). RebuildProjections is part of the EntityGraphProvider interface, so
+// every provider has the method and the test always runs.
 func testEGRebuild(t *testing.T, factory EntityGraphProviderFactory) {
 	t.Helper()
 	p := factory(t)
@@ -295,13 +295,7 @@ func testEGRebuild(t *testing.T, factory EntityGraphProviderFactory) {
 	require.NoError(t, err)
 	require.NotNil(t, before2)
 
-	rebuilder, ok := p.(interface {
-		RebuildProjections(ctx context.Context) error
-	})
-	if !ok {
-		t.Skip("provider does not implement RebuildProjections")
-	}
-	require.NoError(t, rebuilder.RebuildProjections(ctx))
+	require.NoError(t, p.RebuildProjections(ctx))
 
 	after1, err := p.GetEntity(ctx, egEID(t, subject1), opts)
 	require.NoError(t, err)
