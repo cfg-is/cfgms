@@ -110,6 +110,16 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 			RecordedAt: rows[win].recordedAt,
 		},
 	}
+
+	// Wire collapse-group resolution when requested (ADR-022 §3).
+	if opts.CollapseGroup {
+		cg, err := p.resolveCollapseGroup(ctx, eid, opts.AsOf, opts.TenantFilter)
+		if err != nil {
+			return nil, fmt.Errorf("entitygraph/database: resolve collapse group: %w", err)
+		}
+		view.CollapseGroup = cg
+	}
+
 	return view, nil
 }
 
@@ -561,19 +571,4 @@ func (p *DatabaseEntityGraphProvider) GetHistory(ctx context.Context, eid interf
 		return nil, fmt.Errorf("entitygraph/database: iterate history: %w", err)
 	}
 	return records, nil
-}
-
-// Diff returns the attribute delta between two points in time for a subject.
-func (p *DatabaseEntityGraphProvider) Diff(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) (*interfaces.StateDiff, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// GetTimeline returns a merged change-event stream for the given subjects.
-func (p *DatabaseEntityGraphProvider) GetTimeline(_ context.Context, _ []interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.TimelineEvent, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// Watch returns a durable, cursor-replayable change feed.
-func (p *DatabaseEntityGraphProvider) Watch(_ context.Context, _ interfaces.WatchFilter, _ string) (<-chan interfaces.WatchEvent, error) {
-	return nil, interfaces.ErrNotImplemented
 }
