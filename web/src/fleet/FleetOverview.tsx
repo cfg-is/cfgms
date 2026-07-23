@@ -17,12 +17,15 @@
  *
  * Story #2498 adds saved views (SavedViews.tsx) and the row drill-in
  * asset-DNA drawer (DnaDrawer.tsx). Story #2723 converts the row drill-in
- * from component state to a real route: clicking a row navigates to
- * /stewards/:id (StewardAssetPage).
+ * from component state to a real route. Story #2917 restores the overlay
+ * drawer pattern: clicking a row opens StewardDrawer over the list (no URL
+ * change); middle-click/Ctrl+click on the name-cell anchor opens the full
+ * page at /stewards/:id in a new tab.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useOutletContext } from 'react-router-dom'
 import { isScopeMatch, useTenantScope } from '../shell/TenantScopeContext.tsx'
+import StewardDrawer from './StewardDrawer.tsx'
 import {
   COLUMNS,
   DEFAULT_VISIBLE,
@@ -74,8 +77,8 @@ export default function FleetOverview() {
     search: string
     onSearchChange: (value: string) => void
   }>()
-  const navigate = useNavigate()
   const { scope, rootPath } = useTenantScope()
+  const [drawerStewardId, setDrawerStewardId] = useState<string | null>(null)
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
   const [pageIndex, setPageIndex] = useState(0)
   const [sort, setSort] = useState<SortState | null>(null)
@@ -251,9 +254,7 @@ export default function FleetOverview() {
             sort={sort}
             onSort={onSort}
             nowMs={nowMs}
-            onRowSelect={(steward) =>
-              navigate(`/stewards/${encodeURIComponent(steward.id)}`)
-            }
+            onRowSelect={(steward) => setDrawerStewardId(steward.id)}
           />
         )}
 
@@ -314,6 +315,13 @@ export default function FleetOverview() {
           </div>
         )}
       </section>
+
+      {drawerStewardId !== null && (
+        <StewardDrawer
+          stewardId={drawerStewardId}
+          onClose={() => setDrawerStewardId(null)}
+        />
+      )}
     </>
   )
 }

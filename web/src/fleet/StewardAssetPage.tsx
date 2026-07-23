@@ -118,7 +118,7 @@ export default function StewardAssetPage() {
             onClick={() => activateTab(tab.key)}
           >
             {tab.label}
-            {tab.soon && <span className="tag">soon</span>}
+            {tab.soon && <span className="tag asset-tab-soon">soon</span>}
           </button>
         ))}
       </div>
