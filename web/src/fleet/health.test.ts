@@ -103,10 +103,12 @@ describe('deriveHealth ↔ handleFleetHealth taxonomy contract', () => {
     return null // not counted by server aggregate
   }
 
-  const serverToClient: Record<string, { label: string; tone: HealthTone }> = {
-    healthy:     { label: 'Healthy',     tone: 'ok' },
-    degraded:    { label: 'Degraded',    tone: 'warn' },
-    unreachable: { label: 'Unreachable', tone: 'crit' },
+  function bucketToHealth(bucket: 'healthy' | 'degraded' | 'unreachable'): { label: string; tone: HealthTone } {
+    switch (bucket) {
+      case 'healthy':     return { label: 'Healthy',     tone: 'ok' }
+      case 'degraded':    return { label: 'Degraded',    tone: 'warn' }
+      case 'unreachable': return { label: 'Unreachable', tone: 'crit' }
+    }
   }
 
   const fixtures: Array<{
@@ -131,7 +133,7 @@ describe('deriveHealth ↔ handleFleetHealth taxonomy contract', () => {
       const clientHealth = deriveHealth(status, lastSeen, NOW)
       if (bucket !== null) {
         // For states the server counts, client label must match the server bucket.
-        expect(clientHealth).toEqual(serverToClient[bucket])
+        expect(clientHealth).toEqual(bucketToHealth(bucket))
       } else {
         // For states the server does not count, client must not produce a bucket
         // label that would imply the server tracks it (healthy/degraded/unreachable).
