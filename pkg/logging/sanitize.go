@@ -145,6 +145,13 @@ func SanitizeLogValue(s string) string {
 // When SensitiveLogConfig.UnredactedSensitiveValues is true (development opt-in),
 // the full sanitized value is returned without truncation.
 //
+// The explicit strings.ReplaceAll calls at the end mirror SanitizeLogValue's
+// pattern so that CodeQL's ReplaceSanitizer (go/log-injection) recognises every
+// return path of this function as sanitised. The replacements are functionally
+// redundant (SanitizeLogValue already strips CR/LF), but CodeQL's hardcoded
+// sanitizer only recognises strings.ReplaceAll with literal "\n"/"\r" and does
+// not trace through nested function calls.
+//
 // Usage:
 //
 //	logger.Info("session opened", "session_id", logging.RedactedID(sessionID))
@@ -152,13 +159,19 @@ func RedactedID(s string) string {
 	if s == "" {
 		return ""
 	}
+	var result string
 	if GetSensitiveLogConfig().UnredactedSensitiveValues {
-		return SanitizeLogValue(s)
+		result = SanitizeLogValue(s)
+	} else if len(s) <= 8 {
+		result = SanitizeLogValue(s) + "…"
+	} else {
+		result = SanitizeLogValue(s[:8]) + "…"
 	}
-	if len(s) <= 8 {
-		return SanitizeLogValue(s) + "…"
-	}
-	return SanitizeLogValue(s[:8]) + "…"
+	// Explicit CR/LF replacement so CodeQL's ReplaceSanitizer recognises the
+	// return value as sanitised (same pattern as SanitizeLogValue).
+	result = strings.ReplaceAll(result, "\n", "_")
+	result = strings.ReplaceAll(result, "\r", "_")
+	return result
 }
 
 // sanitizeMapValues sanitizes every value in a map for safe logging.

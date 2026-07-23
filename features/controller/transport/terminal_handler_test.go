@@ -4,6 +4,7 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,13 +20,18 @@ import (
 	"google.golang.org/grpc/status"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/audit"
+	cfgcert "github.com/cfgis/cfgms/pkg/cert"
+	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
 // ---------------------------------------------------------------------------
@@ -40,6 +46,11 @@ type testTerminalStream struct {
 
 	mu   sync.Mutex
 	sent []*transportpb.TerminalData
+
+	// sentCh, when non-nil, is signaled once after every Send appends a frame.
+	// Tests use it to synchronize on the send goroutine draining relay.inputCh
+	// without resorting to time.Sleep. Buffered + non-blocking so Send never stalls.
+	sentCh chan struct{}
 }
 
 func newTestTerminalStream(ctx context.Context, initial ...*transportpb.TerminalData) *testTerminalStream {
@@ -64,8 +75,14 @@ func (s *testTerminalStream) Recv() (*transportpb.TerminalData, error) {
 
 func (s *testTerminalStream) Send(f *transportpb.TerminalData) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.sent = append(s.sent, f)
+	s.mu.Unlock()
+	if s.sentCh != nil {
+		select {
+		case s.sentCh <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -85,37 +102,96 @@ func (s *testTerminalStream) SendMsg(interface{}) error    { return nil }
 func (s *testTerminalStream) RecvMsg(interface{}) error    { return nil }
 
 // ---------------------------------------------------------------------------
-// Test double: TerminalCommandPublisher
+// Real TerminalCommandPublisher harness
 // ---------------------------------------------------------------------------
+//
+// These tests exercise the real CFGMS command publisher — features/controller/
+// commands.Publisher — wired to the real gRPC-over-QUIC control-plane provider.
+// No stubs or mocks: PublishCommand signs the command and sends it over a live
+// mTLS transport, exactly as production does. When a steward client is connected,
+// the command it receives off the wire is recorded so the dispatch path can be
+// asserted end-to-end; when no steward is connected, PublishCommand fails with
+// the real "steward not connected" error, reproducing the offline case.
 
-type stubCommandPublisher struct {
-	mu       sync.Mutex
-	commands []publishedCmd
-	err      error
-}
+// newRealTerminalCommandPublisher builds a real commands.Publisher backed by a
+// real gRPC control-plane server. When connectedStewardID is non-empty a real
+// steward client connects over mTLS and subscribes to commands; every received
+// SignedCommand is delivered on the returned channel. When it is empty no steward
+// connects, so PublishCommand returns the genuine "steward not connected" error.
+func newRealTerminalCommandPublisher(t *testing.T, connectedStewardID string) (*commands.Publisher, <-chan *controlplaneTypes.SignedCommand) {
+	t.Helper()
+	ctx := context.Background()
 
-type publishedCmd struct {
-	stewardID string
-	cmdType   controlplaneTypes.CommandType
-	params    map[string]interface{}
-}
+	ca := newTestCA(t)
+	caPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
 
-func (p *stubCommandPublisher) PublishCommand(_ context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) (string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.err != nil {
-		return "", p.err
+	serverCert, err := ca.GenerateServerCertificate(&cfgcert.ServerCertConfig{
+		CommonName:   "localhost",
+		DNSNames:     []string{"localhost"},
+		ValidityDays: 1,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	serverTLS, err := cfgcert.CreateServerTLSConfig(
+		serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caPEM, tls.VersionTLS13)
+	require.NoError(t, err)
+	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
+
+	reg := registry.NewRegistry()
+	server := cpgrpc.New(cpgrpc.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": serverTLS,
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() { server.ForceStop() })
+
+	received := make(chan *controlplaneTypes.SignedCommand, 4)
+
+	if connectedStewardID != "" {
+		clientCert, err := ca.GenerateClientCertificate(&cfgcert.ClientCertConfig{
+			CommonName:   connectedStewardID,
+			ValidityDays: 1,
+			KeySize:      2048,
+		})
+		require.NoError(t, err)
+		clientTLS, err := cfgcert.CreateClientTLSConfig(
+			clientCert.CertificatePEM, clientCert.PrivateKeyPEM, caPEM, "localhost", tls.VersionTLS13)
+		require.NoError(t, err)
+		clientTLS.NextProtos = []string{quictransport.ALPNProtocol}
+
+		client := cpgrpc.New(cpgrpc.ModeClient)
+		require.NoError(t, client.Initialize(ctx, map[string]interface{}{
+			"mode":       "client",
+			"addr":       server.ListenAddr(),
+			"tls_config": clientTLS,
+			"steward_id": connectedStewardID,
+		}))
+		require.NoError(t, client.Start(ctx))
+		t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+		require.NoError(t, client.SubscribeCommands(ctx, connectedStewardID,
+			func(_ context.Context, sc *controlplaneTypes.SignedCommand) error {
+				select {
+				case received <- sc:
+				default:
+				}
+				return nil
+			}))
+
+		require.Eventually(t, func() bool { return reg.Count() == 1 }, 10*time.Second, 10*time.Millisecond,
+			"steward must register with the control-plane server before commands can be delivered")
 	}
-	p.commands = append(p.commands, publishedCmd{stewardID: stewardID, cmdType: cmdType, params: params})
-	return "cmd-" + stewardID, nil
-}
 
-func (p *stubCommandPublisher) getCommands() []publishedCmd {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([]publishedCmd, len(p.commands))
-	copy(out, p.commands)
-	return out
+	pub, err := commands.New(&commands.Config{
+		ControlPlane: server,
+		Logger:       logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+	return pub, received
 }
 
 // ---------------------------------------------------------------------------
@@ -257,13 +333,21 @@ func TestTerminalHandler_HandleGRPC_InputRelayedToStewardStream(t *testing.T) {
 	stream := newTestTerminalStream(peerCtx,
 		&transportpb.TerminalData{SessionId: sess.ID}, // correlation frame, no payload
 	)
+	// Signal the test the instant the send goroutine drains relay.inputCh and
+	// forwards a frame via stream.Send — deterministic readiness, no time.Sleep.
+	stream.sentCh = make(chan struct{}, 1)
 
 	waitDone := startHandleGRPCTerminal(t, h, stream)
 
 	inputPayload := []byte("ls -la\n")
 	relay.inputCh <- inputMsg{data: inputPayload}
 
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the send goroutine to actually forward the frame before asserting.
+	select {
+	case <-stream.sentCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("browser input was not forwarded to the steward stream within deadline")
+	}
 
 	close(stream.recvCh)
 	require.NoError(t, waitDone())
@@ -394,7 +478,10 @@ func TestTerminalHandler_ServeWebSocket_ForbiddenOrigin(t *testing.T) {
 // TestTerminalHandler_ServeWebSocket_AllowlistOriginAccepted verifies that an
 // origin on the explicit allowlist passes the origin check.
 func TestTerminalHandler_ServeWebSocket_AllowlistOriginAccepted(t *testing.T) {
-	pub := &stubCommandPublisher{}
+	// Real publisher with no steward connected: the origin check runs before
+	// command dispatch, so an allowlisted origin must not be rejected with 403
+	// regardless of the (offline) publish outcome.
+	pub, _ := newRealTerminalCommandPublisher(t, "")
 	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, []string{"admin.example.com"})
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/steward-1", nil)
 	req.Host = "app.internal"
@@ -415,7 +502,9 @@ func TestTerminalHandler_ServeWebSocket_AllowlistOriginAccepted(t *testing.T) {
 func TestTerminalHandler_ServeWebSocket_OfflineSteward(t *testing.T) {
 	startTime := time.Now()
 
-	pub := &stubCommandPublisher{err: assert.AnError}
+	// Real publisher with no steward connected: PublishCommand returns the genuine
+	// "steward not connected" error, which the handler must translate to 503.
+	pub, _ := newRealTerminalCommandPublisher(t, "")
 	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/offline-steward", nil)
@@ -440,13 +529,17 @@ func TestTerminalHandler_ServeWebSocket_OfflineSteward(t *testing.T) {
 // verifies that ServeWebSocket dispatches COMMAND_TYPE_OPEN_TERMINAL with the
 // correct steward_id, session_id, shell, cols, and rows.
 func TestTerminalHandler_ServeWebSocket_DispatchesOpenTerminalCommand(t *testing.T) {
-	pub := &stubCommandPublisher{}
+	const stewardID = "dispatch-steward"
+
+	// Real publisher with a real steward connected over mTLS. The OPEN_TERMINAL
+	// command travels the actual publish path and is captured off the wire.
+	pub, received := newRealTerminalCommandPublisher(t, stewardID)
 	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/dispatch-steward?shell=bash&cols=120&rows=40", nil)
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID+"?shell=bash&cols=120&rows=40", nil)
 	req.Host = "localhost"
 	req.Header.Set("Origin", "http://localhost")
-	req = mux.SetURLVars(req, map[string]string{"steward_id": "dispatch-steward"})
+	req = mux.SetURLVars(req, map[string]string{"steward_id": stewardID})
 	// Set tenant and user so session creation succeeds before command dispatch.
 	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-dispatch")
 	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, "user-dispatch")
@@ -455,14 +548,31 @@ func TestTerminalHandler_ServeWebSocket_DispatchesOpenTerminalCommand(t *testing
 	rec := httptest.NewRecorder()
 	h.ServeWebSocket(rec, req)
 
-	cmds := pub.getCommands()
-	require.Len(t, cmds, 1, "exactly one OPEN_TERMINAL command must be dispatched")
-	assert.Equal(t, "dispatch-steward", cmds[0].stewardID)
-	assert.Equal(t, controlplaneTypes.CommandOpenTerminal, cmds[0].cmdType)
-	assert.NotEmpty(t, cmds[0].params["session_id"])
-	assert.Equal(t, "bash", cmds[0].params["shell"])
-	assert.Equal(t, int32(120), cmds[0].params["cols"])
-	assert.Equal(t, int32(40), cmds[0].params["rows"])
+	// The command is delivered asynchronously over the real transport; wait for
+	// the connected steward to receive it.
+	var sc *controlplaneTypes.SignedCommand
+	select {
+	case sc = <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OPEN_TERMINAL command was not delivered to the connected steward")
+	}
+
+	require.NotNil(t, sc)
+	assert.Equal(t, stewardID, sc.Command.StewardID)
+	assert.Equal(t, controlplaneTypes.CommandOpenTerminal, sc.Command.Type)
+	// RawParams preserves the exact string-encoded params that crossed the wire.
+	require.NotNil(t, sc.RawParams)
+	assert.NotEmpty(t, sc.RawParams["session_id"])
+	assert.Equal(t, "bash", sc.RawParams["shell"])
+	assert.Equal(t, "120", sc.RawParams["cols"])
+	assert.Equal(t, "40", sc.RawParams["rows"])
+
+	// Exactly one command must be dispatched.
+	select {
+	case extra := <-received:
+		t.Fatalf("expected exactly one OPEN_TERMINAL command, got a second: %+v", extra.Command)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 // ---------------------------------------------------------------------------

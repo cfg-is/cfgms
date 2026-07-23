@@ -23,8 +23,8 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -33,6 +33,9 @@ const (
 	terminalPingInterval       = 54 * time.Second
 	terminalWriteTimeout       = 10 * time.Second
 	terminalInputBufSize       = 64
+	// maxTerminalDim caps terminal columns/rows before int32 conversion to
+	// prevent integer overflow on 64-bit platforms where int is 64-bit.
+	maxTerminalDim = 65535
 )
 
 // TerminalCommandPublisher dispatches COMMAND_TYPE_OPEN_TERMINAL to a steward.
@@ -55,9 +58,9 @@ type terminalRelay struct {
 	tenantID  string
 	userID    string
 	session   *terminal.Session // carries outputCh and recorder
-	inputCh   chan inputMsg      // browser → steward (buffered; drained by HandleGRPC)
-	grpcReady chan struct{}       // closed when HandleGRPC binds the stream
-	done      chan struct{}       // closed when either side ends the relay
+	inputCh   chan inputMsg     // browser → steward (buffered; drained by HandleGRPC)
+	grpcReady chan struct{}     // closed when HandleGRPC binds the stream
+	done      chan struct{}     // closed when either side ends the relay
 	closeOnce sync.Once
 }
 
@@ -254,6 +257,14 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 	cols := parseTerminalInt(q.Get("cols"), 80)
 	rows := parseTerminalInt(q.Get("rows"), 24)
+	// Cap to maxTerminalDim so the subsequent int32 conversions cannot overflow
+	// on 64-bit platforms (int is 64-bit; maxTerminalDim fits in int32).
+	if cols > maxTerminalDim {
+		cols = maxTerminalDim
+	}
+	if rows > maxTerminalDim {
+		rows = maxTerminalDim
+	}
 	clientIP := terminalClientIP(r)
 
 	// Create terminal session (includes recording + audit start event).
@@ -268,8 +279,11 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	})
 	if err != nil {
 		if h.logger != nil {
+			// Sanitize err.Error() explicitly: the error message may embed
+			// stewardID (user-controlled) from session-creation internals.
 			h.logger.Error("terminal: session creation failed",
-				"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 		http.Error(w, "failed to create terminal session", http.StatusInternalServerError)
 		return
@@ -305,15 +319,17 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, map[string]interface{}{
 			"session_id": sess.ID,
 			"shell":      shell,
-			"cols":       int32(cols), //nolint:gosec // cols is capped by parseTerminalInt
-			"rows":       int32(rows), //nolint:gosec // rows is capped by parseTerminalInt
+			"cols":       int32(cols), // safe: bounded by maxTerminalDim above
+			"rows":       int32(rows), // safe: bounded by maxTerminalDim above
 		})
 		if cmdErr != nil {
 			if h.logger != nil {
 				h.logger.Warn("terminal: dispatch open-terminal command failed",
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"session_id", logging.RedactedID(sess.ID),
-					"error", cmdErr)
+					// Sanitize cmdErr.Error() explicitly: the error message may
+					// embed stewardID (user-controlled) from PublishCommand internals.
+					"error", logging.SanitizeLogValue(cmdErr.Error()))
 			}
 			http.Error(w, "steward unavailable", http.StatusServiceUnavailable)
 			return
@@ -377,8 +393,14 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 			case terminal.MessageTypeResize:
 				var req terminal.ResizeRequest
 				if jsonErr := json.Unmarshal(msg.Data, &req); jsonErr == nil && req.Cols > 0 && req.Rows > 0 {
+					if req.Cols > maxTerminalDim {
+						req.Cols = maxTerminalDim
+					}
+					if req.Rows > maxTerminalDim {
+						req.Rows = maxTerminalDim
+					}
 					select {
-					case relay.inputCh <- inputMsg{resize: true, rows: int32(req.Rows), cols: int32(req.Cols)}: //nolint:gosec // terminal dimensions
+					case relay.inputCh <- inputMsg{resize: true, rows: int32(req.Rows), cols: int32(req.Cols)}: // safe: bounded above
 					case <-relay.done:
 						return
 					}
