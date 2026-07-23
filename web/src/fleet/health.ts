@@ -9,9 +9,11 @@ import { apiFetch } from '../api/client.ts'
  * The API payload carries a lifecycle `status` (business.StewardStatus:
  * registered/active/lost/dormant/archived/revoked — plus online/offline on
  * the filtered fleet-query path) and a `last_seen` heartbeat timestamp. The
- * Health column folds both into one signal: an "active" steward whose
- * heartbeat has gone stale is presented as Unreachable, because a healthy
- * label next to a 20-minute-old check-in would be a lie.
+ * Health column folds both into one signal using the same taxonomy as the
+ * server-side handleFleetHealth aggregate (handlers_fleet.go):
+ *   - active + fresh heartbeat  → Healthy (ok)
+ *   - active + stale heartbeat  → Degraded (warn)
+ *   - lost                      → Unreachable (crit)
  *
  * Colors carry meaning only (design-system pillar 2): each tone maps to a
  * semantic state token (--state-ok/-warn/-crit/-neutral), never a decorative
@@ -27,9 +29,10 @@ export interface Health {
 
 /*
  * Heartbeat age beyond which an otherwise-active steward is presented as
- * Unreachable. The payload pins no heartbeat contract, so this is a display
- * threshold, not protocol truth; 5 minutes matches the reference mockup's
- * semantics (a 6-minute-old check-in renders critical).
+ * Degraded. Must match DegradedHeartbeatAge in
+ * features/controller/api/handlers_fleet.go (currently 5 minutes); drift
+ * between these two constants re-introduces the tile/row disagreement fixed
+ * in Issue #2920.
  */
 export const STALE_AFTER_MS = 5 * 60_000
 
@@ -64,7 +67,7 @@ export function deriveHealth(
       const fresh = seen !== null && nowMs - seen <= STALE_AFTER_MS
       return fresh
         ? { label: 'Healthy', tone: 'ok' }
-        : { label: 'Unreachable', tone: 'crit' }
+        : { label: 'Degraded', tone: 'warn' }
     }
     case 'degraded':
       return { label: 'Degraded', tone: 'warn' }
