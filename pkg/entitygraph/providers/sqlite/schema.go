@@ -186,16 +186,21 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS eg_entity_index_serial ON eg_entity_index(serial_number)`,
 	`CREATE INDEX IF NOT EXISTS eg_entity_index_cloud_id ON eg_entity_index(cloud_object_id)`,
 
-	// Edge projection — populated by STORY-3. Created now (empty) so the
-	// schema is forward-stable and RebuildProjections has a place to write.
+	// Edge projection — populated by STORY-3. edge_key encodes uniqueness as
+	// from_subject + "\x1f" + edge_type + "\x1f" + to_subject + "\x1f" + source.
 	`CREATE TABLE IF NOT EXISTS eg_edge_projection (
 		edge_key     TEXT PRIMARY KEY,
 		edge_type    TEXT NOT NULL DEFAULT '',
 		from_subject TEXT NOT NULL DEFAULT '',
 		to_subject   TEXT NOT NULL DEFAULT '',
+		source       TEXT NOT NULL DEFAULT '',
+		source_class TEXT NOT NULL DEFAULT '',
+		observed_at  TEXT NOT NULL DEFAULT '',
 		payload_hash TEXT NOT NULL DEFAULT '',
 		log_seq      INTEGER NOT NULL DEFAULT 0
 	)`,
+	`CREATE INDEX IF NOT EXISTS eg_edge_proj_from ON eg_edge_projection(from_subject)`,
+	`CREATE INDEX IF NOT EXISTS eg_edge_proj_to   ON eg_edge_projection(to_subject)`,
 
 	// Drift projection — populated by a later story. Created now (empty).
 	`CREATE TABLE IF NOT EXISTS eg_drift_projection (
@@ -215,9 +220,100 @@ var schemaStatements = []string{
 	)`,
 }
 
+// egTableExists reports whether the named table is present in the SQLite schema catalog.
+func egTableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// egColumnExists reports whether the named column is present in the given table.
+// SQLite PRAGMA does not support ? binding, so only literal table/column names
+// from trusted call-sites may be passed.
+func egColumnExists(ctx context.Context, db *sql.DB, table, column string) (found bool, retErr error) {
+	// #nosec G202 -- PRAGMA does not support ? binding; caller passes only literals.
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var colName, colType string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if colName == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// backfillEdgeProjection adds the source, source_class, and observed_at columns
+// to an eg_edge_projection table created by STORY-2 before those columns existed,
+// and creates the from/to indexes. It is idempotent: presence of each column is
+// checked via PRAGMA before ALTER TABLE is attempted.
+func backfillEdgeProjection(ctx context.Context, db *sql.DB) error {
+	exists, err := egTableExists(ctx, db, "eg_edge_projection")
+	if err != nil {
+		return fmt.Errorf("entitygraph/sqlite: probe eg_edge_projection: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+
+	type colDef struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []colDef{
+		{"source", `ALTER TABLE eg_edge_projection ADD COLUMN source TEXT NOT NULL DEFAULT ''`},
+		{"source_class", `ALTER TABLE eg_edge_projection ADD COLUMN source_class TEXT NOT NULL DEFAULT ''`},
+		{"observed_at", `ALTER TABLE eg_edge_projection ADD COLUMN observed_at TEXT NOT NULL DEFAULT ''`},
+	} {
+		present, err := egColumnExists(ctx, db, "eg_edge_projection", c.name)
+		if err != nil {
+			return fmt.Errorf("entitygraph/sqlite: probe column %s: %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("entitygraph/sqlite: add column %s: %w", c.name, err)
+		}
+	}
+
+	// Indexes are idempotent due to IF NOT EXISTS.
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS eg_edge_proj_from ON eg_edge_projection(from_subject)`,
+		`CREATE INDEX IF NOT EXISTS eg_edge_proj_to   ON eg_edge_projection(to_subject)`,
+	} {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("entitygraph/sqlite: create index: %w", err)
+		}
+	}
+	return nil
+}
+
 // initializeSchema creates all entity-graph tables and indexes in a single
 // transaction. It is idempotent (every statement uses IF NOT EXISTS).
+// After the DDL pass, it runs backfill migrations for databases created by
+// earlier story revisions that may be missing columns.
 func initializeSchema(ctx context.Context, db *sql.DB) error {
+	// Backfill before the DDL pass so that ALTER TABLE runs on the old schema
+	// before CREATE TABLE IF NOT EXISTS is a no-op for existing tables.
+	if err := backfillEdgeProjection(ctx, db); err != nil {
+		return fmt.Errorf("entitygraph/sqlite: backfill edge projection: %w", err)
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("entitygraph/sqlite: begin schema tx: %w", err)

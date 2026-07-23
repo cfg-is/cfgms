@@ -105,3 +105,25 @@ func TestSubjectKind_Database(t *testing.T) {
 	assert.Equal(t, "edge", subjectKind("contains|host:a|host:b"))
 	assert.Equal(t, "edge", subjectKind("arbitrary-edge-string"))
 }
+
+func TestParseEdgeSubject_Database(t *testing.T) {
+	edgeType, from, to, err := parseEdgeSubject("contains|host:a|host:b")
+	require.NoError(t, err)
+	assert.Equal(t, "contains", edgeType)
+	assert.Equal(t, "host:a", from)
+	assert.Equal(t, "host:b", to)
+
+	// to_subject may contain slashes (local_id component of EID).
+	edgeType, from, to, err = parseEdgeSubject("runs-on|cluster:cl1|host:cl1/vm1")
+	require.NoError(t, err)
+	assert.Equal(t, "runs-on", edgeType)
+	assert.Equal(t, "cluster:cl1", from)
+	assert.Equal(t, "host:cl1/vm1", to)
+
+	// Missing components must error.
+	_, _, _, err = parseEdgeSubject("only-one-part")
+	require.Error(t, err)
+
+	_, _, _, err = parseEdgeSubject("two|parts")
+	require.Error(t, err)
+}

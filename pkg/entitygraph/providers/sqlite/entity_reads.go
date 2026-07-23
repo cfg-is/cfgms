@@ -384,16 +384,6 @@ func (p *SQLiteEntityGraphProvider) GetDriftState(_ context.Context, _ interface
 	return nil, interfaces.ErrNotImplemented
 }
 
-// GetEdges is implemented by STORY-3.
-func (p *SQLiteEntityGraphProvider) GetEdges(_ context.Context, _ interfaces.EdgeFilter) ([]*interfaces.EdgeView, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// GetNeighborhood is implemented by STORY-3.
-func (p *SQLiteEntityGraphProvider) GetNeighborhood(_ context.Context, _ interfaces.EIDRef, _ []string, _ types.TraversalDirection, _ int) (*types.Neighborhood, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
 // GetHistory is implemented by a later story.
 func (p *SQLiteEntityGraphProvider) GetHistory(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
 	return nil, interfaces.ErrNotImplemented

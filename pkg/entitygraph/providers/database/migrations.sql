@@ -68,10 +68,16 @@ CREATE TABLE IF NOT EXISTS eg_edge_projection (
     edge_type    TEXT NOT NULL,
     source       TEXT NOT NULL,
     source_class TEXT NOT NULL DEFAULT '',
-    tenant_path  TEXT NOT NULL DEFAULT '',
+    observed_at  TEXT NOT NULL DEFAULT '',
     payload_hash TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (from_subject, to_subject, edge_type, source)
 );
+
+-- Story-3: add observed_at to databases created before it existed.
+ALTER TABLE eg_edge_projection ADD COLUMN IF NOT EXISTS observed_at TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_eg_edge_from ON eg_edge_projection(from_subject);
+CREATE INDEX IF NOT EXISTS idx_eg_edge_to   ON eg_edge_projection(to_subject);
 
 CREATE TABLE IF NOT EXISTS eg_drift_projection (
     subject          TEXT PRIMARY KEY,

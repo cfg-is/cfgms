@@ -52,6 +52,12 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("ResolveIdentity", func(t *testing.T) { testEGResolveIdentity(t, factory) })        // AC 8
 	t.Run("EmptyProjectionTables", func(t *testing.T) { testEGEmptyProjections(t, factory) }) // AC 9
 	t.Run("GetEntityOptsNoOp", func(t *testing.T) { testEGOptsNoOp(t, factory) })             // opts pass-through
+	// Story-3: edges, placeholder nodes, depth-bounded neighborhood (Issue #2873)
+	t.Run("EdgeRoundTrip", func(t *testing.T) { testEGEdgeRoundTrip(t, factory) })                       // AC 1
+	t.Run("PlaceholderNode", func(t *testing.T) { testEGPlaceholderNode(t, factory) })                   // AC 2
+	t.Run("NeighborhoodDepthCap", func(t *testing.T) { testEGNeighborhoodDepthCap(t, factory) })         // AC 3
+	t.Run("NeighborhoodTenantPerHop", func(t *testing.T) { testEGNeighborhoodTenantPerHop(t, factory) }) // AC 4
+	t.Run("GetEdgesTenantFilter", func(t *testing.T) { testEGGetEdgesTenantFilter(t, factory) })         // AC 5
 }
 
 // --- Contract test helpers ---
@@ -409,6 +415,285 @@ func testEGOptsNoOp(t *testing.T, factory EntityGraphProviderFactory) {
 	require.NoError(t, err)
 	require.NotNil(t, view)
 	assert.Nil(t, view.CollapseGroup, "CollapseGroup opt is a pass-through no-op in this round")
+}
+
+// egReportEdge ingests a single-observation edge batch, failing on error.
+// Subject format: "edge_type|from_eid|to_eid".
+func egReportEdge(ctx context.Context, t *testing.T, p interfaces.EntityGraphProvider, source, fromEIDStr, toEIDStr, edgeType string) {
+	t.Helper()
+	subject := edgeType + "|" + fromEIDStr + "|" + toEIDStr
+	batch := interfaces.ObservationBatch{
+		Source: source,
+		Observations: []types.Observation{
+			egObservation(subject, source, time.Now().UTC(), map[string]interface{}{}),
+		},
+	}
+	require.NoError(t, p.ReportObservations(ctx, batch), "report edge %s", subject)
+}
+
+// testEGEdgeRoundTrip verifies that an edge asserted via ReportObservations is
+// readable via GetEdges by endpoint, type, and source (Story-3 AC 1).
+func testEGEdgeRoundTrip(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	fromEID := egEID(t, "host:er-auth/from1")
+	toEID := egEID(t, "host:er-auth/to1")
+	egReport(ctx, t, p, "observer:scan", fromEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/er-tenant",
+	})
+	egReport(ctx, t, p, "observer:scan", toEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/er-tenant",
+	})
+	egReportEdge(ctx, t, p, "observer:scan", fromEID.String(), toEID.String(), "contains")
+
+	// Filter by FromEID.
+	fromRef := fromEID
+	edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{
+		FromEID:      &fromRef,
+		TenantFilter: "root/er-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "edge must be readable by FromEID")
+	assert.Equal(t, "contains", edges[0].Edge.Type)
+	assert.Equal(t, fromEID.String(), edges[0].Edge.From.String())
+	assert.Equal(t, toEID.String(), edges[0].Edge.To.String())
+
+	// Filter by ToEID.
+	toRef := toEID
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{
+		ToEID:        &toRef,
+		TenantFilter: "root/er-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "edge must be readable by ToEID")
+
+	// Filter by source.
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{
+		FromEID:      &fromRef,
+		Source:       "observer:scan",
+		TenantFilter: "root/er-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "edge must be readable by source")
+
+	// Wrong source returns nothing.
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{
+		FromEID:      &fromRef,
+		Source:       "observer:other",
+		TenantFilter: "root/er-tenant",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "filter by wrong source must return nothing")
+
+	// Filter by edge type.
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{
+		FromEID:      &fromRef,
+		Types:        []string{"contains"},
+		TenantFilter: "root/er-tenant",
+	})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "edge must be readable by type")
+
+	// Wrong type returns nothing.
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{
+		FromEID:      &fromRef,
+		Types:        []string{"runs-on"},
+		TenantFilter: "root/er-tenant",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "filter by wrong type must return nothing")
+}
+
+// testEGPlaceholderNode verifies that an edge referencing an unseen EID creates a
+// placeholder node, and a later observation of that EID enriches it without
+// creating a duplicate (Story-3 AC 2).
+func testEGPlaceholderNode(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	fromEID := egEID(t, "host:ph-auth/from1")
+	toEID := egEID(t, "host:ph-auth/to1") // not yet observed
+	egReport(ctx, t, p, "observer:scan", fromEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/ph-tenant",
+	})
+
+	// Edge references toEID which has no prior observation — placeholder created.
+	egReportEdge(ctx, t, p, "observer:scan", fromEID.String(), toEID.String(), "contains")
+
+	// Edge is readable via GetEdges (no tenant filter so placeholder's empty owning_tenant passes).
+	fromRef := fromEID
+	edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "edge referencing placeholder node must be readable")
+	assert.Equal(t, toEID.String(), edges[0].Edge.To.String())
+
+	// Now enrich the placeholder with a real observation.
+	egReport(ctx, t, p, "observer:scan", toEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/ph-tenant", "hostname": "enriched-host",
+	})
+
+	// Entity is retrievable and carries the enriched data.
+	view, err := p.GetEntity(ctx, toEID, interfaces.GetEntityOpts{TenantFilter: "root/ph-tenant"})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	assert.Equal(t, "enriched-host", view.Entity.Attributes["hostname"], "placeholder must be enriched, not duplicated")
+
+	// Edge still has exactly one entry (no orphan or duplicate).
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "enriching placeholder must not duplicate the edge")
+}
+
+// testEGNeighborhoodDepthCap verifies that GetNeighborhood enforces the contract
+// maximum depth of 3 and uses depth 2 when depth ≤ 0 (Story-3 AC 3).
+func testEGNeighborhoodDepthCap(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	eid := egEID(t, "host:ndep-auth/root1")
+	egReport(ctx, t, p, "observer:scan", eid.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/ndep-tenant",
+	})
+
+	// depth ≤ 0 → default depth 2: must not error.
+	n, err := p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 0)
+	require.NoError(t, err, "depth=0 (default) must not error")
+	require.NotNil(t, n)
+	assert.Equal(t, eid.String(), n.Root.String())
+
+	// depth=3 (maximum): must not error.
+	n, err = p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 3)
+	require.NoError(t, err, "depth=3 (contract max) must not error")
+	require.NotNil(t, n)
+
+	// depth=4 (exceeds maximum): must be rejected with an error.
+	_, err = p.GetNeighborhood(ctx, eid, nil, types.TraversalBoth, 4)
+	require.Error(t, err, "depth=4 must be rejected")
+}
+
+// testEGNeighborhoodTenantPerHop verifies that GetNeighborhood excludes edges to
+// out-of-subtree entities at every hop, resolved through current endpoint ownership,
+// not any cached edge-row tenant field (Story-3 AC 4).
+//
+// Covers the static case (endpoint always out-of-subtree) and the moved-endpoint
+// case (endpoint was in-subtree when the edge was first observed, then moved).
+func testEGNeighborhoodTenantPerHop(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	rootEID := egEID(t, "host:nhop-auth/root1")
+	inEID := egEID(t, "host:nhop-auth/in1")
+	outEID := egEID(t, "host:nhop-auth/out1")
+
+	egReport(ctx, t, p, "observer:scan", rootEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/nhop-tenant",
+	})
+	egReport(ctx, t, p, "observer:scan", inEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/nhop-tenant",
+	})
+	egReport(ctx, t, p, "observer:scan", outEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/other-tenant",
+	})
+
+	// Static cross-tenant edge: root → outEID (always out-of-subtree).
+	egReportEdge(ctx, t, p, "observer:scan", rootEID.String(), outEID.String(), "contains")
+	// Same-tenant edge: root → inEID.
+	egReportEdge(ctx, t, p, "observer:scan", rootEID.String(), inEID.String(), "contains")
+
+	n, err := p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1)
+	require.NoError(t, err)
+	require.NotNil(t, n)
+
+	// Cross-tenant edge must be absent.
+	for _, e := range n.Edges {
+		assert.NotEqual(t, outEID.String(), e.To.String(),
+			"static cross-tenant edge endpoint must be excluded")
+	}
+	// Same-tenant edge must be present.
+	var foundIn bool
+	for _, e := range n.Edges {
+		if e.To.String() == inEID.String() {
+			foundIn = true
+		}
+	}
+	assert.True(t, foundIn, "same-tenant edge must be included in neighborhood")
+
+	// Moved-endpoint case: movedEID starts in nhop-tenant, then moves to other-tenant.
+	movedEID := egEID(t, "host:nhop-auth/moved1")
+	egReport(ctx, t, p, "enforcing-module:mover", movedEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/nhop-tenant",
+	})
+	egReportEdge(ctx, t, p, "observer:scan", rootEID.String(), movedEID.String(), "contains")
+
+	// Before move: edge is visible (movedEID is in-subtree).
+	n, err = p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1)
+	require.NoError(t, err)
+	var movedVisible bool
+	for _, e := range n.Edges {
+		if e.To.String() == movedEID.String() {
+			movedVisible = true
+		}
+	}
+	assert.True(t, movedVisible, "edge to in-subtree entity must be visible before endpoint moves")
+
+	// Move movedEID to other-tenant.
+	egReport(ctx, t, p, "enforcing-module:mover", movedEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/other-tenant",
+	})
+
+	// After move: edge must be excluded via current-ownership check.
+	n, err = p.GetNeighborhood(ctx, rootEID, nil, types.TraversalOutbound, 1)
+	require.NoError(t, err)
+	for _, e := range n.Edges {
+		assert.NotEqual(t, movedEID.String(), e.To.String(),
+			"moved-out endpoint must be excluded from neighborhood after move")
+	}
+}
+
+// testEGGetEdgesTenantFilter verifies that GetEdges applies the same tenant-subtree
+// filter as GetNeighborhood's hop-0 case, and that a cross-tenant edge query
+// returns nothing (Story-3 AC 5).
+func testEGGetEdgesTenantFilter(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	fromEID := egEID(t, "host:getef-auth/from1")
+	toEID := egEID(t, "host:getef-auth/to1")
+	egReport(ctx, t, p, "observer:scan", fromEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/tenant-a",
+	})
+	egReport(ctx, t, p, "observer:scan", toEID.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/tenant-b",
+	})
+	egReportEdge(ctx, t, p, "observer:scan", fromEID.String(), toEID.String(), "contains")
+
+	// Scoped to tenant-a: to-endpoint is in tenant-b → cross-tenant → excluded.
+	fromRef := fromEID
+	edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{
+		FromEID:      &fromRef,
+		TenantFilter: "root/tenant-a",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "cross-tenant edge must not be returned when tenant filter is set")
+
+	// Scoped to tenant-b: from-endpoint is in tenant-a → cross-tenant → excluded.
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{
+		ToEID:        &toEID,
+		TenantFilter: "root/tenant-b",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "cross-tenant edge must not be returned from the other side's tenant filter")
+
+	// No tenant filter: edge is returned.
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef})
+	require.NoError(t, err)
+	assert.Len(t, edges, 1, "edge must be returned when no tenant filter is applied")
 }
 
 func testEGProviderIdentity(t *testing.T, factory EntityGraphProviderFactory) {
