@@ -304,3 +304,58 @@ describe('panel resolution', () => {
     expect(screen.getByText(/Shell is not yet available/i)).toBeInTheDocument()
   })
 })
+
+describe('"soon" badge separation (Story #2917)', () => {
+  it('renders the "soon" badge as its own <span> element, not concatenated with the label', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    for (const tab of TABS.filter((t) => t.soon)) {
+      const tabEl = screen.getByRole('tab', { name: (n) => n.startsWith(tab.label) })
+      const badge = within(tabEl).getByText(/^soon$/i)
+      // The badge must be its own element, not the same text node as the label.
+      expect(badge.tagName).toBe('SPAN')
+      // The tab element's textContent concatenates label + badge, but they
+      // must be SEPARATE nodes: the label text node and the badge element.
+      const labelNode = [...tabEl.childNodes].find(
+        (n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim() === tab.label,
+      )
+      expect(labelNode).toBeTruthy()
+    }
+  })
+
+  it('the "soon" badge element has CSS margin-left so it is visually separated', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    for (const tab of TABS.filter((t) => t.soon)) {
+      const tabEl = screen.getByRole('tab', { name: (n) => n.startsWith(tab.label) })
+      const badge = within(tabEl).getByText(/^soon$/i)
+      // The badge carries the .tag class that AppShell.css styles with margin-left.
+      expect(badge).toHaveClass('tag')
+    }
+  })
+})
+
+describe('direct load / deep-link (Story #2917)', () => {
+  it('mounting at /stewards/:id directly renders the full StewardAssetPage layout', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage('stw-direct')
+
+    // Full page has breadcrumb, h1, and tab strip — not a drawer.
+    expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /device/i })).toBeInTheDocument()
+    expect(screen.getByRole('tablist')).toBeInTheDocument()
+    // There is no drawer close button or scrim in the full-page rendering.
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('drawer-close')).not.toBeInTheDocument()
+  })
+
+  it('the breadcrumb shows the decoded steward ID even for encoded IDs', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage('stw/encoded')
+
+    // React Router decodes the path param — the page should show the decoded ID.
+    expect(screen.getByText('stw/encoded')).toBeInTheDocument()
+  })
+})

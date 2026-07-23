@@ -16,7 +16,6 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from '@testing-library/react'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
@@ -391,10 +390,14 @@ describe('saved views in the fleet overview', () => {
 })
 
 describe('row drill-in wiring', () => {
-  it('clicking a fleet row navigates to the steward asset page', async () => {
+  it('clicking a fleet row opens the overlay drawer (Story #2917)', async () => {
     renderHarness()
-    const table = await screen.findByRole('table')
-    fireEvent.click(within(table).getByText('acme-web-01'))
-    expect(await screen.findByTestId('nav-asset-page')).toBeInTheDocument()
+    await screen.findByRole('table')
+    // The name cell now renders as an anchor; clicking it opens the drawer.
+    const anchor = screen.getByRole('link', { name: 'acme-web-01' })
+    fireEvent.click(anchor)
+    expect(await screen.findByTestId('steward-drawer')).toBeInTheDocument()
+    // The fleet table stays visible — the drawer overlays it.
+    expect(screen.getByRole('table')).toBeInTheDocument()
   })
 })

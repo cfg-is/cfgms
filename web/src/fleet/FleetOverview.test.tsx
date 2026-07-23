@@ -521,31 +521,68 @@ describe('data states', () => {
   })
 })
 
-describe('row click → navigate to /stewards/:id (Story #2723)', () => {
-  it('clicking a fleet row navigates to the steward asset page', async () => {
+describe('row click → opens overlay drawer (Story #2917)', () => {
+  it('clicking a fleet row opens the overlay drawer over the list', async () => {
     mockFleet([makeSteward({ id: 'stw-42', hostname: 'web-ingest-04' })])
     renderFleet()
     await screen.findByRole('table')
 
-    const [firstRow] = dataRows()
-    if (!firstRow) throw new Error('expected a data row')
-    fireEvent.click(firstRow)
+    // The drawer is not mounted yet.
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
 
-    expect(await screen.findByTestId('nav-location')).toHaveTextContent('/stewards/stw-42')
+    // Click the name-cell anchor (plain left click).
+    const anchor = screen.getByRole('link', { name: 'web-ingest-04' })
+    fireEvent.click(anchor)
+
+    // Drawer is now mounted and the fleet table is still visible.
+    expect(screen.getByTestId('steward-drawer')).toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
   })
 
-  it('encodes special characters in the steward ID in the URL', async () => {
+  it('close button dismisses the drawer without losing the fleet table', async () => {
+    mockFleet([makeSteward({ id: 'stw-1', hostname: 'host-a' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('link', { name: 'host-a' }))
+    expect(screen.getByTestId('steward-drawer')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('drawer-close'))
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
+  })
+
+  it('ESC key closes the drawer', async () => {
+    mockFleet([makeSteward({ id: 'stw-2', hostname: 'host-b' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('link', { name: 'host-b' }))
+    expect(screen.getByTestId('steward-drawer')).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('steward-drawer')).not.toBeInTheDocument()
+  })
+
+  it('the row anchor href encodes the steward ID for native new-tab support', async () => {
     mockFleet([makeSteward({ id: 'stw/special id', hostname: 'host' })])
     renderFleet()
     await screen.findByRole('table')
 
-    const [firstRow] = dataRows()
-    if (!firstRow) throw new Error('expected a data row')
-    fireEvent.click(firstRow)
+    const anchor = screen.getByRole('link', { name: 'host' })
+    expect(anchor).toHaveAttribute('href', '/stewards/stw%2Fspecial%20id')
+  })
 
-    expect(await screen.findByTestId('nav-location')).toHaveTextContent(
-      '/stewards/stw%2Fspecial%20id',
-    )
+  it('does NOT navigate away — fleet list stays mounted after row click', async () => {
+    mockFleet([makeSteward({ id: 'stw-3', hostname: 'host-c' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('link', { name: 'host-c' }))
+
+    // nav-location sentinel would only appear if navigation happened.
+    expect(screen.queryByTestId('nav-location')).not.toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
   })
 })
 

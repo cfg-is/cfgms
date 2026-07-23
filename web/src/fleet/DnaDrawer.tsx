@@ -192,9 +192,11 @@ function KVRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-/** DNA content panel — rendered inside the DNA tab of StewardAssetPage. */
-export default function DnaDrawer() {
-  const { id: stewardId = '' } = useParams<{ id: string }>()
+/** DNA content panel — rendered inside the DNA tab of StewardAssetPage or the overlay drawer.
+ * Accepts an explicit stewardId prop; falls back to useParams for the route-driven case. */
+export default function DnaDrawer({ stewardId: propId }: { stewardId?: string } = {}) {
+  const { id: paramId = '' } = useParams<{ id: string }>()
+  const stewardId = propId !== undefined ? propId : paramId
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
   const key = `${stewardId}:${attempt}`

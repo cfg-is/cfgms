@@ -513,6 +513,14 @@ table.tbl {
   cursor: default;
 }
 
+/* Name-cell row link: covers the cell so middle-click / Ctrl+click / right-click
+ * "Open in new tab" work natively; display:block lets it fill the cell area. */
+a.row-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
 /* Asset-DNA drawer (mockup `.det`). The shell scrim is inert by default;
  * the drawer's own scrim is always live while mounted. */
 .det-scrim {
@@ -547,6 +555,65 @@ table.tbl {
   .det {
     animation: none;
   }
+}
+
+/* Expand toggle: full-width in-place view */
+.det.det-expanded {
+  width: 100%;
+  left: 0;
+  max-width: none;
+  animation: none;
+}
+@media (min-width: 1024px) {
+  /* On desktop the sidebar occupies 250px on the left — expanded drawer sits beside it. */
+  .det.det-expanded {
+    left: 250px;
+    width: calc(100% - 250px);
+  }
+}
+
+/* Asset tab strip — shared between the overlay drawer and the full-page StewardAssetPage. */
+.asset-page [role="tablist"],
+.det [role="tablist"] {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.asset-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 9px 10px 8px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.asset-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.asset-tab.soon {
+  opacity: 0.6;
+}
+
+/* Full asset page layout */
+.asset-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.asset-page [role="tabpanel"] {
+  min-height: 200px;
 }
 .det .dh {
   display: flex;

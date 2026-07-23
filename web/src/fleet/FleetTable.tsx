@@ -30,15 +30,41 @@ function Cell({
   column,
   steward,
   nowMs,
+  rowHref,
+  onRowSelect,
 }: {
   column: ColumnDef
   steward: Steward
   nowMs: number
+  rowHref?: string
+  onRowSelect?: () => void
 }) {
+  /* The name cell hosts the row anchor so native modifier-key / middle-click /
+   * context-menu "Open in new tab" works. Plain left-click opens the drawer
+   * instead of navigating; modified clicks fall through to native anchor behavior. */
+  if (column.key === 'name' && rowHref !== undefined) {
+    const value = column.value(steward)
+    return (
+      <td className="c-name">
+        <a
+          href={rowHref}
+          className="nm row-link"
+          onClick={(e) => {
+            if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+              e.preventDefault()
+              onRowSelect?.()
+            }
+          }}
+        >
+          {value || '—'}
+        </a>
+      </td>
+    )
+  }
   if (column.kind === 'health') {
     const health = deriveHealth(steward.status, steward.last_seen, nowMs)
     return (
-      <td className={`c-${column.key}`}>
+      <td className={`c-${column.key}`} onClick={onRowSelect}>
         <span className={`pill ${health.tone}`}>
           <span className="dot" />
           {health.label}
@@ -48,14 +74,14 @@ function Cell({
   }
   if (column.kind === 'seen') {
     return (
-      <td className={`c-${column.key}`}>
+      <td className={`c-${column.key}`} onClick={onRowSelect}>
         <span className="seen">{formatLastSeen(steward.last_seen, nowMs)}</span>
       </td>
     )
   }
   const value = column.value(steward)
   return (
-    <td className={`c-${column.key}`}>
+    <td className={`c-${column.key}`} onClick={onRowSelect}>
       <span className={CELL_CLASS[column.kind]}>{value || '—'}</span>
     </td>
   )
@@ -106,33 +132,37 @@ export default function FleetTable({
         </tr>
       </thead>
       <tbody>
-        {stewards.map((steward) => (
-          <tr
-            key={steward.id}
-            className={onRowSelect ? 'sel' : undefined}
-            tabIndex={onRowSelect ? 0 : undefined}
-            onClick={onRowSelect && (() => onRowSelect(steward))}
-            onKeyDown={
-              onRowSelect &&
-              ((event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  onRowSelect(steward)
-                }
-              })
-            }
-          >
-            {columns.map((column) => (
-              <Cell
-                key={column.key}
-                column={column}
-                steward={steward}
-                nowMs={nowMs}
-              />
-            ))}
-            <td className="c-spacer" />
-          </tr>
-        ))}
+        {stewards.map((steward) => {
+          const href = `/stewards/${encodeURIComponent(steward.id)}`
+          return (
+            <tr
+              key={steward.id}
+              className={onRowSelect ? 'sel' : undefined}
+              onKeyDown={
+                onRowSelect
+                  ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        onRowSelect(steward)
+                      }
+                    }
+                  : undefined
+              }
+            >
+              {columns.map((column) => (
+                <Cell
+                  key={column.key}
+                  column={column}
+                  steward={steward}
+                  nowMs={nowMs}
+                  rowHref={onRowSelect ? href : undefined}
+                  onRowSelect={onRowSelect ? () => onRowSelect(steward) : undefined}
+                />
+              ))}
+              <td className="c-spacer" />
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )
