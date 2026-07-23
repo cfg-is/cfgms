@@ -84,12 +84,12 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 
 #### `codeql-analysis.yml` — CodeQL Security Analysis
 
-**Triggers**: Pull Requests (Go/CodeQL paths), Merge Group, push to main/develop, Weekly schedule
+**Triggers**: Pull Requests (Go/CodeQL/web paths), Merge Group, push to main/develop, Weekly schedule
 
 **What it does**:
-- Semantic code analysis using the `cfg-is/cfgms-go-extensions` data-extension pack (published via `codeql-pack-publish.yml`)
+- Semantic code analysis for Go (with `cfg-is/cfgms-go-extensions` data-extension pack) and `javascript-typescript` (web SPA)
 - Uploads findings to GitHub Security tab
-- Emits the `CodeQL` required context for Go PRs
+- Emits the `CodeQL` required context for Go and web PRs
 
 **Runtime**: ~5–10 min
 
@@ -97,7 +97,7 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 
 #### `codeql-stub.yml` — CodeQL Stub
 
-**Triggers**: Pull Requests that touch no Go code or CodeQL config (exact complement of `codeql-analysis.yml`'s path filter)
+**Triggers**: Pull Requests that touch no Go code, CodeQL config, or web sources (exact complement of `codeql-analysis.yml`'s path filter)
 
 **What it does**: Emits `CodeQL` as success for docs-only / scripts-only / yaml-only PRs so the required check is satisfied without running the full analysis. Does NOT trigger on `merge_group` (the real analysis is authoritative there).
 
@@ -221,8 +221,8 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 | `cross-platform-build.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 | `fleet-e2e.yml` | ❌ | ❌ | ✅ | ❌ | ❌ |
 | `security-scan.yml` | ✅ | ✅ | ✅ | Daily 3 AM UTC | ❌ |
-| `codeql-analysis.yml` | ✅ | ✅ (Go paths) | ✅ | Weekly | ❌ |
-| `codeql-stub.yml` | ❌ | ✅ (non-Go) | ❌ | ❌ | ❌ |
+| `codeql-analysis.yml` | ✅ | ✅ (Go/CodeQL/web paths) | ✅ | Weekly | ❌ |
+| `codeql-stub.yml` | ❌ | ✅ (non-Go/non-web) | ❌ | ❌ | ❌ |
 | `codeql-pack-publish.yml` | ✅ (extensions path) | ❌ | ❌ | ❌ | ✅ |
 | `docker-security.yml` | ✅ | ✅ | ❌ | ❌ | ✅ |
 | `zizmor.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |

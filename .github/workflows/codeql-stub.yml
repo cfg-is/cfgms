@@ -26,6 +26,7 @@ on:
       - 'go.sum'
       - '.github/codeql/**'
       - '.github/workflows/codeql-analysis.yml'
+      - 'web/**'
 
 permissions: {}
 
