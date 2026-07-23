@@ -384,9 +384,54 @@ func (p *SQLiteEntityGraphProvider) GetDriftState(_ context.Context, _ interface
 	return nil, interfaces.ErrNotImplemented
 }
 
-// GetHistory is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) GetHistory(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
-	return nil, interfaces.ErrNotImplemented
+// GetHistory returns the versioned observation log for a subject over a time
+// range in ascending sequence order. Both state and absence observations are
+// included so that source-closure events are visible in the history stream.
+func (p *SQLiteEntityGraphProvider) GetHistory(ctx context.Context, eid interfaces.EIDRef, r interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
+	subject := eid.String()
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT l.id, l.source, l.observed_at, l.recorded_at, l.kind, l.confidence, p.payload
+		 FROM eg_observation_log l
+		 JOIN eg_payload_content p ON p.payload_hash = l.payload_hash
+		 WHERE l.subject = ? AND l.observed_at >= ? AND l.observed_at <= ?
+		 ORDER BY l.id ASC`,
+		subject, rfc3339(r.From), rfc3339(r.To),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("entitygraph/sqlite: get history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []*interfaces.ObservationRecord
+	for rows.Next() {
+		var id int64
+		var source, observedAt, recordedAt, kind, confidence, payloadJSON string
+		if err := rows.Scan(&id, &source, &observedAt, &recordedAt, &kind, &confidence, &payloadJSON); err != nil {
+			return nil, fmt.Errorf("entitygraph/sqlite: scan history row: %w", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			payload = map[string]interface{}{}
+		}
+		oa, _ := time.Parse(time.RFC3339Nano, observedAt)
+		ra, _ := time.Parse(time.RFC3339Nano, recordedAt)
+		records = append(records, &interfaces.ObservationRecord{
+			Observation: types.Observation{
+				Source:     source,
+				ObservedAt: oa,
+				RecordedAt: ra,
+				Subject:    subject,
+				Kind:       types.ObservationKind(kind),
+				Confidence: types.Confidence(confidence),
+				Payload:    payload,
+			},
+			Version: id,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("entitygraph/sqlite: iterate history: %w", err)
+	}
+	return records, nil
 }
 
 // Diff is implemented by a later story.

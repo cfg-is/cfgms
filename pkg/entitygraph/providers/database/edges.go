@@ -33,6 +33,19 @@ func parseEdgeSubject(subject string) (edgeType, fromSubject, toSubject string, 
 // the per-source edge projection row and materializes placeholder nodes for any
 // referenced EID not yet in eg_entity_index (ADR-022 §2).
 func updateEdgeProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, _ int64) error {
+	if obs.Kind == types.ObservationKindAbsence {
+		edgeType, fromSubject, toSubject, err := parseEdgeSubject(obs.Subject)
+		if err != nil {
+			return nil // non-edge subject in absence — skip
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM eg_edge_projection WHERE from_subject = $1 AND to_subject = $2 AND edge_type = $3 AND source = $4`,
+			fromSubject, toSubject, edgeType, obs.Source,
+		); err != nil {
+			return fmt.Errorf("entitygraph/database: delete edge projection for absence: %w", err)
+		}
+		return nil
+	}
 	edgeType, fromSubject, toSubject, err := parseEdgeSubject(obs.Subject)
 	if err != nil {
 		return err

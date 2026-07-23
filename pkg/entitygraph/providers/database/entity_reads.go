@@ -384,6 +384,20 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 		if subjectKind(lr.subject) != "entity" {
 			continue
 		}
+		if lr.kind == string(types.ObservationKindAbsence) {
+			// Absence: remove the source assertion and let the index reflect the
+			// remaining sources so that retraction events survive a full replay.
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM eg_entity_current WHERE subject = $1 AND source = $2`,
+				lr.subject, lr.source,
+			); err != nil {
+				return fmt.Errorf("entitygraph/database: replay absence seq %d: %w", lr.id, err)
+			}
+			if err := rebuildEntityIndex(ctx, tx, lr.subject); err != nil {
+				return fmt.Errorf("entitygraph/database: rebuild index seq %d: %w", lr.id, err)
+			}
+			continue
+		}
 		// Replay: fold the log row into eg_entity_current (same supersede logic as
 		// ReportObservations) then rebuild the index from the accumulated state.
 		if _, err := tx.ExecContext(ctx,
@@ -446,9 +460,58 @@ func (p *DatabaseEntityGraphProvider) GetDriftState(_ context.Context, _ interfa
 	return nil, interfaces.ErrNotImplemented
 }
 
-// GetHistory returns the versioned observation log for a subject over a range.
-func (p *DatabaseEntityGraphProvider) GetHistory(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
-	return nil, interfaces.ErrNotImplemented
+// GetHistory returns the versioned observation log for a subject over a time
+// range in ascending sequence order. Both state and absence observations are
+// included so that source-closure events are visible in the history stream.
+func (p *DatabaseEntityGraphProvider) GetHistory(ctx context.Context, eid interfaces.EIDRef, r interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
+	subject := eid.String()
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT l.id, l.source, l.observed_at, l.recorded_at, l.kind, l.confidence, p.payload_json
+		 FROM eg_observation_log l
+		 JOIN eg_payload_content p ON p.content_hash = l.payload_hash
+		 WHERE l.subject = $1 AND l.observed_at >= $2 AND l.observed_at <= $3
+		 ORDER BY l.id ASC`,
+		subject,
+		r.From.UTC().Format(time.RFC3339Nano),
+		r.To.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("entitygraph/database: get history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []*interfaces.ObservationRecord
+	for rows.Next() {
+		var id int64
+		var source, observedAt, recordedAt, kind, confidence, payloadJSON string
+		if err := rows.Scan(&id, &source, &observedAt, &recordedAt, &kind, &confidence, &payloadJSON); err != nil {
+			return nil, fmt.Errorf("entitygraph/database: scan history row: %w", err)
+		}
+		var payload map[string]interface{}
+		if payloadJSON != "" {
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+				payload = map[string]interface{}{}
+			}
+		}
+		oa, _ := time.Parse(time.RFC3339Nano, observedAt)
+		ra, _ := time.Parse(time.RFC3339Nano, recordedAt)
+		records = append(records, &interfaces.ObservationRecord{
+			Observation: types.Observation{
+				Source:     source,
+				ObservedAt: oa,
+				RecordedAt: ra,
+				Subject:    subject,
+				Kind:       types.ObservationKind(kind),
+				Confidence: types.Confidence(confidence),
+				Payload:    payload,
+			},
+			Version: id,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("entitygraph/database: iterate history: %w", err)
+	}
+	return records, nil
 }
 
 // Diff returns the attribute delta between two points in time for a subject.

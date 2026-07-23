@@ -58,6 +58,11 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("NeighborhoodDepthCap", func(t *testing.T) { testEGNeighborhoodDepthCap(t, factory) })         // AC 3
 	t.Run("NeighborhoodTenantPerHop", func(t *testing.T) { testEGNeighborhoodTenantPerHop(t, factory) }) // AC 4
 	t.Run("GetEdgesTenantFilter", func(t *testing.T) { testEGGetEdgesTenantFilter(t, factory) })         // AC 5
+	// Story-4: claim-scoped ingest + source-closure retraction (Issue #2874)
+	t.Run("ClaimScopeEntityReplace", func(t *testing.T) { testEGClaimScopeEntityReplace(t, factory) })     // AC 1
+	t.Run("ClaimScopeEdgeReplace", func(t *testing.T) { testEGClaimScopeEdgeReplace(t, factory) })         // AC 2
+	t.Run("ClaimScopeOverlapRejected", func(t *testing.T) { testEGClaimScopeOverlapRejected(t, factory) }) // AC 3
+	t.Run("SourceClosure", func(t *testing.T) { testEGSourceClosure(t, factory) })                         // AC 4
 }
 
 // --- Contract test helpers ---
@@ -694,6 +699,225 @@ func testEGGetEdgesTenantFilter(t *testing.T, factory EntityGraphProviderFactory
 	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &fromRef})
 	require.NoError(t, err)
 	assert.Len(t, edges, 1, "edge must be returned when no tenant filter is applied")
+}
+
+// testEGClaimScopeEntityReplace verifies that a re-enumeration under an entity
+// claim scope retracts previously-asserted subjects that are absent from the new
+// set, while leaving assertions from other sources untouched (Story-4 AC1).
+func testEGClaimScopeEntityReplace(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		sub1 = "host:csent-auth/host1"
+		sub2 = "host:csent-auth/host2"
+		sub3 = "host:csent-auth/host3"
+	)
+	const srcA = "enforcing-module:scanner-a"
+	const srcB = "enforcing-module:scanner-b"
+
+	now := time.Now().UTC()
+	scopePattern := types.ClaimScopePattern{
+		Entity: &types.EntityScopePattern{EntityType: "host", AuthorityPrefix: "host:csent-auth/"},
+	}
+
+	// Initial batch from source A: asserts host1, host2, host3 under a claim scope.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcA,
+		Observations: []types.Observation{
+			egObservation(sub1, srcA, now, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/csent-tenant", "hostname": "host1"}),
+			egObservation(sub2, srcA, now, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/csent-tenant", "hostname": "host2"}),
+			egObservation(sub3, srcA, now, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/csent-tenant", "hostname": "host3"}),
+		},
+		ClaimScopes: []types.ClaimScope{{Source: srcA, Pattern: scopePattern, AsOf: now}},
+	}))
+
+	// Source B also asserts host2 (different source, no claim scope).
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcB,
+		Observations: []types.Observation{
+			egObservation(sub2, srcB, now, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/csent-tenant", "hostname": "host2-from-b"}),
+		},
+	}))
+
+	// All three visible after initial assert.
+	for _, sub := range []string{sub1, sub2, sub3} {
+		_, err := p.GetEntity(ctx, egEID(t, sub), interfaces.GetEntityOpts{TenantFilter: "root/csent-tenant"})
+		require.NoError(t, err, "entity %s must be visible after initial assert", sub)
+	}
+
+	now2 := now.Add(time.Second)
+
+	// Re-enumeration from source A: only host1 now asserted.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcA,
+		Observations: []types.Observation{
+			egObservation(sub1, srcA, now2, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/csent-tenant", "hostname": "host1"}),
+		},
+		ClaimScopes: []types.ClaimScope{{Source: srcA, Pattern: scopePattern, AsOf: now2}},
+	}))
+
+	// host1 is still visible (not retracted by source A).
+	_, err := p.GetEntity(ctx, egEID(t, sub1), interfaces.GetEntityOpts{TenantFilter: "root/csent-tenant"})
+	require.NoError(t, err, "host1 must remain visible after re-enumeration that includes it")
+
+	// host3 must be retracted: source A no longer asserts it, no other source does.
+	_, err = p.GetEntity(ctx, egEID(t, sub3), interfaces.GetEntityOpts{TenantFilter: "root/csent-tenant"})
+	require.Error(t, err, "host3 must be retracted after source A omits it from re-enumeration")
+
+	// host2: source A's assertion is retracted, but source B's assertion survives.
+	view2, err := p.GetEntity(ctx, egEID(t, sub2), interfaces.GetEntityOpts{TenantFilter: "root/csent-tenant"})
+	require.NoError(t, err, "host2 must remain visible because source B still asserts it")
+	require.NotNil(t, view2)
+	require.NotNil(t, view2.Entity)
+	assert.Equal(t, "host2-from-b", view2.Entity.Attributes["hostname"],
+		"host2 must be served from source B's assertion after source A retracts")
+}
+
+// testEGClaimScopeEdgeReplace verifies that a re-enumeration under an edge
+// claim scope retracts edges that were present in the prior assertion set but
+// absent from the new enumeration (Story-4 AC2).
+func testEGClaimScopeEdgeReplace(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	anchor := egEID(t, "host:csedge-auth/anchor1")
+	peer1 := egEID(t, "host:csedge-auth/peer1")
+	peer2 := egEID(t, "host:csedge-auth/peer2")
+	const src = "enforcing-module:edge-scanner"
+
+	now := time.Now().UTC()
+	edgeScope := types.ClaimScopePattern{
+		Edge: &types.EdgeScopePattern{
+			EdgeType:  "contains",
+			AnchorEID: anchor,
+			Direction: types.TraversalOutbound,
+		},
+	}
+
+	mkEdgeObs := func(from, to interfaces.EIDRef, at time.Time) types.Observation {
+		return egObservation("contains|"+from.String()+"|"+to.String(), src, at, map[string]interface{}{})
+	}
+
+	// Initial batch: anchor → peer1, anchor → peer2.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source:       src,
+		Observations: []types.Observation{mkEdgeObs(anchor, peer1, now), mkEdgeObs(anchor, peer2, now)},
+		ClaimScopes:  []types.ClaimScope{{Source: src, Pattern: edgeScope, AsOf: now}},
+	}))
+
+	anchorRef := anchor
+	edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &anchorRef, Source: src})
+	require.NoError(t, err)
+	require.Len(t, edges, 2, "both edges must be visible after initial assert")
+
+	now2 := now.Add(time.Second)
+
+	// Re-enumeration: only anchor → peer1 remains.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source:       src,
+		Observations: []types.Observation{mkEdgeObs(anchor, peer1, now2)},
+		ClaimScopes:  []types.ClaimScope{{Source: src, Pattern: edgeScope, AsOf: now2}},
+	}))
+
+	edges, err = p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &anchorRef, Source: src})
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "edge to peer2 must be retracted after re-enumeration omits it")
+	assert.Equal(t, peer1.String(), edges[0].Edge.To.String(), "remaining edge must point to peer1")
+}
+
+// testEGClaimScopeOverlapRejected verifies that two claim scopes with the same
+// source and pattern key within a single batch are rejected (Story-4 AC3).
+func testEGClaimScopeOverlapRejected(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const src = "enforcing-module:overlap-scanner"
+	now := time.Now().UTC()
+	pattern := types.ClaimScopePattern{
+		Entity: &types.EntityScopePattern{EntityType: "host", AuthorityPrefix: "host:csovlp-auth/"},
+	}
+
+	err := p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{
+			egObservation("host:csovlp-auth/host1", src, now, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": "root/ovlp-tenant",
+			}),
+		},
+		ClaimScopes: []types.ClaimScope{
+			{Source: src, Pattern: pattern, AsOf: now},
+			{Source: src, Pattern: pattern, AsOf: now.Add(time.Millisecond)},
+		},
+	})
+	require.Error(t, err, "two claim scopes with the same source+pattern in one batch must be rejected")
+}
+
+// testEGSourceClosure verifies that an empty re-enumeration retracts all prior
+// subjects under the scope and that the retraction is visible as an absence
+// observation in GetHistory (Story-4 AC4).
+func testEGSourceClosure(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		sub1 = "host:csclo-auth/host1"
+		sub2 = "host:csclo-auth/host2"
+	)
+	const src = "enforcing-module:closure-scanner"
+
+	t0 := time.Now().UTC().Add(-time.Millisecond)
+	now := time.Now().UTC()
+	scopePattern := types.ClaimScopePattern{
+		Entity: &types.EntityScopePattern{EntityType: "host", AuthorityPrefix: "host:csclo-auth/"},
+	}
+
+	// Initial assertion: host1 and host2.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{
+			egObservation(sub1, src, now, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/clo-tenant"}),
+			egObservation(sub2, src, now, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/clo-tenant"}),
+		},
+		ClaimScopes: []types.ClaimScope{{Source: src, Pattern: scopePattern, AsOf: now}},
+	}))
+
+	for _, sub := range []string{sub1, sub2} {
+		_, err := p.GetEntity(ctx, egEID(t, sub), interfaces.GetEntityOpts{TenantFilter: "root/clo-tenant"})
+		require.NoError(t, err, "entity %s must be visible after initial assert", sub)
+	}
+
+	now2 := now.Add(time.Second)
+
+	// Source closure: empty re-enumeration retracts everything in scope.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source:       src,
+		Observations: nil,
+		ClaimScopes:  []types.ClaimScope{{Source: src, Pattern: scopePattern, AsOf: now2}},
+	}))
+
+	// Both entities must be gone.
+	for _, sub := range []string{sub1, sub2} {
+		_, err := p.GetEntity(ctx, egEID(t, sub), interfaces.GetEntityOpts{TenantFilter: "root/clo-tenant"})
+		require.Error(t, err, "entity %s must be retracted after source closure", sub)
+	}
+
+	// Absence must be visible in GetHistory for sub1.
+	t1 := now2.Add(time.Second)
+	history, err := p.GetHistory(ctx, egEID(t, sub1), interfaces.TimeRange{From: t0, To: t1})
+	require.NoError(t, err)
+	var hasAbsence bool
+	for _, rec := range history {
+		if rec.Observation.Kind == types.ObservationKindAbsence && rec.Observation.Source == src {
+			hasAbsence = true
+			break
+		}
+	}
+	assert.True(t, hasAbsence, "GetHistory must include an absence observation for the retracted entity")
 }
 
 func testEGProviderIdentity(t *testing.T, factory EntityGraphProviderFactory) {

@@ -44,8 +44,21 @@ func parseEdgeSubject(subject string) (edgeType, fromSubject, toSubject string, 
 // updateEdgeProjection is the "edge" subject-kind projection updater registered
 // via init(). It upserts the per-source edge projection row and materializes
 // placeholder nodes in eg_entity_index for any referenced EID that has no
-// prior observation (ADR-022 §2).
+// prior observation (ADR-022 §2). Absence observations retract the edge.
 func updateEdgeProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, logSeq int64) error {
+	if obs.Kind == types.ObservationKindAbsence {
+		edgeType, fromSubject, toSubject, err := parseEdgeSubject(obs.Subject)
+		if err != nil {
+			return nil // non-edge subject in absence — skip
+		}
+		key := edgeProjectionKey(fromSubject, edgeType, toSubject, obs.Source)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM eg_edge_projection WHERE edge_key = ?`, key,
+		); err != nil {
+			return fmt.Errorf("entitygraph/sqlite: delete edge projection for absence: %w", err)
+		}
+		return nil
+	}
 	edgeType, fromSubject, toSubject, err := parseEdgeSubject(obs.Subject)
 	if err != nil {
 		return err
