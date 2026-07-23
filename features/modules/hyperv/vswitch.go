@@ -106,6 +106,12 @@ func (c *VSwitchConfig) GetManagedFields() []string {
 // $Name travels via ArgumentList — never interpolated into the script text.
 const psGetVSwitch = `$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue; if (-not $sw) { Write-Output '{"found":false}'; return }; $result = @{ found=$true; Name=$sw.Name; SwitchType=$sw.SwitchType.ToString() }; ConvertTo-Json $result -Compress`
 
+// psEnumerateVSwitches lists all virtual switches on the host with their types.
+// No parameters — enumerates the full switch inventory. Used by the domain
+// observe path. The @() wrapper ensures ConvertTo-Json emits a JSON array even
+// for 0 or 1 switches.
+const psEnumerateVSwitches = `$sw = @(Get-VMSwitch -ErrorAction SilentlyContinue | ForEach-Object { @{Name=$_.Name; SwitchType=$_.SwitchType.ToString()} }); ConvertTo-Json @{switches=$sw} -Compress -Depth 4`
+
 // psRemoveVSwitch removes a virtual switch by host-side name. Guarded so a
 // removal of an already-absent switch is a clean no-op rather than an
 // ObjectNotFound error (mirrors psRemoveVM's existence guard — keeps the
@@ -176,6 +182,37 @@ func (m *hypervModule) getVSwitch(ctx context.Context, switchName string) (*VSwi
 	m.vswitchesMu.Unlock()
 
 	return cfg, nil
+}
+
+// observeVSwitchDomain returns the full vSwitch inventory on this host without
+// requiring declared hyperv.vswitch resources. Used by GetDomain. Returns nil
+// when the transport is not wired. All PowerShell calls are read-only (Get-*).
+func (m *hypervModule) observeVSwitchDomain(ctx context.Context) ([]*VSwitchConfig, error) {
+	if m.transport == nil {
+		return nil, nil
+	}
+	output, err := m.transport.ExecutePS(ctx, psEnumerateVSwitches, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: enumerate vswitches: %w", err)
+	}
+	var parsed struct {
+		Switches []struct {
+			Name       string `json:"Name"`
+			SwitchType string `json:"SwitchType"`
+		} `json:"switches"`
+	}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
+		return nil, fmt.Errorf("hyperv: parse enumerate-vswitches response: %w", jsonErr)
+	}
+	out := make([]*VSwitchConfig, 0, len(parsed.Switches))
+	for _, sw := range parsed.Switches {
+		out = append(out, &VSwitchConfig{
+			Name:       sw.Name,
+			SwitchType: strings.ToLower(sw.SwitchType),
+			State:      "present",
+		})
+	}
+	return out, nil
 }
 
 // setVSwitch applies the desired vSwitch configuration.

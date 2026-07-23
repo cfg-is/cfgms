@@ -130,6 +130,13 @@ type SourceConfig struct {
 	Edition string `yaml:"edition,omitempty"`
 }
 
+// VMNetworkAdapter holds the observed MAC address of a VM's virtual network
+// adapter, captured by psGetVM and exposed on the Get/DNA surface. Observed-only:
+// MAC addresses are Hyper-V-assigned and never authored in config.
+type VMNetworkAdapter struct {
+	MacAddress string `yaml:"mac_address,omitempty"`
+}
+
 // VMConfig represents the desired state of a Hyper-V virtual machine.
 //
 // Networking is declarative: switch_name is the FULL desired network of the
@@ -192,6 +199,17 @@ type VMConfig struct {
 	// drift on vhd_path (#2626). Like ConfigLocation it is never declared and is
 	// deliberately absent from GetManagedFields — visible as DNA, never drift.
 	CheckpointCount int `yaml:"checkpoint_count,omitempty"`
+
+	// VMGUID is the Hyper-V VM identifier ($vm.Id), captured by psGetVM/getVM
+	// and exposed on the Get/DNA surface. Observed-only: never declared in config,
+	// never participates in drift comparison.
+	VMGUID string `yaml:"vm_guid,omitempty"`
+
+	// NetworkAdapters is the observed virtual network adapter inventory with
+	// MAC addresses, captured by psGetVM and exposed on the Get/DNA surface.
+	// Observed-only: adapter management uses switch_name/switch_names; MACs are
+	// Hyper-V-assigned and never authored.
+	NetworkAdapters []VMNetworkAdapter `yaml:"network_adapters,omitempty"`
 
 	// seedDir is the module-level provisioning seed directory (m.seedDir),
 	// injected by setVM before Validate so the HA-role CSV seed-dir rule can be
@@ -590,11 +608,17 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		"generation":   c.Generation,
 		"state":        c.State,
 		"source":       nil,
-		// Observed-only (#2411, #2626): reported for the Get/DNA surface, absent
-		// from GetManagedFields so they never participate in drift comparison.
+		// Observed-only (#2411, #2626, #2891): reported for the Get/DNA surface,
+		// absent from GetManagedFields so they never participate in drift comparison.
 		"configuration_location": c.ConfigLocation,
 		"checkpoint_count":       c.CheckpointCount,
+		"vm_guid":                c.VMGUID,
 	}
+	adapters := make([]interface{}, len(c.NetworkAdapters))
+	for i, a := range c.NetworkAdapters {
+		adapters[i] = map[string]interface{}{"mac_address": a.MacAddress}
+	}
+	m["network_adapters"] = adapters
 	// Declarative checkpoint policy (#2627): the drift comparator compares the
 	// AUTHORED `checkpoints` block (a managed config key) against what getVM
 	// reports here. getVM echoes the desired block back (checkpointsEcho) ONLY when
@@ -701,7 +725,13 @@ func (c *VMConfig) GetManagedFields() []string {
 // VMConfig.VHDPath stores the disk path; conflating it with the config
 // directory caused #1887 B1 verification to flag 2-changed drift on
 // every successful create.
-const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $diskPath = if ($disk) { $disk.Path } else { "" }; $rootPath = $diskPath; if ($diskPath) { try { $v = Get-VHD -Path $diskPath -ErrorAction Stop; while ($v.ParentPath) { $rootPath = $v.ParentPath; $v = Get-VHD -Path $v.ParentPath -ErrorAction Stop } } catch { Write-Warning "Get-VHD chain resolution failed for $diskPath: $($_.Exception.Message)" } }; $checkpointCount = @(Get-VMSnapshot -VMName $Name -ErrorAction SilentlyContinue).Count; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=$rootPath; ConfigurationLocation=[string]$vm.ConfigurationLocation; CheckpointCount=[int]$checkpointCount; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString() }; ConvertTo-Json $result -Compress -Depth 4`
+const psGetVM = `$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue; if (-not $vm) { Write-Output '{"found":false}'; return }; $adapters = @(Get-VMNetworkAdapter -VMName $Name -ErrorAction SilentlyContinue); $switchNames = @($adapters | ForEach-Object { $_.SwitchName } | Where-Object { $_ }); $disk = Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Select-Object -First 1; $diskPath = if ($disk) { $disk.Path } else { "" }; $rootPath = $diskPath; if ($diskPath) { try { $v = Get-VHD -Path $diskPath -ErrorAction Stop; while ($v.ParentPath) { $rootPath = $v.ParentPath; $v = Get-VHD -Path $v.ParentPath -ErrorAction Stop } } catch { Write-Warning "Get-VHD chain resolution failed for $diskPath: $($_.Exception.Message)" } }; $checkpointCount = @(Get-VMSnapshot -VMName $Name -ErrorAction SilentlyContinue).Count; $mem = Get-VMMemory -VMName $Name -ErrorAction SilentlyContinue; $startupBytes = if ($mem) { [long]$mem.Startup } else { 0 }; $result = @{ found=$true; Name=$vm.Name; MemoryStartupBytes=$startupBytes; ProcessorCount=[int]$vm.ProcessorCount; Generation=[int]$vm.Generation; Path=$rootPath; ConfigurationLocation=[string]$vm.ConfigurationLocation; CheckpointCount=[int]$checkpointCount; SwitchName=if ($switchNames.Count -gt 0) { $switchNames[0] } else { "" }; SwitchNames=$switchNames; State=$vm.State.ToString(); Id=[string]$vm.Id; Adapters=@($adapters | ForEach-Object { @{MacAddress=$_.MacAddress} }) }; ConvertTo-Json $result -Compress -Depth 4`
+
+// psEnumerateVMs lists the names of all VMs on this Hyper-V host without
+// requiring any declared hyperv.vm resource. Used by the domain observe path.
+// The @() wrapper ensures ConvertTo-Json always emits a JSON array — even for
+// 0 or 1 VMs.
+const psEnumerateVMs = `ConvertTo-Json @{vms=@(Get-VM -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })} -Compress`
 
 // psCreateVM is the script block passed to ExecutePS for VM creation.
 // All user-supplied values are transmitted via ArgumentList — none are
@@ -998,8 +1028,45 @@ func (m *hypervModule) readVMState(ctx context.Context, vmName string) (*VMConfi
 			cfg.State = strings.ToLower(v)
 		}
 	}
+	if v, ok := parsed["Id"].(string); ok {
+		cfg.VMGUID = v
+	}
+	if raw, ok := parsed["Adapters"].([]interface{}); ok {
+		for _, a := range raw {
+			if amap, ok := a.(map[string]interface{}); ok {
+				mac, _ := amap["MacAddress"].(string)
+				cfg.NetworkAdapters = append(cfg.NetworkAdapters, VMNetworkAdapter{MacAddress: mac})
+			}
+		}
+	}
 
 	return cfg, true, nil
+}
+
+// enumerateVMNames returns the names of all VMs on this host. It does not
+// require declared hyperv.vm resources and is used by the domain observe path.
+// Returns nil when the transport is not wired.
+func (m *hypervModule) enumerateVMNames(ctx context.Context) ([]string, error) {
+	if m.transport == nil {
+		return nil, nil
+	}
+	output, err := m.transport.ExecutePS(ctx, psEnumerateVMs, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: enumerate vms: %w", err)
+	}
+	var parsed struct {
+		VMs []interface{} `json:"vms"`
+	}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
+		return nil, fmt.Errorf("hyperv: parse enumerate-vms response: %w", jsonErr)
+	}
+	var names []string
+	for _, v := range parsed.VMs {
+		if s, ok := v.(string); ok && s != "" {
+			names = append(names, s)
+		}
+	}
+	return names, nil
 }
 
 // probeClusterRoleMembership reports whether vmName is a registered clustered

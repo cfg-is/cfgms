@@ -455,10 +455,13 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 
 // Get returns the current Hyper-V resource configuration.
 // Supported resource ID prefixes:
-//   - "vm:<name>": retrieve VMConfig for the named virtual machine
-//   - "vswitch:<name>": retrieve VSwitchConfig for the named virtual switch
-//   - "cluster:<name>": retrieve ClusterStatus (read-only) for the named
+//   - "vm:<name>":       retrieve VMConfig for the named virtual machine
+//   - "vswitch:<name>":  retrieve VSwitchConfig for the named virtual switch
+//   - "cluster:<name>":  retrieve ClusterStatus (read-only) for the named
 //     failover cluster, subject to the cluster_name scope cap (S5)
+//   - "domain:hyperv":   retrieve DomainObservation — a deterministic summary
+//     of cluster membership, VM names, and vswitch names, requiring no declared
+//     hyperv.* resource (whole-domain observe path, ADR-024)
 func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if err := m.checkDetection(ctx); err != nil {
 		if errors.Is(err, ErrHostNotHyperV) {
@@ -480,6 +483,9 @@ func (m *hypervModule) Get(ctx context.Context, resourceID string) (modules.Conf
 		return m.getVSwitch(ctx, name)
 	case "cluster":
 		return m.getCluster(ctx, name)
+	case "domain":
+		_ = name // always "hyperv"; reserved for future sub-domain scoping
+		return m.getDomainSummary(ctx)
 	default:
 		return nil, modules.ErrNotImplemented
 	}
