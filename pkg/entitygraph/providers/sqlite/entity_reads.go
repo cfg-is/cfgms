@@ -358,6 +358,20 @@ func (p *SQLiteEntityGraphProvider) RebuildProjections(ctx context.Context) erro
 	return nil
 }
 
+// CorruptProjectionsForTesting deletes both projection tables while leaving the
+// observation log intact. Used by contract tests to verify that
+// RebuildProjections genuinely recovers from corruption rather than only testing
+// the idempotent no-op path.
+func (p *SQLiteEntityGraphProvider) CorruptProjectionsForTesting(ctx context.Context) error {
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_current`); err != nil {
+		return fmt.Errorf("entitygraph/sqlite: corrupt current: %w", err)
+	}
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
+		return fmt.Errorf("entitygraph/sqlite: corrupt index: %w", err)
+	}
+	return nil
+}
+
 // --- Unimplemented methods (owned by later stories) -------------------------
 
 // GetDesiredState is implemented by a later story.

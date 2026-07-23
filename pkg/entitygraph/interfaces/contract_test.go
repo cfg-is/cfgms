@@ -267,9 +267,18 @@ func testEGMovedEntity(t *testing.T, factory EntityGraphProviderFactory) {
 	}
 }
 
-// testEGRebuild verifies that RebuildProjections leaves entity reads unchanged
-// (AC 7). RebuildProjections is part of the EntityGraphProvider interface, so
-// every provider has the method and the test always runs.
+// corruptibleProvider is satisfied by providers that expose a test-only
+// corruption hook. The interface is used by testEGRebuild to verify the
+// corruption-recovery path of RebuildProjections (AC 7, tested directly).
+type corruptibleProvider interface {
+	CorruptProjectionsForTesting(ctx context.Context) error
+}
+
+// testEGRebuild verifies that RebuildProjections reconstructs projections from
+// the observation log (AC 7). When the provider implements corruptibleProvider,
+// the test verifies the full corruption-recovery path: delete both projection
+// tables and confirm that reads recover after rebuild. When the provider does
+// not expose a corruption hook, the test verifies idempotency instead.
 func testEGRebuild(t *testing.T, factory EntityGraphProviderFactory) {
 	t.Helper()
 	p := factory(t)
@@ -288,24 +297,46 @@ func testEGRebuild(t *testing.T, factory EntityGraphProviderFactory) {
 	})
 
 	opts := interfaces.GetEntityOpts{TenantFilter: "root/rb-tenant"}
-	before1, err := p.GetEntity(ctx, egEID(t, subject1), opts)
-	require.NoError(t, err)
-	require.NotNil(t, before1)
-	before2, err := p.GetEntity(ctx, egEID(t, subject2), opts)
-	require.NoError(t, err)
-	require.NotNil(t, before2)
 
-	require.NoError(t, p.RebuildProjections(ctx))
+	if c, ok := p.(corruptibleProvider); ok {
+		// Corruption-recovery path: delete both projection tables, confirm reads
+		// fail, rebuild, confirm reads recover with the correct values.
+		require.NoError(t, c.CorruptProjectionsForTesting(ctx))
 
-	after1, err := p.GetEntity(ctx, egEID(t, subject1), opts)
-	require.NoError(t, err)
-	require.NotNil(t, after1)
-	after2, err := p.GetEntity(ctx, egEID(t, subject2), opts)
-	require.NoError(t, err)
-	require.NotNil(t, after2)
+		_, err := p.GetEntity(ctx, egEID(t, subject1), opts)
+		require.Error(t, err, "entity must be unreachable after projection corruption")
 
-	assert.Equal(t, before1.Entity.Attributes["hostname"], after1.Entity.Attributes["hostname"])
-	assert.Equal(t, before2.Entity.Attributes["hostname"], after2.Entity.Attributes["hostname"])
+		require.NoError(t, p.RebuildProjections(ctx))
+
+		after1, err := p.GetEntity(ctx, egEID(t, subject1), opts)
+		require.NoError(t, err, "entity must be readable after rebuild")
+		require.NotNil(t, after1)
+		after2, err := p.GetEntity(ctx, egEID(t, subject2), opts)
+		require.NoError(t, err, "entity must be readable after rebuild")
+		require.NotNil(t, after2)
+		assert.Equal(t, "rebuild-1", after1.Entity.Attributes["hostname"])
+		assert.Equal(t, "rebuild-2", after2.Entity.Attributes["hostname"])
+	} else {
+		// Idempotency path: rebuild leaves entity reads unchanged.
+		before1, err := p.GetEntity(ctx, egEID(t, subject1), opts)
+		require.NoError(t, err)
+		require.NotNil(t, before1)
+		before2, err := p.GetEntity(ctx, egEID(t, subject2), opts)
+		require.NoError(t, err)
+		require.NotNil(t, before2)
+
+		require.NoError(t, p.RebuildProjections(ctx))
+
+		after1, err := p.GetEntity(ctx, egEID(t, subject1), opts)
+		require.NoError(t, err)
+		require.NotNil(t, after1)
+		after2, err := p.GetEntity(ctx, egEID(t, subject2), opts)
+		require.NoError(t, err)
+		require.NotNil(t, after2)
+
+		assert.Equal(t, before1.Entity.Attributes["hostname"], after1.Entity.Attributes["hostname"])
+		assert.Equal(t, before2.Entity.Attributes["hostname"], after2.Entity.Attributes["hostname"])
+	}
 }
 
 // testEGResolveIdentity verifies identity-claim resolution to EIDs (AC 8).

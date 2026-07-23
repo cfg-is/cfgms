@@ -327,10 +327,10 @@ func (p *DatabaseEntityGraphProvider) ResolveIdentity(ctx context.Context, claim
 	return eids, nil
 }
 
-// RebuildProjections rebuilds the entity index projection from the durable
-// current-state table. It clears the index and replays every distinct subject
-// through the same projection logic used during ingestion, all within one
-// transaction.
+// RebuildProjections deletes the current-state and index projections, then
+// replays every row in the observation log (ascending sequence order) to
+// reconstruct an identical state. The log is the authoritative source of truth;
+// projections are derived — this is the ADR-023 §3 corruption-recovery path.
 func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) error {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -338,42 +338,93 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err := tx.ExecContext(ctx, `DELETE FROM eg_entity_current`); err != nil {
+		return fmt.Errorf("entitygraph/database: clear current: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
 		return fmt.Errorf("entitygraph/database: clear entity index: %w", err)
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT subject FROM eg_entity_current`)
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, subject, source, source_class, observed_at, recorded_at,
+		        kind, confidence, payload_hash, tenant_path
+		 FROM eg_observation_log
+		 ORDER BY id ASC`,
+	)
 	if err != nil {
-		return fmt.Errorf("entitygraph/database: list subjects for rebuild: %w", err)
+		return fmt.Errorf("entitygraph/database: read observation log: %w", err)
 	}
-	var subjects []string
+
+	type logRow struct {
+		id                                       int64
+		subject, source, sourceClass, observedAt string
+		recordedAt, kind, confidence             string
+		payloadHash, tenantPath                  string
+	}
+	var logRows []logRow
 	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
+		var lr logRow
+		if err := rows.Scan(&lr.id, &lr.subject, &lr.source, &lr.sourceClass,
+			&lr.observedAt, &lr.recordedAt, &lr.kind, &lr.confidence,
+			&lr.payloadHash, &lr.tenantPath); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("entitygraph/database: scan rebuild subject: %w", err)
+			return fmt.Errorf("entitygraph/database: scan log row: %w", err)
 		}
-		subjects = append(subjects, s)
+		logRows = append(logRows, lr)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return fmt.Errorf("entitygraph/database: iterate rebuild subjects: %w", err)
+		return fmt.Errorf("entitygraph/database: iterate log: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("entitygraph/database: close rebuild subjects: %w", err)
+		return fmt.Errorf("entitygraph/database: close log rows: %w", err)
 	}
 
-	for _, s := range subjects {
-		if subjectKind(s) != "entity" {
+	for _, lr := range logRows {
+		if subjectKind(lr.subject) != "entity" {
 			continue
 		}
-		if err := rebuildEntityIndex(ctx, tx, s); err != nil {
-			return err
+		// Replay: fold the log row into eg_entity_current (same supersede logic as
+		// ReportObservations) then rebuild the index from the accumulated state.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO eg_entity_current
+				(subject, source, source_class, kind, confidence, observed_at, recorded_at, payload_hash, tenant_path, log_seq)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			 ON CONFLICT (subject, source) DO UPDATE SET
+				source_class = EXCLUDED.source_class,
+				kind         = EXCLUDED.kind,
+				confidence   = EXCLUDED.confidence,
+				observed_at  = EXCLUDED.observed_at,
+				recorded_at  = EXCLUDED.recorded_at,
+				payload_hash = EXCLUDED.payload_hash,
+				tenant_path  = EXCLUDED.tenant_path,
+				log_seq      = EXCLUDED.log_seq`,
+			lr.subject, lr.source, lr.sourceClass, lr.kind, lr.confidence,
+			lr.observedAt, lr.recordedAt, lr.payloadHash, lr.tenantPath, lr.id,
+		); err != nil {
+			return fmt.Errorf("entitygraph/database: replay current state seq %d: %w", lr.id, err)
+		}
+		if err := rebuildEntityIndex(ctx, tx, lr.subject); err != nil {
+			return fmt.Errorf("entitygraph/database: rebuild index seq %d: %w", lr.id, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("entitygraph/database: commit rebuild: %w", err)
+	}
+	return nil
+}
+
+// CorruptProjectionsForTesting deletes both projection tables while leaving the
+// observation log intact. Used by contract tests to verify that
+// RebuildProjections genuinely recovers from corruption rather than only testing
+// the idempotent no-op path.
+func (p *DatabaseEntityGraphProvider) CorruptProjectionsForTesting(ctx context.Context) error {
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_current`); err != nil {
+		return fmt.Errorf("entitygraph/database: corrupt current: %w", err)
+	}
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
+		return fmt.Errorf("entitygraph/database: corrupt index: %w", err)
 	}
 	return nil
 }
