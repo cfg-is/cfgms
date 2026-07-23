@@ -102,16 +102,22 @@ func (tx *Taxonomy) EffectivePrecedenceOrder(desc *EntityTypeDescriptor) []Sourc
 	return DefaultPrecedenceOrder
 }
 
-// DefaultTaxonomy returns the canonical seed taxonomy (version 1).
+// DefaultTaxonomy returns the canonical seed taxonomy (version 2).
 // Seed entity kinds and edge kinds are per ADR-022 §1/§2.
+// Version 2 adds DNA fragment kinds per ADR-017/A1.2.
 func DefaultTaxonomy() *Taxonomy {
 	tx := &Taxonomy{
-		Version:     1,
+		// Version 2: added DNA fragment kinds (ADR-017/A1.2) and host:* observe-only kinds.
+		Version:     2,
 		entityTypes: make(map[string]*EntityTypeDescriptor),
 		edgeTypes:   make(map[string]*EdgeTypeDescriptor),
 	}
 
 	// Seed entity kinds per ADR-022 §1.
+	// user carries directory/m365/host — the host class is added here (ADR-017/A1.2)
+	// to merge with the pre-existing directory/m365 authority for local-account fragments
+	// from the stdlib user module; a second descriptor would silently overwrite via map
+	// assignment, so the merge is done in-place on this single entry.
 	entitySeeds := []*EntityTypeDescriptor{
 		{Kind: "host", AuthorityClasses: []string{"host"}},
 		{Kind: "cluster", AuthorityClasses: []string{"cluster"}},
@@ -119,12 +125,43 @@ func DefaultTaxonomy() *Taxonomy {
 		{Kind: "vswitch", AuthorityClasses: []string{"cluster", "host"}},
 		{Kind: "device", AuthorityClasses: []string{"host"}},
 		{Kind: "application", AuthorityClasses: []string{"host"}},
-		{Kind: "user", AuthorityClasses: []string{"directory", "m365"}},
+		{Kind: "user", AuthorityClasses: []string{"directory", "m365", "host"}},
 		{Kind: "group", AuthorityClasses: []string{"directory", "m365"}},
 		{Kind: "tenant", AuthorityClasses: []string{"cfgms"}},
 		{Kind: "directory", AuthorityClasses: []string{"directory", "m365"}},
 	}
 	for _, d := range entitySeeds {
+		tx.entityTypes[d.Kind] = d
+	}
+
+	// DNA fragment kinds per ADR-017/A1.2 — one entry per stdlib module that declares
+	// owns: in features/modules/stdlib/*/module.yaml (re-grepped at story-2904 authoring
+	// time: file, package, script, firewall, service, patch, hostname, cert_trust, time).
+	// All are host-scoped; the user collision is handled above via the merged entry.
+	dnaFragmentSeeds := []*EntityTypeDescriptor{
+		{Kind: "file", AuthorityClasses: []string{"host"}},
+		{Kind: "package", AuthorityClasses: []string{"host"}},
+		{Kind: "script", AuthorityClasses: []string{"host"}},
+		{Kind: "firewall", AuthorityClasses: []string{"host"}},
+		{Kind: "service", AuthorityClasses: []string{"host"}},
+		{Kind: "patch", AuthorityClasses: []string{"host"}},
+		{Kind: "hostname", AuthorityClasses: []string{"host"}},
+		{Kind: "cert_trust", AuthorityClasses: []string{"host"}},
+		{Kind: "time", AuthorityClasses: []string{"host"}},
+	}
+	for _, d := range dnaFragmentSeeds {
+		tx.entityTypes[d.Kind] = d
+	}
+
+	// host:* observe-only kinds per ADR-017 §8 fixed contract — hardware and OS facts
+	// observed by the steward but not enforced by any module.
+	hostObserveSeeds := []*EntityTypeDescriptor{
+		{Kind: "host:cpu", AuthorityClasses: []string{"host"}},
+		{Kind: "host:memory", AuthorityClasses: []string{"host"}},
+		{Kind: "host:os", AuthorityClasses: []string{"host"}},
+		{Kind: "host:bios", AuthorityClasses: []string{"host"}},
+	}
+	for _, d := range hostObserveSeeds {
 		tx.entityTypes[d.Kind] = d
 	}
 
