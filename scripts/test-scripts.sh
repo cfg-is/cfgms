@@ -800,7 +800,15 @@ for arg in "$@"; do
     if [[ "$arg" == *"/pulls/"*"/files"* ]]; then printf '%s' "${FILES_JSON:-[]}"; exit 0; fi
 done
 for arg in "$@"; do
-    if [[ "$arg" == *"/code-scanning/alerts"* ]]; then printf '%s' "${ALERTS_JSON:-[]}"; exit 0; fi
+    if [[ "$arg" == *"/code-scanning/alerts"* ]]; then
+        # ALERTS_REQUIRE_REF (Issue #2913): simulate a new-file alert that exists
+        # ONLY on the PR-merge ref — return the alert data only when the request
+        # carries that ref, else the empty (default-branch) set.
+        if [[ -n "${ALERTS_REQUIRE_REF:-}" && "$arg" != *"$ALERTS_REQUIRE_REF"* ]]; then
+            printf '[]'; exit 0
+        fi
+        printf '%s' "${ALERTS_JSON:-[]}"; exit 0
+    fi
 done
 exit 0
 MOCKEOF
@@ -869,6 +877,43 @@ MOCKEOF
         log_fail "pr-security-findings.sh: inherited alert on unchanged line :254 must NOT be emitted, got: '$output'"
     else
         log_pass "pr-security-findings.sh: inherited alert on unchanged line NOT emitted (added-line intersection)"
+    fi
+
+    # --- Pass 2 (Issue #2913): a HIGH alert in a file the PR NEWLY ADDS is
+    #     emitted. The alert exists ONLY on the PR-merge ref (the file isn't on
+    #     develop yet), so this passes iff the script queries refs/pull/<N>/merge.
+    #     Mirrors PR #2896 / terminal_handler.go go/incorrect-integer-conversion. ---
+    local FILES_NEW='[{"filename":"features/controller/transport/terminal_handler.go","patch":"@@ -0,0 +1,4 @@\n+package transport\n+// new file\n+var cols int\n+var narrow = int32(cols)"}]'
+    local ALERTS_NEWFILE='[{"most_recent_instance":{"location":{"path":"features/controller/transport/terminal_handler.go","start_line":4}},"rule":{"id":"go/incorrect-integer-conversion"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_NEW" ALERTS_JSON="$ALERTS_NEWFILE" ALERTS_REQUIRE_REF="ref=refs/pull/2896/merge" PATH="$tmp_dir:$PATH" bash "$script" 2896 2>/dev/null) || true
+    if echo "$output" | grep -q "features/controller/transport/terminal_handler.go:4:go/incorrect-integer-conversion"; then
+        log_pass "pr-security-findings.sh: HIGH alert in a PR-added new file is emitted (merge-ref query, #2913)"
+    else
+        log_fail "pr-security-findings.sh: expected new-file alert :4 from merge ref, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2913): guard against regressing to the unref'd query.
+    #     Same new-file alert, but gated behind the merge ref → an unref'd
+    #     (default-branch) query would see nothing and the finding would be
+    #     silently missed (the exact false-negative #2913 fixes). ---
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_NEW" ALERTS_JSON="$ALERTS_NEWFILE" ALERTS_REQUIRE_REF="ref=refs/pull/9999/does-not-match" PATH="$tmp_dir:$PATH" bash "$script" 2896 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: new-file alert absent from unref'd set → no output (confirms ref gating)"
+    else
+        log_fail "pr-security-findings.sh: control case should be empty, got: '$output'"
+    fi
+
+    # --- Pass 2 (Issue #2913, AC4): a pre-existing baseline warning on an
+    #     UNCHANGED line (e.g. zizmor ref-version-mismatch, warning severity)
+    #     stays filtered by the added-line intersection even though it is now
+    #     returned by the merge-ref query — the ref change adds no new FP. ---
+    local FILES_WF='[{"filename":".github/workflows/ci.yml","patch":"@@ -10,1 +10,2 @@\n context10\n+added11"}]'
+    local ALERTS_WARN='[{"most_recent_instance":{"location":{"path":".github/workflows/ci.yml","start_line":10}},"rule":{"id":"zizmor/ref-version-mismatch"}}]'
+    output=$(HEAD_JSON="$HEAD" CHECK_RUNS_JSON="$CR_NONE" FILES_JSON="$FILES_WF" ALERTS_JSON="$ALERTS_WARN" ALERTS_REQUIRE_REF="ref=refs/pull/2896/merge" PATH="$tmp_dir:$PATH" bash "$script" 2896 2>/dev/null) || true
+    if [[ -z "$output" ]]; then
+        log_pass "pr-security-findings.sh: baseline warning on unchanged line stays filtered under merge-ref query (#2913 AC4)"
+    else
+        log_fail "pr-security-findings.sh: unchanged-line baseline warning must not FP, got: '$output'"
     fi
 
     # --- Pass 2: with no alerts data, the extra passes stay silent (PASS) ---
