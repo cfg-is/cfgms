@@ -55,6 +55,7 @@ import (
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/features/workflow"
 	workflownodes "github.com/cfgis/cfgms/features/workflow/nodes"
 	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
@@ -1731,6 +1732,34 @@ func (s *Server) Start() error {
 		composite.SetBulkHandler(bulkHandler)
 		composite.SetLogStreamHandler(logStreamHandler)
 		composite.SetTelemetryHandler(telemetryHandler)
+
+		// Wire terminal relay (Issue #2761). Parse allowed origins from env
+		// (mirrors CFGMS_ALLOWED_ORIGINS: comma-separated, trimmed, empty filtered).
+		var terminalOrigins []string
+		if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
+			for _, o := range strings.Split(raw, ",") {
+				if trimmed := strings.TrimSpace(o); trimmed != "" {
+					terminalOrigins = append(terminalOrigins, trimmed)
+				}
+			}
+		}
+		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminal.DefaultConfig(), s.logger)
+		if terminalMgrErr != nil {
+			return fmt.Errorf("failed to create terminal session manager: %w", terminalMgrErr)
+		}
+		// Avoid a non-nil interface with a nil pointer (would bypass the nil-check in ServeWebSocket).
+		var terminalCmdPub controllerTransport.TerminalCommandPublisher
+		if s.commandPublisher != nil {
+			terminalCmdPub = s.commandPublisher
+		}
+		terminalHandler := controllerTransport.NewTerminalHandler(
+			s.logger, terminalCmdPub, terminalSessionMgr, s.auditManager, terminalOrigins,
+		)
+		composite.SetTerminalHandler(terminalHandler)
+		if s.httpServer != nil {
+			s.httpServer.SetTerminalHandler(http.HandlerFunc(terminalHandler.ServeWebSocket))
+		}
+
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
 		// Wire telemetry WebSocket fan-out into the REST API (Issue #2765).
 		if s.httpServer != nil {

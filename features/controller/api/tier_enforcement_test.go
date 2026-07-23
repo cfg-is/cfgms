@@ -92,6 +92,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Part (d) skips step-up assertion for these; see assertBasicPassesFromRequirePermission.
 	{"POST", "/api/v1/webauthn/elevate/begin", "webauthn:elevate"},
 	{"POST", "/api/v1/webauthn/elevate/finish", "webauthn:elevate"},
+	// Terminal WebSocket relay (Issue #2761) — browser must hold AssuranceStrong before
+	// an interactive terminal to a steward is opened.
+	{"GET", "/api/v1/terminal/ws/test-steward-id", "terminal:create"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

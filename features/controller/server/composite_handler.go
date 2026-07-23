@@ -16,7 +16,8 @@ import (
 // handler. Control plane RPCs go to the CP handler; SyncConfig is handled
 // directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
 // by the bulk handler; LogStream by the log stream handler; TelemetryStream
-// by the telemetry handler. Future RPCs fall through to the Unimplemented base.
+// by the telemetry handler; Terminal by the terminal handler. Future RPCs fall
+// through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
@@ -26,6 +27,7 @@ type compositeTransportServer struct {
 	bulkHandler      *controllerTransport.BulkHandler      // BulkTransfer (direct handling)
 	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
 	telemetryHandler *controllerTransport.TelemetryHandler // TelemetryStream (direct handling)
+	terminalHandler  *controllerTransport.TerminalHandler  // Terminal (direct handling)
 	logger           logging.Logger
 }
 
@@ -65,6 +67,11 @@ func (c *compositeTransportServer) SetLogStreamHandler(h *controllerTransport.Lo
 // SetTelemetryHandler sets the TelemetryStream handler. Call after newCompositeTransportServer.
 func (c *compositeTransportServer) SetTelemetryHandler(h *controllerTransport.TelemetryHandler) {
 	c.telemetryHandler = h
+}
+
+// SetTerminalHandler sets the Terminal bidi RPC handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetTerminalHandler(h *controllerTransport.TerminalHandler) {
+	c.terminalHandler = h
 }
 
 // --- Control Plane RPCs (delegated to CP handler) ---
@@ -132,4 +139,14 @@ func (c *compositeTransportServer) TelemetryStream(stream grpc.BidiStreamingServ
 		return c.telemetryHandler.HandleGRPC(stream)
 	}
 	return c.UnimplementedStewardTransportServer.TelemetryStream(stream)
+}
+
+// Terminal is handled directly by the terminal handler. The steward opens this
+// bidi stream after receiving COMMAND_TYPE_OPEN_TERMINAL; the handler correlates
+// the stream to the pending browser WebSocket session by session_id.
+func (c *compositeTransportServer) Terminal(stream grpc.BidiStreamingServer[transportpb.TerminalData, transportpb.TerminalData]) error {
+	if c.terminalHandler != nil {
+		return c.terminalHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.Terminal(stream)
 }

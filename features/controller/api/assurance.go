@@ -77,10 +77,15 @@ var permissionAssurance = map[string]Requirement{
 	// (API keys) cannot call this endpoint — they hold no web session to elevate.
 	"webauthn:elevate": {Min: session.AssuranceBasic}, // POST /webauthn/elevate/begin|finish
 
-	// Catastrophic permissions: RequireUserPresence: true is ENFORCED as of Issue #2784.
-	// requirePermission validates the X-Presence-Token header (minted by
-	// POST /api/v1/webauthn/presence/finish) and rejects requests without a valid,
-	// fresh, single-use token with:
+	// Terminal relay (Issue #2761). Browser WebSocket clients must hold a WebAuthn-strength
+	// session (AssuranceStrong) before an interactive terminal to a steward is opened.
+	// The steward leg authenticates via mTLS independently of this check.
+	"terminal:create": {Min: session.AssuranceStrong}, // GET /terminal/ws/{steward_id}
+
+	// Catastrophic permissions (no live REST routes yet — issue #2728/#2732 adds the routes).
+	// RequireUserPresence: true is ENFORCED as of Issue #2784: requirePermission now validates
+	// the X-Presence-Token header (minted by POST /api/v1/webauthn/presence/finish) and rejects
+	// requests without a valid, fresh, single-use token with:
 	//   401 WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"
 	// The presence mechanism: POST /webauthn/presence/begin → finish → attach X-Presence-Token.
 
