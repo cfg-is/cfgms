@@ -772,7 +772,7 @@ test_skip_tracking_and_verdict_regression() {
 #   $2  path to mock project-queue.sh
 #   $3  project item id
 #   $4  issue number
-#   $5  exit code to simulate (default 1)
+#   $5  exit code for driver to return (default 1)
 # ===========================================================================
 _build_zw_driver() {
     local driver="$1" mock_pq="$2" item_id="$3" issue_num="$4" exit_code="${5:-1}"
