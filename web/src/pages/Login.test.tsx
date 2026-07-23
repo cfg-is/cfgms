@@ -102,7 +102,7 @@ describe('Login screen states (mockup: docs/design/mockups/login.html)', () => {
   })
 
   it('expired: shows the session-expired banner when auth state is expired', async () => {
-    // Sign in, then 401 an API call to force the expired state.
+    // Sign in, then 401 a subsequent API call to simulate a mid-session drop.
     mockLoginEndpoints(200)
     renderLogin()
     fireEvent.change(screen.getByLabelText(/username/i), {
@@ -112,6 +112,15 @@ describe('Login screen states (mockup: docs/design/mockups/login.html)', () => {
       target: { value: 'pw-pw-pw-pw' },
     })
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+
+    // Wait for the login request to complete (button disabled → re-enabled)
+    // before triggering the mid-session 401. The onSessionExpired handler only
+    // transitions to 'expired' when status is 'signedIn' (Story #2933); firing
+    // apiFetch before login resolves would race against signedOut and not
+    // produce 'expired'.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in/i })).not.toBeDisabled(),
+    )
 
     fetchMock.mockResolvedValue(jsonResponse(401))
     const { apiFetch } = await import('../api/client.ts')
