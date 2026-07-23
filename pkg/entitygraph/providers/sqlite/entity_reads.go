@@ -293,6 +293,9 @@ func (p *SQLiteEntityGraphProvider) RebuildProjections(ctx context.Context) erro
 	if _, err := tx.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: clear index: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM eg_drift_projection`); err != nil {
+		return fmt.Errorf("entitygraph/sqlite: clear drift projection: %w", err)
+	}
 
 	// Collect the full log first: modernc/sqlite cannot interleave writes on a
 	// transaction while a result-set cursor from the same tx is still open.
@@ -358,10 +361,11 @@ func (p *SQLiteEntityGraphProvider) RebuildProjections(ctx context.Context) erro
 	return nil
 }
 
-// CorruptProjectionsForTesting deletes both projection tables while leaving the
-// observation log intact. Used by contract tests to verify that
+// CorruptProjectionsForTesting deletes every derived projection table while
+// leaving the observation log intact. Used by contract tests to verify that
 // RebuildProjections genuinely recovers from corruption rather than only testing
-// the idempotent no-op path.
+// the idempotent no-op path. eg_drift_projection is included so that the
+// drift/lifecycle replay path in RebuildProjections is exercised on recovery.
 func (p *SQLiteEntityGraphProvider) CorruptProjectionsForTesting(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_current`); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: corrupt current: %w", err)
@@ -369,19 +373,10 @@ func (p *SQLiteEntityGraphProvider) CorruptProjectionsForTesting(ctx context.Con
 	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: corrupt index: %w", err)
 	}
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_drift_projection`); err != nil {
+		return fmt.Errorf("entitygraph/sqlite: corrupt drift projection: %w", err)
+	}
 	return nil
-}
-
-// --- Unimplemented methods (owned by later stories) -------------------------
-
-// GetDesiredState is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) GetDesiredState(_ context.Context, _ interfaces.EIDRef) (*types.DesiredStateView, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// GetDriftState is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) GetDriftState(_ context.Context, _ interfaces.EIDRef) (*interfaces.DriftState, error) {
-	return nil, interfaces.ErrNotImplemented
 }
 
 // GetHistory returns the versioned observation log for a subject over a time
@@ -444,17 +439,7 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(_ context.Context, _ []interface
 	return nil, interfaces.ErrNotImplemented
 }
 
-// ListDrifted is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) ListDrifted(_ context.Context, _ interfaces.DriftFilter) ([]*interfaces.DriftState, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
 // Watch is implemented by a later story.
 func (p *SQLiteEntityGraphProvider) Watch(_ context.Context, _ interfaces.WatchFilter, _ string) (<-chan interfaces.WatchEvent, error) {
 	return nil, interfaces.ErrNotImplemented
-}
-
-// UpdateDriftLifecycle is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) UpdateDriftLifecycle(_ context.Context, _ interfaces.DriftLifecycleUpdate) error {
-	return interfaces.ErrNotImplemented
 }

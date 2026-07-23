@@ -344,6 +344,9 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 	if _, err := tx.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
 		return fmt.Errorf("entitygraph/database: clear entity index: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM eg_drift_projection`); err != nil {
+		return fmt.Errorf("entitygraph/database: clear drift projection: %w", err)
+	}
 
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, subject, source, source_class, observed_at, recorded_at,
@@ -382,6 +385,41 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 
 	for _, lr := range logRows {
 		if subjectKind(lr.subject) != "entity" {
+			continue
+		}
+		// Drift-diff and lifecycle rows project to eg_drift_projection; they must
+		// not be folded into entity_current. Load the payload and replay via the
+		// same helpers used by ReportObservations.
+		if lr.kind == string(types.ObservationKindDriftDiff) || lr.kind == string(types.ObservationKindLifecycle) {
+			var payloadJSON string
+			if err := tx.QueryRowContext(ctx,
+				`SELECT payload_json FROM eg_payload_content WHERE content_hash = $1`, lr.payloadHash,
+			).Scan(&payloadJSON); err != nil {
+				return fmt.Errorf("entitygraph/database: load drift payload seq %d: %w", lr.id, err)
+			}
+			var payload map[string]interface{}
+			if payloadJSON != "" {
+				if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+					return fmt.Errorf("entitygraph/database: unmarshal drift payload seq %d: %w", lr.id, err)
+				}
+			}
+			oa, _ := time.Parse(time.RFC3339Nano, lr.observedAt)
+			obs := types.Observation{
+				Subject:    lr.subject,
+				Source:     lr.source,
+				Kind:       types.ObservationKind(lr.kind),
+				ObservedAt: oa,
+				Payload:    payload,
+			}
+			if lr.kind == string(types.ObservationKindDriftDiff) {
+				if err := updateDriftProjectionFromObservation(ctx, tx, obs); err != nil {
+					return fmt.Errorf("entitygraph/database: replay drift-diff seq %d: %w", lr.id, err)
+				}
+			} else {
+				if err := applyLifecycleTransitionFromObs(ctx, tx, obs); err != nil {
+					return fmt.Errorf("entitygraph/database: replay lifecycle seq %d: %w", lr.id, err)
+				}
+			}
 			continue
 		}
 		if lr.kind == string(types.ObservationKindAbsence) {
@@ -429,10 +467,11 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 	return nil
 }
 
-// CorruptProjectionsForTesting deletes both projection tables while leaving the
-// observation log intact. Used by contract tests to verify that
+// CorruptProjectionsForTesting deletes every derived projection table while
+// leaving the observation log intact. Used by contract tests to verify that
 // RebuildProjections genuinely recovers from corruption rather than only testing
-// the idempotent no-op path.
+// the idempotent no-op path. eg_drift_projection is included so that the
+// drift/lifecycle replay path in RebuildProjections is exercised on recovery.
 func (p *DatabaseEntityGraphProvider) CorruptProjectionsForTesting(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_current`); err != nil {
 		return fmt.Errorf("entitygraph/database: corrupt current: %w", err)
@@ -440,24 +479,10 @@ func (p *DatabaseEntityGraphProvider) CorruptProjectionsForTesting(ctx context.C
 	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_index`); err != nil {
 		return fmt.Errorf("entitygraph/database: corrupt index: %w", err)
 	}
+	if _, err := p.db.ExecContext(ctx, `DELETE FROM eg_drift_projection`); err != nil {
+		return fmt.Errorf("entitygraph/database: corrupt drift projection: %w", err)
+	}
 	return nil
-}
-
-// --- Deferred read operations ---
-//
-// The following reads share the observation-log / projection substrate above
-// but are scheduled in later rounds of the entity graph epic. They satisfy the
-// EntityGraphProvider contract at compile time and return ErrNotImplemented
-// until their round lands.
-
-// GetDesiredState returns the desired state and originating config revision.
-func (p *DatabaseEntityGraphProvider) GetDesiredState(_ context.Context, _ interfaces.EIDRef) (*types.DesiredStateView, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// GetDriftState returns the persisted drift-diff for a managed entity.
-func (p *DatabaseEntityGraphProvider) GetDriftState(_ context.Context, _ interfaces.EIDRef) (*interfaces.DriftState, error) {
-	return nil, interfaces.ErrNotImplemented
 }
 
 // GetHistory returns the versioned observation log for a subject over a time
@@ -524,17 +549,7 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(_ context.Context, _ []interfa
 	return nil, interfaces.ErrNotImplemented
 }
 
-// ListDrifted returns entities with active drift matching the filter.
-func (p *DatabaseEntityGraphProvider) ListDrifted(_ context.Context, _ interfaces.DriftFilter) ([]*interfaces.DriftState, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
 // Watch returns a durable, cursor-replayable change feed.
 func (p *DatabaseEntityGraphProvider) Watch(_ context.Context, _ interfaces.WatchFilter, _ string) (<-chan interfaces.WatchEvent, error) {
 	return nil, interfaces.ErrNotImplemented
-}
-
-// UpdateDriftLifecycle records a workflow annotation on a drift record.
-func (p *DatabaseEntityGraphProvider) UpdateDriftLifecycle(_ context.Context, _ interfaces.DriftLifecycleUpdate) error {
-	return interfaces.ErrNotImplemented
 }

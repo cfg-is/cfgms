@@ -166,24 +166,28 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 			return fmt.Errorf("entitygraph/database: append observation log: %w", err)
 		}
 
-		// Fold into per-source current state. The latest observation for the
-		// same (subject, source) supersedes the prior one.
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO eg_entity_current
-				(subject, source, source_class, kind, confidence, observed_at, recorded_at, payload_hash, tenant_path, log_seq)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			 ON CONFLICT (subject, source) DO UPDATE SET
-				source_class = EXCLUDED.source_class,
-				kind         = EXCLUDED.kind,
-				confidence   = EXCLUDED.confidence,
-				observed_at  = EXCLUDED.observed_at,
-				recorded_at  = EXCLUDED.recorded_at,
-				payload_hash = EXCLUDED.payload_hash,
-				tenant_path  = EXCLUDED.tenant_path,
-				log_seq      = EXCLUDED.log_seq`,
-			obs.Subject, obs.Source, sourceClass, string(obs.Kind), string(obs.Confidence),
-			observedAt, recordedAtStr, hash, tenantPath, logSeq); err != nil {
-			return fmt.Errorf("entitygraph/database: upsert current state: %w", err)
+		// Skip entity_current upsert for observation kinds that project to
+		// eg_drift_projection instead of entity_current (ADR-022 §6).
+		if obs.Kind != types.ObservationKindDriftDiff && obs.Kind != types.ObservationKindLifecycle {
+			// Fold into per-source current state. The latest observation for the
+			// same (subject, source) supersedes the prior one.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO eg_entity_current
+					(subject, source, source_class, kind, confidence, observed_at, recorded_at, payload_hash, tenant_path, log_seq)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				 ON CONFLICT (subject, source) DO UPDATE SET
+					source_class = EXCLUDED.source_class,
+					kind         = EXCLUDED.kind,
+					confidence   = EXCLUDED.confidence,
+					observed_at  = EXCLUDED.observed_at,
+					recorded_at  = EXCLUDED.recorded_at,
+					payload_hash = EXCLUDED.payload_hash,
+					tenant_path  = EXCLUDED.tenant_path,
+					log_seq      = EXCLUDED.log_seq`,
+				obs.Subject, obs.Source, sourceClass, string(obs.Kind), string(obs.Confidence),
+				observedAt, recordedAtStr, hash, tenantPath, logSeq); err != nil {
+				return fmt.Errorf("entitygraph/database: upsert current state: %w", err)
+			}
 		}
 
 		if err := dispatchProjectionUpdate(ctx, tx, subjectKind(obs.Subject), obs, logSeq); err != nil {
@@ -205,8 +209,14 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 
 // updateEntityProjection rebuilds the entity index row for the observation's
 // subject from the merged current state. Registered for the "entity" subject
-// kind.
+// kind. Drift-diff and lifecycle observations route to eg_drift_projection.
 func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, _ int64) error {
+	if obs.Kind == types.ObservationKindDriftDiff {
+		return updateDriftProjectionFromObservation(ctx, tx, obs)
+	}
+	if obs.Kind == types.ObservationKindLifecycle {
+		return applyLifecycleTransitionFromObs(ctx, tx, obs)
+	}
 	return rebuildEntityIndex(ctx, tx, obs.Subject)
 }
 
