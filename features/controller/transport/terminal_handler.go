@@ -316,11 +316,18 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 
 	// Dispatch COMMAND_TYPE_OPEN_TERMINAL to the steward.
 	if h.commandPub != nil {
+		// Clamp to [0, maxTerminalDim] at the conversion site so the int32 cast
+		// is provably in range. The upper cap above already bounds cols/rows,
+		// but that guard is too far from this conversion for the static
+		// integer-overflow analysis to track it (go/incorrect-integer-conversion);
+		// re-clamping inline makes the bound local and explicit.
+		cols32 := int32(min(max(cols, 0), maxTerminalDim))
+		rows32 := int32(min(max(rows, 0), maxTerminalDim))
 		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, map[string]interface{}{
 			"session_id": sess.ID,
 			"shell":      shell,
-			"cols":       int32(cols), // safe: bounded by maxTerminalDim above
-			"rows":       int32(rows), // safe: bounded by maxTerminalDim above
+			"cols":       cols32,
+			"rows":       rows32,
 		})
 		if cmdErr != nil {
 			if h.logger != nil {
