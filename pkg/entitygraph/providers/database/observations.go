@@ -210,12 +210,17 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 // updateEntityProjection rebuilds the entity index row for the observation's
 // subject from the merged current state. Registered for the "entity" subject
 // kind. Drift-diff and lifecycle observations route to eg_drift_projection.
+// Desired-state observations project to eg_entity_current for dedup but must
+// not contribute to the entity index.
 func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, _ int64) error {
 	if obs.Kind == types.ObservationKindDriftDiff {
 		return updateDriftProjectionFromObservation(ctx, tx, obs)
 	}
 	if obs.Kind == types.ObservationKindLifecycle {
 		return applyLifecycleTransitionFromObs(ctx, tx, obs)
+	}
+	if obs.Kind == types.ObservationKindDesiredState {
+		return nil
 	}
 	return rebuildEntityIndex(ctx, tx, obs.Subject)
 }
@@ -229,7 +234,7 @@ func rebuildEntityIndex(ctx context.Context, tx *sql.Tx, subject string) error {
 		`SELECT c.source, c.source_class, c.observed_at, c.payload_hash, p.payload_json
 		 FROM eg_entity_current c
 		 JOIN eg_payload_content p ON p.content_hash = c.payload_hash
-		 WHERE c.subject = $1`, subject)
+		 WHERE c.subject = $1 AND c.kind != 'desired-state'`, subject)
 	if err != nil {
 		return fmt.Errorf("entitygraph/database: read current state: %w", err)
 	}

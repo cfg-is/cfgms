@@ -17,10 +17,19 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
+	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// egConfigstoreIngestor is the narrow interface the config-push handler needs
+// to record desired-state observations into the entity graph after a push is
+// accepted. *configstorewriter.Writer satisfies it.
+type egConfigstoreIngestor interface {
+	Ingest(ctx context.Context, rev configstorewriter.ConfigRevision, eids []egtypes.EID) error
+}
 
 // leaderStatus is the minimal interface the config-push handler needs from the
 // HA manager. *ha.Manager satisfies it automatically; test doubles use stubLeaderStatus.
@@ -136,6 +145,34 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	pushID := fmt.Sprintf("push-%d", time.Now().UnixNano())
 	queuedAt := time.Now().UTC()
+
+	// Write desired-state observations for every targeted steward into the
+	// entity graph so that GetDesiredState reflects the new config revision
+	// before the fan-out completes (ADR-022 §6). Best-effort: a failure here
+	// does not block the push — the fan-out and audit are more critical.
+	if s.egConfigstoreWriter != nil {
+		eids := make([]egtypes.EID, 0, len(targeted))
+		for _, st := range targeted {
+			if eid, eidErr := egtypes.NewEID("cfgms", "controller", st.ID); eidErr == nil {
+				eids = append(eids, eid)
+			}
+		}
+		egRev := configstorewriter.ConfigRevision{
+			ConfigID: cfg.ConfigID,
+			Revision: cfg.Version,
+			TenantID: cfg.TenantID,
+			DesiredState: map[string]interface{}{
+				"policies": cfg.Policies,
+				"modules":  cfg.Modules,
+			},
+		}
+		if err := s.egConfigstoreWriter.Ingest(r.Context(), egRev, eids); err != nil {
+			s.logger.Warn("Failed to ingest desired-state observations into entity graph",
+				"push_id", pushID,
+				"error", err,
+			)
+		}
+	}
 
 	s.emitConfigPushAudit(r, cfg.TenantID, cfg.ConfigID, pushID)
 

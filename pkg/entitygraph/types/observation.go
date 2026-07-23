@@ -22,6 +22,15 @@ const (
 	// Tagged by actor rather than a source provenance class; appears distinctly
 	// in GetHistory alongside state and drift-diff observations.
 	ObservationKindLifecycle ObservationKind = "lifecycle"
+
+	// ObservationKindDesiredState is written by the ConfigStore internal writer
+	// (ADR-022 §6) when a config revision is pushed to a set of entities. Each
+	// entity receives one desired-state observation per push; GetDesiredState
+	// reads the most-recent such observation from the log. Desired-state
+	// observations project into eg_entity_current for content-hash dedup but are
+	// excluded from entity-state views and the entity index so they do not
+	// contaminate the merged attribute set.
+	ObservationKindDesiredState ObservationKind = "desired-state"
 )
 
 // Confidence is the producer-declared confidence level for an observation.

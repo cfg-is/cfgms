@@ -68,6 +68,7 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("DriftStateRoundTrip", func(t *testing.T) { testEGDriftStateRoundTrip(t, factory) })             // AC 2+3
 	t.Run("DriftLifecycleTransition", func(t *testing.T) { testEGDriftLifecycle(t, factory) })             // AC 4
 	t.Run("DriftProjectionRebuildRecovery", func(t *testing.T) { testEGDriftRebuildRecovery(t, factory) }) // AC 4 + AC 7
+	t.Run("DesiredStateIsolation", func(t *testing.T) { testEGDesiredStateIsolation(t, factory) })         // AC 5 (isolation)
 }
 
 // --- Contract test helpers ---
@@ -429,6 +430,109 @@ func testEGDriftRebuildRecovery(t *testing.T, factory EntityGraphProviderFactory
 	require.Len(t, after.Fields, 1, "drift fields must survive rebuild")
 	assert.Equal(t, "state", after.Fields[0].Attribute)
 	assert.False(t, after.Fields[0].Matching)
+}
+
+// testEGDesiredStateIsolation verifies that desired-state observations are fully
+// isolated from the entity view and entity index and that the isolation survives
+// a projection rebuild. This locks down four provider code paths that would
+// otherwise be untested:
+//
+//  1. the GetEntity current-row query filter that excludes kind='desired-state'
+//     rows (queryCurrentRows / eg_entity_current read);
+//  2. the updateEntityProjection early return that folds a desired-state row into
+//     eg_entity_current for dedup but skips the entity-index rebuild;
+//  3. the rebuildEntityIndex query filter (kind != 'desired-state') — exercised
+//     because the desired-state row is ingested *before* the state observation,
+//     so it is already present in eg_entity_current when the later state
+//     observation triggers an index rebuild;
+//  4. the RebuildProjections desired-state replay branch — after corruption the
+//     log is replayed and the desired-state row must fold into current without
+//     polluting the rebuilt index.
+//
+// GetDesiredState (which reads the log directly) must continue to surface the
+// record throughout. ADR-022 §6 / ADR-023 §3.
+func testEGDesiredStateIsolation(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:ds-iso-auth/ent1")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 1. Ingest a desired-state observation FIRST, before any state observation.
+	//    This forces the ordering where a desired-state row is already resident in
+	//    eg_entity_current when the later state observation rebuilds the index —
+	//    the exact scenario the rebuildEntityIndex filter must survive.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "config:rev-ds-1",
+		Observations: []types.Observation{{
+			Source:     "config:rev-ds-1",
+			ObservedAt: now,
+			RecordedAt: now,
+			Subject:    eid.String(),
+			Kind:       types.ObservationKindDesiredState,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"config_revision": "rev-ds-1",
+				"poison_key":      "must-not-appear",
+				"hostname":        "desired-not-actual",
+				"policies":        map[string]interface{}{"enforce_firewall": true},
+			},
+		}},
+	}))
+
+	// 2. Report a real state observation for the same subject. Its projection
+	//    upsert is followed by an entity-index rebuild that reads every current
+	//    row for the subject — including the desired-state row from step 1.
+	egReport(ctx, t, p, "observer:test", eid.String(), map[string]interface{}{
+		"entity_kind":   "host",
+		"hostname":      "web01",
+		"owning_tenant": "root/ds-iso",
+	})
+
+	// assertIsolated checks the invariants that must hold both before and after a
+	// projection rebuild.
+	assertIsolated := func(t *testing.T, phase string) {
+		t.Helper()
+		view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/ds-iso"})
+		require.NoError(t, err, "%s: GetEntity", phase)
+		require.NotNil(t, view)
+
+		// The desired-state source must not appear in the entity view sources.
+		for _, src := range view.Sources {
+			assert.NotEqual(t, types.ObservationKindDesiredState, src.Kind,
+				"%s: desired-state observation must not appear in entity Sources", phase)
+		}
+		// The desired-state-only payload key must not contaminate merged attributes
+		// or the entity index, and the state observation's hostname must win.
+		_, hasPoison := view.Entity.Attributes["poison_key"]
+		assert.False(t, hasPoison,
+			"%s: desired-state payload key must not appear in merged entity attributes", phase)
+		assert.Equal(t, "web01", view.Entity.Attributes["hostname"],
+			"%s: hostname must come from the state observation, not the desired-state row", phase)
+
+		// GetDesiredState must still surface the desired-state record from the log.
+		ds, err := p.GetDesiredState(ctx, eid)
+		require.NoError(t, err, "%s: GetDesiredState", phase)
+		require.NotNil(t, ds, "%s: GetDesiredState must return the desired-state record", phase)
+		assert.Equal(t, "rev-ds-1", ds.ConfigRevision, "%s: ConfigRevision", phase)
+		_, hasRev := ds.State["config_revision"]
+		assert.False(t, hasRev, "%s: config_revision must be stripped from State", phase)
+	}
+
+	assertIsolated(t, "pre-rebuild")
+
+	// 3. Corrupt the derived projections and rebuild from the log. The replay must
+	//    fold the desired-state row into current without rebuilding the index from
+	//    it, and the state row's index rebuild must again exclude the desired-state
+	//    row. Providers without a corruption hook still validate rebuild idempotency.
+	if c, ok := p.(corruptibleProvider); ok {
+		require.NoError(t, c.CorruptProjectionsForTesting(ctx))
+		_, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/ds-iso"})
+		require.Error(t, err, "entity must be unreachable after projection corruption")
+	}
+	require.NoError(t, p.RebuildProjections(ctx))
+
+	assertIsolated(t, "post-rebuild")
 }
 
 // testEGResolveIdentity verifies identity-claim resolution to EIDs (AC 8).
