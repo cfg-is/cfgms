@@ -127,6 +127,12 @@ func TestWorkflowHandler_ListWorkflows_EmptyReturnsEmpty(t *testing.T) {
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.EqualValues(t, 0, resp["count"])
+
+	// workflows must serialize as [] not null — a nil slice marshals as null and crashes
+	// client-side .map() calls, so the storage layer must return a non-nil empty slice.
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, json.RawMessage("[]"), raw["workflows"], "empty workflows list must be [] not null")
 }
 
 // --- create workflow ---------------------------------------------------------

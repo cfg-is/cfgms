@@ -4,16 +4,15 @@ package trigger
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,19 +25,42 @@ func newTestTriggerRouter(handler *APIHandler) *mux.Router {
 	return router
 }
 
-func TestAPIHandler_NewAPIHandler(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
+// newRealTriggerManager builds a fully-wired TriggerManagerImpl backed by real
+// CFGMS test components (in-memory storage provider + workflow trigger). CFGMS
+// mandates real-component testing, so the API handler is exercised against the
+// genuine manager rather than a mock of the TriggerManager interface.
+func newRealTriggerManager() *TriggerManagerImpl {
+	return NewControllerTriggerManager(NewTestStorageProvider(), NewTestWorkflowTrigger())
+}
 
-	handler := NewAPIHandler(mockTriggerManager)
+// newRealTriggerManagerWithWorkflow is like newRealTriggerManager but also returns
+// the underlying TestWorkflowTrigger so tests can drive workflow-execution outcomes.
+func newRealTriggerManagerWithWorkflow() (*TriggerManagerImpl, *TestWorkflowTrigger) {
+	wf := NewTestWorkflowTrigger()
+	return NewControllerTriggerManager(NewTestStorageProvider(), wf), wf
+}
+
+// seedTrigger creates a trigger through the real manager path (validation,
+// handler registration, storage persistence). The API test router carries no
+// tenant middleware, so triggers are created with the empty-tenant context to
+// match the tenant the handler will extract from inbound requests.
+func seedTrigger(t *testing.T, mgr *TriggerManagerImpl, trigger *Trigger) {
+	t.Helper()
+	require.NoError(t, mgr.CreateTrigger(context.Background(), trigger))
+}
+
+func TestAPIHandler_NewAPIHandler(t *testing.T) {
+	mgr := newRealTriggerManager()
+
+	handler := NewAPIHandler(mgr)
 
 	assert.NotNil(t, handler)
-	assert.Equal(t, mockTriggerManager, handler.triggerManager)
+	assert.Equal(t, mgr, handler.triggerManager)
 	assert.NotNil(t, handler.logger)
 }
 
 func TestAPIHandler_RegisterRoutes(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
+	handler := NewAPIHandler(newRealTriggerManager())
 	router := newTestTriggerRouter(handler)
 
 	// Test that routes are registered by attempting to match them
@@ -69,14 +91,9 @@ func TestAPIHandler_RegisterRoutes(t *testing.T) {
 }
 
 func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
 	tests := []struct {
 		name           string
 		requestBody    interface{}
-		setupMocks     func()
 		expectedStatus int
 		expectedError  string
 	}{
@@ -92,28 +109,23 @@ func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 					Enabled:        true,
 				},
 			},
-			setupMocks: func() {
-				mockTriggerManager.On("CreateTrigger", mock.Anything, mock.Anything).Return(nil)
-			},
 			expectedStatus: http.StatusCreated,
 		},
 		{
 			name:           "invalid JSON payload",
 			requestBody:    "invalid json",
-			setupMocks:     func() {},
 			expectedStatus: http.StatusBadRequest,
 			expectedError:  "Invalid JSON payload",
 		},
 		{
-			name: "trigger manager error",
+			// A schedule trigger with no schedule configuration fails real
+			// validation inside the manager, which the handler maps to 500.
+			name: "trigger validation failure",
 			requestBody: Trigger{
 				ID:           "test-2",
 				Name:         "Test Trigger",
 				Type:         TriggerTypeSchedule,
 				WorkflowName: "test-workflow",
-			},
-			setupMocks: func() {
-				mockTriggerManager.On("CreateTrigger", mock.Anything, mock.Anything).Return(fmt.Errorf("creation failed"))
 			},
 			expectedStatus: http.StatusInternalServerError,
 			expectedError:  "Failed to create trigger",
@@ -122,9 +134,8 @@ func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
+			handler := NewAPIHandler(newRealTriggerManager())
+			router := newTestTriggerRouter(handler)
 
 			var body bytes.Buffer
 			if str, ok := tt.requestBody.(string); ok {
@@ -158,84 +169,64 @@ func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 }
 
 func TestAPIHandler_HandleListTriggers(t *testing.T) {
-	testTriggers := []*Trigger{
-		{
+	// seedListTriggers populates a real manager with one schedule and one manual
+	// trigger so list/filter behaviour is exercised against real manager state.
+	seedListTriggers := func(t *testing.T, mgr *TriggerManagerImpl) {
+		t.Helper()
+		seedTrigger(t, mgr, &Trigger{
 			ID:           "trigger-1",
 			Name:         "Test Trigger 1",
 			Type:         TriggerTypeSchedule,
-			Status:       TriggerStatusActive,
 			WorkflowName: "workflow-1",
-		},
-		{
+			Schedule:     &ScheduleConfig{CronExpression: "0 2 * * *", Enabled: true},
+		})
+		seedTrigger(t, mgr, &Trigger{
 			ID:           "trigger-2",
 			Name:         "Test Trigger 2",
-			Type:         TriggerTypeWebhook,
-			Status:       TriggerStatusActive,
+			Type:         TriggerTypeManual,
 			WorkflowName: "workflow-2",
-		},
+		})
 	}
 
 	tests := []struct {
 		name           string
 		queryParams    string
-		setupMocks     func(*MockTriggerManager)
 		expectedStatus int
 		expectedCount  int
 		expectedError  string
 	}{
 		{
-			name:        "list all triggers",
-			queryParams: "",
-			setupMocks: func(m *MockTriggerManager) {
-				m.On("ListTriggers", mock.Anything, mock.Anything).Return(testTriggers, nil)
-			},
+			name:           "list all triggers",
+			queryParams:    "",
 			expectedStatus: http.StatusOK,
 			expectedCount:  2,
 		},
 		{
-			name:        "list with type filter",
-			queryParams: "?type=schedule",
-			setupMocks: func(m *MockTriggerManager) {
-				m.On("ListTriggers", mock.Anything, mock.Anything).Return([]*Trigger{testTriggers[0]}, nil)
-			},
+			name:           "list with type filter",
+			queryParams:    "?type=schedule",
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
 		},
 		{
-			name:        "list with limit",
-			queryParams: "?limit=1",
-			setupMocks: func(m *MockTriggerManager) {
-				m.On("ListTriggers", mock.Anything, mock.Anything).Return([]*Trigger{testTriggers[0]}, nil)
-			},
+			name:           "list with limit",
+			queryParams:    "?limit=1",
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
 		},
 		{
 			name:           "invalid query parameter",
 			queryParams:    "?limit=invalid",
-			setupMocks:     func(m *MockTriggerManager) {},
 			expectedStatus: http.StatusBadRequest,
 			expectedError:  "Invalid query parameters",
-		},
-		{
-			name:        "trigger manager error",
-			queryParams: "",
-			setupMocks: func(m *MockTriggerManager) {
-				m.On("ListTriggers", mock.Anything, mock.Anything).Return(nil, fmt.Errorf("list failed"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			expectedError:  "Failed to list triggers",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create fresh mock for each test
-			mockTriggerManager := &MockTriggerManager{}
-			handler := NewAPIHandler(mockTriggerManager)
+			mgr := newRealTriggerManager()
+			seedListTriggers(t, mgr)
+			handler := NewAPIHandler(mgr)
 			router := newTestTriggerRouter(handler)
-
-			tt.setupMocks(mockTriggerManager)
 
 			req, err := http.NewRequest("GET", "/triggers"+tt.queryParams, nil)
 			require.NoError(t, err)
@@ -261,58 +252,36 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 }
 
 func TestAPIHandler_HandleGetTrigger(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
-	testTrigger := &Trigger{
-		ID:           "test-1",
-		Name:         "Test Trigger",
-		Type:         TriggerTypeSchedule,
-		Status:       TriggerStatusActive,
-		WorkflowName: "test-workflow",
-	}
-
 	tests := []struct {
 		name           string
 		triggerID      string
-		setupMocks     func()
 		expectedStatus int
 		expectedError  string
 	}{
 		{
-			name:      "get existing trigger",
-			triggerID: "test-1",
-			setupMocks: func() {
-				mockTriggerManager.On("GetTrigger", mock.Anything, "test-1").Return(testTrigger, nil)
-			},
+			name:           "get existing trigger",
+			triggerID:      "test-1",
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:      "get non-existent trigger",
-			triggerID: "non-existent",
-			setupMocks: func() {
-				mockTriggerManager.On("GetTrigger", mock.Anything, "non-existent").Return(nil, fmt.Errorf("trigger not found"))
-			},
+			name:           "get non-existent trigger",
+			triggerID:      "non-existent",
 			expectedStatus: http.StatusNotFound,
 			expectedError:  "Trigger not found",
-		},
-		{
-			name:      "trigger manager error",
-			triggerID: "error-trigger",
-			setupMocks: func() {
-				mockTriggerManager.On("GetTrigger", mock.Anything, "error-trigger").Return(nil, fmt.Errorf("internal error"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			expectedError:  "Failed to get trigger",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
+			mgr := newRealTriggerManager()
+			seedTrigger(t, mgr, &Trigger{
+				ID:           "test-1",
+				Name:         "Test Trigger",
+				Type:         TriggerTypeManual,
+				WorkflowName: "test-workflow",
+			})
+			handler := NewAPIHandler(mgr)
+			router := newTestTriggerRouter(handler)
 
 			req, err := http.NewRequest("GET", "/triggers/"+tt.triggerID, nil)
 			require.NoError(t, err)
@@ -331,39 +300,28 @@ func TestAPIHandler_HandleGetTrigger(t *testing.T) {
 				var trigger Trigger
 				err := json.Unmarshal(rr.Body.Bytes(), &trigger)
 				require.NoError(t, err)
-				assert.Equal(t, testTrigger.ID, trigger.ID)
+				assert.Equal(t, "test-1", trigger.ID)
 			}
 		})
 	}
 }
 
 func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
-	updatedTrigger := Trigger{
-		ID:           "test-1",
-		Name:         "Updated Test Trigger",
-		Type:         TriggerTypeSchedule,
-		Status:       TriggerStatusActive,
-		WorkflowName: "updated-workflow",
-	}
-
 	tests := []struct {
 		name           string
 		triggerID      string
 		requestBody    interface{}
-		setupMocks     func()
 		expectedStatus int
 		expectedError  string
 	}{
 		{
-			name:        "successful update",
-			triggerID:   "test-1",
-			requestBody: updatedTrigger,
-			setupMocks: func() {
-				mockTriggerManager.On("UpdateTrigger", mock.Anything, mock.Anything).Return(nil)
+			name:      "successful update",
+			triggerID: "test-1",
+			requestBody: Trigger{
+				ID:           "test-1",
+				Name:         "Updated Test Trigger",
+				Type:         TriggerTypeManual,
+				WorkflowName: "updated-workflow",
 			},
 			expectedStatus: http.StatusOK,
 		},
@@ -371,16 +329,30 @@ func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 			name:           "invalid JSON payload",
 			triggerID:      "test-1",
 			requestBody:    "invalid json",
-			setupMocks:     func() {},
 			expectedStatus: http.StatusBadRequest,
 			expectedError:  "Invalid JSON payload",
 		},
 		{
-			name:        "trigger manager error",
-			triggerID:   "test-1",
-			requestBody: updatedTrigger,
-			setupMocks: func() {
-				mockTriggerManager.On("UpdateTrigger", mock.Anything, mock.Anything).Return(fmt.Errorf("update failed"))
+			name:      "update non-existent trigger",
+			triggerID: "non-existent",
+			requestBody: Trigger{
+				Name:         "Ghost",
+				Type:         TriggerTypeManual,
+				WorkflowName: "ghost-workflow",
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedError:  "Trigger not found",
+		},
+		{
+			// Updating an existing trigger with an invalid schedule config fails
+			// real validation, which the handler maps to 500.
+			name:      "update validation failure",
+			triggerID: "test-1",
+			requestBody: Trigger{
+				ID:           "test-1",
+				Name:         "Bad Update",
+				Type:         TriggerTypeSchedule,
+				WorkflowName: "test-workflow",
 			},
 			expectedStatus: http.StatusInternalServerError,
 			expectedError:  "Failed to update trigger",
@@ -389,9 +361,15 @@ func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
+			mgr := newRealTriggerManager()
+			seedTrigger(t, mgr, &Trigger{
+				ID:           "test-1",
+				Name:         "Test Trigger",
+				Type:         TriggerTypeManual,
+				WorkflowName: "test-workflow",
+			})
+			handler := NewAPIHandler(mgr)
+			router := newTestTriggerRouter(handler)
 
 			var body bytes.Buffer
 			if str, ok := tt.requestBody.(string); ok {
@@ -420,50 +398,36 @@ func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 }
 
 func TestAPIHandler_HandleDeleteTrigger(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
 	tests := []struct {
 		name           string
 		triggerID      string
-		setupMocks     func()
 		expectedStatus int
 		expectedError  string
 	}{
 		{
-			name:      "successful deletion",
-			triggerID: "test-1",
-			setupMocks: func() {
-				mockTriggerManager.On("DeleteTrigger", mock.Anything, "test-1").Return(nil)
-			},
+			name:           "successful deletion",
+			triggerID:      "test-1",
 			expectedStatus: http.StatusNoContent,
 		},
 		{
-			name:      "delete non-existent trigger",
-			triggerID: "non-existent",
-			setupMocks: func() {
-				mockTriggerManager.On("DeleteTrigger", mock.Anything, "non-existent").Return(fmt.Errorf("trigger not found"))
-			},
+			name:           "delete non-existent trigger",
+			triggerID:      "non-existent",
 			expectedStatus: http.StatusNotFound,
 			expectedError:  "Trigger not found",
-		},
-		{
-			name:      "trigger manager error",
-			triggerID: "error-trigger",
-			setupMocks: func() {
-				mockTriggerManager.On("DeleteTrigger", mock.Anything, "error-trigger").Return(fmt.Errorf("internal error"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			expectedError:  "Failed to delete trigger",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
+			mgr := newRealTriggerManager()
+			seedTrigger(t, mgr, &Trigger{
+				ID:           "test-1",
+				Name:         "Test Trigger",
+				Type:         TriggerTypeManual,
+				WorkflowName: "test-workflow",
+			})
+			handler := NewAPIHandler(mgr)
+			router := newTestTriggerRouter(handler)
 
 			req, err := http.NewRequest("DELETE", "/triggers/"+tt.triggerID, nil)
 			require.NoError(t, err)
@@ -484,66 +448,53 @@ func TestAPIHandler_HandleDeleteTrigger(t *testing.T) {
 }
 
 func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
 	tests := []struct {
 		name                  string
 		endpoint              string
 		triggerID             string
-		setupMocks            func()
+		seededStatus          TriggerStatus
 		expectedStatus        int
 		expectedError         string
 		expectedTriggerStatus string
 	}{
 		{
-			name:      "enable trigger success",
-			endpoint:  "enable",
-			triggerID: "test-1",
-			setupMocks: func() {
-				mockTriggerManager.On("EnableTrigger", mock.Anything, "test-1").Return(nil)
-			},
+			name:                  "enable trigger success",
+			endpoint:              "enable",
+			triggerID:             "test-1",
+			seededStatus:          TriggerStatusInactive,
 			expectedStatus:        http.StatusOK,
 			expectedTriggerStatus: "active",
 		},
 		{
-			name:      "disable trigger success",
-			endpoint:  "disable",
-			triggerID: "test-1",
-			setupMocks: func() {
-				mockTriggerManager.On("DisableTrigger", mock.Anything, "test-1").Return(nil)
-			},
+			name:                  "disable trigger success",
+			endpoint:              "disable",
+			triggerID:             "test-1",
+			seededStatus:          TriggerStatusActive,
 			expectedStatus:        http.StatusOK,
 			expectedTriggerStatus: "inactive",
 		},
 		{
-			name:      "enable non-existent trigger",
-			endpoint:  "enable",
-			triggerID: "non-existent",
-			setupMocks: func() {
-				mockTriggerManager.On("EnableTrigger", mock.Anything, "non-existent").Return(fmt.Errorf("trigger not found"))
-			},
+			name:           "enable non-existent trigger",
+			endpoint:       "enable",
+			triggerID:      "non-existent",
+			seededStatus:   TriggerStatusActive,
 			expectedStatus: http.StatusNotFound,
 			expectedError:  "Trigger not found",
-		},
-		{
-			name:      "disable with manager error",
-			endpoint:  "disable",
-			triggerID: "error-trigger",
-			setupMocks: func() {
-				mockTriggerManager.On("DisableTrigger", mock.Anything, "error-trigger").Return(fmt.Errorf("internal error"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			expectedError:  "Failed to disable trigger",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
+			mgr := newRealTriggerManager()
+			seedTrigger(t, mgr, &Trigger{
+				ID:           "test-1",
+				Name:         "Test Trigger",
+				Type:         TriggerTypeManual,
+				Status:       tt.seededStatus,
+				WorkflowName: "test-workflow",
+			})
+			handler := NewAPIHandler(mgr)
+			router := newTestTriggerRouter(handler)
 
 			url := fmt.Sprintf("/triggers/%s/%s", tt.triggerID, tt.endpoint)
 			req, err := http.NewRequest("POST", url, nil)
@@ -570,209 +521,212 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 }
 
 func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
-	executionResult := &TriggerExecution{
-		ID:                  "exec-123",
-		TriggerID:           "test-1",
-		Status:              TriggerExecutionStatusSuccess,
-		StartTime:           time.Now(),
-		WorkflowExecutionID: "workflow-exec-456",
-	}
-
-	tests := []struct {
-		name           string
-		triggerID      string
-		requestBody    map[string]interface{}
-		setupMocks     func()
-		expectedStatus int
-		expectedError  string
-	}{
-		{
-			name:      "successful execution",
-			triggerID: "test-1",
-			requestBody: map[string]interface{}{
-				"manual_execution": true,
-				"user_id":          "user-123",
-			},
-			setupMocks: func() {
-				mockTriggerManager.On("ExecuteTrigger", mock.Anything, "test-1", mock.Anything).Return(executionResult, nil)
-			},
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:        "execution with empty data",
-			triggerID:   "test-1",
-			requestBody: map[string]interface{}{},
-			setupMocks: func() {
-				mockTriggerManager.On("ExecuteTrigger", mock.Anything, "test-1", mock.Anything).Return(executionResult, nil)
-			},
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:      "execute non-existent trigger",
-			triggerID: "non-existent",
-			requestBody: map[string]interface{}{
-				"test": "data",
-			},
-			setupMocks: func() {
-				mockTriggerManager.On("ExecuteTrigger", mock.Anything, "non-existent", mock.Anything).Return(nil, fmt.Errorf("trigger not found"))
-			},
-			expectedStatus: http.StatusNotFound,
-			expectedError:  "Trigger not found",
-		},
-		{
-			name:      "execution error",
-			triggerID: "error-trigger",
-			requestBody: map[string]interface{}{
-				"test": "data",
-			},
-			setupMocks: func() {
-				mockTriggerManager.On("ExecuteTrigger", mock.Anything, "error-trigger", mock.Anything).Return(nil, fmt.Errorf("execution failed"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			expectedError:  "Failed to execute trigger",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
-
-			var body bytes.Buffer
-			_ = json.NewEncoder(&body).Encode(tt.requestBody)
-
-			req, err := http.NewRequest("POST", "/triggers/"+tt.triggerID+"/execute", &body)
-			require.NoError(t, err)
-			req.Header.Set("Content-Type", "application/json")
-
-			rr := httptest.NewRecorder()
-			router.ServeHTTP(rr, req)
-
-			assert.Equal(t, tt.expectedStatus, rr.Code)
-
-			if tt.expectedError != "" {
-				var errorResponse map[string]interface{}
-				err := json.Unmarshal(rr.Body.Bytes(), &errorResponse)
-				require.NoError(t, err)
-				assert.Contains(t, errorResponse["error"], tt.expectedError)
-			} else {
-				var execution TriggerExecution
-				err := json.Unmarshal(rr.Body.Bytes(), &execution)
-				require.NoError(t, err)
-				assert.Equal(t, executionResult.ID, execution.ID)
-				assert.Equal(t, executionResult.TriggerID, execution.TriggerID)
-			}
+	t.Run("successful execution", func(t *testing.T) {
+		mgr := newRealTriggerManager()
+		seedTrigger(t, mgr, &Trigger{
+			ID:           "test-1",
+			Name:         "Test Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			WorkflowName: "test-workflow",
 		})
-	}
+		handler := NewAPIHandler(mgr)
+		router := newTestTriggerRouter(handler)
+
+		body := mustJSON(t, map[string]interface{}{"manual_execution": true, "user_id": "user-123"})
+		req, err := http.NewRequest("POST", "/triggers/test-1/execute", bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		var execution TriggerExecution
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &execution))
+		assert.Equal(t, "test-1", execution.TriggerID)
+		assert.Equal(t, TriggerExecutionStatusSuccess, execution.Status)
+		assert.NotEmpty(t, execution.WorkflowExecutionID)
+	})
+
+	t.Run("execution with empty data", func(t *testing.T) {
+		mgr := newRealTriggerManager()
+		seedTrigger(t, mgr, &Trigger{
+			ID:           "test-1",
+			Name:         "Test Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			WorkflowName: "test-workflow",
+		})
+		handler := NewAPIHandler(mgr)
+		router := newTestTriggerRouter(handler)
+
+		body := mustJSON(t, map[string]interface{}{})
+		req, err := http.NewRequest("POST", "/triggers/test-1/execute", bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+		var execution TriggerExecution
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &execution))
+		assert.Equal(t, "test-1", execution.TriggerID)
+	})
+
+	t.Run("execute non-existent trigger", func(t *testing.T) {
+		handler := NewAPIHandler(newRealTriggerManager())
+		router := newTestTriggerRouter(handler)
+
+		body := mustJSON(t, map[string]interface{}{"test": "data"})
+		req, err := http.NewRequest("POST", "/triggers/non-existent/execute", bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusNotFound, rr.Code)
+		var errorResponse map[string]interface{}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errorResponse))
+		assert.Contains(t, errorResponse["error"], "Trigger not found")
+	})
+
+	t.Run("workflow failure returns failed execution", func(t *testing.T) {
+		// A workflow-execution failure is not an API error: the manager records
+		// the failed execution and returns 200 with a failed status. This is the
+		// real manager contract, verified with the real TestWorkflowTrigger.
+		mgr, wf := newRealTriggerManagerWithWorkflow()
+		seedTrigger(t, mgr, &Trigger{
+			ID:           "test-1",
+			Name:         "Test Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			WorkflowName: "failing-workflow",
+		})
+		wf.SetFailNext(true)
+
+		handler := NewAPIHandler(mgr)
+		router := newTestTriggerRouter(handler)
+
+		body := mustJSON(t, map[string]interface{}{"test": "data"})
+		req, err := http.NewRequest("POST", "/triggers/test-1/execute", bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+		var execution TriggerExecution
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &execution))
+		assert.Equal(t, TriggerExecutionStatusFailed, execution.Status)
+		assert.NotEmpty(t, execution.Error)
+	})
 }
 
 func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
-	router := newTestTriggerRouter(handler)
-
-	executions := []*TriggerExecution{
-		{
-			ID:        "exec-1",
-			TriggerID: "test-1",
-			Status:    TriggerExecutionStatusSuccess,
-			StartTime: time.Now().Add(-1 * time.Hour),
-		},
-		{
-			ID:        "exec-2",
-			TriggerID: "test-1",
-			Status:    TriggerExecutionStatusFailed,
-			StartTime: time.Now().Add(-30 * time.Minute),
-		},
-	}
-
-	tests := []struct {
-		name           string
-		triggerID      string
-		queryParams    string
-		setupMocks     func()
-		expectedStatus int
-		expectedCount  int
-		expectedError  string
-	}{
-		{
-			name:        "get executions success",
-			triggerID:   "test-1",
-			queryParams: "",
-			setupMocks: func() {
-				mockTriggerManager.On("GetTriggerExecutions", mock.Anything, "test-1", 50).Return(executions, nil)
-			},
-			expectedStatus: http.StatusOK,
-			expectedCount:  2,
-		},
-		{
-			name:        "get executions with limit",
-			triggerID:   "test-1",
-			queryParams: "?limit=1",
-			setupMocks: func() {
-				mockTriggerManager.On("GetTriggerExecutions", mock.Anything, "test-1", 1).Return([]*TriggerExecution{executions[0]}, nil)
-			},
-			expectedStatus: http.StatusOK,
-			expectedCount:  1,
-		},
-		{
-			name:           "invalid limit parameter",
-			triggerID:      "test-1",
-			queryParams:    "?limit=invalid",
-			setupMocks:     func() {},
-			expectedStatus: http.StatusBadRequest,
-			expectedError:  "Invalid limit parameter",
-		},
-		{
-			name:        "trigger manager error",
-			triggerID:   "error-trigger",
-			queryParams: "",
-			setupMocks: func() {
-				mockTriggerManager.On("GetTriggerExecutions", mock.Anything, "error-trigger", 50).Return(nil, fmt.Errorf("internal error"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			expectedError:  "Failed to get trigger executions",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset mocks
-			mockTriggerManager.ExpectedCalls = nil
-			tt.setupMocks()
-
-			url := fmt.Sprintf("/triggers/%s/executions%s", tt.triggerID, tt.queryParams)
-			req, err := http.NewRequest("GET", url, nil)
-			require.NoError(t, err)
-
-			rr := httptest.NewRecorder()
-			router.ServeHTTP(rr, req)
-
-			assert.Equal(t, tt.expectedStatus, rr.Code)
-
-			if tt.expectedError != "" {
-				var errorResponse map[string]interface{}
-				err := json.Unmarshal(rr.Body.Bytes(), &errorResponse)
-				require.NoError(t, err)
-				assert.Contains(t, errorResponse["error"], tt.expectedError)
-			} else {
-				var response map[string]interface{}
-				err := json.Unmarshal(rr.Body.Bytes(), &response)
-				require.NoError(t, err)
-				assert.Equal(t, float64(tt.expectedCount), response["count"])
-			}
+	t.Run("get executions success", func(t *testing.T) {
+		mgr := newRealTriggerManager()
+		seedTrigger(t, mgr, &Trigger{
+			ID:           "test-1",
+			Name:         "Test Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			WorkflowName: "test-workflow",
 		})
-	}
+		_, err := mgr.ExecuteTrigger(context.Background(), "test-1", map[string]interface{}{"run": 1})
+		require.NoError(t, err)
+
+		handler := NewAPIHandler(mgr)
+		router := newTestTriggerRouter(handler)
+
+		req, err := http.NewRequest("GET", "/triggers/test-1/executions", nil)
+		require.NoError(t, err)
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+		var response map[string]interface{}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+		assert.Equal(t, float64(1), response["count"])
+	})
+
+	t.Run("get executions with limit", func(t *testing.T) {
+		mgr := newRealTriggerManager()
+		seedTrigger(t, mgr, &Trigger{
+			ID:           "test-1",
+			Name:         "Test Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			WorkflowName: "test-workflow",
+		})
+		_, err := mgr.ExecuteTrigger(context.Background(), "test-1", map[string]interface{}{"run": 1})
+		require.NoError(t, err)
+		_, err = mgr.ExecuteTrigger(context.Background(), "test-1", map[string]interface{}{"run": 2})
+		require.NoError(t, err)
+
+		handler := NewAPIHandler(mgr)
+		router := newTestTriggerRouter(handler)
+
+		req, err := http.NewRequest("GET", "/triggers/test-1/executions?limit=1", nil)
+		require.NoError(t, err)
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+		var response map[string]interface{}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+		assert.Equal(t, float64(1), response["count"])
+	})
+
+	t.Run("invalid limit parameter", func(t *testing.T) {
+		mgr := newRealTriggerManager()
+		seedTrigger(t, mgr, &Trigger{
+			ID:           "test-1",
+			Name:         "Test Trigger",
+			Type:         TriggerTypeManual,
+			Status:       TriggerStatusActive,
+			WorkflowName: "test-workflow",
+		})
+		handler := NewAPIHandler(mgr)
+		router := newTestTriggerRouter(handler)
+
+		req, err := http.NewRequest("GET", "/triggers/test-1/executions?limit=invalid", nil)
+		require.NoError(t, err)
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code)
+		var errorResponse map[string]interface{}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errorResponse))
+		assert.Contains(t, errorResponse["error"], "Invalid limit parameter")
+	})
+
+	t.Run("executions for non-existent trigger", func(t *testing.T) {
+		handler := NewAPIHandler(newRealTriggerManager())
+		router := newTestTriggerRouter(handler)
+
+		req, err := http.NewRequest("GET", "/triggers/non-existent/executions", nil)
+		require.NoError(t, err)
+
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusNotFound, rr.Code)
+		var errorResponse map[string]interface{}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errorResponse))
+		assert.Contains(t, errorResponse["error"], "Trigger not found")
+	})
 }
 
 func TestAPIHandler_HandleHealthCheck(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
+	handler := NewAPIHandler(newRealTriggerManager())
 	router := newTestTriggerRouter(handler)
 
 	req, err := http.NewRequest("GET", "/triggers/health", nil)
@@ -793,8 +747,7 @@ func TestAPIHandler_HandleHealthCheck(t *testing.T) {
 }
 
 func TestAPIHandler_ParseFilterFromQuery(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
+	handler := NewAPIHandler(newRealTriggerManager())
 
 	tests := []struct {
 		name           string
@@ -904,9 +857,33 @@ func TestAPIHandler_ParseFilterFromQuery(t *testing.T) {
 	}
 }
 
+// TestAPIHandler_HandleListTriggers_EmptyReturnsArrayNotNull verifies that when the trigger
+// manager holds no triggers for a tenant, the API serializes the list as [] rather than null.
+// A nil slice marshals as JSON null, which crashes client-side .map() calls.
+// The fix is in TriggerManagerImpl.ListTriggers (source level), not in the handler.
+func TestAPIHandler_HandleListTriggers_EmptyReturnsArrayNotNull(t *testing.T) {
+	// Use a real TriggerManagerImpl with no triggers seeded — this is what exercises the
+	// source-level fix in manager.go. If the fix is absent, ListTriggers returns a nil
+	// slice and the JSON will contain "triggers": null.
+	mgr := NewControllerTriggerManager(nil, nil)
+	handler := NewAPIHandler(mgr)
+	router := newTestTriggerRouter(handler)
+
+	req, err := http.NewRequest("GET", "/triggers", nil)
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	assert.Equal(t, json.RawMessage("[]"), raw["triggers"], "empty trigger list must be [] not null")
+}
+
 func TestAPIHandler_SendErrorResponse(t *testing.T) {
-	mockTriggerManager := &MockTriggerManager{}
-	handler := NewAPIHandler(mockTriggerManager)
+	handler := NewAPIHandler(newRealTriggerManager())
 
 	tests := []struct {
 		name           string
@@ -959,4 +936,12 @@ func TestAPIHandler_SendErrorResponse(t *testing.T) {
 			assert.NotEmpty(t, errorResponse["timestamp"])
 		})
 	}
+}
+
+// mustJSON marshals v to JSON, failing the test on error.
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
 }

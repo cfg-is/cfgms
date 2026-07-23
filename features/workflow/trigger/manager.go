@@ -425,7 +425,7 @@ func (tm *TriggerManagerImpl) ListTriggers(ctx context.Context, filter *TriggerF
 
 	tenantID := extractTenantFromContext(ctx)
 
-	var triggers []*Trigger
+	triggers := make([]*Trigger, 0)
 
 	for _, trigger := range tm.triggers {
 		// Apply tenant filter (security) - skip tenant filtering if no tenant in context (admin access)
