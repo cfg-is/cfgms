@@ -452,22 +452,26 @@ describe('columns', () => {
 describe('health column', () => {
   it('maps Status + LastSeen staleness onto semantic pills', async () => {
     mockFleet([
-      makeSteward({ id: 's1', hostname: 'fresh', status: 'active', lastSeenMsAgo: 10_000 }),
-      makeSteward({ id: 's2', hostname: 'stale', status: 'active', lastSeenMsAgo: STALE_AFTER_MS + 60_000 }),
-      makeSteward({ id: 's3', hostname: 'degraded', status: 'degraded' }),
+      // active + fresh  → Healthy/ok
+      makeSteward({ id: 's1', hostname: 'fresh',   status: 'active', lastSeenMsAgo: 10_000 }),
+      // active + stale  → Degraded/warn (matches server handleFleetHealth bucket; Issue #2920)
+      makeSteward({ id: 's2', hostname: 'stale',   status: 'active', lastSeenMsAgo: STALE_AFTER_MS + 60_000 }),
+      // lost            → Unreachable/crit
+      makeSteward({ id: 's3', hostname: 'lost',    status: 'lost' }),
+      // registered (no heartbeat) → Registered/neutral
       makeSteward({ id: 's4', hostname: 'enrolled', status: 'registered', lastSeenMsAgo: null }),
     ])
     renderFleet()
     await screen.findByRole('table')
 
     expect(screen.getByText('Healthy')).toBeInTheDocument()
-    expect(screen.getByText('Unreachable')).toBeInTheDocument()
     expect(screen.getByText('Degraded')).toBeInTheDocument()
+    expect(screen.getByText('Unreachable')).toBeInTheDocument()
     expect(screen.getByText('Registered')).toBeInTheDocument()
 
     expect(screen.getByText('Healthy').className).toContain('ok')
-    expect(screen.getByText('Unreachable').className).toContain('crit')
     expect(screen.getByText('Degraded').className).toContain('warn')
+    expect(screen.getByText('Unreachable').className).toContain('crit')
     expect(screen.getByText('Registered').className).toContain('neutral')
   })
 })

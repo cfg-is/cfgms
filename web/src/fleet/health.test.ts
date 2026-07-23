@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   STALE_AFTER_MS,
+  type HealthTone,
   deriveHealth,
   fetchFleetHealth,
   formatLastSeen,
@@ -21,21 +22,27 @@ describe('deriveHealth', () => {
     })
   })
 
-  it('maps an active steward with a stale heartbeat to Unreachable/crit', () => {
+  it('maps an active steward with a stale heartbeat to Degraded/warn', () => {
     expect(deriveHealth('active', iso(STALE_AFTER_MS + 60_000), NOW)).toEqual({
-      label: 'Unreachable',
-      tone: 'crit',
+      label: 'Degraded',
+      tone: 'warn',
     })
   })
 
-  it('treats exactly-at-threshold as still fresh, one ms past as stale', () => {
+  it('treats exactly-at-threshold as still fresh, one ms past as stale (Degraded)', () => {
     expect(deriveHealth('active', iso(STALE_AFTER_MS), NOW).tone).toBe('ok')
-    expect(deriveHealth('active', iso(STALE_AFTER_MS + 1), NOW).tone).toBe('crit')
+    expect(deriveHealth('active', iso(STALE_AFTER_MS + 1), NOW).tone).toBe('warn')
   })
 
-  it('maps an active steward that has never checked in to Unreachable', () => {
-    expect(deriveHealth('active', '0001-01-01T00:00:00Z', NOW).tone).toBe('crit')
-    expect(deriveHealth('active', undefined, NOW).tone).toBe('crit')
+  it('maps an active steward that has never checked in to Degraded', () => {
+    expect(deriveHealth('active', '0001-01-01T00:00:00Z', NOW)).toEqual({
+      label: 'Degraded',
+      tone: 'warn',
+    })
+    expect(deriveHealth('active', undefined, NOW)).toEqual({
+      label: 'Degraded',
+      tone: 'warn',
+    })
   })
 
   it('maps lifecycle states independently of staleness', () => {
@@ -69,6 +76,69 @@ describe('deriveHealth', () => {
       tone: 'neutral',
     })
   })
+})
+
+// ── Server/client taxonomy contract (Issue #2920) ─────────────────────────────
+//
+// Mirrors the bucketing logic from handleFleetHealth
+// (features/controller/api/handlers_fleet.go) so we can assert that
+// deriveHealth and the server aggregate classify the same (status, last_seen)
+// pair into the same bucket. Drift here reproduces the "Degraded: 5 /
+// Unreachable: 0" tile vs. 5 Unreachable rows bug.
+
+describe('deriveHealth ↔ handleFleetHealth taxonomy contract', () => {
+  // TypeScript mirror of handleFleetHealth's bucketing (handlers_fleet.go:142-152).
+  // Update this whenever DegradedHeartbeatAge changes on the server.
+  function serverBucket(
+    status: string,
+    lastSeen: string | undefined,
+    nowMs: number,
+  ): 'healthy' | 'degraded' | 'unreachable' | null {
+    if (status === 'active') {
+      const seen = parseLastSeen(lastSeen)
+      const ageMs = seen !== null ? nowMs - seen : Infinity
+      return ageMs <= STALE_AFTER_MS ? 'healthy' : 'degraded'
+    }
+    if (status === 'lost') return 'unreachable'
+    return null // not counted by server aggregate
+  }
+
+  const serverToClient: Record<string, { label: string; tone: HealthTone }> = {
+    healthy:     { label: 'Healthy',     tone: 'ok' },
+    degraded:    { label: 'Degraded',    tone: 'warn' },
+    unreachable: { label: 'Unreachable', tone: 'crit' },
+  }
+
+  const fixtures: Array<{
+    desc: string
+    status: string
+    lastSeen: string | undefined
+  }> = [
+    { desc: 'active + fresh heartbeat',        status: 'active', lastSeen: iso(30_000) },
+    { desc: 'active + stale heartbeat',         status: 'active', lastSeen: iso(STALE_AFTER_MS + 60_000) },
+    { desc: 'active + never checked in (zero)', status: 'active', lastSeen: '0001-01-01T00:00:00Z' },
+    { desc: 'active + undefined last_seen',      status: 'active', lastSeen: undefined },
+    { desc: 'lost',                              status: 'lost',   lastSeen: iso(60_000) },
+    { desc: 'registered (not counted)',          status: 'registered',  lastSeen: undefined },
+    { desc: 'dormant (not counted)',             status: 'dormant',     lastSeen: iso(0) },
+    { desc: 'archived (not counted)',            status: 'archived',    lastSeen: iso(0) },
+    { desc: 'revoked (not counted)',             status: 'revoked',     lastSeen: iso(0) },
+  ]
+
+  for (const { desc, status, lastSeen } of fixtures) {
+    it(`agrees with server for: ${desc}`, () => {
+      const bucket = serverBucket(status, lastSeen, NOW)
+      const clientHealth = deriveHealth(status, lastSeen, NOW)
+      if (bucket !== null) {
+        // For states the server counts, client label must match the server bucket.
+        expect(clientHealth).toEqual(serverToClient[bucket])
+      } else {
+        // For states the server does not count, client must not produce a bucket
+        // label that would imply the server tracks it (healthy/degraded/unreachable).
+        expect(['Healthy', 'Degraded', 'Unreachable']).not.toContain(clientHealth.label)
+      }
+    })
+  }
 })
 
 describe('parseLastSeen', () => {
