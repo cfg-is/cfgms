@@ -54,8 +54,11 @@ func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 // observation is content-hash-deduped, appended to the observation log, and
 // projected into the current-state and index tables — all within a single
 // transaction so a partial batch never leaves torn projections.
+//
+// When ClaimScopes is non-empty the provider also diffs the current enumeration
+// against the prior-assertion set and retracts missing subjects (ADR-022 §4).
 func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batch interfaces.ObservationBatch) error {
-	if len(batch.Observations) == 0 {
+	if len(batch.Observations) == 0 && len(batch.ClaimScopes) == 0 {
 		return nil
 	}
 
@@ -133,6 +136,12 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 		}
 	}
 
+	if len(batch.ClaimScopes) > 0 {
+		if err := processClaimScopes(ctx, tx, batch.Source, batch.ClaimScopes, batch.Observations); err != nil {
+			return err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: commit: %w", err)
 	}
@@ -142,7 +151,16 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 // updateEntityProjection is the "entity" subject-kind projection updater. It
 // upserts the current-state row for (subject, source) with the new log
 // sequence and rebuilds the entity index from all current sources.
+// Absence observations retract the source's assertion instead of upserting.
 func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, logSeq int64) error {
+	if obs.Kind == types.ObservationKindAbsence {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM eg_entity_current WHERE subject = ? AND source = ?`, obs.Subject, obs.Source,
+		); err != nil {
+			return fmt.Errorf("entitygraph/sqlite: delete entity current for absence: %w", err)
+		}
+		return rebuildEntityIndex(ctx, tx, obs.Subject)
+	}
 	hash, err := payloadHash(obs.Payload)
 	if err != nil {
 		return err

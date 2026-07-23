@@ -87,7 +87,7 @@ func tenantPathOf(obs types.Observation) string {
 // per-source current-state table, and dispatched to the registered projection
 // updater — all inside a single transaction so partial batches never persist.
 func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, batch interfaces.ObservationBatch) error {
-	if len(batch.Observations) == 0 {
+	if len(batch.Observations) == 0 && len(batch.ClaimScopes) == 0 {
 		return nil
 	}
 
@@ -188,6 +188,12 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 
 		if err := dispatchProjectionUpdate(ctx, tx, subjectKind(obs.Subject), obs, logSeq); err != nil {
 			return fmt.Errorf("entitygraph/database: projection update: %w", err)
+		}
+	}
+
+	if len(batch.ClaimScopes) > 0 {
+		if err := processClaimScopes(ctx, tx, batch.Source, batch.ClaimScopes, batch.Observations); err != nil {
+			return err
 		}
 	}
 
