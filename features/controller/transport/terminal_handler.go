@@ -316,13 +316,27 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 
 	// Dispatch COMMAND_TYPE_OPEN_TERMINAL to the steward.
 	if h.commandPub != nil {
-		// Clamp to [0, maxTerminalDim] at the conversion site so the int32 cast
-		// is provably in range. The upper cap above already bounds cols/rows,
-		// but that guard is too far from this conversion for the static
-		// integer-overflow analysis to track it (go/incorrect-integer-conversion);
-		// re-clamping inline makes the bound local and explicit.
-		cols32 := int32(min(max(cols, 0), maxTerminalDim))
-		rows32 := int32(min(max(rows, 0), maxTerminalDim))
+		// Clamp to [0, maxTerminalDim] with explicit comparison guards immediately
+		// before the int32 cast. CodeQL's go/incorrect-integer-conversion range
+		// analysis tracks explicit if-bounds but does NOT model the min/max
+		// builtins, so the guards are written out longhand for the cast to be
+		// provably in range. clampedCols/Rows are locals; cols/rows are unchanged.
+		clampedCols := cols
+		if clampedCols < 0 {
+			clampedCols = 0
+		}
+		if clampedCols > maxTerminalDim {
+			clampedCols = maxTerminalDim
+		}
+		clampedRows := rows
+		if clampedRows < 0 {
+			clampedRows = 0
+		}
+		if clampedRows > maxTerminalDim {
+			clampedRows = maxTerminalDim
+		}
+		cols32 := int32(clampedCols)
+		rows32 := int32(clampedRows)
 		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, map[string]interface{}{
 			"session_id": sess.ID,
 			"shell":      shell,
