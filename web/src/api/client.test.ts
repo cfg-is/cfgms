@@ -5,6 +5,7 @@ import {
   apiFetch,
   loginRequest,
   logoutRequest,
+  onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
 } from './client.ts'
@@ -32,6 +33,7 @@ describe('apiFetch', () => {
     clearCookies()
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
     onSessionExpired(null)
     onStepUpRequired(null)
   })
@@ -90,6 +92,50 @@ describe('apiFetch', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(403))
     await apiFetch('/api/v1/things', { method: 'POST' })
     expect(expired).not.toHaveBeenCalled()
+  })
+
+  // ── Session-confirmed listener (Story #2933) ──────────────────────────────
+
+  it('notifies the session-confirmed listener on 200', async () => {
+    const confirmed = vi.fn()
+    onSessionConfirmed(confirmed)
+    fetchMock.mockResolvedValue(jsonResponse(200))
+    await apiFetch('/api/v1/stewards')
+    expect(confirmed).toHaveBeenCalledTimes(1)
+  })
+
+  it('notifies the session-confirmed listener on non-401 responses (403, 500)', async () => {
+    const confirmed = vi.fn()
+    onSessionConfirmed(confirmed)
+    fetchMock.mockResolvedValueOnce(jsonResponse(403))
+    await apiFetch('/api/v1/stewards')
+    fetchMock.mockResolvedValueOnce(jsonResponse(500))
+    await apiFetch('/api/v1/stewards')
+    expect(confirmed).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT notify the session-confirmed listener on a plain 401', async () => {
+    const confirmed = vi.fn()
+    onSessionConfirmed(confirmed)
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    await apiFetch('/api/v1/stewards')
+    expect(confirmed).not.toHaveBeenCalled()
+  })
+
+  it('does NOT notify the session-confirmed listener on a CFGMS-StepUp 401', async () => {
+    const confirmed = vi.fn()
+    onSessionConfirmed(confirmed)
+    onStepUpRequired(async () => null)
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"',
+        },
+      }),
+    )
+    await apiFetch('/api/v1/stewards')
+    expect(confirmed).not.toHaveBeenCalled()
   })
 
   // ── Step-up detection (Story #2786) ──────────────────────────────────────

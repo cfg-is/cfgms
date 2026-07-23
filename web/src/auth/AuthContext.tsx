@@ -23,12 +23,14 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
 import {
   loginRequest,
   logoutRequest,
+  onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
   type StepUpRequest,
@@ -54,6 +56,13 @@ export type AuthStatus = 'signedOut' | 'invalid' | 'expired' | 'signedIn'
 export interface AuthValue {
   status: AuthStatus
   principal: Principal | null
+  /**
+   * True from initial mount until the first apiFetch response resolves
+   * (success or 401). RequireAuth uses this to render children optimistically
+   * on first load so the route's own data call can act as the session probe
+   * (Story #2933, #2495 no-dedicated-probe constraint).
+   */
+  probing: boolean
   /** Attempt sign-in; resolves true on success. */
   login: (username: string, password: string) => Promise<boolean>
   logout: () => Promise<void>
@@ -70,11 +79,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('signedOut')
   const [principal, setPrincipal] = useState<Principal | null>(null)
   const [stepUpState, setStepUpState] = useState<StepUpState | null>(null)
+  // probingRef gates onSessionConfirmed (resolve the initial probe once).
+  // sessionEstablishedRef tracks whether a real session has been confirmed
+  // (explicit login OR probe success) — only then does a 401 mean 'expired'
+  // rather than 'signedOut'. Both avoid stale-closure without mutating during
+  // render (react-hooks/refs constraint).
+  const probingRef = useRef(true)
+  const sessionEstablishedRef = useRef(false)
+  const [probing, setProbing] = useState(true)
 
   useEffect(() => {
     onSessionExpired(() => {
       setPrincipal(null)
-      setStatus('expired')
+      // A 401 only means a mid-session drop if a session was actually
+      // established (login or probe confirmed). Probe-phase 401s — including
+      // concurrent ones — leave status as signedOut (ADR-018 §4).
+      if (sessionEstablishedRef.current) {
+        setStatus('expired')
+      }
+      probingRef.current = false
+      setProbing(false)
+    })
+    onSessionConfirmed(() => {
+      // First non-401 response after mount: the session cookie is valid.
+      if (probingRef.current) {
+        probingRef.current = false
+        setProbing(false)
+        sessionEstablishedRef.current = true
+        setStatus('signedIn')
+      }
     })
     onStepUpRequired(
       (req) =>
@@ -84,13 +117,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     )
     return () => {
       onSessionExpired(null)
+      onSessionConfirmed(null)
       onStepUpRequired(null)
     }
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
+    // Explicit login commits us out of the probe phase regardless of outcome.
+    probingRef.current = false
+    setProbing(false)
     const result = await loginRequest(username, password)
     if (result.ok) {
+      sessionEstablishedRef.current = true
       setPrincipal({ username })
       setStatus('signedIn')
       return true
@@ -104,11 +142,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await logoutRequest()
     setPrincipal(null)
     setStatus('signedOut')
+    // After an explicit logout the probe phase is over and the session is gone:
+    // show the login screen immediately rather than rendering protected content.
+    sessionEstablishedRef.current = false
+    probingRef.current = false
+    setProbing(false)
   }, [])
 
   const value = useMemo(
-    () => ({ status, principal, login, logout }),
-    [status, principal, login, logout],
+    () => ({ status, principal, probing, login, logout }),
+    [status, principal, probing, login, logout],
   )
 
   function handleStepUpSuccess(response: Response) {
@@ -147,13 +190,15 @@ export function useAuth(): AuthValue {
 }
 
 /**
- * Route guard: renders children only when signed in; otherwise the login
- * screen (which presents signin/invalid/expired per auth status).
+ * Route guard: renders children when signed in, or during the initial probe
+ * (probing=true, signedOut) so the route's first data call can act as the
+ * session probe. Falls back to the login screen for invalid/expired or once
+ * the probe resolves unauthenticated. (Story #2933)
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { status } = useAuth()
-  if (status !== 'signedIn') {
-    return <Login />
+  const { status, probing } = useAuth()
+  if (status === 'signedIn' || (probing && status === 'signedOut')) {
+    return <>{children}</>
   }
-  return <>{children}</>
+  return <Login />
 }

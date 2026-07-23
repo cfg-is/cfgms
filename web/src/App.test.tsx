@@ -36,23 +36,43 @@ function renderApp() {
 }
 
 describe('App', () => {
-  it('guards the authenticated screen: unauthenticated visit renders the login screen', () => {
+  it('guards the authenticated screen: unauthenticated visit renders the login screen', async () => {
+    // All data calls return 401 — no session cookie.
+    // RequireAuth renders children during the probe phase, the first data call
+    // 401s, and the guard falls back to the login screen (Story #2933).
+    fetchMock.mockResolvedValue(jsonResponse(401))
     renderApp()
-    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument(),
+    )
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
   })
 
   it('full flow: login lands on the app shell; sign-out returns to signin', async () => {
+    // Initial probe calls return 401 so the login form appears; once the user
+    // logs in all subsequent calls return 200 (Story #2933 probe pattern).
+    let loggedIn = false
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
         document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      return Promise.resolve(jsonResponse(url.endsWith('/logout') ? 204 : 200))
+      if (url.endsWith('/api/v1/web/login')) {
+        loggedIn = true
+        return Promise.resolve(jsonResponse(200))
+      }
+      if (url.endsWith('/api/v1/web/logout')) {
+        return Promise.resolve(jsonResponse(204))
+      }
+      return Promise.resolve(jsonResponse(loggedIn ? 200 : 401))
     })
 
     renderApp()
+    // Probe resolves with 401 → signedOut → login form appears.
+    await waitFor(() =>
+      expect(screen.getByLabelText(/username/i)).toBeInTheDocument(),
+    )
     fireEvent.change(screen.getByLabelText(/username/i), {
       target: { value: 'admin@msp-a' },
     })
@@ -89,12 +109,17 @@ describe('App', () => {
       if (url.endsWith('/api/v1/web/login')) {
         return Promise.resolve(jsonResponse(200))
       }
-      // The fleet view's steward-page fetch (#2497) doubles as the
-      // authenticated probe — a dead session answers 401.
+      // All data calls return 401: probe resolves to signedOut, login form
+      // appears; after explicit login the fleet call 401s again (mid-session
+      // drop) and the guard shows the expired state (Story #2933, ADR-018 §4).
       return Promise.resolve(jsonResponse(401))
     })
 
     renderApp()
+    // Probe resolves with 401 → signedOut → login form appears.
+    await waitFor(() =>
+      expect(screen.getByLabelText(/username/i)).toBeInTheDocument(),
+    )
     fireEvent.change(screen.getByLabelText(/username/i), {
       target: { value: 'admin@msp-a' },
     })
@@ -103,8 +128,8 @@ describe('App', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    // The fleet data call fires on mount of the authenticated screen, 401s,
-    // and the guard drops back to the login screen in its expired state.
+    // The fleet data call fires on mount of the authenticated screen, 401s
+    // mid-session, and the guard drops back to the login screen as expired.
     await waitFor(() =>
       expect(
         screen.getByText(/session expired\. sign in again to continue\./i),

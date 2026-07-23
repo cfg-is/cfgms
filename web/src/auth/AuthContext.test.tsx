@@ -2,7 +2,9 @@
 // Copyright 2026 Jordan Ritz
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
+import { useEffect } from 'react'
 import { AuthProvider, RequireAuth, useAuth } from './AuthContext.tsx'
+import { apiFetch } from '../api/client.ts'
 
 function jsonResponse(
   status: number,
@@ -28,6 +30,17 @@ function Probe() {
       <button onClick={() => void auth.logout()}>do-logout</button>
     </div>
   )
+}
+
+/**
+ * Simulates a protected route: renders PROTECTED-CONTENT and fires a single
+ * apiFetch on mount so the session probe can resolve (Story #2933).
+ */
+function DataCallChild() {
+  useEffect(() => {
+    void apiFetch('/api/v1/stewards')
+  }, [])
+  return <div>PROTECTED-CONTENT</div>
 }
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -308,7 +321,9 @@ describe('AuthProvider — step-up (Story #2786)', () => {
 })
 
 describe('RequireAuth route guard', () => {
-  it('renders the login screen instead of protected content when signed out', () => {
+  it('renders children on initial mount (probe phase — not the login screen)', () => {
+    // On fresh load (probing=true, signedOut), RequireAuth renders children so
+    // the route's data call can act as the session probe (Story #2933).
     render(
       <AuthProvider>
         <RequireAuth>
@@ -316,13 +331,29 @@ describe('RequireAuth route guard', () => {
         </RequireAuth>
       </AuthProvider>,
     )
-    expect(screen.queryByText('PROTECTED-CONTENT')).not.toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: /sign in/i }),
-    ).toBeInTheDocument()
+    expect(screen.getByText('PROTECTED-CONTENT')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /sign in/i })).not.toBeInTheDocument()
   })
 
-  it('renders protected content once signed in', async () => {
+  it('shows login screen after the initial data call 401s (probe resolved unauthenticated)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    render(
+      <AuthProvider>
+        <RequireAuth>
+          <DataCallChild />
+        </RequireAuth>
+      </AuthProvider>,
+    )
+    // Children render during probe phase.
+    expect(screen.getByText('PROTECTED-CONTENT')).toBeInTheDocument()
+    // After the 401 resolves the probe, the login screen appears.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument(),
+    )
+    expect(screen.queryByText('PROTECTED-CONTENT')).not.toBeInTheDocument()
+  })
+
+  it('renders protected content once signed in via explicit login', async () => {
     mockLoginEndpoints(200)
     render(
       <AuthProvider>
@@ -336,5 +367,102 @@ describe('RequireAuth route guard', () => {
     await waitFor(() =>
       expect(screen.getByText('PROTECTED-CONTENT')).toBeInTheDocument(),
     )
+  })
+
+  it('shows login screen immediately for invalid status (failed login attempt)', async () => {
+    mockLoginEndpoints(401)
+    render(
+      <AuthProvider>
+        <Probe />
+        <RequireAuth>
+          <div>PROTECTED-CONTENT</div>
+        </RequireAuth>
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('invalid'),
+    )
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
+    expect(screen.queryByText('PROTECTED-CONTENT')).not.toBeInTheDocument()
+  })
+
+  it('shows login screen immediately for expired status (mid-session 401)', async () => {
+    mockLoginEndpoints(200)
+    render(
+      <AuthProvider>
+        <Probe />
+        <RequireAuth>
+          <div>PROTECTED-CONTENT</div>
+        </RequireAuth>
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('signedIn'),
+    )
+
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    const { apiFetch: af } = await import('../api/client.ts')
+    await act(async () => {
+      await af('/api/v1/stewards')
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('status')).toHaveTextContent('expired')
+    expect(screen.queryByText('PROTECTED-CONTENT')).not.toBeInTheDocument()
+  })
+})
+
+describe('AuthProvider — session probe (Story #2933)', () => {
+  it('initial mount with successful data call → signedIn (valid session cookie)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200))
+    render(
+      <AuthProvider>
+        <Probe />
+        <RequireAuth>
+          <DataCallChild />
+        </RequireAuth>
+      </AuthProvider>,
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('signedIn'),
+    )
+  })
+
+  it('initial mount with 401 data call → signedOut, not expired (no session cookie)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    render(
+      <AuthProvider>
+        <Probe />
+        <RequireAuth>
+          <DataCallChild />
+        </RequireAuth>
+      </AuthProvider>,
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument(),
+    )
+    // Must be signedOut (first-load semantics), not expired (mid-session semantics).
+    expect(screen.getByTestId('status')).toHaveTextContent('signedOut')
+    expect(screen.getByTestId('status').textContent).toBe('signedOut')
+  })
+
+  it('explicit failed login → invalid immediately (regression: not via probe path)', async () => {
+    mockLoginEndpoints(401)
+    render(
+      <AuthProvider>
+        <Probe />
+        <RequireAuth>
+          <div>PROTECTED-CONTENT</div>
+        </RequireAuth>
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('invalid'),
+    )
+    expect(screen.queryByTestId('status')?.textContent).toBe('invalid')
   })
 })

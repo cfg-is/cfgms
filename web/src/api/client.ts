@@ -51,6 +51,18 @@ export function onSessionExpired(listener: SessionExpiredListener | null): void 
   sessionExpiredListener = listener
 }
 
+type SessionConfirmedListener = () => void
+let sessionConfirmedListener: SessionConfirmedListener | null = null
+
+/**
+ * Register the central session-confirmed handler (or clear it with null).
+ * The AuthProvider owns this; it fires on any non-401 response from apiFetch,
+ * signalling that the session cookie is valid (Story #2933).
+ */
+export function onSessionConfirmed(listener: SessionConfirmedListener | null): void {
+  sessionConfirmedListener = listener
+}
+
 /**
  * Context carried to the step-up listener on a CFGMS-StepUp 401.
  * Includes the original request so the modal can retry it after a successful
@@ -126,7 +138,11 @@ export async function apiFetch(
     }
     // Plain 401 (no step-up header): session is gone.
     sessionExpiredListener?.()
+    return response
   }
+  // Non-401 response: the session cookie is valid (or there is no session guard on
+  // this endpoint). Signal to AuthProvider that the probe resolved successfully.
+  sessionConfirmedListener?.()
   return response
 }
 
