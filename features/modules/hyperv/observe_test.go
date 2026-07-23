@@ -477,3 +477,242 @@ func TestGetDomain_AsMapKeys(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []interface{}{"db-01", "web-01"}, vmNames)
 }
+
+// ── GetDomain (per-resource DNA emission) tests ────────────────────────────────
+
+// clusterMemberVMDomainOutputs returns the ordered per-call PS outputs for a
+// full GetDomain sweep on a cluster-member node (NODE2) with a single VM that
+// reports its VMGUID and two network adapters, plus one external vswitch. The
+// order matches GetDomain's call sequence: observeLocalCluster (5 reads),
+// enumerateVMNames, readVMState (per VM), observeVSwitchDomain.
+func clusterMemberVMDomainOutputs() []string {
+	return []string{
+		// observeLocalCluster (NODE2 non-owner path)
+		`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
+		`{"owner":"NODE1"}`,
+		`{"owners":{}}`,
+		`{"owner":"NODE1"}`,
+		`{"account":"LAB\\NODE2$","access_ok":true,"remediation":""}`,
+		// enumerateVMNames
+		`{"vms":["web-01"]}`,
+		// readVMState(web-01) — includes Id and Adapters (#2891)
+		`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,` +
+			`"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx",` +
+			`"SwitchName":"External","SwitchNames":["External"],"State":"Running",` +
+			`"Id":"11111111-2222-3333-4444-555555555555",` +
+			`"Adapters":[{"MacAddress":"00:15:5D:01:02:03"},{"MacAddress":"00:15:5D:01:02:04"}]}`,
+		// observeVSwitchDomain
+		`{"switches":[{"Name":"External","SwitchType":"External"}]}`,
+	}
+}
+
+// TestGetDomain_HappyPath is the primary coverage for GetDomain. It verifies the
+// full multi-resource DNA emission: a cluster:<name> entry, one vm:<name> entry
+// carrying the parsed VMGUID + NetworkAdapters (the #2891 readVMState additions),
+// and one vswitch:<name> entry — all from a single read-only sweep.
+func TestGetDomain_HappyPath(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "NODE2"
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Exactly one of each resource kind is emitted.
+	require.Contains(t, result, "cluster:cfg-lab")
+	require.Contains(t, result, "vm:web-01")
+	require.Contains(t, result, "vswitch:External")
+	assert.Len(t, result, 3)
+
+	// The cluster entry is the observed ClusterStatus.
+	cluster, ok := result["cluster:cfg-lab"].(*ClusterStatus)
+	require.True(t, ok, "cluster entry must be a *ClusterStatus")
+	assert.Equal(t, "cfg-lab", cluster.Name)
+	assert.True(t, cluster.Found)
+
+	// The vm entry carries the parsed VMGUID and NIC inventory (#2891).
+	vm, ok := result["vm:web-01"].(*VMConfig)
+	require.True(t, ok, "vm entry must be a *VMConfig")
+	assert.Equal(t, "web-01", vm.Name)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", vm.VMGUID)
+	require.Len(t, vm.NetworkAdapters, 2)
+	assert.Equal(t, "00:15:5D:01:02:03", vm.NetworkAdapters[0].MacAddress)
+	assert.Equal(t, "00:15:5D:01:02:04", vm.NetworkAdapters[1].MacAddress)
+
+	// The vswitch entry is the observed VSwitchConfig.
+	sw, ok := result["vswitch:External"].(*VSwitchConfig)
+	require.True(t, ok, "vswitch entry must be a *VSwitchConfig")
+	assert.Equal(t, "External", sw.Name)
+	assert.Equal(t, "external", sw.SwitchType)
+}
+
+// TestGetDomain_Standalone verifies GetDomain on a standalone (non-clustered)
+// host: no cluster:<name> entry is emitted, only the VM and vswitch entries.
+func TestGetDomain_Standalone(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			// observeLocalCluster → standalone
+			`{"found":false}`,
+			// enumerateVMNames
+			`{"vms":["solo-01"]}`,
+			// readVMState(solo-01) — no Id/Adapters (older host)
+			hostVMJSON("solo-01", "stopped", 2, 2048),
+			// observeVSwitchDomain
+			`{"switches":[{"Name":"Default Switch","SwitchType":"Internal"}]}`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "STANDALONE"
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+
+	for k := range result {
+		assert.NotContains(t, k, "cluster:", "standalone host must emit no cluster entry")
+	}
+	require.Contains(t, result, "vm:solo-01")
+	require.Contains(t, result, "vswitch:Default Switch")
+	assert.Len(t, result, 2)
+}
+
+// TestGetDomain_SkipsUnreadableVM verifies that a per-VM read failure does not
+// abort the whole sweep: an unparseable psGetVM response for one VM is skipped
+// (GetDomain lines 101-104) while the healthy VM is still emitted.
+func TestGetDomain_SkipsUnreadableVM(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":false}`,
+			// two VMs enumerated
+			`{"vms":["good-01","bad-01"]}`,
+			// readVMState(good-01) — valid
+			hostVMJSON("good-01", "running", 2, 4096),
+			// readVMState(bad-01) — malformed JSON → rErr, must be skipped
+			`}{ not json`,
+			// observeVSwitchDomain
+			`{"switches":[]}`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, result, "vm:good-01")
+	assert.NotContains(t, result, "vm:bad-01", "an unreadable VM must be skipped, not emitted")
+}
+
+// TestGetDomain_SkipsAbsentVM verifies that a VM which enumerates but reports
+// found=false on the follow-up read (a race: destroyed between enumerate and
+// read) is skipped rather than emitted as an empty entry.
+func TestGetDomain_SkipsAbsentVM(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":false}`,
+			`{"vms":["ghost-01"]}`,
+			// readVMState(ghost-01) → found=false sentinel
+			`{"found":false}`,
+			`{"switches":[]}`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, result, "vm:ghost-01")
+	assert.Empty(t, result)
+}
+
+// TestGetDomain_ClusterError verifies GetDomain wraps and returns a cluster
+// observation error (GetDomain line 90) rather than swallowing it.
+func TestGetDomain_ClusterError(t *testing.T) {
+	transport := &testWinRMTransport{
+		// Malformed psGetClusterSelf output → observeLocalCluster parse error.
+		perCallOutputs: []string{`not-json`},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "NODE2"
+
+	result, err := m.GetDomain(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "domain observe (cluster)")
+}
+
+// TestGetDomain_VMEnumError verifies GetDomain wraps and returns a VM
+// enumeration error (GetDomain line 98).
+func TestGetDomain_VMEnumError(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":false}`,
+			// Malformed enumerateVMNames output → parse error.
+			`not-json`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+
+	result, err := m.GetDomain(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "domain observe (vms)")
+}
+
+// TestGetDomain_VSwitchError verifies GetDomain wraps and returns a vswitch
+// enumeration error (GetDomain line 110).
+func TestGetDomain_VSwitchError(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":false}`,
+			`{"vms":[]}`,
+			// Malformed observeVSwitchDomain output → parse error.
+			`not-json`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+
+	result, err := m.GetDomain(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "domain observe (vswitches)")
+}
+
+// TestGetDomain_ReadOnly extends the AC3 read-only guarantee to the full
+// GetDomain per-resource path (the summary variant is covered by
+// TestObserveDomain_ReadOnly). Every PS script issued must be an allowed Get-*
+// read, and no write-mutating cmdlet may appear.
+func TestGetDomain_ReadOnly(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "NODE2"
+
+	_, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+
+	transport.mu.Lock()
+	calls := make([]winRMCall, len(transport.calls))
+	copy(calls, transport.calls)
+	transport.mu.Unlock()
+
+	allowedScripts := map[string]bool{
+		psGetClusterSelf:          true,
+		psGetClusterOwnerNode:     true,
+		psGetClusterResourceOwner: true,
+		psGetClusterAccessSelf:    true,
+		psEnumerateVMs:            true,
+		psGetVM:                   true,
+		psEnumerateVSwitches:      true,
+	}
+	for _, call := range calls {
+		if !allowedScripts[call.scriptBlock] {
+			t.Errorf("GetDomain used unexpected (non-read-only) script:\n%s", call.scriptBlock)
+		}
+	}
+	assertNoWriteCmdlets(t, calls)
+}

@@ -43,12 +43,12 @@ func (d *DomainObservation) AsMap() map[string]interface{} {
 		swNames[i] = n
 	}
 	return map[string]interface{}{
-		"cluster_name":   d.ClusterName,
-		"cluster_found":  d.ClusterFound,
-		"vm_count":       len(d.VMNames),
-		"vm_names":       vmNames,
-		"vswitch_count":  len(d.VSwitchNames),
-		"vswitch_names":  swNames,
+		"cluster_name":  d.ClusterName,
+		"cluster_found": d.ClusterFound,
+		"vm_count":      len(d.VMNames),
+		"vm_names":      vmNames,
+		"vswitch_count": len(d.VSwitchNames),
+		"vswitch_names": swNames,
 	}
 }
 

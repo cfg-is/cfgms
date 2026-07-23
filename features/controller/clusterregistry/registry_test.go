@@ -196,9 +196,9 @@ func TestBuildRegistry_NonCNOSteward_HasClusterMembership(t *testing.T) {
 			TenantID: "default",
 			DNAAttributes: map[string]string{
 				// Produced by observeLocalCluster on the CNO owner (NODE1).
-				"cluster:cfg-lab.member_nodes":        "NODE1,NODE2",
-				"cluster:cfg-lab.cno_owner_node":      "NODE1",
-				"cluster:cfg-lab.found":               "true",
+				"cluster:cfg-lab.member_nodes":          "NODE1,NODE2",
+				"cluster:cfg-lab.cno_owner_node":        "NODE1",
+				"cluster:cfg-lab.found":                 "true",
 				"cluster:cfg-lab.resource_owner.web-01": "NODE1",
 			},
 		},
