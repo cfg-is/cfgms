@@ -77,6 +77,7 @@ assert_contains() {
 
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
+    [[ -n "$haystack" ]] || { _fail "$msg — haystack is empty"; return; }
     if [[ "$haystack" != *"$needle"* ]]; then
         _pass "$msg"
     else
