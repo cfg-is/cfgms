@@ -252,6 +252,12 @@ type EntityGraphProvider interface {
 
 	// UpdateDriftLifecycle records a workflow annotation on a drift record.
 	UpdateDriftLifecycle(ctx context.Context, update DriftLifecycleUpdate) error
+
+	// RebuildProjections rebuilds all derived projection tables (entity index,
+	// edge, and drift projections) from the observation log and current-state
+	// tables. Used after a projection-logic change or schema migration so that
+	// derived views reflect the full accumulated observation history (ADR-022 §6).
+	RebuildProjections(ctx context.Context) error
 }
 
 // --- Provider Registry ---
