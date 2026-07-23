@@ -126,7 +126,7 @@ func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subj
 		query = `SELECT c.source, c.source_class, c.kind, c.confidence, c.observed_at, c.recorded_at, c.payload_hash, p.payload_json
 			 FROM eg_entity_current c
 			 JOIN eg_payload_content p ON p.content_hash = c.payload_hash
-			 WHERE c.subject = $1`
+			 WHERE c.subject = $1 AND c.kind != 'desired-state'`
 		if tenantFilter != "" {
 			query += ` AND (c.tenant_path = $2 OR c.tenant_path LIKE $3)`
 			args = append(args, tenantFilter, tenantFilter+"/%")
@@ -136,7 +136,7 @@ func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subj
 		query = `SELECT DISTINCT ON (l.source) l.source, l.source_class, l.kind, l.confidence, l.observed_at, l.recorded_at, l.payload_hash, p.payload_json
 			 FROM eg_observation_log l
 			 JOIN eg_payload_content p ON p.content_hash = l.payload_hash
-			 WHERE l.subject = $1 AND l.observed_at <= $2`
+			 WHERE l.subject = $1 AND l.observed_at <= $2 AND l.kind != 'desired-state'`
 		args = append(args, asOf.UTC().Format(time.RFC3339Nano))
 		if tenantFilter != "" {
 			query += ` AND (l.tenant_path = $3 OR l.tenant_path LIKE $4)`
@@ -433,6 +433,30 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 			}
 			if err := rebuildEntityIndex(ctx, tx, lr.subject); err != nil {
 				return fmt.Errorf("entitygraph/database: rebuild index seq %d: %w", lr.id, err)
+			}
+			continue
+		}
+		if lr.kind == string(types.ObservationKindDesiredState) {
+			// Desired-state: fold into eg_entity_current for dedup tracking but do
+			// not rebuild the entity index — desired-state payloads must not pollute
+			// the merged attribute set or identity columns.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO eg_entity_current
+					(subject, source, source_class, kind, confidence, observed_at, recorded_at, payload_hash, tenant_path, log_seq)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				 ON CONFLICT (subject, source) DO UPDATE SET
+					source_class = EXCLUDED.source_class,
+					kind         = EXCLUDED.kind,
+					confidence   = EXCLUDED.confidence,
+					observed_at  = EXCLUDED.observed_at,
+					recorded_at  = EXCLUDED.recorded_at,
+					payload_hash = EXCLUDED.payload_hash,
+					tenant_path  = EXCLUDED.tenant_path,
+					log_seq      = EXCLUDED.log_seq`,
+				lr.subject, lr.source, lr.sourceClass, lr.kind, lr.confidence,
+				lr.observedAt, lr.recordedAt, lr.payloadHash, lr.tenantPath, lr.id,
+			); err != nil {
+				return fmt.Errorf("entitygraph/database: replay desired-state seq %d: %w", lr.id, err)
 			}
 			continue
 		}

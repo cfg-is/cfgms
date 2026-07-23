@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,9 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	sqliteprovider "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
+	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -419,6 +423,83 @@ func TestHandleConfigPush_FanoutToActiveStewards(t *testing.T) {
 	cp.wg.Wait()
 
 	assert.ElementsMatch(t, []string{stewardID}, cp.ReceivedIDs())
+}
+
+// newConfigStoreWriterProvider builds a real SQLite-backed entity-graph provider
+// and a real configstore.Writer over it, wires the writer into the server via
+// SetConfigStoreWriter, and returns the provider so the test can query it. No
+// mocks: the writer records desired-state observations into a live SQLite store.
+func newConfigStoreWriterProvider(t *testing.T, server *Server) *sqliteprovider.SQLiteEntityGraphProvider {
+	t.Helper()
+	p, err := sqliteprovider.NewSQLiteEntityGraphProvider(filepath.Join(t.TempDir(), "eg.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	w, err := configstorewriter.New(p)
+	require.NoError(t, err)
+	server.SetConfigStoreWriter(w)
+	return p
+}
+
+// TestHandleConfigPush_ConfigStoreWriterIngestsDesiredState verifies the happy
+// path of the egConfigstoreWriter block: with a real SQLite-backed writer wired
+// via SetConfigStoreWriter, a successful push records a desired-state observation
+// for each targeted steward's EID, retrievable via GetDesiredState with the
+// config revision carried by the push.
+func TestHandleConfigPush_ConfigStoreWriterIngestsDesiredState(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil // leader
+
+	p := newConfigStoreWriterProvider(t, server)
+
+	payload := validPushPayload()
+	stewardID := registerActiveSteward(t, server.controllerService, "eg-ingest-dna-1", payload.TenantID)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	// Ingest is synchronous (runs before the 202 response), so the desired-state
+	// observation is already durable in the entity graph for the targeted steward.
+	eid, err := egtypes.NewEID("cfgms", "controller", stewardID)
+	require.NoError(t, err)
+
+	ds, err := p.GetDesiredState(context.Background(), eid)
+	require.NoError(t, err)
+	require.NotNil(t, ds, "desired-state observation must be recorded for the targeted steward")
+	assert.Equal(t, payload.Version, ds.ConfigRevision,
+		"desired-state ConfigRevision must match the pushed config version")
+}
+
+// TestHandleConfigPush_ConfigStoreWriterFailureDoesNotBlock verifies the
+// best-effort error path: when the wired writer's Ingest fails, the failure is
+// swallowed (logged as a warning) and the push still returns 202 Accepted. The
+// failure is produced by a real closed-store provider, not a mock.
+func TestHandleConfigPush_ConfigStoreWriterFailureDoesNotBlock(t *testing.T) {
+	server := setupTestServer(t)
+	server.pushLeaderStatus = nil // leader
+
+	p, err := sqliteprovider.NewSQLiteEntityGraphProvider(filepath.Join(t.TempDir(), "eg.db"))
+	require.NoError(t, err)
+	w, err := configstorewriter.New(p)
+	require.NoError(t, err)
+	// Close the underlying store so every Ingest attempt fails against a real,
+	// non-mock provider whose database connection is gone.
+	require.NoError(t, p.Close())
+	server.SetConfigStoreWriter(w)
+
+	payload := validPushPayload()
+	registerActiveSteward(t, server.controllerService, "eg-fail-dna-1", payload.TenantID)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	// The Ingest failure must not block the push.
+	require.Equal(t, http.StatusAccepted, rec.Code)
 }
 
 // TestHandleConfigPush_PersistenceRecord verifies that a successful push request

@@ -60,7 +60,7 @@ func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interface
 		`SELECT c.source, c.source_class, c.kind, c.confidence, c.observed_at, c.recorded_at, c.payload_hash, p.payload
 		 FROM eg_entity_current c
 		 JOIN eg_payload_content p ON p.payload_hash = c.payload_hash
-		 WHERE c.subject = ?`,
+		 WHERE c.subject = ? AND c.kind != 'desired-state'`,
 		subject,
 	)
 	if err != nil {

@@ -194,6 +194,13 @@ func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observati
 		return fmt.Errorf("entitygraph/sqlite: upsert current: %w", err)
 	}
 
+	// Desired-state observations project to eg_entity_current for content-hash
+	// dedup (so re-ingesting an identical revision is a no-op) but must not
+	// contribute to the entity index — GetDesiredState reads the log directly.
+	if obs.Kind == types.ObservationKindDesiredState {
+		return nil
+	}
+
 	return rebuildEntityIndex(ctx, tx, obs.Subject)
 }
 
@@ -207,7 +214,7 @@ func rebuildEntityIndex(ctx context.Context, tx *sql.Tx, subject string) error {
 		`SELECT c.source, c.source_class, c.observed_at, c.payload_hash, p.payload
 		 FROM eg_entity_current c
 		 JOIN eg_payload_content p ON p.payload_hash = c.payload_hash
-		 WHERE c.subject = ?`,
+		 WHERE c.subject = ? AND c.kind != 'desired-state'`,
 		subject,
 	)
 	if err != nil {

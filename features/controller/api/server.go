@@ -146,6 +146,7 @@ type Server struct {
 	webAuthnPresenceSessions       sync.Map                              // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
 	presenceTokens                 sync.Map                              // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
+	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -1169,6 +1170,15 @@ func (s *Server) SetModuleBundleReviewer(r resolution.BundleReviewer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.moduleBundleReviewer = r
+}
+
+// SetConfigStoreWriter wires the ConfigStore → desired-state entity-graph writer
+// (Issue #2879). When set, handleConfigPush records desired-state observations
+// for every targeted steward immediately on push acceptance.
+func (s *Server) SetConfigStoreWriter(w egConfigstoreIngestor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egConfigstoreWriter = w
 }
 
 // getHTTPListenAddr determines the HTTP listen address with the
