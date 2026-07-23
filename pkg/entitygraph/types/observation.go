@@ -11,6 +11,17 @@ const (
 	ObservationKindState    ObservationKind = "state"
 	ObservationKindPresence ObservationKind = "presence"
 	ObservationKindAbsence  ObservationKind = "absence"
+
+	// ObservationKindDriftDiff is written by the steward drift reporter for
+	// each entity where actual state diverges from desired state (ADR-022 §6).
+	// Drift-diff observations project to eg_drift_projection, not entity_current.
+	ObservationKindDriftDiff ObservationKind = "drift-diff"
+
+	// ObservationKindLifecycle is written by UpdateDriftLifecycle to record
+	// workflow annotations (acknowledge/resolve/ignore) on drift records.
+	// Tagged by actor rather than a source provenance class; appears distinctly
+	// in GetHistory alongside state and drift-diff observations.
+	ObservationKindLifecycle ObservationKind = "lifecycle"
 )
 
 // Confidence is the producer-declared confidence level for an observation.

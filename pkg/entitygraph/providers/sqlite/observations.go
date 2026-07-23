@@ -152,7 +152,14 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 // upserts the current-state row for (subject, source) with the new log
 // sequence and rebuilds the entity index from all current sources.
 // Absence observations retract the source's assertion instead of upserting.
+// Drift-diff and lifecycle observations route to eg_drift_projection instead.
 func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, logSeq int64) error {
+	if obs.Kind == types.ObservationKindDriftDiff {
+		return updateDriftProjectionFromObservation(ctx, tx, obs)
+	}
+	if obs.Kind == types.ObservationKindLifecycle {
+		return applyLifecycleTransitionFromObs(ctx, tx, obs)
+	}
 	if obs.Kind == types.ObservationKindAbsence {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM eg_entity_current WHERE subject = ? AND source = ?`, obs.Subject, obs.Source,

@@ -123,6 +123,22 @@ func TestRebuildProjections_Database(t *testing.T) {
 	require.Equal(t, "db-rb01", view.Entity.Attributes["hostname"])
 }
 
+// TestUpdateDriftLifecycleMissingRecord_Database exercises the
+// sql.ErrNoRows -> errNotFound branch on the PostgreSQL provider: a valid
+// transition ("acknowledge") passes transitionLifecycleStatus but the subject
+// has no row in eg_drift_projection, so the projection lookup must surface
+// errNotFound. Mirrors sqlite/provider_test.go:TestUpdateDriftLifecycleMissingRecord.
+func TestUpdateDriftLifecycleMissingRecord_Database(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	p := newTestDBProvider(t, dsn)
+	err := p.UpdateDriftLifecycle(context.Background(), interfaces.DriftLifecycleUpdate{
+		EID:        dbMustEID(t, "host:db-no-drift"),
+		Transition: "acknowledge",
+		Actor:      "operator:alice",
+	})
+	require.ErrorIs(t, err, errNotFound)
+}
+
 // TestContentHashDedup_Database verifies that a bit-identical re-observation
 // from the same source appends no new log row on the PostgreSQL provider.
 // Mirrors sqlite/provider_test.go:TestContentHashDedup. AC 2 requires this

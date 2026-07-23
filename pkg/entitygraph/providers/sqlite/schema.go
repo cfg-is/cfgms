@@ -207,7 +207,7 @@ var schemaStatements = []string{
 		subject          TEXT PRIMARY KEY,
 		detected_at      TEXT NOT NULL DEFAULT '',
 		config_revision  TEXT NOT NULL DEFAULT '',
-		lifecycle_status TEXT NOT NULL DEFAULT '',
+		lifecycle_status TEXT NOT NULL DEFAULT 'detected',
 		fields           TEXT NOT NULL DEFAULT ''
 	)`,
 

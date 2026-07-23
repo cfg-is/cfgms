@@ -63,6 +63,11 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("ClaimScopeEdgeReplace", func(t *testing.T) { testEGClaimScopeEdgeReplace(t, factory) })         // AC 2
 	t.Run("ClaimScopeOverlapRejected", func(t *testing.T) { testEGClaimScopeOverlapRejected(t, factory) }) // AC 3
 	t.Run("SourceClosure", func(t *testing.T) { testEGSourceClosure(t, factory) })                         // AC 4
+	// Story-5: drift, desired-state, drift-lifecycle (Issue #2875)
+	t.Run("DriftNotFoundBehavior", func(t *testing.T) { testEGDriftNotFound(t, factory) })                 // AC 1
+	t.Run("DriftStateRoundTrip", func(t *testing.T) { testEGDriftStateRoundTrip(t, factory) })             // AC 2+3
+	t.Run("DriftLifecycleTransition", func(t *testing.T) { testEGDriftLifecycle(t, factory) })             // AC 4
+	t.Run("DriftProjectionRebuildRecovery", func(t *testing.T) { testEGDriftRebuildRecovery(t, factory) }) // AC 4 + AC 7
 }
 
 // --- Contract test helpers ---
@@ -348,6 +353,82 @@ func testEGRebuild(t *testing.T, factory EntityGraphProviderFactory) {
 		assert.Equal(t, before1.Entity.Attributes["hostname"], after1.Entity.Attributes["hostname"])
 		assert.Equal(t, before2.Entity.Attributes["hostname"], after2.Entity.Attributes["hostname"])
 	}
+}
+
+// testEGDriftRebuildRecovery verifies that RebuildProjections reconstructs the
+// eg_drift_projection table from the observation log, not just the entity/index
+// projections. Drift-diff and lifecycle rows follow an independent replay path in
+// RebuildProjections (loading payloads and dispatching to the drift/lifecycle
+// helpers), so this test seeds a drift-diff observation plus a lifecycle
+// transition, corrupts the drift projection, rebuilds, and confirms GetDriftState
+// recovers the config revision, drift fields, and lifecycle status. Without a
+// corruption hook the drift projection cannot be cleared, so the test instead
+// asserts rebuild is a no-op for drift state (idempotency).
+func testEGDriftRebuildRecovery(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:drift-rebuild-auth/ent1")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Seed a drift-diff observation so eg_drift_projection has a record.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:drift-reporter",
+		Observations: []types.Observation{
+			{
+				Source:     "enforcing-module:drift-reporter",
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       types.ObservationKindDriftDiff,
+				Confidence: types.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"config_revision": "rev-rebuild",
+					"fields": []interface{}{
+						map[string]interface{}{"attribute": "state", "desired": "running", "actual": "stopped", "matching": false},
+					},
+				},
+			},
+		},
+	}))
+
+	// Drive a lifecycle transition so the independent lifecycle-replay branch of
+	// RebuildProjections is also exercised.
+	require.NoError(t, p.UpdateDriftLifecycle(ctx, interfaces.DriftLifecycleUpdate{
+		EID:        eid,
+		Transition: "acknowledge",
+		Actor:      "ops-bot",
+		At:         now.Add(time.Minute),
+		Note:       "tracked in ticket #99",
+	}))
+
+	// Baseline: drift state reflects both the diff and the lifecycle transition.
+	before, err := p.GetDriftState(ctx, eid)
+	require.NoError(t, err)
+	require.NotNil(t, before)
+	require.Equal(t, "rev-rebuild", before.ConfigRevision)
+	require.Equal(t, "acknowledged", before.LifecycleStatus)
+	require.Len(t, before.Fields, 1)
+
+	c, ok := p.(corruptibleProvider)
+	if ok {
+		// Corruption-recovery path: wipe the drift projection and confirm the
+		// state is unreachable, then rebuild from the log and confirm recovery.
+		require.NoError(t, c.CorruptProjectionsForTesting(ctx))
+		_, err = p.GetDriftState(ctx, eid)
+		require.Error(t, err, "drift state must be unreachable after projection corruption")
+	}
+
+	require.NoError(t, p.RebuildProjections(ctx))
+
+	after, err := p.GetDriftState(ctx, eid)
+	require.NoError(t, err, "drift state must be readable after rebuild")
+	require.NotNil(t, after)
+	assert.Equal(t, "rev-rebuild", after.ConfigRevision, "config revision must survive rebuild")
+	assert.Equal(t, "acknowledged", after.LifecycleStatus, "lifecycle status must survive rebuild")
+	require.Len(t, after.Fields, 1, "drift fields must survive rebuild")
+	assert.Equal(t, "state", after.Fields[0].Attribute)
+	assert.False(t, after.Fields[0].Matching)
 }
 
 // testEGResolveIdentity verifies identity-claim resolution to EIDs (AC 8).
@@ -973,6 +1054,161 @@ func TestRegistry_DuplicateNameRejected(t *testing.T) {
 func TestRegistry_LookupMissing(t *testing.T) {
 	_, err := interfaces.GetEntityGraphProvider("no-such-provider-xyzzy")
 	require.Error(t, err)
+}
+
+// --- Story-5: drift, desired-state, drift-lifecycle (Issue #2875) ---
+
+// testEGDriftNotFound verifies AC1: GetDesiredState returns (nil, nil) and
+// GetDriftState returns a not-found error when no observations exist.
+func testEGDriftNotFound(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:drift-nf-auth/ent1")
+
+	// GetDesiredState with no observations must return (nil, nil).
+	ds, err := p.GetDesiredState(ctx, eid)
+	require.NoError(t, err, "GetDesiredState with no observations must succeed")
+	assert.Nil(t, ds, "GetDesiredState must return nil when no desired-state records exist")
+
+	// GetDriftState with no drift record must return a not-found error.
+	_, err = p.GetDriftState(ctx, eid)
+	require.Error(t, err, "GetDriftState must return an error when no drift record exists")
+}
+
+// testEGDriftStateRoundTrip verifies AC2+AC3: a drift-diff observation surfaces
+// via GetDriftState and ListDrifted with the correct fields and matching flags.
+func testEGDriftStateRoundTrip(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:drift-rt-auth/ent1")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	driftFields := []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "web01", "actual": "web99", "matching": false},
+		map[string]interface{}{"attribute": "cpu_count", "desired": float64(4), "actual": float64(4), "matching": true},
+	}
+
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:drift-reporter",
+		Observations: []types.Observation{
+			{
+				Source:     "enforcing-module:drift-reporter",
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       types.ObservationKindDriftDiff,
+				Confidence: types.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"config_revision": "rev-abc",
+					"fields":          driftFields,
+				},
+			},
+		},
+	}))
+
+	// GetDriftState must return the drift record.
+	state, err := p.GetDriftState(ctx, eid)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, "rev-abc", state.ConfigRevision)
+	assert.Equal(t, "detected", state.LifecycleStatus)
+	require.Len(t, state.Fields, 2)
+
+	// Verify the mismatching field.
+	var hostnameField *interfaces.DriftField
+	for i := range state.Fields {
+		if state.Fields[i].Attribute == "hostname" {
+			hostnameField = &state.Fields[i]
+		}
+	}
+	require.NotNil(t, hostnameField, "hostname drift field must be present")
+	assert.False(t, hostnameField.Matching)
+
+	// ListDrifted must include this entity.
+	all, err := p.ListDrifted(ctx, interfaces.DriftFilter{})
+	require.NoError(t, err)
+	found := false
+	for _, s := range all {
+		if s.EID.String() == eid.String() {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "ListDrifted must include the drifted entity")
+}
+
+// testEGDriftLifecycle verifies AC4: UpdateDriftLifecycle transitions are
+// queryable, appear distinctly in GetHistory, and do not alter the drift fields.
+func testEGDriftLifecycle(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:drift-lc-auth/ent1")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Seed a drift-diff observation.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:drift-reporter",
+		Observations: []types.Observation{
+			{
+				Source:     "enforcing-module:drift-reporter",
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       types.ObservationKindDriftDiff,
+				Confidence: types.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"config_revision": "rev-lc",
+					"fields": []interface{}{
+						map[string]interface{}{"attribute": "state", "desired": "running", "actual": "stopped", "matching": false},
+					},
+				},
+			},
+		},
+	}))
+
+	// Acknowledge the drift.
+	require.NoError(t, p.UpdateDriftLifecycle(ctx, interfaces.DriftLifecycleUpdate{
+		EID:        eid,
+		Transition: "acknowledge",
+		Actor:      "ops-bot",
+		At:         now.Add(time.Minute),
+		Note:       "tracked in ticket #42",
+	}))
+
+	// Lifecycle status must be updated.
+	state, err := p.GetDriftState(ctx, eid)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, "acknowledged", state.LifecycleStatus, "lifecycle_status must be 'acknowledged' after acknowledge transition")
+
+	// Drift fields must be unchanged after lifecycle transition (AC4).
+	require.Len(t, state.Fields, 1, "drift fields must not be altered by lifecycle transition")
+	assert.Equal(t, "state", state.Fields[0].Attribute)
+
+	// GetHistory must include a lifecycle-kind entry tagged by actor (AC3).
+	tr := interfaces.TimeRange{From: now.Add(-time.Second), To: now.Add(time.Hour)}
+	history, err := p.GetHistory(ctx, eid, tr)
+	require.NoError(t, err)
+	lifecycleCount := 0
+	for _, rec := range history {
+		if rec.Observation.Kind == types.ObservationKindLifecycle {
+			lifecycleCount++
+			assert.Equal(t, "ops-bot", rec.Observation.Source,
+				"lifecycle history entry must be tagged by actor, not source-provenance class")
+		}
+	}
+	assert.Equal(t, 1, lifecycleCount, "exactly one lifecycle entry must appear in GetHistory")
+
+	// UpdateDriftLifecycle with unknown transition must return an error.
+	err = p.UpdateDriftLifecycle(ctx, interfaces.DriftLifecycleUpdate{
+		EID:        eid,
+		Transition: "vaporize",
+		Actor:      "ops-bot",
+	})
+	require.Error(t, err, "unknown lifecycle transition must return an error")
 }
 
 // --- Compile-time assertion ---

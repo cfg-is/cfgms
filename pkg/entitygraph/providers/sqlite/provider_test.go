@@ -255,15 +255,34 @@ func TestRebuildProjections(t *testing.T) {
 	require.Equal(t, "rb01", view.Entity.Attributes["hostname"])
 }
 
-func TestUnimplementedReturnsErrNotImplemented(t *testing.T) {
+func TestGetDesiredStateNotFound(t *testing.T) {
 	p := newTestProvider(t)
-	ctx := context.Background()
-	eid := mustEID(t, "host:x")
+	ds, err := p.GetDesiredState(context.Background(), mustEID(t, "host:x"))
+	require.NoError(t, err)
+	require.Nil(t, ds)
+}
 
-	_, err := p.GetDesiredState(ctx, eid)
-	require.ErrorIs(t, err, interfaces.ErrNotImplemented)
-	err = p.UpdateDriftLifecycle(ctx, interfaces.DriftLifecycleUpdate{})
-	require.ErrorIs(t, err, interfaces.ErrNotImplemented)
+func TestUpdateDriftLifecycleInvalidTransition(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.UpdateDriftLifecycle(context.Background(), interfaces.DriftLifecycleUpdate{
+		EID:        mustEID(t, "host:x"),
+		Transition: "fly",
+	})
+	require.Error(t, err)
+}
+
+// TestUpdateDriftLifecycleMissingRecord exercises the sql.ErrNoRows -> ErrNotFound
+// branch: a valid transition ("acknowledge") passes transitionLifecycleStatus but
+// the subject has no row in eg_drift_projection, so the projection lookup must
+// surface ErrNotFound rather than an opaque error.
+func TestUpdateDriftLifecycleMissingRecord(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.UpdateDriftLifecycle(context.Background(), interfaces.DriftLifecycleUpdate{
+		EID:        mustEID(t, "host:no-drift"),
+		Transition: "acknowledge",
+		Actor:      "operator:alice",
+	})
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestGetEdgesEmpty(t *testing.T) {
