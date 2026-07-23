@@ -425,6 +425,49 @@ func TestTerminalHandler_HandleGRPC_UnknownSessionID(t *testing.T) {
 	assert.Equal(t, codes.NotFound, status.Code(err))
 }
 
+// TestTerminalHandler_HandleGRPC_DuplicateStreamRejected verifies that a second
+// HandleGRPC stream for an already-bound session_id is rejected with
+// FailedPrecondition rather than panicking ("close of closed channel").
+// Regression test for the double-close vulnerability: a compromised or buggy
+// steward retrying an open stream for a live session must be rejected cleanly.
+func TestTerminalHandler_HandleGRPC_DuplicateStreamRejected(t *testing.T) {
+	const stewardID = "steward-dup"
+
+	ca := newTestCA(t)
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil)
+
+	_, sess := registerPendingRelay(t, h, mgr, stewardID)
+
+	peerCtx, cancel := context.WithTimeout(
+		peerContextWithCA(t, ca, stewardID), 5*time.Second)
+	defer cancel()
+
+	// First stream: binds the relay (grpcReady is closed inside bindRelay path).
+	stream1 := newTestTerminalStream(peerCtx,
+		&transportpb.TerminalData{SessionId: sess.ID},
+	)
+	waitDone1 := startHandleGRPCTerminal(t, h, stream1)
+
+	// Second stream: same session_id, same steward CN. Must be rejected with
+	// FailedPrecondition, not cause a "close of closed channel" panic.
+	peerCtx2, cancel2 := context.WithTimeout(
+		peerContextWithCA(t, ca, stewardID), 2*time.Second)
+	defer cancel2()
+	stream2 := newTestTerminalStream(peerCtx2,
+		&transportpb.TerminalData{SessionId: sess.ID},
+	)
+
+	err := h.HandleGRPC(stream2)
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err),
+		"duplicate gRPC stream for an already-bound session_id must be rejected, not panic")
+
+	// Tear down the first stream cleanly.
+	close(stream1.recvCh)
+	require.NoError(t, waitDone1())
+}
+
 // TestTerminalHandler_HandleGRPC_EmptySessionID verifies that a first frame
 // without session_id returns InvalidArgument.
 func TestTerminalHandler_HandleGRPC_EmptySessionID(t *testing.T) {

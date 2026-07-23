@@ -62,6 +62,7 @@ type terminalRelay struct {
 	grpcReady chan struct{}     // closed when HandleGRPC binds the stream
 	done      chan struct{}     // closed when either side ends the relay
 	closeOnce sync.Once
+	bound     bool // set under h.mu by bindRelay; duplicate gRPC streams are rejected
 }
 
 func (r *terminalRelay) close() {
@@ -151,8 +152,15 @@ func (h *TerminalHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportpb
 		return status.Error(codes.PermissionDenied, "terminal: steward ID mismatch")
 	}
 
+	// Atomically mark relay as gRPC-bound. A second stream for the same session_id
+	// (e.g. a compromised steward retrying) is rejected here rather than reaching
+	// close(relay.grpcReady) and causing a "close of closed channel" panic.
+	if !h.bindRelay(sessionID) {
+		return status.Error(codes.FailedPrecondition, "terminal: session already has an active gRPC stream")
+	}
+
 	// Signal the browser-side goroutine that the gRPC stream is ready.
-	close(relay.grpcReady)
+	close(relay.grpcReady) // safe: bindRelay ensures at-most-once
 	if h.onGRPCBound != nil {
 		h.onGRPCBound(sessionID)
 	}
@@ -482,6 +490,19 @@ func (h *TerminalHandler) lookupRelay(sessionID string) (*terminalRelay, bool) {
 	defer h.mu.Unlock()
 	relay, ok := h.relays[sessionID]
 	return relay, ok
+}
+
+// bindRelay atomically marks the relay as gRPC-bound. Returns false if the relay
+// is already bound (a second stream for the same session_id must be rejected).
+func (h *TerminalHandler) bindRelay(sessionID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	relay, ok := h.relays[sessionID]
+	if !ok || relay.bound {
+		return false
+	}
+	relay.bound = true
+	return true
 }
 
 // ---------------------------------------------------------------------------
