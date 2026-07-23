@@ -262,15 +262,42 @@ func TestUnimplementedReturnsErrNotImplemented(t *testing.T) {
 
 	_, err := p.GetDesiredState(ctx, eid)
 	require.ErrorIs(t, err, interfaces.ErrNotImplemented)
-	_, err = p.GetEdges(ctx, interfaces.EdgeFilter{})
-	require.ErrorIs(t, err, interfaces.ErrNotImplemented)
 	err = p.UpdateDriftLifecycle(ctx, interfaces.DriftLifecycleUpdate{})
 	require.ErrorIs(t, err, interfaces.ErrNotImplemented)
+}
+
+func TestGetEdgesEmpty(t *testing.T) {
+	// GetEdges on an empty provider returns empty slice, not ErrNotImplemented.
+	p := newTestProvider(t)
+	edges, err := p.GetEdges(context.Background(), interfaces.EdgeFilter{})
+	require.NoError(t, err)
+	require.Empty(t, edges)
 }
 
 func TestSubjectKind(t *testing.T) {
 	require.Equal(t, "entity", subjectKind("host:abc"))
 	require.Equal(t, "edge", subjectKind("contains|host:a|host:b"))
+}
+
+func TestParseEdgeSubject(t *testing.T) {
+	edgeType, from, to, err := parseEdgeSubject("contains|host:a|host:b")
+	require.NoError(t, err)
+	require.Equal(t, "contains", edgeType)
+	require.Equal(t, "host:a", from)
+	require.Equal(t, "host:b", to)
+
+	// to_subject may include a local_id with slashes.
+	edgeType, from, to, err = parseEdgeSubject("runs-on|cluster:cl1|host:cl1/vm1")
+	require.NoError(t, err)
+	require.Equal(t, "runs-on", edgeType)
+	require.Equal(t, "cluster:cl1", from)
+	require.Equal(t, "host:cl1/vm1", to)
+
+	_, _, _, err = parseEdgeSubject("bad")
+	require.Error(t, err, "missing components must error")
+
+	_, _, _, err = parseEdgeSubject("two|parts")
+	require.Error(t, err)
 }
 
 func TestSourceClassPrecedence(t *testing.T) {

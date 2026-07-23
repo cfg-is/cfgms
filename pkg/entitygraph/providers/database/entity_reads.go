@@ -446,16 +446,6 @@ func (p *DatabaseEntityGraphProvider) GetDriftState(_ context.Context, _ interfa
 	return nil, interfaces.ErrNotImplemented
 }
 
-// GetEdges returns edges matching the filter.
-func (p *DatabaseEntityGraphProvider) GetEdges(_ context.Context, _ interfaces.EdgeFilter) ([]*interfaces.EdgeView, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
-// GetNeighborhood returns a depth-bounded connected subgraph starting at eid.
-func (p *DatabaseEntityGraphProvider) GetNeighborhood(_ context.Context, _ interfaces.EIDRef, _ []string, _ types.TraversalDirection, _ int) (*types.Neighborhood, error) {
-	return nil, interfaces.ErrNotImplemented
-}
-
 // GetHistory returns the versioned observation log for a subject over a range.
 func (p *DatabaseEntityGraphProvider) GetHistory(_ context.Context, _ interfaces.EIDRef, _ interfaces.TimeRange) ([]*interfaces.ObservationRecord, error) {
 	return nil, interfaces.ErrNotImplemented
