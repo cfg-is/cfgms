@@ -25,7 +25,6 @@ package storage
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -43,16 +42,12 @@ import (
 // - Retention policy enforcement
 // - Storage optimization
 type Manager struct {
-	logger        logging.Logger
-	config        *Config
-	storage       Backend
-	compressor    Compressor
-	indexer       Indexer
-	pruneWg       sync.WaitGroup
-	maintenanceWg sync.WaitGroup
-	doneCh        chan struct{}
-	closeOnce     sync.Once
-	closeErr      error
+	logger     logging.Logger
+	config     *Config
+	storage    Backend
+	compressor Compressor
+	indexer    Indexer
+	pruneWg    sync.WaitGroup
 }
 
 // Config defines the configuration for DNA storage management.
@@ -188,11 +183,9 @@ func NewManager(config *Config, logger logging.Logger) (*Manager, error) {
 		storage:    backend,
 		compressor: compressor,
 		indexer:    indexer,
-		doneCh:     make(chan struct{}),
 	}
 
 	// Start background maintenance tasks
-	manager.maintenanceWg.Add(1)
 	go manager.startMaintenanceTasks()
 
 	logger.Info("DNA storage manager initialized",
@@ -462,41 +455,27 @@ func (m *Manager) GetStorageStats(ctx context.Context) (*StorageStats, error) {
 }
 
 // Close gracefully shuts down the storage manager and flushes pending operations.
-//
-// Close is safe to call multiple times: the shutdown sequence runs exactly once
-// (guarded by closeOnce) so that concurrent callers and duplicate cleanup
-// registrations (e.g. an explicit Close() plus a t.Cleanup) cannot double-close
-// doneCh. Subsequent calls return the result of the first shutdown.
 func (m *Manager) Close() error {
-	m.closeOnce.Do(func() {
-		m.logger.Info("Shutting down DNA storage manager")
+	m.logger.Info("Shutting down DNA storage manager")
 
-		// Signal the maintenance goroutine to stop, then wait for it to exit so
-		// that runMaintenance cannot access the storage after we close it below.
-		close(m.doneCh)
-		m.maintenanceWg.Wait()
+	// Wait for any in-flight per-device prune goroutines so that all database
+	// transactions are committed before we tear down the connection pool.
+	m.pruneWg.Wait()
 
-		// Wait for any in-flight per-device prune goroutines so that all database
-		// transactions are committed before we tear down the connection pool.
-		m.pruneWg.Wait()
+	// Close components in order
+	if err := m.indexer.Close(); err != nil {
+		m.logger.Error("Failed to close indexer", "error", err)
+	}
 
-		var errs []error
-		if err := m.indexer.Close(); err != nil {
-			m.logger.Error("Failed to close indexer", "error", err)
-			errs = append(errs, err)
-		}
-		if err := m.compressor.Close(); err != nil {
-			m.logger.Error("Failed to close compressor", "error", err)
-			errs = append(errs, err)
-		}
-		if err := m.storage.Close(); err != nil {
-			m.logger.Error("Failed to close storage backend", "error", err)
-			errs = append(errs, err)
-		}
-		m.closeErr = errors.Join(errs...)
-	})
+	if err := m.compressor.Close(); err != nil {
+		m.logger.Error("Failed to close compressor", "error", err)
+	}
 
-	return m.closeErr
+	if err := m.storage.Close(); err != nil {
+		m.logger.Error("Failed to close storage backend", "error", err)
+	}
+
+	return nil
 }
 
 // DefaultConfig returns a default configuration for DNA storage
@@ -663,17 +642,12 @@ func (m *Manager) filterAttributes(dna *commonpb.DNA, attributes []string) *comm
 }
 
 func (m *Manager) startMaintenanceTasks() {
-	defer m.maintenanceWg.Done()
 	ticker := time.NewTicker(m.config.FlushInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-m.doneCh:
-			return
-		case <-ticker.C:
-			m.runMaintenance()
-		}
+	for range ticker.C {
+		// Run periodic maintenance
+		m.runMaintenance()
 	}
 }
 
