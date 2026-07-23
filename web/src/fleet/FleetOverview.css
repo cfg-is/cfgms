@@ -385,7 +385,8 @@ table.tbl {
   .tbl td.c-model,
   .tbl td.c-mac,
   .tbl td.c-ring,
-  .tbl td.c-spacer {
+  .tbl td.c-spacer,
+  .tbl td.c-act {
     display: none;
   }
 }
@@ -686,4 +687,177 @@ a.row-link {
 }
 .det .kv .skel {
   height: 12px;
+}
+
+/* Row action column — kebab button and popover (Story #2938).
+ * Mirrors the `.rowkebab` idiom from `asset-live-activity.html` lines 204-205.
+ * The `.pop .row` base styles come from AppShell.css; only resets/overrides here. */
+.tbl .c-act {
+  width: 36px;
+  padding: 0 4px;
+  text-align: center;
+}
+.ram-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.rowkebab {
+  opacity: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tbl tbody tr:hover .rowkebab,
+.rowkebab:focus-visible {
+  opacity: 1;
+}
+.rowkebab:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+/* Override the .pop base top/left defaults for the row-anchored popover. */
+.ram-pop {
+  top: calc(100% + 2px);
+  min-width: 160px;
+}
+.ram-pop button.row {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+/* Inline tag editor within the row action popover (Story #2938).
+ * Destructive affordances (remove button hover) use --state-crit per design tokens. */
+.row-tag-editor {
+  padding: 4px 0;
+}
+.rtag-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.rtag-back {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+.rtag-back:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.rtag-title {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.rtag-err {
+  font-size: var(--text-sm);
+  color: var(--state-crit);
+  padding: 4px 10px;
+}
+.rtag-spin {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  padding: 6px 10px;
+}
+.rtag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px 8px;
+  min-height: 34px;
+}
+.rtag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 2px 6px 2px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.rtag-rm {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.rtag-rm:hover {
+  color: var(--state-crit);
+}
+.rtag-rm:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.rtag-empty {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  align-self: center;
+}
+.rtag-row {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--border);
+}
+.rtag-in {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-sunk);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.rtag-in::placeholder {
+  color: var(--text-faint);
+}
+.rtag-btn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.rtag-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
