@@ -5,6 +5,16 @@ workflow-driven Hyper-V role promotion epic (**#2657**, stories #2667/#2668/
 #2670/#2671). Pairs with the automated suite
 `test/e2e/hyperv/promote_role_test.go` (Issue **#2671**).
 
+> **Cluster membership DNA — available on every member (story #2891).**
+> The `promote-hv-role` workflow derives the target steward's cluster from its
+> `cluster:*` DNA. Prior to story #2891, this DNA was emitted only on the node
+> where `hyperv.cluster` was declared (the CNO owner), so the workflow could not
+> derive the cluster for non-CNO stewards. Story #2891 decoupled cluster
+> membership DNA from resource declaration: every cluster member now emits
+> `cluster:<name>` DNA unconditionally via `Get-Cluster` (self-discovery, no
+> `-Name` filter). The workflow therefore works for **any cluster member**, not
+> only the CNO owner.
+
 The epic promotes a **standalone** `hyperv.vm` into a cluster-wide, CNO-owned
 **failover-cluster HA role** through three moving parts, driven by the
 `promote-hv-role` workflow (`features/workflow/templates/promote-hv-role.yaml`):

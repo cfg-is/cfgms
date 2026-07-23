@@ -270,7 +270,8 @@ func TestExactName_RegardlessOfTenant(t *testing.T) {
 
 // ─── VMConfig ConfigState interface tests ─────────────────────────────────────
 
-// TestVMConfig_AsMap verifies that AsMap includes all configuration fields.
+// TestVMConfig_AsMap verifies that AsMap includes all configuration fields,
+// including the observed-only vm_guid and network_adapters keys (#2891).
 func TestVMConfig_AsMap(t *testing.T) {
 	cfg := &VMConfig{
 		Name:       "my-vm",
@@ -280,6 +281,11 @@ func TestVMConfig_AsMap(t *testing.T) {
 		SwitchName: "External",
 		Generation: 2,
 		State:      "running",
+		VMGUID:     "11111111-2222-3333-4444-555555555555",
+		NetworkAdapters: []VMNetworkAdapter{
+			{MacAddress: "00:15:5D:01:02:03"},
+			{MacAddress: "00:15:5D:01:02:04"},
+		},
 	}
 	m := cfg.AsMap()
 	assert.Equal(t, "my-vm", m["name"])
@@ -289,6 +295,73 @@ func TestVMConfig_AsMap(t *testing.T) {
 	assert.Equal(t, "External", m["switch_name"])
 	assert.Equal(t, 2, m["generation"])
 	assert.Equal(t, "running", m["state"])
+
+	// #2891: the observed VM GUID is surfaced on the DNA map.
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", m["vm_guid"])
+
+	// #2891: each observed network adapter is serialised as a mac_address map,
+	// preserving order.
+	adapters, ok := m["network_adapters"].([]interface{})
+	require.True(t, ok, "network_adapters must serialise as a slice")
+	require.Len(t, adapters, 2)
+	assert.Equal(t, map[string]interface{}{"mac_address": "00:15:5D:01:02:03"}, adapters[0])
+	assert.Equal(t, map[string]interface{}{"mac_address": "00:15:5D:01:02:04"}, adapters[1])
+}
+
+// TestVMConfig_AsMap_EmptyAdapters verifies that a VMConfig with no observed
+// adapters emits an empty (non-nil) network_adapters slice and an empty vm_guid.
+func TestVMConfig_AsMap_EmptyAdapters(t *testing.T) {
+	cfg := &VMConfig{Name: "bare-vm"}
+	m := cfg.AsMap()
+	assert.Equal(t, "", m["vm_guid"])
+	adapters, ok := m["network_adapters"].([]interface{})
+	require.True(t, ok, "network_adapters must always be a slice, even when empty")
+	assert.Empty(t, adapters)
+}
+
+// TestReadVMState_ParsesGUIDAndAdapters verifies that readVMState maps the
+// psGetVM "Id" field to VMGUID and the "Adapters" array to NetworkAdapters,
+// preserving MAC-address order (#2891). Without this parsing the DNA surface
+// would silently omit the VM identity and NIC inventory.
+func TestReadVMState_ParsesGUIDAndAdapters(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,` +
+				`"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx",` +
+				`"SwitchName":"External","SwitchNames":["External"],"State":"Running",` +
+				`"Id":"11111111-2222-3333-4444-555555555555",` +
+				`"Adapters":[{"MacAddress":"00:15:5D:01:02:03"},{"MacAddress":"00:15:5D:01:02:04"}]}`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+
+	cfg, found, err := m.readVMState(context.Background(), "web-01")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", cfg.VMGUID)
+	require.Len(t, cfg.NetworkAdapters, 2)
+	assert.Equal(t, "00:15:5D:01:02:03", cfg.NetworkAdapters[0].MacAddress)
+	assert.Equal(t, "00:15:5D:01:02:04", cfg.NetworkAdapters[1].MacAddress)
+}
+
+// TestReadVMState_NoGUIDOrAdapters verifies back-compat: a psGetVM response that
+// omits the Id and Adapters fields yields an empty VMGUID and no adapters, with
+// no error (older host scripts / VMs with no NICs).
+func TestReadVMState_NoGUIDOrAdapters(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{hostVMJSON("db-01", "stopped", 4, 8192)},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+
+	cfg, found, err := m.readVMState(context.Background(), "db-01")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Empty(t, cfg.VMGUID)
+	assert.Empty(t, cfg.NetworkAdapters)
 }
 
 // TestVMConfig_YAML verifies round-trip YAML serialization.

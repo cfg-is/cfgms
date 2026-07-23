@@ -10,6 +10,13 @@ A steward on a Hyper-V cluster node (a non-CNO member) did not report its cluste
 
 This is a specific instance of a general coupling defect: **DNA observation was gated on convergence**. A steward reports rich state only for what it is told to *manage*, not for everything it can *see*. That is backwards. It also blocked the `promote-hv-role` workflow (`cfg workflow promote-hv-role`), whose cluster derivation reads the selected steward's `cluster:*` DNA and therefore only works for the one node that publishes it.
 
+**Story #2891 is the shipped fix for the hyperv-specific case** — no new ADR is
+needed; this is implementation of the accepted decision above. It decouples
+`cluster:<name>` DNA from `hyperv.cluster` resource declaration (all cluster
+members now emit membership DNA via `Get-Cluster` self-discovery), adds
+whole-domain VM and vSwitch inventory to the unconditional observe path, and
+extends `psGetVM` with VM GUID and MAC addresses as entity-graph join keys.
+
 The generalisation, articulated during design: *stewards should be authoritative for what they can see*. A steward should report the union of what it can observe, and worry about convergence only for declared resources. Taken to its conclusion: installing a steward on a box should let it detect what the box **is** (installed roles/features) and emit rich DNA for each capability, with nothing declared — convergence being a separate, opt-in layer.
 
 ### Relationship to existing ADRs

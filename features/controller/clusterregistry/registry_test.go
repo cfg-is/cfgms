@@ -181,6 +181,62 @@ func TestClusterRegistry_Cluster_NotFound(t *testing.T) {
 	assert.Nil(t, reg.Cluster("does-not-exist"))
 }
 
+// TestBuildRegistry_NonCNOSteward_HasClusterMembership is the AC5 acceptance
+// test for issue #2891. It verifies that clusterregistry.BuildRegistry correctly
+// includes non-CNO cluster members (stewards that carry cluster:* DNA produced
+// by the whole-domain observe path without a declared hyperv.cluster resource).
+//
+// Fixture: steward-1 is NODE1 (CNO owner), steward-2 is NODE2 (non-CNO member).
+// Both stewards publish cluster:cfg-lab.* DNA — steward-2 via observeLocalCluster
+// (no declared resource). The registry must list both as members.
+func TestBuildRegistry_NonCNOSteward_HasClusterMembership(t *testing.T) {
+	stewards := []fleet.StewardData{
+		{
+			ID:       "steward-1",
+			TenantID: "default",
+			DNAAttributes: map[string]string{
+				// Produced by observeLocalCluster on the CNO owner (NODE1).
+				"cluster:cfg-lab.member_nodes":          "NODE1,NODE2",
+				"cluster:cfg-lab.cno_owner_node":        "NODE1",
+				"cluster:cfg-lab.found":                 "true",
+				"cluster:cfg-lab.resource_owner.web-01": "NODE1",
+			},
+		},
+		{
+			ID:       "steward-2",
+			TenantID: "default",
+			DNAAttributes: map[string]string{
+				// Produced by observeLocalCluster on the non-CNO member (NODE2).
+				// No declared hyperv.cluster resource — pure domain observe output.
+				"cluster:cfg-lab.member_nodes":   "NODE1,NODE2",
+				"cluster:cfg-lab.cno_owner_node": "NODE1",
+				"cluster:cfg-lab.found":          "true",
+			},
+		},
+	}
+
+	reg := clusterregistry.BuildRegistry(stewards)
+	require.NotNil(t, reg)
+
+	entry := reg.Cluster("cfg-lab")
+	require.NotNil(t, entry, "cfg-lab must be in the registry")
+
+	members := make([]string, len(entry.Members))
+	copy(members, entry.Members)
+	sort.Strings(members)
+	assert.Equal(t, []string{"steward-1", "steward-2"}, members,
+		"non-CNO member (steward-2/NODE2) must appear in cluster membership")
+
+	// Reverse lookup: steward-2 belongs to cfg-lab even without CNO ownership.
+	clustersFor2 := reg.MemberClusters("steward-2")
+	assert.Equal(t, []string{"cfg-lab"}, clustersFor2,
+		"MemberClusters for non-CNO steward must include cfg-lab")
+
+	// Reverse lookup: steward-1 still has its membership too.
+	clustersFor1 := reg.MemberClusters("steward-1")
+	assert.Equal(t, []string{"cfg-lab"}, clustersFor1)
+}
+
 func TestClusterRegistry_RoleOwnerNotOverwrittenByNonOwnerField(t *testing.T) {
 	// Non resource_owner fields (e.g., member_nodes, found) must not pollute RoleOwners.
 	stewards := []fleet.StewardData{

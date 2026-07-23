@@ -14,13 +14,39 @@ the default and supported deployment shape is the in-host PS host.
 ## Purpose and scope
 
 The Hyper-V module provides desired-state management of Hyper-V resources on the
-Windows Server host the steward runs on. It enables CFGMS to create, start,
-stop, resize, and remove virtual machines, configure virtual switches, and read
-failover-cluster topology and ownership — all by invoking host-native Hyper-V /
-Failover-Clustering PowerShell cmdlets through the in-host `psHostTransport`. A
-VM's network connection is declared on the VM itself (`switch_name`); the module
-converges its adapters to match. All user-supplied values travel via PowerShell
-`ArgumentList` — never composed into script text.
+Windows Server host the steward runs on, and emits whole-domain Hyper-V inventory
+DNA — cluster membership, VM inventory, and vSwitch inventory — unconditionally,
+with no `hyperv.*` resource declared (story #2891, ADR-024).
+
+### Whole-domain observation (declaration-independent)
+
+On any Hyper-V host where the module is active, the steward emits Hyper-V domain
+DNA best-effort, regardless of whether any `hyperv.*` resource is declared:
+
+- **Cluster membership:** every cluster member — not only the CNO owner — emits
+  `cluster:<name>` DNA including `member_nodes`. This is sourced from
+  `Get-Cluster` with no `-Name` filter (self-discovery), run locally on the
+  member. No `hyperv.cluster` resource needs to be declared for this to happen;
+  the emission is fully decoupled from `hyperv.cluster` reconciliation.
+- **VM inventory:** all VMs visible to `Get-VM` are enumerated and reported,
+  including identity-claim attributes (VM GUID and per-adapter MAC addresses)
+  used as entity-graph join keys (ADR-022 §3).
+- **vSwitch inventory:** all virtual switches visible to `Get-VMSwitch` are
+  enumerated and reported.
+
+This observe path is **read-only** (enumerate + `Get`-equivalent, never `Set`),
+uses `-ErrorAction SilentlyContinue` on anything absent, and is independent of
+convergence. See ADR-024 for the observation-vs-convergence design rationale.
+
+### Convergence (declared resources)
+
+The module also enables CFGMS to create, start, stop, resize, and remove virtual
+machines, configure virtual switches, and read failover-cluster topology and
+ownership — all by invoking host-native Hyper-V / Failover-Clustering PowerShell
+cmdlets through the in-host `psHostTransport`. A VM's network connection is
+declared on the VM itself (`switch_name`); the module converges its adapters to
+match. All user-supplied values travel via PowerShell `ArgumentList` — never
+composed into script text.
 
 The module's scope includes:
 

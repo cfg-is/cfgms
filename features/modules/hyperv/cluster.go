@@ -232,6 +232,13 @@ func (s *ClusterStatus) GetManagedFields() []string {
 // service is not running or the host is standalone).
 const psGetCluster = `$c = Get-Cluster -Name $ClusterName -ErrorAction SilentlyContinue; if (-not $c) { Write-Output '{"found":false}'; return }; $nodes = @(Get-ClusterNode -Cluster $ClusterName -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }); $csv = @(Get-ClusterSharedVolume -Cluster $ClusterName -ErrorAction SilentlyContinue | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName }); ConvertTo-Json @{ found=$true; Name=$c.Name; MemberNodes=$nodes; CsvPaths=$csv } -Compress -Depth 4`
 
+// psGetClusterSelf reads the local host's cluster membership without a -Name
+// parameter — Get-Cluster returns the cluster this node belongs to, if any.
+// Used by observeLocalCluster (the whole-domain observe path) to report cluster
+// membership independently of any declared hyperv.cluster resource. No args —
+// auto-discovery only. Emits {"found":false} when the host is standalone.
+const psGetClusterSelf = `$c = Get-Cluster -ErrorAction SilentlyContinue; if (-not $c) { Write-Output '{"found":false}'; return }; $nodes = @(Get-ClusterNode -Cluster $c.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }); $csv = @(Get-ClusterSharedVolume -Cluster $c.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName }); ConvertTo-Json @{ found=$true; Name=$c.Name; MemberNodes=$nodes; CsvPaths=$csv } -Compress -Depth 4`
+
 // psGetClusterOwnerNode reads the current owner node of the core "Cluster
 // Group" (the CNO). It emits {"owner":""} when the group has no current owner
 // (transient failover) so the Go helper can treat absence as non-error.
@@ -387,6 +394,71 @@ func (m *hypervModule) getCluster(ctx context.Context, name string) (modules.Con
 
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 		"Get-Cluster", "cluster:"+name, nil, nil, nil)
+
+	return status, nil
+}
+
+// observeLocalCluster returns the cluster status for the local host without
+// requiring a declared hyperv.cluster resource. It self-discovers the cluster
+// via Get-Cluster (no -Name parameter), bypassing the scope cap (S5) used by
+// the declared-resource path. Standalone hosts return ClusterStatus.Found=false
+// with no error. Used by GetDomain to populate cluster:* DNA on any Hyper-V
+// cluster member, including non-CNO nodes that have no declared hyperv.cluster.
+//
+// All PowerShell calls are read-only (Get-* only).
+func (m *hypervModule) observeLocalCluster(ctx context.Context) (*ClusterStatus, error) {
+	if m.transport == nil {
+		return nil, ErrTransportNotConfigured
+	}
+
+	output, err := m.transport.ExecutePS(ctx, psGetClusterSelf, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hyperv: observe local cluster: %w", err)
+	}
+
+	var parsed struct {
+		Found       bool     `json:"found"`
+		Name        string   `json:"Name"`
+		MemberNodes []string `json:"MemberNodes"`
+		CsvPaths    []string `json:"CsvPaths"`
+	}
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &parsed); jsonErr != nil {
+		return nil, fmt.Errorf("hyperv: parse observe-cluster response: %w", jsonErr)
+	}
+	if !parsed.Found {
+		return &ClusterStatus{Found: false, ClusterAccessOK: true}, nil
+	}
+
+	name := firstNonEmpty(parsed.Name, "")
+	if name == "" {
+		return &ClusterStatus{Found: false, ClusterAccessOK: true}, nil
+	}
+	status := &ClusterStatus{
+		Name:        name,
+		MemberNodes: parsed.MemberNodes,
+		CSVPaths:    parsed.CsvPaths,
+		RoleOwners:  map[string]string{},
+		Found:       true,
+	}
+
+	// CNO owner and role owners: delegate to clusterOwnershipHelper. When no
+	// cluster resource is declared (m.clusterName == ""), the scope cap does not
+	// fire. When a declared cluster name matches the self-discovered name, the cap
+	// also passes cleanly. On any scope-cap or ownership error, degrade gracefully —
+	// missing ownership info never fails the domain observe.
+	ownsCNO, roleOwners, ownErr := m.clusterOwnershipHelper(ctx, name)
+	if ownErr == nil {
+		if roleOwners != nil {
+			status.RoleOwners = roleOwners
+		}
+		if ownsCNO {
+			status.CNOOwnerNode = m.nodeHostname
+		} else {
+			status.CNOOwnerNode = m.readCNOOwner(ctx, name)
+		}
+	}
+
+	status.ClusterAccessOK, status.ClusterAccessRemediation = m.probeClusterAccess(ctx, name)
 
 	return status, nil
 }
