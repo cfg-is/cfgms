@@ -166,12 +166,12 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 		saRows, err := p.db.QueryContext(ctx, `
 			SELECT l.id, l.observed_at, l.kind, l.subject
 			FROM eg_observation_log l
-			WHERE (l.subject LIKE $1 OR l.subject LIKE $2)
+			WHERE (l.subject LIKE $1 ESCAPE '\' OR l.subject LIKE $2 ESCAPE '\')
 			  AND l.observed_at >= $3
 			  AND l.observed_at <= $4
 			ORDER BY l.id ASC`,
-			"same-as|"+subject+"|%",
-			"same-as|%|"+subject,
+			"same-as|"+escapeLIKE(subject)+"|%",
+			"same-as|%|"+escapeLIKE(subject),
 			fromStr, toStr,
 		)
 		if err != nil {

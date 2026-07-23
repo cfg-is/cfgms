@@ -266,12 +266,12 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 		saRows, err := p.db.QueryContext(ctx, `
 			SELECT l.id, l.observed_at, l.kind, l.subject
 			FROM eg_observation_log l
-			WHERE (l.subject LIKE ? OR l.subject LIKE ?)
+			WHERE (l.subject LIKE ? ESCAPE '\' OR l.subject LIKE ? ESCAPE '\')
 			  AND l.observed_at >= ?
 			  AND l.observed_at <= ?
 			ORDER BY l.id ASC`,
-			"same-as|"+subject+"|%",
-			"same-as|%|"+subject,
+			"same-as|"+escapeLIKE(subject)+"|%",
+			"same-as|%|"+escapeLIKE(subject),
 			rfc3339(r.From), rfc3339(r.To),
 		)
 		if err != nil {

@@ -8,11 +8,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
+
+// escapeLIKE escapes SQL LIKE metacharacters (\, %, _) in s so s is treated as
+// a literal substring when used in a LIKE pattern with ESCAPE '\'.
+func escapeLIKE(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
 
 // resolveGroupMembersCurrentState walks the same-as graph from eid using the
 // current edge projection (fast path for non-temporal reads). Returns all group
@@ -76,11 +86,11 @@ func (p *DatabaseEntityGraphProvider) resolveGroupMembersAsOf(ctx context.Contex
 		rows, err := p.db.QueryContext(ctx, `
 			SELECT DISTINCT ON (l.subject) l.subject, l.kind
 			FROM eg_observation_log l
-			WHERE (l.subject LIKE $1 OR l.subject LIKE $2)
+			WHERE (l.subject LIKE $1 ESCAPE '\' OR l.subject LIKE $2 ESCAPE '\')
 			  AND l.observed_at <= $3
 			ORDER BY l.subject, l.observed_at DESC, l.id DESC`,
-			"same-as|"+current+"|%",
-			"same-as|%|"+current,
+			"same-as|"+escapeLIKE(current)+"|%",
+			"same-as|%|"+escapeLIKE(current),
 			asOfStr,
 		)
 		if err != nil {
