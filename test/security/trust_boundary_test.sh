@@ -760,6 +760,188 @@ test_skip_tracking_and_verdict_regression() {
 }
 
 # ===========================================================================
+# Helper: build a zero-work-retry driver script.
+#
+# Extracts _zero_work_retry() from entrypoint.sh (by name-anchored awk range),
+# prepends a minimal bash header, and appends the caller-supplied environment
+# assignments.  The driver is written to a caller-managed temp file so that the
+# caller can chmod+execute it with a PATH-injected stub directory.
+#
+# Arguments:
+#   $1  path to driver file (already created by caller)
+#   $2  path to mock project-queue.sh
+#   $3  project item id
+#   $4  issue number
+#   $5  exit code for driver to return (default 1)
+# ===========================================================================
+_build_zw_driver() {
+    local driver="$1" mock_pq="$2" item_id="$3" issue_num="$4" exit_code="${5:-1}"
+
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n' > "$driver"
+
+    # Extract the _zero_work_retry function body from entrypoint.sh.
+    # The awk range opens on the exact function header line and closes on the
+    # first bare "}" at column 0 — the function's closing brace.  This is
+    # reliable because bash uses fi/done/esac to close control structures, so
+    # the only ^}$ inside a well-formatted function is its own closing brace.
+    awk '/^_zero_work_retry\(\) \{$/,/^}$/' "$ENTRYPOINT" >> "$driver"
+
+    # Append environment setup with values from the caller's shell.
+    cat >> "$driver" <<DRIVER_ENV
+PROJECT_QUEUE="${mock_pq}"
+CFGMS_PROJECT_ITEM_ID="${item_id}"
+ISSUE_NUM="${issue_num}"
+EXIT_CODE="${exit_code}"
+_zero_work_retry
+DRIVER_ENV
+
+    chmod +x "$driver"
+}
+
+# ===========================================================================
+# TEST (AC5): zero-work retry reads field count, not comment count.
+#
+# Setup: get-item returns ZeroWorkRetries=0; gh returns 10 marker comments.
+# If the code still counted comments (count=10 ≥ 3), it would set Blocked.
+# Correct code reads the field (count=0 < 3) and sets Ready.
+# ===========================================================================
+test_zw_field_ignores_comments() {
+    echo ""
+    echo "--- AC5: zero-work retry reads project field, not issue comment count ---"
+
+    local stub_dir status_file driver
+    stub_dir=$(mktemp -d)
+    status_file="$stub_dir/status.txt"
+    driver=$(mktemp)
+    trap 'rm -rf "$stub_dir" "$driver" 2>/dev/null || true' RETURN
+
+    # Mock project-queue.sh: get-item returns ZeroWorkRetries=0; captures status.
+    cat > "$stub_dir/project-queue.sh" <<PQMOCK
+#!/usr/bin/env bash
+case "\${1:-}" in
+    get-item)
+        printf '{"item_id":"TEST1","title":"T","body":"B","status":"In Progress","fields":{"ZeroWorkRetries":"0"}}\n'
+        exit 0
+        ;;
+    update-field)
+        if [[ "\${3:-}" == "status" ]]; then
+            echo "\${4:-}" > "${status_file}"
+        fi
+        exit 0
+        ;;
+esac
+exit 0
+PQMOCK
+    chmod +x "$stub_dir/project-queue.sh"
+
+    # Mock gh: returns 10 marker comments.  If the code still counted these,
+    # it would treat zw_count=10 ≥ 3 and set Blocked instead of Ready.
+    cat > "$stub_dir/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+    "issue comment") exit 0 ;;
+    "issue view")
+        printf '{"comments":[{"body":"<!-- cfgms-zero-work-retry --> a1"},{"body":"<!-- cfgms-zero-work-retry --> a2"},{"body":"<!-- cfgms-zero-work-retry --> a3"},{"body":"<!-- cfgms-zero-work-retry --> a4"},{"body":"<!-- cfgms-zero-work-retry --> a5"},{"body":"<!-- cfgms-zero-work-retry --> a6"},{"body":"<!-- cfgms-zero-work-retry --> a7"},{"body":"<!-- cfgms-zero-work-retry --> a8"},{"body":"<!-- cfgms-zero-work-retry --> a9"},{"body":"<!-- cfgms-zero-work-retry --> a10"}]}\n'
+        exit 0 ;;
+    *) exit 0 ;;
+esac
+GHSTUB
+    chmod +x "$stub_dir/gh"
+
+    _build_zw_driver "$driver" "$stub_dir/project-queue.sh" "TEST1" "999" "1"
+
+    PATH="$stub_dir:$PATH" bash "$driver" 2>/dev/null || true
+
+    local status
+    status=$(cat "$status_file" 2>/dev/null || echo "NOT_SET")
+    assert_eq "$status" "Ready" \
+        "AC5: ZeroWorkRetries field=0 with 10 marker comments → status Ready (field count wins, not comment count)"
+}
+
+# ===========================================================================
+# TEST (AC6): a failed retry-count read must not produce Ready.
+#
+# Setup: get-item fails (API error); update-field captures status updates.
+# Correct code detects the read failure and sets Blocked (conservative).
+# ===========================================================================
+test_zw_read_failure_blocks() {
+    echo ""
+    echo "--- AC6: zero-work retry read failure → Blocked (not Ready) ---"
+
+    local stub_dir status_file driver
+    stub_dir=$(mktemp -d)
+    status_file="$stub_dir/status.txt"
+    driver=$(mktemp)
+    trap 'rm -rf "$stub_dir" "$driver" 2>/dev/null || true' RETURN
+
+    # Mock project-queue.sh: get-item FAILS; captures status updates.
+    cat > "$stub_dir/project-queue.sh" <<PQMOCK
+#!/usr/bin/env bash
+case "\${1:-}" in
+    get-item)
+        echo "ERROR: Cannot reach GitHub API" >&2
+        exit 1
+        ;;
+    update-field)
+        if [[ "\${3:-}" == "status" ]]; then
+            echo "\${4:-}" > "${status_file}"
+        fi
+        exit 0
+        ;;
+esac
+exit 0
+PQMOCK
+    chmod +x "$stub_dir/project-queue.sh"
+
+    # Minimal gh stub (comment calls are best-effort; ignored for the decision).
+    cat > "$stub_dir/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+exit 0
+GHSTUB
+    chmod +x "$stub_dir/gh"
+
+    _build_zw_driver "$driver" "$stub_dir/project-queue.sh" "TEST1" "999" "1"
+
+    PATH="$stub_dir:$PATH" bash "$driver" 2>/dev/null || true
+
+    local status
+    status=$(cat "$status_file" 2>/dev/null || echo "NOT_SET")
+
+    if [[ "$status" != "Ready" ]]; then
+        _pass "AC6: get-item failure → status NOT set to Ready (read failure is conservative)"
+    else
+        _fail "AC6: get-item failure must NOT set status to Ready — got Ready"
+    fi
+
+    if [[ "$status" == "Blocked" ]]; then
+        _pass "AC6: get-item failure → status set to Blocked"
+    else
+        _fail "AC6: get-item failure should set status to Blocked — got: ${status}"
+    fi
+}
+
+# ===========================================================================
+# STRUCTURAL TEST: _zero_work_retry contains no gh issue view call.
+#
+# Regression guard: the function must not call `gh issue view` (comment
+# fetching) — only `project-queue.sh get-item` for the retry count.
+# ===========================================================================
+test_structural_zero_work_retry_no_comment_fetch() {
+    echo ""
+    echo "--- Structural: _zero_work_retry contains no gh issue view call ---"
+
+    local body count
+    body=$(awk '/^_zero_work_retry\(\) \{$/,/^}$/' "$ENTRYPOINT")
+    if [[ -z "$body" ]]; then
+        _fail "_zero_work_retry structural: awk range matched nothing — function may have been renamed"
+        return
+    fi
+    count=$(printf '%s' "$body" | grep -c "gh issue view" 2>/dev/null || true)
+    assert_eq "$count" "0" \
+        "_zero_work_retry body: zero 'gh issue view' calls (dispatch state must not derive from comments)"
+}
+
+# ===========================================================================
 # Main
 # ===========================================================================
 echo "🔐 Trust Boundary Regression Test Suite"
@@ -779,6 +961,9 @@ test_project_queue_integration
 test_phase2_lifecycle
 test_phase2_step_i_fail_open_regression
 test_skip_tracking_and_verdict_regression
+test_zw_field_ignores_comments
+test_zw_read_failure_blocks
+test_structural_zero_work_retry_no_comment_fetch
 
 echo ""
 echo "📊 Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_SKIPPED skipped"
