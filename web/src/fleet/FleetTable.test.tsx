@@ -134,3 +134,36 @@ describe('row anchor (Story #2917 AC)', () => {
     expect(screen.queryByRole('link')).not.toBeInTheDocument()
   })
 })
+
+describe('row action menu (Story #2938 AC)', () => {
+  it('each interactive row has a kebab action button', () => {
+    renderTable([makeSteward('stw-1', 'host1')], vi.fn())
+
+    expect(screen.getByRole('button', { name: 'Actions' })).toBeInTheDocument()
+  })
+
+  it('no action button when table is not interactive (no onRowSelect)', () => {
+    renderTable([makeSteward('stw-1', 'host1')])
+
+    expect(screen.queryByRole('button', { name: 'Actions' })).not.toBeInTheDocument()
+  })
+
+  it('clicking the kebab does NOT call onRowSelect — navigation unchanged', () => {
+    const onRowSelect = vi.fn()
+    renderTable([makeSteward('stw-1', 'host1')], onRowSelect)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+
+    expect(onRowSelect).not.toHaveBeenCalled()
+  })
+
+  it('a direct row click still calls onRowSelect after kebab is present', () => {
+    const onRowSelect = vi.fn()
+    renderTable([makeSteward('stw-1', 'host1')], onRowSelect)
+
+    fireEvent.click(screen.getByRole('link', { name: 'host1' }), { button: 0 })
+
+    expect(onRowSelect).toHaveBeenCalledTimes(1)
+    expect(onRowSelect.mock.calls[0]?.[0].id).toBe('stw-1')
+  })
+})

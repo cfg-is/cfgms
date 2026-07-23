@@ -14,6 +14,7 @@
  */
 import { deriveHealth, formatLastSeen } from './health.ts'
 import type { ColumnDef, Steward } from './columns.ts'
+import RowActionMenu from './RowActionMenu.tsx'
 
 export interface SortState {
   key: string
@@ -128,6 +129,7 @@ export default function FleetTable({
               </th>
             )
           })}
+          {onRowSelect !== undefined && <th className="c-act" aria-hidden="true" />}
           <th className="c-spacer" aria-hidden="true" />
         </tr>
       </thead>
@@ -159,6 +161,11 @@ export default function FleetTable({
                   onRowSelect={onRowSelect ? () => onRowSelect(steward) : undefined}
                 />
               ))}
+              {onRowSelect !== undefined && (
+                <td className="c-act">
+                  <RowActionMenu stewardId={steward.id} />
+                </td>
+              )}
               <td className="c-spacer" />
             </tr>
           )

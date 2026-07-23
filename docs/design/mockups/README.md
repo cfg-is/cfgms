@@ -21,6 +21,8 @@ principles, and token rationale these mockups express.
 | [`login.html`](login.html) | The authentication screen — terminal-window framing, single mTLS/session sign-in, with `signin` / `loading` / `invalid` / `expired` states and a **passkey/WebAuthn MFA seam** (`mfa` state) designed now, built later. Both themes. | **Reference** |
 | [`fleet-overview.html`](fleet-overview.html) | The read-only fleet overview inside the app shell — tenant-scope switcher, live-filter search, sort, saved views, selectable **device-DNA columns**, scale-aware pagination, and a row drill-in **asset-DNA drawer**. Both themes; Ready / Loading / Error / Empty states. | **Reference** |
 | [`fleet-overview-generic-v0.html`](fleet-overview-generic-v0.html) | The initial generic management dashboard, before brand alignment. Kept for provenance only. | Superseded |
+| [`asset-live-activity.html`](asset-live-activity.html) | The asset live-activity tab — real-time process table and service list driven by the telemetry WebSocket; includes the `.rowkebab` per-row action menu pattern (applied to fleet rows in Story #2938). Both themes. | **Reference** |
+| [`asset-shell.html`](asset-shell.html) | The asset interactive shell tab — terminal emulator panel with WebSocket-backed session, command history, and resize handling. Both themes. | **Reference** |
 
 > These are design references, not production code. The shipped UI is
 > React + TypeScript + Vite (Epic #2344), built against
