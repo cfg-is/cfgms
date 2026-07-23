@@ -199,3 +199,19 @@ func TestHandleListAuditEntries_OffsetAndLimitForwarded(t *testing.T) {
 	rec := getAuditEntries(server, "tenant-a", "offset=10&limit=5")
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+// TestHandleListAuditEntries_EmptyResult_NeverNull verifies that when the underlying
+// storage returns a nil slice (as FlatFileAuditStore does for an unknown tenant), the
+// API handler serializes "data" as [] rather than null. A nil slice marshals as JSON null,
+// which crashes client-side .map() calls.  The fix is a nil-guard in handlers_audit.go
+// immediately before writeSuccessResponse, mirroring the existing pattern in handlers_configs.go.
+func TestHandleListAuditEntries_EmptyResult_NeverNull(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := getAuditEntries(server, "tenant-no-data-null-guard", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, json.RawMessage("[]"), raw["data"], "empty audit list must serialize as [] not null")
+}

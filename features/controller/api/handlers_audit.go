@@ -109,6 +109,10 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 		entries = filtered
 	}
 
+	if entries == nil {
+		entries = []*business.AuditEntry{}
+	}
+
 	s.logger.Info("Retrieved audit entries",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"count", len(entries),

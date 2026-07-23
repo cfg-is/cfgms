@@ -1359,6 +1359,9 @@ List workflow definitions for the calling tenant.
 
 **Response:**
 
+The `workflows` key is always a JSON array — never `null`. When the tenant has no
+workflows, the response is `{"workflows": [], "count": 0}`.
+
 ```json
 {
   "workflows": [
@@ -1641,6 +1644,9 @@ List triggers with optional filtering.
 - `limit` / `offset` — pagination (default limit: server-defined)
 
 **Response:**
+
+The `triggers` key is always a JSON array — never `null`. When the tenant has no
+triggers matching the filter, the response includes `"triggers": []`.
 
 ```json
 {

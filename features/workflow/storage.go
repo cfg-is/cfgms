@@ -170,7 +170,7 @@ func (ws *WorkflowStore) ListWorkflows(ctx context.Context) ([]*VersionedWorkflo
 		}
 	}
 
-	var workflows []*VersionedWorkflow
+	workflows := make([]*VersionedWorkflow, 0, len(workflowMap))
 	for _, workflow := range workflowMap {
 		workflows = append(workflows, workflow)
 	}
