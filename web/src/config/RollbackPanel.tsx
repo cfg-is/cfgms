@@ -18,8 +18,11 @@ import { apiFetch } from '../api/client.ts'
 import {
   useRollbackPoints,
   useRollbackHistory,
+  parseRollbackPreview,
   type RollbackPoint,
   type RollbackOperation,
+  type RollbackPreview,
+  type ConfigurationChange,
 } from './useConfigs.ts'
 
 interface RollbackPanelProps {
@@ -53,6 +56,35 @@ function statusTone(status: string): string {
     default:
       return 'neutral'
   }
+}
+
+function DiffLine({ line }: { line: string }) {
+  let cls = 'cfg-diff-line'
+  if (line.startsWith('+')) cls += ' add'
+  else if (line.startsWith('-')) cls += ' del'
+  return <div className={cls}>{line}</div>
+}
+
+function ChangeRow({ change }: { change: ConfigurationChange }) {
+  return (
+    <div className="cfg-rb-change" data-testid="rb-change-row">
+      <div className="cfg-rb-change-header">
+        <span className="mono2 cfg-rb-change-path">{change.path}</span>
+        {change.module && <span className="mut">{change.module}</span>}
+        <span className={`pill ${riskTone(change.risk)}`}>
+          <span className="dot" />
+          {change.risk || 'unknown'}
+        </span>
+      </div>
+      {change.diff && (
+        <pre className="cfg-diff-block">
+          {change.diff.split('\n').map((line, i) => (
+            <DiffLine key={i} line={line} />
+          ))}
+        </pre>
+      )}
+    </div>
+  )
 }
 
 function LoadingRows() {
@@ -182,7 +214,7 @@ export default function RollbackPanel({ stewardId }: RollbackPanelProps) {
   const [view, setView] = useState<PanelView>('points')
   const [selectedSha, setSelectedSha] = useState<string | null>(null)
 
-  const [preview, setPreview] = useState<Record<string, unknown> | null>(null)
+  const [preview, setPreview] = useState<RollbackPreview | null>(null)
   const [previewing, setPreviewing] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
 
@@ -217,7 +249,7 @@ export default function RollbackPanel({ stewardId }: RollbackPanelProps) {
       })
       if (!response.ok) throw new Error(`Preview failed — ${response.status}`)
       const result = (await response.json()) as Record<string, unknown>
-      setPreview(result?.preview as Record<string, unknown> | null ?? {})
+      setPreview(parseRollbackPreview(result?.preview))
     } catch (cause: unknown) {
       setPreviewError(
         cause instanceof Error && cause.message ? cause.message : 'Preview failed',
@@ -314,9 +346,17 @@ export default function RollbackPanel({ stewardId }: RollbackPanelProps) {
             {preview !== null && (
               <div className="cfg-rb-preview" data-testid="rb-preview-result">
                 <h4>Preview</h4>
-                <p className="mono2">
-                  {JSON.stringify(preview, null, 2).slice(0, 400)}
-                </p>
+                {preview.changes.length === 0 ? (
+                  <p className="mut" data-testid="rb-preview-no-changes">
+                    No configuration changes detected.
+                  </p>
+                ) : (
+                  <div className="cfg-rb-changes">
+                    {preview.changes.map((change, i) => (
+                      <ChangeRow key={`${change.path}-${i}`} change={change} />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 

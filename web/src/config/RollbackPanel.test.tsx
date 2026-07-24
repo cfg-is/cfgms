@@ -71,11 +71,23 @@ function makeOperation(id = 'rb-1') {
   }
 }
 
-function makePreviewResponse() {
+function makePreviewResponse(changes: object[] = []) {
   return new Response(
-    JSON.stringify({ preview: { changes: [], affected_modules: [] } }),
+    JSON.stringify({ preview: { changes, affected_modules: [] } }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   )
+}
+
+function makeChange(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    path: 'configs/sw-1/base.yaml',
+    current_version: 'abc123',
+    rollback_version: 'def456',
+    diff: '--- a/configs/sw-1/base.yaml\n+++ b/configs/sw-1/base.yaml\n-old line\n+new line\n context',
+    risk: 'medium',
+    module: 'patch',
+    ...overrides,
+  }
 }
 
 function makeExecuteResponse(id = 'rb-new-1') {
@@ -282,6 +294,110 @@ describe('RollbackPanel — preview', () => {
     fireEvent.click(screen.getByTestId('rb-preview-btn'))
 
     await waitFor(() => expect(screen.getByTestId('rb-preview-error')).toBeInTheDocument())
+  })
+})
+
+describe('RollbackPanel — structured diff preview (Story #2981)', () => {
+  it('renders one row per ConfigurationChange with path, module, and risk pill', async () => {
+    fetchMock.mockResolvedValueOnce(makePointsResponse([makePoint()]))
+    fetchMock.mockResolvedValueOnce(makeHistoryResponse([]))
+    fetchMock.mockResolvedValueOnce(
+      makePreviewResponse([
+        makeChange({ path: 'configs/sw-1/base.yaml', module: 'patch', risk: 'medium' }),
+        makeChange({ path: 'configs/sw-1/firewall.yaml', module: 'firewall', risk: 'high' }),
+      ]),
+    )
+
+    renderRollbackPanel()
+    await waitFor(() => expect(screen.getAllByTestId('rb-preview-btn')).toHaveLength(1))
+    fireEvent.click(screen.getByTestId('rb-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('rb-preview-result')).toBeInTheDocument())
+
+    const rows = screen.getAllByTestId('rb-change-row')
+    expect(rows).toHaveLength(2)
+
+    expect(rows[0]).toHaveTextContent('configs/sw-1/base.yaml')
+    expect(rows[0]).toHaveTextContent('patch')
+    expect(rows[0]).toHaveTextContent('medium')
+
+    expect(rows[1]).toHaveTextContent('configs/sw-1/firewall.yaml')
+    expect(rows[1]).toHaveTextContent('firewall')
+    expect(rows[1]).toHaveTextContent('high')
+  })
+
+  it('renders diff lines with added/removed class markers', async () => {
+    const diff = '--- a/file\n+++ b/file\n-removed line\n+added line\n context line'
+    fetchMock.mockResolvedValueOnce(makePointsResponse([makePoint()]))
+    fetchMock.mockResolvedValueOnce(makeHistoryResponse([]))
+    fetchMock.mockResolvedValueOnce(makePreviewResponse([makeChange({ diff })]))
+
+    renderRollbackPanel()
+    await waitFor(() => expect(screen.getAllByTestId('rb-preview-btn')).toHaveLength(1))
+    fireEvent.click(screen.getByTestId('rb-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('rb-change-row')).toBeInTheDocument())
+
+    const addedLines = document.querySelectorAll('.cfg-diff-line.add')
+    const removedLines = document.querySelectorAll('.cfg-diff-line.del')
+    expect(addedLines.length).toBeGreaterThanOrEqual(1)
+    expect(removedLines.length).toBeGreaterThanOrEqual(1)
+
+    const allLines = document.querySelectorAll('.cfg-diff-line')
+    const texts = Array.from(allLines).map((el) => el.textContent ?? '')
+    expect(texts).toContain('-removed line')
+    expect(texts).toContain('+added line')
+  })
+
+  it('shows empty-changes notice when preview has no changes', async () => {
+    fetchMock.mockResolvedValueOnce(makePointsResponse([makePoint()]))
+    fetchMock.mockResolvedValueOnce(makeHistoryResponse([]))
+    fetchMock.mockResolvedValueOnce(makePreviewResponse([]))
+
+    renderRollbackPanel()
+    await waitFor(() => expect(screen.getAllByTestId('rb-preview-btn')).toHaveLength(1))
+    fireEvent.click(screen.getByTestId('rb-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('rb-preview-result')).toBeInTheDocument())
+    expect(screen.queryAllByTestId('rb-change-row')).toHaveLength(0)
+    expect(screen.getByTestId('rb-preview-no-changes')).toBeInTheDocument()
+  })
+
+  it('does not render raw JSON blob (no truncated slice behaviour)', async () => {
+    fetchMock.mockResolvedValueOnce(makePointsResponse([makePoint()]))
+    fetchMock.mockResolvedValueOnce(makeHistoryResponse([]))
+    fetchMock.mockResolvedValueOnce(makePreviewResponse([makeChange()]))
+
+    renderRollbackPanel()
+    await waitFor(() => expect(screen.getAllByTestId('rb-preview-btn')).toHaveLength(1))
+    fireEvent.click(screen.getByTestId('rb-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('rb-preview-result')).toBeInTheDocument())
+
+    // Raw JSON stringify output would start with '{"changes"' — must not appear
+    const container = screen.getByTestId('rb-preview-result')
+    expect(container.textContent).not.toMatch(/^\{"changes"/)
+    expect(container.textContent).not.toContain('"current_version"')
+  })
+
+  it('renders diff content as text nodes, not HTML markup', async () => {
+    const xssAttempt = '<img src=x onerror=alert(1)>'
+    fetchMock.mockResolvedValueOnce(makePointsResponse([makePoint()]))
+    fetchMock.mockResolvedValueOnce(makeHistoryResponse([]))
+    fetchMock.mockResolvedValueOnce(
+      makePreviewResponse([makeChange({ diff: `+${xssAttempt}` })]),
+    )
+
+    renderRollbackPanel()
+    await waitFor(() => expect(screen.getAllByTestId('rb-preview-btn')).toHaveLength(1))
+    fireEvent.click(screen.getByTestId('rb-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('rb-change-row')).toBeInTheDocument())
+
+    // The img tag must not be rendered as an HTML element — it must appear as text only
+    expect(document.querySelector('img')).toBeNull()
+    const rowText = screen.getByTestId('rb-change-row').textContent ?? ''
+    expect(rowText).toContain('<img src=x onerror=alert(1)>')
   })
 })
 

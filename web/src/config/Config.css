@@ -617,3 +617,44 @@ table.tbl {
   font-weight: 600;
   color: var(--text-primary);
 }
+.cfg-rb-changes {
+  margin: 0;
+}
+.cfg-rb-change {
+  border-top: 1px solid var(--border);
+  padding: 10px 0 8px;
+}
+.cfg-rb-change:first-child {
+  border-top: 0;
+}
+.cfg-rb-change-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.cfg-rb-change-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cfg-diff-block {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  white-space: pre;
+}
+.cfg-diff-line.add {
+  color: var(--state-ok);
+}
+.cfg-diff-line.del {
+  color: var(--state-crit);
+}
