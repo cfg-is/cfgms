@@ -1,0 +1,46 @@
+name: Nightly Fuzz
+
+on:
+  schedule:
+    # Run nightly at 02:00 UTC. Fuzzing is time-boxed and NOT a PR gate —
+    # time-boxed fuzz runs are flaky as required checks (either the budget finds
+    # nothing, proving little, or intermittently finds something and blocks
+    # unrelated PRs).
+    - cron: '0 2 * * *'
+  # Allow manual dispatch to re-run or test the workflow without waiting for midnight.
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.26.5'
+  FUZZTIME: 60s
+
+jobs:
+  fuzz:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run fuzz targets
+        run: ./scripts/fuzz-all.sh "${{ env.FUZZTIME }}"
+
+      - name: Upload crash corpora
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crash-corpora
+          # Each target writes crashes to testdata/fuzz/<FuzzName>/ under its package.
+          path: |
+            pkg/config/testdata/fuzz/
+            features/controller/transport/testdata/fuzz/
+            pkg/entitygraph/types/testdata/fuzz/
+            pkg/cert/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
