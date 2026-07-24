@@ -106,6 +106,22 @@ export interface RollbackOperation {
   reason: string
 }
 
+export interface ConfigurationChange {
+  path: string
+  current_version: string
+  rollback_version: string
+  diff: string
+  risk: string
+  module: string
+}
+
+export interface RollbackPreview {
+  changes: ConfigurationChange[]
+  affected_modules: string[]
+  requires_approval: boolean
+  risk_assessment: Record<string, unknown>
+}
+
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 
 function parseConfigSummary(value: unknown): ConfigSummary | null {
@@ -163,6 +179,41 @@ export function parsePushStatus(data: unknown): PushStatus {
     initiated_by: str(r.initiated_by),
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+  }
+}
+
+function parseConfigurationChange(value: unknown): ConfigurationChange | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  return {
+    path: str(r.path),
+    current_version: str(r.current_version),
+    rollback_version: str(r.rollback_version),
+    diff: str(r.diff),
+    risk: str(r.risk),
+    module: str(r.module),
+  }
+}
+
+export function parseRollbackPreview(data: unknown): RollbackPreview {
+  const r = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+  const changes: ConfigurationChange[] = []
+  if (Array.isArray(r.changes)) {
+    for (const item of r.changes) {
+      const c = parseConfigurationChange(item)
+      if (c !== null) changes.push(c)
+    }
+  }
+  return {
+    changes,
+    affected_modules: Array.isArray(r.affected_modules)
+      ? r.affected_modules.filter((m): m is string => typeof m === 'string')
+      : [],
+    requires_approval: bool(r.requires_approval),
+    risk_assessment:
+      typeof r.risk_assessment === 'object' && r.risk_assessment !== null
+        ? (r.risk_assessment as Record<string, unknown>)
+        : {},
   }
 }
 
