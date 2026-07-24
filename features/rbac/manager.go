@@ -401,7 +401,7 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 					Result(business.AuditResultError).
 					Error("RBAC_PARENT_ROLE_NOT_FOUND", fmt.Sprintf("parent role %s not found: %v", role.ParentRoleId, err)).
 					Detail("parent_role_id", role.ParentRoleId).
-					Severity(business.AuditSeverityCritical)
+					Severity(business.AuditSeverityHigh)
 				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 					slog.Warn("rbac: failed to record audit event", "error", auditErr)
 				}
@@ -644,7 +644,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 				Resource("role", id, roleName).
 				Result(business.AuditResultError).
 				Error("RBAC_DELETE_ROLE_FAILED", err.Error()).
-				Severity(business.AuditSeverityCritical)
+				Severity(business.AuditSeverityHigh)
 			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 				slog.Warn("rbac: failed to record audit event", "error", auditErr)
 			}
@@ -668,7 +668,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 					Resource("role", id, roleName).
 					Result(business.AuditResultError).
 					Error("RBAC_DELETE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
-					Severity(business.AuditSeverityCritical)
+					Severity(business.AuditSeverityHigh)
 				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 					slog.Warn("rbac: failed to record audit event", "error", auditErr)
 				}
@@ -690,7 +690,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 		event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
 			Resource("role", id, roleName).
 			Result(business.AuditResultSuccess).
-			Severity(business.AuditSeverityCritical) // Role deletion is critical
+			Severity(business.AuditSeverityHigh)
 
 		if deletedRole != nil {
 			event = event.Detail("deleted_permissions", len(deletedRole.PermissionIds)).

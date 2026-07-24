@@ -840,7 +840,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 	s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 		business.AuditEventAuthentication, "steward_registered",
-		business.AuditResultSuccess, business.AuditSeverityHigh, nil)
+		business.AuditResultSuccess, business.AuditSeverityLow, nil)
 
 	// Return response
 	w.Header().Set("Content-Type", "application/json")

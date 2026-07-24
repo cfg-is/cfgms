@@ -324,6 +324,11 @@ func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, acti
 	if tenantID == "" {
 		tenantID = audit.SystemTenantID
 	}
+	// Severity is outcome-aware: success (including logout) is Low; failure/denial is High.
+	severity := business.AuditSeverityHigh
+	if result == business.AuditResultSuccess {
+		severity = business.AuditSeverityLow
+	}
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventAuthentication).
@@ -331,7 +336,7 @@ func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, acti
 		User(logging.SanitizeLogValue(username), business.AuditUserTypeHuman).
 		Resource("web-session", logging.SanitizeLogValue(username), "").
 		Result(result).
-		Severity(business.AuditSeverityHigh)
+		Severity(severity)
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit web login audit event",
 			"action", action,

@@ -786,7 +786,21 @@ func (b *AuditEventBuilder) build(entry *business.AuditEntry) {
 
 // Predefined audit event builders for common operations
 
-// AuthenticationEvent creates an authentication event builder
+// authOutcomeSeverity maps an AuditResult to the calibrated severity for auth/authz events.
+// Success is Low (routine operation); anything else is High (failure, denial, or error).
+// Call sites that want Critical (e.g. compromised-device or session-hijack indicators) must
+// override with .Severity(business.AuditSeverityCritical) after the constructor.
+func authOutcomeSeverity(result business.AuditResult) business.AuditSeverity {
+	if result == business.AuditResultSuccess {
+		return business.AuditSeverityLow
+	}
+	return business.AuditSeverityHigh
+}
+
+// AuthenticationEvent creates an authentication event builder.
+// Severity is outcome-aware: success → Low, failure/denied/error → High.
+// Call sites for compromise-indicator-grade failures (revoked device, session hijack, invalid PoP)
+// must add .Severity(business.AuditSeverityCritical) to override.
 func AuthenticationEvent(tenantID, userID, action string, result business.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
@@ -795,10 +809,14 @@ func AuthenticationEvent(tenantID, userID, action string, result business.AuditR
 		User(userID, business.AuditUserTypeHuman).
 		Resource("session", userID, "").
 		Result(result).
-		Severity(business.AuditSeverityHigh)
+		Severity(authOutcomeSeverity(result))
 }
 
-// AuthorizationEvent creates an authorization event builder
+// AuthorizationEvent creates an authorization event builder.
+// Severity is outcome-aware: success → Low, failure/denied/error → High.
+// Call sites for sensitive authorization management actions (permission grants, JIT approvals)
+// must add .Severity(business.AuditSeverityHigh) to override, since those represent
+// security-relevant operations regardless of outcome.
 func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action string, result business.AuditResult) *AuditEventBuilder {
 	return NewEventBuilder().
 		Tenant(tenantID).
@@ -807,7 +825,7 @@ func AuthorizationEvent(tenantID, userID, resourceType, resourceID, action strin
 		User(userID, business.AuditUserTypeHuman).
 		Resource(resourceType, resourceID, "").
 		Result(result).
-		Severity(business.AuditSeverityHigh)
+		Severity(authOutcomeSeverity(result))
 }
 
 // ConfigurationEvent creates a configuration change event builder

@@ -298,7 +298,10 @@ func (a *AdvancedAuthEngine) CreateTemporaryPermission(ctx context.Context, req 
 		if err := a.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
 			req.TenantID, req.SubjectID, "permission", req.PermissionID,
 			"grant_permission", business.AuditResultSuccess,
-		).Detail("granted_by", req.GrantedBy).
+		).
+			// permission grant is a sensitive admin action
+			Severity(business.AuditSeverityHigh).
+			Detail("granted_by", req.GrantedBy).
 			Detail("type", "temporary").
 			Detail("expires_at", fmt.Sprintf("%d", req.ExpiresAt))); err != nil {
 			slog.Warn("failed to record permission grant audit event", "error", err)

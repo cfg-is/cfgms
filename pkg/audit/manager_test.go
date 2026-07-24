@@ -423,7 +423,8 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "session", entry.ResourceType)
 		assert.Equal(t, "user1", entry.ResourceID)
 		assert.Equal(t, business.AuditResultSuccess, entry.Result)
-		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
+		// Success is Low — routine authentication; failures/denials are High (Issue #2964).
+		assert.Equal(t, business.AuditSeverityLow, entry.Severity)
 	})
 
 	t.Run("AuthorizationEvent", func(t *testing.T) {
@@ -438,6 +439,7 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "config", entry.ResourceType)
 		assert.Equal(t, "config1", entry.ResourceID)
 		assert.Equal(t, business.AuditResultDenied, entry.Result)
+		// Denied is High — ordinary access denial (Issue #2964).
 		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 	})
 
@@ -1473,4 +1475,142 @@ func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
 
 	breaks := m.VerifyChain(entries)
 	assert.Empty(t, breaks, "chain must be intact even with an in-process fallback HMAC key")
+}
+
+// TestConvenienceBuilderSeverity verifies that the predefined convenience constructors
+// emit calibrated severity at the source (Issue #2964).
+// The table covers all four tiers and all four AuditResult variants so that a future
+// unconditional hardcode would be caught by at least one row.
+func TestConvenienceBuilderSeverity(t *testing.T) {
+	cases := []struct {
+		name    string
+		builder *audit.AuditEventBuilder
+		want    business.AuditSeverity
+	}{
+		// AuthenticationEvent — success must be Low (routine login/registration path)
+		{
+			name:    "AuthenticationEvent/success → Low",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.success", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow,
+		},
+		// AuthenticationEvent — failure/denied must be High (ordinary auth failure)
+		{
+			name:    "AuthenticationEvent/failure → High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.failure", business.AuditResultFailure),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthenticationEvent/denied → High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.lockout", business.AuditResultDenied),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthenticationEvent/error → High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.error", business.AuditResultError),
+			want:    business.AuditSeverityHigh,
+		},
+		// AuthenticationEvent — Critical override: call sites for compromise indicators
+		// (revoked device, invalid PoP, session hijack) must be able to override.
+		{
+			name: "AuthenticationEvent/success + Critical override",
+			builder: audit.AuthenticationEvent("t", "u", "steward_registered", business.AuditResultSuccess).
+				Severity(business.AuditSeverityCritical),
+			want: business.AuditSeverityCritical,
+		},
+		// AuthorizationEvent — success must be Low (routine check_permission granted)
+		{
+			name:    "AuthorizationEvent/success → Low",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "read", "check_permission", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow,
+		},
+		// AuthorizationEvent — denied must be High (ordinary access denial)
+		{
+			name:    "AuthorizationEvent/denied → High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "write", "check_permission", business.AuditResultDenied),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthorizationEvent/failure → High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "admin", "check_permission", business.AuditResultFailure),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthorizationEvent/error → High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "admin", "check_permission", business.AuditResultError),
+			want:    business.AuditSeverityHigh,
+		},
+		// AuthorizationEvent — sensitive management actions must override to High
+		{
+			name: "AuthorizationEvent/grant_permission success + High override",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "write", "grant_permission", business.AuditResultSuccess).
+				Severity(business.AuditSeverityHigh),
+			want: business.AuditSeverityHigh,
+		},
+		// UserManagementEvent — always High (sensitive admin actions)
+		{
+			name:    "UserManagementEvent/success stays High",
+			builder: audit.UserManagementEvent("t", "admin", "user1", "create_user"),
+			want:    business.AuditSeverityHigh,
+		},
+		// ConfigurationEvent — Medium baseline
+		{
+			name:    "ConfigurationEvent stays Medium",
+			builder: audit.ConfigurationEvent("t", "admin", "config", "cfg1", "settings", "update"),
+			want:    business.AuditSeverityMedium,
+		},
+		// SystemEvent — Low (routine system lifecycle)
+		{
+			name:    "SystemEvent stays Low",
+			builder: audit.SystemEvent("t", "controller_start", "started"),
+			want:    business.AuditSeverityLow,
+		},
+		// Regression guard: routine success must NOT be High or Critical
+		{
+			name:    "AuthenticationEvent/success not High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.success", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow, // definitively not High
+		},
+		{
+			name:    "AuthorizationEvent/success not High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "read", "check_permission", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow, // definitively not High
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var entry business.AuditEntry
+			audit.BuildEntry(tc.builder, &entry)
+			assert.Equal(t, tc.want, entry.Severity,
+				"expected severity %q but got %q for %s", tc.want, entry.Severity, tc.name)
+		})
+	}
+}
+
+// TestConvenienceBuilderSeverityNotHighOnSuccess verifies the key regression guard:
+// routine authentication and authorization successes must never emit High or Critical severity.
+// This is the canonical regression test for Issue #2964.
+func TestConvenienceBuilderSeverityNotHighOnSuccess(t *testing.T) {
+	successes := []struct {
+		name    string
+		builder *audit.AuditEventBuilder
+	}{
+		{"web.login.success", audit.AuthenticationEvent("t", "u", "web.login.success", business.AuditResultSuccess)},
+		{"web.logout", audit.AuthenticationEvent("t", "u", "web.logout", business.AuditResultSuccess)},
+		{"steward_registered", audit.AuthenticationEvent("t", "s", "steward_registered", business.AuditResultSuccess)},
+		{"check_permission granted", audit.AuthorizationEvent("t", "u", "permission", "read", "check_permission", business.AuditResultSuccess)},
+		{"jit_access_request", audit.AuthorizationEvent("t", "u", "jit_access", "req1", "request", business.AuditResultSuccess)},
+		{"jit_access_expired", audit.AuthorizationEvent("t", "u", "jit_access", "grant1", "expired", business.AuditResultSuccess)},
+	}
+
+	for _, tc := range successes {
+		t.Run(tc.name, func(t *testing.T) {
+			var entry business.AuditEntry
+			audit.BuildEntry(tc.builder, &entry)
+			if entry.Severity == business.AuditSeverityHigh || entry.Severity == business.AuditSeverityCritical {
+				t.Errorf("routine success %q emits severity %q — must be Low or Medium (Issue #2964 regression)",
+					tc.name, entry.Severity)
+			}
+		})
+	}
 }

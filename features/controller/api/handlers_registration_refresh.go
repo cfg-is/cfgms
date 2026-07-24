@@ -100,7 +100,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	if s.stewardStore == nil {
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "steward_store_unavailable"})
 		http.Error(w, "steward store unavailable", http.StatusServiceUnavailable)
 		return
@@ -119,7 +119,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_error"})
 		http.Error(w, "failed to look up device", http.StatusInternalServerError)
 		return
@@ -151,7 +151,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.logger.Error("Failed to generate refresh nonce", "error", err)
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_generation_failed"})
 		http.Error(w, "failed to generate challenge", http.StatusInternalServerError)
 		return
@@ -169,7 +169,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		s.logger.Error("Failed to store nonce in cache", "error", err)
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "cache_store_failed"})
 		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
 		return
@@ -221,7 +221,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "store_error"})
 		http.Error(w, "failed to look up device", http.StatusInternalServerError)
 		return
@@ -262,7 +262,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "nonce_type_error"})
 		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
 		return
@@ -348,7 +348,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(record.TenantID), "error", err)
 			s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 				business.AuditEventSystemEvent, "refresh_error",
-				business.AuditResultError, business.AuditSeverityHigh,
+				business.AuditResultError, business.AuditSeverityMedium,
 				map[string]interface{}{"reason": "policy_store_error"})
 			http.Error(w, "failed to get refresh policy", http.StatusInternalServerError)
 			return
@@ -391,14 +391,14 @@ func (s *Server) handleRefreshByPolicy(
 			s.logger.Error("Failed to issue refresh certificate", "steward_id", record.ID, "error", err)
 			s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 				business.AuditEventSystemEvent, "refresh_error",
-				business.AuditResultError, business.AuditSeverityHigh,
+				business.AuditResultError, business.AuditSeverityMedium,
 				map[string]interface{}{"reason": "cert_issuance_failed"})
 			http.Error(w, "failed to issue certificate", http.StatusInternalServerError)
 			return
 		}
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventAuthentication, "refresh_cert_issued",
-			business.AuditResultSuccess, business.AuditSeverityHigh,
+			business.AuditResultSuccess, business.AuditSeverityLow,
 			map[string]interface{}{"decision": "approved", "reason": "auto_accept"})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -420,7 +420,7 @@ func (s *Server) handleRefreshQueueEntry(
 	if s.pendingRefreshStore == nil {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "pending_store_unavailable"})
 		http.Error(w, "pending refresh store unavailable", http.StatusServiceUnavailable)
 		return
@@ -442,7 +442,7 @@ func (s *Server) handleRefreshQueueEntry(
 		s.logger.Error("Failed to add pending refresh", "steward_id", record.ID, "error", err)
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"reason": "pending_store_write_failed"})
 		http.Error(w, "failed to queue refresh request", http.StatusInternalServerError)
 		return
@@ -679,7 +679,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		if err == business.ErrStewardNotFound {
 			s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
 				business.AuditEventSystemEvent, "refresh_admin_approve_error",
-				business.AuditResultError, business.AuditSeverityHigh,
+				business.AuditResultError, business.AuditSeverityMedium,
 				map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "steward_not_found"})
 			http.Error(w, "steward not found", http.StatusNotFound)
 			return
@@ -687,7 +687,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to get steward for refresh approval", "device_id", logging.SanitizeLogValue(entry.DeviceID), "error", err)
 		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
 			business.AuditEventSystemEvent, "refresh_admin_approve_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "store_error"})
 		http.Error(w, "failed to get steward", http.StatusInternalServerError)
 		return
@@ -712,7 +712,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
 			business.AuditEventSystemEvent, "refresh_admin_approve_error",
-			business.AuditResultError, business.AuditSeverityHigh,
+			business.AuditResultError, business.AuditSeverityMedium,
 			map[string]interface{}{"pending_id": logging.SanitizeLogValue(pendingID), "reason": "cert_issuance_failed"})
 		http.Error(w, "failed to issue certificate", http.StatusInternalServerError)
 		return
