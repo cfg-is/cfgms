@@ -113,6 +113,18 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 
 ---
 
+#### `dast-scan.yml` — OWASP ZAP DAST Scan
+
+**Triggers**: Manual dispatch (`workflow_dispatch`), Weekly schedule (Sunday 03:00 UTC)
+
+**What it does**: Builds the controller image, starts it with flatfile storage (no external DB), production auth posture (no `CFGMS_ENABLE_TEST_ENDPOINTS`/`CFGMS_SEED_TEST_TOKENS`), and runs an OWASP ZAP baseline scan (spider + passive rules) against `https://localhost:8080` — the single listener serving both the REST API and the embedded SPA. Results uploaded as the `zap-dast-report` artifact. Advisory only, not a required check.
+
+**Rules file**: `.zap/rules.tsv` — add IGNORE entries only for confirmed false positives; see `docs/development/security-workflow-guide.md` §6.
+
+**Runtime**: ~15–25 min (dominated by Docker build + ZAP spider)
+
+---
+
 #### `docker-security.yml` — Docker Security Scanning
 
 **Triggers**: Pull Requests, push to main/develop, Manual dispatch
@@ -243,6 +255,7 @@ security workflow guide for the full per-check gap list).
 | `codeql-analysis.yml` | ✅ | ✅ (Go/CodeQL/web paths) | ✅ | Weekly | ❌ |
 | `codeql-stub.yml` | ❌ | ✅ (non-Go/non-web) | ❌ | ❌ | ❌ |
 | `codeql-pack-publish.yml` | ✅ (extensions path) | ❌ | ❌ | ❌ | ✅ |
+| `dast-scan.yml` | ❌ | ❌ | ❌ | Weekly Sun | ✅ |
 | `docker-security.yml` | ✅ | ✅ | ❌ | ❌ | ✅ |
 | `zizmor.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 | `scorecard.yml` | push develop only | ❌ | ❌ | Weekly Sat | ✅ |
