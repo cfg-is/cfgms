@@ -168,7 +168,7 @@ export async function loginRequest(
     credentials: 'same-origin',
   })
   if (!preflight.ok) {
-    return { ok: false, status: preflight.status }
+    return { ok: false, status: preflight.status, tenantId: '', rootScope: false }
   }
   const headers = new Headers({ 'Content-Type': 'application/json' })
   const preCookieValue = readCookie(csrfCookiePre)

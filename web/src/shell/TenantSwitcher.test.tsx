@@ -37,6 +37,21 @@ describe('TenantSwitcher', () => {
     expect(screen.getByRole('button', { name: /root\/msp-a\/client-1/ })).toBeInTheDocument()
   })
 
+  it('renders the "root" label when the scope is empty (root-scoped account, Issue #2919)', () => {
+    // A root-scoped account seeds TenantScopeProvider with rootPath="" (empty
+    // scope). The switcher must fall back to the literal 'root' label rather than
+    // rendering an empty <b> — this is the only branch that exercises
+    // `displayLeaf = leaf || 'root'` for an empty leaf.
+    render(
+      <TenantScopeProvider rootPath="">
+        <TenantSwitcher />
+      </TenantScopeProvider>,
+    )
+    const button = screen.getByRole('button', { name: /root/i })
+    expect(button).toBeInTheDocument()
+    expect(button.querySelector('b')?.textContent).toBe('root')
+  })
+
   it('closes the menu on Escape', () => {
     render(
       <TenantScopeProvider rootPath="root/msp-a">

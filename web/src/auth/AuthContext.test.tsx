@@ -24,6 +24,7 @@ function Probe() {
     <div>
       <output data-testid="status">{auth.status}</output>
       <output data-testid="principal">{auth.principal?.username ?? ''}</output>
+      <output data-testid="tenantId">{auth.principal?.tenantId ?? ''}</output>
       <button onClick={() => void auth.login('admin@msp-a', 'pw-pw-pw-pw')}>
         do-login
       </button>
@@ -45,7 +46,7 @@ function DataCallChild() {
 
 const fetchMock = vi.fn<typeof fetch>()
 
-function mockLoginEndpoints(loginStatus: number) {
+function mockLoginEndpoints(loginStatus: number, loginBody: unknown = {}) {
   fetchMock.mockImplementation((input, init) => {
     const url = String(input)
     if (url.endsWith('/api/v1/web/csrf')) {
@@ -53,7 +54,7 @@ function mockLoginEndpoints(loginStatus: number) {
       return Promise.resolve(jsonResponse(204))
     }
     if (url.endsWith('/api/v1/web/login')) {
-      return Promise.resolve(jsonResponse(loginStatus))
+      return Promise.resolve(jsonResponse(loginStatus, loginBody))
     }
     if (url.endsWith('/api/v1/web/logout')) {
       return Promise.resolve(jsonResponse(204))
@@ -96,6 +97,40 @@ describe('AuthProvider state transitions', () => {
       expect(screen.getByTestId('status')).toHaveTextContent('signedIn'),
     )
     expect(screen.getByTestId('principal')).toHaveTextContent('admin@msp-a')
+  })
+
+  it('login success stores the response tenantId on the principal (Issue #2919)', async () => {
+    // The login body's data.tenant_id is the sole source of principal.tenantId,
+    // which AppShell forwards to TenantScopeProvider rootPath — the tenant-subtree
+    // boundary. A tenant-scoped account must land on its own path, not root.
+    mockLoginEndpoints(200, { data: { tenant_id: 'msp-a', root_scope: false } })
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('signedIn'),
+    )
+    expect(screen.getByTestId('tenantId')).toHaveTextContent('msp-a')
+  })
+
+  it('a root-scoped login (empty tenant_id) leaves principal.tenantId empty (Issue #2919)', async () => {
+    // A root-scoped grant carries an empty tenant_id; principal.tenantId must stay
+    // '' so TenantScopeProvider initialises at root rather than a spurious subtree.
+    mockLoginEndpoints(200, { data: { tenant_id: '', root_scope: true } })
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('signedIn'),
+    )
+    expect(screen.getByTestId('principal')).toHaveTextContent('admin@msp-a')
+    expect(screen.getByTestId('tenantId')).toBeEmptyDOMElement()
   })
 
   it('login failure → invalid, not signed in, not expired', async () => {
