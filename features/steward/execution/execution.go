@@ -59,6 +59,7 @@ type ExecutionReport struct {
 	FailedCount       int
 	SkippedCount      int
 	NonCompliantCount int
+	DeferredCount     int
 	ResourceResults   []ResourceResult
 	Errors            []string
 }
@@ -73,6 +74,9 @@ type ResourceResult struct {
 	ExecutionTime  time.Duration
 	Error          string
 	StateDiff      *stewardtesting.StateDiff
+	// DeferredUntil is the next instant at which a deferred reboot-gated action
+	// may be retried. Zero when Status is not StatusDeferred.
+	DeferredUntil time.Time
 }
 
 // ResourceStatus represents the execution status of a resource
@@ -90,6 +94,12 @@ const (
 	// exceeded the configured per-call timeout. Treated as a failure in all aggregation
 	// paths. The emitted outcome event carries action=did-not-finish(timeout) (ADR-012 §7).
 	StatusTimeout
+	// StatusDeferred indicates a reboot-gated action was withheld because the current
+	// time falls outside the resource's reboot_window. The deferred action will be retried
+	// on the next convergence pass; ResourceResult.DeferredUntil carries the next window
+	// open time when known. Distinct from StatusFailed (the action is not in error — it is
+	// intentionally deferred) and StatusSkipped (the module did run but could not proceed).
+	StatusDeferred
 )
 
 // NewConfigState creates a ConfigState from a raw configuration map.
