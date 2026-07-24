@@ -1,0 +1,177 @@
+<style>
+  :root {
+    --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(60,45,30,.4); --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a;
+    --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
+  :root[data-theme="light"]{ --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(60,45,30,.4); }
+  :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+  *{box-sizing:border-box;}
+  body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+  .topbar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; background:var(--chrome);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+  .brand b{font-size:14px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+  .brand span{font-size:11px; color:var(--text-dim); letter-spacing:.04em;}
+  .seg{display:inline-flex; position:relative; background:var(--chrome-2); border:1px solid var(--border); border-radius:10px; padding:3px;}
+  .seg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-dim);
+    font:inherit; font-size:12.5px; font-weight:600; padding:6px 13px; border-radius:7px; cursor:pointer; transition:color .18s ease;}
+  .seg button[aria-pressed="true"]{color:var(--accent-ink);}
+  .seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+    transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .dims{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; color:var(--text-dim);
+    font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .stage{flex:1; display:flex; align-items:flex-start; justify-content:center; padding:22px 16px 30px; overflow:auto;}
+  .frame-wrap{position:relative; margin:0 auto; border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow);
+    border:1px solid var(--border); background:var(--chrome); transition:width .22s ease, height .22s ease;}
+  .frame{display:block; border:0; transform-origin:0 0; background:transparent;}
+  .hint{text-align:center; color:var(--text-dim); font-size:12.5px; line-height:1.6; padding:0 20px 30px; max-width:680px; margin:0 auto;}
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>refresh requests</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS refresh-queue mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  <b>Refresh requests</b> (Epic #2931 · #2941) — a distinct page (its own nav entry / <code>/refresh</code> route),
+  not a Registration-console tab. Pending steward device-credential rotations, tenant-scoped. <b>Reject</b> ships now;
+  <b>Approve</b> is drawn deferred ("SOON"). The <b>provenance</b> column shows how many device-identity fields matched
+  the known device — a <b>partial</b> match is what an operator scrutinizes. Both themes.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1320,h:720}, tablet:{w:900,h:900}, mobile:{w:390,h:860} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+      --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --ok:#507055; --ok-bg:#e8f0e9; --warn:#a05a35; --warn-bg:#f7e8db; --crit:#b56a5a; --crit-bg:#f2e5e3; --neutral:#7a6a5a; --neutral-bg:#e8e0d8;
+    }
+    :root[data-theme="dark"]{
+      --bg-primary:#1e1e1e; --bg-surface:#252526; --bg-elevated:#2d2d2d; --bg-sunk:#1a1a1a; --border:#3c3c3c;
+      --text-primary:#c4b4a4; --text-secondary:#a89888; --text-faint:#8a7a68;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --ok:#6d9472; --ok-bg:#1a2e1d; --warn:#d4864f; --warn-bg:#332518; --crit:#c97a6a; --crit-bg:#2d1f1c; --neutral:#a89888; --neutral-bg:#2a2520;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0; height:100%;}
+    body{background:var(--bg-primary); color:var(--text-primary); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; padding:26px 24px;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;}
+    .page{max-width:1000px; margin:0 auto;}
+    .page-head{margin-bottom:16px;}
+    .page-head h1{font-size:21px; font-weight:700; margin:0 0 4px;}
+    .page-head .sub{margin:0; font-size:13px; color:var(--text-secondary);}
+
+    .panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow:var(--shadow);}
+    .grid{display:grid; align-items:center; grid-template-columns:1.4fr 1.1fr .9fr 1fr .9fr 150px;}
+    .thead{color:var(--text-faint); font-size:10px; letter-spacing:.09em; text-transform:uppercase; font-weight:600;
+      padding:11px 18px; border-bottom:1px solid var(--border); background:var(--bg-elevated);}
+    .row{padding:13px 18px; border-bottom:1px solid var(--border); font-size:13px;}
+    .row:last-child{border-bottom:0;}
+    .row .nm{font-weight:600;}
+    .row .sub2{font-size:11px; color:var(--text-faint);}
+    .cell{color:var(--text-secondary); font-family:'JetBrains Mono',Menlo,monospace; font-size:12.5px;}
+    .act{text-align:right; display:flex; gap:6px; justify-content:flex-end; align-items:center;}
+
+    .badge{display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border-radius:20px; font-size:11px; font-weight:600; font-family:'JetBrains Mono',Menlo,monospace;}
+    .badge .dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+    .b-ok{background:var(--ok-bg); color:var(--ok);} .b-warn{background:var(--warn-bg); color:var(--warn);}
+
+    .rbtn{appearance:none; padding:5px 10px; border-radius:7px; background:transparent; border:1px solid var(--border);
+      font:inherit; font-size:11.5px; font-weight:600; cursor:pointer; color:var(--text-primary);}
+    .rbtn.deny{color:var(--crit);} .rbtn.deny:hover{border-color:var(--crit); background:var(--crit-bg);}
+    /* deferred control — readable label + muted SOON marker */
+    .deferred{cursor:not-allowed; color:var(--text-secondary)!important; background:var(--bg-elevated)!important; border-color:var(--border)!important;}
+    .soon{font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; padding:1px 6px; border-radius:20px;
+      background:var(--neutral-bg); color:var(--text-faint); border:1px solid var(--border);}
+    .note{margin:12px 2px 0; font-size:11.5px; color:var(--text-faint);}
+  `;
+
+  const MOCK_HTML = `
+    <div class="page">
+      <div class="page-head">
+        <h1>Refresh requests</h1>
+        <p class="sub">Pending steward device-credential rotations awaiting review for <b>root/msp-a</b> and below.</p>
+      </div>
+      <div class="panel">
+        <div class="thead grid"><span>Device</span><span>Tenant</span><span>Source IP</span><span>Provenance</span><span>Requested</span><span class="r">&nbsp;</span></div>
+        <div class="row grid">
+          <div><div class="nm">web-07.msp-a.lan</div><div class="sub2 mono">dev 3a9f…c1</div></div>
+          <span class="cell">root/msp-a/prod</span><span class="cell">10.2.4.19</span>
+          <span><span class="badge b-ok"><span class="dot"></span>7 / 7</span></span>
+          <span class="cell">5 min ago</span>
+          <div class="act"><button class="rbtn deferred">Approve <span class="soon">soon</span></button><button class="rbtn deny">Reject</button></div>
+        </div>
+        <div class="row grid">
+          <div><div class="nm">edge-03.client-1.lan</div><div class="sub2 mono">dev 88b2…7e</div></div>
+          <span class="cell">root/msp-a/client-1</span><span class="cell">192.0.2.44</span>
+          <span><span class="badge b-warn"><span class="dot"></span>4 / 7</span></span>
+          <span class="cell">22 min ago</span>
+          <div class="act"><button class="rbtn deferred">Approve <span class="soon">soon</span></button><button class="rbtn deny">Reject</button></div>
+        </div>
+        <div class="row grid">
+          <div><div class="nm">db-02.msp-a.lan</div><div class="sub2 mono">dev 2f70…ab</div></div>
+          <span class="cell">root/msp-a/prod</span><span class="cell">10.2.4.31</span>
+          <span><span class="badge b-ok"><span class="dot"></span>7 / 7</span></span>
+          <span class="cell">1 hr ago</span>
+          <div class="act"><button class="rbtn deferred">Approve <span class="soon">soon</span></button><button class="rbtn deny">Reject</button></div>
+        </div>
+      </div>
+      <p class="note">Provenance = device-identity fields that matched the enrolled device. A partial match (amber) means fewer fields lined up — scrutinize before acting.</p>
+    </div>
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body>'+
+    MOCK_HTML+'</body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>
