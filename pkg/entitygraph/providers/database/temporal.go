@@ -219,8 +219,3 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 
 	return events, nil
 }
-
-// Watch is implemented by a later story.
-func (p *DatabaseEntityGraphProvider) Watch(_ context.Context, _ interfaces.WatchFilter, _ string) (<-chan interfaces.WatchEvent, error) {
-	return nil, interfaces.ErrNotImplemented
-}
