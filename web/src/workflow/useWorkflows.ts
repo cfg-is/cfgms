@@ -92,6 +92,8 @@ export interface TriggerItem {
   workflow_name?: string
   created_at?: string
   updated_at?: string
+  schedule?: { cron_expression: string }
+  webhook?: { path: string }
 }
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -218,6 +220,14 @@ export function parseTriggerItem(value: unknown): TriggerItem | null {
       r.created_at !== undefined ? str(r.created_at) : undefined,
     updated_at:
       r.updated_at !== undefined ? str(r.updated_at) : undefined,
+    schedule:
+      typeof r.schedule === 'object' && r.schedule !== null
+        ? { cron_expression: str((r.schedule as Record<string, unknown>).cron_expression) }
+        : undefined,
+    webhook:
+      typeof r.webhook === 'object' && r.webhook !== null
+        ? { path: str((r.webhook as Record<string, unknown>).path) }
+        : undefined,
   }
 }
 
