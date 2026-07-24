@@ -21,6 +21,13 @@ import (
 // interface at compile time but are not backed by real storage.
 var ErrNotImplemented = errors.New("entitygraph: not implemented")
 
+// ErrCursorExpired is returned by Watch when the requested cursor predates the
+// earliest retained observation log row. The rows between the cursor and the
+// retention boundary have been pruned and cannot be replayed without gaps.
+// Callers must issue a fresh snapshot read and then call Watch with an empty
+// cursor to resume (ADR-023 §7).
+var ErrCursorExpired = errors.New("entitygraph: watch cursor expired; resync via fresh snapshot read")
+
 // EIDRef is an alias for types.EID so callers can import only this package.
 type EIDRef = types.EID
 
@@ -176,6 +183,26 @@ type ObservationBatch struct {
 	ClaimScopes []types.ClaimScope
 }
 
+// RetentionPolicy configures the observation-history retention window applied
+// by RunRetentionGC. An empty TenantPath sets the cluster-wide default; a
+// non-empty TenantPath installs a per-subtree override (most-specific prefix
+// wins per ADR-023 §7). Zero values for the day counts inherit the global
+// default (90 days history, 7 extra days for tombstones).
+type RetentionPolicy struct {
+	// TenantPath is the tenant subtree this policy applies to.
+	// Empty sets the global default.
+	TenantPath string
+
+	// HistoryDays is how many days of observation history to retain.
+	// Zero uses the global default (90 days).
+	HistoryDays int
+
+	// TombstoneDays is how many days to retain absence records for retracted
+	// subjects before fully removing their log rows and projections.
+	// Zero uses HistoryDays + 7.
+	TombstoneDays int
+}
+
 // DriftLifecycleUpdate carries a single drift lifecycle transition (ADR-022 §6/§9).
 type DriftLifecycleUpdate struct {
 	EID        EIDRef
@@ -258,6 +285,26 @@ type EntityGraphProvider interface {
 	// tables. Used after a projection-logic change or schema migration so that
 	// derived views reflect the full accumulated observation history (ADR-022 §6).
 	RebuildProjections(ctx context.Context) error
+
+	// RunRetentionGC executes one retention garbage-collection sweep.
+	// It prunes observation log rows and orphaned payload blobs that exceed the
+	// configured history depth, subject to the never-prune-current invariant:
+	// the latest current-state projection log row, the latest drift-diff row for
+	// open drift records, and the latest edge projection row are never removed.
+	// Retracted subjects survive until the tombstone horizon, then are fully
+	// removed (log rows + all projections).
+	//
+	// policy carries the global defaults; per-tenant overrides stored via
+	// SetRetentionPolicy take precedence (most-specific tenant prefix wins).
+	// The call is idempotent and safe to run on multiple nodes concurrently
+	// (implementations must use a lock or singleton to prevent double-sweeps).
+	RunRetentionGC(ctx context.Context, policy RetentionPolicy) error
+
+	// SetRetentionPolicy stores or replaces the per-tenant-subtree retention
+	// policy override for policy.TenantPath. An empty TenantPath is rejected.
+	// Calling with HistoryDays=0 and TombstoneDays=0 removes the override
+	// (falls back to global defaults passed to RunRetentionGC).
+	SetRetentionPolicy(ctx context.Context, policy RetentionPolicy) error
 }
 
 // --- Provider Registry ---

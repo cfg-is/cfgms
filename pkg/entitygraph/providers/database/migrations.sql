@@ -93,3 +93,12 @@ CREATE TABLE IF NOT EXISTS eg_claim_scope_prior (
     subject         TEXT NOT NULL,
     PRIMARY KEY (source, claim_scope_key, subject)
 );
+
+-- Per-tenant-subtree retention policy overrides (ADR-023 §7, Story #2878).
+-- history_days=0 and tombstone_days=0 fall back to RunRetentionGC's global defaults.
+-- The most-specific matching tenant_path prefix wins at GC time.
+CREATE TABLE IF NOT EXISTS eg_retention_policy (
+    tenant_path    TEXT PRIMARY KEY,
+    history_days   INTEGER NOT NULL DEFAULT 0,
+    tombstone_days INTEGER NOT NULL DEFAULT 0
+);

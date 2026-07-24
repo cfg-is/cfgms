@@ -31,10 +31,23 @@ const (
 // we never advance the cursor past a row whose inserting transaction is still
 // in-flight: only rows whose xmin < the minimum active transaction id are
 // returned. This prevents gaps caused by out-of-order commits (ADR-023 §5/§6).
+//
+// A non-zero cursor that predates the earliest retained log row returns
+// ErrCursorExpired — the caller must resync via a fresh snapshot read (ADR-023 §7).
 func (p *DatabaseEntityGraphProvider) Watch(ctx context.Context, filter interfaces.WatchFilter, cursor string) (<-chan interfaces.WatchEvent, error) {
 	startSeq, err := dbResolveWatchCursor(ctx, p.db, cursor)
 	if err != nil {
 		return nil, fmt.Errorf("entitygraph/database: watch: %w", err)
+	}
+
+	// Check for expired cursor. A non-zero cursor that predates the earliest
+	// retained log row signals that GC has pruned the rows the consumer would
+	// need to replay (ADR-023 §7). Cursor=0 is the "start from the very
+	// beginning" sentinel and is exempt.
+	if startSeq > 0 {
+		if err := checkDatabaseCursorExpiry(ctx, p.db, startSeq); err != nil {
+			return nil, err
+		}
 	}
 
 	ch := make(chan interfaces.WatchEvent, 64)
@@ -42,9 +55,26 @@ func (p *DatabaseEntityGraphProvider) Watch(ctx context.Context, filter interfac
 	return ch, nil
 }
 
+// checkDatabaseCursorExpiry returns ErrCursorExpired if seq predates the
+// earliest retained log row. Called only for non-zero cursors.
+func checkDatabaseCursorExpiry(ctx context.Context, db *sql.DB, seq int64) error {
+	var minID sql.NullInt64
+	if err := db.QueryRowContext(ctx,
+		`SELECT MIN(id) FROM eg_observation_log`,
+	).Scan(&minID); err != nil {
+		return fmt.Errorf("entitygraph/database: watch: get min log id: %w", err)
+	}
+	if minID.Valid && seq < minID.Int64 {
+		return interfaces.ErrCursorExpired
+	}
+	return nil
+}
+
 // dbResolveWatchCursor returns the starting sequence position for Watch.
 // An empty cursor means "start from now" — the current max log id.
-// Any other cursor is parsed as a decimal int64.
+// Any other cursor is parsed as a decimal int64. This function is pure
+// (no DB access for non-empty cursors); expiry detection is handled by
+// the caller after this function returns.
 func dbResolveWatchCursor(ctx context.Context, db *sql.DB, cursor string) (int64, error) {
 	if cursor == "" {
 		var cur int64
