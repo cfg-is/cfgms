@@ -112,6 +112,59 @@ go test -run='^$' -fuzz='^FuzzParseEID$' -fuzztime=30s ./pkg/entitygraph/types/
 ./scripts/fuzz-all.sh 30s
 ```
 
+### 7. OpenSSF Scorecard
+
+- **Purpose**: Measures supply-chain security posture across 18 checks (dependency pinning, token
+  permissions, code review, branch protection, SAST, fuzzing, and more)
+- **Scope**: `develop` branch state (Scorecard scores the default branch regardless of which branch
+  the workflow runs from)
+- **Blocking**: No — runs post-merge on push to `develop` and weekly; NOT a required PR check
+- **SARIF Support**: Yes (published to GitHub Security tab and to the OSSF public dashboard)
+- **Workflow**: `.github/workflows/scorecard.yml`
+
+#### Baseline (2026-07-24, commit fa292575, Scorecard v5.5.0)
+
+**Overall score: 6.3 / 10**
+
+Scored using Scorecard CLI v5.5.0 with the default `GITHUB_TOKEN` against `develop` commit
+`fa292575`. Two checks (`CII-Best-Practices`, `Vulnerabilities`) hit network errors in the
+container environment and are excluded from the average; they will resolve on the first GitHub
+Actions workflow run (the GHA runner has the required external API access). The score above is the
+real CLI-measured value — the first `workflow_dispatch` after the workflow lands on `develop` will
+produce the definitive GHA-run score.
+
+**Checks at full marks (10/10):** CI-Tests, Dangerous-Workflow, Dependency-Update-Tool, Fuzzing,
+License, Maintained, Packaging, SAST, Security-Policy.
+
+**Checks below full marks — gap list:**
+
+| Check | Score | Gap / Rationale | Owning Story or Status |
+|-------|-------|-----------------|------------------------|
+| Binary-Artifacts | 9/10 | Scorecard detected binaries in the repository | Follow-up investigation |
+| Pinned-Dependencies | 7/10 | Dockerfiles use image tags without SHA digest (`FROM golang:1.26.5-bookworm`); GitHub Actions are SHA-pinned but Scorecard scores Docker images too | Dependabot covers Actions pins; Docker image pinning is a separate follow-up story |
+| CII-Best-Practices | -1/10¹ | No OpenSSF Best Practices badge obtained; expected 0/10 on GHA run | Future improvement |
+| Vulnerabilities | -1/10¹ | OSV scanner failed due to container network restriction; Trivy + Nancy run as blocking gates in `security-scan.yml`; expected 10/10 on GHA run | Covered by existing blocking gates |
+| Token-Permissions | 0/10 | `develop-sanity.yml` sets `issues: write` at the workflow top level; `cla-check.yml` sets `pull-requests: write` at the top level — Scorecard flags any workflow that doesn't start from `permissions: {}` (default-deny) and grant only per-job. The story notes' expectation of 10/10 here was incorrect: not all workflows use the default-deny pattern. | Follow-up story to migrate both workflows to `permissions: {}` top-level + job-level-only grants |
+| Signed-Releases | 0/10 | No releases cut yet; no cosign / sigstore provenance attached | Future — when release process is established |
+| Contributors | 0/10 | 0 contributing organizations; Scorecard rewards multi-org contribution | **Accepted gap — solo-dev model (CLAUDE.md)** |
+| Code-Review | 0/10 | 0 approved changesets found; branch protection deliberately omits required reviewers (CLAUDE.md: "squash-only, no-review, solo-friendly") | **Accepted gap — solo-dev model (CLAUDE.md)**. Will improve to 10/10 when team expansion adds required reviews. |
+| Branch-Protection | 0/10 | Two compounding factors: (1) default `GITHUB_TOKEN` lacks `administration:read` scope, so Scorecard cannot read the branch ruleset — a founder-provisioned fine-grained PAT added as `SCORECARD_READ_TOKEN` is required to unlock this; (2) even with a PAT, branch protection deliberately omits required PR reviewers (CLAUDE.md solo-dev model), which caps the score below 8/10 regardless. | **Accepted gap — solo-dev model (CLAUDE.md)**. PAT provisioning is a founder-owned decision. No `SCORECARD_READ_TOKEN` secret is provisioned by this story. |
+
+¹ `CII-Best-Practices` and `Vulnerabilities` hit network errors during the container CLI run.
+Expected GHA scores: `CII-Best-Practices` → 0/10 (no badge); `Vulnerabilities` → 10/10
+(no unfixed known CVEs in OSV data; Trivy/Nancy blocking gates confirm this).
+
+**Realistic ceiling given the solo-dev model: ~7.5–8.0, not 9.0+**
+
+The source issue's "toward 9.0+" framing is walked back here. Even with all fixable gaps
+resolved (Token-Permissions, Pinned-Dependencies, Binary-Artifacts, Signed-Releases,
+CII-Best-Practices), Code-Review (0/10) and Contributors (0/10) are structurally capped by the
+solo operating model, and Branch-Protection stays below 8/10 without required reviewers. This
+ceiling is structural — not a gap list to chase.
+
+**Fuzzing:** 10/10 (native Go fuzz targets; Scorecard recognises Go native fuzzing since v5). Score
+may improve further as additional fuzz surfaces land from related stories.
+
 ## Local Development Workflow
 
 ### Prerequisites
