@@ -84,7 +84,7 @@ function makeSteward(spec: StewardSpec): Steward {
 function extractMockTenantPrefix(q: string): { tenant: string; rest: string } {
   let splitAt = -1
   for (let i = 0; i < q.length; i++) {
-    if (q[i] === '/') {
+    if (q.charAt(i) === '/') {
       const left = q.slice(0, i)
       if (left.length > 0 && !left.includes(':') && !left.includes(' ')) splitAt = i
     }
