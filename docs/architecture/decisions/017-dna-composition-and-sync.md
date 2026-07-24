@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
-**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022)
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority
 **Issue:** #2901
 **Epic:** #2852 — DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph (ADR-017)
 
@@ -276,3 +276,35 @@ validation, provenance envelope, and versioned history are untouched. The join-f
 A1.2 exists for is preserved in substance — DNA, graph nodes, and DEX signals still join on one
 shared identity; ADR-022 §1 is authoritative for the grammar, the authority-type registry, and
 the eid-constructor enforcement point.
+
+## Amendment 3 (2026-07-23) — Existing gatherers are the interim observe-only host-fact authority
+
+**Status:** Accepted (2026-07-23, rider on this ADR)
+
+**Context.** Clause 2/clause 8 name osquery as the authority for unmanaged
+`host:*` observe-only facts, and epic #2852 originally scoped retiring the
+monolithic flat collector with those facts "going dark" until osquery lands. A
+product review established this would cause a functional regression — the existing
+per-platform gatherers (`features/steward/dna/{hardware,network,security}_*.go`)
+already collect these facts and drive live consumers (role-selector
+config-targeting #2546, the compliance Reports Engine, host-attribute views) — for
+no benefit, since the collectors already work.
+
+**Decision.** Until the osquery integration lands, the **existing gatherers are
+the interim authority** for the curated `host:*` observe-only fragment allowlist
+(clause 8). A partition step shapes a curated, stable, non-ephemeral,
+non-module-owned subset of the already-gathered attribute map into `host:*`
+fragments (canonical serialization + hash, clauses 5–6); the gatherers are
+**reused unmodified** and continue to populate the legacy flat `attributes`
+surface unchanged. The osquery epic later **swaps the source** of the same
+`host:*` fragment ids from gatherers to osquery — a source change, observe-only
+either way, invisible to fragment consumers.
+
+**Invariants preserved.** This builds no *new* bespoke collector (the "build our
+own osquery" trap clause 2/Alternatives warns of) — it retains existing working
+collection until its declared replacement exists, as Consequences→Negative #4
+already implied. Managed objects remain module-`Get`-sourced (clause 2a); the
+module-ownership exclusion filter keeps gatherer output from ever competing with a
+module-owned kind (clause 5 atomicity). The flat collector's full retirement and
+the `commonpb.DNA.attributes` removal are deferred to a follow-on clean-break epic
+that also re-homes the Reports Engine off the flat `DNARecord` store.

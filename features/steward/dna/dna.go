@@ -33,6 +33,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/modules"
+	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -136,6 +138,36 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 		// Background not yet complete; return fast data only.
 	}
 
+	// Partition the already-populated flat attributes map into host:* fragments
+	// (ADR-017 Amendment 3). The gatherers are reused as-is; this step only reads
+	// the map they already wrote — no re-gathering.
+	hostFragments, hostEnvelopes, fragErr := PartitionHostFacts(
+		attributes,
+		entitygraphtypes.DefaultTaxonomy(),
+		stdlibModuleOwnership(),
+	)
+	if fragErr != nil {
+		c.logger.Error("Failed to partition host facts into fragments", "error", fragErr)
+		// Non-fatal: continue with flat attributes only; fragment fields stay nil.
+	}
+
+	// Build the sorted manifest and compute the aggregate root for partial-sync.
+	var manifest []*commonpb.ManifestEntry
+	for _, frag := range hostFragments {
+		manifest = append(manifest, &commonpb.ManifestEntry{
+			FragmentId:   frag.FragmentId,
+			FragmentHash: frag.FragmentHash,
+		})
+	}
+	aggregateRoot := ""
+	if len(manifest) > 0 {
+		var rootErr error
+		aggregateRoot, rootErr = AggregateRoot(manifest)
+		if rootErr != nil {
+			c.logger.Error("Failed to compute DNA aggregate root", "error", rootErr)
+		}
+	}
+
 	// Generate stable system ID from hardware characteristics
 	systemID := c.generateSystemID(attributes)
 
@@ -152,14 +184,40 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 		LastSyncTime:    timestamppb.New(now),
 		AttributeCount:  c.safeInt32(len(attributes)), // Safe conversion with bounds validation
 		SyncFingerprint: c.generateSyncFingerprint(systemID, attributes, ""),
+
+		// ADR-017 fragment fields (Amendment 3: gatherers as interim host-fact authority).
+		Fragments:     hostFragments,
+		Envelopes:     hostEnvelopes,
+		AggregateRoot: aggregateRoot,
+		Manifest:      manifest,
 	}
 
 	c.logger.Info("System DNA collected",
 		"id", systemID,
 		"attributes", len(attributes),
+		"fragments", len(hostFragments),
 		"total_duration", totalDuration)
 
 	return dna, nil
+}
+
+// stdlibModuleOwnership returns the ownership declarations for the standard
+// library modules, hardcoded from features/modules/stdlib/*/module.yaml.
+// These kinds are module-owned and must never be promoted to host:* fragments
+// by the gatherer partition step (ADR-017 §2, Amendment 3).
+func stdlibModuleOwnership() map[string][]modules.OwnershipDeclaration {
+	return map[string][]modules.OwnershipDeclaration{
+		"cert_trust": {{Kind: "cert_trust"}},
+		"file":       {{Kind: "file"}},
+		"firewall":   {{Kind: "firewall"}},
+		"hostname":   {{Kind: "hostname"}},
+		"package":    {{Kind: "package"}},
+		"patch":      {{Kind: "patch"}},
+		"script":     {{Kind: "script"}},
+		"service":    {{Kind: "service"}},
+		"time":       {{Kind: "time"}},
+		"user":       {{Kind: "user"}},
+	}
 }
 
 // WaitForBackground blocks until the asynchronous background collection started

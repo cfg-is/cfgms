@@ -44,6 +44,17 @@ func TestCollect(t *testing.T) {
 	// Test timestamp is recent
 	timeDiff := time.Since(dna.LastUpdated.AsTime())
 	assert.True(t, timeDiff < time.Minute, "DNA timestamp should be recent")
+
+	// Fragment fields (ADR-017 Amendment 3) — wiring check:
+	// cpu_count and cpu_arch are always set by the hardware collector (runtime
+	// fallbacks), so host:cpu must always emit at least one fragment.
+	assert.NotEmpty(t, dna.Fragments, "Collect should emit at least one host:* fragment")
+	assert.NotEmpty(t, dna.AggregateRoot, "AggregateRoot must be non-empty when fragments are present")
+	assert.Equal(t, len(dna.Fragments), len(dna.Manifest), "Manifest entry count must match fragment count")
+	for _, frag := range dna.Fragments {
+		_, ok := dna.Envelopes[frag.FragmentId]
+		assert.Truef(t, ok, "fragment %q must have a corresponding envelope entry", frag.FragmentId)
+	}
 }
 
 // TestCollectAcceptsContext verifies that Collect honours a cancelled context.
