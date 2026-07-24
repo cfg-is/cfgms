@@ -18,7 +18,7 @@ principles, and token rationale these mockups express.
 | File | What it is | Status |
 |------|------------|--------|
 | [`troubleshooting-cockpit.html`](troubleshooting-cockpit.html) | The chosen direction — agentic troubleshooting cockpit: case bar, dense ticket quick-reference, tabbed Investigation/Chat rail, and an evidence→cause→action canvas (drift-diff, blast-radius graph, change timeline, remediation). Brand-aligned, both themes. | **Reference** |
-| [`login.html`](login.html) | The authentication screen — terminal-window framing, single mTLS/session sign-in, with `signin` / `loading` / `invalid` / `expired` states and a **passkey/WebAuthn MFA seam** (`mfa` state) designed now, built later. Both themes. | **Reference** |
+| [`login.html`](login.html) | The authentication screen — **passkey-only** (ADR-021 Amendment 1): usernameless-first "Sign in with a passkey", optional username to scope to a specific account, "Remember Username" prefill, no password. `signin` / `waiting` / `invalid` (no passkey) / `expired` states, both themes. | **Reference** |
 | [`fleet-overview.html`](fleet-overview.html) | The read-only fleet overview inside the app shell — tenant-scope switcher, live-filter search, sort, saved views, selectable **device-DNA columns**, scale-aware pagination, and a row drill-in **asset-DNA drawer**. Both themes; Ready / Loading / Error / Empty states. | **Reference** |
 | [`fleet-overview-generic-v0.html`](fleet-overview-generic-v0.html) | The initial generic management dashboard, before brand alignment. Kept for provenance only. | Superseded |
 
