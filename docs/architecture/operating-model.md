@@ -468,3 +468,4 @@ and fans out `CommandPushStewardBinary`. Requires `installer:dispatch:steward` p
 ## Monitoring Export Credentials
 
 OTLP exporter credentials (API keys / bearer tokens) are stored in `pkg/secrets`, not in config files. Configure the secret key name via `config["secret_key"]` and use `NewOTLPExporterWithSecrets` to wire the store at construction time.
+
