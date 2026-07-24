@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -759,4 +760,146 @@ func TestTokenResponseFormat(t *testing.T) {
 	// Verify timestamps are ISO 8601 format
 	_, err = time.Parse(time.RFC3339, resp.CreatedAt)
 	assert.NoError(t, err, "CreatedAt should be RFC3339 format")
+}
+
+// findAuditEntryByAction returns the first entry whose Action matches, or fails the test.
+func findAuditEntryByAction(t *testing.T, entries []*business.AuditEntry, action string) *business.AuditEntry {
+	t.Helper()
+	for _, e := range entries {
+		if e.Action == action {
+			return e
+		}
+	}
+	t.Fatalf("no audit entry with action %q found among %d entries", action, len(entries))
+	return nil
+}
+
+// The four token-management mutation handlers (create, delete, revoke, rotate) each
+// emit a durable audit event via emitTokenManagementAudit. These tests flush the audit
+// manager and assert the event actually reaches the store with the correct action,
+// tenant, and resource fields — mirroring the register-path assertions in
+// handlers_registration_test.go.
+
+func TestCreateRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, _ := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	reqBody := registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+	}
+	body, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp TokenResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Token)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.created")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
+}
+
+func TestDeleteRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	token, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, token))
+
+	req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/"+token.Token, nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.deleted")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
+}
+
+func TestRevokeRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	token, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, token))
+
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/"+token.Token+"/revoke", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.revoked")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
+}
+
+func TestRotateRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	seed, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "rotate-group",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, seed))
+
+	body := []byte(`{"group":"rotate-group"}`)
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/audit-tenant/rotate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp TokenResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Token)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.rotated")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the new token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }

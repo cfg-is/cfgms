@@ -280,7 +280,7 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	tokenPrefix := tokenStr[:min(len(tokenStr), 6)]
-	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
+	s.logger.Info("Deleted registration token", "token_prefix", logging.SanitizeLogValue(tokenPrefix))
 	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.TenantID)
 
 	w.WriteHeader(http.StatusNoContent)
@@ -341,7 +341,7 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	tokenPrefix := tokenStr[:min(len(tokenStr), 6)]
-	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
+	s.logger.Info("Revoked registration token", "token_prefix", logging.SanitizeLogValue(tokenPrefix))
 	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.TenantID)
 
 	// Return redacted response — revoke callers do not receive the raw secret.
