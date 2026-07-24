@@ -3,8 +3,8 @@
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
 **Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022)
-**Issue:** (to be assigned at decomposition)
-**Epic:** (controller-baseline-DNA / DNA-composition epic — to be filed)
+**Issue:** #2901
+**Epic:** #2852 — DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph (ADR-017)
 
 ---
 

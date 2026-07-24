@@ -36,6 +36,12 @@ message HeartbeatRequest {
   string steward_id = 1;
   string status = 2;
   map<string, string> metrics = 3;
+  // dna_aggregate_root is the Merkle-style root of the DNA fragment manifest
+  // (SHA-256 over sorted (fragment_id, fragment_hash) pairs, ADR-017 §6).
+  // Replaces the legacy sync_fingerprint for heartbeat-based DNA currency
+  // checks; the controller compares this to its stored root and triggers a
+  // partial-sync diff only on mismatch (ADR-017 §7).
+  string dna_aggregate_root = 4;
 }
 
 message StewardRequest {

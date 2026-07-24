@@ -8,6 +8,8 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -72,4 +74,48 @@ func TestRegisterRequest_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHeartbeatRequest_DnaAggregateRoot_RoundTrip verifies that the new
+// dna_aggregate_root field (ADR-017 §6 / Issue #2901) marshals and unmarshals
+// correctly alongside the existing fields.
+func TestHeartbeatRequest_DnaAggregateRoot_RoundTrip(t *testing.T) {
+	original := &HeartbeatRequest{
+		StewardId:        "steward-01",
+		Status:           "healthy",
+		Metrics:          map[string]string{"cpu": "0.15"},
+		DnaAggregateRoot: "sha256:aabbccddeeff",
+	}
+
+	data, err := proto.Marshal(original)
+	require.NoError(t, err)
+
+	got := &HeartbeatRequest{}
+	err = proto.Unmarshal(data, got)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.StewardId, got.StewardId)
+	assert.Equal(t, original.Status, got.Status)
+	assert.Equal(t, original.Metrics, got.Metrics)
+	assert.Equal(t, original.DnaAggregateRoot, got.DnaAggregateRoot)
+}
+
+// TestHeartbeatRequest_DnaAggregateRoot_BackwardCompatibility verifies that a
+// HeartbeatRequest without dna_aggregate_root (pre-ADR-017 wire) still
+// deserialises correctly — the field defaults to empty string (proto3 zero value).
+func TestHeartbeatRequest_DnaAggregateRoot_BackwardCompatibility(t *testing.T) {
+	legacy := &HeartbeatRequest{
+		StewardId: "steward-legacy",
+		Status:    "healthy",
+	}
+
+	data, err := proto.Marshal(legacy)
+	require.NoError(t, err)
+
+	got := &HeartbeatRequest{}
+	err = proto.Unmarshal(data, got)
+	require.NoError(t, err)
+
+	assert.Equal(t, "steward-legacy", got.StewardId)
+	assert.Equal(t, "", got.DnaAggregateRoot, "missing dna_aggregate_root must default to empty string")
 }

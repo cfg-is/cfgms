@@ -11,14 +11,105 @@ import "google/protobuf/timestamp.proto";
 // Common message types used across multiple services
 message DNA {
   string id = 1;
+
+  // Deprecated: use fragments, envelopes, aggregate_root, and manifest per
+  // ADR-017 / Epic #2852.  This flat map is retained for wire
+  // backward-compatibility only; all new code must use the fragment fields
+  // below (fields 8-11).
   map<string, string> attributes = 2;
+
   google.protobuf.Timestamp last_updated = 3;
-  
-  // Sync verification metadata
+
+  // Sync verification metadata (legacy — superseded by aggregate_root below)
   string config_hash = 4;                        // Hash of current configuration
   google.protobuf.Timestamp last_sync_time = 5;  // When DNA was last synced with controller
   int32 attribute_count = 6;                     // Number of attributes (for verification)
   string sync_fingerprint = 7;                   // Combined hash of all sync-relevant data
+
+  // ADR-017 fragment set — authoritative DNA representation.
+  // Fields 8-11 are additive; existing consumers of fields 1-7 are unaffected.
+
+  // fragments is the per-object state set.  Each fragment is independently
+  // addressed by fragment_id and hashed; authority resolves atomically per
+  // object (module > osquery, per ADR-017 §2).
+  repeated Fragment fragments = 8;
+
+  // envelopes carries provenance metadata keyed by fragment_id.  Kept
+  // structurally separate from Fragment so that hash-computation code can
+  // range over Fragment fields without risk of including envelope data
+  // (ADR-017 Amendment A1.1 structural guarantee).
+  map<string, FragmentEnvelope> envelopes = 9;
+
+  // aggregate_root is the Merkle-style root over the sorted manifest
+  // (SHA-256 over sorted (fragment_id, fragment_hash) pairs, ADR-017 §6).
+  // Heartbeats carry this value instead of the legacy sync_fingerprint.
+  string aggregate_root = 10;
+
+  // manifest is the sorted (fragment_id, fragment_hash) pair list whose hash
+  // equals aggregate_root.  Used for partial-sync diff (ADR-017 §6, §7).
+  repeated ManifestEntry manifest = 11;
+}
+
+// Fragment is one addressable unit of DNA state.  Its hash (fragment_hash)
+// covers exactly the four fields below — provenance envelope metadata is
+// structurally excluded (see FragmentEnvelope / DNA.envelopes) so that
+// hash-computation code can range over Fragment fields without risk of
+// including run-local noise (ADR-017 Amendment A1.1).
+message Fragment {
+  // fragment_id is the object-canonical typed entity id, e.g. "service:sshd",
+  // "file:/etc/hosts", "host:cpu".  Stable regardless of which source produced
+  // the fragment; the same id is used whether the object is managed or
+  // observe-only (ADR-017 §1).
+  string fragment_id = 1;
+
+  // authority identifies the source that produced this fragment on this host
+  // right now: a module identity (e.g. "service") or "osquery".
+  //
+  // IMPORTANT — this is NOT an eid and is NOT eid-shaped.  ADR-017 §1 defines
+  // authority as the *role* that won resolution on this host at this moment
+  // (a plain token like "service" or "osquery"), never an entity address.
+  // Do not conflate with the eid's authority_segment (always "host:<peerID>"
+  // for a steward's own DNA, constructed entirely server-side from the mTLS
+  // peer in S7 — that field is never read from here).  These are distinct
+  // security concepts; conflating them is a known naming trap flagged by SE.
+  string authority = 2;
+
+  // canonical_bytes is the fragment's state under the canonical serialization
+  // (fixed field ordering, normalised values, no run-local noise — ADR-017 §5).
+  // Populated by S2/S3; this field defines the container only.
+  bytes canonical_bytes = 3;
+
+  // fragment_hash is the SHA-256 of canonical_bytes.  Populated by S3.
+  string fragment_hash = 4;
+}
+
+// FragmentEnvelope carries provenance metadata for one fragment.  It is keyed
+// by fragment_id in the DNA.envelopes map and is structurally excluded from
+// Fragment itself — this guarantees that hash-computation code ranging over
+// Fragment fields cannot accidentally include envelope data (ADR-017 A1.1).
+message FragmentEnvelope {
+  // source is the concrete producer instance (module version or osquery read).
+  // Distinct from Fragment.authority, which is the resolved role; source is the
+  // provenance of this specific read.
+  string source = 1;
+
+  // observed_at is when the steward last confirmed this fragment's state.
+  // Excluded from Fragment.fragment_hash per ADR-017 A1.1 (run-local timestamp
+  // noise would make identical state hash differently on different reads).
+  google.protobuf.Timestamp observed_at = 2;
+
+  // confidence is the producer-declared reliability of this read:
+  // "high" | "medium" | "low".  Mirrors pkg/entitygraph/types/observation.go
+  // Confidence; kept as string to decouple proto from Go package imports.
+  string confidence = 3;
+}
+
+// ManifestEntry is one (fragment_id, fragment_hash) pair in the sorted manifest.
+// The DNA.aggregate_root is the SHA-256 of the serialised sorted manifest
+// (ADR-017 §6).
+message ManifestEntry {
+  string fragment_id = 1;
+  string fragment_hash = 2;
 }
 
 message Status {
@@ -47,4 +138,4 @@ message SyncStatus {
   string sync_fingerprint = 2;
   bool is_in_sync = 3;
   string reason = 4;  // If not in sync, reason why
-} 
+}

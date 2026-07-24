@@ -166,6 +166,17 @@ linters:
   exclusions:
     paths:
       - web/
+    rules:
+      # SA1019 (use of a deprecated symbol) is managed manually, not enforced
+      # by the linter — mirrors the policy in staticcheck.conf and the intent
+      # of the (v1-schema, currently non-functional) linters-settings block.
+      # Required for intentionally-retained, wire backward-compatible deprecated
+      # fields such as commonpb.DNA.Attributes (ADR-017 / Epic #2852): the field
+      # is deprecated but kept for wire compatibility, so its transitional
+      # consumers must not fail the build.
+      - linters:
+          - staticcheck
+        text: "SA1019"
   enable:
     # Central Provider Architecture Enforcement (CRITICAL)
     # NOTE: depguard disabled - architectural enforcement via make check-architecture
