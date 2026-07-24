@@ -5,15 +5,16 @@
  * Audit-entries fetch hook (Story #2727): query GET /api/v1/audit/entries with
  * the full filter set handleListAuditEntries accepts.
  *
- * The endpoint returns a bare array (no pagination envelope); hasMore is
- * inferred by the caller from response length vs. requested limit. A 401 is
- * handled centrally by apiFetch; everything else surfaces as the view's error.
+ * The endpoint returns {"entries": [...], "has_more": bool} inside the standard
+ * {data, timestamp} envelope. A 401 is handled centrally by apiFetch;
+ * everything else surfaces as the view's error.
  *
  * Audit-entry field values may originate from user/steward-supplied data and
  * are untrusted — every field is coerced to a plain string. Callers must
  * render them as text nodes only, never via dangerouslySetInnerHTML (security
  * A9.1 — audit logs are a high-value XSS target because they faithfully record
- * attacker-controlled input).
+ * attacker-controlled input). details/changes are passed through as-is and must
+ * also be rendered as text (e.g. via JSON.stringify into JSX text interpolation).
  */
 import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
@@ -62,6 +63,9 @@ export interface AuditEntry {
   path: string
   error_code: string
   error_message: string
+  // Untrusted, steward/user-supplied data — render as text nodes only (A9.1).
+  details?: Record<string, unknown>
+  changes?: Record<string, unknown>
 }
 
 export interface UseAuditEntriesResult {
@@ -69,6 +73,7 @@ export interface UseAuditEntriesResult {
   loading: boolean
   error: string | null
   fetchedAtMs: number
+  hasMore: boolean
   retry: () => void
 }
 
@@ -98,10 +103,18 @@ function parseAuditEntry(value: unknown): AuditEntry | null {
     path: str(r.path),
     error_code: str(r.error_code),
     error_message: str(r.error_message),
+    details:
+      typeof r.details === 'object' && r.details !== null && !Array.isArray(r.details)
+        ? (r.details as Record<string, unknown>)
+        : undefined,
+    changes:
+      typeof r.changes === 'object' && r.changes !== null && !Array.isArray(r.changes)
+        ? (r.changes as Record<string, unknown>)
+        : undefined,
   }
 }
 
-/** Validate + parse the bare array returned by GET /api/v1/audit/entries. */
+/** Validate + parse the entries array from the response payload. */
 export function parseAuditEntries(data: unknown): AuditEntry[] {
   if (!Array.isArray(data)) throw new Error('unexpected response shape')
   const entries: AuditEntry[] = []
@@ -112,9 +125,26 @@ export function parseAuditEntries(data: unknown): AuditEntry[] {
   return entries
 }
 
+interface AuditListPayload {
+  entries: AuditEntry[]
+  hasMore: boolean
+}
+
+/** Parse the {entries, has_more} payload inside body.data. */
+function parseAuditResponse(data: unknown): AuditListPayload {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    throw new Error('unexpected response shape')
+  }
+  const d = data as Record<string, unknown>
+  const entries = parseAuditEntries(d.entries)
+  const hasMore = d.has_more === true
+  return { entries, hasMore }
+}
+
 interface FetchOutcome {
   key: string
   entries?: AuditEntry[]
+  hasMore?: boolean
   error?: string
   fetchedAtMs: number
 }
@@ -160,11 +190,11 @@ export function useAuditEntries(filters: AuditFilters): UseAuditEntriesResult {
           throw new Error(`GET /api/v1/audit/entries — ${response.status}`)
         }
         const body: unknown = await response.json()
-        const parsed = parseAuditEntries(
+        const { entries: parsed, hasMore } = parseAuditResponse(
           (body as Record<string, unknown> | null)?.data,
         )
         if (cancelled) return
-        setOutcome({ key, entries: parsed, fetchedAtMs: Date.now() })
+        setOutcome({ key, entries: parsed, hasMore, fetchedAtMs: Date.now() })
       })
       .catch((cause: unknown) => {
         if (cancelled) return
@@ -188,6 +218,7 @@ export function useAuditEntries(filters: AuditFilters): UseAuditEntriesResult {
     loading: current === null,
     error: current?.error ?? null,
     fetchedAtMs: current?.fetchedAtMs ?? 0,
+    hasMore: current?.hasMore ?? false,
     retry,
   }
 }

@@ -13,9 +13,22 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// auditListResponse is the data payload inside the standard {data, timestamp}
+// envelope returned by handleListAuditEntries.
+type auditListResponse struct {
+	Entries []*business.AuditEntry `json:"entries"`
+	HasMore bool                   `json:"has_more"`
+}
+
 // handleListAuditEntries handles GET /api/v1/audit/entries.
+// Returns {"data": {"entries": [...], "has_more": bool}, "timestamp": "..."}.
 // TenantID is always sourced from the authenticated principal's context —
 // any tenant_id query param supplied by the caller is silently discarded.
+//
+// has_more uses the limit+1 technique: the handler requests one extra row from
+// QueryEntries; if the extra row exists has_more is true and the extra row is
+// trimmed before sending. has_more is computed from the pre-module-filter
+// result set — see Issue #2989 implementation notes.
 func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) {
 	if s.auditManager == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Audit service not available", "AUDIT_NOT_AVAILABLE")
@@ -24,9 +37,10 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 
 	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
+	requestedLimit := 50
+
 	filter := &business.AuditFilter{
 		TenantID: tenantID,
-		Limit:    50,
 	}
 
 	if since := r.URL.Query().Get("since"); since != "" {
@@ -54,9 +68,12 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 			if l > 500 {
 				l = 500
 			}
-			filter.Limit = l
+			requestedLimit = l
 		}
 	}
+
+	// Fetch one extra row to detect whether more pages exist without a count query.
+	filter.Limit = requestedLimit + 1
 
 	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
 		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
@@ -98,6 +115,12 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Compute has_more from the raw (pre-module-filter) result set, then trim.
+	hasMore := len(entries) > requestedLimit
+	if hasMore {
+		entries = entries[:requestedLimit]
+	}
+
 	if module != "" {
 		prefix := module + "/"
 		filtered := make([]*business.AuditEntry, 0, len(entries))
@@ -116,7 +139,11 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 	s.logger.Info("Retrieved audit entries",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"count", len(entries),
+		"has_more", hasMore,
 		"module", logging.SanitizeLogValue(module),
 	)
-	s.writeSuccessResponse(w, entries)
+	s.writeSuccessResponse(w, auditListResponse{
+		Entries: entries,
+		HasMore: hasMore,
+	})
 }

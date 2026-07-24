@@ -258,6 +258,43 @@ table.tbl {
   border-bottom: 0;
 }
 
+/* ── Row expansion ─────────────────────────────────────────────── */
+.tbl tbody tr.expandable {
+  cursor: pointer;
+}
+.tbl tbody tr.expandable:hover td {
+  background: var(--bg-elevated);
+}
+.audit-detail-row td.audit-detail-cell {
+  background: var(--bg-sunk);
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: normal;
+}
+.audit-detail-section {
+  margin-bottom: 10px;
+}
+.audit-detail-section:last-child {
+  margin-bottom: 0;
+}
+.audit-detail-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+.audit-detail-pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ── Data state notices ────────────────────────────────────────── */
 .notice {
   display: flex;

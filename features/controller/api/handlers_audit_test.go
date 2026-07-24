@@ -17,6 +17,14 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// auditResp mirrors the envelope returned by handleListAuditEntries.
+type auditResp struct {
+	Data struct {
+		Entries []*business.AuditEntry `json:"entries"`
+		HasMore bool                   `json:"has_more"`
+	} `json:"data"`
+}
+
 // getAuditEntries performs GET /api/v1/audit/entries with the given tenant and optional query params.
 func getAuditEntries(server *Server, tenantID, query string) *httptest.ResponseRecorder {
 	url := "/api/v1/audit/entries"
@@ -55,12 +63,10 @@ func TestHandleListAuditEntries_HappyPath(t *testing.T) {
 	rec := getAuditEntries(server, "tenant-a", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp struct {
-		Data []*business.AuditEntry `json:"data"`
-	}
+	var resp auditResp
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp.Data, "expected at least one audit entry")
-	for _, e := range resp.Data {
+	assert.NotEmpty(t, resp.Data.Entries, "expected at least one audit entry")
+	for _, e := range resp.Data.Entries {
 		assert.Equal(t, "tenant-a", e.TenantID, "all entries must belong to tenant-a")
 	}
 }
@@ -71,12 +77,11 @@ func TestHandleListAuditEntries_EmptyResult(t *testing.T) {
 	rec := getAuditEntries(server, "tenant-no-data", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp struct {
-		Data []*business.AuditEntry `json:"data"`
-	}
+	var resp auditResp
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	// Empty slice or nil both satisfy: no entries for an unknown tenant.
-	assert.Empty(t, resp.Data)
+	assert.Empty(t, resp.Data.Entries)
+	assert.False(t, resp.Data.HasMore)
 }
 
 func TestHandleListAuditEntries_ModulePrefixFilter(t *testing.T) {
@@ -105,12 +110,10 @@ func TestHandleListAuditEntries_ModulePrefixFilter(t *testing.T) {
 	rec := getAuditEntries(server, "tenant-b", "module=hyperv")
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp struct {
-		Data []*business.AuditEntry `json:"data"`
-	}
+	var resp auditResp
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Data, 1, "only the hyperv/ entry must be returned")
-	assert.Equal(t, "hyperv/New-VM", resp.Data[0].ResourceType)
+	require.Len(t, resp.Data.Entries, 1, "only the hyperv/ entry must be returned")
+	assert.Equal(t, "hyperv/New-VM", resp.Data.Entries[0].ResourceType)
 }
 
 func TestHandleListAuditEntries_AuditManagerNil_Returns503(t *testing.T) {
@@ -155,19 +158,17 @@ func TestHandleListAuditEntries_CrossTenantIsolation(t *testing.T) {
 	rec := getAuditEntries(server, "tenant-a", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp struct {
-		Data []*business.AuditEntry `json:"data"`
-	}
+	var resp auditResp
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	for _, e := range resp.Data {
+	for _, e := range resp.Data.Entries {
 		assert.Equal(t, "tenant-a", e.TenantID,
 			"tenant-a request must not expose tenant-b entry: %s", e.ID)
 	}
 
 	// Confirm at least one tenant-a entry is present.
 	found := false
-	for _, e := range resp.Data {
+	for _, e := range resp.Data.Entries {
 		if e.TenantID == "tenant-a" {
 			found = true
 			break
@@ -202,8 +203,8 @@ func TestHandleListAuditEntries_OffsetAndLimitForwarded(t *testing.T) {
 
 // TestHandleListAuditEntries_EmptyResult_NeverNull verifies that when the underlying
 // storage returns a nil slice (as FlatFileAuditStore does for an unknown tenant), the
-// API handler serializes "data" as [] rather than null. A nil slice marshals as JSON null,
-// which crashes client-side .map() calls.  The fix is a nil-guard in handlers_audit.go
+// API handler serializes "entries" as [] rather than null. A nil slice marshals as JSON null,
+// which crashes client-side .map() calls. The fix is a nil-guard in handlers_audit.go
 // immediately before writeSuccessResponse, mirroring the existing pattern in handlers_configs.go.
 func TestHandleListAuditEntries_EmptyResult_NeverNull(t *testing.T) {
 	server := setupTestServer(t)
@@ -213,5 +214,71 @@ func TestHandleListAuditEntries_EmptyResult_NeverNull(t *testing.T) {
 
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
-	assert.Equal(t, json.RawMessage("[]"), raw["data"], "empty audit list must serialize as [] not null")
+
+	var dataObj struct {
+		Entries json.RawMessage `json:"entries"`
+		HasMore bool            `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(raw["data"], &dataObj))
+	assert.Equal(t, json.RawMessage("[]"), dataObj.Entries,
+		"empty entries must serialize as [] not null")
+	assert.False(t, dataObj.HasMore)
+}
+
+// TestHandleListAuditEntries_HasMore_True verifies that has_more is true when the
+// underlying store contains more rows than the requested limit (limit+1 technique).
+func TestHandleListAuditEntries_HasMore_True(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Seed 3 entries; request limit=2 — the handler fetches 3 (limit+1), sees all
+	// 3, trims to 2, and sets has_more=true.
+	for i := range 3 {
+		recordAndFlush(t, server.auditManager, audit.NewEventBuilder().
+			Tenant("tenant-hasmore").
+			Type(business.AuditEventConfiguration).
+			Action("op").
+			User("sys", business.AuditUserTypeSystem).
+			Resource("config", string(rune('a'+i)), "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityLow),
+		)
+	}
+
+	rec := getAuditEntries(server, "tenant-hasmore", "limit=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp auditResp
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp.Data.Entries, 2, "response must be trimmed to requested limit")
+	assert.True(t, resp.Data.HasMore, "has_more must be true when more rows exist")
+}
+
+// TestHandleListAuditEntries_HasMore_False_ExactPageBoundary verifies that has_more
+// is false when the result set ends exactly on a page boundary (no false positive).
+// This is the bug the limit+1 technique fixes: the old heuristic
+// (entries.length >= PAGE_SIZE) returned true here incorrectly.
+func TestHandleListAuditEntries_HasMore_False_ExactPageBoundary(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Seed exactly 2 entries; request limit=2 — the handler fetches 3 (limit+1),
+	// gets back 2 (storage has no more), and sets has_more=false.
+	for i := range 2 {
+		recordAndFlush(t, server.auditManager, audit.NewEventBuilder().
+			Tenant("tenant-exactpage").
+			Type(business.AuditEventConfiguration).
+			Action("op").
+			User("sys", business.AuditUserTypeSystem).
+			Resource("config", string(rune('a'+i)), "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityLow),
+		)
+	}
+
+	rec := getAuditEntries(server, "tenant-exactpage", "limit=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp auditResp
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp.Data.Entries, 2, "all rows must be returned")
+	assert.False(t, resp.Data.HasMore, "has_more must be false when result ends exactly on page boundary")
 }

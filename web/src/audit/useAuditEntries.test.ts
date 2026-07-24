@@ -44,9 +44,12 @@ function makeEntry(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
-function makeResponse(entries: object[], status = 200) {
+function makeResponse(entries: object[], status = 200, hasMore = false) {
   return new Response(
-    JSON.stringify({ data: entries, timestamp: new Date().toISOString() }),
+    JSON.stringify({
+      data: { entries, has_more: hasMore },
+      timestamp: new Date().toISOString(),
+    }),
     { status, headers: { 'Content-Type': 'application/json' } },
   )
 }
@@ -111,6 +114,36 @@ describe('parseAuditEntries', () => {
     expect(parsed!.error_code).toBe('UNAUTHORIZED')
     expect(parsed!.ip_address).toBe('10.0.0.1')
   })
+
+  it('parses details when present as an object', () => {
+    const [parsed] = parseAuditEntries([makeEntry({ details: { key: 'value', count: 3 } })])
+    expect(parsed!.details).toEqual({ key: 'value', count: 3 })
+  })
+
+  it('sets details to undefined when absent', () => {
+    const [parsed] = parseAuditEntries([makeEntry()])
+    expect(parsed!.details).toBeUndefined()
+  })
+
+  it('sets details to undefined when it is null or non-object', () => {
+    const [p1] = parseAuditEntries([makeEntry({ details: null })])
+    expect(p1!.details).toBeUndefined()
+    const [p2] = parseAuditEntries([makeEntry({ details: 'string' })])
+    expect(p2!.details).toBeUndefined()
+    const [p3] = parseAuditEntries([makeEntry({ details: [1, 2] })])
+    expect(p3!.details).toBeUndefined()
+  })
+
+  it('parses changes when present as an object', () => {
+    const changes = { before: { name: 'old' }, after: { name: 'new' }, fields: ['name'] }
+    const [parsed] = parseAuditEntries([makeEntry({ changes })])
+    expect(parsed!.changes).toEqual(changes)
+  })
+
+  it('sets changes to undefined when absent', () => {
+    const [parsed] = parseAuditEntries([makeEntry()])
+    expect(parsed!.changes).toBeUndefined()
+  })
 })
 
 describe('useAuditEntries', () => {
@@ -120,6 +153,7 @@ describe('useAuditEntries', () => {
     expect(result.current.loading).toBe(true)
     expect(result.current.entries).toEqual([])
     expect(result.current.error).toBeNull()
+    expect(result.current.hasMore).toBe(false)
   })
 
   it('always includes limit and offset in the request URL', async () => {
@@ -183,6 +217,45 @@ describe('useAuditEntries', () => {
     expect(result.current.entries).toHaveLength(2)
     expect(result.current.entries[1]!.action).toBe('logout')
     expect(result.current.error).toBeNull()
+  })
+
+  it('exposes hasMore=true when the server signals more results', async () => {
+    fetchMock.mockResolvedValue(makeResponse([makeEntry()], 200, true))
+    const { result } = renderHook(() => useAuditEntries(DEFAULT_FILTERS))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.hasMore).toBe(true)
+  })
+
+  it('exposes hasMore=false when the server signals no more results', async () => {
+    fetchMock.mockResolvedValue(makeResponse([makeEntry()], 200, false))
+    const { result } = renderHook(() => useAuditEntries(DEFAULT_FILTERS))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.hasMore).toBe(false)
+  })
+
+  it('defaults hasMore to false when the field is absent from the response', async () => {
+    // Legacy/malformed response without has_more
+    const resp = new Response(
+      JSON.stringify({ data: { entries: [makeEntry()] }, timestamp: '' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+    fetchMock.mockResolvedValue(resp)
+    const { result } = renderHook(() => useAuditEntries(DEFAULT_FILTERS))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.hasMore).toBe(false)
+  })
+
+  it('parses details and changes from entry payload', async () => {
+    const entryWithPayload = makeEntry({
+      details: { action_count: 5, target: 'dns' },
+      changes: { before: { name: 'old' }, after: { name: 'new' } },
+    })
+    fetchMock.mockResolvedValue(makeResponse([entryWithPayload]))
+    const { result } = renderHook(() => useAuditEntries(DEFAULT_FILTERS))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const entry = result.current.entries[0]!
+    expect(entry.details).toEqual({ action_count: 5, target: 'dns' })
+    expect(entry.changes).toEqual({ before: { name: 'old' }, after: { name: 'new' } })
   })
 
   it('surfaces a user-presentable error on non-ok response', async () => {
