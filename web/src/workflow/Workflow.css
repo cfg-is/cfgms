@@ -467,6 +467,58 @@ table.tbl {
   padding: 0 14px 10px;
 }
 
+/* ── Step builder ──────────────────────────────────────────────── */
+.wf-builder-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wf-builder-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.wf-step-row {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wf-step-remove {
+  align-self: flex-end;
+}
+.wf-raw-config {
+  margin-top: 2px;
+}
+.wf-raw-config-toggle {
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 2px 0;
+}
+.wf-raw-config-toggle:hover {
+  color: var(--text-secondary);
+}
+
+/* ── Variable editor ───────────────────────────────────────────── */
+.wf-var-row {
+  align-items: flex-end;
+}
+.wf-var-remove {
+  align-self: flex-end;
+}
+.wf-var-empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  padding: 2px 0;
+}
+
 /* ── Trigger panel ─────────────────────────────────────────────── */
 .wf-trigger-panel {
   background: var(--bg-sunk);

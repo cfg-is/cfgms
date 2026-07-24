@@ -2,24 +2,113 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Workflow list view (Story #2731) — the /workflows route entry point.
+ * Workflow list view (Stories #2731, #2984) — the /workflows route entry point.
  * Fetches GET /api/v1/workflows, renders a table, and exposes workflow
  * create/edit/delete, execution tracking, and trigger management.
  *
- * Security A9.1: workflow name, description, and step values originate
- * from user-supplied content. Every value reaches the DOM as a JSX text
- * node — never dangerouslySetInnerHTML.
+ * Security A9.1: workflow name, description, step names, step values, and
+ * variable keys/values originate from user-supplied content. Every value
+ * reaches the DOM as a JSX text node or controlled input value —
+ * never dangerouslySetInnerHTML.
  */
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import {
   useWorkflowList,
   type VersionedWorkflow,
+  type WorkflowStep,
 } from './useWorkflows.ts'
 import WorkflowExecutionView from './WorkflowExecutionView.tsx'
 import TriggerPanel from './TriggerPanel.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
 import './Workflow.css'
+
+// ── Row ID counter (used only as React key, never surfaced to DOM) ────────────
+
+let _rowId = 0
+function mkid(): string {
+  _rowId += 1
+  return String(_rowId)
+}
+
+// ── Step builder types ────────────────────────────────────────────────────────
+
+const STEP_TYPES = ['script', 'shell', 'http', 'notification', 'approval'] as const
+
+interface StepRow {
+  id: string
+  name: string
+  type: string
+  scriptBody: string   // config.script for type === 'script'
+  configJson: string   // raw config JSON (for non-script types or advanced mode)
+  rawOpen: boolean     // whether the Raw config details panel is expanded
+}
+
+// ── Variable editor types ─────────────────────────────────────────────────────
+
+interface VarRow {
+  id: string
+  key: string
+  value: string
+}
+
+// ── Form state ────────────────────────────────────────────────────────────────
+
+interface FormState {
+  name: string
+  description: string
+  version: string
+  steps: StepRow[]
+  variables: VarRow[]
+}
+
+function defaultStep(): StepRow {
+  return { id: mkid(), name: 'step-1', type: 'script', scriptBody: '', configJson: '{}', rawOpen: false }
+}
+
+function stepToRow(step: WorkflowStep): StepRow {
+  const cfg = step.config ?? {}
+  const scriptBody = step.type === 'script' && typeof cfg.script === 'string' ? cfg.script : ''
+  // Show raw config when there are keys beyond 'script' (for script type) or any keys (for other types)
+  const hasExtra = step.type === 'script'
+    ? Object.keys(cfg).some((k) => k !== 'script')
+    : Object.keys(cfg).length > 0
+  return {
+    id: mkid(),
+    name: step.name,
+    type: step.type,
+    scriptBody,
+    configJson: hasExtra ? JSON.stringify(cfg, null, 2) : '{}',
+    rawOpen: hasExtra,
+  }
+}
+
+function defaultForm(wf: VersionedWorkflow | null): FormState {
+  if (wf === null) {
+    return {
+      name: '',
+      description: '',
+      version: '1.0.0',
+      steps: [defaultStep()],
+      variables: [],
+    }
+  }
+  return {
+    name: wf.name,
+    description: wf.description,
+    version: wf.version || '1.0.0',
+    steps: wf.steps.length > 0 ? wf.steps.map(stepToRow) : [defaultStep()],
+    variables: wf.variables
+      ? Object.entries(wf.variables).map(([k, v]) => ({
+          id: mkid(),
+          key: k,
+          value: typeof v === 'string' ? v : JSON.stringify(v),
+        }))
+      : [],
+  }
+}
+
+// ── Loading skeleton ──────────────────────────────────────────────────────────
 
 function LoadingRows() {
   return (
@@ -36,7 +125,6 @@ function LoadingRows() {
   )
 }
 
-
 function WorkflowEmpty() {
   return (
     <div className="notice empty" data-testid="workflow-empty">
@@ -46,6 +134,8 @@ function WorkflowEmpty() {
     </div>
   )
 }
+
+// ── Workflow table row ────────────────────────────────────────────────────────
 
 function WorkflowRow({
   workflow,
@@ -105,32 +195,167 @@ function WorkflowRow({
   )
 }
 
-interface FormState {
-  name: string
-  description: string
-  version: string
-  stepsJson: string
-  variablesJson: string
+// ── Step builder row ──────────────────────────────────────────────────────────
+
+function StepBuilderRow({
+  step,
+  index,
+  canRemove,
+  onChange,
+  onRemove,
+}: {
+  step: StepRow
+  index: number
+  canRemove: boolean
+  onChange: (updated: StepRow) => void
+  onRemove: () => void
+}) {
+  const isScriptType = step.type === 'script'
+  const isKnownType = (STEP_TYPES as readonly string[]).includes(step.type)
+
+  return (
+    <div className="wf-step-row" data-testid="step-row">
+      <div className="wf-form-row">
+        <div className="wf-form-field">
+          <span className="wf-form-label">Step {index + 1} name *</span>
+          <input
+            type="text"
+            aria-label={`Step ${index + 1} name`}
+            placeholder={`step-${index + 1}`}
+            value={step.name}
+            onChange={(e) => onChange({ ...step, name: e.target.value })}
+            data-testid="step-name-input"
+          />
+        </div>
+        <div className="wf-form-field">
+          <span className="wf-form-label">Type</span>
+          <select
+            aria-label={`Step ${index + 1} type`}
+            value={step.type}
+            onChange={(e) =>
+              onChange({ ...step, type: e.target.value, scriptBody: '', configJson: '{}', rawOpen: false })
+            }
+            data-testid="step-type-select"
+          >
+            {STEP_TYPES.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+            {!isKnownType && (
+              <option value={step.type}>{step.type}</option>
+            )}
+          </select>
+        </div>
+        {isScriptType && (
+          <div className="wf-form-field">
+            <span className="wf-form-label">Script</span>
+            <textarea
+              aria-label={`Step ${index + 1} script`}
+              placeholder="echo hello"
+              value={step.scriptBody}
+              onChange={(e) => onChange({ ...step, scriptBody: e.target.value })}
+              data-testid="step-script-input"
+            />
+          </div>
+        )}
+        {!isScriptType && (
+          <div className="wf-form-field">
+            <span className="wf-form-label">Config (JSON)</span>
+            <textarea
+              aria-label={`Step ${index + 1} config JSON`}
+              placeholder="{}"
+              value={step.configJson}
+              onChange={(e) => onChange({ ...step, configJson: e.target.value })}
+              data-testid="step-config-json"
+            />
+          </div>
+        )}
+        {canRemove && (
+          <button
+            type="button"
+            className="wf-btn-sm-danger wf-step-remove"
+            onClick={onRemove}
+            aria-label={`Remove step ${index + 1}`}
+            data-testid="step-remove-btn"
+          >
+            Remove
+          </button>
+        )}
+      </div>
+      {isScriptType && (
+        <details
+          open={step.rawOpen}
+          onToggle={(e) =>
+            onChange({ ...step, rawOpen: (e.currentTarget as HTMLDetailsElement).open })
+          }
+          className="wf-raw-config"
+        >
+          <summary className="wf-raw-config-toggle">Raw config JSON</summary>
+          <div className="wf-form-row" style={{ marginTop: 6 }}>
+            <div className="wf-form-field">
+              <textarea
+                aria-label={`Step ${index + 1} raw config JSON`}
+                placeholder="{}"
+                value={step.configJson}
+                onChange={(e) => onChange({ ...step, configJson: e.target.value })}
+                data-testid="step-config-json"
+              />
+            </div>
+          </div>
+        </details>
+      )}
+    </div>
+  )
 }
 
-function defaultForm(wf: VersionedWorkflow | null): FormState {
-  if (wf === null) {
-    return {
-      name: '',
-      description: '',
-      version: '1.0.0',
-      stepsJson: '[{"name":"step-1","type":"script","config":{}}]',
-      variablesJson: '',
-    }
-  }
-  return {
-    name: wf.name,
-    description: wf.description,
-    version: wf.version || '1.0.0',
-    stepsJson: JSON.stringify(wf.steps, null, 2),
-    variablesJson: wf.variables ? JSON.stringify(wf.variables, null, 2) : '',
-  }
+// ── Variable key/value row ────────────────────────────────────────────────────
+
+function VarBuilderRow({
+  varRow,
+  onChange,
+  onRemove,
+}: {
+  varRow: VarRow
+  onChange: (updated: VarRow) => void
+  onRemove: () => void
+}) {
+  return (
+    <div className="wf-var-row wf-form-row" data-testid="var-row">
+      <div className="wf-form-field">
+        <span className="wf-form-label">Key</span>
+        <input
+          type="text"
+          aria-label="Variable key"
+          placeholder="var-name"
+          value={varRow.key}
+          onChange={(e) => onChange({ ...varRow, key: e.target.value })}
+          data-testid="var-key-input"
+        />
+      </div>
+      <div className="wf-form-field">
+        <span className="wf-form-label">Value</span>
+        <input
+          type="text"
+          aria-label="Variable value"
+          placeholder="value"
+          value={varRow.value}
+          onChange={(e) => onChange({ ...varRow, value: e.target.value })}
+          data-testid="var-value-input"
+        />
+      </div>
+      <button
+        type="button"
+        className="wf-btn-sm-danger wf-var-remove"
+        onClick={onRemove}
+        aria-label="Remove variable"
+        data-testid="var-remove-btn"
+      >
+        Remove
+      </button>
+    </div>
+  )
 }
+
+// ── Workflow form panel ───────────────────────────────────────────────────────
 
 function WorkflowFormPanel({
   mode,
@@ -147,8 +372,46 @@ function WorkflowFormPanel({
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  function set<K extends keyof FormState>(key: K, value: FormState[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }))
+  // Step operations
+  function addStep() {
+    const num = form.steps.length + 1
+    setForm((prev) => ({
+      ...prev,
+      steps: [
+        ...prev.steps,
+        { id: mkid(), name: `step-${num}`, type: 'script', scriptBody: '', configJson: '{}', rawOpen: false },
+      ],
+    }))
+  }
+
+  function removeStep(idx: number) {
+    setForm((prev) => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))
+  }
+
+  function updateStep(idx: number, updated: StepRow) {
+    setForm((prev) => ({
+      ...prev,
+      steps: prev.steps.map((s, i) => (i === idx ? updated : s)),
+    }))
+  }
+
+  // Variable operations
+  function addVar() {
+    setForm((prev) => ({
+      ...prev,
+      variables: [...prev.variables, { id: mkid(), key: '', value: '' }],
+    }))
+  }
+
+  function removeVar(idx: number) {
+    setForm((prev) => ({ ...prev, variables: prev.variables.filter((_, i) => i !== idx) }))
+  }
+
+  function updateVar(idx: number, updated: VarRow) {
+    setForm((prev) => ({
+      ...prev,
+      variables: prev.variables.map((v, i) => (i === idx ? updated : v)),
+    }))
   }
 
   async function handleSubmit() {
@@ -156,33 +419,44 @@ function WorkflowFormPanel({
       setSaveError('Workflow name is required')
       return
     }
-
-    let steps: unknown[]
-    try {
-      steps = JSON.parse(form.stepsJson)
-      if (!Array.isArray(steps) || steps.length === 0) {
-        setSaveError('Steps must be a JSON array with at least one step')
-        return
-      }
-    } catch {
-      setSaveError('Steps must be valid JSON array')
+    if (form.steps.length === 0) {
+      setSaveError('At least one step is required')
       return
     }
-
-    let variables: Record<string, unknown> | undefined
-    if (form.variablesJson.trim()) {
-      try {
-        const v = JSON.parse(form.variablesJson)
-        if (typeof v !== 'object' || Array.isArray(v) || v === null) {
-          setSaveError('Variables must be a JSON object')
-          return
-        }
-        variables = v as Record<string, unknown>
-      } catch {
-        setSaveError('Variables must be valid JSON object')
+    for (const s of form.steps) {
+      if (!s.name.trim()) {
+        setSaveError('All steps must have a name')
         return
       }
     }
+    for (const s of form.steps) {
+      if (s.rawOpen || s.type !== 'script') {
+        try {
+          JSON.parse(s.configJson || '{}')
+        } catch {
+          setSaveError(`Step "${s.name}": config must be valid JSON`)
+          return
+        }
+      }
+    }
+
+    // Build steps array from structured state
+    const steps = form.steps.map((s) => {
+      let config: Record<string, unknown> = {}
+      if (s.rawOpen || s.type !== 'script') {
+        config = JSON.parse(s.configJson || '{}') as Record<string, unknown>
+      } else if (s.scriptBody.trim()) {
+        config = { script: s.scriptBody }
+      }
+      return { name: s.name.trim(), type: s.type, config }
+    })
+
+    // Build variables object, omitting rows with empty keys
+    const varEntries = form.variables.filter((v) => v.key.trim())
+    const variables: Record<string, unknown> | undefined =
+      varEntries.length > 0
+        ? Object.fromEntries(varEntries.map((v) => [v.key.trim(), v.value]))
+        : undefined
 
     setSaving(true)
     setSaveError(null)
@@ -229,6 +503,7 @@ function WorkflowFormPanel({
   return (
     <div className="wf-form-panel" data-testid="workflow-form-panel">
       <div className="wf-form">
+        {/* Workflow metadata row */}
         <div className="wf-form-row">
           <div className="wf-form-field">
             <span className="wf-form-label">Name {isEdit ? '' : '*'}</span>
@@ -238,7 +513,7 @@ function WorkflowFormPanel({
               placeholder="my-workflow"
               value={form.name}
               disabled={isEdit}
-              onChange={(e) => set('name', e.target.value)}
+              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
               data-testid="workflow-name-input"
             />
           </div>
@@ -249,7 +524,7 @@ function WorkflowFormPanel({
               aria-label="Description"
               placeholder="Optional description"
               value={form.description}
-              onChange={(e) => set('description', e.target.value)}
+              onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
               className="wide"
             />
           </div>
@@ -260,30 +535,60 @@ function WorkflowFormPanel({
               aria-label="Version"
               placeholder="1.0.0"
               value={form.version}
-              onChange={(e) => set('version', e.target.value)}
+              onChange={(e) => setForm((prev) => ({ ...prev, version: e.target.value }))}
             />
           </div>
         </div>
 
-        <div className="wf-form-row">
-          <div className="wf-form-field">
-            <span className="wf-form-label">Steps (JSON array) *</span>
-            <textarea
-              aria-label="Steps JSON"
-              value={form.stepsJson}
-              onChange={(e) => set('stepsJson', e.target.value)}
-              data-testid="workflow-steps-input"
-            />
+        {/* Step builder */}
+        <div className="wf-builder-section">
+          <div className="wf-builder-header">
+            <span className="wf-form-label">Steps *</span>
+            <button
+              type="button"
+              className="wf-btn-sm"
+              onClick={addStep}
+              data-testid="add-step-btn"
+            >
+              + Add step
+            </button>
           </div>
-          <div className="wf-form-field">
-            <span className="wf-form-label">Variables (JSON object)</span>
-            <textarea
-              aria-label="Variables JSON"
-              placeholder="{}"
-              value={form.variablesJson}
-              onChange={(e) => set('variablesJson', e.target.value)}
+          {form.steps.map((step, idx) => (
+            <StepBuilderRow
+              key={step.id}
+              step={step}
+              index={idx}
+              canRemove={form.steps.length > 1}
+              onChange={(updated) => updateStep(idx, updated)}
+              onRemove={() => removeStep(idx)}
             />
+          ))}
+        </div>
+
+        {/* Variables editor */}
+        <div className="wf-builder-section">
+          <div className="wf-builder-header">
+            <span className="wf-form-label">Variables</span>
+            <button
+              type="button"
+              className="wf-btn-sm"
+              onClick={addVar}
+              data-testid="add-var-btn"
+            >
+              + Add variable
+            </button>
           </div>
+          {form.variables.length === 0 && (
+            <p className="wf-var-empty">No variables defined.</p>
+          )}
+          {form.variables.map((v, idx) => (
+            <VarBuilderRow
+              key={v.id}
+              varRow={v}
+              onChange={(updated) => updateVar(idx, updated)}
+              onRemove={() => removeVar(idx)}
+            />
+          ))}
         </div>
 
         <div className="wf-form-actions">
@@ -313,6 +618,8 @@ function WorkflowFormPanel({
     </div>
   )
 }
+
+// ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function WorkflowListView() {
   const { workflows, loading, error, retry } = useWorkflowList()
