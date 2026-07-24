@@ -22,6 +22,8 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
+import { stewardDisplayName } from '../fleet/columns.ts'
+import { parseStewardPage } from '../fleet/useStewards.ts'
 
 // ── Primitive coercers ────────────────────────────────────────────────────────
 
@@ -514,4 +516,38 @@ export function useRollbackHistory(stewardId: string | null): UseRollbackHistory
     error: current?.error ?? null,
     retry,
   }
+}
+
+// ── useStewardHostnameMap ─────────────────────────────────────────────────────
+
+/*
+ * Fetches the steward list and returns a Map<stewardId, displayName> for
+ * hostname resolution in the config view. Uses the same hostname fallback
+ * logic as fleet/columns.ts's `name` column (dna.hostname || id). Errors
+ * are silently swallowed — the config view falls back to raw IDs when the
+ * stewards fetch fails or is slow.
+ */
+export function useStewardHostnameMap(): Map<string, string> {
+  const [map, setMap] = useState<Map<string, string>>(new Map())
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/v1/stewards?limit=500&offset=0')
+      .then(async (response) => {
+        if (!response.ok) return
+        const body: unknown = await response.json()
+        const page = parseStewardPage((body as Record<string, unknown> | null)?.data)
+        const m = new Map<string, string>()
+        for (const s of page.stewards) {
+          m.set(s.id, stewardDisplayName(s))
+        }
+        if (!cancelled) setMap(m)
+      })
+      .catch(() => { /* hostname fetch failed; caller falls back to raw steward IDs */ })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return map
 }

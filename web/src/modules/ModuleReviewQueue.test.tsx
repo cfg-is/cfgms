@@ -126,6 +126,21 @@ describe('ModuleReviewQueue — heading and list rendering', () => {
     await waitFor(() => expect(screen.getByTestId('modules-empty')).toBeInTheDocument())
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
+
+  it('shows server-error copy (not connectivity) for a 5xx response', async () => {
+    fetchMock.mockResolvedValue(makeListResponse([], 503))
+    renderQueue()
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.queryByText(/check your connection/i)).toBeNull()
+    expect(screen.getByText(/server.*error|returned an error/i)).toBeInTheDocument()
+  })
+
+  it('shows connectivity copy for a network-level failure', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'))
+    renderQueue()
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.getByText(/check your connection/i)).toBeInTheDocument()
+  })
 })
 
 describe('ModuleReviewQueue — approve-confirm-fire', () => {

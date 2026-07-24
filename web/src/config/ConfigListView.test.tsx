@@ -197,6 +197,63 @@ describe('ConfigListView — push panel toggle', () => {
   })
 })
 
+function makeStewardsPageEnvelope(stewards: object[], status = 200) {
+  return new Response(
+    JSON.stringify({
+      data: { stewards, total: stewards.length, limit: 500, offset: 0 },
+      timestamp: new Date().toISOString(),
+    }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+describe('ConfigListView — STEWARD column hostname display', () => {
+  it('shows hostname from the stewards list when available', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-1' })]),
+    )
+    fetchMock.mockResolvedValueOnce(
+      makeStewardsPageEnvelope([{ id: 'sw-1', dna: { hostname: 'CFG-AB-01' } }]),
+    )
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+    expect(screen.getByText('CFG-AB-01')).toBeInTheDocument()
+    expect(screen.queryByText('sw-1')).toBeNull()
+  })
+
+  it('falls back to steward ID when hostname is absent from DNA', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-2' })]),
+    )
+    fetchMock.mockResolvedValueOnce(
+      makeStewardsPageEnvelope([{ id: 'sw-2', dna: null }]),
+    )
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+    expect(screen.getByText('sw-2')).toBeInTheDocument()
+  })
+
+  it('falls back to steward ID when steward is not in the hostname map', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-3' })]),
+    )
+    fetchMock.mockResolvedValueOnce(makeStewardsPageEnvelope([]))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+    expect(screen.getByText('sw-3')).toBeInTheDocument()
+  })
+
+  it('shows ID when stewards fetch fails (graceful degradation)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-4' })]),
+    )
+    fetchMock.mockRejectedValueOnce(new Error('network down'))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+    expect(screen.getByText('sw-4')).toBeInTheDocument()
+  })
+})
+
 describe('ConfigListView — security (A9.1)', () => {
   it('renders steward_id and tenant_id as plain text, not HTML', async () => {
     const xss = '<img src=x onerror="window.__xss=1">'

@@ -420,6 +420,23 @@ describe('WorkflowListView — trigger panel', () => {
   })
 })
 
+describe('WorkflowListView — error-card classification', () => {
+  it('shows server-error copy (not connectivity) for a 5xx response', async () => {
+    fetchMock.mockResolvedValue(makeWorkflowListResponse([], 500))
+    renderWorkflowListView()
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.queryByText(/check your connection/i)).toBeNull()
+    expect(screen.getByText(/server.*error|returned an error/i)).toBeInTheDocument()
+  })
+
+  it('shows connectivity copy for a network-level failure', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'))
+    renderWorkflowListView()
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    expect(screen.getByText(/check your connection/i)).toBeInTheDocument()
+  })
+})
+
 describe('WorkflowListView — security (A9.1)', () => {
   it('renders workflow name and description as plain text, not HTML', async () => {
     const xss = '<img src=x onerror="window.__xss=1">'

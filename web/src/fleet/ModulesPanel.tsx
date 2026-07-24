@@ -15,6 +15,7 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { apiFetch } from '../api/client.ts'
+import ErrorCard from '../shell/ErrorCard.tsx'
 
 export interface StewardModule {
   name: string
@@ -100,19 +101,11 @@ export default function ModulesPanel() {
             </p>
           </div>
         ) : current.error !== undefined ? (
-          <div className="notice err" role="alert" data-testid="modules-error">
-            <div className="ic">!</div>
-            <h3>Couldn&apos;t load modules</h3>
-            <p>Module data for this steward isn&apos;t available right now.</p>
-            <span className="mono2 detail">{current.error}</span>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setAttempt((n) => n + 1)}
-            >
-              Retry
-            </button>
-          </div>
+          <ErrorCard
+            heading="Couldn&apos;t load modules"
+            detail={current.error}
+            onRetry={() => setAttempt((n) => n + 1)}
+          />
         ) : current.modules !== undefined && current.modules.length === 0 ? (
           <div className="notice" data-testid="modules-empty">
             <p>No modules loaded on this steward.</p>
