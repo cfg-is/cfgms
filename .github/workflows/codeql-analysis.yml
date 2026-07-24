@@ -32,6 +32,7 @@ on:
       - 'go.sum'
       - '.github/codeql/**'
       - '.github/workflows/codeql-analysis.yml'
+      - 'web/**'
   pull_request:
     branches: [ main, develop ]
     paths:
@@ -40,6 +41,7 @@ on:
       - 'go.sum'
       - '.github/codeql/**'
       - '.github/workflows/codeql-analysis.yml'
+      - 'web/**'
   # Merge queue. merge_group events ignore `paths` filters, so CodeQL runs on
   # EVERY merge group regardless of what changed. This is REQUIRED, not
   # optional: with `CodeQL` a required check, the merge-group evaluation must
@@ -75,8 +77,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'go' ]
-        # CodeQL supports: 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby'
+        language: [ 'go', 'javascript-typescript' ]
+        # CodeQL supports: 'cpp', 'csharp', 'go', 'java', 'javascript-typescript', 'python', 'ruby'
 
     steps:
     - name: Checkout repository
@@ -85,6 +87,7 @@ jobs:
         persist-credentials: false
 
     - name: Set up Go
+      if: matrix.language == 'go'
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
@@ -96,6 +99,7 @@ jobs:
     # or a non-Go change in the same series get a fast restore + analyze.
     # Cache scope: the CodeQL action stores its DB under runner.temp by default.
     - name: Cache CodeQL database
+      if: matrix.language == 'go'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/codeql_databases
@@ -104,6 +108,7 @@ jobs:
           ${{ runner.os }}-codeql-db-${{ matrix.language }}-
 
     - name: Download dependencies
+      if: matrix.language == 'go'
       run: go mod download
 
     # Initialize CodeQL tools for scanning.
@@ -129,7 +134,9 @@ jobs:
 
     # Build the Go code for CodeQL to analyze
     # CodeQL needs to trace the build to understand code flow
+    # javascript-typescript is interpreted — no build step needed
     - name: Build project
+      if: matrix.language == 'go'
       run: |
         echo "🔨 Building CFGMS for CodeQL analysis..."
         # Build all binaries to ensure complete code coverage
