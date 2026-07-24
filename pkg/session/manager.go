@@ -356,6 +356,63 @@ func (m *manager) List(ctx context.Context) ([]*Session, error) {
 	return out, nil
 }
 
+// Elevate atomically upgrades a live session to AssuranceStrong (ADR-021 Amendment 2,
+// Issue #2965). It sets Assurance=Strong, BoundIP=sourceIP, CredentialID=credentialID,
+// LastProvenAt=now, and rotates the session token. The prior token stays valid for
+// GraceWindow so concurrent in-flight requests complete cleanly, but a pre-elevation
+// stolen cookie is severed as soon as the grace window elapses.
+//
+// The session identity (ID) and any CSRF binding keyed on that ID are preserved through
+// the rotation. Elevate is looked up by session ID, not by token, because the caller
+// (the step-up assertion handler) knows the session ID from context.
+func (m *manager) Elevate(ctx context.Context, sessionID string, credentialID []byte, sourceIP string) (*Session, string, error) {
+	m.mu.RLock()
+	ms := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if ms == nil {
+		return nil, "", ErrSessionNotFound
+	}
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if ms.revoked {
+		return nil, "", ErrSessionRevoked
+	}
+	now := m.clockFn()
+	if now.After(ms.session.AbsoluteExpiresAt) {
+		return nil, "", ErrSessionExpired
+	}
+	if now.After(ms.session.LastActivity.Add(m.cfg.IdleTimeout)) {
+		return nil, "", ErrSessionExpired
+	}
+	newToken, err := GenerateToken()
+	if err != nil {
+		return nil, "", err
+	}
+	newHash := HashToken(newToken)
+	ms.session.Assurance = AssuranceStrong
+	ms.session.BoundIP = sourceIP
+	ms.session.CredentialID = credentialID
+	ms.session.LastProvenAt = now
+	ms.session.LastActivity = now
+	if ms.prevHash != "" {
+		m.mu.Lock()
+		delete(m.byHash, ms.prevHash)
+		m.mu.Unlock()
+	}
+	ms.prevHash = ms.currentHash
+	ms.prevExpiry = now.Add(m.cfg.GraceWindow)
+	ms.currentHash = newHash
+	m.mu.Lock()
+	m.byHash[newHash] = ms
+	m.mu.Unlock()
+	_ = m.store.Set(ctx, newHash, ms.session)
+	if gs, ok := m.store.(graceStamper); ok {
+		_ = gs.StampGraceExpiry(ctx, ms.prevHash, ms.prevExpiry)
+	}
+	out := *ms.session
+	return &out, newToken, nil
+}
+
 // Revoke immediately invalidates the session identified by id. Subsequent Validate
 // or Renew calls for any token belonging to this session return ErrSessionRevoked.
 // Revoke deletes all token-hash records from the durable store so revocation is

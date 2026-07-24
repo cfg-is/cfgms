@@ -38,8 +38,10 @@ type strongAssuranceRouteEntry struct {
 }
 
 // strongAssuranceRouteTable is the authoritative list of routes that enforce
-// AssuranceStrong via requirePermission (ADR-021, Issue #2780). The F2 parity
+// Min > AssuranceMachine via requirePermission (ADR-021, Issue #2780). The F2 parity
 // test verifies this matches the permissionAssurance registry (minus known-future entries).
+// Most entries require AssuranceStrong; AssuranceBasic-minimum entries are included so the
+// machine-403 and strong-passes invariants apply to them too (Issue #2965).
 //
 // Three routes share the "registration:approve" permission, and two share
 // "registration:manage-ip-trust" — all must appear here so the parity check
@@ -85,6 +87,11 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// WebAuthn presence ceremony (Issue #2784) — gates RequireUserPresence-gated actions.
 	{"POST", "/api/v1/webauthn/presence/begin", "webauthn:assert-presence"},
 	{"POST", "/api/v1/webauthn/presence/finish", "webauthn:assert-presence"},
+	// WebAuthn step-up elevation (Issue #2965, ADR-021 Amendment 2) — Basic→Strong.
+	// Min=AssuranceBasic: Machine gets 403, Strong passes, but Basic PASSES (not step-up).
+	// Part (d) skips step-up assertion for these; see assertBasicPassesFromRequirePermission.
+	{"POST", "/api/v1/webauthn/elevate/begin", "webauthn:elevate"},
+	{"POST", "/api/v1/webauthn/elevate/finish", "webauthn:elevate"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
@@ -179,12 +186,20 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 		})
 	}
 
-	// Part (d): Basic-assurance caller must get 401 + CFGMS-StepUp on every
-	// strong-assurance route. Uses requirePermission directly since mTLS/web-session
-	// credentials are not available in unit tests; the gate is in requirePermission,
-	// not in the authentication middleware (ADR-021 Decision 6).
+	// Part (d): Basic-assurance callers on Strong-minimum routes must get 401+CFGMS-StepUp;
+	// on Basic-minimum routes they must pass. Uses requirePermission directly.
 	for _, entry := range strongAssuranceRouteTable {
 		entry := entry
+		perm, permFound := permissionAssurance[entry.permission]
+		if permFound && perm.Min == session.AssuranceBasic {
+			// Basic-minimum route: a Basic caller must reach the handler (no step-up).
+			t.Run("d_basic_passes/"+entry.method+" "+entry.path, func(t *testing.T) {
+				parts := strings.SplitN(entry.permission, ":", 2)
+				require.Len(t, parts, 2, "permission %q must be resource:action", entry.permission)
+				assertBasicPassesFromRequirePermission(t, server, parts[0], parts[1])
+			})
+			continue
+		}
 		t.Run("d_basic_gets_stepup/"+entry.method+" "+entry.path, func(t *testing.T) {
 			parts := strings.SplitN(entry.permission, ":", 2)
 			require.Len(t, parts, 2, "permission %q must be resource:action", entry.permission)
@@ -429,6 +444,27 @@ func TestNonStrongRoute_RemainsReachableByAPIKey(t *testing.T) {
 		"valid API-key must be authenticated on non-strong-assurance route")
 	assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
 		"non-strong-assurance route must not issue step-up challenge to API-key principal")
+}
+
+// assertBasicPassesFromRequirePermission verifies that requirePermission allows a Basic-assurance
+// caller through for a Basic-minimum permission (no step-up challenge). Used by Part (d) for
+// permissions with Min=AssuranceBasic (Issue #2965 elevate routes).
+func assertBasicPassesFromRequirePermission(t *testing.T, server *Server, resource, action string) {
+	t.Helper()
+	basicPrincipal := &Principal{
+		ID: "web-admin", Name: "web-session:web-admin",
+		Assurance: session.AssuranceBasic,
+	}
+	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := server.requirePermission(resource, action)(probe)
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, basicPrincipal))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"Basic-assurance caller must pass Basic-minimum permission %s:%s without step-up", resource, action)
+	assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+		"Basic-assurance pass-through must not set WWW-Authenticate on %s:%s", resource, action)
 }
 
 // assertStepUpFromRequirePermission is a shared helper for testing that the assurance gate
