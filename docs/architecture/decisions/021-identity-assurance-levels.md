@@ -402,6 +402,8 @@ configuration errors at boot.
 
 ## 7. Bootstrap and recovery ride the existing mTLS cert root of trust
 
+> **Amended 2026-07-24 — see [Amendment 1](#amendment-1-2026-07-24-browser-passkey-self-enrollment-for-accounts-without-a-phishing-resistant-authenticator).** The absolute in this section — *"the browser never sees credential enrollment"* — was too strong and made CFGMS not fully web-manageable: a web-only, password-only admin could never obtain a first passkey and so could never reach `AssuranceStrong` from a browser. Amendment 1 permits **first-passkey self-enrollment from the browser for an account that holds no phishing-resistant authenticator** (an *upgrade*, with nothing to downgrade), while keeping this section's anti-downgrade rule intact for every account that already has one, and keeping the **cert path** as the recovery route for a *lost* sole authenticator.
+
 An admin obtains their first strong authenticator — and replaces a lost one — by
 **registering a passkey via `cfg`, authenticated with their mTLS admin cert.**
 
@@ -512,3 +514,183 @@ overrides root→leaf against the global `permissionAssurance` map so that
 `requirePermission` and `scanAPIKeysForPrivilegedAccess` enforce the stricter of
 the global floor and any ancestor-chain override. Until that story lands,
 `permissionAssurance` is the sole source of truth.
+
+---
+
+## Amendment 1 (2026-07-24): Browser passkey self-enrollment for accounts without a phishing-resistant authenticator
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** §7
+
+### Why §7 was too strong
+
+§7 rested on one absolute — *"the browser never sees credential enrollment; the
+first passkey is enrolled via `cfg` with the mTLS admin cert."* That constraint
+made CFGMS **not fully web-manageable**, which every RMM must be. Its concrete
+failure: a **web-only account created with a password and no MFA** (the normal way
+an MSP onboards a new operator) can *never* obtain a first passkey, because
+enrollment requires a cert it does not have. It therefore can never reach
+`AssuranceStrong` and can never perform any privileged action from the browser —
+including the very act (`+ New account`) that would let it grow the team. The
+account is permanently stuck at `AssuranceBasic`. This is the root cause of the
+web-session Strong-assurance gap.
+
+The founder's decision: **§7's prohibition was a mistake.** CFGMS must let a
+no-MFA account self-enroll a passkey from the browser, under minimal-standing-
+privilege, strong-auth-at-time-of-use, and zero-trust.
+
+### The resolution: passkey-only human accounts, forced enrollment via a single-use magic link
+
+§7's anti-downgrade argument is **correct and retained**: a phishable credential must
+never mint or recover a phishing-resistant one *for an account that already has strong
+auth*. The gap §7 over-corrected was **bootstrap** — it made the browser incapable of
+producing a *first* passkey at all, so a web-only account was stuck at `AssuranceBasic`
+forever.
+
+The fix (founder-decided 2026-07-24) removes the phishable factor entirely rather than
+managing it: **human accounts are passkey-only — they have no password at all.**
+
+- **Passkey-only, mandatory, and multiple.** A human account holds **one or more
+  passkeys** and no password. Multiple passkeys are **supported and encouraged for
+  anti-lockout** — a second passkey on another device (phone + laptop + hardware key) is
+  the primary self-recovery path, not an admin ticket. There is no password to phish, so
+  the entire "phished password → Strong" surface these amendments worried about **does
+  not exist** for human accounts.
+- **Forced first-passkey enrollment via a single-use magic link.** Provisioning mints a
+  **single-use, TTL-bounded enrollment magic link**, delivered either **shown once in the
+  admin UI** for out-of-band handoff **or emailed** to the new user. Redeeming it forces
+  first-passkey registration and consumes the link. A no-passkey account can do **exactly
+  one thing** — redeem its link and register a first passkey; every other request is
+  refused. A link stolen before the legitimate redemption is useless once redeemed, and
+  expires on TTL regardless. The residual exposure is the narrow admin→human handoff
+  window of a single-use, short-TTL link — the same irreducible onboarding-secret window
+  every system has — not a durable phishable password.
+- **QA and bootstrap use the mTLS admin cert**, in the browser as well as in `cfg`. The
+  privileged bootstrap path depends on no shared secret at all; a fresh deployment is
+  administered from a cert (§7).
+
+A *first* passkey is still an **upgrade** (there is nothing to downgrade from); the
+upgrade happens under a forced, single-use magic-link ceremony rather than an open-ended
+"password ⇒ passkey" endpoint.
+
+### Decision
+
+1. **Passkey-only, mandatory, multiple.** Human accounts have no password. Each holds one
+   or more passkeys; login is a WebAuthn passkey assertion. Registering **additional
+   backup passkeys is expected** (anti-lockout). An account with zero passkeys is confined
+   to a single permitted action — first-passkey enrollment — and every other request is
+   refused. Enrollment is self-scoped to the account the redeemed link identifies, never
+   an arbitrary target, and its "zero existing authenticators" precondition is enforced
+   **server-side at the finish step** (compare-and-swap on credential-count == 0), never
+   inferred from the client.
+
+2. **First-passkey enrollment rides a single-use magic link.** Account provisioning mints
+   a single-use, TTL-bounded enrollment link, delivered **shown-once in the admin UI or
+   by email**. Redeeming forces first-passkey registration and invalidates the link; a
+   reused or expired link is rejected.
+
+3. **Adding or removing a passkey is gated at `AssuranceStrong`.** Once an account holds
+   ≥1 passkey, registering an **additional (backup) passkey** — the routine anti-lockout
+   action — or removing one requires step-up with an existing passkey (Amendment 2). No
+   magic link is involved after the first passkey. A stolen session with no passkey can
+   never add one to an enrolled account.
+
+4. **Recovery is self-service while any passkey survives.** With multiple passkeys,
+   losing one device is self-service: assert a surviving passkey, register a replacement.
+   Only when **all** passkeys are lost does recovery need the **cert path (§7)** or an
+   **admin-mediated reset** — an operator at `AssuranceStrong` re-provisions the account
+   to the zero-authenticator state and issues a **fresh** single-use magic link,
+   invalidating any residual credentials. There is no password path, ever.
+
+5. **Enrollment grants no standing privilege.** A passkey is a *credential*, not an
+   entitlement. Privileged actions still require step-up to `AssuranceStrong` at time of
+   use (Decision 6 / Amendment 2). Enrolling makes future elevation *possible*; it does
+   not elevate the current session.
+
+### Consequences
+
+- A new operator redeems a single-use magic link, registers a first passkey, registers a
+  backup passkey, and manages the fleet from the browser — CFGMS is fully web-manageable
+  with **no password anywhere** in the human-account model.
+- The phishable-factor attack surface for human accounts is **removed, not bounded**:
+  there is no password to phish, so a phished-credential → Strong path does not exist. The
+  only onboarding residual is the single-use, short-TTL magic-link handoff window.
+- Losing a device is self-service (a surviving backup passkey), not an admin ticket —
+  which is why multiple passkeys are mandatory to encourage, not merely allowed.
+- QA / bootstrap administers a fresh controller entirely from the mTLS cert (§7), browser
+  included.
+- Implementations MUST enforce rules 1–4 server-side: the zero-authenticator confinement,
+  the finish-step CAS precondition, single-use + TTL on the magic link, and the
+  Strong-gate on adding/removing passkeys are all controller-side, never client-inferred.
+
+**Consequence to design separately (not in this amendment):** passkey-only human accounts
+means the **password web-login path retires** — login becomes a passkey assertion, and a
+login-time assertion (`userVerification: "required"`) is itself phishing-resistant and may
+establish `AssuranceStrong` directly (subject to Decision 3 continuity), collapsing much of
+the Basic→Strong step-up need for humans to the *lost-continuity re-proof* case. That login
+redesign is a related but separate change; it is flagged here and tracked as its own story,
+not specified in this amendment.
+
+### Scope
+
+This amendment is implemented alongside the web-session step-up handler (Epic #2931):
+first-passkey magic-link enrollment (this amendment) + backup-passkey management
+(Strong-gated) + the elevation ceremony (Amendment 2). Together they make human accounts
+passkey-only and fully web-manageable.
+
+---
+
+## Amendment 2 (2026-07-24): Web-session Basic→Strong elevation via WebAuthn assertion
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Extends:** Decisions 3 and 6 · **Implements the addendum Epic #2931 required before decomposition**
+
+The assurance model (Decisions 1–6) defined the *levels* and the step-up *challenge*,
+but the specific ceremony that raises an **existing** password-authenticated web session
+from `AssuranceBasic` to `AssuranceStrong` was left as "future" (named verbatim at
+`handlers_webauthn.go:233-237`, unbuilt). Without it, no browser session can reach Strong
+and every `Min: AssuranceStrong` action 401s with `WWW-Authenticate: CFGMS-StepUp`. This
+amendment specifies that ceremony and its threat model.
+
+### The ceremony
+
+1. A `Min: AssuranceBasic` session encounters a `Min: AssuranceStrong` action and receives the
+   step-up challenge (Decision 6). The client calls a **step-up assertion endpoint**, itself
+   callable at `AssuranceBasic`.
+2. The controller issues a **single-use, server-generated challenge bound to the current
+   session**. The browser produces a **WebAuthn assertion** (`userVerification: "required"`)
+   signed by a credential **already registered to the account** (via `cfg`/cert per §7, or via
+   browser self-enroll per Amendment 1).
+3. The controller verifies: challenge match, RP ID + **origin binding**, signature against the
+   registered public key, and a **monotonically advancing signature counter** (clone/replay
+   detection).
+4. On success the controller **elevates the existing session in place** — sets
+   `Principal.Assurance = AssuranceStrong` on the *same* session. **No new session is minted**,
+   preserving session continuity and the CSRF binding. The original request is retried by the
+   client's step-up interceptor.
+
+### Threat model and bounds
+
+- **Elevation is not permanent.** The Strong state is subject to the same continuity and
+  downgrade rules as Decision 3: silent device proof maintains it; a network-context change
+  (Decision 5), a long activity gap, or the configurable interval triggers re-proof, and a
+  failed/impossible proof downgrades to `AssuranceBasic` (requiring a fresh assertion). Step-up
+  buys an **elevation window**, not a standing Strong session.
+- **Replay / clone.** The challenge is single-use and session-bound; the counter must advance.
+  A stolen cookie replayed from the same network still cannot elevate — it holds no private key
+  (the reasoning in Decision 3 applies identically).
+- **Phishing resistance.** WebAuthn origin binding makes the assertion unphishable: it is valid
+  only for the controller's RP ID. A phished password yields at most `AssuranceBasic`.
+- **Orthogonal to presence tokens (Decision 4 / #2784).** Elevation raises the *session's
+  assurance level*; it does **not** substitute for the per-action human-presence gesture that
+  the `RequireUserPresence` catastrophic actions demand. An elevated Strong session still mints
+  a presence token for those two permissions. Elevation and presence are distinct layers.
+- **Composes with Amendment 1.** A freshly self-enrolled passkey is immediately usable as the
+  assertion credential here — that is how a no-MFA account completes password → self-enroll →
+  assert → Strong in a single browser sitting, with no cert.
+
+### Scope note
+
+This supersedes Epic #2931's original "Out of scope: browser never sees credential enrollment"
+line — browser first-passkey enrollment is now in scope via Amendment 1. Epic #2931 therefore
+decomposes into the elevation assertion handler (this amendment), the browser self-enrollment
+backend + UI (Amendment 1), the step-up modal + `apiFetch` interceptor, and the held write-action
+wiring (W1–W5) that becomes reachable once elevation works.
