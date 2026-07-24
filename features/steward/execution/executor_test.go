@@ -1064,3 +1064,189 @@ func TestExecuteResource_ManagedElsewhere_CompliantNoSet(t *testing.T) {
 	assert.Equal(t, int32(0), atomic.LoadInt32(&mod.setCalled),
 		"Set must never be called for a resource managed on another node")
 }
+
+// ─── Story #2977: reboot-deferred sentinel classification ──────────────────────
+
+// rebootDeferredSetModule is a real test module that reports drift on Get() and then
+// returns a *modules.RebootDeferredError from Set(), simulating a module that
+// withholds a reboot because the current time is outside the reboot_window.
+type rebootDeferredSetModule struct {
+	nextWindow time.Time
+}
+
+func (m *rebootDeferredSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *rebootDeferredSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return modules.NewRebootDeferredError(m.nextWindow)
+}
+
+var _ modules.Module = (*rebootDeferredSetModule)(nil)
+
+// TestExecuteResource_RebootDeferred_ProducesStatusDeferred verifies that when a
+// module's Set() returns a *modules.RebootDeferredError, the executor:
+//   - classifies the result as StatusDeferred (not StatusFailed or StatusSkipped)
+//   - populates DeferredUntil from the error's NextWindow field
+//   - does NOT call verifyChanges (ChangesApplied must remain false)
+func TestExecuteResource_RebootDeferred_ProducesStatusDeferred(t *testing.T) {
+	nextWindow := time.Date(2026, time.January, 12, 2, 0, 0, 0, time.UTC)
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("reboot-deferred", &rebootDeferredSetModule{nextWindow: nextWindow})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "reboot-gated-resource",
+		Module: "reboot-deferred",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusDeferred, result.Status,
+		"a module.Set returning RebootDeferredError must produce StatusDeferred")
+	assert.False(t, result.ChangesApplied,
+		"ChangesApplied must be false when Set returns RebootDeferredError (no change was applied)")
+	assert.Equal(t, nextWindow, result.DeferredUntil,
+		"DeferredUntil must be populated from the RebootDeferredError's NextWindow field")
+	assert.NotEmpty(t, result.Error,
+		"result.Error must carry the deferred error message for operator visibility")
+}
+
+// TestExecuteResource_RebootDeferred_DistinctFromFailed verifies that
+// StatusDeferred is distinct from StatusFailed — a plain non-deferred error from
+// Set must produce StatusFailed, not StatusDeferred.
+func TestExecuteResource_RebootDeferred_DistinctFromFailed(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("set-fail", &plainErrorSetModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "plain-fail-resource",
+		Module: "set-fail",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.NotEqual(t, execution.StatusDeferred, result.Status,
+		"a plain (non-deferred) Set error must NOT produce StatusDeferred")
+	assert.Equal(t, execution.StatusFailed, result.Status,
+		"a plain Set error must produce StatusFailed")
+	assert.True(t, result.DeferredUntil.IsZero(),
+		"DeferredUntil must be zero for a plain (non-deferred) failure")
+}
+
+// plainErrorSetModule reports drift on Get and returns a plain error from Set.
+type plainErrorSetModule struct{}
+
+func (m *plainErrorSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *plainErrorSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return fmt.Errorf("plain set failure — not a reboot deferral")
+}
+
+var _ modules.Module = (*plainErrorSetModule)(nil)
+
+// TestExecuteResource_RebootDeferred_ZeroNextWindow verifies that a
+// RebootDeferredError with a zero NextWindow (no upcoming window known) still
+// produces StatusDeferred with a zero DeferredUntil — no panic, no fallthrough
+// to StatusFailed.
+func TestExecuteResource_RebootDeferred_ZeroNextWindow(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("reboot-deferred-zero", &rebootDeferredSetModule{nextWindow: time.Time{}})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "reboot-gated-zero",
+		Module: "reboot-deferred-zero",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusDeferred, result.Status,
+		"zero NextWindow RebootDeferredError must still produce StatusDeferred")
+	assert.True(t, result.DeferredUntil.IsZero(),
+		"DeferredUntil must be zero when RebootDeferredError carries no next window")
+}
+
+// TestExecuteConfiguration_DeferredCount verifies that StatusDeferred resources
+// are counted in ExecutionReport.DeferredCount and not in FailedCount.
+func TestExecuteConfiguration_DeferredCount(t *testing.T) {
+	nextWindow := time.Date(2026, time.January, 12, 2, 0, 0, 0, time.UTC)
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("reboot-deferred", &rebootDeferredSetModule{nextWindow: nextWindow})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	cfg := stewardconfig.StewardConfig{
+		Resources: []stewardconfig.ResourceConfig{
+			{
+				Name:   "deferred-resource",
+				Module: "reboot-deferred",
+				Config: map[string]interface{}{"state": "desired"},
+			},
+		},
+	}
+
+	report := executor.ExecuteConfiguration(context.Background(), cfg)
+
+	assert.Equal(t, 1, report.TotalResources)
+	assert.Equal(t, 1, report.DeferredCount,
+		"deferred resource must increment DeferredCount")
+	assert.Equal(t, 0, report.FailedCount,
+		"deferred resource must NOT increment FailedCount")
+	assert.Equal(t, 0, report.SkippedCount)
+}

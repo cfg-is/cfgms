@@ -224,6 +224,8 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 				report.SkippedCount++
 			case StatusNonCompliant:
 				report.NonCompliantCount++
+			case StatusDeferred:
+				report.DeferredCount++
 			}
 		}
 	}
@@ -245,6 +247,7 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 		"failed", report.FailedCount,
 		"skipped", report.SkippedCount,
 		"non_compliant", report.NonCompliantCount,
+		"deferred", report.DeferredCount,
 		"duration", report.EndTime.Sub(report.StartTime))
 
 	return report
@@ -460,6 +463,22 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 				"module", resource.Module,
 				"timeout_ms", setEffectiveBudget.Milliseconds(),
 				"elapsed_ms", result.ExecutionTime.Milliseconds())
+			return result
+		}
+		// Reboot-deferred: a module's Set returned ErrRebootDeferred because the
+		// current time falls outside the resource's reboot_window. This is not a
+		// failure — the action is intentionally deferred and will be retried on the
+		// next convergence pass once the window opens.
+		var rebootErr *modules.RebootDeferredError
+		if errors.As(err, &rebootErr) {
+			result.Status = StatusDeferred
+			result.DeferredUntil = rebootErr.NextWindow
+			result.Error = err.Error()
+			e.enqueueOutcome(correlationID, "deferred", result.ExecutionTime)
+			e.logger.Info("module.Set deferred: reboot outside window",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"deferred_until", result.DeferredUntil)
 			return result
 		}
 		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
@@ -691,6 +710,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		successCount, _ := moduleStatus.Details["success_count"].(int)
 		errorCount, _ := moduleStatus.Details["error_count"].(int)
 		nonCompliantCount, _ := moduleStatus.Details["non_compliant_count"].(int)
+		deferredCount, _ := moduleStatus.Details["deferred_count"].(int)
 		totalCount, _ := moduleStatus.Details["total_count"].(int)
 		totalCount++
 
@@ -714,17 +734,26 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 			if moduleStatus.Status == "OK" {
 				moduleStatus.Status = "NON_COMPLIANT"
 			}
+		case StatusDeferred:
+			// Reboot-gated action deferred outside window — not an error; retried next pass.
+			deferredCount++
+			if moduleStatus.Status == "OK" {
+				moduleStatus.Status = "DEFERRED"
+			}
 		}
 
 		moduleStatus.Details["success_count"] = successCount
 		moduleStatus.Details["error_count"] = errorCount
 		moduleStatus.Details["non_compliant_count"] = nonCompliantCount
+		moduleStatus.Details["deferred_count"] = deferredCount
 		moduleStatus.Details["total_count"] = totalCount
 
 		if errorCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Applied %d/%d resources (%d errors)", successCount, totalCount, errorCount)
 		} else if nonCompliantCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Monitored %d resources (%d non-compliant)", totalCount, nonCompliantCount)
+		} else if deferredCount > 0 {
+			moduleStatus.Message = fmt.Sprintf("Deferred %d/%d resources (outside reboot_window)", deferredCount, totalCount)
 		} else {
 			moduleStatus.Message = fmt.Sprintf("Applied %d resources", totalCount)
 		}
@@ -736,12 +765,17 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		hasErrors = true
 	}
 
+	hasDeferred := execReport.DeferredCount > 0
+
 	if hasErrors {
 		report.Status = "ERROR"
 		report.Message = "Configuration applied with errors"
 	} else if hasNonCompliant {
 		report.Status = "NON_COMPLIANT"
 		report.Message = "Configuration monitored: drift detected but not corrected"
+	} else if hasDeferred {
+		report.Status = "DEFERRED"
+		report.Message = "Configuration partially deferred: reboot-gated actions outside window"
 	}
 
 	report.ExecutionTimeMs = time.Since(startTime).Milliseconds()

@@ -4,6 +4,9 @@ package modules
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 )
 
 // Module defines the core interface that all modules must implement.
@@ -118,3 +121,43 @@ const (
 	ChangeTypeDeleted
 	ChangeTypePermissions
 )
+
+// RebootDeferredError is returned by a module's Set when a reboot-gated action falls
+// outside its reboot_window. The executor recognizes this error with errors.As and
+// classifies the result as StatusDeferred, populating DeferredUntil from NextWindow.
+//
+// Use NewRebootDeferredError to construct and errors.As to extract:
+//
+//	var re *modules.RebootDeferredError
+//	if errors.As(err, &re) {
+//	    deferredUntil = re.NextWindow
+//	}
+type RebootDeferredError struct {
+	// NextWindow is the next instant at which the reboot-gated action may proceed.
+	// Zero means no upcoming window is known (ungated or schedule not yet computed).
+	NextWindow time.Time
+}
+
+// Error implements the error interface.
+func (e *RebootDeferredError) Error() string {
+	if e.NextWindow.IsZero() {
+		return "reboot deferred: no upcoming window scheduled"
+	}
+	return fmt.Sprintf("reboot deferred: next window opens at %s", e.NextWindow.Format(time.RFC3339))
+}
+
+// ErrRebootDeferred is a package-level sentinel for reboot deferral detection via errors.Is.
+// Prefer errors.As when the next-window time is needed.
+var ErrRebootDeferred = errors.New("reboot deferred outside reboot_window")
+
+// NewRebootDeferredError constructs a RebootDeferredError with the given next window time.
+// Pass a zero time.Time when the next window is not yet known.
+func NewRebootDeferredError(nextWindow time.Time) *RebootDeferredError {
+	return &RebootDeferredError{NextWindow: nextWindow}
+}
+
+// Is implements errors.Is support so that errors.Is(err, ErrRebootDeferred) returns true
+// for any *RebootDeferredError, regardless of the wrapped NextWindow value.
+func (e *RebootDeferredError) Is(target error) bool {
+	return target == ErrRebootDeferred
+}
