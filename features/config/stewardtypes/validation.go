@@ -6,6 +6,8 @@ package stewardtypes
 import (
 	"fmt"
 	"time"
+
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 )
 
 // scriptSigningPolicyLevel returns the numeric strictness level of a signing policy.
@@ -110,6 +112,12 @@ func ValidateConfiguration(config StewardConfig) error {
 
 	if err := ValidateModuleTrustConfig(config.Steward.ModuleTrust); err != nil {
 		return fmt.Errorf("module_trust configuration invalid: %w", err)
+	}
+
+	if config.Steward.RebootWindow != nil {
+		if err := maintenanceschedule.Validate(config.Steward.RebootWindow); err != nil {
+			return fmt.Errorf("reboot_window configuration invalid: %w", err)
+		}
 	}
 
 	resourceNames := make(map[string]bool)
