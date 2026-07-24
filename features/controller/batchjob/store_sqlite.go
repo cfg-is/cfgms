@@ -249,6 +249,56 @@ ORDER BY created_at ASC`
 	return jobs, nil
 }
 
+// ListBatchJobs returns batch jobs ordered by created_at DESC with pagination.
+// When tenantID is non-empty only jobs belonging to that tenant are returned.
+// An empty tenantID returns all jobs across tenants (global-scope admin callers).
+func (s *SQLiteBatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*BatchJob, error) {
+	const selectCols = `
+SELECT id, tenant_id, selector, config_json, targets_json, status,
+       created_at, updated_at, initiated_by
+FROM batch_jobs`
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(selectCols+`
+WHERE tenant_id = ?
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?`, tenantID, limit, offset)
+	} else {
+		rows, err = s.db.Query(selectCols+`
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?`, limit, offset)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("batch job store list: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var jobs []*BatchJob
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("batch job store list scan: %w", err)
+		}
+		steps, err := s.loadSteps(job.ID)
+		if err != nil {
+			return nil, err
+		}
+		job.Steps = steps
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("batch job store list rows: %w", err)
+	}
+	if jobs == nil {
+		jobs = []*BatchJob{}
+	}
+	return jobs, nil
+}
+
 // HealthCheck verifies the store is reachable.
 func (s *SQLiteBatchJobStore) HealthCheck(_ context.Context) error {
 	if err := s.db.Ping(); err != nil {

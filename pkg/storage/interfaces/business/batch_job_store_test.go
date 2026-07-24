@@ -108,6 +108,25 @@ func (s *inMemBatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID s
 	return out, nil
 }
 
+func (s *inMemBatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*batchjob.BatchJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*batchjob.BatchJob
+	for _, j := range s.jobs {
+		if tenantID == "" || j.TenantID == tenantID {
+			out = append(out, deepCopyBatchJob(j))
+		}
+	}
+	if offset >= len(out) {
+		return []*batchjob.BatchJob{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (s *inMemBatchJobStore) HealthCheck(_ context.Context) error { return nil }
 func (s *inMemBatchJobStore) Initialize(_ context.Context) error  { return nil }
 func (s *inMemBatchJobStore) Close() error                        { return nil }

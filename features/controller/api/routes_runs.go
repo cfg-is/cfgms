@@ -14,6 +14,7 @@ func registerRunRoutes(s *Server, api *mux.Router) {
 	// Ad-hoc run endpoints (Issue #1673). Always registered — returns 503 when
 	// run manager is not wired (transport-disabled deployments).
 	runs := api.PathPrefix("/runs").Subrouter()
+	runs.Handle("", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleListRuns))).Methods("GET")
 	runs.Handle("/script", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunScript))).Methods("POST")
 	runs.Handle("/command", s.requirePermission("steward", "execute-scripts")(http.HandlerFunc(s.handlePostRunCommand))).Methods("POST")
 	runs.Handle("/{run_id}", s.requirePermission("steward", "read-scripts")(http.HandlerFunc(s.handleGetRun))).Methods("GET")

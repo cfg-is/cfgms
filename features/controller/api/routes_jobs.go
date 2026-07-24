@@ -14,6 +14,7 @@ func registerJobRoutes(s *Server, api *mux.Router) {
 	// Batch job endpoints (Issue #2296). Always registered — returns 503 when
 	// batchJobStore is nil (nil-safe by design).
 	jobs := api.PathPrefix("/jobs").Subrouter()
+	jobs.Handle("", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleListJobs))).Methods("GET")
 	jobs.Handle("", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleCreateJob))).Methods("POST")
 	jobs.Handle("/{id}", s.requirePermission("jobs", "write")(http.HandlerFunc(s.handleGetJob))).Methods("GET")
 }

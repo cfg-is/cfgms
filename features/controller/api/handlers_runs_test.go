@@ -912,3 +912,168 @@ func TestAllowedShellsMatchesExecutorTaxonomy(t *testing.T) {
 	assert.True(t, allowedShells["powershell"], "Windows PowerShell 5.1 must be dispatchable")
 	assert.True(t, allowedShells["pwsh"], "PowerShell Core must be dispatchable")
 }
+
+// ── handleListRuns tests ──────────────────────────────────────────────────────
+
+// listRunsAs sends GET /api/v1/runs with the given principal and optional query string.
+func listRunsAs(server *Server, principal *Principal, query string) *httptest.ResponseRecorder {
+	url := "/api/v1/runs"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handleListRuns(rec, req)
+	return rec
+}
+
+// TestHandleListRuns_NilManager_Returns503 verifies the service-unavailable guard.
+func TestHandleListRuns_NilManager_Returns503(t *testing.T) {
+	server := setupTestServer(t)
+	// runManager is nil by default in setupTestServer.
+	rec := listRunsAs(server, adminRunPrincipal(), "")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", resp.Error.Code)
+}
+
+// adminRunPrincipal returns a global-admin principal for run handler tests.
+func adminRunPrincipal() *Principal {
+	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+}
+
+// TestHandleListRuns_NoPrincipal_Returns401 verifies the auth guard.
+func TestHandleListRuns_NoPrincipal_Returns401(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
+	rec := httptest.NewRecorder()
+	server.handleListRuns(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleListRuns_EmptyList_NeverNull verifies that an empty store returns [] not null.
+func TestHandleListRuns_EmptyList_NeverNull(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	rec := listRunsAs(server, adminRunPrincipal(), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, json.RawMessage("[]"), raw["data"], "empty run list must serialize as [] not null")
+}
+
+// TestHandleListRuns_CrossTenantIsolation is the [REQUIRED TEST] verifying that a
+// principal in tenant A cannot see tenant B's runs.
+func TestHandleListRuns_CrossTenantIsolation(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "s-1", TenantID: "tenant-a"}}
+	server, _, _ := setupRunServer(t, stewards)
+
+	principalA := &Principal{ID: "user-a", TenantID: "tenant-a", Assurance: session.AssuranceMachine}
+	principalB := &Principal{ID: "user-b", TenantID: "tenant-b", Assurance: session.AssuranceMachine}
+
+	// Create a run under tenant-a.
+	recA := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script", principalA,
+		map[string]interface{}{"target": "all", "script_id": "scripts/a.sh"})
+	require.Equal(t, http.StatusOK, recA.Code, "create run for tenant-a: %s", recA.Body.String())
+
+	// Create a run under tenant-b.
+	recB := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script", principalB,
+		map[string]interface{}{"target": "all", "script_id": "scripts/b.sh"})
+	require.Equal(t, http.StatusOK, recB.Code, "create run for tenant-b: %s", recB.Body.String())
+
+	// List as tenant-a: must see exactly 1 run belonging to tenant-a.
+	recList := listRunsAs(server, principalA, "")
+	require.Equal(t, http.StatusOK, recList.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &resp))
+	runs, ok := resp.Data.([]interface{})
+	require.True(t, ok, "data must be an array")
+	require.Len(t, runs, 1, "tenant-a must see exactly 1 run, not tenant-b's")
+
+	runMap, ok := runs[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "tenant-a", runMap["tenant_id"], "the visible run must belong to tenant-a")
+
+	// List as tenant-b: must see exactly 1 run belonging to tenant-b.
+	recListB := listRunsAs(server, principalB, "")
+	require.Equal(t, http.StatusOK, recListB.Code)
+
+	var respB APIResponse
+	require.NoError(t, json.Unmarshal(recListB.Body.Bytes(), &respB))
+	runsB, ok := respB.Data.([]interface{})
+	require.True(t, ok, "data must be an array")
+	require.Len(t, runsB, 1, "tenant-b must see exactly 1 run, not tenant-a's")
+
+	runMapB, ok := runsB[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "tenant-b", runMapB["tenant_id"])
+}
+
+// [REQUIRED TEST] TestHandleListRuns_PaginationClamping verifies that limit/offset
+// clamping mirrors the convention in handlers_audit.go.
+func TestHandleListRuns_PaginationClamping(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	p := adminRunPrincipal()
+
+	// limit > 500 is silently clamped; request must succeed.
+	rec := listRunsAs(server, p, "limit=9999")
+	assert.Equal(t, http.StatusOK, rec.Code, "limit=9999 must be clamped to 500, not error")
+
+	// limit=0 is clamped to 1; request must succeed.
+	rec = listRunsAs(server, p, "limit=0")
+	assert.Equal(t, http.StatusOK, rec.Code, "limit=0 must be clamped to 1, not error")
+
+	// Non-numeric params are silently ignored; defaults apply.
+	rec = listRunsAs(server, p, "limit=notanumber&offset=bad")
+	assert.Equal(t, http.StatusOK, rec.Code, "invalid params must be silently ignored")
+
+	// Valid offset with no data returns empty list.
+	rec = listRunsAs(server, p, "offset=100&limit=10")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestHandleListRuns_PaginationOffsetLimit verifies that offset and limit correctly
+// slice the result set.
+func TestHandleListRuns_PaginationOffsetLimit(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "s-1", TenantID: "tenant-pg"}}
+	server, _, _ := setupRunServer(t, stewards)
+	p := &Principal{ID: "user-pg", TenantID: "tenant-pg", Assurance: session.AssuranceMachine}
+
+	// Create 3 runs.
+	for i := 0; i < 3; i++ {
+		rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script", p,
+			map[string]interface{}{"target": "all", "script_id": "scripts/pg.sh"})
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+
+	// Fetch all 3 with a generous limit.
+	rec := listRunsAs(server, p, "limit=10")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	all, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, all, 3, "limit=10 must return all 3 runs")
+
+	// Fetch with limit=2: should return exactly 2.
+	rec = listRunsAs(server, p, "limit=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	page1, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, page1, 2, "limit=2 must return exactly 2 runs")
+
+	// Fetch with offset=2 and limit=10: should return exactly 1.
+	rec = listRunsAs(server, p, "limit=10&offset=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	page2, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, page2, 1, "offset=2 must return the remaining 1 run")
+}
