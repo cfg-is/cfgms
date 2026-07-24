@@ -20,6 +20,7 @@
 import { useState } from 'react'
 import { useModuleQueue } from './useModuleQueue.ts'
 import type { ModuleApprovalEntry } from './useModuleQueue.ts'
+import ErrorCard from '../shell/ErrorCard.tsx'
 
 interface PendingAction {
   bundle: ModuleApprovalEntry
@@ -41,19 +42,6 @@ function LoadingRows() {
   )
 }
 
-function ErrorNotice({ detail, onRetry }: { detail: string; onRetry: () => void }) {
-  return (
-    <div className="notice err" role="alert">
-      <div className="ic">!</div>
-      <h3>Couldn&apos;t load module queue</h3>
-      <p>The module approval list request failed. Check your connection and try again.</p>
-      <span className="mono2 detail">{detail}</span>
-      <button type="button" className="btn" onClick={onRetry}>
-        Retry
-      </button>
-    </div>
-  )
-}
 
 function ModuleEmpty() {
   return (
@@ -157,7 +145,7 @@ export default function ModuleReviewQueue() {
         {loading ? (
           <LoadingRows />
         ) : error !== null ? (
-          <ErrorNotice detail={error} onRetry={retry} />
+          <ErrorCard heading="Couldn&apos;t load module queue" detail={error} onRetry={retry} />
         ) : bundles.length === 0 ? (
           <ModuleEmpty />
         ) : (

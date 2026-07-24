@@ -11,7 +11,7 @@
  * reaches the DOM as a JSX text node — never dangerouslySetInnerHTML.
  */
 import { useState } from 'react'
-import { useConfigList, type ConfigSummary } from './useConfigs.ts'
+import { useConfigList, useStewardHostnameMap, type ConfigSummary } from './useConfigs.ts'
 import ConfigEditor from './ConfigEditor.tsx'
 import PushPanel from './PushPanel.tsx'
 import './Config.css'
@@ -61,10 +61,12 @@ function ConfigEmpty() {
 
 function ConfigRow({
   config,
+  displayName,
   selected,
   onClick,
 }: {
   config: ConfigSummary
+  displayName: string
   selected: boolean
   onClick: () => void
 }) {
@@ -75,7 +77,7 @@ function ConfigRow({
       data-testid="config-row"
     >
       <td>
-        <span className="nm">{config.steward_id}</span>
+        <span className="nm">{displayName}</span>
       </td>
       <td>
         <span className="mono2">{String(config.version)}</span>
@@ -96,6 +98,7 @@ function ConfigRow({
 
 export default function ConfigListView() {
   const { configs, loading, error, retry } = useConfigList()
+  const hostnameMap = useStewardHostnameMap()
   const [selectedStewardId, setSelectedStewardId] = useState<string | null>(null)
   const [showPushPanel, setShowPushPanel] = useState(false)
 
@@ -158,6 +161,7 @@ export default function ConfigListView() {
                 <ConfigRow
                   key={c.steward_id}
                   config={c}
+                  displayName={hostnameMap.get(c.steward_id) ?? c.steward_id}
                   selected={selectedStewardId === c.steward_id}
                   onClick={() => handleRowClick(c.steward_id)}
                 />

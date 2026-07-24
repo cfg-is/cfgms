@@ -12,6 +12,7 @@ import {
   useConfigList,
   useStewardConfig,
   usePushStatus,
+  useStewardHostnameMap,
 } from './useConfigs.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -311,5 +312,62 @@ describe('usePushStatus', () => {
     const { result } = renderHook(() => usePushStatus('push-bad'))
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.error).toContain('404')
+  })
+})
+
+// ── useStewardHostnameMap ─────────────────────────────────────────────────────
+
+function makeStewardsPageResponse(stewards: object[], status = 200) {
+  return new Response(
+    JSON.stringify({
+      data: { stewards, total: stewards.length, limit: 500, offset: 0 },
+      timestamp: new Date().toISOString(),
+    }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+describe('useStewardHostnameMap', () => {
+  it('returns an empty map before the stewards response arrives', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    const { result } = renderHook(() => useStewardHostnameMap())
+    expect(result.current.size).toBe(0)
+  })
+
+  it('maps steward id → hostname when dna.hostname is present', async () => {
+    fetchMock.mockResolvedValue(
+      makeStewardsPageResponse([
+        { id: 'sw-1', dna: { hostname: 'CFG-AB-01' } },
+        { id: 'sw-2', dna: { hostname: 'CFG-AB-02' } },
+      ]),
+    )
+    const { result } = renderHook(() => useStewardHostnameMap())
+    await waitFor(() => expect(result.current.size).toBe(2))
+    expect(result.current.get('sw-1')).toBe('CFG-AB-01')
+    expect(result.current.get('sw-2')).toBe('CFG-AB-02')
+  })
+
+  it('falls back to steward id when dna.hostname is absent', async () => {
+    fetchMock.mockResolvedValue(
+      makeStewardsPageResponse([{ id: 'sw-3', dna: null }]),
+    )
+    const { result } = renderHook(() => useStewardHostnameMap())
+    await waitFor(() => expect(result.current.size).toBe(1))
+    expect(result.current.get('sw-3')).toBe('sw-3')
+  })
+
+  it('returns empty map and does not throw when stewards fetch fails', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'))
+    const { result } = renderHook(() => useStewardHostnameMap())
+    // Allow microtasks to settle; map must stay empty without throwing.
+    await act(async () => {})
+    expect(result.current.size).toBe(0)
+  })
+
+  it('returns empty map when stewards response is non-ok', async () => {
+    fetchMock.mockResolvedValue(makeStewardsPageResponse([], 503))
+    const { result } = renderHook(() => useStewardHostnameMap())
+    await act(async () => {})
+    expect(result.current.size).toBe(0)
   })
 })

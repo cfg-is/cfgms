@@ -186,6 +186,11 @@ export const COLUMNS: readonly ColumnDef[] = [
   },
 ] as const
 
+/** Resolve the display name for a steward: hostname from DNA, falling back to the steward ID. */
+export function stewardDisplayName(steward: Pick<Steward, 'id' | 'dna'>): string {
+  return steward.dna?.hostname || steward.id
+}
+
 export const DEFAULT_VISIBLE: readonly ColumnKey[] = COLUMNS.filter(
   (c) => c.defaultVisible,
 ).map((c) => c.key)

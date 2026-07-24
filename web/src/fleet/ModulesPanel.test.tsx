@@ -256,4 +256,21 @@ describe('error states', () => {
     expect(alert).toBeTruthy()
     expect(screen.queryByTestId('modules-list')).toBeNull()
   })
+
+  it('shows server-error copy (not connectivity) for a 5xx response', async () => {
+    mockError(503)
+    renderPanel()
+
+    await screen.findByRole('alert')
+    expect(screen.queryByText(/check your connection/i)).toBeNull()
+    expect(screen.getByText(/server.*error|returned an error/i)).toBeInTheDocument()
+  })
+
+  it('shows connectivity copy for a network-level failure', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'))
+    renderPanel()
+
+    await screen.findByRole('alert')
+    expect(screen.getByText(/check your connection/i)).toBeInTheDocument()
+  })
 })

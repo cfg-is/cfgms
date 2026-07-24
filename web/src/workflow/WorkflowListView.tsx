@@ -18,6 +18,7 @@ import {
 } from './useWorkflows.ts'
 import WorkflowExecutionView from './WorkflowExecutionView.tsx'
 import TriggerPanel from './TriggerPanel.tsx'
+import ErrorCard from '../shell/ErrorCard.tsx'
 import './Workflow.css'
 
 function LoadingRows() {
@@ -35,19 +36,6 @@ function LoadingRows() {
   )
 }
 
-function ErrorNotice({ detail, onRetry }: { detail: string; onRetry: () => void }) {
-  return (
-    <div className="notice err" role="alert">
-      <div className="ic">!</div>
-      <h3>Couldn&apos;t load workflows</h3>
-      <p>The workflow list request failed. Check your connection and try again.</p>
-      <span className="mono2 detail">{detail}</span>
-      <button type="button" className="btn" onClick={onRetry}>
-        Retry
-      </button>
-    </div>
-  )
-}
 
 function WorkflowEmpty() {
   return (
@@ -464,7 +452,7 @@ export default function WorkflowListView() {
         {loading ? (
           <LoadingRows />
         ) : error !== null ? (
-          <ErrorNotice detail={error} onRetry={retry} />
+          <ErrorCard heading="Couldn&apos;t load workflows" detail={error} onRetry={retry} />
         ) : workflows.length === 0 ? (
           <WorkflowEmpty />
         ) : (
