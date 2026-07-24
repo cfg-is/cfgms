@@ -1,0 +1,69 @@
+name: OpenSSF Scorecard
+
+# Scorecard analyzes supply-chain security posture of the default branch (develop).
+# Results publish to the OSSF dashboard and the GitHub Security tab.
+# NOT a required PR check — runs post-merge on develop and weekly to track posture
+# over time. Scorecard measures the *default branch* state regardless of where
+# this workflow executes.
+
+on:
+  push:
+    branches: [develop]
+  schedule:
+    - cron: '41 5 * * 6'  # Weekly Saturday 05:41 UTC (staggered to avoid GH rate limits)
+  workflow_dispatch:
+
+# Default-deny: only grant what the analysis job needs.
+permissions: {}
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required to publish SARIF to GitHub Security tab
+      security-events: write
+      # Required for Scorecard to mint a keyless OIDC token (sigstore signing)
+      id-token: write
+      # Required to read repo contents
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          # Default GITHUB_TOKEN — Branch-Protection check will under-report
+          # because GITHUB_TOKEN lacks fine-grained branch-protection read
+          # permissions. This is a documented accepted gap (see
+          # docs/development/security-workflow-guide.md §7). A founder-
+          # provisioned fine-grained PAT as SCORECARD_READ_TOKEN would close
+          # this gap.
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          # Publish to the OSSF Scorecard dashboard (public visibility for
+          # OSS repos).
+          publish_results: true
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        if: always() && hashFiles('scorecard.sarif') != ''
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard
+        continue-on-error: true
+
+      - name: Upload Scorecard results artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: scorecard-results
+          path: scorecard.sarif
+          retention-days: 30
