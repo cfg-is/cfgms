@@ -82,6 +82,36 @@ Decision path for a CodeQL alert:
 | 0.0.6 | #747–#751 | log-injection | Dismiss | handlers_registration_refresh.go — json.Decode field-selection sources; all sites use `SanitizeLogValue`. Same heuristic-source class as #669–#722. |
 | 0.0.5 | safeJoin | path-injection | Model | `summaryModel` + `barrierModel` for `pkg/storage/providers/flatfile.safeJoin`. |
 
+### 6. Go Native Fuzzing
+
+- **Purpose**: Finds panics and unexpected crashes in parse/decode boundaries under adversarial input — the threat-model-relevant surfaces a compromised steward or malicious config push would hit
+- **Scope**: Four CFGMS-owned parse surfaces (does NOT fuzz `crypto/x509`, `google.golang.org/protobuf`, or any vendored library's own internals)
+- **Blocking**: **NOT a PR gate** — time-boxed fuzzing is flaky as a required check. Runs nightly via `.github/workflows/fuzz-nightly.yml`
+- **Discovery**: `scripts/fuzz-all.sh` auto-discovers all `Fuzz*` targets via `go test -list '^Fuzz'` for each listed package — any new `Fuzz*` target in a listed package is picked up automatically, no workflow edit needed
+
+**Fuzz targets:**
+
+| Target | File | Surface |
+|--------|------|---------|
+| `FuzzUnmarshalStewardConfig` | `pkg/config/manager_fuzz_test.go` | `yaml.Unmarshal` + `ValidateConfiguration` on steward config payloads (the config-parsing boundary a malformed `cfg push` would hit) |
+| `FuzzReassembleDNA` | `features/controller/transport/dna_handler_fuzz_test.go` | Both `json.Unmarshal` calls in `reassembleDNA` on concatenated steward-supplied `DNAChunk` payload bytes (the compromised-steward-to-controller wire boundary) |
+| `FuzzParseEID` | `pkg/entitygraph/types/eid_fuzz_test.go` | Hand-rolled `ParseEID` parser on steward/directory-supplied identifier strings |
+| `FuzzParseCertificateFromPEM` | `pkg/cert/utils_fuzz_test.go` | PEM decode + `x509.ParseCertificate` (mTLS-everywhere means cert parsing is the highest threat-model-relevant fuzz surface) |
+| `FuzzParseCertificateChainFromPEM` | `pkg/cert/utils_fuzz_test.go` | Multi-block `pem.Decode` loop |
+| `FuzzParsePrivateKeyFromPEM` | `pkg/cert/utils_fuzz_test.go` | PEM block type dispatch to `x509.ParsePKCS1PrivateKey` / `ParsePKCS8PrivateKey` / `ParseECPrivateKey` |
+
+**Corpus locations:** `<package>/testdata/fuzz/<FuzzName>/` — crash entries are committed as regression fixtures and uploaded as workflow artifacts by `fuzz-nightly.yml`.
+
+**Local run:**
+
+```bash
+# Run a single target for 30 seconds
+go test -run='^$' -fuzz='^FuzzParseEID$' -fuzztime=30s ./pkg/entitygraph/types/
+
+# Run all targets via the auto-discovery script (same as CI)
+./scripts/fuzz-all.sh 30s
+```
+
 ## Local Development Workflow
 
 ### Prerequisites
