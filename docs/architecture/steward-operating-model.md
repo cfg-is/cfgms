@@ -306,14 +306,23 @@ The steward continuously knows about itself. This information is collected indep
 
 ### DNA (Digital Native Attributes)
 
-The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](dna-collection.md).
+The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or the gatherer/osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](dna-collection.md).
 
 Fragments are sourced by class:
 
 | Class | Examples | Authority | Drift |
 |-------|----------|-----------|-------|
 | **Managed** | services, files, users, packages, firewall (from module `Get`) | managing module | enforced (`auto_correct` / `report_only`) |
-| **Observe-only** | CPU model, total memory, BIOS, OS build (osquery stable-fact allowlist) | osquery | report-only |
+| **Observe-only** | CPU model, total memory, BIOS, OS build | **interim**: existing per-platform gatherers (ADR-017 Amendment 3); **future**: osquery source swap | report-only |
+
+> **Interim authority note (ADR-017 Amendment 3):** The `host:*` observe-only fragments
+> (`host:cpu`, `host:memory`, `host:os`, `host:bios`) are currently sourced by the existing
+> per-platform gatherers (`features/steward/dna/{hardware,network,security}_*.go`) via a
+> partition step that reads the already-collected flat attribute map. The gatherers are reused
+> unmodified; the flat `attributes` surface and all legacy consumers (Reports Engine,
+> role-selector config-targeting) are unaffected. The osquery integration will later **swap
+> the source** of the same `host:*` fragment ids — a source change only, invisible to
+> fragment consumers, deferred to a follow-on epic.
 
 Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
