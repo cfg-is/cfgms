@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -278,7 +279,9 @@ func TestListRegistrationTokens(t *testing.T) {
 	err = tokenStore.SaveToken(ctx, otherToken)
 	require.NoError(t, err)
 
-	t.Run("list all tokens", func(t *testing.T) {
+	t.Run("list all tokens — scoped caller sees only own tenant", func(t *testing.T) {
+		// apiKey is scoped to "test-tenant" (via NewTestKey). After Issue #2932, scoped callers
+		// always see only their own tenant's tokens regardless of any query param.
 		req := httptest.NewRequest("GET", "/api/v1/registration/tokens", nil)
 		req.Header.Set("X-API-Key", apiKey)
 		rec := httptest.NewRecorder()
@@ -291,11 +294,18 @@ func TestListRegistrationTokens(t *testing.T) {
 		err := json.Unmarshal(rec.Body.Bytes(), &resp)
 		require.NoError(t, err)
 
-		assert.Equal(t, 4, resp.Total)
-		assert.Len(t, resp.Tokens, 4)
+		// Scoped caller sees only the 3 "test-tenant" tokens, not the "other-tenant" one.
+		assert.Equal(t, 3, resp.Total)
+		assert.Len(t, resp.Tokens, 3)
+		for _, tok := range resp.Tokens {
+			assert.Equal(t, "test-tenant", tok.TenantID)
+			assert.Empty(t, tok.Token, "list response must not include the raw secret")
+			assert.NotEmpty(t, tok.TokenPrefix, "list response must include token_prefix")
+		}
 	})
 
 	t.Run("filter by tenant_id", func(t *testing.T) {
+		// Scoped caller: query param is ignored; they still see their own tenant tokens.
 		req := httptest.NewRequest("GET", "/api/v1/registration/tokens?tenant_id=test-tenant", nil)
 		req.Header.Set("X-API-Key", apiKey)
 		rec := httptest.NewRecorder()
@@ -316,7 +326,9 @@ func TestListRegistrationTokens(t *testing.T) {
 		}
 	})
 
-	t.Run("filter returns empty for non-existent tenant", func(t *testing.T) {
+	t.Run("scoped caller ignores tenant_id query param — sees own tenant only", func(t *testing.T) {
+		// Before Issue #2932: scoped caller with ?tenant_id=nonexistent returned 0 entries.
+		// After: scoped caller ignores the query param and returns their own tenant's tokens.
 		req := httptest.NewRequest("GET", "/api/v1/registration/tokens?tenant_id=nonexistent", nil)
 		req.Header.Set("X-API-Key", apiKey)
 		rec := httptest.NewRecorder()
@@ -329,8 +341,11 @@ func TestListRegistrationTokens(t *testing.T) {
 		err := json.Unmarshal(rec.Body.Bytes(), &resp)
 		require.NoError(t, err)
 
-		assert.Equal(t, 0, resp.Total)
-		assert.Len(t, resp.Tokens, 0)
+		// The query param is ignored; the scoped key's own tenant (test-tenant) is used.
+		assert.Equal(t, 3, resp.Total)
+		for _, tok := range resp.Tokens {
+			assert.Equal(t, "test-tenant", tok.TenantID)
+		}
 	})
 
 	t.Run("unauthorized without API key", func(t *testing.T) {
@@ -373,7 +388,9 @@ func TestGetRegistrationToken(t *testing.T) {
 		err := json.Unmarshal(rec.Body.Bytes(), &resp)
 		require.NoError(t, err)
 
-		assert.Equal(t, token.Token, resp.Token)
+		// After Issue #2932: GET redacts the token secret; only token_prefix is returned.
+		assert.Empty(t, resp.Token, "GET response must not include the raw token secret")
+		assert.Equal(t, token.Token[:6], resp.TokenPrefix, "GET response must include the first 6 chars as token_prefix")
 		assert.Equal(t, "test-tenant", resp.TenantID)
 		assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 		assert.Equal(t, "test-group", resp.Group)
@@ -605,14 +622,16 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 
 		assert.GreaterOrEqual(t, resp.Total, 1)
 
+		// After Issue #2932: list responses redact the token secret; match by TokenPrefix.
+		wantPrefix := createdToken[:6]
 		found := false
 		for _, token := range resp.Tokens {
-			if token.Token == createdToken {
+			if token.TokenPrefix == wantPrefix {
 				found = true
 				break
 			}
 		}
-		assert.True(t, found, "Created token should be in the list")
+		assert.True(t, found, "Created token should be in the list (matched by token_prefix)")
 	})
 
 	// 3. Get specific token (Tier-1)
@@ -628,7 +647,9 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 		err := json.Unmarshal(rec.Body.Bytes(), &resp)
 		require.NoError(t, err)
 
-		assert.Equal(t, createdToken, resp.Token)
+		// After Issue #2932: GET redacts the token secret; verify via token_prefix.
+		assert.Empty(t, resp.Token, "GET response must not include the raw token secret")
+		assert.Equal(t, createdToken[:6], resp.TokenPrefix, "GET response must include the first 6 chars as token_prefix")
 		assert.Equal(t, "crud-test-tenant", resp.TenantID)
 		assert.Equal(t, "crud-test-group", resp.Group)
 		assert.False(t, resp.Revoked)
@@ -690,12 +711,10 @@ func TestRegistrationTokenCRUDFlow(t *testing.T) {
 
 func TestTokenResponseFormat(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
-
-	// Create API key with read permission
-	apiKey := NewTestKey(t, server, []string{"registration:read-token"})
 	ctx := context.Background()
 
-	// Create a token with all fields populated
+	// Create a token with all fields populated.
+	// Use the token's literal value as the raw secret (len >= 6 required for prefix check).
 	now := time.Now()
 	expiresAt := now.Add(24 * time.Hour)
 	revokedAt := now.Add(2 * time.Hour)
@@ -714,8 +733,9 @@ func TestTokenResponseFormat(t *testing.T) {
 	err := tokenStore.SaveToken(ctx, token)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest("GET", "/api/v1/registration/tokens/"+token.Token, nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// Use an unscoped mTLS admin request: "format-test-tenant" is outside "test-tenant"
+	// so a scoped API key would receive 404 after Issue #2932's tenant-scope enforcement.
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/tokens/"+token.Token, nil)
 	rec := httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
@@ -726,8 +746,9 @@ func TestTokenResponseFormat(t *testing.T) {
 	err = json.Unmarshal(rec.Body.Bytes(), &resp)
 	require.NoError(t, err)
 
-	// Verify all fields are present and correctly formatted
-	assert.Equal(t, "testformat123", resp.Token)
+	// After Issue #2932: GET redacts the token secret; token_prefix (first 6 chars) is returned.
+	assert.Empty(t, resp.Token, "GET response must not include the raw token secret")
+	assert.Equal(t, token.Token[:6], resp.TokenPrefix, "token_prefix should be the first 6 chars of the secret")
 	assert.Equal(t, "format-test-tenant", resp.TenantID)
 	assert.Equal(t, "grpc://controller.example.com:7443", resp.ControllerURL)
 	assert.Equal(t, "format-group", resp.Group)
@@ -739,4 +760,146 @@ func TestTokenResponseFormat(t *testing.T) {
 	// Verify timestamps are ISO 8601 format
 	_, err = time.Parse(time.RFC3339, resp.CreatedAt)
 	assert.NoError(t, err, "CreatedAt should be RFC3339 format")
+}
+
+// findAuditEntryByAction returns the first entry whose Action matches, or fails the test.
+func findAuditEntryByAction(t *testing.T, entries []*business.AuditEntry, action string) *business.AuditEntry {
+	t.Helper()
+	for _, e := range entries {
+		if e.Action == action {
+			return e
+		}
+	}
+	t.Fatalf("no audit entry with action %q found among %d entries", action, len(entries))
+	return nil
+}
+
+// The four token-management mutation handlers (create, delete, revoke, rotate) each
+// emit a durable audit event via emitTokenManagementAudit. These tests flush the audit
+// manager and assert the event actually reaches the store with the correct action,
+// tenant, and resource fields — mirroring the register-path assertions in
+// handlers_registration_test.go.
+
+func TestCreateRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, _ := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	reqBody := registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+	}
+	body, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp TokenResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Token)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.created")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
+}
+
+func TestDeleteRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	token, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, token))
+
+	req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/"+token.Token, nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.deleted")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
+}
+
+func TestRevokeRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	token, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, token))
+
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/"+token.Token+"/revoke", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.revoked")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
+}
+
+func TestRotateRegistrationToken_EmitsAuditEvent(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	seed, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "audit-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "rotate-group",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, seed))
+
+	body := []byte(`{"group":"rotate-group"}`)
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/audit-tenant/rotate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp TokenResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Token)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-tenant"})
+	require.NoError(t, err)
+
+	entry := findAuditEntryByAction(t, entries, "registration_token.rotated")
+	assert.Equal(t, "audit-tenant", entry.TenantID)
+	assert.Equal(t, "registration_token", entry.ResourceType)
+	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the new token prefix")
+	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
+	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }

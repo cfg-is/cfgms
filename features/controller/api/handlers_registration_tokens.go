@@ -9,13 +9,18 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// TokenResponse represents a registration token in API responses
+// TokenResponse represents a registration token in API responses.
+// Token (full secret) is only populated by create and rotate responses.
+// All other endpoints (list, get, revoke) set TokenPrefix only.
 type TokenResponse struct {
-	Token         string  `json:"token"`
+	Token         string  `json:"token,omitempty"`        // full secret — create/rotate only
+	TokenPrefix   string  `json:"token_prefix,omitempty"` // first 6 chars — always set
 	TenantID      string  `json:"tenant_id"`
 	ControllerURL string  `json:"controller_url"`
 	Group         string  `json:"group,omitempty"`
@@ -73,6 +78,17 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Tenant subtree enforcement: scoped callers may only create tokens for tenants
+	// within their own subtree. Unscoped (mTLS admin) callers have no restriction.
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := req.TenantID == callerTenant || strings.HasPrefix(req.TenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+			return
+		}
+	}
+
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
 		s.logger.Error("Registration token store not available")
@@ -98,8 +114,10 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	s.logger.Info("Created registration token",
 		"token_prefix", token.Token[:min(len(token.Token), 6)],
 		"tenant_id", logging.SanitizeLogValue(token.TenantID))
+	s.emitTokenManagementAudit(r, "registration_token.created",
+		token.Token[:min(len(token.Token), 6)], token.TenantID)
 
-	// Return token response
+	// Return full token response — create is the one-time mint window where the secret is disclosed.
 	resp := tokenToResponse(token)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -122,8 +140,13 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Get tenant_id from query parameter (optional filter)
-	tenantID := r.URL.Query().Get("tenant_id")
+	// Tenant scoping: scoped callers always see only their own tenant (query param is ignored).
+	// Unscoped (mTLS admin) callers may supply ?tenant_id= to narrow the result.
+	callerTenant := s.callerTenantID(r)
+	tenantID := callerTenant
+	if tenantID == "" {
+		tenantID = r.URL.Query().Get("tenant_id")
+	}
 
 	// List tokens
 	tokens, err := s.registrationTokenStore.ListTokens(r.Context(), tenantID)
@@ -133,13 +156,13 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Convert to response format
+	// Convert to redacted response format — list callers never receive the full secret.
 	resp := TokenListResponse{
 		Tokens: make([]TokenResponse, 0, len(tokens)),
 		Total:  len(tokens),
 	}
 	for _, token := range tokens {
-		resp.Tokens = append(resp.Tokens, tokenToResponse(token))
+		resp.Tokens = append(resp.Tokens, tokenToResponseRedacted(token))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -182,8 +205,19 @@ func (s *Server) handleGetRegistrationToken(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Return token response
-	resp := tokenToResponse(token)
+	// Tenant subtree enforcement: scoped callers may not read tokens from other tenants.
+	// 404 (not 403) avoids existence disclosure across tenant boundaries.
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := token.TenantID == callerTenant || strings.HasPrefix(token.TenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "Token not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	// Return redacted response — get callers never receive the full secret.
+	resp := tokenToResponseRedacted(token)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode token response", "error", err)
@@ -212,6 +246,28 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Look up the token first for tenant scope enforcement and audit.
+	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "Token not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to get registration token for delete", "error", err)
+		http.Error(w, "Failed to delete token", http.StatusInternalServerError)
+		return
+	}
+
+	// Tenant subtree enforcement: scoped callers may not delete tokens from other tenants.
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := token.TenantID == callerTenant || strings.HasPrefix(token.TenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "Token not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	// Delete token from store
 	if err := s.registrationTokenStore.DeleteToken(r.Context(), tokenStr); err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -223,7 +279,10 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	s.logger.Info("Deleted registration token", "token_prefix", tokenStr[:min(len(tokenStr), 6)])
+	// SanitizeLogValue wraps strings.ReplaceAll so CodeQL's ReplaceSanitizer clears the taint.
+	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
+	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.TenantID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -262,6 +321,16 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Tenant subtree enforcement: scoped callers may not revoke tokens from other tenants.
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := token.TenantID == callerTenant || strings.HasPrefix(token.TenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "Token not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	// Revoke the token
 	token.Revoke()
 
@@ -272,10 +341,13 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	s.logger.Info("Revoked registration token", "token_prefix", tokenStr[:min(len(tokenStr), 6)])
+	// SanitizeLogValue wraps strings.ReplaceAll so CodeQL's ReplaceSanitizer clears the taint.
+	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
+	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.TenantID)
 
-	// Return updated token
-	resp := tokenToResponse(token)
+	// Return redacted response — revoke callers do not receive the raw secret.
+	resp := tokenToResponseRedacted(token)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode token response", "error", err)
@@ -299,6 +371,17 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Tenant subtree enforcement: scoped callers may only rotate tokens for tenants
+	// within their own subtree.
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := tenantID == callerTenant || strings.HasPrefix(tenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+			return
+		}
+	}
+
 	// Parse optional request body for group filter
 	var req rotateTokenRequest
 	if r.ContentLength > 0 {
@@ -319,10 +402,13 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	tokenPrefix := newToken.Token[:min(len(newToken.Token), 6)]
 	s.logger.Info("Rotated registration token",
-		"token_prefix", newToken.Token[:min(len(newToken.Token), 6)],
+		"token_prefix", tokenPrefix,
 		"tenant_id", logging.SanitizeLogValue(tenantID))
+	s.emitTokenManagementAudit(r, "registration_token.rotated", tokenPrefix, tenantID)
 
+	// Return full token response — rotate is a mint window where the new secret is disclosed once.
 	resp := tokenToResponse(newToken)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -331,10 +417,12 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// tokenToResponse converts a registration.Token to TokenResponse
+// tokenToResponse converts a registration.Token to TokenResponse including the full secret.
+// Use ONLY for create and rotate responses where the secret must be returned once.
 func tokenToResponse(token *registration.Token) TokenResponse {
 	resp := TokenResponse{
 		Token:         token.Token,
+		TokenPrefix:   token.Token[:min(len(token.Token), 6)],
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
 		Group:         token.Group,
@@ -353,4 +441,42 @@ func tokenToResponse(token *registration.Token) TokenResponse {
 	}
 
 	return resp
+}
+
+// tokenToResponseRedacted converts a registration.Token to TokenResponse WITHOUT the full secret.
+// Use for list, get, and revoke responses — callers must never see the raw token outside of
+// the create/rotate mint window.
+func tokenToResponseRedacted(token *registration.Token) TokenResponse {
+	resp := tokenToResponse(token)
+	resp.Token = "" // never expose the secret in list/get/revoke responses
+	return resp
+}
+
+// emitTokenManagementAudit records an audit event for a token management action
+// (create, rotate, revoke, delete). It is a no-op when auditManager is nil.
+func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tenantID string) {
+	if s.auditManager == nil {
+		return
+	}
+	auditTenantID := tenantID
+	if auditTenantID == "" {
+		auditTenantID = audit.SystemTenantID
+	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principalID := ""
+	if principal != nil {
+		principalID = principal.ID
+	}
+	b := audit.NewEventBuilder().
+		Tenant(auditTenantID).
+		Type(business.AuditEventSystemAccess).
+		Action(action).
+		User(principalID, business.AuditUserTypeHuman).
+		Resource("registration_token", tokenPrefix, "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh)
+	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+		s.logger.Warn("Failed to emit token management audit event",
+			"error", err, "action", action)
+	}
 }
