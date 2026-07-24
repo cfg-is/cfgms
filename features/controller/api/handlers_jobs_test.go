@@ -643,3 +643,161 @@ func TestHandleCreateJob_ExecutorError_LogValueSanitized(t *testing.T) {
 			"clean error message must pass through unchanged")
 	})
 }
+
+// ── handleListJobs tests ──────────────────────────────────────────────────────
+
+// listJobsAs sends GET /api/v1/jobs with the given principal and optional query string.
+func listJobsAs(server *Server, principal *Principal, query string) *httptest.ResponseRecorder {
+	url := "/api/v1/jobs"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req = withPrincipal(req, principal)
+	rec := httptest.NewRecorder()
+	server.handleListJobs(rec, req)
+	return rec
+}
+
+// TestHandleListJobs_NilStore_Returns503 verifies the service-unavailable guard.
+func TestHandleListJobs_NilStore_Returns503(t *testing.T) {
+	server := setupTestServer(t)
+	// batchJobStore is nil by default.
+	rec := listJobsAs(server, adminPrincipal(), "")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", resp.Error.Code)
+}
+
+// TestHandleListJobs_NoPrincipal_Returns401 verifies the auth guard.
+func TestHandleListJobs_NoPrincipal_Returns401(t *testing.T) {
+	server := setupTestServer(t)
+	server.batchJobStore = newTestBatchJobStoreForAPI()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	rec := httptest.NewRecorder()
+	server.handleListJobs(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleListJobs_EmptyList_NeverNull verifies that an empty store returns [] not null.
+func TestHandleListJobs_EmptyList_NeverNull(t *testing.T) {
+	server := setupTestServer(t)
+	server.batchJobStore = newTestBatchJobStoreForAPI()
+
+	rec := listJobsAs(server, adminPrincipal(), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, json.RawMessage("[]"), raw["data"], "empty job list must serialize as [] not null")
+}
+
+// TestHandleListJobs_CrossTenantIsolation is the [REQUIRED TEST] verifying that a
+// principal in tenant A cannot see tenant B's jobs.
+func TestHandleListJobs_CrossTenantIsolation(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+
+	// Create a job under tenant-a.
+	recA := postCreateJobAs(server, tenantPrincipal("tenant-a"), `{"selector":"all","batch_size":1}`)
+	require.Equal(t, http.StatusAccepted, recA.Code, "create job for tenant-a: %s", recA.Body.String())
+
+	// Create a job under tenant-b.
+	recB := postCreateJobAs(server, tenantPrincipal("tenant-b"), `{"selector":"all","batch_size":1}`)
+	require.Equal(t, http.StatusAccepted, recB.Code, "create job for tenant-b: %s", recB.Body.String())
+
+	// List as tenant-a: must see exactly 1 job belonging to tenant-a.
+	recList := listJobsAs(server, tenantPrincipal("tenant-a"), "")
+	require.Equal(t, http.StatusOK, recList.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &resp))
+	jobs, ok := resp.Data.([]interface{})
+	require.True(t, ok, "data must be an array")
+	require.Len(t, jobs, 1, "tenant-a must see exactly 1 job, not tenant-b's")
+
+	jobMap, ok := jobs[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "tenant-a", jobMap["TenantID"], "the visible job must belong to tenant-a")
+
+	// List as tenant-b: must see exactly 1 job belonging to tenant-b.
+	recListB := listJobsAs(server, tenantPrincipal("tenant-b"), "")
+	require.Equal(t, http.StatusOK, recListB.Code)
+
+	var respB APIResponse
+	require.NoError(t, json.Unmarshal(recListB.Body.Bytes(), &respB))
+	jobsB, ok := respB.Data.([]interface{})
+	require.True(t, ok, "data must be an array")
+	require.Len(t, jobsB, 1, "tenant-b must see exactly 1 job, not tenant-a's")
+
+	jobMapB, ok := jobsB[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "tenant-b", jobMapB["TenantID"])
+}
+
+// [REQUIRED TEST] TestHandleListJobs_PaginationClamping verifies that limit/offset
+// clamping mirrors the convention in handlers_audit.go.
+func TestHandleListJobs_PaginationClamping(t *testing.T) {
+	server := setupTestServer(t)
+	server.batchJobStore = newTestBatchJobStoreForAPI()
+
+	// limit > 500 is silently clamped; request must succeed.
+	rec := listJobsAs(server, adminPrincipal(), "limit=9999")
+	assert.Equal(t, http.StatusOK, rec.Code, "limit=9999 must be clamped to 500, not error")
+
+	// limit=0 is clamped to 1; request must succeed.
+	rec = listJobsAs(server, adminPrincipal(), "limit=0")
+	assert.Equal(t, http.StatusOK, rec.Code, "limit=0 must be clamped to 1, not error")
+
+	// Non-numeric params are silently ignored; defaults apply.
+	rec = listJobsAs(server, adminPrincipal(), "limit=notanumber&offset=bad")
+	assert.Equal(t, http.StatusOK, rec.Code, "invalid params must be silently ignored")
+
+	// Valid offset with no data returns empty list.
+	rec = listJobsAs(server, adminPrincipal(), "offset=100&limit=10")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestHandleListJobs_PaginationOffsetLimit verifies that offset and limit correctly
+// slice the result set.
+func TestHandleListJobs_PaginationOffsetLimit(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+	p := tenantPrincipal("tenant-pg")
+
+	// Create 3 jobs.
+	for i := 0; i < 3; i++ {
+		rec := postCreateJobAs(server, p, `{"selector":"all","batch_size":1}`)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+	}
+
+	// Fetch all 3 with a generous limit.
+	rec := listJobsAs(server, p, "limit=10")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	all, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, all, 3, "limit=10 must return all 3 jobs")
+
+	// Fetch with limit=2: should return exactly 2.
+	rec = listJobsAs(server, p, "limit=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	page1, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, page1, 2, "limit=2 must return exactly 2 jobs")
+
+	// Fetch with offset=2 and limit=10: should return exactly 1.
+	rec = listJobsAs(server, p, "limit=10&offset=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	page2, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	assert.Len(t, page2, 1, "offset=2 must return the remaining 1 job")
+}

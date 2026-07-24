@@ -111,6 +111,10 @@ type RunStore interface {
 	CreateRun(*RunRecord) error
 	CreateJob(*JobRecord) error
 	GetRun(runID string) (*RunRecord, error)
+	// ListRuns returns runs ordered by created_at DESC with pagination. When tenantID is
+	// non-empty only runs belonging to that tenant are returned. An empty tenantID returns
+	// all runs across tenants (for use by global-scope admin callers).
+	ListRuns(tenantID string, limit, offset int) ([]*RunRecord, error)
 	ListRunJobs(runID string) ([]*JobRecord, error)
 	UpdateJobStatus(jobID string, status JobStatus, executionID string) error
 	// UpdateJobResult sets the terminal status, executionID, and captured execution
@@ -368,6 +372,67 @@ WHERE run_id = ?`
 	return r, nil
 }
 
+// ListRuns returns run records ordered by created_at DESC with pagination.
+// When tenantID is non-empty only runs belonging to that tenant are returned.
+// An empty tenantID returns all runs (for global-scope admin callers).
+func (s *RunStoreSQL) ListRuns(tenantID string, limit, offset int) ([]*RunRecord, error) {
+	const selectCols = `
+SELECT run_id, tenant_id, created_by, created_at, status, filter_json,
+       script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs
+FROM script_runs`
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(selectCols+`
+WHERE tenant_id = ?
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?`, tenantID, limit, offset)
+	} else {
+		rows, err = s.db.Query(selectCols+`
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?`, limit, offset)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("run store list runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var runs []*RunRecord
+	for rows.Next() {
+		r := &RunRecord{}
+		var (
+			createdBy     sql.NullString
+			filterJSON    sql.NullString
+			scriptRef     sql.NullString
+			inlineContent sql.NullString
+			shell         sql.NullString
+		)
+		if err := rows.Scan(
+			&r.RunID, &r.TenantID, &createdBy, &r.CreatedAt,
+			(*string)(&r.Status), &filterJSON,
+			&scriptRef, &inlineContent, &shell,
+			&r.JobCount, &r.CompletedJobs, &r.FailedJobs,
+		); err != nil {
+			return nil, fmt.Errorf("run store list runs scan: %w", err)
+		}
+		r.CreatedBy = createdBy.String
+		r.ScriptRef = scriptRef.String
+		r.InlineContent = inlineContent.String
+		r.Shell = scriptmodule.ShellType(shell.String)
+		if filterJSON.Valid && filterJSON.String != "" {
+			_ = json.Unmarshal([]byte(filterJSON.String), &r.Filter)
+		}
+		runs = append(runs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run store list runs rows: %w", err)
+	}
+	return runs, nil
+}
+
 // ListRunJobs returns all job records for runID ordered by created_at ASC.
 func (s *RunStoreSQL) ListRunJobs(runID string) ([]*JobRecord, error) {
 	const q = `
@@ -571,6 +636,12 @@ func (m *Manager) SetDeviceLockReleaser(r DeviceLockReleaser) {
 // Returns ErrNotFound when no run exists with that ID.
 func (m *Manager) GetRun(_ context.Context, runID string) (*RunRecord, error) {
 	return m.store.GetRun(runID)
+}
+
+// ListRuns returns runs with pagination, optionally scoped to tenantID.
+// An empty tenantID returns runs across all tenants (global-scope admin callers).
+func (m *Manager) ListRuns(_ context.Context, tenantID string, limit, offset int) ([]*RunRecord, error) {
+	return m.store.ListRuns(tenantID, limit, offset)
 }
 
 // ListRunJobs returns all job records for the given run.

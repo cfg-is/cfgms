@@ -179,5 +179,33 @@ func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 		assert.Empty(t, listNone)
 	})
 
+	t.Run("ListBatchJobs scopes by tenant and paginates", func(t *testing.T) {
+		require.NoError(t, store.CreateBatchJob(ctx, newContractBatchJob("ctr-list-ta-1", "ctr-list-tenant-A")))
+		require.NoError(t, store.CreateBatchJob(ctx, newContractBatchJob("ctr-list-ta-2", "ctr-list-tenant-A")))
+		require.NoError(t, store.CreateBatchJob(ctx, newContractBatchJob("ctr-list-tb-1", "ctr-list-tenant-B")))
+
+		// Tenant-scoped: only tenant-A's jobs.
+		listA, err := store.ListBatchJobs(ctx, "ctr-list-tenant-A", 50, 0)
+		require.NoError(t, err)
+		assert.Len(t, listA, 2)
+
+		// Tenant-scoped with limit=1: pagination works.
+		listA1, err := store.ListBatchJobs(ctx, "ctr-list-tenant-A", 1, 0)
+		require.NoError(t, err)
+		assert.Len(t, listA1, 1)
+
+		// Global (empty tenant): returns all jobs including both tenants.
+		listAll, err := store.ListBatchJobs(ctx, "", 500, 0)
+		require.NoError(t, err)
+		// At least the 3 we just inserted (other test cases may have inserted more).
+		assert.GreaterOrEqual(t, len(listAll), 3)
+
+		// Unknown tenant returns empty slice, not nil.
+		listNone, err := store.ListBatchJobs(ctx, "ctr-list-tenant-unknown", 50, 0)
+		require.NoError(t, err)
+		assert.NotNil(t, listNone)
+		assert.Empty(t, listNone)
+	})
+
 	require.NoError(t, store.Close())
 }

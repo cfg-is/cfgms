@@ -176,6 +176,58 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleListJobs handles GET /api/v1/jobs.
+// Returns a tenant-scoped, paginated list of batch jobs. TenantID is always sourced
+// from the authenticated principal's context — any tenant_id query param supplied
+// by the caller is silently discarded. Global-scope (admin mTLS) principals
+// receive jobs across all tenants.
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	if s.batchJobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Batch job service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	_, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			if l < 1 {
+				l = 1
+			}
+			if l > 500 {
+				l = 500
+			}
+			limit = l
+		}
+	}
+
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	jobs, err := s.batchJobStore.ListBatchJobs(r.Context(), tenantID, limit, offset)
+	if err != nil {
+		s.logger.Error("Failed to list batch jobs",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err,
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
+		return
+	}
+
+	if jobs == nil {
+		jobs = []*batchjob.BatchJob{}
+	}
+	s.writeSuccessResponse(w, jobs)
+}
+
 // handleGetJob handles GET /api/v1/jobs/{id}.
 //
 // Returns the full BatchJob JSON for the caller's tenant. Rejects with 404

@@ -6,6 +6,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -106,6 +107,30 @@ func (s *BatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string
 		if j.TenantID == tenantID {
 			out = append(out, deepCopyJob(j))
 		}
+	}
+	return out, nil
+}
+
+// ListBatchJobs returns deep copies of jobs ordered by created_at DESC with pagination.
+// An empty tenantID returns all jobs across tenants.
+func (s *BatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*batchjob.BatchJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*batchjob.BatchJob
+	for _, j := range s.jobs {
+		if tenantID == "" || j.TenantID == tenantID {
+			out = append(out, deepCopyJob(j))
+		}
+	}
+	sort.Slice(out, func(i, k int) bool {
+		return out[i].CreatedAt.After(out[k].CreatedAt)
+	})
+	if offset >= len(out) {
+		return []*batchjob.BatchJob{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

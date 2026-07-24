@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -336,6 +337,58 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccessResponse(w, map[string]string{"run_id": runID})
+}
+
+// handleListRuns handles GET /api/v1/runs.
+// Returns a tenant-scoped, paginated list of runs. TenantID is always sourced
+// from the authenticated principal's context — any tenant_id query param supplied
+// by the caller is silently discarded. Global-scope (admin mTLS) principals
+// receive runs across all tenants.
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	if s.runManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Run service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	_, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			if l < 1 {
+				l = 1
+			}
+			if l > 500 {
+				l = 500
+			}
+			limit = l
+		}
+	}
+
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	runs, err := s.runManager.ListRuns(r.Context(), tenantID, limit, offset)
+	if err != nil {
+		s.logger.Error("Failed to list runs",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err,
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list runs", "INTERNAL_ERROR")
+		return
+	}
+
+	if runs == nil {
+		runs = []*controllerrun.RunRecord{}
+	}
+	s.writeSuccessResponse(w, runs)
 }
 
 // handleGetRun handles GET /api/v1/runs/{run_id}.

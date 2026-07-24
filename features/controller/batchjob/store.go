@@ -54,6 +54,12 @@ type BatchJobStore interface {
 	// Returns an empty slice (not an error) when no records exist.
 	ListBatchJobsByTenant(ctx context.Context, tenantID string) ([]*BatchJob, error)
 
+	// ListBatchJobs returns batch jobs ordered by created_at DESC with pagination.
+	// When tenantID is non-empty only jobs belonging to that tenant are returned.
+	// An empty tenantID returns all jobs across tenants (global-scope admin callers).
+	// Returns an empty slice (not an error) when no records exist.
+	ListBatchJobs(ctx context.Context, tenantID string, limit, offset int) ([]*BatchJob, error)
+
 	// HealthCheck verifies the store is reachable and operational.
 	HealthCheck(ctx context.Context) error
 
