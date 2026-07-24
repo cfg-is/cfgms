@@ -40,6 +40,7 @@ import StepUpModal from './StepUpModal.tsx'
 
 export interface Principal {
   username: string
+  tenantId: string // Issue #2919: empty string means root scope; populated on login
 }
 
 /**
@@ -129,7 +130,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await loginRequest(username, password)
     if (result.ok) {
       sessionEstablishedRef.current = true
-      setPrincipal({ username })
+      // Issue #2919: store tenantId from the login response so AppShell can
+      // initialise TenantScopeProvider with the account's actual root path.
+      setPrincipal({ username, tenantId: result.tenantId })
       setStatus('signedIn')
       return true
     }

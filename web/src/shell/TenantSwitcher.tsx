@@ -33,6 +33,8 @@ export default function TenantSwitcher() {
   const segments = scope.split('/')
   const leaf = segments[segments.length - 1]
   const ancestry = segments.slice(0, -1).join('/')
+  // Issue #2919: show "root" when scope is empty (root admin with no narrowing).
+  const displayLeaf = leaf || 'root'
 
   return (
     <div className="scope-root" ref={rootRef}>
@@ -46,7 +48,7 @@ export default function TenantSwitcher() {
         <span className="scope-lbl">scope</span>
         <span className="scope-path mono">
           {ancestry ? `${ancestry}/` : ''}
-          <b>{leaf}</b>
+          <b>{displayLeaf}</b>
         </span>
       </button>
       {open && (

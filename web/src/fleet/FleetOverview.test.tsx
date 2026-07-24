@@ -73,13 +73,26 @@ function makeSteward(spec: StewardSpec): Steward {
 
 /**
  * Serve a fleet: each request slices [offset, offset+limit) of `stewards`.
- * When ?q= is present, performs a substring filter on hostname or id to simulate
- * server-side selector filtering (approximation for test purposes — real server
- * applies the full selector grammar).
+ * When ?q= is present, simulates server-side selector filtering (Issue #2919):
+ *  - Extracts a leading <tenant-path>/ prefix (same logic as pkg/fleet/selector).
+ *  - If rest is "all" (or empty after prefix), applies only the tenant filter.
+ *  - Otherwise applies a hostname/id substring filter to the tenant-filtered result.
  *
  * Health tiles are best-effort; the mock returns a 503 for /api/v1/fleet/health so
  * tiles stay hidden in tests that don't specifically test tile rendering.
  */
+function extractMockTenantPrefix(q: string): { tenant: string; rest: string } {
+  let splitAt = -1
+  for (let i = 0; i < q.length; i++) {
+    if (q[i] === '/') {
+      const left = q.slice(0, i)
+      if (left.length > 0 && !left.includes(':') && !left.includes(' ')) splitAt = i
+    }
+  }
+  if (splitAt < 0) return { tenant: '', rest: q }
+  return { tenant: q.slice(0, splitAt), rest: q.slice(splitAt + 1) }
+}
+
 function mockFleet(stewards: Steward[]) {
   fetchMock.mockImplementation((input) => {
     const url = new URL(String(input), 'https://controller.test')
@@ -92,13 +105,21 @@ function mockFleet(stewards: Steward[]) {
     const offset = Number(url.searchParams.get('offset'))
     const q = url.searchParams.get('q') ?? ''
 
-    const filtered = q
-      ? stewards.filter(
-          (s) =>
-            s.dna?.hostname?.toLowerCase().includes(q.toLowerCase()) ||
-            s.id.toLowerCase().includes(q.toLowerCase()),
-        )
+    const { tenant, rest } = extractMockTenantPrefix(q)
+    const tenantFiltered = tenant
+      ? stewards.filter((s) => {
+          const t = s.dna?.attributes?.['tenant']
+          return t !== undefined && (t === tenant || t.startsWith(tenant + '/'))
+        })
       : stewards
+    const filtered =
+      rest && rest !== 'all'
+        ? tenantFiltered.filter(
+            (s) =>
+              s.dna?.hostname?.toLowerCase().includes(rest.toLowerCase()) ||
+              s.id.toLowerCase().includes(rest.toLowerCase()),
+          )
+        : tenantFiltered
 
     const body = {
       data: {
@@ -616,6 +637,8 @@ describe('tenant scope', () => {
   ]
 
   it('registers observed tenant paths and narrows displayed rows to the scope', async () => {
+    // Issue #2919: narrowing the switcher sends ?q=root/msp-a/all (server-side
+    // TenantSubtree query) instead of client-side isScopeMatch filtering.
     mockFleet(fleet)
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -628,17 +651,23 @@ describe('tenant scope', () => {
     )
     await screen.findByRole('table')
 
-    // Paths observed in the page data are offered to the switcher.
+    // Paths observed in the initial (unscoped) page are offered to the switcher.
     expect(screen.getByTestId('observed').textContent).toContain('root/msp-a')
     expect(screen.getByTestId('observed').textContent).toContain('root/msp-b')
 
+    // Narrowing triggers a new server fetch with a tenant-path prefix selector;
+    // the mock returns only the two msp-a stewards (server-side subtree filter).
     fireEvent.click(screen.getByRole('button', { name: 'narrow-scope' }))
+    await screen.findByRole('table')
     const names = dataRows().map(firstCellText)
     expect(names).toEqual(['in-scope', 'descendant'])
-    expect(screen.getByTestId('fleet-count').textContent).toBe('2 of 4 match')
+    expect(screen.getByTestId('fleet-count').textContent).toBe('2 stewards in root/msp-a')
   })
 
   it('shows the scope no-match state when the scope holds no rows on this page', async () => {
+    // Issue #2919: server returns empty for the ?q=root/msp-a/all query because
+    // only msp-b stewards exist. FleetOverview detects total===0 && scoped and
+    // renders NoMatch scopeOnly=true → "No stewards in this scope".
     mockFleet([makeSteward({ id: 's3', hostname: 'other-tenant', attributes: { tenant: 'root/msp-b' } })])
     function NarrowToEmpty() {
       const { setScope } = useTenantScope()
@@ -666,7 +695,7 @@ describe('tenant scope', () => {
     )
     await screen.findByRole('table')
     fireEvent.click(screen.getByRole('button', { name: 'narrow-scope' }))
-    expect(screen.getByText('No stewards in this scope')).toBeInTheDocument()
+    expect(await screen.findByText('No stewards in this scope')).toBeInTheDocument()
     expect(screen.queryByText(/match your filter/i)).not.toBeInTheDocument()
   })
 })

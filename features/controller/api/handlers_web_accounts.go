@@ -92,6 +92,10 @@ var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 // they are RBAC-equivalent to API-key principals (ADR-014 §7 parity), NOT
 // implicit global admins.
 //
+// RootScope: true means this account has no tenant restriction (TenantID == "").
+// It must be set explicitly at creation — an empty TenantID alone never grants
+// root scope (defense-in-depth; Issue #2919).
+//
 // Credentials holds registered WebAuthn passkeys / FIDO2 credentials (Issue #2782).
 // These are public keys — they are stored in the same secrets-store record as the
 // argon2id hash (one persistence path per account). See WebAuthnCredential.
@@ -99,6 +103,7 @@ type webAccount struct {
 	ID           string
 	Username     string
 	TenantID     string
+	RootScope    bool // true when TenantID == "" by explicit grant (Issue #2919)
 	Permissions  []string
 	PasswordHash string // argon2id PHC string
 	CreatedAt    time.Time
@@ -114,10 +119,16 @@ type webAccountLockout struct {
 // WebAccountRequest is the POST /api/v1/web/accounts body. The same endpoint
 // creates a new account or resets an existing one (upsert): on reset, omitted
 // tenant_id/permissions are retained from the existing record.
+//
+// root_scope and tenant_id are mutually exclusive. Setting root_scope:true grants
+// cross-tenant visibility; an explicit tenant_id scopes to that subtree. If neither
+// is set on creation the account defaults to "default" (backward-compat); on reset
+// the existing scope is retained.
 type WebAccountRequest struct {
 	Username    string   `json:"username"`
 	Password    string   `json:"password"`
 	TenantID    string   `json:"tenant_id,omitempty"`
+	RootScope   bool     `json:"root_scope,omitempty"` // Issue #2919: explicit root grant
 	Permissions []string `json:"permissions,omitempty"`
 }
 
@@ -127,8 +138,21 @@ type WebAccountInfo struct {
 	ID          string    `json:"id"`
 	Username    string    `json:"username"`
 	TenantID    string    `json:"tenant_id"`
+	RootScope   bool      `json:"root_scope"` // Issue #2919
 	Permissions []string  `json:"permissions"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// webAccountStorageTenant returns the tenant key to use in the secret store
+// for a web account. Root-scoped accounts (logicalTenantID == "") are stored
+// under the system sentinel because the secret store requires non-empty TenantID.
+// The metadata field "root_scope" is the authoritative indicator; this mapping is
+// only for storage routing (Issue #2919).
+func webAccountStorageTenant(logicalTenantID string) string {
+	if logicalTenantID == "" {
+		return audit.SystemTenantID
+	}
+	return logicalTenantID
 }
 
 // --- argon2id PHC hashing ---
@@ -294,6 +318,12 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 		PasswordHash: secret.Value,
 		CreatedAt:    secret.CreatedAt,
 	}
+	// Issue #2919: restore root-scoped accounts. They are stored under the
+	// "system" sentinel tenant; the metadata flag is the authoritative marker.
+	if secret.Metadata["root_scope"] == "true" {
+		acct.TenantID = ""
+		acct.RootScope = true
+	}
 	// Issue #2782: deserialize stored WebAuthn credentials (public keys; non-secret).
 	if credsJSON, ok := secret.Metadata["credentials"]; ok && credsJSON != "" {
 		var creds []WebAuthnCredential
@@ -318,6 +348,11 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 		"permissions":                   serializePermissions(acct.Permissions),
 		"created_at":                    acct.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	// Issue #2919: mark root-scoped accounts so loadWebAccountFromStore can restore
+	// TenantID="" on reload (the store holds them under the "system" sentinel tenant).
+	if acct.RootScope {
+		meta["root_scope"] = "true"
+	}
 	// Issue #2782: persist WebAuthn credentials (public keys) in metadata.
 	if len(acct.Credentials) > 0 {
 		credsJSON, err := json.Marshal(acct.Credentials)
@@ -327,8 +362,8 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 	}
 	secretReq := &secretsif.SecretRequest{
 		Key:         webAccountStoreKey(acct.Username),
-		Value:       acct.PasswordHash, // argon2id PHC hash only — plaintext is never stored
-		TenantID:    acct.TenantID,
+		Value:       acct.PasswordHash,                      // argon2id PHC hash only — plaintext is never stored
+		TenantID:    webAccountStorageTenant(acct.TenantID), // Issue #2919: sentinel for root-scope
 		CreatedBy:   createdBy,
 		Description: "web admin account",
 		Tags:        []string{"web-account"},
@@ -472,6 +507,12 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PASSWORD")
 		return
 	}
+	// root_scope and tenant_id are mutually exclusive (Issue #2919).
+	if req.RootScope && req.TenantID != "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"root_scope and tenant_id are mutually exclusive", "INVALID_SCOPE")
+		return
+	}
 	// Same permission allow-list discipline as API keys ("*" and unknown IDs rejected):
 	// web accounts are RBAC-equivalent to API-key principals, not implicit admins.
 	for _, p := range req.Permissions {
@@ -507,6 +548,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		ID:           uuid.New().String(),
 		Username:     req.Username,
 		TenantID:     req.TenantID,
+		RootScope:    req.RootScope,
 		Permissions:  req.Permissions,
 		PasswordHash: phcHash,
 		CreatedAt:    time.Now().UTC(),
@@ -517,8 +559,11 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		// Reset (upsert): keep the principal identity stable; retain omitted fields.
 		acct.ID = existing.ID
 		acct.CreatedAt = existing.CreatedAt
-		if acct.TenantID == "" {
+		// Retain existing scope when the reset doesn't explicitly set either field
+		// (Issue #2919: an empty TenantID alone must not silently grant root scope).
+		if !req.RootScope && req.TenantID == "" {
 			acct.TenantID = existing.TenantID
+			acct.RootScope = existing.RootScope
 		}
 		if acct.Permissions == nil {
 			acct.Permissions = existing.Permissions
@@ -528,17 +573,23 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		action = "web_account.password_reset"
 		status = http.StatusOK
 	}
-	if acct.TenantID == "" {
+	// Resolve final scope (Issue #2919):
+	//   RootScope:true  → explicit root grant; clear TenantID for uniformity
+	//   TenantID != ""  → tenant-scoped (already set above)
+	//   neither         → default to "default" (backward-compat; never silently root)
+	if acct.RootScope {
+		acct.TenantID = ""
+	} else if acct.TenantID == "" {
 		acct.TenantID = "default"
 	}
 	if acct.Permissions == nil {
 		acct.Permissions = []string{}
 	}
 
-	// If a reset moves the account to a different tenant, remove the old record so
-	// the store never holds two live records for one username.
-	if existing != nil && existing.TenantID != acct.TenantID {
-		oldKey := fmt.Sprintf("%s/%s", existing.TenantID, webAccountStoreKey(existing.Username))
+	// If a reset moves the account to a different storage tenant, remove the old
+	// record so the store never holds two live records for one username.
+	if existing != nil && webAccountStorageTenant(existing.TenantID) != webAccountStorageTenant(acct.TenantID) {
+		oldKey := fmt.Sprintf("%s/%s", webAccountStorageTenant(existing.TenantID), webAccountStoreKey(existing.Username))
 		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
 			s.logger.Warn("Failed to delete web account record from previous tenant",
 				"username", logging.SanitizeLogValue(acct.Username),
@@ -559,12 +610,14 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		"action", action,
 		"username", logging.SanitizeLogValue(acct.Username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
+		"root_scope", acct.RootScope,
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
 	s.writeResponse(w, status, WebAccountInfo{
 		ID:          acct.ID,
 		Username:    acct.Username,
 		TenantID:    acct.TenantID,
+		RootScope:   acct.RootScope,
 		Permissions: acct.Permissions,
 		CreatedAt:   acct.CreatedAt,
 	})
@@ -599,10 +652,18 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 				createdAt = t
 			}
 		}
+		// Issue #2919: root-scoped accounts are stored under the system sentinel;
+		// restore the logical empty TenantID for the response.
+		rootScope := meta.Metadata["root_scope"] == "true"
+		tenantID := meta.TenantID
+		if rootScope {
+			tenantID = ""
+		}
 		accounts = append(accounts, WebAccountInfo{
 			ID:          meta.Metadata["id"],
 			Username:    meta.Metadata["username"],
-			TenantID:    meta.TenantID,
+			TenantID:    tenantID,
+			RootScope:   rootScope,
 			Permissions: parsePermissions(meta.Metadata["permissions"]),
 			CreatedAt:   createdAt,
 		})
@@ -638,7 +699,7 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 	delete(s.webAccountLockouts, username)
 	s.mu.Unlock()
 
-	storeKey := fmt.Sprintf("%s/%s", acct.TenantID, webAccountStoreKey(username))
+	storeKey := fmt.Sprintf("%s/%s", webAccountStorageTenant(acct.TenantID), webAccountStoreKey(username))
 	if err := s.secretStore.DeleteSecret(r.Context(), storeKey); err != nil {
 		s.logger.Warn("Failed to delete web account from secret store (memory cache already cleared)",
 			"username", logging.SanitizeLogValue(username),
@@ -656,6 +717,7 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 	s.logger.Info("Web admin account deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
+		"root_scope", acct.RootScope,
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
 	s.writeSuccessResponse(w, map[string]interface{}{

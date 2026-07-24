@@ -686,3 +686,160 @@ func TestWebAccounts_HashParametersEncodedInPHCString(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok, "hashes created under older cost parameters must keep verifying")
 }
+
+// ---- Issue #2919: root-scope web account tests ----
+
+// TestWebAccounts_RootScope_NotDefaultedToDefault verifies that creating a web account
+// with root_scope:true results in an account with empty TenantID, not "default".
+// This is the primary AC for Issue #2919 defense-in-depth: an empty TenantID returned
+// by VerifyWebCredential is only possible via explicit RootScope grant.
+func TestWebAccounts_RootScope_NotDefaultedToDefault(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "root-admin",
+		Password:    "secure-password-123",
+		RootScope:   true,
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	info, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "", info["tenant_id"], "root-scoped account must have empty tenant_id, not 'default'")
+	assert.Equal(t, true, info["root_scope"], "root_scope must be true in the response")
+	assert.Equal(t, "root-admin", info["username"])
+
+	// VerifyWebCredential must return empty tenantID for a root-scoped account.
+	principalID, tenantID, permissions, err := server.VerifyWebCredential(
+		context.Background(), "root-admin", "secure-password-123")
+	require.NoError(t, err)
+	assert.NotEmpty(t, principalID)
+	assert.Equal(t, "", tenantID,
+		"VerifyWebCredential must return empty tenantID for root-scoped account")
+	assert.ElementsMatch(t, []string{"steward:list"}, permissions)
+}
+
+// TestWebAccounts_RootScope_DurableAfterCacheDrop verifies that a root-scoped
+// account survives a cache drop (store round-trip) and still verifies correctly.
+func TestWebAccounts_RootScope_DurableAfterCacheDrop(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
+		Username:  "root-durable",
+		Password:  "durable-password-123",
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	dropWebAccountCache(server)
+
+	_, tenantID, _, err := server.VerifyWebCredential(context.Background(), "root-durable", "durable-password-123")
+	require.NoError(t, err, "root-scoped account must be reloadable from the secret store")
+	assert.Equal(t, "", tenantID, "root scope must survive a cache drop + store reload")
+}
+
+// TestWebAccounts_RootScope_MutuallyExclusiveWithTenantID verifies that specifying
+// both root_scope:true and a non-empty tenant_id in the same request is rejected.
+func TestWebAccounts_RootScope_MutuallyExclusiveWithTenantID(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
+		Username:  "conflict-user",
+		Password:  "valid-password-123",
+		TenantID:  "tenant-a",
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "INVALID_SCOPE", errResp.Error.Code)
+}
+
+// TestWebAccounts_RootScope_ResetRetainsScope verifies that resetting a root-scoped
+// account's password without specifying a new scope retains root scope.
+func TestWebAccounts_RootScope_ResetRetainsScope(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	// Create root-scoped account.
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:  "root-reset-user",
+		Password:  "original-password-123",
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Reset password without specifying scope — root scope must be retained.
+	rec = postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "root-reset-user",
+		Password: "new-password-456",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "reset of existing account returns 200")
+
+	// Old password must no longer verify.
+	_, _, _, err := server.VerifyWebCredential(context.Background(), "root-reset-user", "original-password-123")
+	assert.ErrorIs(t, err, ErrInvalidWebCredential)
+
+	// New password must verify with empty tenantID (root scope retained).
+	_, tenantID, _, err := server.VerifyWebCredential(context.Background(), "root-reset-user", "new-password-456")
+	require.NoError(t, err)
+	assert.Equal(t, "", tenantID, "root scope must be retained across password reset")
+}
+
+// TestWebAccounts_RootScope_AppearsInList verifies that a root-scoped account
+// appears in the list endpoint with root_scope:true and empty tenant_id.
+func TestWebAccounts_RootScope_AppearsInList(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:  "root-list-user",
+		Password:  "list-password-123",
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	_, accounts := listWebAccounts(t, server, admin)
+	var found *WebAccountInfo
+	for i := range accounts {
+		if accounts[i].Username == "root-list-user" {
+			found = &accounts[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "root-scoped account must appear in list")
+	assert.True(t, found.RootScope, "root_scope must be true in list response")
+	assert.Equal(t, "", found.TenantID, "tenant_id must be empty in list response for root-scoped account")
+}
+
+// TestWebAccounts_RootScope_DeleteWorks verifies that deleting a root-scoped
+// account succeeds and the account no longer verifies afterward.
+func TestWebAccounts_RootScope_DeleteWorks(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:  "root-delete-user",
+		Password:  "delete-password-123",
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Verify account exists.
+	_, _, _, err := server.VerifyWebCredential(context.Background(), "root-delete-user", "delete-password-123")
+	require.NoError(t, err)
+
+	// Delete it.
+	delRec := deleteWebAccount(t, server, admin, "root-delete-user")
+	require.Equal(t, http.StatusOK, delRec.Code)
+
+	// After deletion, verification must fail.
+	dropWebAccountCache(server)
+	_, _, _, err = server.VerifyWebCredential(context.Background(), "root-delete-user", "delete-password-123")
+	assert.ErrorIs(t, err, ErrInvalidWebCredential)
+}
