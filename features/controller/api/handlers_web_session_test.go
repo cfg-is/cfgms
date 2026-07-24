@@ -174,6 +174,68 @@ func TestWebLogin_SuccessSetsBothCookies(t *testing.T) {
 	assert.NotContains(t, body, csrf.Value, "response body must not contain the CSRF token")
 }
 
+// TestWebLogin_ResponseCarriesTenantScope verifies that the login response body exposes
+// the account's tenant_id and root_scope (Issue #2919). These fields determine the
+// cross-tenant access scope for the entire frontend session (they seed TenantScopeProvider
+// rootPath), so both the tenant-scoped and root-scoped shapes are asserted explicitly.
+func TestWebLogin_ResponseCarriesTenantScope(t *testing.T) {
+	// decodeScope pulls tenant_id/root_scope out of the {data:{...}} response envelope.
+	decodeScope := func(t *testing.T, rec *httptest.ResponseRecorder) (string, bool) {
+		t.Helper()
+		var env struct {
+			Data struct {
+				OK        bool   `json:"ok"`
+				TenantID  string `json:"tenant_id"`
+				RootScope bool   `json:"root_scope"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env), "login body: %s", rec.Body.String())
+		require.True(t, env.Data.OK, "login body must report ok=true")
+		return env.Data.TenantID, env.Data.RootScope
+	}
+
+	t.Run("tenant-scoped account returns its tenant_id and root_scope=false", func(t *testing.T) {
+		// setupWebSessionServer provisions an account scoped to TenantID "tenant-test".
+		srv, username, password := setupWebSessionServer(t)
+
+		csrf := doCSRF(t, srv)
+		rec := doLogin(t, srv, csrf, username, password)
+		require.Equal(t, http.StatusOK, rec.Code, "login body: %s", rec.Body.String())
+
+		tenantID, rootScope := decodeScope(t, rec)
+		assert.Equal(t, "tenant-test", tenantID, "tenant-scoped login must echo the account tenant_id")
+		assert.False(t, rootScope, "tenant-scoped login must report root_scope=false")
+	})
+
+	t.Run("root-scoped account returns empty tenant_id and root_scope=true", func(t *testing.T) {
+		srv := setupTestServer(t)
+		webCfg := session.Config{IdleTimeout: 60 * time.Minute, AbsoluteTimeout: 12 * time.Hour, GraceWindow: 30 * time.Second}
+		store := session.NewMemStore(webCfg, time.Now)
+		t.Cleanup(store.Close)
+		srv.SetWebSessionManager(session.NewManager(webCfg, store, time.Now))
+
+		const (
+			rootUser = "rootadmin"
+			rootPass = "correcthorsebattery"
+		)
+		admin := testAdminPrincipal()
+		acctRec := postWebAccount(t, srv, admin, WebAccountRequest{
+			Username:  rootUser,
+			Password:  rootPass,
+			RootScope: true, // explicit root grant → account TenantID == ""
+		})
+		require.Equal(t, http.StatusCreated, acctRec.Code, "root account setup: %s", acctRec.Body.String())
+
+		csrf := doCSRF(t, srv)
+		rec := doLogin(t, srv, csrf, rootUser, rootPass)
+		require.Equal(t, http.StatusOK, rec.Code, "login body: %s", rec.Body.String())
+
+		tenantID, rootScope := decodeScope(t, rec)
+		assert.Empty(t, tenantID, "root-scoped login must return an empty tenant_id")
+		assert.True(t, rootScope, "root-scoped login must report root_scope=true")
+	})
+}
+
 // TestWebLogin_UniformFailureResponse verifies that bad-password and unknown-user both
 // return the identical 401 status and INVALID_CREDENTIALS code (no enumeration).
 func TestWebLogin_UniformFailureResponse(t *testing.T) {

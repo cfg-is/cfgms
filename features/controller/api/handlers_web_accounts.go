@@ -606,12 +606,24 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	s.cacheWebAccount(acct)
 
 	s.emitWebAccountAudit(r.Context(), action, acct.TenantID, actingPrincipalID, acct.Username)
+	// CWE-117 (go/log-injection): acct.TenantID / acct.Username originate as
+	// json.Decode field selections (req.TenantID / req.Username) that are reassigned
+	// across the scope-resolution branches above. CodeQL's ReplaceSanitizer barrier
+	// lives *inside* SanitizeLogValue; its interprocedural recognition through the
+	// function return is unreliable on that reassigned-field-selection path, so the
+	// variadic-sink dataflow re-renders the alert here. Fix: apply the literal
+	// strings.ReplaceAll("\n"/"\r") barrier INLINE on the sanitized value, placing the
+	// ReplaceSanitizer node directly in this function's dataflow graph — the same
+	// sink-level idiom used in pkg/logging/logger.go:266 and handlers_push.go:102.
+	logUsername := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(acct.Username), "\n", "_"), "\r", "_")
+	logTenantID := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(acct.TenantID), "\n", "_"), "\r", "_")
+	logPrincipalID := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(actingPrincipalID), "\n", "_"), "\r", "_")
 	s.logger.Info("Web admin account provisioned",
 		"action", action,
-		"username", logging.SanitizeLogValue(acct.Username),
-		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
+		"username", logUsername,
+		"tenant_id", logTenantID,
 		"root_scope", acct.RootScope,
-		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
+		"principal_id", logPrincipalID)
 
 	s.writeResponse(w, status, WebAccountInfo{
 		ID:          acct.ID,
