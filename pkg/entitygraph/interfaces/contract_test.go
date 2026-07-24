@@ -84,6 +84,11 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("WatchFilterKinds", func(t *testing.T) { testEGWatchFilterKinds(t, factory) })           // AC 2
 	t.Run("WatchTenantFilter", func(t *testing.T) { testEGWatchTenantFilter(t, factory) })         // AC 3 REQUIRED
 	t.Run("WatchConcurrentCommit", func(t *testing.T) { testEGWatchConcurrentCommit(t, factory) }) // AC 4 REQUIRED
+	// Story-8: Retention GC + Watch expired-cursor signal (Issue #2878)
+	t.Run("RetentionNeverPruneCurrent", func(t *testing.T) { testEGRetentionNeverPruneCurrent(t, factory) }) // AC 1
+	t.Run("RetentionTombstoneHorizon", func(t *testing.T) { testEGRetentionTombstoneHorizon(t, factory) })   // AC 3
+	t.Run("RetentionPerSubtreePolicy", func(t *testing.T) { testEGRetentionPerSubtreePolicy(t, factory) })   // AC 2
+	t.Run("WatchExpiredCursor", func(t *testing.T) { testEGWatchExpiredCursor(t, factory) })                 // AC 5 REQUIRED
 }
 
 // --- Contract test helpers ---
@@ -1997,6 +2002,386 @@ func testEGWatchConcurrentCommit(t *testing.T, factory EntityGraphProviderFactor
 		"Watch must deliver all %d concurrently-written events without gaps (ADR-023 §5/§6)", N)
 }
 
+// --- Story-8: Retention GC + Watch expired-cursor signal (Issue #2878) ---
+
+// testEGRetentionNeverPruneCurrent verifies AC1: RunRetentionGC never removes
+// the latest current-state projection row, the current edge projection, or the
+// latest open drift-diff row, even when history_days=0 forces pruning of all
+// non-pinned rows.
+func testEGRetentionNeverPruneCurrent(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		subject = "host:ret-cur-auth/host1"
+		tenant  = "root/ret-cur-tenant"
+		src     = "enforcing-module:scanner"
+	)
+
+	now := time.Now().UTC()
+	past := now.AddDate(-2, 0, 0) // 2 years ago — well outside any retention window
+
+	// V1: observed 2 years ago — should be prunable once V2 exists.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{{
+			Source:     src,
+			Subject:    subject,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: past,
+			RecordedAt: past,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant, "hostname": "v1",
+			},
+		}},
+	}))
+
+	// V2: observed now — becomes the current projection.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{{
+			Source:     src,
+			Subject:    subject,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: now,
+			RecordedAt: now,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant, "hostname": "v2",
+			},
+		}},
+	}))
+
+	// Seed an edge (same-tenant, so it creates a current edge projection).
+	peer := egEID(t, "host:ret-cur-auth/peer1")
+	egReport(ctx, t, p, src, peer.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": tenant,
+	})
+	egReportEdge(ctx, t, p, src, subject, peer.String(), "contains")
+
+	// Seed a drift-diff (open drift record).
+	driftNow := now.Add(time.Second)
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:drift",
+		Observations: []types.Observation{{
+			Source:     "enforcing-module:drift",
+			Subject:    subject,
+			Kind:       types.ObservationKindDriftDiff,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: driftNow,
+			RecordedAt: driftNow,
+			Payload: map[string]interface{}{
+				"config_revision": "rev-gc-test",
+				"fields": []interface{}{
+					map[string]interface{}{"attribute": "state", "desired": "running", "actual": "stopped", "matching": false},
+				},
+			},
+		}},
+	}))
+
+	// Run GC with history_days=0 — forces pruning of everything except pinned rows.
+	require.NoError(t, p.RunRetentionGC(ctx, interfaces.RetentionPolicy{HistoryDays: 1}))
+
+	// Entity must still be readable (current projection survives GC).
+	view, err := p.GetEntity(ctx, egEID(t, subject), interfaces.GetEntityOpts{TenantFilter: tenant})
+	require.NoError(t, err, "entity must survive GC: current projection must not be pruned")
+	require.NotNil(t, view)
+	require.NotNil(t, view.Entity)
+	assert.Equal(t, "v2", view.Entity.Attributes["hostname"], "current projection must reflect V2, not pruned V1")
+
+	// Edge must survive (current edge projection).
+	subjectRef := egEID(t, subject)
+	edges, err := p.GetEdges(ctx, interfaces.EdgeFilter{FromEID: &subjectRef, TenantFilter: tenant})
+	require.NoError(t, err, "edge must survive GC: current edge projection must not be pruned")
+	assert.Len(t, edges, 1, "current edge projection must not be pruned by GC")
+
+	// Open drift record must survive (latest drift-diff row is pinned).
+	drift, err := p.GetDriftState(ctx, egEID(t, subject))
+	require.NoError(t, err, "drift state must survive GC: latest open drift-diff row must not be pruned")
+	require.NotNil(t, drift)
+	assert.Equal(t, "rev-gc-test", drift.ConfigRevision, "drift config revision must survive GC")
+}
+
+// testEGRetentionTombstoneHorizon verifies AC3: a retracted subject's absence
+// record survives until the tombstone horizon, then is fully removed (log rows
+// + projections) on the next sweep.
+func testEGRetentionTombstoneHorizon(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		subject = "host:ret-tomb-auth/host1"
+		tenant  = "root/ret-tomb-tenant"
+		src     = "enforcing-module:scanner"
+	)
+
+	past := time.Now().UTC().AddDate(-2, 0, 0) // 2 years ago
+
+	// Seed an entity, then retract it with an absence observation (both 2 years ago).
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{{
+			Source:     src,
+			Subject:    subject,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: past,
+			RecordedAt: past,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant, "hostname": "will-be-retracted",
+			},
+		}},
+	}))
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{{
+			Source:     src,
+			Subject:    subject,
+			Kind:       types.ObservationKindAbsence,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: past.Add(time.Minute),
+			RecordedAt: past.Add(time.Minute),
+			Payload:    map[string]interface{}{},
+		}},
+	}))
+
+	// GC with tombstone_days=30 (2 years old absence easily exceeds 30 days).
+	require.NoError(t, p.RunRetentionGC(ctx, interfaces.RetentionPolicy{
+		HistoryDays:   30,
+		TombstoneDays: 30,
+	}))
+
+	// After tombstone GC, the subject must be fully gone: GetEntity returns error.
+	_, err := p.GetEntity(ctx, egEID(t, subject), interfaces.GetEntityOpts{TenantFilter: tenant})
+	assert.Error(t, err, "tombstoned subject must be fully removed after tombstone horizon is exceeded")
+
+	// GetHistory must also return empty (all log rows removed).
+	now := time.Now().UTC()
+	history, err := p.GetHistory(ctx, egEID(t, subject), interfaces.TimeRange{
+		From: past.Add(-time.Hour),
+		To:   now,
+	})
+	require.NoError(t, err, "GetHistory on tombstoned subject must not error")
+	assert.Empty(t, history, "tombstoned subject must have no history rows after GC sweep")
+}
+
+// testEGRetentionPerSubtreePolicy verifies AC2: a tenant subtree with a longer
+// retention override is unaffected by a sibling tenant's shorter default.
+// AC4: a moved entity's retention is governed by its current owner.
+func testEGRetentionPerSubtreePolicy(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		shortTenant = "root/ret-short-tenant"
+		longTenant  = "root/ret-long-tenant"
+		srcA        = "enforcing-module:scanner-a"
+		srcB        = "enforcing-module:scanner-b"
+	)
+
+	past31 := time.Now().UTC().AddDate(0, 0, -31) // 31 days ago
+	now := time.Now().UTC()
+
+	subA := "host:ret-sub-auth/host-a"
+	subB := "host:ret-sub-auth/host-b"
+
+	// host-a (short-tenant): V1 31 days ago, V2 now.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcA,
+		Observations: []types.Observation{{
+			Source:     srcA,
+			Subject:    subA,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: past31,
+			RecordedAt: past31,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": shortTenant, "hostname": "a-v1",
+			},
+		}},
+	}))
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcA,
+		Observations: []types.Observation{{
+			Source:     srcA,
+			Subject:    subA,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: now,
+			RecordedAt: now,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": shortTenant, "hostname": "a-v2",
+			},
+		}},
+	}))
+
+	// host-b (long-tenant): V1 31 days ago, V2 now.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcB,
+		Observations: []types.Observation{{
+			Source:     srcB,
+			Subject:    subB,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: past31,
+			RecordedAt: past31,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": longTenant, "hostname": "b-v1",
+			},
+		}},
+	}))
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: srcB,
+		Observations: []types.Observation{{
+			Source:     srcB,
+			Subject:    subB,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: now,
+			RecordedAt: now,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": longTenant, "hostname": "b-v2",
+			},
+		}},
+	}))
+
+	// Install a 60-day retention override for the long tenant (protects V1 31-day-old row).
+	require.NoError(t, p.SetRetentionPolicy(ctx, interfaces.RetentionPolicy{
+		TenantPath:  longTenant,
+		HistoryDays: 60,
+	}))
+
+	// Run GC with a 30-day global default (short-tenant's 31-day-old V1 is prunable).
+	require.NoError(t, p.RunRetentionGC(ctx, interfaces.RetentionPolicy{HistoryDays: 30}))
+
+	// GetHistory for host-a: only V2 should remain (V1 is 31 days old, exceeds 30d default).
+	histA, err := p.GetHistory(ctx, egEID(t, subA), interfaces.TimeRange{
+		From: past31.Add(-time.Hour),
+		To:   now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+	v1InA := false
+	for _, rec := range histA {
+		if rec.Observation.Payload["hostname"] == "a-v1" {
+			v1InA = true
+		}
+	}
+	assert.False(t, v1InA, "short-tenant V1 (31 days old, default 30d policy) must be pruned by GC")
+
+	// GetHistory for host-b: both V1 and V2 must survive (long-tenant 60-day override).
+	histB, err := p.GetHistory(ctx, egEID(t, subB), interfaces.TimeRange{
+		From: past31.Add(-time.Hour),
+		To:   now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+	v1InB := false
+	for _, rec := range histB {
+		if rec.Observation.Payload["hostname"] == "b-v1" {
+			v1InB = true
+		}
+	}
+	assert.True(t, v1InB, "long-tenant V1 (31 days old, override 60d policy) must NOT be pruned by GC")
+}
+
+// testEGWatchExpiredCursor verifies AC5 (REQUIRED): Watch resume from a cursor
+// whose log rows have been pruned by retention returns ErrCursorExpired, not a
+// silent gap or stale replay.
+func testEGWatchExpiredCursor(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		subject = "host:ret-exp-auth/host1"
+		tenant  = "root/ret-exp-tenant"
+		src     = "enforcing-module:scanner"
+	)
+
+	past := time.Now().UTC().AddDate(-2, 0, 0) // 2 years ago
+
+	// V1: observed 2 years ago.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{{
+			Source:     src,
+			Subject:    subject,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: past,
+			RecordedAt: past,
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant, "hostname": "v1",
+			},
+		}},
+	}))
+
+	// Collect the Version (log id) of the V1 event.
+	watchCtx, watchCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer watchCancel()
+	ch, err := p.Watch(watchCtx, interfaces.WatchFilter{}, "0")
+	require.NoError(t, err)
+
+	var v1Version int64
+	deadline := time.After(5 * time.Second)
+collectV1:
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatal("watch channel closed before receiving V1 event")
+			}
+			if ev.Subject.String() == subject {
+				v1Version = ev.Version
+				break collectV1
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for V1 watch event")
+		}
+	}
+	watchCancel()
+	for range ch {
+	}
+	require.Greater(t, v1Version, int64(0), "V1 event must have a positive Version")
+
+	// V2: observed now (different payload → different hash → new log row, becomes current).
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: src,
+		Observations: []types.Observation{{
+			Source:     src,
+			Subject:    subject,
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			ObservedAt: time.Now().UTC(),
+			RecordedAt: time.Now().UTC(),
+			Payload: map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant, "hostname": "v2",
+			},
+		}},
+	}))
+
+	// Run GC with 1-day history — V1 (2 years old) is pruned; V2 (current) survives.
+	require.NoError(t, p.RunRetentionGC(ctx, interfaces.RetentionPolicy{HistoryDays: 1}))
+
+	// Entity must still be readable (V2 current projection survives).
+	view, err := p.GetEntity(ctx, egEID(t, subject), interfaces.GetEntityOpts{TenantFilter: tenant})
+	require.NoError(t, err, "entity must remain accessible after GC prunes V1")
+	require.NotNil(t, view)
+	assert.Equal(t, "v2", view.Entity.Attributes["hostname"])
+
+	// Watch from V1's cursor → the log rows at that position are pruned → ErrCursorExpired.
+	v1Cursor := fmt.Sprintf("%d", v1Version)
+	watchCtx2, watchCancel2 := context.WithTimeout(ctx, 5*time.Second)
+	defer watchCancel2()
+	_, watchErr := p.Watch(watchCtx2, interfaces.WatchFilter{}, v1Cursor)
+	require.Error(t, watchErr, "Watch from pruned cursor must return an error")
+	require.ErrorIs(t, watchErr, interfaces.ErrCursorExpired,
+		"Watch from pruned cursor must return ErrCursorExpired (AC5 REQUIRED)")
+}
+
 // --- Compile-time assertion ---
 
 // Verify that noopProvider satisfies the full EntityGraphProvider interface.
@@ -2059,5 +2444,11 @@ func (n *noopProvider) UpdateDriftLifecycle(_ context.Context, _ interfaces.Drif
 	return interfaces.ErrNotImplemented
 }
 func (n *noopProvider) RebuildProjections(_ context.Context) error {
+	return interfaces.ErrNotImplemented
+}
+func (n *noopProvider) RunRetentionGC(_ context.Context, _ interfaces.RetentionPolicy) error {
+	return interfaces.ErrNotImplemented
+}
+func (n *noopProvider) SetRetentionPolicy(_ context.Context, _ interfaces.RetentionPolicy) error {
 	return interfaces.ErrNotImplemented
 }

@@ -219,6 +219,15 @@ var schemaStatements = []string{
 		as_of     TEXT NOT NULL DEFAULT '',
 		subjects  TEXT NOT NULL DEFAULT ''
 	)`,
+
+	// Per-tenant-subtree retention policy overrides (ADR-023 §7).
+	// history_days=0 means "use global default". tombstone_days=0 means history+7.
+	// The most-specific matching tenant_path prefix wins at GC time.
+	`CREATE TABLE IF NOT EXISTS eg_retention_policy (
+		tenant_path    TEXT PRIMARY KEY,
+		history_days   INTEGER NOT NULL DEFAULT 0,
+		tombstone_days INTEGER NOT NULL DEFAULT 0
+	)`,
 }
 
 // egTableExists reports whether the named table is present in the SQLite schema catalog.
