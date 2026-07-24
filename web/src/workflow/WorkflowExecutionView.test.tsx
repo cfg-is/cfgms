@@ -2,13 +2,18 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * WorkflowExecutionView test suite (Story #2731).
+ * WorkflowExecutionView test suite (Story #2731, extended Story #2985).
  *
- * Required AC: covers the execute → status → cancel flow end-to-end:
+ * Required AC (Story #2731): covers the execute → status → cancel flow end-to-end:
  *   1. Execute button shows confirm dialog.
  *   2. Confirming execute POSTs to /execute and shows live status.
  *   3. Cancel button shows confirm dialog.
  *   4. Confirming cancel POSTs to /cancel.
+ *
+ * Required AC (Story #2985): variable inputs and per-step result rendering:
+ *   5. Confirm dialog includes variable key/value editor.
+ *   6. Execute POST body includes { variables: {...} }.
+ *   7. Active execution status renders step_results per-step table.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -276,6 +281,56 @@ describe('WorkflowExecutionView — execute → status → cancel flow (required
     )
   })
 
+  it('shows cancel error when cancel POST fails', async () => {
+    // Execute/status succeed so an active running execution is shown; the cancel
+    // POST returns a non-2xx with a server error body, exercising the error branch
+    // of handleConfirmCancel (setCancelError → data-testid="cancel-error").
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1'))
+      }
+      if (url.endsWith('/cancel')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: 'execution already completed' }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(
+          makeExecutionStatusResponse(makeExecution({ id: 'exec-1', status: 'running' })),
+        )
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('cancel-active-btn')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('cancel-active-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('cancel-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('cancel-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('cancel-error')).toHaveTextContent(
+      'execution already completed',
+    )
+  })
+
   it('dismisses cancel confirm dialog when Keep running is clicked', async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : (input as Request).url
@@ -375,6 +430,292 @@ describe('WorkflowExecutionView — security (A9.1)', () => {
     expect(screen.getAllByText(xss).length).toBeGreaterThan(0)
     expect(
       (window as unknown as Record<string, unknown>).__xssExec,
+    ).toBeUndefined()
+  })
+})
+
+describe('WorkflowExecutionView — variables and step results (required AC #2985)', () => {
+  it('shows variable editor in the confirm dialog', async () => {
+    fetchMock.mockResolvedValue(makeExecutionsResponse([]))
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('add-var-row-btn')).toBeInTheDocument()
+  })
+
+  it('adds and removes variable rows in the confirm dialog', async () => {
+    fetchMock.mockResolvedValue(makeExecutionsResponse([]))
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('add-var-row-btn'))
+    expect(screen.getByTestId('var-key-0')).toBeInTheDocument()
+    expect(screen.getByTestId('var-value-0')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('remove-var-row-0'))
+    expect(screen.queryByTestId('var-key-0')).toBeNull()
+  })
+
+  it('posts { variables: {...} } when operator enters variables in confirm dialog', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(
+          makeExecutionStatusResponse(makeExecution({ id: 'exec-1', status: 'running' })),
+        )
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('add-var-row-btn'))
+    fireEvent.change(screen.getByTestId('var-key-0'), { target: { value: 'env' } })
+    fireEvent.change(screen.getByTestId('var-value-0'), { target: { value: 'prod' } })
+
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-status')).toBeInTheDocument(),
+    )
+
+    const executeCall = fetchMock.mock.calls.find(([url]) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      return u.endsWith('/execute')
+    })
+    expect(executeCall).toBeDefined()
+    const body = JSON.parse(executeCall![1]?.body as string) as Record<string, unknown>
+    expect(body).toEqual({ variables: { env: 'prod' } })
+  })
+
+  it('posts { variables: {} } when no variable rows are entered', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(
+          makeExecutionStatusResponse(makeExecution({ id: 'exec-1', status: 'running' })),
+        )
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-status')).toBeInTheDocument(),
+    )
+
+    const executeCall = fetchMock.mock.calls.find(([url]) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      return u.endsWith('/execute')
+    })
+    expect(executeCall).toBeDefined()
+    const body = JSON.parse(executeCall![1]?.body as string) as Record<string, unknown>
+    expect(body).toEqual({ variables: {} })
+  })
+
+  it('skips variable rows with empty keys when building POST body', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(
+          makeExecutionStatusResponse(makeExecution({ id: 'exec-1', status: 'running' })),
+        )
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('add-var-row-btn'))
+    fireEvent.click(screen.getByTestId('add-var-row-btn'))
+    // Fill only the second row; first has empty key
+    fireEvent.change(screen.getByTestId('var-key-1'), { target: { value: 'target' } })
+    fireEvent.change(screen.getByTestId('var-value-1'), { target: { value: 'us-east' } })
+
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-status')).toBeInTheDocument(),
+    )
+
+    const executeCall = fetchMock.mock.calls.find(([url]) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      return u.endsWith('/execute')
+    })
+    expect(executeCall).toBeDefined()
+    const body = JSON.parse(executeCall![1]?.body as string) as Record<string, unknown>
+    expect(body).toEqual({ variables: { target: 'us-east' } })
+  })
+
+  it('renders step_results as a per-step table for completed execution', async () => {
+    const execWithResults = makeExecution({
+      id: 'exec-1',
+      status: 'completed',
+      step_results: {
+        'step-a': { output: 'hello' },
+        'step-b': 42,
+      },
+    })
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1', 'completed'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(makeExecutionStatusResponse(execWithResults))
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('step-results')).toBeInTheDocument(),
+    )
+
+    expect(screen.getAllByTestId('step-result-row')).toHaveLength(2)
+    expect(screen.getByText('step-a')).toBeInTheDocument()
+    expect(screen.getByText('step-b')).toBeInTheDocument()
+  })
+
+  it('renders step_results alongside error for failed execution', async () => {
+    const execWithResults = makeExecution({
+      id: 'exec-1',
+      status: 'failed',
+      error: 'step-b timed out',
+      step_results: {
+        'step-a': { output: 'ok' },
+      },
+    })
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1', 'failed'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(makeExecutionStatusResponse(execWithResults))
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-status')).toBeInTheDocument(),
+    )
+
+    expect(screen.getByText('step-b timed out')).toBeInTheDocument()
+    expect(screen.getByTestId('step-results')).toBeInTheDocument()
+    expect(screen.getByText('step-a')).toBeInTheDocument()
+  })
+
+  it('does not render step-results section when execution has no step_results', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1', 'completed'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(
+          makeExecutionStatusResponse(makeExecution({ id: 'exec-1', status: 'completed' })),
+        )
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-status')).toBeInTheDocument(),
+    )
+
+    expect(screen.queryByTestId('step-results')).toBeNull()
+  })
+
+  it('renders step result values as text nodes, not HTML (security A9.1)', async () => {
+    const xss = '<img src=x onerror="window.__xssStep=1">'
+    const execWithResults = makeExecution({
+      id: 'exec-1',
+      status: 'completed',
+      step_results: { [xss]: xss },
+    })
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/execute')) {
+        return Promise.resolve(makeExecuteResponse('exec-1', 'completed'))
+      }
+      if (url.includes('/executions/exec-1')) {
+        return Promise.resolve(makeExecutionStatusResponse(execWithResults))
+      }
+      return Promise.resolve(makeExecutionsResponse([]))
+    })
+
+    renderView()
+    await waitFor(() =>
+      expect(screen.getByTestId('exec-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('step-results')).toBeInTheDocument(),
+    )
+
+    expect(
+      (window as unknown as Record<string, unknown>).__xssStep,
     ).toBeUndefined()
   })
 })

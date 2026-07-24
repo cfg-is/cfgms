@@ -107,19 +107,24 @@ export default function WorkflowExecutionView({
   const [executing, setExecuting] = useState(false)
   const [executeError, setExecuteError] = useState<string | null>(null)
   const [cancelError, setCancelError] = useState<string | null>(null)
+  const [execVarRows, setExecVarRows] = useState<Array<{ key: string; value: string }>>([])
 
   async function handleConfirmExecute() {
     setConfirmExecute(false)
     setExecuting(true)
     setExecuteError(null)
     setActiveExecId(null)
+    const variables: Record<string, string> = {}
+    for (const { key, value } of execVarRows) {
+      if (key.trim()) variables[key.trim()] = value
+    }
     try {
       const response = await apiFetch(
         `/api/v1/workflows/${encodeURIComponent(workflowName)}/execute`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ variables }),
         },
       )
       if (!response.ok) {
@@ -225,6 +230,35 @@ export default function WorkflowExecutionView({
           {activeExec.error && (
             <span className="wf-form-error">{activeExec.error}</span>
           )}
+          {activeExec.step_results &&
+            Object.keys(activeExec.step_results).length > 0 && (
+              <div className="wf-step-results" data-testid="step-results">
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>Step</th>
+                      <th>Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(activeExec.step_results).map(
+                      ([step, result]) => (
+                        <tr key={step} data-testid="step-result-row">
+                          <td>
+                            <span className="nm">{step}</span>
+                          </td>
+                          <td>
+                            <span className="mono2">
+                              {JSON.stringify(result)}
+                            </span>
+                          </td>
+                        </tr>
+                      ),
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
           {activeIsNonTerminal && (
             <button
               type="button"
@@ -306,6 +340,62 @@ export default function WorkflowExecutionView({
               This workflow will execute against real infrastructure. Ensure the
               workflow steps are correct before proceeding.
             </p>
+            <div className="wf-var-editor" data-testid="var-editor">
+              <span className="wf-form-label">Variables</span>
+              {execVarRows.map((row, idx) => (
+                <div key={idx} className="wf-var-row">
+                  <input
+                    type="text"
+                    aria-label={`Variable key ${idx}`}
+                    placeholder="key"
+                    value={row.key}
+                    onChange={(e) =>
+                      setExecVarRows((prev) =>
+                        prev.map((r, i) =>
+                          i === idx ? { ...r, key: e.target.value } : r,
+                        ),
+                      )
+                    }
+                    data-testid={`var-key-${idx}`}
+                  />
+                  <input
+                    type="text"
+                    aria-label={`Variable value ${idx}`}
+                    placeholder="value"
+                    value={row.value}
+                    onChange={(e) =>
+                      setExecVarRows((prev) =>
+                        prev.map((r, i) =>
+                          i === idx ? { ...r, value: e.target.value } : r,
+                        ),
+                      )
+                    }
+                    data-testid={`var-value-${idx}`}
+                  />
+                  <button
+                    type="button"
+                    className="wf-btn-sm-danger"
+                    aria-label={`Remove variable ${idx}`}
+                    onClick={() =>
+                      setExecVarRows((prev) => prev.filter((_, i) => i !== idx))
+                    }
+                    data-testid={`remove-var-row-${idx}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="wf-btn-sm"
+                onClick={() =>
+                  setExecVarRows((prev) => [...prev, { key: '', value: '' }])
+                }
+                data-testid="add-var-row-btn"
+              >
+                + Add variable
+              </button>
+            </div>
             <div className="wf-modal-actions">
               <button
                 type="button"
