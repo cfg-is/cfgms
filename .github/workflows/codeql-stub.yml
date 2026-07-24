@@ -8,8 +8,8 @@
 #
 # The `paths-ignore` list here is the EXACT COMPLEMENT of codeql-analysis.yml's
 # `paths` allowlist, so for any given pull_request exactly one of the two runs:
-#   - touches Go / codeql config  -> real CodeQL runs, this stub does not
-#   - touches neither             -> this stub runs, real CodeQL does not
+#   - touches Go / codeql config / web sources  -> real CodeQL runs, this stub does not
+#   - touches neither                           -> this stub runs, real CodeQL does not
 #
 # This stub deliberately does NOT trigger on merge_group. The real analysis
 # runs on merge_group (unfiltered) and is the authoritative gate in the merge
@@ -35,10 +35,10 @@ jobs:
     name: CodeQL
     runs-on: ubuntu-latest
     steps:
-      - name: No Go changes — CodeQL not applicable
+      - name: No Go/web changes — CodeQL not applicable
         run: |
-          echo "This PR touches no Go source or CodeQL config."
+          echo "This PR touches no Go source, CodeQL config, or web sources."
           echo "The real CodeQL analysis is path-filtered out; reporting the"
-          echo "CodeQL required-check context as success. Any Go PR runs the"
+          echo "CodeQL required-check context as success. Any Go or web PR runs the"
           echo "real analysis (codeql-analysis.yml) instead of this stub, and"
           echo "the merge queue always runs the real analysis on merge_group."
