@@ -78,8 +78,8 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 
 	logger.Info("Created new terminal session",
 		"session_id", logging.RedactedID(sessionID),
-		"steward_id", req.StewardID,
-		"user_id", req.UserID,
+		"steward_id", logging.SanitizeLogValue(req.StewardID),
+		"user_id", logging.SanitizeLogValue(req.UserID),
 		"shell", req.Shell,
 		"cols", req.Cols,
 		"rows", req.Rows)

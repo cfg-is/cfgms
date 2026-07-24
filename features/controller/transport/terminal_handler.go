@@ -263,16 +263,11 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unsupported shell", http.StatusBadRequest)
 		return
 	}
+	// cols/rows are uint16 (parseTerminalInt bitSize=16), so they are inherently
+	// bounded to [0, 65535] — no explicit cap is needed before the int32 dispatch
+	// conversion below.
 	cols := parseTerminalInt(q.Get("cols"), 80)
 	rows := parseTerminalInt(q.Get("rows"), 24)
-	// Cap to maxTerminalDim so the subsequent int32 conversions cannot overflow
-	// on 64-bit platforms (int is 64-bit; maxTerminalDim fits in int32).
-	if cols > maxTerminalDim {
-		cols = maxTerminalDim
-	}
-	if rows > maxTerminalDim {
-		rows = maxTerminalDim
-	}
 	clientIP := terminalClientIP(r)
 
 	// Create terminal session (includes recording + audit start event).
@@ -281,8 +276,8 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		TenantID:  tenantID,
 		StewardID: stewardID,
 		Shell:     shell,
-		Cols:      cols,
-		Rows:      rows,
+		Cols:      int(cols),
+		Rows:      int(rows),
 		ClientIP:  clientIP,
 	})
 	if err != nil {
@@ -324,32 +319,14 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 
 	// Dispatch COMMAND_TYPE_OPEN_TERMINAL to the steward.
 	if h.commandPub != nil {
-		// Clamp to [0, maxTerminalDim] with explicit comparison guards immediately
-		// before the int32 cast. CodeQL's go/incorrect-integer-conversion range
-		// analysis tracks explicit if-bounds but does NOT model the min/max
-		// builtins, so the guards are written out longhand for the cast to be
-		// provably in range. clampedCols/Rows are locals; cols/rows are unchanged.
-		clampedCols := cols
-		if clampedCols < 0 {
-			clampedCols = 0
-		}
-		if clampedCols > maxTerminalDim {
-			clampedCols = maxTerminalDim
-		}
-		clampedRows := rows
-		if clampedRows < 0 {
-			clampedRows = 0
-		}
-		if clampedRows > maxTerminalDim {
-			clampedRows = maxTerminalDim
-		}
-		cols32 := int32(clampedCols)
-		rows32 := int32(clampedRows)
+		// cols/rows are uint16, so int32(cols)/int32(rows) are widening conversions
+		// that are provably in range [0, 65535] — no bounds guard is required and
+		// CodeQL's go/incorrect-integer-conversion does not flag a uint16→int32 cast.
 		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, map[string]interface{}{
 			"session_id": sess.ID,
 			"shell":      shell,
-			"cols":       cols32,
-			"rows":       rows32,
+			"cols":       int32(cols),
+			"rows":       int32(rows),
 		})
 		if cmdErr != nil {
 			if h.logger != nil {
@@ -540,16 +517,20 @@ func terminalSendWSError(conn *websocket.Conn, msg string) {
 	})
 }
 
-// parseTerminalInt parses a query-string integer with a positive-integer constraint.
-func parseTerminalInt(s string, def int) int {
+// parseTerminalInt parses a query-string terminal dimension with a positive-integer
+// constraint. It returns a uint16 so callers get a value whose type range is provably
+// [0, 65535]: the subsequent widening int32 conversion at the command-dispatch site is
+// therefore statically in range, which CodeQL's go/incorrect-integer-conversion accepts
+// without any explicit bounds guard (a uint16→int32 conversion can never overflow).
+func parseTerminalInt(s string, def uint16) uint16 {
 	if s == "" {
 		return def
 	}
-	v, err := strconv.Atoi(s)
-	if err != nil || v <= 0 {
+	v, err := strconv.ParseUint(s, 10, 16) // bitSize=16 → [0, 65535], fits uint16 exactly
+	if err != nil || v == 0 {
 		return def
 	}
-	return v
+	return uint16(v)
 }
 
 // terminalClientIP extracts the client IP from the request (proxy-aware).

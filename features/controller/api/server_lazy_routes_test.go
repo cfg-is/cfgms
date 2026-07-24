@@ -185,6 +185,61 @@ func TestServer_SetTelemetryHandler_RegistersRBACGatedRoute(t *testing.T) {
 		"steward:telemetry caller must not get 404")
 }
 
+// TestServer_SetTerminalHandler_RegistersRBACGatedRoute verifies the terminal
+// WebSocket relay route's pre- and post-wiring behavior through server.router,
+// mirroring TestServer_SetTelemetryHandler_RegistersRBACGatedRoute (Issue #2761).
+//
+// Unlike the telemetry route, terminal:create is AssuranceStrong-gated
+// (permissionAssurance), so an API key (AssuranceMachine) is rejected at the
+// requirePermission layer with 403 and never reaches the route closure. This test
+// therefore drives a Strong-assurance mTLS admin principal (makeSelfSignedAdminCert)
+// through the full router so it clears requirePermission and exercises the closure:
+//
+//	(1) With terminalHandler nil, the authorized request reaches the closure and
+//	    receives 503 (the nil-handler pre-wiring guard) — not 403/404.
+//	(2) After SetTerminalHandler wires a handler, the same authorized request reaches
+//	    the wired handler (sentinel returns 101 Switching Protocols).
+func TestServer_SetTerminalHandler_RegistersRBACGatedRoute(t *testing.T) {
+	const stewardID = "terminal-steward"
+	server := setupTestServer(t)
+
+	// mTLS admin cert yields a Strong-assurance principal that clears the
+	// terminal:create assurance gate. certManager is nil in setupTestServer, so
+	// extractAdminPrincipal skips revocation and admits the admin marker directly.
+	adminCert := makeSelfSignedAdminCert(t)
+
+	// Register the target steward so the tenant-scoping wrapper resolves it. The
+	// admin principal has TenantID "" (GlobalScope), so the wrapper only checks
+	// existence — any tenant is acceptable here.
+	err := server.controllerService.RegisterSteward(stewardID, "test-tenant", "localhost:0", "active")
+	require.NoError(t, err, "test setup: RegisterSteward must not fail")
+
+	// (1) Pre-wiring: terminalHandler is nil. The authorized admin clears
+	// requirePermission and the tenant-scoping wrapper, reaches the closure, and
+	// must receive 503 — proving the nil-handler guard is live, not 403/404.
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, adminCert)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"authorized Strong-assurance request must get 503 when terminalHandler is nil (pre-wiring guard)")
+
+	// (2) Post-wiring: after SetTerminalHandler the same authorized request must
+	// reach the wired handler. The sentinel returns 101 Switching Protocols.
+	var reached bool
+	server.SetTerminalHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+
+	req = requestWithTLSCert(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, adminCert)
+	rec = httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.True(t, reached,
+		"authorized Strong-assurance request must reach the wired terminal handler after SetTerminalHandler")
+	assert.Equal(t, http.StatusSwitchingProtocols, rec.Code,
+		"wired terminal handler response (101) must be returned, not 503/403/404")
+}
+
 // TestServer_SetWorkflowHandler_NilHandler_NoopSafe re-verifies (regression guard) that
 // passing nil to SetWorkflowHandler does not panic and leaves workflowHandler nil.
 func TestServer_SetWorkflowHandler_NilAfterSet_NoopSafe(t *testing.T) {
