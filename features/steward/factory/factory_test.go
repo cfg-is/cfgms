@@ -3,16 +3,18 @@
 package factory
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/pkg/logging"
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	maintinterfaces "github.com/cfgis/cfgms/pkg/maintenance/interfaces"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -277,6 +279,43 @@ func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
 	assert.NotNil(t, mod, "hyperv builtin module must not be nil")
 }
 
+// TestPatch_NotInBuiltinModuleConstructors asserts that "patch" is absent from
+// builtinModuleConstructors (handled by newPatchModule which injects the maintenance
+// gate) and is still loadable via the factory without error.
+func TestPatch_NotInBuiltinModuleConstructors(t *testing.T) {
+	_, ok := builtinModuleConstructors["patch"]
+	assert.False(t, ok, `"patch" must NOT be in builtinModuleConstructors — it is handled by newPatchModule`)
+
+	// patch must still be loadable via the factory (exercises newPatchModule).
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule("patch")
+	assert.NoError(t, err, "patch builtin must load without error")
+	assert.NotNil(t, mod, "patch builtin module must not be nil")
+}
+
+// TestPatch_SetMaintenanceGate verifies that SetMaintenanceGate stores the gate
+// and that LoadModule("patch") loads without error when a gate is configured.
+func TestPatch_SetMaintenanceGate(t *testing.T) {
+	var gate maintinterfaces.Gate = alwaysAllowGate{}
+
+	factory := NewWithStewardID(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, "test-steward", logging.NewNoopLogger())
+	factory.SetMaintenanceGate(gate)
+	assert.Equal(t, gate, factory.gate, "SetMaintenanceGate must store the gate on the factory")
+
+	mod, err := factory.LoadModule("patch")
+	require.NoError(t, err, "patch must load without error when a gate is configured")
+	require.NotNil(t, mod, "patch module must not be nil")
+}
+
+// alwaysAllowGate is a minimal Gate fixture that always permits reboots.
+// Represents an ungated device (no reboot_window declared).
+type alwaysAllowGate struct{}
+
+func (alwaysAllowGate) CanReboot(_ context.Context, _ string) (bool, error) { return true, nil }
+func (alwaysAllowGate) NextWindow(_ context.Context, _ string) (time.Time, error) {
+	return time.Time{}, nil
+}
+
 // TestModuleFactory_Hyperv_DurableStoreCreated verifies that when LoadModule
 // creates the hyperv module, the factory attempts to construct a durable
 // provision store and creates the backing directory. Uses
@@ -319,8 +358,8 @@ func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
 	unwritable := filepath.Join(occupied, "provisions")
 	t.Setenv("CFGMS_HYPERV_PROVISION_STORE_DIR", unwritable)
 
-	mock := pkgtesting.NewMockLogger(true)
-	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, mock)
+	cap := logging.NewCapturingLogger()
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, cap)
 
 	// (a) The module still loads, without error, despite the store failure.
 	mod, err := factory.LoadModule("hyperv")
@@ -328,11 +367,10 @@ func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
 	require.NotNil(t, mod, "hyperv module must not be nil on the fallback path")
 
 	// (b) Exactly one fallback Warn was emitted by newHypervProvisionStore.
-	warnLogs := mock.GetLogs("warn")
-	require.Len(t, warnLogs, 1, "exactly one fallback Warn must be emitted")
+	require.Len(t, cap.WarnMessages, 1, "exactly one fallback Warn must be emitted")
 	assert.Equal(t,
 		"hyperv: durable provision store unavailable; using in-memory fallback for this boot",
-		warnLogs[0].Message)
+		cap.WarnMessages[0])
 
 	// (c) No durable store was selected: the store constructor returns nil for
 	// this path, so newHypervModule builds the module on its in-memory store.

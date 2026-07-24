@@ -27,6 +27,17 @@ func TestCapturingLogger_RecordsWarnEntries(t *testing.T) {
 	assert.Equal(t, "v3", l.WarnEntries[1]["k3"])
 }
 
+func TestCapturingLogger_RecordsWarnMessages(t *testing.T) {
+	l := NewCapturingLogger()
+
+	l.Warn("first warning", "k1", "v1")
+	l.WarnCtx(context.Background(), "second warning", "k2", "v2")
+
+	require.Len(t, l.WarnMessages, 2, "WarnMessages must parallel WarnEntries")
+	assert.Equal(t, "first warning", l.WarnMessages[0])
+	assert.Equal(t, "second warning", l.WarnMessages[1])
+}
+
 func TestCapturingLogger_DiscardsSilentLevels(t *testing.T) {
 	l := NewCapturingLogger()
 

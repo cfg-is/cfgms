@@ -55,6 +55,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/pkg/logging"
+	maintinterfaces "github.com/cfgis/cfgms/pkg/maintenance/interfaces"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -84,6 +85,10 @@ type ModuleFactory struct {
 
 	// secretStore is injected into modules that implement SecretStoreInjectable
 	secretStore secretsif.SecretStore
+
+	// gate is the maintenance gate injected into the patch module for reboot-window
+	// enforcement. When nil, the patch module uses the fail-closed default (nil manager → deny).
+	gate maintinterfaces.Gate
 
 	// injectionStatus tracks logger injection status for each module
 	injectionStatus map[string]modules.LoggerInjectionStatus
@@ -176,8 +181,9 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 // builtinModuleConstructors maps module names to their zero-argument constructors.
 // The "directory" name is retained as an alias for the merged file module so that
 // existing cfg files using type: directory continue to work without migration.
-// Note: "hyperv" is intentionally absent — it is handled separately by newHypervModule
-// (which wires the durable provision store) and early-returned in loadBuiltinModule.
+// Note: "hyperv" and "patch" are intentionally absent — they are handled separately
+// by newHypervModule / newPatchModule (which wire the durable provision store /
+// maintenance gate) and early-returned in loadBuiltinModule.
 var builtinModuleConstructors = map[string]func() modules.Module{
 	"acme":          func() modules.Module { return acme_module.New() },
 	"cert_trust":    func() modules.Module { return cert_trust_module.New() },
@@ -187,7 +193,6 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 	"github_runner": func() modules.Module { return github_runner_module.New() },
 	"hostname":      func() modules.Module { return hostname_module.New() },
 	"package":       func() modules.Module { return package_module.New() },
-	"patch":         func() modules.Module { return patch.New() },
 	"script":        func() modules.Module { return script.New() },
 	"time":          func() modules.Module { return time_module.New() },
 	"user":          func() modules.Module { return user_module.New() },
@@ -196,15 +201,45 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 // loadBuiltinModule creates a new instance of a built-in module.
 // The hyperv module is handled specially so a durable provision store can be
 // wired via the factory logger (required for the fallback warn path).
+// The patch module is handled specially so the maintenance gate can be injected.
 func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, error) {
 	if moduleName == "hyperv" {
 		return f.newHypervModule(), nil
+	}
+	if moduleName == "patch" {
+		return f.newPatchModule(), nil
 	}
 	ctor, ok := builtinModuleConstructors[moduleName]
 	if !ok {
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
 	}
 	return ctor(), nil
+}
+
+// newPatchModule constructs the patch module and injects the production
+// GateWindowAdapter when a maintenance gate is available. When no gate has been
+// set (f.gate == nil), the patch module starts without a window manager; any
+// patch config that declares a maintenance.window will then be denied fail-closed.
+func (f *ModuleFactory) newPatchModule() modules.Module {
+	m := patch.New()
+	if f.gate == nil {
+		return m
+	}
+	pm, ok := m.(*patch.PatchModule)
+	if !ok {
+		f.logger.Warn("patch: cannot inject window manager: unexpected module type")
+		return m
+	}
+	pm.SetWindowManager(patch.NewGateWindowAdapter(f.gate, f.stewardID))
+	pm.SetDeviceID(f.stewardID)
+	return m
+}
+
+// SetMaintenanceGate sets the maintenance gate used by the patch module for
+// reboot-window enforcement. Must be called before the first LoadModule("patch")
+// for the gate to take effect. Parallels SetSecretStore.
+func (f *ModuleFactory) SetMaintenanceGate(gate maintinterfaces.Gate) {
+	f.gate = gate
 }
 
 // newHypervModule constructs the hyperv module with a durable provision store.

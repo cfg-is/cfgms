@@ -697,12 +697,19 @@ func TestUpgradeManager_PerformUpgrade_NoErrInvalidPatchType(t *testing.T) {
 	ctx := context.Background()
 
 	err = upgradeManager.PerformUpgrade(ctx, dna)
+	// The primary assertion: feature-update is a valid patch type, so the error must NOT be
+	// ErrInvalidPatchType (which would indicate the patch type was rejected before install).
 	require.NotErrorIs(t, err, ErrInvalidPatchType,
 		"PerformUpgrade must not return ErrInvalidPatchType for feature-update")
-	require.NoError(t, err, "PerformUpgrade should succeed when feature-update is a valid patch type")
+	// Fail-closed: the patchModule has no window manager injected, so canReboot returns false
+	// when the feature-update patch requires a reboot. In production the factory always injects
+	// a Gate; ungated devices receive a Gate whose CanReboot returns true.
+	require.ErrorIs(t, err, ErrMaintenanceWindowNotActive,
+		"without a configured gate, auto-reboot is denied fail-closed after install")
 
 	// Verify the installation path was exercised: the feature-update patch has
-	// RebootRequired=true, so a successful install sets the reboot-required flag.
+	// RebootRequired=true, so a successful install sets the reboot-required flag even
+	// when the auto-reboot itself is denied by the fail-closed gate.
 	rebootRequired, checkErr := mockManager.CheckRebootRequired(ctx)
 	require.NoError(t, checkErr)
 	assert.True(t, rebootRequired,

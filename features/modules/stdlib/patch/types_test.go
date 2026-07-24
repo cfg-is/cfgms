@@ -3,7 +3,6 @@
 package patch
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -13,8 +12,12 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
-func TestConfig_Validate_MaintenanceWindowRejected(t *testing.T) {
-	t.Run("maintenance.window is rejected", func(t *testing.T) {
+// TestConfig_Validate_MaintenanceWindowAccepted verifies that maintenance.window
+// and maintenance.schedule pass validation now that the real WindowManager
+// (GateWindowAdapter) is implemented. The former ErrMaintenanceWindowUnsupported
+// guard has been removed; enforcement is done at Set() time by the Gate.
+func TestConfig_Validate_MaintenanceWindowAccepted(t *testing.T) {
+	t.Run("maintenance.window passes validation", func(t *testing.T) {
 		cfg := &Config{
 			PatchType: "security",
 			Maintenance: struct {
@@ -27,13 +30,10 @@ func TestConfig_Validate_MaintenanceWindowRejected(t *testing.T) {
 			},
 		}
 		err := cfg.Validate()
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrMaintenanceWindowUnsupported)
-		assert.NotErrorIs(t, err, ErrMaintenanceWindowNotActive,
-			"must not be misreported as 'outside the window'")
+		assert.NoError(t, err, "maintenance.window must now pass validation")
 	})
 
-	t.Run("maintenance.schedule is rejected", func(t *testing.T) {
+	t.Run("maintenance.schedule passes validation", func(t *testing.T) {
 		cfg := &Config{
 			PatchType: "security",
 			Maintenance: struct {
@@ -46,13 +46,10 @@ func TestConfig_Validate_MaintenanceWindowRejected(t *testing.T) {
 			},
 		}
 		err := cfg.Validate()
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrMaintenanceWindowUnsupported)
-		assert.NotErrorIs(t, err, ErrMaintenanceWindowNotActive,
-			"must not be misreported as 'outside the window'")
+		assert.NoError(t, err, "maintenance.schedule must now pass validation")
 	})
 
-	t.Run("both window and schedule rejected", func(t *testing.T) {
+	t.Run("both window and schedule pass validation", func(t *testing.T) {
 		cfg := &Config{
 			PatchType: "security",
 			Maintenance: struct {
@@ -66,8 +63,7 @@ func TestConfig_Validate_MaintenanceWindowRejected(t *testing.T) {
 			},
 		}
 		err := cfg.Validate()
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrMaintenanceWindowUnsupported)
+		assert.NoError(t, err, "both maintenance fields together must pass validation")
 	})
 
 	t.Run("no maintenance fields passes validation", func(t *testing.T) {
@@ -76,7 +72,7 @@ func TestConfig_Validate_MaintenanceWindowRejected(t *testing.T) {
 			AutoReboot: false,
 		}
 		err := cfg.Validate()
-		assert.NoError(t, err, "common case with no maintenance fields must not regress")
+		assert.NoError(t, err, "config with no maintenance fields must pass validation")
 	})
 }
 
@@ -113,10 +109,10 @@ func TestConfig_Validate_InvalidPatchID(t *testing.T) {
 	}
 }
 
-// TestConfig_Validate_ContractHook verifies that ErrMaintenanceWindowUnsupported
-// surfaces through the ConfigState.Validate() method defined by the module contract
-// (features/modules/module.go:60), so a declared window is refused at cfg-apply
-// time rather than being discovered at reboot time.
+// TestConfig_Validate_ContractHook verifies that maintenance.window passes through
+// the ConfigState.Validate() method defined by the module contract
+// (features/modules/module.go). Enforcement moves from validation time to
+// Set()-time via the Gate (ADR-026 story 4).
 func TestConfig_Validate_ContractHook(t *testing.T) {
 	var state modules.ConfigState = &Config{
 		PatchType: "security",
@@ -131,7 +127,6 @@ func TestConfig_Validate_ContractHook(t *testing.T) {
 	}
 
 	err := state.Validate()
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrMaintenanceWindowUnsupported),
-		"ErrMaintenanceWindowUnsupported must be reachable via the ConfigState contract")
+	assert.NoError(t, err,
+		"maintenance.window must pass ConfigState.Validate(); enforcement is at Set() time via the Gate")
 }
