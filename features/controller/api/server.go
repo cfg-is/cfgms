@@ -509,6 +509,7 @@ func (s *Server) setupRouter() {
 	// Bulk registration approval and IP-trust management (Issue #1698)
 	api.Handle("/registration/approve-all", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveAllRegistrations))).Methods("POST")
 	api.Handle("/registration/approve-by-cidr", s.requirePermission("registration", "approve")(http.HandlerFunc(s.handleApproveByCIDR))).Methods("POST")
+	api.Handle("/registration/ip-trust", s.requirePermission("registration", "list-ip-trust")(http.HandlerFunc(s.handleListIPTrust))).Methods("GET")
 	api.Handle("/registration/ip-trust", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleAddIPTrust))).Methods("POST")
 	// {cidr:.+} allows the CIDR slash to appear literally in the URL path after decoding.
 	api.Handle("/registration/ip-trust/{tenant_id}/{cidr:.+}", s.requirePermission("registration", "manage-ip-trust")(http.HandlerFunc(s.handleRevokeIPTrust))).Methods("DELETE")

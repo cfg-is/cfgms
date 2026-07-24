@@ -56,7 +56,8 @@ var knownPermissions = map[string]bool{
 	"registration:list-pending": true,
 	"registration:approve":      true,
 	"registration:deny":         true,
-	// IP-trust management (Issue #1698)
+	// IP-trust management (Issue #1698, #2932)
+	"registration:list-ip-trust":   true,
 	"registration:manage-ip-trust": true,
 	// Monitoring
 	"monitoring:read-health":            true,

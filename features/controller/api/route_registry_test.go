@@ -131,6 +131,7 @@ var goldenRouteTable = []string{
 	"GET /api/v1/rbac/roles",
 	"GET /api/v1/rbac/roles/{id}",
 	"GET /api/v1/ready",
+	"GET /api/v1/registration/ip-trust",
 	"GET /api/v1/registration/pending",
 	"GET /api/v1/registration/status/{pending_id}",
 	"GET /api/v1/registration/tokens",

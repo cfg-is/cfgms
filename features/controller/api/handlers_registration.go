@@ -104,12 +104,15 @@ type denyRegistrationRequest struct {
 
 // handleListPendingRegistrations handles GET /api/v1/registration/pending.
 // Returns all quarantined stewards awaiting operator approval.
+// Scoped callers (API-key principals) see only their own tenant's entries; unscoped
+// (mTLS admin, callerTenant == "") retain global visibility.
 func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	entries, err := s.pendingStore.ListPending(r.Context(), "")
+	callerTenant := s.callerTenantID(r)
+	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending registrations", "error", err)
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
@@ -134,13 +137,15 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 
 // handleApproveRegistration handles POST /api/v1/registration/{id}/approve.
 // Marks the pending entry as approved; no cert is generated here (generate-on-claim).
+// Returns 404 when the entry's tenant is outside the caller's subtree (no existence disclosure).
 func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Request) {
 	pendingID := mux.Vars(r)["id"]
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if _, err := s.pendingStore.GetPendingByID(r.Context(), pendingID); err != nil {
+	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
+	if err != nil {
 		if err == business.ErrPendingRegistrationNotFound {
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
@@ -148,6 +153,14 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
+	}
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := entry.TenantID == callerTenant || strings.HasPrefix(entry.TenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+			return
+		}
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
 		s.logger.Error("Failed to approve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
@@ -155,18 +168,22 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.logger.Info("Steward registration approved (awaiting claim)", "pending_id", logging.SanitizeLogValue(pendingID))
+	s.emitRegistrationManagementAudit(r, "registration.approved",
+		map[string]interface{}{"pending_id": pendingID, "tenant_id": entry.TenantID})
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleDenyRegistration handles POST /api/v1/registration/{id}/deny.
 // Marks the pending entry as denied; no certs are issued.
+// Returns 404 when the entry's tenant is outside the caller's subtree (no existence disclosure).
 func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) {
 	pendingID := mux.Vars(r)["id"]
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if _, err := s.pendingStore.GetPendingByID(r.Context(), pendingID); err != nil {
+	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
+	if err != nil {
 		if err == business.ErrPendingRegistrationNotFound {
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
@@ -174,6 +191,14 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
+	}
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := entry.TenantID == callerTenant || strings.HasPrefix(entry.TenantID, callerTenant+"/")
+		if !inSubtree {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+			return
+		}
 	}
 	var req denyRegistrationRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -185,6 +210,8 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 	s.logger.Info("Steward registration denied",
 		"pending_id", logging.SanitizeLogValue(pendingID),
 		"reason", logging.SanitizeLogValue(req.Reason))
+	s.emitRegistrationManagementAudit(r, "registration.denied",
+		map[string]interface{}{"pending_id": pendingID, "tenant_id": entry.TenantID, "reason": req.Reason})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -379,12 +406,14 @@ type approveByCIDRRequest struct {
 // handleApproveAllRegistrations handles POST /api/v1/registration/approve-all.
 // Approves every entry currently in "pending" status and returns the count.
 // Idempotent: entries already approved/claimed/denied are skipped without error.
+// Scoped callers approve only within their own tenant subtree.
 func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	entries, err := s.pendingStore.ListPending(r.Context(), "")
+	callerTenant := s.callerTenantID(r)
+	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending registrations for approve-all", "error", err)
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
@@ -405,6 +434,8 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 	}
 
 	s.logger.Info("Bulk approve-all completed", "approved", approved)
+	s.emitRegistrationManagementAudit(r, "registration.approve_all",
+		map[string]interface{}{"approved_count": approved})
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
 		s.logger.Error("Failed to encode approve-all response", "error", err)
@@ -414,6 +445,7 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 // handleApproveByCIDR handles POST /api/v1/registration/approve-by-cidr.
 // Filters pending entries by source IP containment in the given CIDR (evaluated in Go,
 // not delegated to storage) and approves matching entries. Returns the count approved.
+// Scoped callers approve only within their own tenant subtree.
 func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
@@ -432,7 +464,8 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := s.pendingStore.ListPending(r.Context(), "")
+	callerTenant := s.callerTenantID(r)
+	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending registrations for approve-by-cidr", "error", err)
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
@@ -458,6 +491,8 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("CIDR bulk approve completed",
 		"cidr", logging.SanitizeLogValue(req.CIDR), "approved", approved)
+	s.emitRegistrationManagementAudit(r, "registration.approve_by_cidr",
+		map[string]interface{}{"cidr": req.CIDR, "approved_count": approved})
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
 		s.logger.Error("Failed to encode approve-by-cidr response", "error", err)
@@ -877,6 +912,38 @@ func extractSourceIP(r *http.Request, trustedProxies []net.IPNet) string {
 	}
 
 	return peerHost
+}
+
+// emitRegistrationManagementAudit records an audit event for a registration management action
+// (approve, deny, approve-all, approve-by-cidr). It is a no-op when auditManager is nil.
+func (s *Server) emitRegistrationManagementAudit(r *http.Request, action string, extras map[string]interface{}) {
+	if s.auditManager == nil {
+		return
+	}
+	callerTenant := s.callerTenantID(r)
+	tenantID := callerTenant
+	if tenantID == "" {
+		tenantID = audit.SystemTenantID
+	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principalID := ""
+	if principal != nil {
+		principalID = principal.ID
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventSystemAccess).
+		Action(action).
+		User(principalID, business.AuditUserTypeHuman).
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh)
+	for k, v := range extras {
+		b = b.Detail(k, v)
+	}
+	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+		s.logger.Warn("Failed to emit registration management audit event",
+			"error", err, "action", action)
+	}
 }
 
 // emitRegistrationAudit records a registration audit event. It is a no-op when auditManager is nil.

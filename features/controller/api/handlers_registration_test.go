@@ -492,10 +492,12 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 
 	t.Run("returns pending entries from durable store", func(t *testing.T) {
 		now := time.Now().UTC()
+		// Use the same TenantID as the API key created in newRegistrationApprovalServer
+		// ("default") so the scoped list returns this entry (Issue #2932 tenant scoping).
 		entry := &business.PendingRegistrationEntry{
 			PendingID:    "pending-list-test-1",
 			StewardID:    "steward-list-test-1",
-			TenantID:     "tenant-a",
+			TenantID:     "default",
 			TokenStr:     "tok-list-1",
 			SourceIP:     "192.168.1.1",
 			RegisteredAt: now,
@@ -514,7 +516,7 @@ func TestHandleListPendingRegistrations(t *testing.T) {
 		require.Len(t, pending, 1)
 		assert.Equal(t, "pending-list-test-1", pending[0].PendingID)
 		assert.Equal(t, "steward-list-test-1", pending[0].StewardID)
-		assert.Equal(t, "tenant-a", pending[0].TenantID)
+		assert.Equal(t, "default", pending[0].TenantID)
 		assert.Equal(t, "192.168.1.1", pending[0].SourceIP)
 	})
 }
@@ -709,7 +711,8 @@ func TestHandleDenyRegistration(t *testing.T) {
 	}
 
 	t.Run("happy path - marks entry as denied in durable store", func(t *testing.T) {
-		addEntry(t, "pending-deny-1", "steward-deny-1", "tenant-b", "10.0.0.2")
+		// "default" matches the API key's TenantID (Issue #2932: deny enforces caller subtree).
+		addEntry(t, "pending-deny-1", "steward-deny-1", "default", "10.0.0.2")
 
 		resp := makeDeny(t, "pending-deny-1", "")
 		defer func() { _ = resp.Body.Close() }()
@@ -722,7 +725,7 @@ func TestHandleDenyRegistration(t *testing.T) {
 	})
 
 	t.Run("deny with reason - marks entry as denied", func(t *testing.T) {
-		addEntry(t, "pending-deny-2", "steward-deny-2", "tenant-b", "10.0.0.3")
+		addEntry(t, "pending-deny-2", "steward-deny-2", "default", "10.0.0.3")
 
 		resp := makeDeny(t, "pending-deny-2", `{"reason":"Unauthorized deployment"}`)
 		defer func() { _ = resp.Body.Close() }()

@@ -186,3 +186,37 @@ This addendum closes it:
   epic (candidate follow-on); the login mockup's WebAuthn/passkey `mfa` state
   is a designed seam, built later. Reset is admin-driven via the same Tier-3
   endpoint — no self-service reset.
+
+---
+
+## Addendum (Issue #2932): Registration/Token/IP-Trust Cluster Tenant Scoping
+
+The registration, registration-token, and IP-trust API clusters are now
+caller-tenant-scoped. A web-session or API-key principal carrying a non-empty
+`TenantID` in context (`ctxkeys.TenantID`, set by `authenticationMiddleware`)
+can only read or mutate resources whose `TenantID` equals or is a path-prefix
+descendant of the caller's own tenant. Unscoped mTLS admin principals
+(`callerTenantID == ""`) retain global visibility and are unaffected.
+
+Specific changes:
+- `handleListPendingRegistrations`, `handleApproveAllRegistrations`,
+  `handleApproveByCIDR` pass `callerTenantID` to `ListPending` (was `""`).
+- `handleApproveRegistration`, `handleDenyRegistration` 404 when the entry's
+  `TenantID` is outside the caller's subtree.
+- `handleListRegistrationTokens`, `handleGetRegistrationToken` scope to
+  `callerTenantID`; list/get responses omit the raw `token` field (only
+  `token_prefix` — first 6 chars — is returned). The full secret is disclosed
+  only at create and rotate time.
+- `handleCreateRegistrationToken`, `handleRotateRegistrationToken`,
+  `handleRevokeRegistrationToken`, `handleDeleteRegistrationToken` enforce
+  caller subtree on the target tenant.
+- `GET /api/v1/registration/ip-trust` (new) lists trusted IP ranges for the
+  caller's tenant. Unscoped callers must supply `?tenant_id=`.
+- `handleAddIPTrust`, `handleRevokeIPTrust` reject requests whose `tenant_id`
+  is outside the caller's subtree.
+- All state-changing operations emit an audit event via `auditManager`.
+
+Roles already granted `registration:manage-ip-trust` should also be granted
+`registration:list-ip-trust` so operators who manage IP trust can also view
+the list (no static role-seed file exists; roles are provisioned via
+`POST /rbac/roles`).
