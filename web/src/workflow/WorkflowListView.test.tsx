@@ -693,7 +693,7 @@ describe('WorkflowListView — variables editor (Story #2984)', () => {
     const valInputs = screen.getAllByTestId('var-value-input') as HTMLInputElement[]
     expect(keyInputs).toHaveLength(2)
     // Keys may be in any order depending on Object.entries order
-    const pairs = keyInputs.map((k, i) => `${k.value}=${valInputs[i].value}`)
+    const pairs = keyInputs.map((k, i) => `${k.value}=${valInputs.at(i)?.value ?? ''}`)
     expect(pairs).toContain('FOO=bar')
     expect(pairs).toContain('BAZ=42')
   })
