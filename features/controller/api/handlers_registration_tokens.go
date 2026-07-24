@@ -279,8 +279,11 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	tokenPrefix := tokenStr[:min(len(tokenStr), 6)]
-	s.logger.Info("Deleted registration token", "token_prefix", logging.SanitizeLogValue(tokenPrefix))
+	// Slice first, then sanitize, so the sanitizer output flows directly into the sink.
+	// CodeQL's ReplaceSanitizer barrier attaches to the SanitizeLogValue result node and
+	// does not survive an intervening string-slice, so sanitizing last clears the taint.
+	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
 	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.TenantID)
 
 	w.WriteHeader(http.StatusNoContent)
@@ -340,8 +343,11 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	tokenPrefix := tokenStr[:min(len(tokenStr), 6)]
-	s.logger.Info("Revoked registration token", "token_prefix", logging.SanitizeLogValue(tokenPrefix))
+	// Slice first, then sanitize, so the sanitizer output flows directly into the sink.
+	// CodeQL's ReplaceSanitizer barrier attaches to the SanitizeLogValue result node and
+	// does not survive an intervening string-slice, so sanitizing last clears the taint.
+	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
 	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.TenantID)
 
 	// Return redacted response — revoke callers do not receive the raw secret.
