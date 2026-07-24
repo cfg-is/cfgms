@@ -142,21 +142,43 @@ func openDB(path string) (*sql.DB, error) {
 	// real-world controller batch commits and gives Windows CI's I/O
 	// variance enough headroom without hiding genuine deadlocks (those
 	// would still surface after 15s).
-	const pragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+	// File-backed databases use WAL for genuine multi-connection concurrency.
+	const filePragmas = "_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+	// In-memory databases are pinned to a single connection (see below), so
+	// neither WAL nor shared-cache buys anything: one connection can never
+	// contend with itself. Shared-cache in-memory is actively harmful — it
+	// routes every statement through the pure-Go driver's process-global
+	// shared-cache lock manager, whose lock-ordering can wedge a CREATE
+	// TABLE/INDEX in VDBE exec indefinitely when many parallel tests are
+	// initialising their own memory schemas at once. busy_timeout does not
+	// cover that wait, so the transaction never completes and the test binary
+	// hangs to its timeout (Issue #2967: schema.go initialiseSchema hang seen
+	// in features/controller/api). A private, single-connection memory DB with
+	// the default rollback journal removes the shared-cache lock manager from
+	// the picture entirely while preserving per-pool isolation and data sharing
+	// across all stores that hold the same *sql.DB.
+	const memPragmas = "_pragma=busy_timeout(15000)&_pragma=foreign_keys(on)"
+
+	inMemory := path == ":memory:" || strings.Contains(path, "mode=memory")
 
 	var dsn string
 	switch {
-	case path == ":memory:":
-		// Shared cache so multiple connections in tests see the same data.
-		dsn = "file::memory:?cache=shared&" + pragmas
+	case inMemory:
+		// Collapse every in-memory request (":memory:" or a named
+		// "file:...?mode=memory[&cache=shared]" DSN) to a private, unnamed
+		// memory DB. The single pinned connection means each pool owns exactly
+		// one private database that lives for the pool's lifetime; the caller's
+		// name only ever served to distinguish shared caches, which no longer
+		// exist here, so dropping it is safe and isolation becomes automatic.
+		dsn = "file::memory:?" + memPragmas
 	case strings.HasPrefix(path, "file:"):
 		sep := "?"
 		if strings.Contains(path, "?") {
 			sep = "&"
 		}
-		dsn = path + sep + pragmas
+		dsn = path + sep + filePragmas
 	default:
-		dsn = "file:" + path + "?" + pragmas
+		dsn = "file:" + path + "?" + filePragmas
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -164,16 +186,17 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("sqlite: failed to open %s: %w", path, err)
 	}
 
-	// A named shared-cache in-memory database (":memory:" or "mode=memory")
-	// exists only while at least one connection to it remains open: SQLite frees
-	// the database the instant the connection pool drops to zero live handles.
-	// Under a parallel test suite the default multi-connection pool churns and
-	// closes idle connections under memory pressure, tearing the database down
-	// mid-run — after which the next query hits a freed handle and the driver
-	// nil-dereferences. Pin such databases to a single, never-expiring
-	// connection so the backing store lives for the pool's entire lifetime.
-	// File-backed databases keep the default pool (WAL gives real concurrency).
-	if path == ":memory:" || strings.Contains(dsn, "mode=memory") {
+	// A private in-memory database exists only while at least one connection to
+	// it remains open: SQLite frees the database the instant the connection pool
+	// drops to zero live handles. Under a parallel test suite the default
+	// multi-connection pool churns and closes idle connections under memory
+	// pressure, tearing the database down mid-run — after which the next query
+	// hits a freed handle and the driver nil-dereferences. Pin such databases to
+	// a single, never-expiring connection so the backing store lives for the
+	// pool's entire lifetime, and so all stores sharing the *sql.DB see one
+	// consistent database. File-backed databases keep the default pool (WAL
+	// gives real concurrency).
+	if inMemory {
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 		db.SetConnMaxLifetime(0)

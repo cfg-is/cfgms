@@ -187,21 +187,27 @@ export default function StepUpModal({
     }
   }, [])
 
-  // Fetch a fresh presence challenge on mount and on each retry.
+  // Fetch a fresh challenge on mount and on each retry.
+  // Routes to the elevation endpoint (Basic→Strong) when presenceRequired is false,
+  // or the presence endpoint (per-action assertion) when presenceRequired is true.
   useEffect(() => {
     let aborted = false
 
-    async function beginPresence() {
+    async function beginCeremony() {
       setPhase('loading')
       setErrorMsg(null)
       optsRef.current = null
+
+      const beginUrl = request.presenceRequired
+        ? '/api/v1/webauthn/presence/begin'
+        : '/api/v1/webauthn/elevate/begin'
 
       try {
         const csrf = readSessionCsrf()
         const headers = new Headers()
         if (csrf !== null) headers.set('X-CSRF-Token', csrf)
 
-        const resp = await fetch('/api/v1/webauthn/presence/begin', {
+        const resp = await fetch(beginUrl, {
           method: 'POST',
           headers,
           credentials: 'same-origin',
@@ -228,11 +234,11 @@ export default function StepUpModal({
       }
     }
 
-    void beginPresence()
+    void beginCeremony()
     return () => {
       aborted = true
     }
-  }, [beginKey])
+  }, [beginKey, request.presenceRequired])
 
   const handleVerify = useCallback(async () => {
     const opts = optsRef.current
@@ -253,12 +259,17 @@ export default function StepUpModal({
       }
       const cred = rawCred as PublicKeyCredential
 
-      // Finish the ceremony: send the assertion to the server and get the token.
+      // Send the assertion to the server. Route to the correct finish endpoint:
+      //   - elevate/finish: upgrades the session to AssuranceStrong (Basic→Strong)
+      //   - presence/finish: mints a short-lived presence token for the action gate
       const csrf = readSessionCsrf()
+      const finishUrl = request.presenceRequired
+        ? '/api/v1/webauthn/presence/finish'
+        : '/api/v1/webauthn/elevate/finish'
       const finishHeaders = new Headers({ 'Content-Type': 'application/json' })
       if (csrf !== null) finishHeaders.set('X-CSRF-Token', csrf)
 
-      const finishResp = await fetch('/api/v1/webauthn/presence/finish', {
+      const finishResp = await fetch(finishUrl, {
         method: 'POST',
         headers: finishHeaders,
         credentials: 'same-origin',
@@ -271,14 +282,22 @@ export default function StepUpModal({
         return
       }
 
-      const finishData = (await finishResp.json()) as { presence_token: string }
-      const presenceToken = finishData.presence_token
-
-      // Retry the original request with the minted presence token.
-      // Raw fetch avoids re-triggering the step-up listener in apiFetch.
+      // Build retry headers, then replay the original request using raw fetch
+      // (not apiFetch) to avoid re-triggering the step-up listener.
       const method = (request.init.method ?? 'GET').toUpperCase()
       const retryHeaders = new Headers(request.init.headers)
-      retryHeaders.set('X-Presence-Token', presenceToken)
+
+      if (request.presenceRequired) {
+        // Presence path: attach the single-use token minted by presence/finish.
+        const presenceData = (await finishResp.json()) as { presence_token: string }
+        retryHeaders.set('X-Presence-Token', presenceData.presence_token)
+      } else {
+        // Elevation path: the session cookie is now Strong — no extra header needed.
+        // Consume the response body to avoid a connection leak.
+        await finishResp.json()
+      }
+
+      // Re-attach the session CSRF token on unsafe-method retries (ADR-018 §3).
       if (UNSAFE.has(method) && csrf !== null) {
         retryHeaders.set('X-CSRF-Token', csrf)
       }
