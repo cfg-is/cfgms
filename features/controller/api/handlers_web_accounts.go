@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -523,6 +522,13 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	// go/log-injection (CWE-117) + storage-key safety: strip CR/LF from json.Decoded
+	// identifier fields at the source using strings.ReplaceAll — the form CodeQL's
+	// ReplaceSanitizer recognises. Runs after validateWebUsername (a mangled username
+	// cannot pass the regex); TenantID has no charset guard, so this is its guard.
+	// Severs the json.Decode→field→sink dataflow CodeQL tracks for alert #1205.
+	req.Username = strings.ReplaceAll(strings.ReplaceAll(req.Username, "\n", ""), "\r", "")
+	req.TenantID = strings.ReplaceAll(strings.ReplaceAll(req.TenantID, "\n", ""), "\r", "")
 
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	actingPrincipalID := ""
@@ -607,33 +613,12 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	s.cacheWebAccount(acct)
 
 	s.emitWebAccountAudit(r.Context(), action, acct.TenantID, actingPrincipalID, acct.Username)
-	// CWE-117 (go/log-injection): acct.TenantID / acct.Username originate as
-	// json.Decode field selections (req.TenantID / req.Username) that are reassigned
-	// across the scope-resolution branches above. CodeQL's ReplaceSanitizer barrier
-	// lives *inside* SanitizeLogValue; its interprocedural recognition through the
-	// function return is unreliable on that reassigned-field-selection path, so the
-	// variadic-sink dataflow re-renders the alert here. Fix: apply the literal
-	// strings.ReplaceAll("\n"/"\r") barrier INLINE on the sanitized value, placing the
-	// ReplaceSanitizer node directly in this function's dataflow graph — the same
-	// sink-level idiom used in pkg/logging/logger.go:266 and handlers_push.go:102.
-	logUsername := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(acct.Username), "\n", "_"), "\r", "_")
-	logTenantID := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(acct.TenantID), "\n", "_"), "\r", "_")
-	logPrincipalID := strings.ReplaceAll(strings.ReplaceAll(logging.SanitizeLogValue(actingPrincipalID), "\n", "_"), "\r", "_")
-	// root_scope is a bool sourced from req.RootScope (json.Decode). A boolean can
-	// only render as "true"/"false" and cannot carry a CR/LF log-forgery payload, but
-	// CodeQL's go/log-injection dataflow still tracks the JSON-decode taint through the
-	// struct field to this variadic sink (alert #1205). The string-only ReplaceSanitizer
-	// idiom used for the three siblings above cannot bind to a bool, so first render the
-	// value to its closed-set string form (strconv.FormatBool) and then apply the same
-	// inline CR/LF barrier — this places the ReplaceSanitizer node directly in this
-	// function's dataflow graph and clears the alert the same way the siblings were cleared.
-	logRootScope := strings.ReplaceAll(strings.ReplaceAll(strconv.FormatBool(acct.RootScope), "\n", "_"), "\r", "_")
 	s.logger.Info("Web admin account provisioned",
 		"action", action,
-		"username", logUsername,
-		"tenant_id", logTenantID,
-		"root_scope", logRootScope,
-		"principal_id", logPrincipalID)
+		"username", logging.SanitizeLogValue(acct.Username),
+		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
+		"root_scope", acct.RootScope,
+		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
 	s.writeResponse(w, status, WebAccountInfo{
 		ID:          acct.ID,
