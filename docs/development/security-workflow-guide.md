@@ -85,7 +85,7 @@ Decision path for a CodeQL alert:
 ### 6. Go Native Fuzzing
 
 - **Purpose**: Finds panics and unexpected crashes in parse/decode boundaries under adversarial input — the threat-model-relevant surfaces a compromised steward or malicious config push would hit
-- **Scope**: Four CFGMS-owned parse surfaces (does NOT fuzz `crypto/x509`, `google.golang.org/protobuf`, or any vendored library's own internals)
+- **Scope**: CFGMS-owned parse surfaces (does NOT fuzz `crypto/x509`, `google.golang.org/protobuf`, or any vendored library's own internals)
 - **Blocking**: **NOT a PR gate** — time-boxed fuzzing is flaky as a required check. Runs nightly via `.github/workflows/fuzz-nightly.yml`
 - **Discovery**: `scripts/fuzz-all.sh` auto-discovers all `Fuzz*` targets via `go test -list '^Fuzz'` for each listed package — any new `Fuzz*` target in a listed package is picked up automatically, no workflow edit needed
 
@@ -99,6 +99,14 @@ Decision path for a CodeQL alert:
 | `FuzzParseCertificateFromPEM` | `pkg/cert/utils_fuzz_test.go` | PEM decode + `x509.ParseCertificate` (mTLS-everywhere means cert parsing is the highest threat-model-relevant fuzz surface) |
 | `FuzzParseCertificateChainFromPEM` | `pkg/cert/utils_fuzz_test.go` | Multi-block `pem.Decode` loop |
 | `FuzzParsePrivateKeyFromPEM` | `pkg/cert/utils_fuzz_test.go` | PEM block type dispatch to `x509.ParsePKCS1PrivateKey` / `ParsePKCS8PrivateKey` / `ParseECPrivateKey` |
+| `FuzzGzipDecompress` | `features/controller/fleet/storage/compression_fuzz_test.go` | Storage read-back decompression boundary: gzip-decompress then `proto.Unmarshal` into `commonpb.DNA`. Decompression-bomb surface — an attacker writing to the config store's compressed blob could trigger unbounded memory growth. |
+| `FuzzOptimizedDNADecompress` | `features/controller/fleet/storage/compression_fuzz_test.go` | Distinct second decode boundary for the `dna-optimized` compressor: gzip-decompress then `json.Unmarshal` into `serializedOptimizedPayload`, then manual field-by-field reconstruction with index bounds checks. |
+| `FuzzSplitCSVLine` | `features/steward/dna/hardware_parse_fuzz_test.go` | RFC-4180 CSV parser (hardware_parse.go:27) on raw CIM/WMI command output — real untrusted-input boundary when the invoked binary is compromised or its output is truncated/malformed. |
+| `FuzzCimDataRows` | `features/steward/dna/hardware_parse_fuzz_test.go` | Multi-row CSV splitter (hardware_parse.go:55) — exercises header-skip and blank-line-skip logic. |
+| `FuzzParseCIMComputerSystem` | `features/steward/dna/hardware_parse_fuzz_test.go` | Full Win32_ComputerSystem CIM parse pipeline including `strconv.ParseInt` on the TotalPhysicalMemory field. |
+| `FuzzParseCIMMemoryModules` | `features/steward/dna/hardware_parse_fuzz_test.go` | Multi-row memory module parser — sums capacities across arbitrarily many rows; higher combinatorial complexity than single-row parsers. |
+
+> **Why no `FuzzZstdDecompress` or `FuzzLZ4Decompress`:** `ZstdCompressor.Decompress` and `LZ4Compressor.Decompress` are one-line delegates to `GzipCompressor.Decompress` (compression.go:225, :308 — design decision documented at line 219: "zstd/LZ4 compression requires build tags... GZIP is the universal fallback"). A separate fuzz target for either would exercise the exact same code path as `FuzzGzipDecompress` and add zero real coverage.
 
 **Corpus locations:** `<package>/testdata/fuzz/<FuzzName>/` — crash entries are committed as regression fixtures and uploaded as workflow artifacts by `fuzz-nightly.yml`.
 
