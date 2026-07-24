@@ -330,6 +330,123 @@ func TestHandleDecommissionSteward_DurableStoreWriteFails(t *testing.T) {
 		"record must remain Active when the durable tombstone write fails")
 }
 
+// TestHandleDecommissionSteward_ListVisibleNotInDurableStore verifies that a steward
+// registered only via the in-memory path (gRPC AcceptRegistration) can be decommissioned
+// even though it has no durable record at the time of the DELETE call (Issue #2929).
+func TestHandleDecommissionSteward_ListVisibleNotInDurableStore(t *testing.T) {
+	server, _ := setupDecommissionServer(t)
+
+	// Register steward only in-memory (never into the durable store).
+	require.NoError(t, server.controllerService.RegisterSteward("s-memonly", "test-tenant", "addr", "registered"))
+
+	// Steward must appear in the default (no-filter) list before decommission.
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	listReq = withTenant(listReq, "")
+	listRec := httptest.NewRecorder()
+	server.handleListStewards(listRec, listReq)
+	require.Equal(t, http.StatusOK, listRec.Code)
+	var listResp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&listResp))
+	foundBefore := false
+	for _, s := range listResp.Data {
+		if s.ID == "s-memonly" {
+			foundBefore = true
+		}
+	}
+	require.True(t, foundBefore, "in-memory-only steward must appear in default list before decommission")
+
+	// Decommission must succeed even though steward is absent from durable store.
+	rec := deleteDecommissionSteward(server, "s-memonly")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "s-memonly", resp.Data["id"])
+	assert.Equal(t, "deregistered", resp.Data["status"])
+
+	// Steward must no longer appear in the default list after decommission.
+	listReq2 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	listReq2 = withTenant(listReq2, "")
+	listRec2 := httptest.NewRecorder()
+	server.handleListStewards(listRec2, listReq2)
+	require.Equal(t, http.StatusOK, listRec2.Code)
+	var listResp2 struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(listRec2.Body).Decode(&listResp2))
+	for _, s := range listResp2.Data {
+		assert.NotEqual(t, "s-memonly", s.ID, "deregistered steward must not appear in default list")
+	}
+}
+
+// TestHandleDecommissionSteward_ListVisibleNotInDurableStore_CrossTenant verifies that a
+// scoped admin receives 404 STEWARD_NOT_FOUND when the in-memory-only record belongs to a
+// different tenant subtree — exercising the fallback path cross-tenant check (Issue #2929).
+func TestHandleDecommissionSteward_ListVisibleNotInDurableStore_CrossTenant(t *testing.T) {
+	server, _ := setupDecommissionServer(t)
+
+	// Register steward only in-memory in tenant-b (simulates gRPC registration path).
+	require.NoError(t, server.controllerService.RegisterSteward("s-memonly-xtenant", "tenant-b", "addr", "registered"))
+
+	// Caller is scoped to tenant-a; steward belongs to tenant-b.
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/s-memonly-xtenant", nil)
+	req = withPrincipal(req, &Principal{ID: "tenant-a-admin", Assurance: session.AssuranceBasic, TenantID: "tenant-a"})
+	req = withVars(req, map[string]string{"id": "s-memonly-xtenant"})
+	rec := httptest.NewRecorder()
+	server.handleDecommissionSteward(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant decommission via fallback path must return 404, not 403")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleDecommissionSteward_BackfillWriteFails verifies that when the durable-store
+// backfill write (RegisterSteward) fails for an in-memory-only steward — after GetSteward
+// returns ErrStewardNotFound and the fallback scope check passes — the handler returns 500
+// INTERNAL_ERROR. This covers the RegisterSteward backfill error branch at
+// handlers_stewards.go:946-950 (Issue #2929), the mirror of the DeregisterSteward
+// write-failure path exercised by TestHandleDecommissionSteward_DurableStoreWriteFails.
+func TestHandleDecommissionSteward_BackfillWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
+	server := setupTestServer(t)
+	st, root := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	// Register steward only in-memory (never into the durable store) so GetSteward returns
+	// ErrStewardNotFound and the handler takes the backfill fallback path.
+	require.NoError(t, server.controllerService.RegisterSteward("s-backfill-writefail", "test-tenant", "addr", "registered"))
+
+	// Induce a genuine durable-store write failure on the backfill: make the flat-file
+	// store's backing directory read-only. GetSteward for a missing record is a pure read
+	// (returns ErrStewardNotFound) and still succeeds, so the handler reaches the backfill
+	// RegisterSteward, whose atomic write (temp-file creation in the directory) then fails
+	// with a permission error — the handler must surface a 500. Restore the mode on cleanup
+	// so t.TempDir() removal can delete the tree.
+	stewardDir := filepath.Join(root, "stewards")
+	require.NoError(t, os.Chmod(stewardDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(stewardDir, 0o750) })
+
+	rec := deleteDecommissionSteward(server, "s-backfill-writefail")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+
+	// The backfill must not have been persisted: restore write access and confirm the
+	// record is still absent from durable storage (the failed write left it unwritten).
+	require.NoError(t, os.Chmod(stewardDir, 0o750))
+	_, err := st.GetSteward(context.Background(), "s-backfill-writefail")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound,
+		"record must remain absent when the durable backfill write fails")
+}
+
 // ---- buildFleetFilter unit tests (no server required) ----
 
 func TestBuildFleetFilter_Empty(t *testing.T) {
