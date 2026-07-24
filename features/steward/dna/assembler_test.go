@@ -5,6 +5,7 @@ package dna
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -424,6 +425,43 @@ func TestAssembler_ModuleGetErrorFailsClosed(t *testing.T) {
 	ids := fragmentIDSet(frags)
 	assert.False(t, ids["broken"], "broken module's fragment must not be emitted on Get error")
 	assert.True(t, ids["ok"], "ok module's fragment must still be emitted")
+}
+
+// TestModuleGetErrorCategory verifies that the Get-error logging label is drawn
+// from a bounded set of constants and never echoes the error's raw message text.
+// This is the taint break that clears CodeQL go/clear-text-logging (CWE-312) at
+// the polymorphic mod.Get sink: no matter what a module embeds in its error
+// (e.g. a /etc/passwd path or a *SecretKey handle reference), the logged value
+// is one of these fixed categories.
+func TestModuleGetErrorCategory(t *testing.T) {
+	sensitive := errors.New("winrm_user_secret=super-secret-value at /etc/passwd")
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, "none"},
+		{"canceled", context.Canceled, "canceled"},
+		{"deadline", context.DeadlineExceeded, "deadline-exceeded"},
+		{"not-implemented", modules.ErrNotImplemented, "not-implemented"},
+		{"unsupported-platform", modules.ErrUnsupportedPlatform, "unsupported-platform"},
+		{"invalid-resource-id", modules.ErrInvalidResourceID, "invalid-resource-id"},
+		{"invalid-input", modules.ErrInvalidInput, "invalid-input"},
+		{"wrapped-sentinel", fmt.Errorf("read cluster: %w", modules.ErrNotImplemented), "not-implemented"},
+		{"opaque", sensitive, "module-error"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := moduleGetErrorCategory(tc.err)
+			assert.Equal(t, tc.want, got)
+			if tc.err != nil {
+				assert.NotContains(t, got, tc.err.Error(),
+					"category label must never contain the raw error text")
+			}
+		})
+	}
 }
 
 // TestAssembler_EmptyInputs verifies graceful handling of all-nil inputs.

@@ -4,6 +4,7 @@ package dna
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -145,8 +146,17 @@ func (a *Assembler) buildModuleFragment(
 ) (*commonpb.Fragment, *commonpb.FragmentEnvelope, bool) {
 	state, err := mod.Get(ctx, decl.Kind)
 	if err != nil {
+		// Log a bounded, taint-free error category rather than the module's raw
+		// error string. mod.Get is a polymorphic call across out-of-process
+		// module binaries; CodeQL go/clear-text-logging (CWE-312) unions every
+		// Module.Get implementation and treats their returned errors as
+		// potentially carrying a sensitive-named field value (heuristic
+		// naming / field-insensitivity FPs — see moduleGetErrorCategory). The
+		// raw error string is not the assembler's to surface across that trust
+		// boundary anyway; each module logs its own error detail via its
+		// injected logger.
 		a.logger.Error("module Get returned error — fragment skipped",
-			"module", moduleName, "kind", decl.Kind, "error", err)
+			"module", moduleName, "kind", decl.Kind, "error_category", moduleGetErrorCategory(err))
 		return nil, nil, false
 	}
 
@@ -182,6 +192,42 @@ func (a *Assembler) buildModuleFragment(
 		Confidence: confidence,
 	}
 	return frag, env, true
+}
+
+// moduleGetErrorCategory maps a Module.Get error onto a bounded, taint-free
+// category label for logging. It exists to satisfy two constraints at once:
+//
+//  1. Diagnosability: ops needs to know why a fragment was skipped without
+//     grepping every module's own logs.
+//  2. No clear-text logging (CWE-312): Module.Get is a polymorphic boundary
+//     across out-of-process module binaries. CodeQL's go/clear-text-logging
+//     unions every Module.Get implementation and treats their returned errors
+//     as potentially carrying a sensitive-named field value — e.g. the linux
+//     user executor formats its /etc/passwd path (field passwdFile) into read
+//     errors, and the hyperv module carries *SecretKey handle references. Those
+//     are naming / field-insensitivity false positives, but the raw error text
+//     is still not the assembler's to surface across that trust boundary. This
+//     function returns only string constants selected by errors.Is checks, so
+//     no data flows from the error's message text into the log sink.
+func moduleGetErrorCategory(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline-exceeded"
+	case errors.Is(err, modules.ErrNotImplemented):
+		return "not-implemented"
+	case errors.Is(err, modules.ErrUnsupportedPlatform):
+		return "unsupported-platform"
+	case errors.Is(err, modules.ErrInvalidResourceID):
+		return "invalid-resource-id"
+	case errors.Is(err, modules.ErrInvalidInput):
+		return "invalid-input"
+	default:
+		return "module-error"
+	}
 }
 
 // checkRequiredFields verifies that every key in decl.RequiredFields is present
