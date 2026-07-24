@@ -145,6 +145,8 @@ type Server struct {
 	webAuthnSessions               sync.Map                              // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
 	webAuthnPresenceSessions       sync.Map                              // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
 	presenceTokens                 sync.Map                              // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
+	webAuthnElevateSessions        sync.Map                              // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
+	webAuthnElevateThrottle        sync.Map                              // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 }

@@ -77,6 +77,10 @@ func buildWebauthnUser(acct *webAccount) *webauthnUser {
 			ID:        c.ID,
 			PublicKey: c.PublicKey,
 			Transport: transports,
+			Flags: webauthn.CredentialFlags{
+				BackupEligible: c.BackupEligible,
+				BackupState:    c.BackupState,
+			},
 			Authenticator: webauthn.Authenticator{
 				SignCount: c.SignCount,
 			},
@@ -254,12 +258,14 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		transports = append(transports, string(t))
 	}
 	stored := WebAuthnCredential{
-		ID:           credential.ID,
-		PublicKey:    credential.PublicKey,
-		SignCount:    credential.Authenticator.SignCount,
-		Transport:    transports,
-		Label:        label,
-		RegisteredAt: time.Now().UTC(),
+		ID:             credential.ID,
+		PublicKey:      credential.PublicKey,
+		SignCount:      credential.Authenticator.SignCount,
+		Transport:      transports,
+		Label:          label,
+		RegisteredAt:   time.Now().UTC(),
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
 	}
 
 	// Re-persist the account with the appended credential. The account loaded above

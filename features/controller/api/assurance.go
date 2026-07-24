@@ -71,6 +71,12 @@ var permissionAssurance = map[string]Requirement{
 	// before they can perform a fresh presence ceremony.
 	"webauthn:assert-presence": {Min: session.AssuranceStrong}, // POST /webauthn/presence/begin|finish
 
+	// WebAuthn step-up elevation endpoint (ADR-021 Amendment 2, Issue #2965).
+	// Callable at AssuranceBasic: this IS the step-up path (the caller cannot already be
+	// at AssuranceStrong via a different path to reach here). AssuranceMachine principals
+	// (API keys) cannot call this endpoint — they hold no web session to elevate.
+	"webauthn:elevate": {Min: session.AssuranceBasic}, // POST /webauthn/elevate/begin|finish
+
 	// Catastrophic permissions (no live REST routes yet — issue #2728/#2732 adds the routes).
 	// RequireUserPresence: true is ENFORCED as of Issue #2784: requirePermission now validates
 	// the X-Presence-Token header (minted by POST /api/v1/webauthn/presence/finish) and rejects

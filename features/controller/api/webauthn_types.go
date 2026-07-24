@@ -17,12 +17,14 @@ import "time"
 // secrets-store seam is chosen for implementation simplicity (one record, one
 // persistence path) rather than because the keys require encryption.
 type WebAuthnCredential struct {
-	ID           []byte    `json:"id"`
-	PublicKey    []byte    `json:"public_key"`
-	SignCount    uint32    `json:"sign_count"`
-	Transport    []string  `json:"transport,omitempty"`
-	Label        string    `json:"label,omitempty"`
-	RegisteredAt time.Time `json:"registered_at"`
+	ID             []byte    `json:"id"`
+	PublicKey      []byte    `json:"public_key"`
+	SignCount      uint32    `json:"sign_count"`
+	Transport      []string  `json:"transport,omitempty"`
+	Label          string    `json:"label,omitempty"`
+	RegisteredAt   time.Time `json:"registered_at"`
+	BackupEligible bool      `json:"backup_eligible,omitempty"` // W3C WebAuthn BE flag (stored at registration)
+	BackupState    bool      `json:"backup_state,omitempty"`    // W3C WebAuthn BS flag (stored at registration)
 }
 
 // webAuthnSessionTTL is the maximum age of a pending WebAuthn registration session.
@@ -77,4 +79,11 @@ type presenceTokenRecord struct {
 type WebAuthnPresenceFinishResponse struct {
 	PresenceToken string `json:"presence_token"`
 	ExpiresIn     int    `json:"expires_in_seconds"` // informational; server enforces TTL
+}
+
+// StepUpElevateFinishResponse is returned by POST /api/v1/webauthn/elevate/finish
+// on successful step-up elevation. The assurance field echoes the new session assurance.
+type StepUpElevateFinishResponse struct {
+	Assurance  string    `json:"assurance"`
+	ElevatedAt time.Time `json:"elevated_at"`
 }

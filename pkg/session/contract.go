@@ -133,12 +133,19 @@ func SourceIPFromContext(ctx context.Context) string {
 // List returns copies of all currently-live sessions across all tenants. A session is live
 // if it is not revoked, not absolute-expired, and not idle-expired — the same three checks
 // Validate applies. Tenant scoping is the caller's responsibility.
+//
+// Elevate atomically upgrades an existing session to AssuranceStrong (ADR-021 Amendment 2,
+// Issue #2965). It sets Assurance=Strong, BoundIP=sourceIP, CredentialID=credentialID,
+// LastProvenAt=now, and rotates the session token — preserving the session ID and CSRF
+// binding while invalidating a pre-elevation stolen cookie. The prior token stays valid for
+// GraceWindow to let concurrent requests complete cleanly.
 type Manager interface {
 	Issue(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error)
 	Validate(ctx context.Context, token string) (*Session, error)
 	Renew(ctx context.Context, token string) (*Session, string, error)
 	Revoke(ctx context.Context, id string) error
 	List(ctx context.Context) ([]*Session, error)
+	Elevate(ctx context.Context, sessionID string, credentialID []byte, sourceIP string) (*Session, string, error)
 }
 
 // Store is the backing store for the session Manager (ADR-014 §2).

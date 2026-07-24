@@ -91,6 +91,12 @@ type Principal struct {
 	CertSerial      string
 	CertFingerprint string
 	CertNotAfter    time.Time
+	// AuthenticatorCount is the number of WebAuthn credentials registered for this principal's
+	// web account. Set at Principal-build time for cookie-authenticated sessions only (Issue #2965).
+	// Zero for mTLS/API-key principals. -1 indicates the account could not be loaded.
+	// Confinement middleware and routing layers use this to distinguish "no passkeys" (0)
+	// from "unknown" (-1) or "has passkeys" (>0) without a per-request store query.
+	AuthenticatorCount int
 }
 
 // loggingMiddleware logs HTTP requests
@@ -410,14 +416,19 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				}
 				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
 				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
-				// and future WebAuthn upgrades are reflected on every request (ADR-021 Decision 3/5).
+				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
+				authCount := -1
+				if acct, err := s.getWebAccount(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
+					authCount = len(acct.Credentials)
+				}
 				webPrincipal := &Principal{
-					ID:           webSess.PrincipalID,
-					Name:         "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
-					Assurance:    webSess.Assurance,
-					LastProvenAt: webSess.LastProvenAt,
-					GlobalScope:  true,
-					TenantID:     webSess.TenantID,
+					ID:                 webSess.PrincipalID,
+					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+					Assurance:          webSess.Assurance,
+					LastProvenAt:       webSess.LastProvenAt,
+					GlobalScope:        true,
+					TenantID:           webSess.TenantID,
+					AuthenticatorCount: authCount,
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))

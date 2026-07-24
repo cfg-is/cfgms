@@ -23,4 +23,11 @@ func registerWebAuthnRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("webauthn", "assert-presence")(http.HandlerFunc(s.handlePresenceBegin))).Methods("POST")
 	webAuthnRouter.Handle("/presence/finish",
 		s.requirePermission("webauthn", "assert-presence")(http.HandlerFunc(s.handlePresenceFinish))).Methods("POST")
+
+	// Step-up elevation endpoints (ADR-021 Amendment 2, Issue #2965).
+	// Callable at AssuranceBasic; on success the session is upgraded to AssuranceStrong.
+	webAuthnRouter.Handle("/elevate/begin",
+		s.requirePermission("webauthn", "elevate")(http.HandlerFunc(s.handleStepUpBegin))).Methods("POST")
+	webAuthnRouter.Handle("/elevate/finish",
+		s.requirePermission("webauthn", "elevate")(http.HandlerFunc(s.handleStepUpFinish))).Methods("POST")
 }
