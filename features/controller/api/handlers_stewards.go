@@ -908,29 +908,59 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
 	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
 	if err != nil {
-		if errors.Is(err, business.ErrStewardNotFound) {
+		if !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Error("decommission failed: store lookup error",
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up steward", "INTERNAL_ERROR")
+			return
+		}
+		// Fallback: steward registered via gRPC path exists only in the in-memory
+		// registry but not in the durable store (Issue #2929 root cause).
+		memInfo, memExists := s.controllerService.GetStewardInfo(stewardID)
+		if !memExists {
+			// Not in either store — genuinely unknown steward.
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
 		}
-		s.logger.Error("decommission failed: store lookup error",
-			"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up steward", "INTERNAL_ERROR")
-		return
-	}
-
-	// Cross-tenant scope check using the durable record's TenantID as the authoritative source.
-	// Admin mTLS (empty callerTenant) has global scope; API-key callers are rejected at the
-	// TierMTLSOnly gate before reaching here, so callerTenant is always from an mTLS principal.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
-		sameTenant := record.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
-			// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		// Cross-tenant scope check using the in-memory record's TenantID (fallback path).
+		// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
+		if callerTenant != "" {
+			sameTenant := memInfo.TenantID == callerTenant
+			ancestorTenant := strings.HasPrefix(memInfo.TenantID, callerTenant+"/")
+			if !sameTenant && !ancestorTenant {
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+				return
+			}
+		}
+		// Backfill a durable record before tombstoning — must succeed before any in-memory
+		// updates (mirrors the "durable write must succeed first" invariant). Populate at
+		// minimum ID and TenantID; the store stamps RegisteredAt/LastSeen/Status itself.
+		backfill := &business.StewardRecord{
+			ID:       stewardID,
+			TenantID: memInfo.TenantID,
+		}
+		if backfillErr := s.stewardStore.RegisterSteward(r.Context(), backfill); backfillErr != nil && !errors.Is(backfillErr, business.ErrStewardAlreadyExists) {
+			s.logger.Error("decommission failed: backfill registration error",
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(backfillErr.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decommission steward", "INTERNAL_ERROR")
 			return
+		}
+	} else {
+		// Cross-tenant scope check using the durable record's TenantID as the authoritative source.
+		// Admin mTLS (empty callerTenant) has global scope; API-key callers are rejected at the
+		// TierMTLSOnly gate before reaching here, so callerTenant is always from an mTLS principal.
+		if callerTenant != "" {
+			sameTenant := record.TenantID == callerTenant
+			ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
+			if !sameTenant && !ancestorTenant {
+				// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+				return
+			}
 		}
 	}
 
