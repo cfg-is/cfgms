@@ -617,7 +617,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		"action", action,
 		"username", logging.SanitizeLogValue(acct.Username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.RootScope,
+		"root_scope", acct.TenantID == "",
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
 	s.writeResponse(w, status, WebAccountInfo{
@@ -724,7 +724,7 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 	s.logger.Info("Web admin account deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.RootScope,
+		"root_scope", acct.TenantID == "",
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
 	s.writeSuccessResponse(w, map[string]interface{}{

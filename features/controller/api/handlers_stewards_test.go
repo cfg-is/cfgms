@@ -3362,7 +3362,7 @@ func TestListStewards_RootScopedSession_SeesAllTenants(t *testing.T) {
 		"hostname": "host-msp-b",
 	})
 
-	// Simulate a root-scoped session: no TenantID in context (empty string).
+	// Root-scoped session: no TenantID in context (empty string).
 	// The handler reads ctxkeys.TenantID; when absent or empty, tenantID stays "".
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, ""))

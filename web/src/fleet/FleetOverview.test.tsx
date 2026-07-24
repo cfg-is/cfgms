@@ -73,7 +73,7 @@ function makeSteward(spec: StewardSpec): Steward {
 
 /**
  * Serve a fleet: each request slices [offset, offset+limit) of `stewards`.
- * When ?q= is present, simulates server-side selector filtering (Issue #2919):
+ * When ?q= is present, applies server-side selector filtering (Issue #2919):
  *  - Extracts a leading <tenant-path>/ prefix (same logic as pkg/fleet/selector).
  *  - If rest is "all" (or empty after prefix), applies only the tenant filter.
  *  - Otherwise applies a hostname/id substring filter to the tenant-filtered result.
