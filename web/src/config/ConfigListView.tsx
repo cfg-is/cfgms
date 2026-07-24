@@ -10,7 +10,7 @@
  * from the controller and may contain attacker-controlled data. Every value
  * reaches the DOM as a JSX text node — never dangerouslySetInnerHTML.
  */
-import { useState } from 'react'
+import { type FormEvent, useState } from 'react'
 import { useConfigList, useStewardHostnameMap, type ConfigSummary } from './useConfigs.ts'
 import ConfigEditor from './ConfigEditor.tsx'
 import PushPanel from './PushPanel.tsx'
@@ -101,13 +101,32 @@ export default function ConfigListView() {
   const hostnameMap = useStewardHostnameMap()
   const [selectedStewardId, setSelectedStewardId] = useState<string | null>(null)
   const [showPushPanel, setShowPushPanel] = useState(false)
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [createInputValue, setCreateInputValue] = useState('')
 
   function handleRowClick(stewardId: string) {
+    setShowCreateForm(false)
     setSelectedStewardId((prev) => (prev === stewardId ? null : stewardId))
   }
 
   function handleEditorClose() {
     setSelectedStewardId(null)
+  }
+
+  function handleToggleCreate() {
+    setShowCreateForm((v) => !v)
+    if (!showCreateForm) {
+      setSelectedStewardId(null)
+    }
+  }
+
+  function handleCreateSubmit(e: FormEvent) {
+    e.preventDefault()
+    const id = createInputValue.trim()
+    if (!id) return
+    setSelectedStewardId(id)
+    setShowCreateForm(false)
+    setCreateInputValue('')
   }
 
   return (
@@ -127,6 +146,14 @@ export default function ConfigListView() {
           >
             {showPushPanel ? 'Close push' : 'Push config'}
           </button>
+          <button
+            type="button"
+            className={showCreateForm ? 'cfg-btn' : 'cfg-btn-secondary'}
+            onClick={handleToggleCreate}
+            data-testid="toggle-create-btn"
+          >
+            {showCreateForm ? 'Close' : '+ New config'}
+          </button>
           {!loading && error === null && (
             <span className="cnt" data-testid="config-count">
               {configs.length} config{configs.length !== 1 ? 's' : ''}
@@ -136,6 +163,38 @@ export default function ConfigListView() {
 
         {showPushPanel && (
           <PushPanel onClose={() => setShowPushPanel(false)} />
+        )}
+
+        {showCreateForm && (
+          <div className="cfg-push-panel" data-testid="create-config-form">
+            <form className="cfg-push-form" onSubmit={handleCreateSubmit}>
+              <div className="cfg-push-row">
+                <div className="cfg-push-field">
+                  <label className="cfg-push-label" htmlFor="create-steward-id">
+                    Steward ID
+                  </label>
+                  <input
+                    id="create-steward-id"
+                    type="text"
+                    value={createInputValue}
+                    onChange={(e) => setCreateInputValue(e.target.value)}
+                    placeholder="Enter steward ID"
+                    data-testid="create-steward-id-input"
+                  />
+                </div>
+                <div className="cfg-push-actions">
+                  <button
+                    type="submit"
+                    className="cfg-btn"
+                    disabled={!createInputValue.trim()}
+                    data-testid="create-open-btn"
+                  >
+                    Open editor
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
         )}
 
         {loading ? (

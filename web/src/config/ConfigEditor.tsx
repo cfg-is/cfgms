@@ -46,9 +46,12 @@ export default function ConfigEditor({ stewardId, onClose }: ConfigEditorProps) 
   const [effectiveLoading, setEffectiveLoading] = useState(false)
   const [effectiveError, setEffectiveError] = useState<string | null>(null)
 
-  const { config, loading, error, retry } = useStewardConfig(stewardId)
+  const { config, loading, error, notFound, retry } = useStewardConfig(stewardId)
 
   const configText = config ? JSON.stringify(config.config, null, 2) : ''
+  // True when the steward exists but has no config yet — show empty editor immediately.
+  const inCreateMode = !loading && notFound
+  const effectiveEditing = editing || inCreateMode
 
   function handleStartEdit() {
     setEditText(configText)
@@ -58,6 +61,10 @@ export default function ConfigEditor({ stewardId, onClose }: ConfigEditorProps) 
   }
 
   function handleCancelEdit() {
+    if (inCreateMode) {
+      onClose()
+      return
+    }
     setEditing(false)
     setSaveError(null)
     setValidationResult(null)
@@ -98,7 +105,7 @@ export default function ConfigEditor({ stewardId, onClose }: ConfigEditorProps) 
   async function handleValidate() {
     setValidating(true)
     setValidationResult(null)
-    const textToValidate = editing ? editText : configText
+    const textToValidate = effectiveEditing ? editText : configText
     try {
       let parsed: unknown
       try {
@@ -220,7 +227,7 @@ export default function ConfigEditor({ stewardId, onClose }: ConfigEditorProps) 
         {view === 'config' && (
           <>
             <div className="cfg-editor-actions">
-              {!editing ? (
+              {!effectiveEditing ? (
                 <>
                   <button
                     type="button"
@@ -307,13 +314,13 @@ export default function ConfigEditor({ stewardId, onClose }: ConfigEditorProps) 
               </div>
             )}
 
-            {!loading && error === null && !editing && config && (
+            {!loading && error === null && !effectiveEditing && config && (
               <pre className="cfg-editor-pre" data-testid="editor-config-pre">
                 {configText}
               </pre>
             )}
 
-            {!loading && error === null && editing && (
+            {!loading && error === null && effectiveEditing && (
               <textarea
                 className="cfg-editor-textarea"
                 aria-label="Edit configuration"

@@ -254,6 +254,70 @@ describe('ConfigListView — STEWARD column hostname display', () => {
   })
 })
 
+function make404Response() {
+  return new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })
+}
+
+describe('ConfigListView — create new config', () => {
+  it('shows + New config button in toolbar', async () => {
+    fetchMock.mockResolvedValue(makeConfigEnvelope([]))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-empty')).toBeInTheDocument())
+    expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument()
+    expect(screen.getByTestId('toggle-create-btn')).toHaveTextContent('+ New config')
+  })
+
+  it('clicking + New config shows the steward ID input form', async () => {
+    fetchMock.mockResolvedValue(makeConfigEnvelope([]))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-empty')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    expect(screen.getByTestId('create-config-form')).toBeInTheDocument()
+    expect(screen.getByTestId('create-steward-id-input')).toBeInTheDocument()
+  })
+
+  it('clicking + New config again closes the form', async () => {
+    fetchMock.mockResolvedValue(makeConfigEnvelope([]))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-empty')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    expect(screen.getByTestId('create-config-form')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    expect(screen.queryByTestId('create-config-form')).toBeNull()
+  })
+
+  it('submitting the form opens ConfigEditor for the entered steward ID without an existing row', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([]))
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ data: { stewards: [], total: 0, limit: 500, offset: 0 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    fetchMock.mockResolvedValue(make404Response())
+
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-empty')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    fireEvent.change(screen.getByTestId('create-steward-id-input'), {
+      target: { value: 'new-steward-id' },
+    })
+    fireEvent.click(screen.getByTestId('create-open-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('config-editor')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByTestId('editor-textarea')).toBeInTheDocument())
+  })
+
+  it('create-open-btn is disabled when steward ID input is empty', async () => {
+    fetchMock.mockResolvedValue(makeConfigEnvelope([]))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-empty')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    expect(screen.getByTestId('create-open-btn')).toBeDisabled()
+  })
+})
+
 describe('ConfigListView — security (A9.1)', () => {
   it('renders steward_id and tenant_id as plain text, not HTML', async () => {
     const xss = '<img src=x onerror="window.__xss=1">'

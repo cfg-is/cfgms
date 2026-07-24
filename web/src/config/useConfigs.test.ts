@@ -270,11 +270,21 @@ describe('useStewardConfig', () => {
     expect(result.current.error).toBeNull()
   })
 
-  it('surfaces an error on non-ok response', async () => {
+  it('returns notFound when GET returns 404', async () => {
     fetchMock.mockResolvedValue(makeEnvelope({}, 404))
     const { result } = renderHook(() => useStewardConfig('sw-1'))
     await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.error).toContain('404')
+    expect(result.current.notFound).toBe(true)
+    expect(result.current.error).toBeNull()
+    expect(result.current.config).toBeNull()
+  })
+
+  it('surfaces an error on non-ok non-404 response', async () => {
+    fetchMock.mockResolvedValue(makeEnvelope({}, 500))
+    const { result } = renderHook(() => useStewardConfig('sw-1'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.error).toContain('500')
+    expect(result.current.notFound).toBe(false)
   })
 })
 
