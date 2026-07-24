@@ -226,6 +226,7 @@ interface FetchOutcome<T> {
   key: string
   data?: T
   error?: string
+  notFound?: boolean
   fetchedAtMs: number
 }
 
@@ -287,6 +288,7 @@ export interface UseStewardConfigResult {
   config: StewardConfigInfo | null
   loading: boolean
   error: string | null
+  notFound: boolean
   retry: () => void
 }
 
@@ -301,6 +303,10 @@ export function useStewardConfig(stewardId: string | null): UseStewardConfigResu
     let cancelled = false
     apiFetch(`/api/v1/stewards/${encodeURIComponent(stewardId)}/config`)
       .then(async (response) => {
+        if (response.status === 404) {
+          if (!cancelled) setOutcome({ key, notFound: true, fetchedAtMs: Date.now() })
+          return
+        }
         if (!response.ok)
           throw new Error(
             `GET /api/v1/stewards/${stewardId}/config — ${response.status}`,
@@ -333,6 +339,7 @@ export function useStewardConfig(stewardId: string | null): UseStewardConfigResu
     config: current?.data ?? null,
     loading: stewardId !== null && current === null,
     error: current?.error ?? null,
+    notFound: current?.notFound ?? false,
     retry,
   }
 }

@@ -260,3 +260,59 @@ describe('ConfigEditor — rollback tab', () => {
     await waitFor(() => expect(screen.getByTestId('rollback-panel')).toBeInTheDocument())
   })
 })
+
+describe('ConfigEditor — create mode (no existing config)', () => {
+  function make404Response() {
+    return new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  it('shows empty editor textarea when GET returns 404', async () => {
+    fetchMock.mockResolvedValue(make404Response())
+    renderEditor('sw-new')
+    await waitFor(() => expect(screen.getByTestId('editor-textarea')).toBeInTheDocument())
+    expect((screen.getByTestId('editor-textarea') as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('does not show an error notice when GET returns 404', async () => {
+    fetchMock.mockResolvedValue(make404Response())
+    renderEditor('sw-new')
+    await waitFor(() => expect(screen.getByTestId('editor-textarea')).toBeInTheDocument())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('save PUTs the entered config and then shows the saved config', async () => {
+    fetchMock.mockResolvedValueOnce(make404Response())
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    fetchMock.mockResolvedValue(makeConfigEnvelope({ resources: [] }, 'sw-new'))
+
+    renderEditor('sw-new')
+    await waitFor(() => expect(screen.getByTestId('editor-textarea')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByTestId('editor-textarea'), {
+      target: { value: '{"resources":[]}' },
+    })
+    fireEvent.click(screen.getByTestId('editor-save-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('editor-config-pre')).toBeInTheDocument())
+
+    const putCalls = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit | undefined)?.method === 'PUT',
+    )
+    expect(putCalls).toHaveLength(1)
+  })
+
+  it('cancel in create mode calls onClose', async () => {
+    fetchMock.mockResolvedValue(make404Response())
+    const onClose = vi.fn()
+    renderEditor('sw-new', onClose)
+    await waitFor(() => expect(screen.getByTestId('editor-textarea')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(onClose).toHaveBeenCalled()
+  })
+})
