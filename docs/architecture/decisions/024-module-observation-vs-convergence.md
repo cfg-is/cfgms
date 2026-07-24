@@ -128,3 +128,65 @@ Rejected. Modules are pulled as whole bundles (verified: one `module.yaml` per m
 - ADR-020 — DNA required-field declaration
 - ADR-022 / ADR-023 — Entity graph model and storage
 - `docs/architecture/modules/README.md` — module manifest contract
+
+---
+
+## Amendment 1 (2026-07-24): One store — observation extends the existing fragment emission, not a parallel channel
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** Decisions 1 and 5
+
+This amendment corrects a framing error that surfaced while sequencing the entity-graph
+population work (epics #2890/#2853). The original text reads as if observation is a *new
+collection layer that feeds a graph* — a second sink alongside DNA. It is not. The founder's
+correction (2026-07-23): **DNA and the entity graph are ONE store, and a module reports its
+observation by extending the emission it already makes — never by adding a parallel channel.**
+
+### 1. DNA and the entity graph are one store
+
+There is a single unified store; DNA is its **lean current-state projection**, not a separate
+database. This is already the settled position of the entity-graph ADRs and is restated here so
+observation is built on it:
+
+- **ADR-023 §2** — one store; the fragment log subsumes DNA fragment history (the
+  "graph-inside-DNA" alternative was rejected).
+- **ADR-022** — one shared identity (`eid` / `fragment_id`) spans DNA, graph, and DEX.
+- **ADR-017 A1.2** — `fragment_id` *is* the entity node id; edges connect `fragment_id`s.
+- **ADR-023 clause 7** — the DNA **sync hot path stays separate** for performance; that is a
+  transport optimization, not a second store.
+
+Consequence: observation does not "populate a graph." A module emits **fragments (and edges,
+identity, drift)** into the one store; the graph and DNA are two views of it.
+
+### 2. One observation over the existing ADR-016 emission — extend it, do not duplicate it
+
+A module's `Get` emits **one observation** — fragments + edges + identity + drift — over the
+**existing ADR-016 fragment emission, extended**. There is **no** separate observation/edge
+channel. The founder's constraint: *"doubling the steward→controller path is bad."*
+
+This supersedes any wording (notably in epic #2853) that says "add an observation channel" or
+"add an edge-emission channel." The corrected instruction is **"extend the existing fragment
+emission."** `psGetVM`-style comprehensive collectors emit once; consumers (DNA inventory,
+entity nodes/edges, identity correlation) read from that single emission rather than re-opening
+the collector.
+
+### 3. Re-observe cadence is the steward convergence cycle, tiered by default
+
+Observation reuses the loop that already `Get`s managed resources — the steward **convergence
+cycle** (~5 min lab, ~15 min production, ~30–60 min workstations). It is **tiered by default**,
+and the tier boundary is **cost × value, not managed-vs-unmanaged**:
+
+- **Tier 1 — declared-resource drift, every cycle.** Cheap, high-value state (including
+  cheap+high-value observation such as cluster membership) refreshes each cycle.
+- **Tier 2 — whole-domain extended discovery, every Nth cycle.** The expensive full-domain
+  sweep runs on a slower beat; N is the endpoint-CPU knob.
+
+Event push (e.g. the Hyper-V `monitor_windows.go` accelerator) is an **optional per-module
+accelerator, not the baseline.** Sync stays light regardless — partial sync ships deltas only,
+orthogonal to the CPU tiering above.
+
+### Effect on decomposition
+
+This amendment is the precondition for decomposing the observe-DNA framework stories (the
+`#2948` remediation of epic #2890). Stories MUST reflect one store, extend-the-existing-emission,
+and the tiered convergence-cycle cadence — not a parallel observation channel or a separate
+collection layer.
