@@ -9,10 +9,12 @@ import {
   parsePushStatus,
   parseRollbackPoints,
   parseRollbackOperations,
+  parseConfigDeployments,
   useConfigList,
   useStewardConfig,
   usePushStatus,
   useStewardHostnameMap,
+  useConfigDeployments,
 } from './useConfigs.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -379,5 +381,164 @@ describe('useStewardHostnameMap', () => {
     const { result } = renderHook(() => useStewardHostnameMap())
     await act(async () => {})
     expect(result.current.size).toBe(0)
+  })
+})
+
+// ── parseConfigDeployments ────────────────────────────────────────────────────
+
+describe('parseConfigDeployments', () => {
+  it('parses a valid deployments response', () => {
+    const data = {
+      config_id: 'sw-1',
+      summary: { applied: 2, pending: 1, failed: 0, halted: 0, total: 3 },
+      stewards: [
+        { steward_id: 'sw-1', status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+        { steward_id: 'sw-2', status: 'pending', last_updated: '2026-01-01T00:00:00Z' },
+      ],
+      push_history: [
+        {
+          push_id: 'push-1',
+          status: 'completed',
+          version: '2',
+          initiated_by: 'admin',
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:01:00Z',
+        },
+      ],
+    }
+    const result = parseConfigDeployments(data)
+    expect(result.config_id).toBe('sw-1')
+    expect(result.summary.applied).toBe(2)
+    expect(result.summary.total).toBe(3)
+    expect(result.stewards).toHaveLength(2)
+    expect(result.stewards[0]!.steward_id).toBe('sw-1')
+    expect(result.stewards[0]!.status).toBe('applied')
+    expect(result.push_history).toHaveLength(1)
+    expect(result.push_history[0]!.push_id).toBe('push-1')
+  })
+
+  it('returns empty arrays when stewards and push_history are absent', () => {
+    const result = parseConfigDeployments({ config_id: 'sw-1' })
+    expect(result.stewards).toEqual([])
+    expect(result.push_history).toEqual([])
+    expect(result.summary.total).toBe(0)
+  })
+
+  it('handles null input gracefully', () => {
+    const result = parseConfigDeployments(null)
+    expect(result.config_id).toBe('')
+    expect(result.stewards).toEqual([])
+    expect(result.push_history).toEqual([])
+  })
+
+  it('skips steward entries without steward_id', () => {
+    const data = {
+      stewards: [
+        { status: 'applied' },
+        { steward_id: 'sw-1', status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+      ],
+    }
+    const result = parseConfigDeployments(data)
+    expect(result.stewards).toHaveLength(1)
+    expect(result.stewards[0]!.steward_id).toBe('sw-1')
+  })
+
+  it('coerces non-numeric summary fields to zero', () => {
+    const result = parseConfigDeployments({ summary: { applied: 'bad', total: null } })
+    expect(result.summary.applied).toBe(0)
+    expect(result.summary.total).toBe(0)
+  })
+})
+
+// ── useConfigDeployments ──────────────────────────────────────────────────────
+
+describe('useConfigDeployments', () => {
+  it('returns null deployments and no loading when configId is null', () => {
+    const { result } = renderHook(() => useConfigDeployments(null))
+    expect(result.current.deployments).toBeNull()
+    expect(result.current.loading).toBe(false)
+    expect(result.current.serviceUnavailable).toBe(false)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('starts loading when configId is provided', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    const { result } = renderHook(() => useConfigDeployments('sw-1'))
+    expect(result.current.loading).toBe(true)
+    expect(result.current.deployments).toBeNull()
+  })
+
+  it('returns parsed deployments on success', async () => {
+    fetchMock.mockResolvedValue(
+      makeEnvelope({
+        config_id: 'sw-1',
+        summary: { applied: 1, pending: 0, failed: 0, halted: 0, total: 1 },
+        stewards: [
+          { steward_id: 'sw-1', status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+        ],
+        push_history: [],
+      }),
+    )
+    const { result } = renderHook(() => useConfigDeployments('sw-1'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.deployments?.config_id).toBe('sw-1')
+    expect(result.current.deployments?.stewards).toHaveLength(1)
+    expect(result.current.deployments?.stewards[0]!.status).toBe('applied')
+    expect(result.current.error).toBeNull()
+    expect(result.current.serviceUnavailable).toBe(false)
+  })
+
+  it('sets serviceUnavailable on 503 and does not crash', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'store not available' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const { result } = renderHook(() => useConfigDeployments('sw-1'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.serviceUnavailable).toBe(true)
+    expect(result.current.deployments).toBeNull()
+    expect(result.current.error).toBeTruthy()
+  })
+
+  it('surfaces an error on non-ok non-503 response', async () => {
+    fetchMock.mockResolvedValue(makeEnvelope({}, 500))
+    const { result } = renderHook(() => useConfigDeployments('sw-1'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.error).toContain('500')
+    expect(result.current.serviceUnavailable).toBe(false)
+  })
+
+  it('refetches when retry is called', async () => {
+    fetchMock.mockResolvedValueOnce(makeEnvelope({}, 500))
+    const { result } = renderHook(() => useConfigDeployments('sw-1'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.error).not.toBeNull()
+
+    fetchMock.mockResolvedValueOnce(
+      makeEnvelope({
+        config_id: 'sw-1',
+        summary: { applied: 0, pending: 0, failed: 0, halted: 0, total: 0 },
+        stewards: [],
+        push_history: [],
+      }),
+    )
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.error).toBeNull()
+    expect(result.current.deployments).not.toBeNull()
+  })
+
+  it('does not fetch when configId transitions from non-null to null', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string | null }) => useConfigDeployments(id),
+      { initialProps: { id: null } },
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+    rerender({ id: null })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(result.current.loading).toBe(false)
   })
 })

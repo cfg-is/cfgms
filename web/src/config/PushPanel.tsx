@@ -14,7 +14,7 @@
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import SelectorInput from '../shell/SelectorInput.tsx'
-import { usePushStatus } from './useConfigs.ts'
+import { usePushStatus, useConfigDeployments } from './useConfigs.ts'
 
 interface PushPanelProps {
   onClose: () => void
@@ -42,6 +42,19 @@ function statusTone(status: string): string {
   }
 }
 
+function deploymentStatusTone(status: string): string {
+  switch (status) {
+    case 'applied':
+      return 'ok'
+    case 'failed':
+      return 'crit'
+    case 'pending':
+      return 'warn'
+    default:
+      return 'neutral'
+  }
+}
+
 export default function PushPanel({ onClose }: PushPanelProps) {
   const [selector, setSelector] = useState('')
   const [configId, setConfigId] = useState('')
@@ -56,8 +69,14 @@ export default function PushPanel({ onClose }: PushPanelProps) {
   const [pushing, setPushing] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
   const [activePushId, setActivePushId] = useState<string | null>(null)
+  const [deployConfigId, setDeployConfigId] = useState<string | null>(null)
 
   const { status: pushStatus } = usePushStatus(activePushId)
+  const {
+    deployments,
+    loading: deploymentsLoading,
+    serviceUnavailable: deploymentsUnavailable,
+  } = useConfigDeployments(deployConfigId)
 
   async function handleResolve() {
     if (!selector.trim()) {
@@ -107,6 +126,7 @@ export default function PushPanel({ onClose }: PushPanelProps) {
 
   async function handleConfirmPush() {
     if (!confirm) return
+    const confirmedConfigId = confirm.configId
     setPushing(true)
     setPushError(null)
     setActivePushId(null)
@@ -114,7 +134,7 @@ export default function PushPanel({ onClose }: PushPanelProps) {
     try {
       const body = {
         selector: confirm.selector,
-        config_id: confirm.configId,
+        config_id: confirmedConfigId,
         version: confirm.version,
         tenant_id: confirm.tenantId,
         policies: {},
@@ -134,6 +154,7 @@ export default function PushPanel({ onClose }: PushPanelProps) {
       }
       const result = (await response.json()) as Record<string, unknown>
       setActivePushId((result?.push_id as string) || null)
+      setDeployConfigId(confirmedConfigId)
     } catch (cause: unknown) {
       setPushError(
         cause instanceof Error && cause.message ? cause.message : 'Push failed',
@@ -258,6 +279,48 @@ export default function PushPanel({ onClose }: PushPanelProps) {
             <span className="mono2">
               Push ID: {activePushId}
             </span>
+          </div>
+        )}
+
+        {deployConfigId !== null && (
+          <div className="cfg-deployment-breakdown" data-testid="deployment-breakdown">
+            {deploymentsLoading && (
+              <p className="mut">Loading deployment results…</p>
+            )}
+            {deploymentsUnavailable && (
+              <p className="mut">Deployment results unavailable (store not ready).</p>
+            )}
+            {deployments !== null && !deploymentsUnavailable && (
+              <>
+                {deployments.stewards.length === 0 ? (
+                  <p className="mut">No per-steward records available for this push.</p>
+                ) : (
+                  <table className="tbl" data-testid="deployment-steward-table">
+                    <thead>
+                      <tr>
+                        <th>Steward</th>
+                        <th>Status</th>
+                        <th>Last Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {deployments.stewards.map((s) => (
+                        <tr key={s.steward_id} data-testid="deployment-steward-row">
+                          <td><span className="mono2">{s.steward_id}</span></td>
+                          <td>
+                            <span className={`pill ${deploymentStatusTone(s.status)}`}>
+                              <span className="dot" />
+                              {s.status}
+                            </span>
+                          </td>
+                          <td><span className="mono2">{s.last_updated}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>

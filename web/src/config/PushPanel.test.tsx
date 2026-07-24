@@ -271,3 +271,192 @@ describe('PushPanel — resolve targets', () => {
     )
   })
 })
+
+// ── Per-steward deployment breakdown ─────────────────────────────────────────
+
+function makeDeploymentsEnvelope(configId: string, stewards: object[]) {
+  return new Response(
+    JSON.stringify({
+      data: {
+        config_id: configId,
+        summary: {
+          applied: stewards.length,
+          pending: 0,
+          failed: 0,
+          halted: 0,
+          total: stewards.length,
+        },
+        stewards,
+        push_history: [],
+      },
+      timestamp: new Date().toISOString(),
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+describe('PushPanel — per-steward deployment breakdown', () => {
+  it('shows deployment breakdown after push fires and deployments load', async () => {
+    fetchMock.mockResolvedValueOnce(makeStewPage(2))
+    fetchMock.mockResolvedValueOnce(makePushResponse('push-xyz'))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          makeDeploymentsEnvelope('sw-1', [
+            { steward_id: 'sw-1', status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+            { steward_id: 'sw-2', status: 'failed', last_updated: '2026-01-01T00:00:00Z' },
+          ]),
+        )
+      }
+      return Promise.resolve(makePushStatus('push-xyz', 'completed'))
+    })
+
+    renderPushPanel()
+    fillPushForm('name:web*', 'sw-1', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('deployment-breakdown')).toBeInTheDocument(),
+    )
+    await waitFor(() =>
+      expect(screen.getAllByTestId('deployment-steward-row')).toHaveLength(2),
+    )
+    expect(screen.getByText('sw-1')).toBeInTheDocument()
+    expect(screen.getByText('sw-2')).toBeInTheDocument()
+  })
+
+  it('renders applied status with ok pill and failed with crit pill', async () => {
+    fetchMock.mockResolvedValueOnce(makeStewPage(1))
+    fetchMock.mockResolvedValueOnce(makePushResponse('push-abc'))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          makeDeploymentsEnvelope('cfg-1', [
+            { steward_id: 'sw-a', status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+            { steward_id: 'sw-b', status: 'failed', last_updated: '2026-01-01T00:00:00Z' },
+          ]),
+        )
+      }
+      return Promise.resolve(makePushStatus('push-abc', 'completed'))
+    })
+
+    renderPushPanel()
+    fillPushForm('os:linux', 'cfg-1', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('deployment-steward-table')).toBeInTheDocument(),
+    )
+
+    const pills = screen.getAllByTestId('deployment-steward-row')
+    expect(pills[0]!.querySelector('.pill.ok')).not.toBeNull()
+    expect(pills[1]!.querySelector('.pill.crit')).not.toBeNull()
+  })
+
+  it('shows unavailable message when deployments store returns 503', async () => {
+    fetchMock.mockResolvedValueOnce(makeStewPage(1))
+    fetchMock.mockResolvedValueOnce(makePushResponse('push-503'))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: 'store unavailable' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      return Promise.resolve(makePushStatus('push-503', 'completed'))
+    })
+
+    renderPushPanel()
+    fillPushForm('os:windows', 'cfg-2', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('deployment-breakdown')).toBeInTheDocument(),
+    )
+    await waitFor(() =>
+      expect(screen.getByText(/unavailable/i)).toBeInTheDocument(),
+    )
+  })
+
+  it('shows no-records message when stewards array is empty', async () => {
+    fetchMock.mockResolvedValueOnce(makeStewPage(0))
+    fetchMock.mockResolvedValueOnce(makePushResponse('push-empty'))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          makeDeploymentsEnvelope('cfg-empty', []),
+        )
+      }
+      return Promise.resolve(makePushStatus('push-empty', 'completed'))
+    })
+
+    renderPushPanel()
+    fillPushForm('os:linux', 'cfg-empty', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('deployment-breakdown')).toBeInTheDocument(),
+    )
+    await waitFor(() =>
+      expect(screen.getByText(/no per-steward records/i)).toBeInTheDocument(),
+    )
+  })
+
+  it('steward IDs in breakdown render as text, not HTML (security A9.1)', async () => {
+    const xssId = '<img src=x onerror="window.__xss=true">'
+    fetchMock.mockResolvedValueOnce(makeStewPage(1))
+    fetchMock.mockResolvedValueOnce(makePushResponse('push-xss'))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          makeDeploymentsEnvelope('cfg-xss', [
+            { steward_id: xssId, status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+          ]),
+        )
+      }
+      return Promise.resolve(makePushStatus('push-xss', 'completed'))
+    })
+
+    renderPushPanel()
+    fillPushForm('os:linux', 'cfg-xss', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('deployment-breakdown')).toBeInTheDocument(),
+    )
+    await waitFor(() => expect(screen.getByText(xssId)).toBeInTheDocument())
+    expect((window as unknown as Record<string, unknown>).__xss).toBeUndefined()
+  })
+})
