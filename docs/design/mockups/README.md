@@ -30,6 +30,7 @@ principles, and token rationale these mockups express.
 | [`refresh-queue.html`](refresh-queue.html) | The **Refresh requests** page (Epic #2931 · #2941) — its own nav entry / `/refresh` route (not a console tab). Pending steward device-credential rotations with a **provenance-match** column (partial match = amber, scrutinize); **Reject** live, **Approve** deferred ("SOON"). Tenant-scoped, both themes. | **Reference** |
 | [`asset-live-activity.html`](asset-live-activity.html) | The asset live-activity tab — real-time process table and service list driven by the telemetry WebSocket; includes the `.rowkebab` per-row action menu pattern (applied to fleet rows in Story #2938). Both themes. | **Reference** |
 | [`asset-shell.html`](asset-shell.html) | The asset interactive shell tab — terminal emulator panel with WebSocket-backed session, command history, and resize handling. Both themes. | **Reference** |
+| [`fleet-bulk.html`](fleet-bulk.html) | Fleet **bulk selection + actions** (Epic #2931 · #2939) — a checkbox column + select-all-on-page and a bulk-action bar layered on the fleet table: **Edit tags** live (one authorized call per steward), **Decommission** deferred ("SOON"). Selection clears on page/filter/sort. Both themes. | **Reference** |
 
 > These are design references, not production code. The shipped UI is
 > React + TypeScript + Vite (Epic #2344), built against
