@@ -17,6 +17,8 @@ PACKAGES=(
   "features/controller/transport"
   "pkg/entitygraph/types"
   "pkg/cert"
+  "features/controller/fleet/storage"
+  "features/steward/dna"
 )
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
