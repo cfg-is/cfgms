@@ -496,6 +496,7 @@ test_phase2_lifecycle() {
     fi
 
     local pq_script="$REPO_ROOT/scripts/project-queue.sh"
+    local ph_script="$REPO_ROOT/scripts/pipeline-helper.sh"
     local item_id="" body_file timestamp title attempt
     body_file=$(mktemp)
     timestamp=$(date +%s)
@@ -503,12 +504,17 @@ test_phase2_lifecycle() {
     printf 'Phase 2 lifecycle smoke test body — %s\n' "$title" > "$body_file"
 
     # Cleanup: fires on RETURN regardless of pass/fail.
-    # A failed delete-item is reported loudly so the leaked item_id can be
-    # removed by hand — a silent || true here would leave fixtures on the live
-    # board with no signal, which has caused real false-positive pipeline picks.
+    # Demotes the fixture to a non-dispatchable status (Blocked) BEFORE deleting
+    # so a failed deletion cannot strand a Ready fixture on the live board.
+    # Releases the dispatch lease after demoting and before deletion, so no
+    # dispatcher cycle can claim the item between demote and delete.
+    # A failed delete-item is still reported loudly so the leaked item_id can be
+    # removed by hand.
     trap '
         [[ -n "${body_file:-}" ]] && rm -f "$body_file" 2>/dev/null || true
         if [[ -n "${item_id:-}" ]]; then
+            bash "${pq_script}" update-field "${item_id}" status Blocked >/dev/null 2>&1 || true
+            bash "${ph_script}" lease-release "story-${item_id}" >/dev/null 2>&1 || true
             if ! bash "${pq_script}" delete-item "${item_id}" >/dev/null 2>&1; then
                 echo "WARNING: fixture item ${item_id} could not be deleted from project board — remove it manually" >&2
                 _fail "phase2 cleanup: delete-item ${item_id} failed — fixture may be leaking on live board"
@@ -530,6 +536,28 @@ test_phase2_lifecycle() {
         return
     fi
     _pass "phase2 step a: create-draft returned non-empty item_id"
+
+    # Acquire the dispatch lease keyed on this item BEFORE setting it Ready.
+    # The PO cron dispatcher calls lease-acquire "story-${item_id}" before
+    # claiming any Ready item; holding that lease here prevents a concurrent
+    # cron cycle from selecting the fixture as real work for the lifetime of
+    # this test run.  TTL of 3600 s covers any realistic test duration; the
+    # RETURN trap releases it unconditionally via lease-release (idempotent).
+    local lease_out lease_rc=0
+    lease_out=$(bash "$ph_script" lease-acquire "story-${item_id}" 3600 2>&1) || lease_rc=$?
+    case "${lease_out}" in
+        ACQUIRED:*|RECLAIMED:*)
+            _pass "phase2 step a.1: dispatch lease acquired — cron cannot select this fixture"
+            ;;
+        HELD:*)
+            _fail "phase2 step a.1: dispatch lease already HELD by another process — aborting: ${lease_out}"
+            return
+            ;;
+        *)
+            _fail "phase2 step a.1: lease-acquire returned unexpected output (rc=${lease_rc}): ${lease_out}"
+            return
+            ;;
+    esac
 
     # --- Step b: list-by-status Draft, item_id present with issue_num=null --
     local found_in_draft=false
@@ -647,7 +675,105 @@ sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
     fi
 
     # --- Step i: privacy boundary — no GitHub issue created -----------------
-    _check_phase2_privacy_boundary "phase2-lifecycle-smoke"
+    # Use the exact fixture title (including the per-run timestamp) so that
+    # residue left by a prior or concurrent run is not attributed to this one.
+    _check_phase2_privacy_boundary "$title"
+}
+
+# ===========================================================================
+# TEST (AC6): RETURN trap demotes fixture to non-dispatchable before deleting.
+#
+# Simulates a mid-run abort: the fixture has been set to Ready and the function
+# returns early.  Verifies that the RETURN trap records a status demote to
+# Blocked BEFORE the delete-item call.  No GitHub credentials required —
+# uses mock project-queue.sh and pipeline-helper.sh scripts.
+# ===========================================================================
+test_phase2_trap_demotes_before_delete() {
+    echo ""
+    echo "--- AC6: RETURN trap demotes fixture to non-dispatchable before deletion on abort ---"
+
+    local stub_dir call_log
+    stub_dir=$(mktemp -d)
+    call_log="${stub_dir}/calls.log"
+    trap 'rm -rf "${stub_dir}" 2>/dev/null || true' RETURN
+
+    # Mock project-queue.sh: append every invocation's args to call_log.
+    cat > "${stub_dir}/project-queue.sh" <<PQMOCK
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+exit 0
+PQMOCK
+    chmod +x "${stub_dir}/project-queue.sh"
+
+    # Mock pipeline-helper.sh: append every invocation's args to call_log.
+    cat > "${stub_dir}/pipeline-helper.sh" <<PHMOCK
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+echo "RELEASED:mock-story-item"
+exit 0
+PHMOCK
+    chmod +x "${stub_dir}/pipeline-helper.sh"
+
+    # Driver script: mirrors the trap pattern in test_phase2_lifecycle.
+    # Sets Ready (mid-run state) then returns — the RETURN trap fires.
+    local driver="${stub_dir}/driver.sh"
+    cat > "${driver}" <<DRIVER
+#!/usr/bin/env bash
+set -euo pipefail
+PQ="${stub_dir}/project-queue.sh"
+PH="${stub_dir}/pipeline-helper.sh"
+
+_simulate_lifecycle_abort() {
+    local item_id="MOCK_ITEM_ABORT"
+    trap '
+        if [[ -n "\${item_id:-}" ]]; then
+            bash "\${PQ}" update-field "\${item_id}" status Blocked >/dev/null 2>&1 || true
+            bash "\${PH}" lease-release "story-\${item_id}" >/dev/null 2>&1 || true
+            bash "\${PQ}" delete-item "\${item_id}" >/dev/null 2>&1 || true
+        fi
+    ' RETURN
+    # Simulate mid-run: fixture set to Ready, then abort before Done/cleanup.
+    bash "\${PQ}" update-field "\${item_id}" status Ready >/dev/null 2>&1 || true
+    return 0
+}
+_simulate_lifecycle_abort
+DRIVER
+    chmod +x "${driver}"
+    bash "${driver}" 2>/dev/null || true
+
+    # Verify ordering: demote to Blocked must precede delete-item.
+    local ready_line demote_line delete_line
+    ready_line=$(grep -n "update-field.*status Ready" "${call_log}" 2>/dev/null \
+        | head -1 | cut -d: -f1 || true)
+    demote_line=$(grep -n "update-field.*status Blocked" "${call_log}" 2>/dev/null \
+        | head -1 | cut -d: -f1 || true)
+    delete_line=$(grep -n "delete-item" "${call_log}" 2>/dev/null \
+        | head -1 | cut -d: -f1 || true)
+
+    if [[ -n "${ready_line}" ]]; then
+        _pass "AC6: fixture was set to Ready before abort (mid-run abort confirmed)"
+    else
+        _fail "AC6: fixture never set to Ready — mid-run abort scenario not exercised"
+        return
+    fi
+
+    if [[ -n "${demote_line}" ]]; then
+        _pass "AC6: RETURN trap demoted fixture to Blocked (non-dispatchable)"
+    else
+        _fail "AC6: RETURN trap did not record demote-to-Blocked — fixture would be stranded dispatchable"
+        return
+    fi
+
+    if [[ -z "${delete_line}" ]]; then
+        _fail "AC6: delete-item not called in RETURN trap — fixture would not be cleaned up"
+        return
+    fi
+
+    if [[ "${demote_line}" -lt "${delete_line}" ]]; then
+        _pass "AC6: demote (call ${demote_line}) precedes delete (call ${delete_line}) — non-dispatchable before cleanup"
+    else
+        _fail "AC6: delete (call ${delete_line}) precedes demote (call ${demote_line}) — wrong order, fixture stranded if delete fails"
+    fi
 }
 
 # ===========================================================================
@@ -959,6 +1085,7 @@ test_error_path_project_queue_failure
 test_regression_comment_render_absent_from_entrypoint
 test_project_queue_integration
 test_phase2_lifecycle
+test_phase2_trap_demotes_before_delete
 test_phase2_step_i_fail_open_regression
 test_skip_tracking_and_verdict_regression
 test_zw_field_ignores_comments
