@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -1027,4 +1029,216 @@ func TestResolveConfiguration_RoleProviderError_LogValueSanitized(t *testing.T) 
 	cleanVal, ok := cleanEntry["steward_id"].(string)
 	require.True(t, ok, "steward_id must be a string in clean-value log entry")
 	assert.Equal(t, cleanStewardID, cleanVal, "clean value must pass through unchanged")
+}
+
+// --- RebootWindow cascade tests (Issue #2976) ---
+
+// makeWeeklyWindow returns a *maintenanceschedule.Config describing a weekly window
+// on the given days for use in cascade tests.
+func makeWeeklyWindow(tz string, days ...time.Weekday) *maintenanceschedule.Config {
+	return &maintenanceschedule.Config{
+		Timezone: tz,
+		Schedules: []maintenanceschedule.Schedule{
+			{
+				Freq:  maintenanceschedule.FreqWeekly,
+				Days:  days,
+				Start: maintenanceschedule.TimeOfDay{Hour: 2, Minute: 0},
+				End:   maintenanceschedule.TimeOfDay{Hour: 4, Minute: 0},
+			},
+		},
+	}
+}
+
+func makeMonthlyWindow(tz string, weekday time.Weekday, nth int) *maintenanceschedule.Config {
+	n := nth
+	return &maintenanceschedule.Config{
+		Timezone: tz,
+		Schedules: []maintenanceschedule.Schedule{
+			{
+				Freq:    maintenanceschedule.FreqMonthly,
+				Weekday: weekday,
+				Nth:     &n,
+				Start:   maintenanceschedule.TimeOfDay{Hour: 22, Minute: 0},
+				End:     maintenanceschedule.TimeOfDay{EndOfDay: true},
+			},
+		},
+	}
+}
+
+// TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins is the REQUIRED TEST
+// from acceptance criteria: a three-level cascade where MSP declares a monthly window,
+// Client overrides with a more-frequent weekly window, and Device overrides again with
+// a looser monthly window. The lowest declaring level wins in each case, proving that
+// override works in both directions (tighter-at-child AND looser-at-child).
+func TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	mspSrc := &InheritanceSource{Source: "msp", TenantID: "msp"}
+	clientSrc := &InheritanceSource{Source: "client", TenantID: "client"}
+	deviceSrc := &InheritanceSource{Source: "device", TenantID: "client"}
+
+	// MSP: monthly window on 1st Saturday (looser/less-frequent)
+	mspWindow := makeMonthlyWindow("America/New_York", time.Saturday, 1)
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: mspWindow},
+	}, mspSrc)
+
+	assert.Equal(t, mspWindow, effective.Config.Steward.RebootWindow,
+		"after MSP pass, MSP window must be the effective window")
+	assert.Equal(t, mspSrc, effective.Sources["steward.reboot_window"])
+	assert.Equal(t, maintenanceschedule.FreqMonthly, effective.Config.Steward.RebootWindow.Schedules[0].Freq,
+		"MSP window must be monthly")
+
+	// Client: weekly Mon+Thu (tighter / more-frequent than MSP monthly)
+	clientWindow := makeWeeklyWindow("America/Chicago", time.Monday, time.Thursday)
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: clientWindow},
+	}, clientSrc)
+
+	assert.Equal(t, clientWindow, effective.Config.Steward.RebootWindow,
+		"client window (more-frequent) must override MSP window — tighter-at-child must win")
+	assert.Equal(t, clientSrc, effective.Sources["steward.reboot_window"])
+	assert.Equal(t, maintenanceschedule.FreqWeekly, effective.Config.Steward.RebootWindow.Schedules[0].Freq,
+		"effective window must be weekly after client override")
+
+	// Device: monthly 1st Wednesday (looser than client weekly)
+	deviceWindow := makeMonthlyWindow("UTC", time.Wednesday, 1)
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: deviceWindow},
+	}, deviceSrc)
+
+	assert.Equal(t, deviceWindow, effective.Config.Steward.RebootWindow,
+		"device window (looser/less-frequent) must override client window — looser-at-child must win")
+	assert.Equal(t, deviceSrc, effective.Sources["steward.reboot_window"])
+	assert.Equal(t, maintenanceschedule.FreqMonthly, effective.Config.Steward.RebootWindow.Schedules[0].Freq,
+		"effective window must be monthly after device override")
+}
+
+// TestApplyConfigurationWithSource_RebootWindowNilDoesNotClobber verifies that a nil
+// RebootWindow at a child level does not clear an inherited window.
+func TestApplyConfigurationWithSource_RebootWindowNilDoesNotClobber(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	parentSrc := &InheritanceSource{Source: "parent", TenantID: "msp"}
+	parentWindow := makeWeeklyWindow("America/New_York", time.Monday)
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{RebootWindow: parentWindow},
+	}, parentSrc)
+
+	// Child has no RebootWindow (nil) — must not clear the inherited value.
+	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{ID: "child-id"},
+	}, childSrc)
+
+	assert.Equal(t, parentWindow, effective.Config.Steward.RebootWindow,
+		"nil RebootWindow at child must not clobber inherited parent window")
+	assert.Equal(t, parentSrc, effective.Sources["steward.reboot_window"],
+		"source must remain the parent that set the window")
+}
+
+// TestResolveConfiguration_RebootWindowCascadeViaStore verifies end-to-end that
+// a reboot_window set at MSP level cascades to a descendant steward via the full
+// store-backed resolution path.
+func TestResolveConfiguration_RebootWindowCascadeViaStore(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	mspWindow := makeWeeklyWindow("America/Chicago", time.Tuesday, time.Friday)
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{RebootWindow: mspWindow},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	require.NotNil(t, effective.Config.Steward.RebootWindow,
+		"reboot_window set at MSP must cascade to descendant steward")
+	assert.Equal(t, "America/Chicago", effective.Config.Steward.RebootWindow.Timezone)
+	require.NotNil(t, effective.Sources["steward.reboot_window"],
+		"inheritance source for reboot_window must be recorded")
+}
+
+// TestApplyConfigurationWithSource_TenantDefaultTimezoneCascade verifies that
+// TenantDefaultTimezone follows the same later-overrides-earlier merge rule.
+func TestApplyConfigurationWithSource_TenantDefaultTimezoneCascade(t *testing.T) {
+	ir := &InheritanceResolver{}
+	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
+
+	rootSrc := &InheritanceSource{Source: "root", TenantID: "root"}
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{TenantDefaultTimezone: "America/New_York"},
+	}, rootSrc)
+	assert.Equal(t, "America/New_York", effective.Config.Steward.TenantDefaultTimezone)
+	assert.Equal(t, rootSrc, effective.Sources["steward.tenant_default_timezone"])
+
+	clientSrc := &InheritanceSource{Source: "client", TenantID: "client"}
+	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+		Steward: stewardconfig.StewardSettings{TenantDefaultTimezone: "Europe/London"},
+	}, clientSrc)
+	assert.Equal(t, "Europe/London", effective.Config.Steward.TenantDefaultTimezone,
+		"client-level TenantDefaultTimezone must override root-level")
+	assert.Equal(t, clientSrc, effective.Sources["steward.tenant_default_timezone"])
+}
+
+// --- ResolveRebootWindowTimezone tests (Issue #2976) ---
+
+// TestResolveRebootWindowTimezone_ExplicitWins is the REQUIRED TEST from acceptance
+// criteria: all three cases are verified (explicit set, explicit absent+tenantDefault
+// set, both absent).
+func TestResolveRebootWindowTimezone_AllCases(t *testing.T) {
+	t.Run("explicit timezone wins over tenant default and device", func(t *testing.T) {
+		cfg := &maintenanceschedule.Config{Timezone: "America/New_York"}
+		got := ResolveRebootWindowTimezone(cfg, "Europe/London")
+		assert.Equal(t, "America/New_York", got,
+			"explicit cfg.Timezone must take highest precedence")
+	})
+
+	t.Run("tenant default used when explicit is absent", func(t *testing.T) {
+		cfg := &maintenanceschedule.Config{Timezone: ""} // not set
+		got := ResolveRebootWindowTimezone(cfg, "Europe/London")
+		assert.Equal(t, "Europe/London", got,
+			"tenant default must be used when cfg.Timezone is empty")
+	})
+
+	t.Run("returns empty string when both are absent (device fallback)", func(t *testing.T) {
+		cfg := &maintenanceschedule.Config{Timezone: ""}
+		got := ResolveRebootWindowTimezone(cfg, "")
+		assert.Equal(t, "", got,
+			`"" signals the steward consumer to fall back to host zone`)
+	})
+}
+
+// TestResolveRebootWindowTimezone_NilConfig verifies that a nil cfg falls back to
+// tenantDefault (no panic).
+func TestResolveRebootWindowTimezone_NilConfig(t *testing.T) {
+	got := ResolveRebootWindowTimezone(nil, "Asia/Tokyo")
+	assert.Equal(t, "Asia/Tokyo", got,
+		"nil cfg must fall back to tenantDefault")
+}
+
+// TestResolveRebootWindowTimezone_NilConfigNilDefault verifies that nil cfg and
+// empty tenantDefault return "".
+func TestResolveRebootWindowTimezone_NilConfigNilDefault(t *testing.T) {
+	got := ResolveRebootWindowTimezone(nil, "")
+	assert.Equal(t, "", got, `nil cfg + empty tenantDefault must return ""`)
+}
+
+// TestResolveRebootWindowTimezone_DeviceExplicit verifies that the literal "device"
+// value in cfg.Timezone is returned as-is (not treated as absent).
+func TestResolveRebootWindowTimezone_DeviceExplicit(t *testing.T) {
+	cfg := &maintenanceschedule.Config{Timezone: "device"}
+	got := ResolveRebootWindowTimezone(cfg, "America/New_York")
+	assert.Equal(t, "device", got,
+		`explicit "device" timezone must be returned as-is, not overridden by tenantDefault`)
 }

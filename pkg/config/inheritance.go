@@ -14,6 +14,7 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -546,6 +547,16 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.error_handling.configuration_error"] = source
 	}
 
+	if config.Steward.TenantDefaultTimezone != "" {
+		effective.Config.Steward.TenantDefaultTimezone = config.Steward.TenantDefaultTimezone
+		effective.Sources["steward.tenant_default_timezone"] = source
+	}
+
+	if config.Steward.RebootWindow != nil {
+		effective.Config.Steward.RebootWindow = config.Steward.RebootWindow
+		effective.Sources["steward.reboot_window"] = source
+	}
+
 	// Apply module mappings
 	if effective.Config.Modules == nil {
 		effective.Config.Modules = make(map[string]string)
@@ -666,6 +677,27 @@ type TraceElement struct {
 // getConfigValue extracts the value at a specific configuration path
 func (ir *InheritanceResolver) getConfigValue(config *stewardconfig.StewardConfig, path string) interface{} {
 	return nil
+}
+
+// ResolveRebootWindowTimezone resolves the effective timezone for a reboot window
+// using precedence: explicit (cfg.Timezone) → tenantDefault → device ("").
+//
+// "device" as cfg.Timezone or as the return value signals the steward-side consumer
+// (Story 3) to substitute its own host zone. This package has no access to the host's
+// local zone, so the caller is responsible for that final fallback.
+//
+// Return value:
+//   - an explicit IANA name or "device" when cfg carries one
+//   - tenantDefault when cfg has no explicit timezone and tenantDefault is non-empty
+//   - "" when neither source provides a timezone (steward falls back to host zone)
+func ResolveRebootWindowTimezone(cfg *maintenanceschedule.Config, tenantDefault string) string {
+	if cfg != nil && cfg.Timezone != "" {
+		return cfg.Timezone
+	}
+	if tenantDefault != "" {
+		return tenantDefault
+	}
+	return ""
 }
 
 // ResolveRingVersion resolves the effective desired_version for a steward based on its

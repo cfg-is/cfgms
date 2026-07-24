@@ -8,7 +8,11 @@
 // shapes without importing steward-internal packages.
 package stewardtypes
 
-import "time"
+import (
+	"time"
+
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
+)
 
 // StewardConfig represents the complete steward configuration.
 type StewardConfig struct {
@@ -60,6 +64,16 @@ type StewardSettings struct {
 	// attribute deltas while connected to the controller (Issue #1915).
 	// Accepts Go duration strings (e.g. "30m", "1h"). Default: 30m.
 	DNARefreshInterval string `yaml:"dna_refresh_interval,omitempty" json:"dna_refresh_interval,omitempty"`
+
+	// TenantDefaultTimezone is the IANA timezone name applied when a reboot_window
+	// does not declare an explicit timezone. A future story reuses this same field
+	// for the workflow-trigger scheduler's timezone default (ADR-026 decision 4).
+	TenantDefaultTimezone string `yaml:"tenant_default_timezone,omitempty" json:"tenant_default_timezone,omitempty"`
+
+	// RebootWindow declares the maintenance window during which reboots are permitted.
+	// Cascades MSP → Client → Group → Cluster → Role → Device with free override in
+	// either direction (tighter or looser). Nil means no window is declared at this level.
+	RebootWindow *maintenanceschedule.Config `yaml:"reboot_window,omitempty" json:"reboot_window,omitempty"`
 }
 
 // UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)
