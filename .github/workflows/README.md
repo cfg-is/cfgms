@@ -133,6 +133,25 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 
 ---
 
+#### `scorecard.yml` — OpenSSF Scorecard
+
+**Triggers**: push to `develop`, Weekly schedule (Saturday 05:41 UTC), Manual dispatch
+
+**What it does**: Runs the [OpenSSF Scorecard](https://github.com/ossf/scorecard) supply-chain
+security analysis against the `develop` branch. Measures 18 checks (token permissions, branch
+protection, code review, dependency pinning, SAST, fuzzing, signed releases, and more). Publishes
+results to the OSSF public dashboard (`publish_results: true`) and uploads SARIF to the GitHub
+Security tab. Uses the default `GITHUB_TOKEN`; Branch-Protection under-reports without a
+founder-provisioned `SCORECARD_READ_TOKEN` fine-grained PAT (accepted gap — see
+`docs/development/security-workflow-guide.md §7`). NOT a required PR check.
+
+**Baseline score**: 6.3/10 (2026-07-24, commit fa292575, Scorecard CLI v5.5.0 — see §7 of the
+security workflow guide for the full per-check gap list).
+
+**Runtime**: ~5–10 min
+
+---
+
 #### `dependency-pin-check.yml` — Dependency Pin Freshness Check
 
 **Triggers**: Weekly schedule (Wednesday 09:00 UTC), Manual dispatch, Pull Requests touching Dockerfiles/workflows/Makefile
@@ -226,6 +245,7 @@ Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to 
 | `codeql-pack-publish.yml` | ✅ (extensions path) | ❌ | ❌ | ❌ | ✅ |
 | `docker-security.yml` | ✅ | ✅ | ❌ | ❌ | ✅ |
 | `zizmor.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
+| `scorecard.yml` | push develop only | ❌ | ❌ | Weekly Sat | ✅ |
 | `dependency-pin-check.yml` | ❌ | ✅ (path-filtered) | ❌ | Weekly Wed | ✅ |
 | `production-gates.yml` | ✅ | ✅ | ✅ | ❌ | ✅ |
 | `license-check.yml` | ✅ | ✅ | ❌ | ❌ | ❌ |
