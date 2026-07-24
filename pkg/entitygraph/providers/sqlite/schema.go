@@ -100,15 +100,16 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("entitygraph/sqlite: open %s: %w", path, err)
 	}
 
-	// Pin single-connection in-memory databases so the backing store lives for
-	// the pool's entire lifetime (a shared-cache in-memory DB is freed the
-	// instant the last connection closes).
-	if path == ":memory:" || strings.Contains(dsn, "mode=memory") {
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-		db.SetConnMaxLifetime(0)
-		db.SetConnMaxIdleTime(0)
-	}
+	// SQLite WAL mode allows one writer at a time. Using a single connection
+	// serialises writes at the database/sql pool level, avoiding SQLITE_BUSY
+	// under concurrent goroutines (modernc.org/sqlite does not reliably honour
+	// PRAGMA busy_timeout across pool connections). In-memory mode additionally
+	// requires a single connection to keep the backing store alive for the
+	// pool's lifetime.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
 
 	if err := db.Ping(); err != nil {
 		_ = db.Close()

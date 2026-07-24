@@ -319,6 +319,51 @@ func TestParseEdgeSubject(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestResolveWatchCursor_InvalidCursor(t *testing.T) {
+	// A non-numeric cursor is rejected before any DB access, so a nil *sql.DB is
+	// safe here and keeps the test a pure error-path check.
+	for _, bad := range []string{"abc", "12x", "3.14", "-", "0x10", " 5"} {
+		_, err := resolveWatchCursor(context.Background(), nil, bad)
+		require.Error(t, err, "cursor %q must be rejected", bad)
+		require.Contains(t, err.Error(), "must be a decimal integer")
+	}
+}
+
+func TestResolveWatchCursor_ValidDecimal(t *testing.T) {
+	// A valid decimal cursor is parsed without touching the DB (nil is safe).
+	seq, err := resolveWatchCursor(context.Background(), nil, "42")
+	require.NoError(t, err)
+	require.Equal(t, int64(42), seq)
+}
+
+func TestBuildWatchEvent_OKFalseBranches(t *testing.T) {
+	// Edge subject whose pipe-delimited form does not split into exactly three
+	// parts: parseEdgeSubject fails (watch.go line ~160).
+	_, ok := buildWatchEvent("two|parts", "observation", "", 1)
+	require.False(t, ok, "malformed edge subject (wrong part count) must not yield an event")
+
+	// Well-formed edge subject but the from-EID is not a parseable EID
+	// (watch.go line ~164) — a stored edge row with a corrupt from-subject.
+	_, ok = buildWatchEvent("contains|nocolon|host:b", "observation", "", 2)
+	require.False(t, ok, "edge with non-parseable from-EID must not yield an event")
+
+	// Non-edge subject that is not a parseable EID (watch.go line ~171).
+	_, ok = buildWatchEvent("nocolon-subject", "observation", "", 3)
+	require.False(t, ok, "non-edge subject that is not a valid EID must not yield an event")
+}
+
+func TestBuildWatchEvent_OKTrue(t *testing.T) {
+	ev, ok := buildWatchEvent("host:abc", string(types.ObservationKindDriftDiff), "", 7)
+	require.True(t, ok)
+	require.Equal(t, "drift-updated", ev.EventKind)
+	require.Equal(t, int64(7), ev.Version)
+
+	ev, ok = buildWatchEvent("contains|host:a|host:b", "observation", "", 8)
+	require.True(t, ok)
+	require.Equal(t, "edge-updated", ev.EventKind)
+	require.Equal(t, "host:a", ev.Subject.String())
+}
+
 func TestSourceClassPrecedence(t *testing.T) {
 	require.Equal(t, types.SourceClassEnforcingModule, resolveSourceClass("enforcing-module:hyperv"))
 	require.Equal(t, types.SourceClassObserver, resolveSourceClass("mystery:thing"))

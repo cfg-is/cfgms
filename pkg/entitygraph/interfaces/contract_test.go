@@ -18,6 +18,9 @@ package interfaces_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,6 +79,11 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("MovedEntityHistoricalScan", func(t *testing.T) { testEGMovedEntityHistoricalScan(t, factory) })   // AC 4 REQUIRED
 	t.Run("CollapseGroupConflictsRetained", func(t *testing.T) { testEGCollapseGroupConflicts(t, factory) }) // AC 5
 	t.Run("CollapseGroupMultiMember", func(t *testing.T) { testEGCollapseGroupMultiMember(t, factory) })     // AC 6
+	// Story-7: Watch — durable cursor-replayable feed (Issue #2877)
+	t.Run("WatchCursorReplay", func(t *testing.T) { testEGWatchCursorReplay(t, factory) })         // AC 1
+	t.Run("WatchFilterKinds", func(t *testing.T) { testEGWatchFilterKinds(t, factory) })           // AC 2
+	t.Run("WatchTenantFilter", func(t *testing.T) { testEGWatchTenantFilter(t, factory) })         // AC 3 REQUIRED
+	t.Run("WatchConcurrentCommit", func(t *testing.T) { testEGWatchConcurrentCommit(t, factory) }) // AC 4 REQUIRED
 }
 
 // --- Contract test helpers ---
@@ -1686,6 +1694,307 @@ func testEGCollapseGroupMultiMember(t *testing.T, factory EntityGraphProviderFac
 		"memberA's unique attribute must be in merged view")
 	assert.Equal(t, "val-b", view.CollapseGroup.Merged["attr_b"],
 		"memberB's unique attribute must be in merged view")
+}
+
+// --- Story-7: Watch — durable cursor-replayable feed (Issue #2877) ---
+
+// collectWatchSubjects drains ch until n distinct subjects matching prefix have
+// been collected or the timeout fires. Returns the set of subject strings seen.
+func collectWatchSubjects(t *testing.T, ch <-chan interfaces.WatchEvent, prefix string, n int, timeout time.Duration) map[string]struct{} {
+	t.Helper()
+	seen := make(map[string]struct{})
+	deadline := time.After(timeout)
+	for len(seen) < n {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("watch channel closed prematurely; got %d/%d distinct subjects", len(seen), n)
+			}
+			if prefix == "" || strings.HasPrefix(ev.Subject.String(), prefix) {
+				seen[ev.Subject.String()] = struct{}{}
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for %d distinct subjects (prefix=%q); got %d", n, prefix, len(seen))
+		}
+	}
+	return seen
+}
+
+// testEGWatchCursorReplay verifies that Watch resumes from a cursor, delivering
+// all events since that position with no gaps (at-least-once) and in ascending
+// Version order (AC 1).
+func testEGWatchCursorReplay(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+
+	const (
+		sub1   = "host:wr-auth/host1"
+		sub2   = "host:wr-auth/host2"
+		sub3   = "host:wr-auth/host3"
+		tenant = "root/wr-tenant"
+	)
+
+	// Seed two observations before Watch starts.
+	ctx := context.Background()
+	egReport(ctx, t, p, "observer:test", sub1, map[string]interface{}{"entity_kind": "host", "owning_tenant": tenant})
+	egReport(ctx, t, p, "observer:test", sub2, map[string]interface{}{"entity_kind": "host", "owning_tenant": tenant})
+
+	// Start Watch from cursor "0" to replay full history.
+	watchCtx, watchCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer watchCancel()
+
+	ch, err := p.Watch(watchCtx, interfaces.WatchFilter{}, "0")
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+
+	// Collect first two events; record the cursor (Version) of the last.
+	seen := collectWatchSubjects(t, ch, "host:wr-auth/", 2, 8*time.Second)
+	assert.Len(t, seen, 2, "must receive exactly 2 pre-Watch events when replaying from cursor 0")
+
+	// Collect events with Version ordering tracked.
+	watchCancel()
+	for range ch {
+	} // drain
+
+	// Determine the cursor position after the first two events by restarting
+	// with cursor "0" and recording the max Version seen.
+	watchCtx2, watchCancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer watchCancel2()
+	ch2, err := p.Watch(watchCtx2, interfaces.WatchFilter{}, "0")
+	require.NoError(t, err)
+
+	var maxVersion int64
+	var evOrder []int64
+	deadline := time.After(5 * time.Second)
+	for len(evOrder) < 2 {
+		select {
+		case ev, ok := <-ch2:
+			if !ok {
+				t.Fatal("watch channel closed unexpectedly")
+			}
+			if strings.HasPrefix(ev.Subject.String(), "host:wr-auth/") {
+				evOrder = append(evOrder, ev.Version)
+				if ev.Version > maxVersion {
+					maxVersion = ev.Version
+				}
+			}
+		case <-deadline:
+			t.Fatal("timeout collecting version-ordered events")
+		}
+	}
+	watchCancel2()
+	for range ch2 {
+	}
+
+	// Versions must be strictly ascending.
+	for i := 1; i < len(evOrder); i++ {
+		assert.Greater(t, evOrder[i], evOrder[i-1], "Watch versions must be ascending at index %d", i)
+	}
+
+	// Add third observation.
+	egReport(ctx, t, p, "observer:test", sub3, map[string]interface{}{"entity_kind": "host", "owning_tenant": tenant})
+
+	// Resume from cursor after the second event: should deliver sub3, not sub1.
+	resumeCursor := fmt.Sprintf("%d", maxVersion)
+	watchCtx3, watchCancel3 := context.WithTimeout(ctx, 10*time.Second)
+	defer watchCancel3()
+	ch3, err := p.Watch(watchCtx3, interfaces.WatchFilter{}, resumeCursor)
+	require.NoError(t, err)
+
+	var resumeEvents []interfaces.WatchEvent
+	deadline3 := time.After(5 * time.Second)
+	for len(resumeEvents) < 1 {
+		select {
+		case ev, ok := <-ch3:
+			if !ok {
+				t.Fatal("resumed watch channel closed prematurely")
+			}
+			if strings.HasPrefix(ev.Subject.String(), "host:wr-auth/") {
+				resumeEvents = append(resumeEvents, ev)
+			}
+		case <-deadline3:
+			t.Fatal("timeout waiting for resumed Watch event")
+		}
+	}
+
+	// Resumed events must have Version > resumeCursor and must include sub3.
+	resumedSubs := make(map[string]bool)
+	for _, ev := range resumeEvents {
+		assert.Greater(t, ev.Version, maxVersion, "resumed event must have Version > cursor")
+		resumedSubs[ev.Subject.String()] = true
+	}
+	assert.True(t, resumedSubs[sub3], "resumed Watch must deliver sub3 (the post-cursor event)")
+	assert.False(t, resumedSubs[sub1], "resumed Watch must not replay sub1 (event before cursor)")
+}
+
+// testEGWatchFilterKinds verifies that WatchFilter.Kinds correctly restricts
+// the event stream to the requested event types (AC 2).
+func testEGWatchFilterKinds(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:wf-auth/ent1")
+
+	// Seed an entity state observation and a drift-diff observation.
+	egReport(ctx, t, p, "observer:test", eid.String(), map[string]interface{}{
+		"entity_kind": "host", "owning_tenant": "root/wf-tenant",
+	})
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:drift",
+		Observations: []types.Observation{{
+			Source:     "enforcing-module:drift",
+			ObservedAt: time.Now().UTC(),
+			RecordedAt: time.Now().UTC(),
+			Subject:    eid.String(),
+			Kind:       types.ObservationKindDriftDiff,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"config_revision": "rev-wf",
+				"fields":          []interface{}{},
+			},
+		}},
+	}))
+
+	// Watch with Kinds=["entity-updated"] from cursor 0.
+	watchCtx, watchCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer watchCancel()
+
+	ch, err := p.Watch(watchCtx, interfaces.WatchFilter{Kinds: []string{"entity-updated"}}, "0")
+	require.NoError(t, err)
+
+	// Collect at least 1 entity event; verify no drift-updated events arrive.
+	var entityCount, driftCount int
+	deadline := time.After(3 * time.Second)
+	for entityCount < 1 {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				goto doneFilterKinds
+			}
+			switch ev.EventKind {
+			case "entity-updated":
+				entityCount++
+			case "drift-updated":
+				driftCount++
+			}
+		case <-deadline:
+			goto doneFilterKinds
+		}
+	}
+doneFilterKinds:
+	watchCancel()
+	for range ch {
+	}
+
+	assert.GreaterOrEqual(t, entityCount, 1, "Kinds=[entity-updated] must pass entity events")
+	assert.Equal(t, 0, driftCount, "Kinds=[entity-updated] must suppress drift-updated events")
+}
+
+// testEGWatchTenantFilter verifies the ADR-022 §7 no-unfiltered-read rule on
+// the Watch feed: a Watch scoped to tenant A never surfaces events belonging to
+// tenant B, even for observations that pre-date the Watch start (AC 3, REQUIRED).
+func testEGWatchTenantFilter(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	const (
+		tenantA = "root/watch-tenant-a"
+		tenantB = "root/watch-tenant-b"
+	)
+
+	// Write tenant-A and tenant-B entities BEFORE starting Watch.
+	for i := 0; i < 3; i++ {
+		subA := fmt.Sprintf("host:wta-auth/a%d", i)
+		egReport(ctx, t, p, "observer:test", subA, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": tenantA,
+		})
+	}
+	for i := 0; i < 3; i++ {
+		subB := fmt.Sprintf("host:wtb-auth/b%d", i)
+		egReport(ctx, t, p, "observer:test", subB, map[string]interface{}{
+			"entity_kind": "host", "owning_tenant": tenantB,
+		})
+	}
+
+	// Watch from cursor "0" scoped to tenant-A.
+	watchCtx, watchCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer watchCancel()
+
+	ch, err := p.Watch(watchCtx, interfaces.WatchFilter{TenantFilter: tenantA}, "0")
+	require.NoError(t, err)
+
+	// Collect all tenant-A events (expect exactly 3).
+	seenA := collectWatchSubjects(t, ch, "host:wta-auth/", 3, 8*time.Second)
+	watchCancel()
+
+	// Drain any remaining events and check that no tenant-B subjects ever appeared.
+	var tenantBSubjects []string
+	for ev := range ch {
+		if strings.HasPrefix(ev.Subject.String(), "host:wtb-auth/") {
+			tenantBSubjects = append(tenantBSubjects, ev.Subject.String())
+		}
+	}
+
+	assert.Len(t, seenA, 3, "Watch scoped to tenant-A must deliver all 3 tenant-A events")
+	assert.Empty(t, tenantBSubjects,
+		"Watch scoped to tenant-A must never surface tenant-B entity events (ADR-022 §7)")
+}
+
+// testEGWatchConcurrentCommit verifies ADR-023 §5/§6: Watch delivers all
+// events written by concurrent goroutines with no gaps, even when commits
+// may occur out of sequence-number order (AC 4, REQUIRED).
+// SQLite passes structurally (WAL single-writer serialises commits).
+// The database provider passes via the commit-time xmin watermark filter.
+func testEGWatchConcurrentCommit(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	const (
+		N      = 10
+		tenant = "root/wcc-tenant"
+		prefix = "host:wcc-auth/host"
+	)
+
+	// Start Watch from current tail so we only see the concurrent writes.
+	ch, err := p.Watch(ctx, interfaces.WatchFilter{}, "")
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+
+	// Write N observations concurrently. Goroutine 0 waits for goroutines 1…N-1
+	// to finish committing before it writes, deterministically forcing goroutine
+	// 0's row to commit last. This exercises the out-of-order-commit path (a
+	// late-committing writer) without a wall-clock sleep, which would be both a
+	// prohibited synchronization primitive and a flakiness source under load.
+	var wg sync.WaitGroup
+	var others sync.WaitGroup
+	others.Add(N - 1)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if idx == 0 {
+				// Block until every other goroutine has committed its row.
+				others.Wait()
+			} else {
+				defer others.Done()
+			}
+			subject := fmt.Sprintf("%s%d", prefix, idx)
+			egReport(context.Background(), t, p, "observer:test", subject, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// Collect all N distinct subjects; at-least-once means we may receive
+	// duplicates, so use a set and accept any size >= N.
+	seen := collectWatchSubjects(t, ch, prefix, N, 15*time.Second)
+
+	assert.Equal(t, N, len(seen),
+		"Watch must deliver all %d concurrently-written events without gaps (ADR-023 §5/§6)", N)
 }
 
 // --- Compile-time assertion ---

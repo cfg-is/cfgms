@@ -10,6 +10,7 @@
 package database
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -126,6 +127,51 @@ func TestParseEdgeSubject_Database(t *testing.T) {
 
 	_, _, _, err = parseEdgeSubject("two|parts")
 	require.Error(t, err)
+}
+
+func TestResolveWatchCursor_InvalidCursor_Database(t *testing.T) {
+	// A non-numeric cursor is rejected before any DB access, so a nil *sql.DB is
+	// safe here and keeps the test a pure error-path check.
+	for _, bad := range []string{"abc", "12x", "3.14", "-", "0x10", " 5"} {
+		_, err := dbResolveWatchCursor(context.Background(), nil, bad)
+		require.Error(t, err, "cursor %q must be rejected", bad)
+		require.Contains(t, err.Error(), "must be a decimal integer")
+	}
+}
+
+func TestResolveWatchCursor_ValidDecimal_Database(t *testing.T) {
+	// A valid decimal cursor is parsed without touching the DB (nil is safe).
+	seq, err := dbResolveWatchCursor(context.Background(), nil, "42")
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), seq)
+}
+
+func TestBuildWatchEvent_OKFalseBranches_Database(t *testing.T) {
+	// Edge subject whose pipe-delimited form does not split into exactly three
+	// parts: parseEdgeSubject fails (watch.go line ~165).
+	_, ok := dbBuildWatchEvent("two|parts", "observation", "", 1)
+	assert.False(t, ok, "malformed edge subject (wrong part count) must not yield an event")
+
+	// Well-formed edge subject but the from-EID is not a parseable EID
+	// (watch.go line ~169) — a stored edge row with a corrupt from-subject.
+	_, ok = dbBuildWatchEvent("contains|nocolon|host:b", "observation", "", 2)
+	assert.False(t, ok, "edge with non-parseable from-EID must not yield an event")
+
+	// Non-edge subject that is not a parseable EID (watch.go line ~176).
+	_, ok = dbBuildWatchEvent("nocolon-subject", "observation", "", 3)
+	assert.False(t, ok, "non-edge subject that is not a valid EID must not yield an event")
+}
+
+func TestBuildWatchEvent_OKTrue_Database(t *testing.T) {
+	ev, ok := dbBuildWatchEvent("host:abc", string(types.ObservationKindDriftDiff), "", 7)
+	require.True(t, ok)
+	assert.Equal(t, "drift-updated", ev.EventKind)
+	assert.Equal(t, int64(7), ev.Version)
+
+	ev, ok = dbBuildWatchEvent("contains|host:a|host:b", "observation", "", 8)
+	require.True(t, ok)
+	assert.Equal(t, "edge-updated", ev.EventKind)
+	assert.Equal(t, "host:a", ev.Subject.String())
 }
 
 func TestEscapeLIKE_Database(t *testing.T) {

@@ -319,8 +319,3 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 
 	return events, nil
 }
-
-// Watch is implemented by a later story.
-func (p *SQLiteEntityGraphProvider) Watch(_ context.Context, _ interfaces.WatchFilter, _ string) (<-chan interfaces.WatchEvent, error) {
-	return nil, interfaces.ErrNotImplemented
-}
