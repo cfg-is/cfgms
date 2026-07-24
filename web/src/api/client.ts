@@ -149,6 +149,8 @@ export async function apiFetch(
 export interface LoginResult {
   ok: boolean
   status: number
+  tenantId: string  // Issue #2919: empty string means root scope
+  rootScope: boolean // Issue #2919: true when tenantId is "" by explicit grant
 }
 
 /**
@@ -166,7 +168,7 @@ export async function loginRequest(
     credentials: 'same-origin',
   })
   if (!preflight.ok) {
-    return { ok: false, status: preflight.status }
+    return { ok: false, status: preflight.status, tenantId: '', rootScope: false }
   }
   const headers = new Headers({ 'Content-Type': 'application/json' })
   const preCookieValue = readCookie(csrfCookiePre)
@@ -179,7 +181,24 @@ export async function loginRequest(
     credentials: 'same-origin',
     body: JSON.stringify({ username, password }),
   })
-  return { ok: response.ok, status: response.status }
+  if (!response.ok) {
+    return { ok: false, status: response.status, tenantId: '', rootScope: false }
+  }
+  // Issue #2919: parse tenant_id and root_scope from the login response so the
+  // frontend can initialise TenantScopeProvider with the account's actual root path.
+  let tenantId = ''
+  let rootScope = false
+  try {
+    const body = (await response.json()) as Record<string, unknown>
+    const data = body.data as Record<string, unknown> | undefined
+    if (data !== undefined && data !== null) {
+      if (typeof data.tenant_id === 'string') tenantId = data.tenant_id
+      if (typeof data.root_scope === 'boolean') rootScope = data.root_scope
+    }
+  } catch {
+    // Body parse is best-effort; tenant scoping falls back to root (safest for UI).
+  }
+  return { ok: true, status: response.status, tenantId, rootScope }
 }
 
 /**

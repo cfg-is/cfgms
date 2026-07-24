@@ -24,7 +24,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
-import { isScopeMatch, useTenantScope } from '../shell/TenantScopeContext.tsx'
+import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 import StewardDrawer from './StewardDrawer.tsx'
 import {
   COLUMNS,
@@ -120,14 +120,10 @@ export default function FleetOverview() {
   const displayRows = useMemo(() => {
     if (page === null) return []
     let rows = page.stewards
-    // Tenant scope is a client-side display filter (security is server-enforced).
-    // Text search is handled server-side via the selector param — no client filtering.
-    if (scoped) {
-      rows = rows.filter((steward) => {
-        const tenantPath = steward.dna?.attributes?.['tenant']
-        return tenantPath !== undefined && isScopeMatch(tenantPath, scope)
-      })
-    }
+    // Issue #2919: client-side tenant filtering removed. Tenant scope narrowing
+    // is now server-side via the ?q=<scope>/all selector in useStewards; the server
+    // enforces TenantSubtree filtering, so every row returned already belongs to the
+    // selected scope.
     if (sort !== null) {
       const key = sort.key as ColumnKey
       rows = [...rows].sort((a, b) => {
@@ -140,7 +136,7 @@ export default function FleetOverview() {
       })
     }
     return rows
-  }, [page, scoped, scope, sort, nowMs])
+  }, [page, sort, nowMs])
 
   function onSort(key: string) {
     setSort((was) =>
@@ -200,8 +196,10 @@ export default function FleetOverview() {
   const from = total === 0 ? 0 : pageIndex * pageSize + 1
   const to = pageIndex * pageSize + pageRowCount
 
+  // Issue #2919: tenant scope narrows are now server-side, so total already reflects
+  // the filtered count. Show "X stewards in <scope>" when narrowed.
   const countText = narrowed
-    ? `${formatCount.format(displayRows.length)} of ${formatCount.format(total)} match`
+    ? `${formatCount.format(total)} stewards in ${scope || 'root'}`
     : `${formatCount.format(total)} stewards`
 
   return (
@@ -241,12 +239,13 @@ export default function FleetOverview() {
           <LoadingRows />
         ) : error !== null ? (
           <ErrorNotice detail={error} onRetry={retry} />
-        ) : page === null || (total === 0 && search.trim() === '') ? (
+        ) : page === null || (total === 0 && !scoped && search.trim() === '') ? (
           <FleetEmpty />
         ) : total === 0 ? (
-          <NoMatch scopeOnly={false} />
+          // Issue #2919: scoped → tenant subtree returned nothing; unscoped + search → no text match.
+          <NoMatch scopeOnly={scoped} />
         ) : displayRows.length === 0 ? (
-          <NoMatch scopeOnly={true} />
+          <NoMatch scopeOnly={false} />
         ) : (
           <FleetTable
             stewards={displayRows}

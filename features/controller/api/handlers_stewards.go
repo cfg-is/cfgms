@@ -351,19 +351,20 @@ func buildFleetFilter(r *http.Request, tenantID string) (fleet.Filter, error) {
 	}
 
 	return fleet.Filter{
-		TenantID:     tenantID,
-		OS:           os,
-		Platform:     platform,
-		Architecture: arch,
-		Status:       status,
-		Hostname:     hostname,
-		Tags:         q["tag"],
+		TenantSubtree: tenantID, // Issue #2919: subtree-aware scope replaces exact TenantID match
+		OS:            os,
+		Platform:      platform,
+		Architecture:  arch,
+		Status:        status,
+		Hostname:      hostname,
+		Tags:          q["tag"],
 	}, nil
 }
 
 // isEmptyFilter reports whether a filter has no criteria set.
 func isEmptyFilter(f fleet.Filter) bool {
 	return f.TenantID == "" &&
+		f.TenantSubtree == "" && // Issue #2919: must check subtree too
 		f.OS == "" &&
 		f.Platform == "" &&
 		f.Architecture == "" &&

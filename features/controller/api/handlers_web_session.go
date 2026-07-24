@@ -214,15 +214,24 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Step 10: audit and respond. Token is never written to the body (security A5.5).
+	// Issue #2919: include tenant_id and root_scope so the frontend can initialise
+	// TenantScopeProvider with the correct rootPath on the session just established.
+	// root_scope is derived from tenantID == "" — after Issue #2919's defense-in-depth
+	// fix, an empty TenantID in session can only originate from an explicit RootScope grant.
 	s.emitWebLoginAudit(r.Context(), req.Username, tenantID, "web.login.success", business.AuditResultSuccess)
 	s.logger.Info("Web login success",
 		"username", logging.SanitizeLogValue(req.Username),
 		"principal_id", logging.SanitizeLogValue(principalID),
 		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"root_scope", tenantID == "",
 		"session_id", logging.SanitizeLogValue(sess.ID),
 		"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 
-	s.writeSuccessResponse(w, map[string]interface{}{"ok": true})
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"ok":         true,
+		"tenant_id":  tenantID,
+		"root_scope": tenantID == "",
+	})
 }
 
 // handleWebLogout handles POST /api/v1/web/logout (ADR-018 §4).

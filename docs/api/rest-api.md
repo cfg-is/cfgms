@@ -123,7 +123,12 @@ All steward management endpoints require an API key. The `cfg steward list/statu
 
 #### GET /api/v1/stewards
 
-List all registered stewards.
+List registered stewards. The returned set depends on the session's tenant scope:
+
+- **Root-scoped session** (web account with `root_scope: true`, or mTLS admin bundle with empty tenant): returns stewards from all tenants.
+- **Tenant-scoped session** (web account with a `tenant_id`): returns only stewards in the session tenant's subtree — path-prefix inclusive, not exact-match. For example, a session scoped to `root/msp-a` sees stewards under `root/msp-a`, `root/msp-a/client-1`, etc.
+
+Use the `?q=` selector parameter to narrow further (e.g. `?q=root/msp-a/all` or `?q=hostname:web-01`). The selector grammar is defined in `pkg/fleet/selector`.
 
 **Authentication:** Required  
 **Required permission:** `steward:list`
@@ -2096,6 +2101,126 @@ file is a full controller compromise.
   ```
 - Rotate the bundle by re-running `cfgms-controller --init` or the admin re-enrollment
   procedure when you suspect compromise.
+
+### Web Accounts
+
+Web accounts are browser-based admin principals backed by an argon2id password and (optionally) WebAuthn passkeys. They are RBAC-equivalent to API-key principals — they carry explicit `permissions` and a tenant scope, and are not implicit global admins.
+
+#### Tenant scope
+
+Each web account has exactly one of:
+
+| Field | Meaning |
+|-------|---------|
+| `root_scope: true` | Account sees all tenants' data (subtree-inclusive from root). `tenant_id` is empty. |
+| `tenant_id: "root/msp-a"` | Account sees only the `root/msp-a` subtree. `root_scope` is false. |
+| neither | Account defaults to `"default"` tenant on creation. |
+
+`root_scope` and `tenant_id` are mutually exclusive — supplying both returns `400 INVALID_SCOPE`. An empty `tenant_id` alone **never** grants root scope; `root_scope: true` must be set explicitly (defense-in-depth).
+
+#### POST /api/v1/web/accounts
+
+Create a new web admin account, or reset an existing one (upsert: password replaced, omitted `tenant_id`/`permissions` retained from the existing record).
+
+**Authentication:** Required  
+**Required permission:** `web-account:create`  
+**Assurance:** Strong session (passkey or elevated mTLS) required
+
+**Request body:**
+
+```json
+{
+  "username": "alice",
+  "password": "change-me-now",
+  "root_scope": true,
+  "permissions": ["steward:list", "steward:read"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `username` | string | 3–64 chars, starting alphanumeric, then `[a-zA-Z0-9._-]` |
+| `password` | string | Plaintext — hashed server-side with argon2id; never stored or logged |
+| `root_scope` | bool | Grant cross-tenant root scope. Mutually exclusive with `tenant_id`. |
+| `tenant_id` | string | Scope account to this tenant subtree. Mutually exclusive with `root_scope`. |
+| `permissions` | array | Permission IDs (e.g. `"steward:list"`). Unknown IDs are rejected. |
+
+**Response (201 Created or 200 OK on reset):**
+
+```json
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "username": "alice",
+    "tenant_id": "",
+    "root_scope": true,
+    "permissions": ["steward:list", "steward:read"],
+    "created_at": "2026-01-12T10:30:00Z"
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+Root-scoped accounts have `tenant_id: ""` and `root_scope: true` in the response. Tenant-scoped accounts have a non-empty `tenant_id` and `root_scope: false`.
+
+#### GET /api/v1/web/accounts
+
+List all web admin accounts. Password hashes are never included.
+
+**Authentication:** Required  
+**Required permission:** `web-account:list`
+
+**Response:**
+
+```json
+{
+  "data": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "username": "alice",
+      "tenant_id": "",
+      "root_scope": true,
+      "permissions": ["steward:list", "steward:read"],
+      "created_at": "2026-01-12T10:30:00Z"
+    },
+    {
+      "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+      "username": "bob",
+      "tenant_id": "root/msp-a",
+      "root_scope": false,
+      "permissions": ["steward:list"],
+      "created_at": "2026-01-10T08:00:00Z"
+    }
+  ],
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+#### DELETE /api/v1/web/accounts/{username}
+
+Delete a web admin account. Removes both the in-memory cache entry and the durable secret-store record.
+
+**Authentication:** Required  
+**Required permission:** `web-account:delete`  
+**Assurance:** Strong session required
+
+**Parameters:**
+
+- `username` (path): Username of the account to delete
+
+**Response (200 OK):**
+
+```json
+{
+  "data": {
+    "username": "alice",
+    "deleted": true
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+Returns `404 WEB_ACCOUNT_NOT_FOUND` if the account does not exist.
 
 ## Configuration
 

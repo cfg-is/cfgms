@@ -333,6 +333,80 @@ describe('loginRequest', () => {
       expect(String(call[0])).not.toContain('pre-tok-3')
     }
   })
+
+  // ── Login-response tenant scope parsing (Issue #2919) ─────────────────────
+  // result.tenantId is the sole input to setPrincipal({ tenantId }) in
+  // AuthContext, which drives TenantScopeProvider rootPath — the boundary that
+  // decides which tenant subtree a signed-in user may browse. These tests pin
+  // the body.data parsing branch and its best-effort catch fallback.
+
+  /** Mock: csrf preflight sets the pre-cookie, then the login POST returns `loginBody`. */
+  function mockLogin(loginResponse: Response) {
+    fetchMock.mockImplementation((input) => {
+      if (String(input).endsWith('/api/v1/web/csrf')) {
+        document.cookie = 'cfgms_csrf_pre=pre-tok-scope; path=/'
+        return Promise.resolve(jsonResponse(204))
+      }
+      return Promise.resolve(loginResponse)
+    })
+  }
+
+  it('parses tenant_id and root_scope from the login response body.data', async () => {
+    mockLogin(jsonResponse(200, { data: { tenant_id: 'msp-a', root_scope: false } }))
+
+    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+
+    expect(result.ok).toBe(true)
+    expect(result.tenantId).toBe('msp-a')
+    expect(result.rootScope).toBe(false)
+  })
+
+  it('parses an explicit root-scope grant (empty tenant_id, root_scope true)', async () => {
+    mockLogin(jsonResponse(200, { data: { tenant_id: '', root_scope: true } }))
+
+    const result = await loginRequest('root-admin', 'hunter2hunter2')
+
+    expect(result.ok).toBe(true)
+    expect(result.tenantId).toBe('')
+    expect(result.rootScope).toBe(true)
+  })
+
+  it('defaults tenantId to "" and rootScope to false when the body has no data', async () => {
+    mockLogin(jsonResponse(200, {}))
+
+    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+
+    expect(result.ok).toBe(true)
+    expect(result.tenantId).toBe('')
+    expect(result.rootScope).toBe(false)
+  })
+
+  it('ignores a non-string tenant_id and non-boolean root_scope (falls back to root)', async () => {
+    mockLogin(jsonResponse(200, { data: { tenant_id: 42, root_scope: 'yes' } }))
+
+    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+
+    expect(result.ok).toBe(true)
+    expect(result.tenantId).toBe('')
+    expect(result.rootScope).toBe(false)
+  })
+
+  it('falls back to root scope when the login body is not valid JSON (catch branch)', async () => {
+    // A 2xx with an unparseable body must not throw — tenant scoping degrades
+    // to root (the safest UI default), and the login still succeeds.
+    mockLogin(
+      new Response('not-json{', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+
+    expect(result.ok).toBe(true)
+    expect(result.tenantId).toBe('')
+    expect(result.rootScope).toBe(false)
+  })
 })
 
 describe('logoutRequest', () => {

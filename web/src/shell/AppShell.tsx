@@ -17,6 +17,7 @@ import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
 import AlertCenter from './AlertCenter.tsx'
 import UserMenu from './UserMenu.tsx'
+import { useAuth } from '../auth/AuthContext.tsx'
 import './AppShell.css'
 
 /** Context type exposed to outlet children via useOutletContext. */
@@ -35,6 +36,7 @@ const NAV_ITEMS = [
 ] as const
 
 export default function AppShell() {
+  const { principal } = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [search, setSearch] = useState('')
 
@@ -53,7 +55,7 @@ export default function AppShell() {
   }, [drawerOpen])
 
   return (
-    <TenantScopeProvider rootPath="root">
+    <TenantScopeProvider rootPath={principal?.tenantId ?? ''}>
       <div
         className="scrim"
         data-testid="shell-scrim"

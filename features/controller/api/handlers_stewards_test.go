@@ -357,7 +357,9 @@ func TestBuildFleetFilter_AllParams(t *testing.T) {
 	assert.Equal(t, "amd64", filter.Architecture)
 	assert.Equal(t, "online", filter.Status)
 	assert.Equal(t, "web", filter.Hostname)
-	assert.Equal(t, "tenant-a", filter.TenantID) // comes from context, not query param
+	// Issue #2919: buildFleetFilter uses TenantSubtree (subtree-aware) not TenantID (exact).
+	assert.Equal(t, "tenant-a", filter.TenantSubtree) // comes from context, not query param
+	assert.Empty(t, filter.TenantID)
 	assert.Equal(t, []string{"prod", "web"}, filter.Tags)
 	assert.False(t, isEmptyFilter(filter))
 }
@@ -370,11 +372,13 @@ func TestBuildFleetFilter_Tags_MultiValue(t *testing.T) {
 }
 
 func TestBuildFleetFilter_TenantID_FromContext_NotQueryParam(t *testing.T) {
-	// tenant_id in query param must be ignored; it comes from context only
+	// tenant_id in query param must be ignored; it comes from context only.
+	// Issue #2919: stored in TenantSubtree for subtree-aware scoping.
 	req := httptest.NewRequest("GET", "/api/v1/stewards?tenant_id=injected-tenant", nil)
 	filter, err := buildFleetFilter(req, "real-tenant-from-context")
 	require.NoError(t, err)
-	assert.Equal(t, "real-tenant-from-context", filter.TenantID)
+	assert.Equal(t, "real-tenant-from-context", filter.TenantSubtree)
+	assert.Empty(t, filter.TenantID)
 }
 
 func TestBuildFleetFilter_InvalidStatus_ReturnsError(t *testing.T) {
@@ -404,6 +408,12 @@ func TestIsEmptyFilter_WithTags(t *testing.T) {
 
 func TestIsEmptyFilter_WithDNAAttributes(t *testing.T) {
 	assert.False(t, isEmptyFilter(fleet.Filter{DNAAttributes: map[string]string{"env": "prod"}}))
+}
+
+// TestIsEmptyFilter_WithTenantSubtree verifies that a non-empty TenantSubtree is
+// not treated as an empty filter (Issue #2919: subtree must trigger Search, not GetAllStewards).
+func TestIsEmptyFilter_WithTenantSubtree(t *testing.T) {
+	assert.False(t, isEmptyFilter(fleet.Filter{TenantSubtree: "msp-a"}))
 }
 
 // ---- Error path tests: handleListStewards with failing fleet query ----
@@ -451,6 +461,25 @@ func registerTestSteward(t *testing.T, svc interface {
 		},
 	}
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
+	resp, err := svc.AcceptRegistration(ctx, req)
+	require.NoError(t, err)
+	return resp.StewardId
+}
+
+// registerStewardInTenant adds a steward to a specific tenant via AcceptRegistration.
+// Used by multi-tenant cross-scoping tests (Issue #2919).
+func registerStewardInTenant(t *testing.T, svc interface {
+	AcceptRegistration(context.Context, *controller.RegisterRequest) (*controller.RegisterResponse, error)
+}, tenantID string, attrs map[string]string) string {
+	t.Helper()
+	req := &controller.RegisterRequest{
+		Version: "v1.0",
+		InitialDna: &common.DNA{
+			Id:         "dna-" + attrs["hostname"],
+			Attributes: attrs,
+		},
+	}
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 	resp, err := svc.AcceptRegistration(ctx, req)
 	require.NoError(t, err)
 	return resp.StewardId
@@ -3315,4 +3344,73 @@ func TestHandleListStewards_Selector_All_AdminUnrestricted(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.Data, 2, "admin must see all stewards with q=all")
+}
+
+// ---- Issue #2919: root-scope and cross-tenant-leakage tests ----
+
+// TestListStewards_RootScopedSession_SeesAllTenants verifies that a web session
+// with empty TenantID (root scope) returns stewards from all tenants via the
+// GetAllStewards path (isEmptyFilter must return true when TenantSubtree is "").
+func TestListStewards_RootScopedSession_SeesAllTenants(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Register stewards in two sibling tenants.
+	registerStewardInTenant(t, server.controllerService, "msp-a", map[string]string{
+		"hostname": "host-msp-a",
+	})
+	registerStewardInTenant(t, server.controllerService, "msp-b", map[string]string{
+		"hostname": "host-msp-b",
+	})
+
+	// Root-scoped session: no TenantID in context (empty string).
+	// The handler reads ctxkeys.TenantID; when absent or empty, tenantID stays "".
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, ""))
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 2, "root-scoped session must see all stewards from all tenants")
+
+	tenants := make(map[string]bool)
+	for _, s := range resp.Data {
+		tenants[s.TenantID] = true
+	}
+	assert.True(t, tenants["msp-a"], "msp-a steward must be visible")
+	assert.True(t, tenants["msp-b"], "msp-b steward must be visible")
+}
+
+// TestListStewards_NonRootAccount_NoCrossTenantLeakage verifies that a non-root
+// web (or API-key) session scoped to "msp-a" never sees stewards from "msp-b".
+// Uses TenantSubtree filtering (Issue #2919: buildFleetFilter switched from TenantID).
+func TestListStewards_NonRootAccount_NoCrossTenantLeakage(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Register one steward per tenant.
+	registerStewardInTenant(t, server.controllerService, "msp-a", map[string]string{
+		"hostname": "host-msp-a",
+	})
+	registerStewardInTenant(t, server.controllerService, "msp-b", map[string]string{
+		"hostname": "host-msp-b",
+	})
+
+	// Create an API key scoped to msp-a only.
+	mspAKey := NewEphemeralTestKey(t, server, []string{"steward:list"}, "msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", mspAKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Data, 1, "msp-a-scoped account must see only msp-a stewards")
+	assert.Equal(t, "msp-a", resp.Data[0].TenantID, "returned steward must be in msp-a")
 }

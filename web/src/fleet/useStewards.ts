@@ -95,15 +95,27 @@ interface FetchOutcome {
 }
 
 export function useStewards(limit: number, offset: number, selector = ''): UseStewardsResult {
-  const { registerObservedPath } = useTenantScope()
+  const { scope, rootPath, registerObservedPath } = useTenantScope()
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
 
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
 
+  // Issue #2919: when the tenant switcher is narrowed (scope !== rootPath), build
+  // a selector with the tenant path prefix so the server applies TenantSubtree
+  // filtering. Reuses the existing ?q= selector grammar (pkg/fleet/selector).
+  //   scope="msp-a", no text   → ?q=msp-a/all
+  //   scope="msp-a", text="web" → ?q=msp-a/web
+  //   not narrowed             → ?q=<text> (or no ?q)
+  const scoped = scope !== rootPath
+  const selectorText = selector.trim()
+  const effectiveSelector = scoped && scope !== ''
+    ? (selectorText !== '' ? `${scope}/${selectorText}` : `${scope}/all`)
+    : selector
+
   // Loading is derived, not set: the view is loading whenever the latest
   // outcome doesn't answer the current request key.
-  const key = `${limit}:${offset}:${selector}:${attempt}`
+  const key = `${limit}:${offset}:${effectiveSelector}:${attempt}`
 
   useEffect(() => {
     let cancelled = false
@@ -111,7 +123,7 @@ export function useStewards(limit: number, offset: number, selector = ''): UseSt
       limit: String(limit),
       offset: String(offset),
     })
-    const selectorTrimmed = selector.trim()
+    const selectorTrimmed = effectiveSelector.trim()
     if (selectorTrimmed !== '') {
       params.set('q', selectorTrimmed)
     }
@@ -145,7 +157,7 @@ export function useStewards(limit: number, offset: number, selector = ''): UseSt
     return () => {
       cancelled = true
     }
-  }, [key, limit, offset, selector, registerObservedPath])
+  }, [key, limit, offset, effectiveSelector, registerObservedPath])
 
   const current = outcome?.key === key ? outcome : null
   return {
