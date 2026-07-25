@@ -11,7 +11,12 @@
  * reaches the DOM as a JSX text node — never dangerouslySetInnerHTML.
  */
 import { type FormEvent, useState } from 'react'
-import { useConfigList, useStewardHostnameMap, type ConfigSummary } from './useConfigs.ts'
+import {
+  useConfigList,
+  useStewardHostnameMap,
+  useConfigDeployments,
+  type ConfigSummary,
+} from './useConfigs.ts'
 import ConfigEditor from './ConfigEditor.tsx'
 import PushPanel from './PushPanel.tsx'
 import './Config.css'
@@ -63,12 +68,16 @@ function ConfigRow({
   config,
   displayName,
   selected,
+  showingDeployments,
   onClick,
+  onViewDeployments,
 }: {
   config: ConfigSummary
   displayName: string
   selected: boolean
+  showingDeployments: boolean
   onClick: () => void
+  onViewDeployments: () => void
 }) {
   return (
     <tr
@@ -91,9 +100,35 @@ function ConfigRow({
       <td>
         <span className="mut">{config.source || '—'}</span>
       </td>
-      <td className="c-spacer" />
+      <td className="c-spacer">
+        <button
+          type="button"
+          className={showingDeployments ? 'cfg-btn' : 'cfg-btn-secondary'}
+          onClick={(e) => {
+            e.stopPropagation()
+            onViewDeployments()
+          }}
+          data-testid="view-deployments-btn"
+          aria-label={`View deployments for ${displayName}`}
+        >
+          Deployments
+        </button>
+      </td>
     </tr>
   )
+}
+
+function deploymentStatusTone(status: string): string {
+  switch (status) {
+    case 'applied':
+      return 'ok'
+    case 'failed':
+      return 'crit'
+    case 'pending':
+      return 'warn'
+    default:
+      return 'neutral'
+  }
 }
 
 export default function ConfigListView() {
@@ -103,10 +138,23 @@ export default function ConfigListView() {
   const [showPushPanel, setShowPushPanel] = useState(false)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [createInputValue, setCreateInputValue] = useState('')
+  const [deploymentConfigId, setDeploymentConfigId] = useState<string | null>(null)
+
+  const {
+    deployments,
+    loading: deploymentsLoading,
+    error: deploymentsError,
+    serviceUnavailable: deploymentsUnavailable,
+    retry: retryDeployments,
+  } = useConfigDeployments(deploymentConfigId)
 
   function handleRowClick(stewardId: string) {
     setShowCreateForm(false)
     setSelectedStewardId((prev) => (prev === stewardId ? null : stewardId))
+  }
+
+  function handleViewDeployments(stewardId: string) {
+    setDeploymentConfigId((prev) => (prev === stewardId ? null : stewardId))
   }
 
   function handleEditorClose() {
@@ -222,13 +270,85 @@ export default function ConfigListView() {
                   config={c}
                   displayName={hostnameMap.get(c.steward_id) ?? c.steward_id}
                   selected={selectedStewardId === c.steward_id}
+                  showingDeployments={deploymentConfigId === c.steward_id}
                   onClick={() => handleRowClick(c.steward_id)}
+                  onViewDeployments={() => handleViewDeployments(c.steward_id)}
                 />
               ))}
             </tbody>
           </table>
         )}
       </section>
+
+      {deploymentConfigId !== null && (
+        <section className="panel" data-testid="deployment-panel">
+          <div className="ptool">
+            <span className="mono2">
+              Deployments: {hostnameMap.get(deploymentConfigId) ?? deploymentConfigId}
+            </span>
+            <button
+              type="button"
+              className="cfg-btn-secondary"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setDeploymentConfigId(null)}
+            >
+              Close
+            </button>
+          </div>
+          {deploymentsLoading && (
+            <p className="mut" style={{ padding: '12px 14px' }}>Loading…</p>
+          )}
+          {deploymentsError !== null && !deploymentsUnavailable && (
+            <div className="notice err" role="alert" style={{ margin: '12px' }}>
+              <div className="ic">!</div>
+              <p>{deploymentsError}</p>
+              <button type="button" className="btn" onClick={retryDeployments}>
+                Retry
+              </button>
+            </div>
+          )}
+          {deploymentsUnavailable && (
+            <p className="mut" style={{ padding: '12px 14px' }}>
+              Deployment results unavailable (store not ready).
+            </p>
+          )}
+          {deployments !== null && !deploymentsUnavailable && (
+            <>
+              {deployments.stewards.length === 0 ? (
+                <p className="mut" style={{ padding: '12px 14px' }}>
+                  No per-steward deployment records found.
+                </p>
+              ) : (
+                <table className="tbl" data-testid="deployment-steward-table">
+                  <thead>
+                    <tr>
+                      <th>Steward</th>
+                      <th>Status</th>
+                      <th>Last Updated</th>
+                      <th className="c-spacer" aria-hidden="true" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deployments.stewards.map((s) => (
+                      <tr key={s.steward_id} data-testid="deployment-steward-row">
+                        <td><span className="mono2">{s.steward_id}</span></td>
+                        <td>
+                          <span className={`pill ${deploymentStatusTone(s.status)}`}>
+                            <span className="dot" />
+                            {s.status}
+                          </span>
+                        </td>
+                        <td><span className="mono2">{s.last_updated}</span></td>
+                        <td className="c-spacer" />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </>
+          )}
+        </section>
+      )}
 
       {selectedStewardId !== null && (
         <ConfigEditor

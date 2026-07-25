@@ -332,3 +332,124 @@ describe('ConfigListView — security (A9.1)', () => {
     expect((window as unknown as Record<string, unknown>).__xss).toBeUndefined()
   })
 })
+
+// ── Deployment affordance ─────────────────────────────────────────────────────
+
+function makeDeploymentsEnvelope(configId: string, stewards: object[], status = 200) {
+  return new Response(
+    JSON.stringify({
+      data: {
+        config_id: configId,
+        summary: { applied: stewards.length, pending: 0, failed: 0, halted: 0, total: stewards.length },
+        stewards,
+        push_history: [],
+      },
+      timestamp: new Date().toISOString(),
+    }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+describe('ConfigListView — deployment affordance', () => {
+  it('shows a Deployments button on each config row', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([makeStewardConfig()]))
+    fetchMock.mockResolvedValue(makeStewardsPageEnvelope([]))
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+    expect(screen.getByTestId('view-deployments-btn')).toBeInTheDocument()
+  })
+
+  it('clicking Deployments button opens the deployment panel', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-1' })]))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          makeDeploymentsEnvelope('sw-1', [
+            { steward_id: 'sw-1', status: 'applied', last_updated: '2026-01-01T00:00:00Z' },
+          ]),
+        )
+      }
+      return Promise.resolve(makeStewardsPageEnvelope([]))
+    })
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('view-deployments-btn'))
+    await waitFor(() => expect(screen.getByTestId('deployment-panel')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByTestId('deployment-steward-row')).toBeInTheDocument())
+  })
+
+  it('clicking Deployments button again closes the deployment panel', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-1' })]))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(makeDeploymentsEnvelope('sw-1', []))
+      }
+      return Promise.resolve(makeStewardsPageEnvelope([]))
+    })
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('view-deployments-btn'))
+    await waitFor(() => expect(screen.getByTestId('deployment-panel')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('view-deployments-btn'))
+    expect(screen.queryByTestId('deployment-panel')).toBeNull()
+  })
+
+  it('clicking Deployments button does not open the ConfigEditor', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-1' })]))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(makeDeploymentsEnvelope('sw-1', []))
+      }
+      return Promise.resolve(makeStewardsPageEnvelope([]))
+    })
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('view-deployments-btn'))
+    expect(screen.queryByTestId('config-editor')).toBeNull()
+  })
+
+  it('shows service-unavailable message when deployments returns 503', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-1' })]))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(
+          makeDeploymentsEnvelope('sw-1', [], 503),
+        )
+      }
+      return Promise.resolve(makeStewardsPageEnvelope([]))
+    })
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('view-deployments-btn'))
+    await waitFor(() => expect(screen.getByTestId('deployment-panel')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/unavailable/i)).toBeInTheDocument())
+  })
+
+  it('Close button in deployment panel hides the panel', async () => {
+    fetchMock.mockResolvedValueOnce(makeConfigEnvelope([makeStewardConfig({ steward_id: 'sw-1' })]))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/deployments')) {
+        return Promise.resolve(makeDeploymentsEnvelope('sw-1', []))
+      }
+      return Promise.resolve(makeStewardsPageEnvelope([]))
+    })
+    renderConfigListView()
+    await waitFor(() => expect(screen.getByTestId('config-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('view-deployments-btn'))
+    await waitFor(() => expect(screen.getByTestId('deployment-panel')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /close/i }))
+    expect(screen.queryByTestId('deployment-panel')).toBeNull()
+  })
+})

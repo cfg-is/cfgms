@@ -122,6 +122,36 @@ export interface RollbackPreview {
   risk_assessment: Record<string, unknown>
 }
 
+export interface DeploymentSummary {
+  applied: number
+  pending: number
+  failed: number
+  halted: number
+  total: number
+}
+
+export interface StewardDeploymentStatus {
+  steward_id: string
+  status: string
+  last_updated: string
+}
+
+export interface PushSummary {
+  push_id: string
+  status: string
+  version: string
+  initiated_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConfigDeployments {
+  config_id: string
+  summary: DeploymentSummary
+  stewards: StewardDeploymentStatus[]
+  push_history: PushSummary[]
+}
+
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 
 function parseConfigSummary(value: unknown): ConfigSummary | null {
@@ -278,6 +308,7 @@ interface FetchOutcome<T> {
   data?: T
   error?: string
   notFound?: boolean
+  serviceUnavailable?: boolean
   fetchedAtMs: number
 }
 
@@ -572,6 +603,131 @@ export function useRollbackHistory(stewardId: string | null): UseRollbackHistory
     operations: current?.data ?? [],
     loading: stewardId !== null && current === null,
     error: current?.error ?? null,
+    retry,
+  }
+}
+
+// ── useConfigDeployments ──────────────────────────────────────────────────────
+
+function parseDeploymentSummary(value: unknown): DeploymentSummary {
+  const r =
+    typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+  return {
+    applied: num(r.applied),
+    pending: num(r.pending),
+    failed: num(r.failed),
+    halted: num(r.halted),
+    total: num(r.total),
+  }
+}
+
+function parseStewardDeploymentStatus(value: unknown): StewardDeploymentStatus | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const steward_id = str(r.steward_id)
+  if (!steward_id) return null
+  return {
+    steward_id,
+    status: str(r.status),
+    last_updated: str(r.last_updated),
+  }
+}
+
+export function parseConfigDeployments(data: unknown): ConfigDeployments {
+  const r =
+    typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+  const stewards: StewardDeploymentStatus[] = []
+  if (Array.isArray(r.stewards)) {
+    for (const item of r.stewards) {
+      const s = parseStewardDeploymentStatus(item)
+      if (s !== null) stewards.push(s)
+    }
+  }
+  const push_history: PushSummary[] = []
+  if (Array.isArray(r.push_history)) {
+    for (const item of r.push_history) {
+      if (typeof item !== 'object' || item === null) continue
+      const p = item as Record<string, unknown>
+      push_history.push({
+        push_id: str(p.push_id),
+        status: str(p.status),
+        version: str(p.version),
+        initiated_by: str(p.initiated_by),
+        created_at: str(p.created_at),
+        updated_at: str(p.updated_at),
+      })
+    }
+  }
+  return {
+    config_id: str(r.config_id),
+    summary: parseDeploymentSummary(r.summary),
+    stewards,
+    push_history,
+  }
+}
+
+export interface UseConfigDeploymentsResult {
+  deployments: ConfigDeployments | null
+  loading: boolean
+  error: string | null
+  serviceUnavailable: boolean
+  retry: () => void
+}
+
+export function useConfigDeployments(configId: string | null): UseConfigDeploymentsResult {
+  const [attempt, setAttempt] = useState(0)
+  const [outcome, setOutcome] = useState<FetchOutcome<ConfigDeployments> | null>(null)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
+  const key = `config-deployments:${configId ?? ''}:${attempt}`
+
+  useEffect(() => {
+    if (!configId) return
+    let cancelled = false
+    apiFetch(`/api/v1/configs/${encodeURIComponent(configId)}/deployments`)
+      .then(async (response) => {
+        if (response.status === 503) {
+          if (!cancelled)
+            setOutcome({
+              key,
+              serviceUnavailable: true,
+              error: 'deployment store not available',
+              fetchedAtMs: Date.now(),
+            })
+          return
+        }
+        if (!response.ok)
+          throw new Error(
+            `GET /api/v1/configs/${configId}/deployments — ${response.status}`,
+          )
+        const body: unknown = await response.json()
+        const parsed = parseConfigDeployments(
+          (body as Record<string, unknown> | null)?.data,
+        )
+        if (cancelled) return
+        setOutcome({ key, data: parsed, fetchedAtMs: Date.now() })
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setOutcome({
+          key,
+          error:
+            cause instanceof Error && cause.message
+              ? cause.message
+              : `GET /api/v1/configs/${configId}/deployments — request failed`,
+          fetchedAtMs: Date.now(),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key, configId, attempt])
+
+  const current = outcome?.key === key ? outcome : null
+  return {
+    deployments: current?.data ?? null,
+    loading: configId !== null && current === null,
+    error: current?.error ?? null,
+    serviceUnavailable: current?.serviceUnavailable ?? false,
     retry,
   }
 }
