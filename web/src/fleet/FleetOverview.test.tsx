@@ -20,7 +20,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
-import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router-dom'
+import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import {
   TenantScopeProvider,

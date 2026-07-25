@@ -2,7 +2,7 @@
 // Copyright 2026 Jordan Ritz
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import App from './App.tsx'
 
 function jsonResponse(status: number, body: unknown = {}): Response {

@@ -19,7 +19,7 @@
  * on a single active tab; ArrowLeft/ArrowRight cycle between tabs.
  */
 import { type ComponentType, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router'
 import DnaDrawer from './DnaDrawer.tsx'
 import LiveActivityTab from './LiveActivityTab.tsx'
 import LogsPanel from './LogsPanel.tsx'

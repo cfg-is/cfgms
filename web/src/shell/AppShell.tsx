@@ -11,7 +11,7 @@
  * the route table.
  */
 import { useEffect, useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet } from 'react-router'
 import { TenantScopeProvider } from './TenantScopeContext.tsx'
 import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
