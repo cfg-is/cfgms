@@ -226,13 +226,6 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Reject maintenance.window and maintenance.schedule: reboot windows are not yet
-	// implemented. Accepting and silently ignoring these fields would cause endpoints
-	// to patch and reboot outside the declared window with no error or log line.
-	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
-		return ErrMaintenanceWindowUnsupported
-	}
-
 	// Validate patch IDs format
 	for _, patchID := range c.IncludePatches {
 		if !isValidPatchID(patchID) {

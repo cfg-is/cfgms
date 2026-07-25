@@ -22,12 +22,6 @@ var (
 	// ErrInvalidMaxDowntime is returned when the max downtime format is invalid
 	ErrInvalidMaxDowntime = errors.New("invalid max downtime format (must be a valid duration like '30m', '1h')")
 
-	// ErrMaintenanceWindowUnsupported is returned when a config declares maintenance.window
-	// or maintenance.schedule, which are not yet implemented. Reboot windows are planned
-	// but no production WindowManager exists; accepting the declaration and silently
-	// ignoring it would cause endpoints to reboot outside the declared window.
-	ErrMaintenanceWindowUnsupported = errors.New("maintenance.window and maintenance.schedule are not yet implemented: reboot windows are planned but not active — remove these fields from your patch config")
-
 	// ErrInvalidPatchID is returned when a patch ID is invalid
 	ErrInvalidPatchID = errors.New("invalid patch ID format")
 

@@ -237,8 +237,9 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 	// Check if we're in a maintenance window (if specified)
 	if cfg.Maintenance.Window != "" || cfg.Maintenance.Schedule != "" {
 		if !m.isInMaintenanceWindow(ctx, cfg) {
+			nextWindow := m.nextWindowLocked(ctx)
 			m.mu.Unlock()
-			return ErrMaintenanceWindowNotActive
+			return fmt.Errorf("%w: %w", ErrMaintenanceWindowNotActive, modules.NewRebootDeferredError(nextWindow))
 		}
 	}
 
@@ -264,10 +265,13 @@ func (m *PatchModule) Set(ctx context.Context, resourceID string, config modules
 
 	if rebootRequired {
 		if cfg.AutoReboot {
-			// Check if reboot is allowed by maintenance window policy
+			// Check if reboot is allowed by the maintenance gate. Fails closed: a nil
+			// window manager denies the reboot. In production the factory always injects
+			// a Gate; ungated devices receive a Gate whose CanReboot returns true.
 			if !m.canReboot(ctx) {
+				nextWindow := m.nextWindowLocked(ctx)
 				m.mu.Unlock()
-				return ErrMaintenanceWindowNotActive
+				return fmt.Errorf("%w: %w", ErrMaintenanceWindowNotActive, modules.NewRebootDeferredError(nextWindow))
 			}
 
 			m.GetEffectiveLogger(logging.NewNoopLogger()).Info("auto-reboot triggered")
@@ -393,38 +397,50 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 	return nil
 }
 
-// isInMaintenanceWindow checks if the current time is within the maintenance window
+// isInMaintenanceWindow checks if the current time is within the maintenance window.
+// Fails closed: a nil manager or a check error denies the operation.
 func (m *PatchModule) isInMaintenanceWindow(ctx context.Context, config *Config) bool {
-	// If no window manager is configured, allow operations (backwards compatibility)
 	if m.windowManager == nil {
-		return true
+		return false
 	}
 
-	// Check if we're in a maintenance window
 	inWindow, err := m.windowManager.IsInWindow(ctx, m.deviceID)
 	if err != nil {
 		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to check maintenance window", "error", err)
-		return true
+		return false
 	}
 
 	return inWindow
 }
 
-// canReboot checks if a reboot is allowed at the current time
+// canReboot checks if a reboot is allowed at the current time.
+// Fails closed: a nil manager or a check error denies the reboot.
 func (m *PatchModule) canReboot(ctx context.Context) bool {
-	// If no window manager is configured, allow reboots (backwards compatibility)
 	if m.windowManager == nil {
-		return true
+		return false
 	}
 
-	// Check if we can reboot
 	canReboot, err := m.windowManager.CanReboot(ctx, m.deviceID)
 	if err != nil {
 		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to check reboot permission", "error", err)
-		return true
+		return false
 	}
 
 	return canReboot
+}
+
+// nextWindowLocked returns the next upcoming maintenance window for the device.
+// Must be called while m.mu is held. Returns zero time if unavailable.
+func (m *PatchModule) nextWindowLocked(ctx context.Context) time.Time {
+	if m.windowManager == nil {
+		return time.Time{}
+	}
+	next, err := m.windowManager.GetNextWindow(ctx, m.deviceID)
+	if err != nil {
+		m.GetEffectiveLogger(logging.NewNoopLogger()).Warn("failed to get next maintenance window", "error", err)
+		return time.Time{}
+	}
+	return next
 }
 
 // GetPatchStatus returns the current patch status
