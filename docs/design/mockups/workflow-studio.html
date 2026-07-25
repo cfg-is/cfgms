@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CFGMS Workflow Studio — mockup</title>
+<!--
+  CFGMS Workflow Studio — design baseline mockup (Epic #2859, workflow surface).
+  Browse/run/schedule overlay drawer + full DAG flowchart builder.
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of
+  truth). Standalone, interactive: top bar toggles View (Browse & run / Editor),
+  Run state (Running / Idle / Failed), and Theme (Auto / Light / Dark).
+-->
+<style>*{margin:0}html,body{margin:0}</style>
+</head>
+<body>
+<style>
+/* ============================================================================
+   CFGMS Workflow Studio — mockup
+   Tokens copied verbatim from docs/design/web-ui-design-tokens.css (source of
+   truth). "A warm terminal": warm grounds, taupe text, slate-blue accent for
+   INTERACTION ONLY, earth-tone semantics, mono carries all machine data.
+   ========================================================================== */
+:root{
+  --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+  --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+  --accent:#4a6b7c; --accent-ink:#ffffff; --accent-weak:#e6eef2;
+  --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#8f4f2e; --state-warn-bg:#f7e8db;
+  --state-crit:#965044; --state-crit-bg:#f2e5e3; --state-mauve:#7a5f6e; --state-neutral:#6b5c4d; --state-neutral-bg:#e8e0d8;
+  --tint-red:#f2e5e3; --tint-green:#e8f0e9; --tint-orange:#f7e8db; --tint-blue:#e6eef2; --tint-brown:#e8e0d8; --tint-cream:#faf8f5;
+  --font-sans:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,"SF Mono","SFMono-Regular",Menlo,monospace;
+  --grid-dot:rgba(107,90,74,.14);
+  --shadow:0 18px 50px -22px rgba(60,45,30,.40); --pop-sh:0 12px 34px -14px rgba(60,45,30,.42);
+  --tracking-label:.09em;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#31313a; --bg-sunk:#101010; --border:#52525c;
+  --text-primary:#c8b8a6; --text-secondary:#a89888; --text-faint:#9a8974;
+  --accent:#7b9fb0; --accent-ink:#16202a; --accent-weak:#1e2b33;
+  --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#d4864f; --state-warn-bg:#332518;
+  --state-crit:#d0846f; --state-crit-bg:#2d1f1c; --state-mauve:#a58198; --state-neutral:#a89888; --state-neutral-bg:#2a2520;
+  --tint-red:#2d1f1c; --tint-green:#1a2e1d; --tint-orange:#332518; --tint-blue:#1e2528; --tint-brown:#2a2520; --tint-cream:#252321;
+  --grid-dot:rgba(200,184,166,.10);
+  --shadow:0 22px 60px -26px rgba(0,0,0,.80); --pop-sh:0 16px 40px -18px rgba(0,0,0,.7);
+}}
+:root[data-theme="light"]{
+  --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+  --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+  --accent:#4a6b7c; --accent-ink:#ffffff; --accent-weak:#e6eef2;
+  --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#8f4f2e; --state-warn-bg:#f7e8db;
+  --state-crit:#965044; --state-crit-bg:#f2e5e3; --state-mauve:#7a5f6e; --state-neutral:#6b5c4d; --state-neutral-bg:#e8e0d8;
+  --tint-red:#f2e5e3; --tint-green:#e8f0e9; --tint-orange:#f7e8db; --tint-blue:#e6eef2; --tint-brown:#e8e0d8; --tint-cream:#faf8f5;
+  --grid-dot:rgba(107,90,74,.14); --shadow:0 18px 50px -22px rgba(60,45,30,.40); --pop-sh:0 12px 34px -14px rgba(60,45,30,.42);
+}
+:root[data-theme="dark"]{
+  --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#31313a; --bg-sunk:#101010; --border:#52525c;
+  --text-primary:#c8b8a6; --text-secondary:#a89888; --text-faint:#9a8974;
+  --accent:#7b9fb0; --accent-ink:#16202a; --accent-weak:#1e2b33;
+  --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#d4864f; --state-warn-bg:#332518;
+  --state-crit:#d0846f; --state-crit-bg:#2d1f1c; --state-mauve:#a58198; --state-neutral:#a89888; --state-neutral-bg:#2a2520;
+  --tint-red:#2d1f1c; --tint-green:#1a2e1d; --tint-orange:#332518; --tint-blue:#1e2528; --tint-brown:#2a2520; --tint-cream:#252321;
+  --grid-dot:rgba(200,184,166,.10); --shadow:0 22px 60px -26px rgba(0,0,0,.80); --pop-sh:0 16px 40px -18px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box;}
+.wfx-root{ font-family:var(--font-sans); font-size:13.5px; line-height:1.45; color:var(--text-primary);
+  background:var(--bg-primary); min-height:100dvh; -webkit-font-smoothing:antialiased; }
+.wfx-root .mono{font-family:var(--font-mono); font-variant-numeric:tabular-nums;}
+.lbl{font-size:10px; letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.dot{width:7px; height:7px; border-radius:50%; background:currentColor; flex:none;}
+button{font:inherit; cursor:pointer;}
+
+/* pills */
+.pill{display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:600; white-space:nowrap;}
+.pill.ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill.warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill.crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill.neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.pill.acc{background:var(--accent); color:var(--accent-ink);}
+
+/* buttons */
+.wf-btn{border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); border-radius:9px; padding:8px 15px; font-size:12.5px; font-weight:600;}
+.wf-btn:hover{filter:brightness(1.06);}
+.wf-btn-secondary{border:1px solid var(--border); background:transparent; color:var(--text-secondary); border-radius:9px; padding:8px 15px; font-size:12.5px; font-weight:600;}
+.wf-btn-secondary:hover{background:var(--bg-elevated); color:var(--text-primary);}
+.wf-btn-danger{border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit); border-radius:9px; padding:8px 15px; font-size:12.5px; font-weight:600;}
+.wf-btn-sm{border:1px solid var(--border); background:transparent; color:var(--text-secondary); border-radius:7px; padding:4px 9px; font-size:11px; font-weight:600;}
+.wf-btn-sm:hover{border-color:var(--accent); color:var(--accent);}
+.icobtn{border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); border-radius:9px; width:32px; height:32px; display:grid; place-items:center; flex:none;}
+.icobtn:hover{color:var(--accent); border-color:var(--accent);}
+:where(button,a,input,select,[tabindex]):focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+/* segmented control (demo bar + tabs) */
+.seg{display:inline-flex; position:relative; background:var(--bg-elevated); border:1px solid var(--border); border-radius:9px; padding:3px;}
+.seg button{position:relative; z-index:1; border:0; background:transparent; color:var(--text-secondary); font-size:12px; font-weight:600; padding:6px 12px; border-radius:6px; transition:color .18s;}
+.seg button.on{color:var(--accent-ink);}
+.seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); border-radius:6px; background:var(--accent); transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+
+/* ---- demo/harness bar ---- */
+.wfx-demobar{position:sticky; top:0; z-index:40; display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  padding:9px 16px; background:var(--bg-elevated); border-bottom:1px solid var(--border);}
+.wfx-demobar .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+.wfx-demobar .brand b{font-size:13px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+.wfx-demobar .brand span{font-size:11px; color:var(--text-faint); letter-spacing:.04em;}
+.wfx-demobar .dlab{font-size:10px; letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600; margin-right:-6px;}
+
+/* ============================ APP SHELL (browse) ========================== */
+.wfx-app{display:grid; grid-template-columns:228px 1fr; min-height:calc(100dvh - 44px);}
+.side{background:var(--bg-surface); border-right:1px solid var(--border); display:flex; flex-direction:column; padding:14px 12px;}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:6px 8px 14px;}
+.side .logo b{font-size:14px; letter-spacing:.14em; text-transform:uppercase; font-weight:700;}
+.side .logo i{font-size:10.5px; font-style:normal; color:var(--text-faint); letter-spacing:.04em;}
+.side nav{display:flex; flex-direction:column; gap:2px;}
+.side nav a{display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:8px; color:var(--text-secondary); text-decoration:none; font-size:13px; font-weight:500;}
+.side nav a .ico{width:15px; height:15px; opacity:.75; flex:none;}
+.side nav a:hover{background:var(--bg-elevated);}
+.side nav a.active{background:var(--accent-weak); color:var(--accent); font-weight:600;}
+.side nav a.active .ico{opacity:1;}
+.side .cfoot{margin-top:auto; padding:10px 10px 4px; border-top:1px solid var(--border); display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-faint);}
+
+.wfx-main{display:flex; flex-direction:column; min-width:0;}
+.appbar{position:sticky; top:44px; z-index:20; display:flex; align-items:center; gap:10px; padding:10px 16px; background:var(--bg-primary); border-bottom:1px solid var(--border);}
+.scope{display:flex; align-items:center; gap:8px; padding:6px 11px; border:1px solid var(--border); border-radius:9px; background:var(--bg-surface); font-size:12px;}
+.scope .path{font-family:var(--font-mono); color:var(--text-secondary); font-size:11.5px;}
+.searchbox{flex:1; max-width:420px; padding:7px 12px; border:1px solid var(--border); border-radius:9px; background:var(--bg-surface); color:var(--text-faint); font-size:12.5px;}
+.appbar .spacer{flex:1;}
+.uav{width:32px; height:32px; border-radius:50%; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:11px; font-weight:700; font-family:var(--font-mono);}
+
+.content{padding:18px 20px 40px; display:flex; flex-direction:column; gap:14px; min-width:0;}
+.htitle h1{margin:0; font-size:20px; font-weight:700; letter-spacing:-.01em;}
+.htitle p{margin:3px 0 0; color:var(--text-secondary); font-size:12.5px;}
+
+/* List stays full-width and fixed; the drawer overlays it (asset-shell pattern) —
+   rows never move when the drawer opens or closes. */
+.workspace{display:grid; grid-template-columns:1fr; gap:16px; align-items:start; position:relative;}
+.workspace:not(.drawer-open) .drawer{display:none;}
+
+/* panel + list */
+.panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:13px; overflow:hidden;}
+.ptool{display:flex; align-items:center; gap:9px; padding:11px 14px; border-bottom:1px solid var(--border);}
+.ptool .cnt{margin-left:auto; font-size:11.5px; color:var(--text-faint); font-family:var(--font-mono);}
+table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+.tbl th{font-size:10px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); font-weight:600; text-align:left; padding:9px 14px; border-bottom:1px solid var(--border);}
+.tbl td{padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle;}
+.tbl tr:last-child td{border-bottom:0;}
+.tbl tbody tr{cursor:pointer;}
+.tbl tbody tr:hover td{background:var(--bg-elevated);}
+.tbl tbody tr.selected td{background:var(--accent-weak);}
+.tbl tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 var(--accent);}
+.nm{font-family:var(--font-mono); font-weight:600; font-size:12.5px;}
+.mut{color:var(--text-faint);}
+.chips{display:flex; gap:5px; flex-wrap:wrap;}
+.chip{display:inline-flex; align-items:center; gap:5px; font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:20px; background:var(--bg-elevated); color:var(--text-secondary); border:1px solid var(--border);}
+.chip .mono{font-size:10px;}
+.toggle{width:34px; height:19px; border-radius:20px; background:var(--state-neutral-bg); position:relative; border:1px solid var(--border); flex:none;}
+.toggle::after{content:""; position:absolute; top:1px; left:1px; width:15px; height:15px; border-radius:50%; background:var(--bg-surface); box-shadow:0 1px 2px rgba(0,0,0,.2); transition:transform .18s;}
+.toggle.on{background:var(--accent); border-color:var(--accent);}
+.toggle.on::after{transform:translateX(15px);}
+.runcell{display:flex; align-items:center; gap:8px;}
+.runcell .t{font-size:11px; color:var(--text-faint); font-family:var(--font-mono);}
+
+/* ============================ ASSET DRAWER ================================ */
+.drawer{background:var(--bg-surface); border:1px solid var(--border); border-radius:13px; box-shadow:var(--shadow); display:flex; flex-direction:column; overflow:hidden;
+  position:absolute; top:0; right:0; width:min(430px, calc(100% - 16px)); z-index:6;
+  animation:wfx-slidein .24s cubic-bezier(.4,.9,.3,1);}
+@keyframes wfx-slidein{from{transform:translateX(14px); opacity:0;} to{transform:translateX(0); opacity:1;}}
+.drawer .dhead{padding:13px 15px; border-bottom:1px solid var(--border);}
+.drawer .dhead .top{display:flex; align-items:center; gap:9px;}
+.drawer .dhead h2{margin:0; font-size:17px; font-weight:700; font-family:var(--font-mono);}
+.drawer .dhead .meta{margin-top:5px; font-size:11px; color:var(--text-faint); font-family:var(--font-mono);}
+.drawer .dhead .acts{margin-left:auto; display:flex; gap:6px;}
+.dtabs{display:flex; gap:2px; padding:0 12px; border-bottom:1px solid var(--border);}
+.dtabs button{border:0; background:transparent; color:var(--text-secondary); font-size:12.5px; font-weight:600; padding:11px 12px; border-bottom:2px solid transparent; margin-bottom:-1px;}
+.dtabs button.on{color:var(--accent); border-bottom-color:var(--accent);}
+.dbody{overflow:auto; padding:15px; display:flex; flex-direction:column; gap:14px;}
+.dpane{display:none; flex-direction:column; gap:14px;}
+.dpane.on{display:flex;}
+
+.field{display:flex; flex-direction:column; gap:5px;}
+.field > .lbl{display:flex; align-items:center; gap:6px;}
+.field .req{color:var(--accent);}
+.field input,.field select,.field textarea{width:100%; padding:8px 11px; border:1px solid var(--border); border-radius:9px; background:var(--bg-primary); color:var(--text-primary); font-size:12.5px; font-family:inherit;}
+.field .hint{font-size:10.5px; color:var(--text-faint);}
+.field.inline{flex-direction:row; align-items:center; justify-content:space-between;}
+.formgrid{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+.sectlabel{display:flex; align-items:center; gap:8px;}
+.sectlabel::after{content:""; flex:1; height:1px; background:var(--border);}
+.rowacts{display:flex; gap:8px;}
+
+/* recent runs / live */
+.runlist{display:flex; flex-direction:column; gap:8px;}
+.runrow{display:flex; align-items:center; gap:10px; padding:9px 11px; border:1px solid var(--border); border-radius:10px; background:var(--bg-primary);}
+.runrow.live{border-color:var(--accent); background:var(--accent-weak);}
+.runrow .rid{font-family:var(--font-mono); font-size:11.5px; font-weight:600;}
+.runrow .rt{font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint); margin-left:auto;}
+.livedot{width:8px; height:8px; border-radius:50%; background:var(--accent); position:relative; flex:none;}
+.livedot::after{content:""; position:absolute; inset:-4px; border-radius:50%; border:1.5px solid var(--accent); opacity:.5; animation:wfx-pulse 1.8s ease-out infinite;}
+@keyframes wfx-pulse{0%{transform:scale(.6); opacity:.6;} 100%{transform:scale(1.5); opacity:0;}}
+.progress{height:5px; border-radius:3px; background:var(--bg-elevated); overflow:hidden; border:1px solid var(--border);}
+.progress > i{display:block; height:100%; background:var(--accent); border-radius:3px;}
+
+/* read-only flow preview (vertical) */
+.flowmini{display:flex; flex-direction:column;}
+.fstep{display:grid; grid-template-columns:24px 1fr; gap:11px; padding:7px 0; position:relative;}
+.fstep:not(:last-child)::before{content:""; position:absolute; left:11px; top:26px; bottom:-7px; width:1.5px; background:var(--border);}
+.fnico{width:24px; height:24px; border-radius:7px; display:grid; place-items:center; font-family:var(--font-mono); font-size:9px; font-weight:700; border:1px solid var(--border);}
+.fnico.trig{background:var(--accent-weak); color:var(--accent); border-color:var(--accent);}
+.fnico.script{background:var(--tint-brown); color:var(--text-secondary);}
+.fnico.gate{background:var(--tint-orange); color:var(--state-warn); border-color:var(--state-warn);}
+.fnico.wait{background:var(--tint-orange); color:var(--state-warn); border-color:var(--state-warn);}
+.fnico.module{background:var(--tint-green); color:var(--state-ok); border-color:var(--state-ok);}
+.fnico.cond{background:var(--tint-blue); color:var(--accent);}
+.fnico.notify{background:var(--tint-blue); color:var(--accent);}
+.fstep .fn{font-family:var(--font-mono); font-size:12px; font-weight:600;}
+.fstep .fd{font-size:10.5px; color:var(--text-faint);}
+
+/* ============================ EDITOR ===================================== */
+.wfx-editor{display:none; flex-direction:column; height:calc(100dvh - 44px);}
+.wfx-root[data-mode="editor"] .wfx-app{display:none;}
+.wfx-root[data-mode="editor"] .wfx-editor{display:flex;}
+.wfx-root[data-mode="browse"] .wfx-editor{display:none;}
+
+.editbar{display:flex; align-items:center; gap:12px; padding:9px 14px; background:var(--bg-surface); border-bottom:1px solid var(--border); flex:none;}
+.editbar .back{display:flex; align-items:center; gap:8px;}
+.editbar .wfname{font-family:var(--font-mono); font-weight:700; font-size:14px;}
+.editbar .ver{font-family:var(--font-mono); font-size:11px; color:var(--text-faint);}
+.editbar .valid{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--state-ok); font-weight:600;}
+.editbar .spacer{flex:1;}
+.editstage{flex:1; display:grid; grid-template-columns:288px 1fr 320px; min-height:0; transition:grid-template-columns .24s cubic-bezier(.4,.9,.3,1);}
+.wfx-editor[data-left="collapsed"] .editstage{grid-template-columns:48px 1fr 320px;}
+.wfx-editor[data-right="collapsed"] .editstage{grid-template-columns:288px 1fr 46px;}
+.wfx-editor[data-left="collapsed"][data-right="collapsed"] .editstage{grid-template-columns:48px 1fr 46px;}
+
+/* editor left drawer (scheduler + inputs) */
+.edrawer{background:var(--bg-surface); border-right:1px solid var(--border); display:flex; flex-direction:column; min-width:0; overflow:hidden;}
+.edrawer .edh{display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--border);}
+.edrawer .edh b{font-size:12px; font-weight:700;}
+.edrawer .edh .icobtn{margin-left:auto; width:26px; height:26px;}
+.edrawer .edbody{overflow:auto; padding:13px; display:flex; flex-direction:column; gap:14px;}
+.edrawer .rail{display:none; flex-direction:column; align-items:center; gap:14px; padding:12px 0;}
+.edrawer .rail .icobtn{width:30px; height:30px;}
+.wfx-editor[data-left="collapsed"] .edrawer .edbody,
+.wfx-editor[data-left="collapsed"] .edrawer .edh b,
+.wfx-editor[data-left="collapsed"] .edrawer .edh .htext{display:none;}
+.wfx-editor[data-left="collapsed"] .edrawer .rail{display:flex;}
+.wfx-editor[data-left="collapsed"] .edrawer .edh{justify-content:center; padding:11px 0;}
+.wfx-editor[data-left="collapsed"] .edrawer .edh .icobtn{margin:0;}
+
+.trigcard{border:1px solid var(--border); border-radius:10px; padding:10px 11px; display:flex; flex-direction:column; gap:7px; background:var(--bg-primary);}
+.trigcard .th{display:flex; align-items:center; gap:8px;}
+.trigcard .tn{font-family:var(--font-mono); font-size:12px; font-weight:600;}
+.trigcard .cronline{font-family:var(--font-mono); font-size:11px; color:var(--text-secondary); background:var(--bg-sunk); border:1px solid var(--border); border-radius:7px; padding:5px 8px;}
+.trigcard .tacts{display:flex; gap:6px; margin-left:auto;}
+
+/* canvas */
+.canvaswrap{position:relative; overflow:hidden; background:var(--bg-primary);}
+.canvasscroll{position:absolute; inset:0; overflow:auto;}
+.canvas{position:relative; width:1500px; height:640px;
+  background:radial-gradient(var(--grid-dot) 1.4px, transparent 1.4px); background-size:22px 22px;}
+.canvas svg.links{position:absolute; inset:0; width:1500px; height:640px; pointer-events:none;}
+.canvas svg.links path{fill:none; stroke:var(--border); stroke-width:2;}
+.canvas svg.links path.done{stroke:var(--state-ok);}
+.canvas svg.links path.active{stroke:var(--accent); stroke-dasharray:6 5; animation:wfx-dash 1s linear infinite;}
+.canvas svg.links path.pend{stroke:var(--border); stroke-dasharray:4 5; opacity:.6;}
+@keyframes wfx-dash{to{stroke-dashoffset:-22;}}
+
+.node{position:absolute; width:150px; background:var(--bg-surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 6px 16px -12px rgba(60,45,30,.5); overflow:visible;}
+.node .nhead{display:flex; align-items:center; gap:9px; padding:9px 11px 8px;}
+.node .nico{width:26px; height:26px; border-radius:8px; display:grid; place-items:center; font-family:var(--font-mono); font-size:9px; font-weight:700; border:1px solid var(--border); flex:none;}
+.node .nttl{font-family:var(--font-mono); font-size:12px; font-weight:600; line-height:1.2;}
+.node .ntype{font-size:9.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.node .nfoot{padding:0 11px 9px; font-size:10.5px; color:var(--text-secondary); font-family:var(--font-mono);}
+.node .port{position:absolute; width:11px; height:11px; border-radius:50%; background:var(--bg-surface); border:2px solid var(--border); top:calc(50% - 5.5px);}
+.node .port.in{left:-6px;} .node .port.out{right:-6px;}
+.node .port.out.p1{top:22px;} .node .port.out.p2{top:auto; bottom:16px;}
+.node .plabel{position:absolute; right:-4px; font-size:8.5px; font-weight:700; color:var(--text-faint); font-family:var(--font-mono);}
+
+/* node type tints */
+.nico.trig{background:var(--accent-weak); color:var(--accent); border-color:var(--accent);}
+.nico.script{background:var(--tint-brown); color:var(--text-secondary);}
+.nico.gate{background:var(--tint-orange); color:var(--state-warn); border-color:var(--state-warn);}
+.nico.cond{background:var(--tint-blue); color:var(--accent); border-color:var(--accent);}
+.nico.module{background:var(--tint-green); color:var(--state-ok); border-color:var(--state-ok);}
+.nico.wait{background:var(--tint-orange); color:var(--state-warn); border-color:var(--state-warn);}
+.nico.notify{background:var(--tint-blue); color:var(--accent);}
+.node.trig-node{border-color:var(--accent);}
+
+/* run states on nodes */
+.node .badge{position:absolute; top:-8px; left:-8px; width:19px; height:19px; border-radius:50%; display:grid; place-items:center; font-size:10px; font-weight:800; border:2px solid var(--bg-surface);}
+.node.done .badge{background:var(--state-ok); color:#fff;}
+.node.done{border-color:var(--state-ok-bg);}
+.node.running{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak), 0 8px 20px -10px rgba(74,107,124,.6);}
+.node.running .badge{background:var(--accent); color:var(--accent-ink);}
+.node.failed{border-color:var(--state-crit);}
+.node.failed .badge{background:var(--state-crit); color:#fff;}
+.node.pending{opacity:.6; border-style:dashed;}
+.wfx-editor:not([data-run]) .node .badge{display:none;}
+.node.selected{outline:2px solid var(--accent); outline-offset:2px;}
+
+/* node palette */
+.palette{position:absolute; top:14px; left:14px; background:var(--bg-surface); border:1px solid var(--border); border-radius:11px; box-shadow:var(--pop-sh); padding:8px; display:flex; flex-direction:column; gap:4px; width:172px; z-index:3;}
+.palette .ph{padding:2px 4px 6px;}
+.palette .pitem{display:flex; align-items:center; gap:9px; padding:6px 7px; border-radius:8px; font-size:11.5px; color:var(--text-secondary);}
+.palette .pitem:hover{background:var(--bg-elevated); color:var(--text-primary);}
+.palette .pitem .nico{width:22px; height:22px; border-radius:6px; font-size:8px;}
+
+/* canvas floating controls */
+.canvctl{position:absolute; bottom:16px; right:16px; display:flex; gap:6px; z-index:3;}
+.canvctl .icobtn{background:var(--bg-surface); box-shadow:var(--pop-sh);}
+.runbar{position:absolute; bottom:16px; left:14px; z-index:3; display:flex; align-items:center; gap:10px; background:var(--bg-surface); border:1px solid var(--border); border-radius:11px; box-shadow:var(--pop-sh); padding:8px 12px;}
+.runbar .rl{font-size:11.5px; color:var(--text-secondary);}
+.runbar.hidden{display:none;}
+
+/* editor right drawer (YAML) */
+.ydrawer{background:var(--bg-surface); border-left:1px solid var(--border); display:flex; flex-direction:column; min-width:0; overflow:hidden;}
+.ydrawer .ydh{display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--border);}
+.ydrawer .ydh b{font-size:12px; font-weight:700;}
+.ydrawer .ydh .icobtn{margin-left:auto; width:26px; height:26px;}
+.ydrawer .ybody{overflow:auto; padding:12px 14px; background:var(--bg-sunk); flex:1;}
+.ydrawer pre{margin:0; font-family:var(--font-mono); font-size:11.5px; line-height:1.65; color:var(--text-secondary); white-space:pre; tab-size:2;}
+.ycode{font-family:var(--font-mono); font-size:11.5px; line-height:1.75; color:var(--text-secondary); width:max-content; min-width:100%;}
+.yrow{display:flex; align-items:stretch;}
+.yrow:hover{background:var(--bg-elevated);}
+.yg{flex:none; width:20px; text-align:right; padding-right:12px; color:var(--text-faint); opacity:.5; user-select:none;}
+.yind{flex:none; width:2ch; border-left:1px solid color-mix(in srgb, var(--border) 70%, transparent);}
+.yrow:hover .yind{border-left-color:var(--accent);}
+.ytx{white-space:pre;}
+.ydrawer .rail{display:none; flex-direction:column; align-items:center; padding:12px 0;}
+.wfx-editor[data-right="collapsed"] .ydrawer .ybody, .wfx-editor[data-right="collapsed"] .ydrawer .ydh b{display:none;}
+.wfx-editor[data-right="collapsed"] .ydrawer .rail{display:flex;}
+.wfx-editor[data-right="collapsed"] .ydrawer .ydh{justify-content:center; padding:11px 0;}
+.wfx-editor[data-right="collapsed"] .ydrawer .ydh .icobtn{margin:0;}
+.yk{color:var(--accent);} .ys{color:var(--state-ok);} .yc{color:var(--text-faint); font-style:italic;} .yn{color:var(--state-mauve);}
+
+/* vertical writing for collapsed rail labels */
+.railtxt{writing-mode:vertical-rl; text-orientation:mixed; font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--text-faint); font-weight:600; margin-top:10px;}
+
+@media (max-width:1120px){
+  .editstage{grid-template-columns:240px 1fr 0;}
+}
+@media (max-width:820px){
+  .wfx-app{grid-template-columns:1fr;} .side{display:none;}
+}
+@media (prefers-reduced-motion:reduce){
+  .livedot::after,.canvas svg.links path.active,.drawer{animation:none;}
+  *{transition:none !important;}
+}
+</style>
+
+<div class="wfx-root" id="root" data-mode="browse">
+
+  <!-- ===================== demo / harness bar ===================== -->
+  <div class="wfx-demobar">
+    <div class="brand"><b>CFGMS</b><span>workflow studio · design mockup</span></div>
+    <span class="dlab">View</span>
+    <div class="seg" id="modeSeg" role="group" aria-label="View mode">
+      <span class="thumb"></span>
+      <button data-mode="browse" class="on">Browse &amp; run</button>
+      <button data-mode="editor">Editor</button>
+    </div>
+    <span class="dlab">Run</span>
+    <div class="seg" id="runSeg" role="group" aria-label="Run state">
+      <span class="thumb"></span>
+      <button data-run="running" class="on">Running</button>
+      <button data-run="idle">Idle</button>
+      <button data-run="failed">Failed</button>
+    </div>
+    <span class="dlab">Theme</span>
+    <div class="seg" id="themeSeg" role="group" aria-label="Theme">
+      <span class="thumb"></span>
+      <button data-theme-mode="auto" class="on">Auto</button>
+      <button data-theme-mode="light">Light</button>
+      <button data-theme-mode="dark">Dark</button>
+    </div>
+  </div>
+
+  <!-- ============================ BROWSE MODE ============================ -->
+  <div class="wfx-app">
+    <aside class="side">
+      <div class="logo"><b>CFGMS</b><i>controller</i></div>
+      <nav>
+        <a href="#"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>Fleet</a>
+        <a href="#"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg>Modules</a>
+        <a href="#"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10M3 8h10M3 12h6"/></svg>Config</a>
+        <a href="#" class="active"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><path d="M4 6v2a2 2 0 002 2h4a2 2 0 002-2V6M8 10v0"/></svg>Workflows</a>
+        <a href="#"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 3h10v10H3zM6 6h4M6 9h4"/></svg>Audit</a>
+        <a href="#"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5" r="2.4"/><path d="M3.5 13a4.5 4.5 0 019 0"/></svg>Accounts</a>
+      </nav>
+      <div class="cfoot"><span class="dot" style="color:var(--state-ok)"></span>controller · healthy</div>
+    </aside>
+
+    <div class="wfx-main">
+      <div class="appbar">
+        <div class="scope">scope <span class="path">root / msp-a / client-1</span></div>
+        <div class="searchbox">Search workflows, runs, triggers…</div>
+        <div class="spacer"></div>
+        <button class="icobtn" aria-label="Notifications"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 6a4 4 0 118 0c0 3 1 4 1 4H3s1-1 1-4zM6.5 13a1.5 1.5 0 003 0"/></svg></button>
+        <div class="uav">AD</div>
+      </div>
+
+      <div class="content">
+        <div class="htitle">
+          <h1>Workflows</h1>
+          <p>Author, schedule, and run automations. Select a workflow to run it or open the builder.</p>
+        </div>
+
+        <div class="workspace drawer-open" id="workspace">
+          <!-- list -->
+          <section class="panel">
+            <div class="ptool">
+              <button class="wf-btn">+ New workflow</button>
+              <button class="wf-btn-secondary">Import YAML</button>
+              <span class="cnt">5 workflows</span>
+            </div>
+            <table class="tbl">
+              <thead><tr><th>Workflow</th><th>Triggers</th><th>Steps</th><th>Last run</th><th style="text-align:center">Enabled</th></tr></thead>
+              <tbody id="wfrows">
+                <tr class="selected" data-wf="onboard-user">
+                  <td><span class="nm">onboard-user</span><div class="mut" style="font-size:11px;margin-top:2px">Create user on the DC, sync to Entra, license via M365, copy an example user's groups</div></td>
+                  <td><div class="chips"><span class="chip">webhook</span><span class="chip">manual</span></div></td>
+                  <td><span class="mono">10</span></td>
+                  <td><div class="runcell"><span class="pill acc"><span class="livedot" style="background:var(--accent-ink)"></span>running</span><span class="t">2m</span></div></td>
+                  <td style="text-align:center"><span class="toggle on"></span></td>
+                </tr>
+                <tr data-wf="offboard-user">
+                  <td><span class="nm">offboard-user</span><div class="mut" style="font-size:11px;margin-top:2px">Disable account, revoke sessions, reclaim license, convert mailbox to shared</div></td>
+                  <td><div class="chips"><span class="chip">webhook</span></div></td>
+                  <td><span class="mono">7</span></td>
+                  <td><div class="runcell"><span class="pill ok"><span class="dot"></span>completed</span><span class="t">1h</span></div></td>
+                  <td style="text-align:center"><span class="toggle on"></span></td>
+                </tr>
+                <tr data-wf="license-reclaim">
+                  <td><span class="nm">license-reclaim</span><div class="mut" style="font-size:11px;margin-top:2px">Find M365 licenses unused 30+ days and release the seats</div></td>
+                  <td><div class="chips"><span class="chip">schedule <span class="mono">0 6 * * 1</span></span></div></td>
+                  <td><span class="mono">4</span></td>
+                  <td><div class="runcell"><span class="pill ok"><span class="dot"></span>completed</span><span class="t">1d</span></div></td>
+                  <td style="text-align:center"><span class="toggle on"></span></td>
+                </tr>
+                <tr data-wf="dist-group-sync">
+                  <td><span class="nm">dist-group-sync</span><div class="mut" style="font-size:11px;margin-top:2px">Reconcile distribution groups from the HR roster</div></td>
+                  <td><div class="chips"><span class="chip">schedule <span class="mono">*/30 * *</span></span></div></td>
+                  <td><span class="mono">3</span></td>
+                  <td><div class="runcell"><span class="pill crit"><span class="dot"></span>failed</span><span class="t">12m</span></div></td>
+                  <td style="text-align:center"><span class="toggle on"></span></td>
+                </tr>
+                <tr data-wf="guest-access-review">
+                  <td><span class="nm">guest-access-review</span><div class="mut" style="font-size:11px;margin-top:2px">Quarterly review of Entra guest accounts and stale access</div></td>
+                  <td><div class="chips"><span class="chip">manual</span></div></td>
+                  <td><span class="mono">5</span></td>
+                  <td><div class="runcell"><span class="pill neutral"><span class="dot"></span>draft</span><span class="t">—</span></div></td>
+                  <td style="text-align:center"><span class="toggle"></span></td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <!-- asset-style drawer -->
+          <aside class="drawer" id="drawer">
+            <div class="dhead">
+              <div class="top">
+                <h2>onboard-user</h2>
+                <div class="acts">
+                  <button class="wf-btn-sm" id="expandBtn" title="Open builder">⤢ Open builder</button>
+                  <button class="icobtn" id="drawerClose" aria-label="Close" style="width:28px;height:28px">✕</button>
+                </div>
+              </div>
+              <div class="meta">v1.5.0 · root / msp-a / client-1 · updated 3d ago</div>
+            </div>
+            <div class="dtabs" id="dtabs">
+              <button data-pane="run" class="on">Run</button>
+              <button data-pane="schedule">Schedule</button>
+              <button data-pane="preview">What it does</button>
+            </div>
+            <div class="dbody">
+              <!-- RUN pane -->
+              <div class="dpane on" data-pane="run">
+                <div class="runrow live">
+                  <span class="livedot"></span>
+                  <div style="display:flex;flex-direction:column;gap:3px;min-width:0;flex:1">
+                    <div style="display:flex;align-items:center;gap:8px"><span class="rid">run-8f21ac</span><span class="pill acc" style="padding:2px 8px">step 6 / 10</span><span class="rt">started 2m ago</span></div>
+                    <div class="progress"><i style="width:58%"></i></div>
+                    <div class="mono" style="font-size:10.5px;color:var(--text-faint)">▸ await-provision · polling M365 for jappleseed (3 / 20)</div>
+                  </div>
+                  <button class="wf-btn-sm" style="border-color:var(--state-crit);color:var(--state-crit)">Cancel</button>
+                </div>
+
+                <div class="sectlabel"><span class="lbl">Run inputs</span></div>
+                <div class="formgrid">
+                  <div class="field">
+                    <span class="lbl">display_name <span class="req">*</span></span>
+                    <input value="Johnny Appleseed">
+                  </div>
+                  <div class="field">
+                    <span class="lbl">sam_account <span class="req">*</span></span>
+                    <input value="jappleseed" class="mono">
+                  </div>
+                  <div class="field" style="grid-column:1/-1">
+                    <span class="lbl">license_sku</span>
+                    <select><option>Microsoft 365 Business Premium</option><option>Microsoft 365 Business Standard</option><option>Office 365 E3</option></select>
+                  </div>
+                  <div class="field" style="grid-column:1/-1">
+                    <span class="lbl">copy_groups_from <span class="req">*</span></span>
+                    <input value="bdavis" class="mono">
+                    <span class="hint">Mirror this user's group membership onto the new account</span>
+                  </div>
+                  <div class="field inline" style="grid-column:1/-1">
+                    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">buy_seat_if_unavailable</span><span class="hint">Purchase a seat from Pax8 if none is free</span></div>
+                    <span class="toggle on"></span>
+                  </div>
+                </div>
+                <div class="rowacts">
+                  <button class="wf-btn">Run now</button>
+                  <button class="wf-btn-secondary">Save as scheduled…</button>
+                </div>
+
+                <div class="sectlabel"><span class="lbl">Recent runs</span></div>
+                <div class="runlist">
+                  <div class="runrow"><span class="dot" style="color:var(--state-ok)"></span><span class="rid">run-7c04b1</span><span class="pill ok" style="padding:2px 8px">completed</span><span class="rt">1d ago · kmorales</span></div>
+                  <div class="runrow"><span class="dot" style="color:var(--state-ok)"></span><span class="rid">run-6a91de</span><span class="pill ok" style="padding:2px 8px">completed</span><span class="rt">2d ago · tnguyen</span></div>
+                  <div class="runrow"><span class="dot" style="color:var(--state-crit)"></span><span class="rid">run-5f70ab</span><span class="pill crit" style="padding:2px 8px">failed</span><span class="rt">3d ago · await-provision timeout</span></div>
+                </div>
+              </div>
+
+              <!-- SCHEDULE pane -->
+              <div class="dpane" data-pane="schedule">
+                <div class="sectlabel"><span class="lbl">Triggers</span><button class="wf-btn-sm">+ Add trigger</button></div>
+                <div class="trigcard">
+                  <div class="th"><span class="fnico notify" style="width:22px;height:22px;border-radius:6px;font-size:8px">HK</span><span class="tn">hook-psa</span><span class="pill ok" style="padding:2px 8px;margin-left:auto"><span class="dot"></span>enabled</span></div>
+                  <div class="cronline">POST /api/v1/hooks/onboard  ·  secret ••••••••</div>
+                  <div style="display:flex;align-items:center;gap:8px"><span class="hint">Fired by the PSA on a "New user" ticket</span><div class="tacts"><button class="wf-btn-sm">Edit</button><button class="wf-btn-sm">Disable</button></div></div>
+                </div>
+                <div class="trigcard">
+                  <div class="th"><span class="fnico trig" style="width:22px;height:22px;border-radius:6px;font-size:8px">MAN</span><span class="tn">manual</span><span class="pill ok" style="padding:2px 8px;margin-left:auto"><span class="dot"></span>allowed</span></div>
+                  <div class="cronline">operators may run ad-hoc from this drawer</div>
+                  <div style="display:flex;align-items:center;gap:8px"><span class="hint">Requires the Onboard-user permission</span><div class="tacts"><button class="wf-btn-sm">Edit</button></div></div>
+                </div>
+              </div>
+
+              <!-- PREVIEW pane -->
+              <div class="dpane" data-pane="preview">
+                <div class="sectlabel"><span class="lbl">What it does</span><button class="wf-btn-sm" id="expandBtn2">Open builder ⤢</button></div>
+                <div class="flowmini">
+                  <div class="fstep"><span class="fnico trig">HK</span><div><div class="fn">on webhook / manual</div><div class="fd">fans out into 3 parallel branches</div></div></div>
+                  <div class="fstep"><span class="fnico module">MD</span><div><div class="fn">A · create-ad-user → entra-sync</div><div class="fd">create on the DC, push to Entra</div></div></div>
+                  <div class="fstep"><span class="fnico module">MD</span><div><div class="fn">B · check-license → buy-seat</div><div class="fd">buy from Pax8 only if no seat is free</div></div></div>
+                  <div class="fstep"><span class="fnico module">MD</span><div><div class="fn">C · get-source-groups</div><div class="fd">read bdavis's group membership</div></div></div>
+                  <div class="fstep"><span class="fnico wait">WT</span><div><div class="fn">await-provision · join A + B</div><div class="fd">poll until user + license are live</div></div></div>
+                  <div class="fstep"><span class="fnico module">MD</span><div><div class="fn">assign-license</div><div class="fd">m365 — license the new user</div></div></div>
+                  <div class="fstep"><span class="fnico module">MD</span><div><div class="fn">add-to-groups · join + C</div><div class="fd">licensed user → bdavis's groups</div></div></div>
+                  <div class="fstep"><span class="fnico notify">NT</span><div><div class="fn">notify</div><div class="fd">reply on the PSA ticket — ready</div></div></div>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================ EDITOR MODE ============================ -->
+  <div class="wfx-editor" id="editor" data-left="open" data-right="open" data-run="running">
+    <div class="editbar">
+      <div class="back">
+        <button class="icobtn" id="collapseBtn" title="Back to workflows">‹</button>
+        <span class="wfname">onboard-user</span>
+        <span class="ver">v1.5.0</span>
+      </div>
+      <span class="valid"><span class="dot"></span>valid · 10 steps</span>
+      <div class="spacer"></div>
+      <button class="wf-btn-secondary">Validate</button>
+      <button class="wf-btn-secondary">Run ▸</button>
+      <button class="wf-btn">Save</button>
+    </div>
+
+    <div class="editstage">
+      <!-- left: scheduler + inputs -->
+      <aside class="edrawer">
+        <div class="edh"><b class="htext">Schedule &amp; inputs</b><button class="icobtn" id="leftToggle" title="Collapse" aria-label="Collapse left drawer">‹</button></div>
+        <div class="rail"><button class="icobtn" id="leftToggleRail" title="Expand" aria-label="Expand left drawer">›</button><span class="railtxt">Schedule &amp; inputs</span></div>
+        <div class="edbody">
+          <div class="sectlabel"><span class="lbl">Triggers</span><button class="wf-btn-sm">+ Add</button></div>
+          <div class="trigcard">
+            <div class="th"><span class="fnico notify" style="width:22px;height:22px;border-radius:6px;font-size:8px">HK</span><span class="tn">hook-psa</span><span class="toggle on" style="margin-left:auto"></span></div>
+            <div class="cronline">/hooks/onboard</div>
+          </div>
+          <div class="trigcard">
+            <div class="th"><span class="fnico trig" style="width:22px;height:22px;border-radius:6px;font-size:8px">MAN</span><span class="tn">manual</span><span class="toggle on" style="margin-left:auto"></span></div>
+            <div class="cronline">ad-hoc from the run drawer</div>
+          </div>
+          <div class="sectlabel"><span class="lbl">Declared inputs</span></div>
+          <div class="field"><span class="lbl">display_name · string</span><input value="Johnny Appleseed"></div>
+          <div class="field"><span class="lbl">sam_account · string</span><input value="jappleseed" class="mono"></div>
+          <div class="field"><span class="lbl">license_sku · enum</span><select><option>Business Premium</option><option>Business Standard</option><option>Office 365 E3</option></select></div>
+          <div class="field"><span class="lbl">copy_groups_from · string</span><input value="bdavis" class="mono"></div>
+          <div class="field inline"><span class="lbl">buy_seat_if_unavailable</span><span class="toggle on"></span></div>
+          <button class="wf-btn-sm" style="align-self:flex-start">+ Add input</button>
+        </div>
+      </aside>
+
+      <!-- center: flowchart canvas -->
+      <div class="canvaswrap">
+        <div class="palette">
+          <div class="ph lbl">Add node</div>
+          <div class="pitem"><span class="nico module">MD</span>Module / API call</div>
+          <div class="pitem"><span class="nico cond">IF</span>Condition</div>
+          <div class="pitem"><span class="nico wait">WT</span>Wait / poll</div>
+          <div class="pitem"><span class="nico gate">AP</span>Approval gate</div>
+          <div class="pitem"><span class="nico notify">NT</span>Notify</div>
+        </div>
+
+        <div class="canvasscroll" id="canvasscroll">
+        <div class="canvas" id="canvas">
+          <svg class="links" viewBox="0 0 1500 640" preserveAspectRatio="none">
+            <!-- fan-out from start -->
+            <path class="done" d="M170 341 C 195 341, 195 161, 210 161"/>
+            <path class="done" d="M170 341 C 195 341, 195 341, 210 341"/>
+            <path class="done" d="M170 341 C 195 341, 195 531, 210 531"/>
+            <!-- branch A: create -> entra -> await -->
+            <path class="done" d="M360 161 C 385 161, 385 161, 410 161"/>
+            <path class="done" d="M560 161 C 620 161, 620 251, 680 251"/>
+            <!-- branch B: check -> license? -> buy -> await -->
+            <path class="done" d="M360 341 C 385 341, 385 341, 410 341"/>
+            <path d="M560 328 C 620 328, 620 251, 680 251"/>
+            <path class="done" d="M560 358 C 575 358, 545 501, 560 501"/>
+            <path class="done" d="M710 501 C 775 501, 745 251, 680 251"/>
+            <!-- join -> assign -> add-to-groups(join with C) -> notify -->
+            <path class="pend" d="M830 251 C 855 251, 855 251, 880 251"/>
+            <path class="pend" d="M1030 251 C 1062 251, 1062 381, 1090 381"/>
+            <path class="pend" d="M360 531 C 720 531, 760 381, 1090 381"/>
+            <path class="pend" d="M1240 381 C 1265 381, 1265 381, 1300 381"/>
+          </svg>
+
+          <!-- nodes -->
+          <div class="node trig-node done" style="left:20px;top:310px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico trig">HK</span><div><div class="ntype">trigger</div><div class="nttl">start</div></div></div>
+            <div class="nfoot">webhook · manual</div>
+            <span class="port out"></span>
+          </div>
+
+          <!-- branch A: account -->
+          <div class="node done" style="left:210px;top:130px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module · branch A</div><div class="nttl">create-ad-user</div></div></div>
+            <div class="nfoot">directory.ad · DC</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+          <div class="node done" style="left:410px;top:130px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module</div><div class="nttl">entra-sync</div></div></div>
+            <div class="nfoot">directory.entra</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+
+          <!-- branch B: license -->
+          <div class="node done" style="left:210px;top:310px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module · branch B</div><div class="nttl">check-license</div></div></div>
+            <div class="nfoot">m365.license</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+          <div class="node done" style="left:410px;top:310px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico cond">IF</span><div><div class="ntype">condition</div><div class="nttl">license-free?</div></div></div>
+            <div class="nfoot">seat available</div>
+            <span class="port in"></span>
+            <span class="port out p1"></span><span class="plabel" style="top:14px">yes</span>
+            <span class="port out p2"></span><span class="plabel" style="bottom:10px">no</span>
+          </div>
+          <div class="node done" style="left:560px;top:470px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module</div><div class="nttl">buy-seat</div></div></div>
+            <div class="nfoot">pax8.order · 1× seat</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+
+          <!-- branch C: source groups -->
+          <div class="node done" style="left:210px;top:500px">
+            <span class="badge">✓</span>
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module · branch C</div><div class="nttl">get-source-groups</div></div></div>
+            <div class="nfoot">groups of bdavis</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+
+          <!-- join A+B: poll -->
+          <div class="node running" style="left:680px;top:220px">
+            <span class="badge">▸</span>
+            <div class="nhead"><span class="nico wait">WT</span><div><div class="ntype">wait · join A+B</div><div class="nttl">await-provision</div></div></div>
+            <div class="nfoot">user + license · 3/20</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+          <div class="node pending" style="left:880px;top:220px">
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module</div><div class="nttl">assign-license</div></div></div>
+            <div class="nfoot">m365.license</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+
+          <!-- join main+C: add to groups -->
+          <div class="node pending" style="left:1090px;top:350px">
+            <div class="nhead"><span class="nico module">MD</span><div><div class="ntype">module · join +C</div><div class="nttl">add-to-groups</div></div></div>
+            <div class="nfoot">licensed user → groups</div>
+            <span class="port in"></span><span class="port out"></span>
+          </div>
+          <div class="node pending" style="left:1300px;top:350px">
+            <div class="nhead"><span class="nico notify">NT</span><div><div class="ntype">notify</div><div class="nttl">notify</div></div></div>
+            <div class="nfoot">reply on PSA ticket</div>
+            <span class="port in"></span>
+          </div>
+        </div>
+        </div>
+
+        <div class="runbar" id="runbar">
+          <span class="livedot"></span>
+          <span class="rl"><b>Running</b> · run-8f21ac · step 6 / 10 · <span class="mono">await-provision</span> · updated <span class="mono">2s</span> ago</span>
+          <button class="wf-btn-sm" style="border-color:var(--state-crit);color:var(--state-crit)">Cancel run</button>
+        </div>
+        <div class="canvctl">
+          <button class="icobtn">−</button><button class="icobtn">100%</button><button class="icobtn">+</button><button class="icobtn" title="Fit">⤢</button>
+        </div>
+      </div>
+
+      <!-- right: YAML -->
+      <aside class="ydrawer">
+        <div class="ydh"><b>workflow.yaml</b><button class="icobtn" id="rightToggle" title="Collapse" aria-label="Collapse YAML drawer">›</button></div>
+        <div class="rail"><button class="icobtn" id="rightToggleRail" title="Expand" aria-label="Expand YAML drawer">‹</button><span class="railtxt">workflow.yaml</span></div>
+        <div class="ybody">
+          <div class="ycode" id="ycode"></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var root=document.getElementById('root');
+  var editor=document.getElementById('editor');
+
+  function wireSeg(id, apply){
+    var seg=document.getElementById(id); if(!seg) return;
+    var btns=[].slice.call(seg.querySelectorAll('button'));
+    var thumb=seg.querySelector('.thumb');
+    function pos(){var a=btns.filter(function(b){return b.classList.contains('on');})[0]||btns[0];
+      thumb.style.width=a.offsetWidth+'px'; thumb.style.transform='translateX('+(a.offsetLeft-3)+'px)';}
+    btns.forEach(function(b){b.addEventListener('click',function(){
+      btns.forEach(function(x){x.classList.toggle('on',x===b);}); pos(); apply(b);
+    });});
+    requestAnimationFrame(pos); window.addEventListener('resize',pos);
+    return pos;
+  }
+
+  function frameCanvas(){ var s=document.getElementById('canvasscroll'); if(s){ s.scrollLeft=0; s.scrollTop=90; } }
+  wireSeg('modeSeg', function(b){ root.dataset.mode=b.dataset.mode; if(b.dataset.mode==='editor') requestAnimationFrame(frameCanvas); });
+  wireSeg('runSeg', function(b){
+    var s=b.dataset.run;
+    if(s==='idle'){ editor.removeAttribute('data-run'); document.getElementById('runbar').classList.add('hidden'); }
+    else { editor.setAttribute('data-run', s); document.getElementById('runbar').classList.remove('hidden'); }
+  });
+  wireSeg('themeSeg', function(b){
+    var m=b.dataset.themeMode;
+    if(m==='auto') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', m);
+  });
+
+  // drawer tabs
+  var dtabs=document.getElementById('dtabs');
+  if(dtabs){ [].slice.call(dtabs.querySelectorAll('button')).forEach(function(t){
+    t.addEventListener('click',function(){
+      [].slice.call(dtabs.querySelectorAll('button')).forEach(function(x){x.classList.toggle('on',x===t);});
+      [].slice.call(document.querySelectorAll('.dpane')).forEach(function(p){p.classList.toggle('on',p.dataset.pane===t.dataset.pane);});
+    });
+  }); }
+
+  // workflow row selection → open the overlay drawer (list rows never shift)
+  var workspace = document.getElementById('workspace');
+  [].slice.call(document.querySelectorAll('#wfrows tr')).forEach(function(tr){
+    tr.addEventListener('click',function(){
+      [].slice.call(document.querySelectorAll('#wfrows tr')).forEach(function(x){x.classList.toggle('selected',x===tr);});
+      if(workspace) workspace.classList.add('drawer-open');
+    });
+  });
+  var drawerClose = document.getElementById('drawerClose');
+  if(drawerClose) drawerClose.addEventListener('click',function(){
+    if(workspace) workspace.classList.remove('drawer-open');
+    [].slice.call(document.querySelectorAll('#wfrows tr')).forEach(function(x){x.classList.remove('selected');});
+  });
+
+  // mode transitions: expand to editor / back
+  function go(mode){ root.dataset.mode=mode;
+    var seg=document.getElementById('modeSeg');
+    [].slice.call(seg.querySelectorAll('button')).forEach(function(x){x.classList.toggle('on',x.dataset.mode===mode);});
+    var t=seg.querySelector('.thumb'); var a=seg.querySelector('button.on');
+    t.style.width=a.offsetWidth+'px'; t.style.transform='translateX('+(a.offsetLeft-3)+'px)';
+    if(mode==='editor') requestAnimationFrame(frameCanvas);
+  }
+  ['expandBtn','expandBtn2'].forEach(function(id){var el=document.getElementById(id); if(el) el.addEventListener('click',function(){go('editor');});});
+  var cb=document.getElementById('collapseBtn'); if(cb) cb.addEventListener('click',function(){go('browse');});
+
+  // editor drawer collapse
+  function bindCollapse(openId, railId, attr){
+    function toggle(){ editor.dataset[attr]= editor.dataset[attr]==='collapsed'?'open':'collapsed'; }
+    var a=document.getElementById(openId), b=document.getElementById(railId);
+    if(a) a.addEventListener('click',toggle); if(b) b.addEventListener('click',toggle);
+  }
+  bindCollapse('leftToggle','leftToggleRail','left');
+  bindCollapse('rightToggle','rightToggleRail','right');
+
+  // toggles (visual)
+  [].slice.call(document.querySelectorAll('.toggle')).forEach(function(t){
+    t.addEventListener('click',function(){ t.classList.toggle('on'); });
+  });
+
+  // ---- YAML code view: gutter + indent guides + light syntax highlight ----
+  var YAML = [
+    'name: onboard-user',
+    'version: 1.5.0',
+    "description: Create a user across AD + Entra, license via M365, mirror an example user's groups",
+    'inputs:',
+    '  display_name:  { type: string, required: true }',
+    '  sam_account:   { type: string, required: true }',
+    '  license_sku:   { type: enum, default: business_premium }',
+    '  copy_groups_from: { type: string, required: true }',
+    '  buy_seat_if_unavailable: { type: bool, default: true }',
+    'triggers:',
+    '  - name: hook-psa',
+    '    type: webhook',
+    '    path: /hooks/onboard',
+    '    enabled: true',
+    '  - name: manual',
+    '    type: manual',
+    '    enabled: true',
+    'steps:',
+    '  # branch A — create the account',
+    '  - name: create-ad-user',
+    '    type: module',
+    '    module: directory.ad          # on the local DC',
+    '  - name: entra-sync',
+    '    type: module',
+    '    module: directory.entra.delta_sync',
+    '    needs: [create-ad-user]',
+    '  # branch B — ensure a license (runs in parallel)',
+    '  - name: check-license',
+    '    type: module',
+    '    module: m365.license.available',
+    '  - name: license-free?',
+    '    type: condition',
+    '    expr: steps.check-license.count > 0',
+    '    needs: [check-license]',
+    '    else: buy-seat',
+    '  - name: buy-seat',
+    '    type: module',
+    '    module: pax8.order            # only if none free',
+    '    needs: [license-free?]',
+    '  # branch C — source groups (runs in parallel)',
+    '  - name: get-source-groups',
+    '    type: module',
+    '    module: m365.groups.list',
+    '    with: { user: "{{ copy_groups_from }}" }',
+    '  # join A + B — poll until the user AND a license are live',
+    '  - name: await-provision',
+    '    type: wait',
+    '    until: [m365.user.exists, m365.license.free]',
+    '    needs: [entra-sync, license-free?, buy-seat]',
+    '    timeout: 20m',
+    '  - name: assign-license',
+    '    type: module',
+    '    module: m365.license.assign',
+    '    needs: [await-provision]',
+    '  # join main + C — add the licensed user to the mirrored groups',
+    '  - name: add-to-groups',
+    '    type: module',
+    '    module: m365.groups.add',
+    '    needs: [assign-license, get-source-groups]',
+    '  - name: notify',
+    '    type: notify',
+    '    channel: psa',
+    '    needs: [add-to-groups]'
+  ];
+  function yesc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function hlLine(t){
+    t = yesc(t);
+    t = t.replace(/"[^"]*"/g, '<span class="ys">$&</span>');
+    t = t.replace(/\b(true|false)\b/g, '<span class="yn">$1</span>');
+    t = t.replace(/(?<![\w.\d])\d+(?:\.\d+)*(?![\w.])/g, '<span class="yn">$&</span>');
+    t = t.replace(/(#.*)$/, '<span class="yc">$1</span>');
+    t = t.replace(/^(- )?([\w.\-?]+)(:)/, function(_,d,k,c){ return (d||'')+'<span class="yk">'+k+'</span>'+c; });
+    return t;
+  }
+  var yc = document.getElementById('ycode');
+  if(yc){
+    var html = YAML.map(function(line, i){
+      var indent = line.match(/^ */)[0].length;
+      var guides = Math.floor(indent/2);
+      var row = '<div class="yrow"><span class="yg">'+(i+1)+'</span>';
+      for(var g=0; g<guides; g++) row += '<span class="yind"></span>';
+      row += '<span class="ytx">'+ hlLine(line.slice(indent)) +'</span></div>';
+      return row;
+    }).join('');
+    yc.innerHTML = html;
+  }
+})();
+</script>
+
+</body>
+</html>

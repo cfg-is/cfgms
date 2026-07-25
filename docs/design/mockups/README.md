@@ -23,6 +23,7 @@ principles, and token rationale these mockups express.
 | [`fleet-overview-generic-v0.html`](fleet-overview-generic-v0.html) | The initial generic management dashboard, before brand alignment. Kept for provenance only. | Superseded |
 | [`asset-live-activity.html`](asset-live-activity.html) | The asset live-activity tab — real-time process table and service list driven by the telemetry WebSocket; includes the `.rowkebab` per-row action menu pattern (applied to fleet rows in Story #2938). Both themes. | **Reference** |
 | [`asset-shell.html`](asset-shell.html) | The asset interactive shell tab — terminal emulator panel with WebSocket-backed session, command history, and resize handling. Both themes. | **Reference** |
+| [`workflow-studio.html`](workflow-studio.html) | The Workflow Studio surface (Epic #2859) — a browse/run/schedule **overlay** drawer over the workflow list, and a full-screen **flowchart builder**: typed nodes, parallel branches + fan-in joins, node palette, live run-state overlay, collapsible scheduler drawer, and an indent-guided YAML mirror. Renders directly (no iframe harness) with its own **View / Run-state / Theme** toggles; both themes. | **Reference** |
 
 > These are design references, not production code. The shipped UI is
 > React + TypeScript + Vite (Epic #2344), built against
