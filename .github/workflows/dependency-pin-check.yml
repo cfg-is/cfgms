@@ -125,6 +125,30 @@ jobs:
         check_version "go-licenses" "google/go-licenses"                      "v2.0.1"
         check_version "golangci-lint" "golangci/golangci-lint"                "v2.12.2"
 
+        # Claude Code CLI freshness check. Installed from npm rather than a
+        # GitHub release asset, so check_version's release API doesn't apply —
+        # the authoritative "what would an unpinned install get" answer is
+        # npm's dist-tags.latest. The pin lives in .devcontainer/Dockerfile as
+        # ARG CLAUDE_CODE_VERSION and is read from there so this check can
+        # never disagree with what the image actually installs.
+        echo "Checking Claude Code CLI version..."
+        cc_pinned=$(grep -oE '^ARG CLAUDE_CODE_VERSION=.+' .devcontainer/Dockerfile \
+                    | sed 's/^ARG CLAUDE_CODE_VERSION=//')
+        cc_latest=$(curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code" 2>/dev/null \
+                    | jq -r '.["dist-tags"].latest' 2>/dev/null)
+        if [ -z "$cc_pinned" ]; then
+          echo "  WARN: could not read ARG CLAUDE_CODE_VERSION from .devcontainer/Dockerfile"
+          warnings="${warnings}- **Claude Code CLI**: could not read \`ARG CLAUDE_CODE_VERSION\` from \`.devcontainer/Dockerfile\` — did the pin get renamed or removed?\n"
+        elif [ -z "$cc_latest" ] || [ "$cc_latest" = "null" ]; then
+          echo "  WARN: Could not fetch latest claude-code version from npm"
+          warnings="${warnings}- **Claude Code CLI**: could not fetch \`dist-tags.latest\` from registry.npmjs.org\n"
+        elif [ "$cc_pinned" != "$cc_latest" ]; then
+          echo "  OUTDATED: Claude Code CLI pinned=${cc_pinned} latest=${cc_latest}"
+          outdated="${outdated}- **Claude Code CLI**: pinned \`${cc_pinned}\`, latest \`${cc_latest}\` ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)). Bump \`ARG CLAUDE_CODE_VERSION\` in \`.devcontainer/Dockerfile\`, then rebuild the agent image.\n"
+        else
+          echo "  OK: Claude Code CLI ${cc_pinned}"
+        fi
+
         # Go toolchain freshness check. Go's release index doesn't fit the
         # GitHub Releases pattern of check_version above, so it gets its own
         # handler. The toolchain version is pinned in go.mod and in workflow
