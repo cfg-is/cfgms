@@ -14,7 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import DnaDrawer, { DNA_GROUP_HEADINGS, parseDNAInfo } from './DnaDrawer.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()

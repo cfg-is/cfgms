@@ -17,7 +17,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react'
-import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import {
   TenantScopeProvider,

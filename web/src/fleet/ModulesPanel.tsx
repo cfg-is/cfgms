@@ -13,7 +13,7 @@
  * parseModulesResponse before rendering.
  */
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams } from 'react-router'
 import { apiFetch } from '../api/client.ts'
 import ErrorCard from '../shell/ErrorCard.tsx'
 

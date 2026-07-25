@@ -4,7 +4,7 @@
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import FleetOverview from '../fleet/FleetOverview.tsx'
 import AppShell from './AppShell.tsx'

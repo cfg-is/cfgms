@@ -12,7 +12,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import FleetTable from './FleetTable.tsx'
 import type { Steward } from './columns.ts'
 import { COLUMNS, DEFAULT_VISIBLE } from './columns.ts'

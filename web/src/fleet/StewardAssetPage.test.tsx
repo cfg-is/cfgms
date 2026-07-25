@@ -14,7 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import StewardAssetPage, { PanelContent, TABS } from './StewardAssetPage.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()

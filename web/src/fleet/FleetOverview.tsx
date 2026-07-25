@@ -23,7 +23,7 @@
  * page at /stewards/:id in a new tab.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useOutletContext } from 'react-router'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 import StewardDrawer from './StewardDrawer.tsx'
 import {

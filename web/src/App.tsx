@@ -20,7 +20,7 @@
  * centrally and drops the app to the login screen ("session expired"), so
  * the shell no longer fires a separate probe request.
  */
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route } from 'react-router'
 import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
 import AppShell from './shell/AppShell.tsx'
 import FleetOverview from './fleet/FleetOverview.tsx'
