@@ -56,7 +56,7 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Audit, and Accounts as links', () => {
+  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Audit, and Accounts as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
@@ -64,11 +64,12 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /scripts/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /registration/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
 
-  it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732)', () => {
+  it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934)', () => {
     renderShell()
     expect(screen.queryAllByText(/soon/i)).toHaveLength(0)
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
@@ -76,6 +77,7 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /scripts/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /registration/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })

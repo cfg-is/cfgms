@@ -190,6 +190,31 @@ search box doubles as its live filter).
   drawer opened by the hamburger button; a scrim covers the content and
   Escape or a scrim click closes it, matching the mockup harness.
 
+## Registration console (Story #2934)
+
+[`src/registration/RegistrationConsolePage.tsx`](src/registration/RegistrationConsolePage.tsx)
+renders the steward enrollment console at `/registration`. The page opens on the
+**Pending** tab by default, which lists every pending registration in the caller's
+tenant scope (`pending_id`, `steward_id`, `source_ip`, `registered_at`) and provides
+a functional **Deny** button per row (`POST /api/v1/registration/{id}/deny`).
+
+The **Tokens** and **IP Trust** tabs are added by Stories #2935 and #2936 respectively;
+they render a "soon" placeholder in this story.
+
+No approve, approve-all, or approve-by-CIDR control is present in this story — those
+are Section 2's follow-on epic, working from the same founder mockup at
+[`docs/design/mockups/registration-console.html`](../docs/design/mockups/registration-console.html).
+
+### Data flow
+
+- **List endpoint:** `GET /api/v1/registration/pending` — bare-array response (no
+  `{data:...}` envelope). Shape-validated by `parsePendingRegistrations` before any
+  value reaches the DOM.
+- **Deny endpoint:** `POST /api/v1/registration/{id}/deny` — removes the row from
+  the list on success; surfaces a row-level error without crashing on failure.
+- All steward-supplied and operator-influenced values render as JSX text nodes only
+  (security A9.1).
+
 ## Fleet overview (Story #2497)
 
 [`src/fleet/FleetOverview.tsx`](src/fleet/FleetOverview.tsx) renders the
