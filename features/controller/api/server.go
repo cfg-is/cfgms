@@ -78,7 +78,6 @@ type Server struct {
 	apiKeys                        map[string]*APIKey                    // In-memory cache for fast lookup
 	secretStore                    secretsif.SecretStore                 // M-AUTH-1: Central secrets provider for API keys
 	webAccounts                    map[string]*webAccount                // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
-	webAccountLockouts             map[string]*webAccountLockout         // Issue #2490: per-account lockout state (lazy-init, guarded by mu; in-memory only)
 	registrationTokenStore         registration.Store                    // Registration token store for steward registration
 	corsConfig                     *CORSConfig                           // CORS configuration
 	signerCertSerial               string                                // Story #378: Serial of cert used for config signing
@@ -147,6 +146,8 @@ type Server struct {
 	presenceTokens                 sync.Map                              // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
 	webAuthnElevateSessions        sync.Map                              // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
 	webAuthnElevateThrottle        sync.Map                              // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyLoginSessions           sync.Map                              // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
+	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-ceremony/per-IP failed login throttle; key="ceremony:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 }
@@ -527,16 +528,18 @@ func (s *Server) setupRouter() {
 	api.Handle("/stewards/refresh/{pending_id}/reject",
 		s.requirePermission("refresh", "reject")(http.HandlerFunc(s.handleRejectRefresh))).Methods("POST")
 
-	// Web login / CSRF / logout endpoints (Issue #2493, ADR-018 §3,4).
+	// Web CSRF / logout / passkey-login endpoints (Issue #2493, #2993, ADR-018 §3,4).
 	// Registered on the BASE router (TierPublic pattern) and explicitly wrapped in
 	// authDefense.Middleware. The api subrouter chain at line ~414 does NOT cover
 	// base-router routes (security A5.4), so wrapping is mandatory here.
 	s.router.Handle("/api/v1/web/csrf",
 		s.authDefense.Middleware(http.HandlerFunc(s.handleGetWebCSRF))).Methods("GET")
-	s.router.Handle("/api/v1/web/login",
-		s.authDefense.Middleware(http.HandlerFunc(s.handleWebLogin))).Methods("POST")
 	s.router.Handle("/api/v1/web/logout",
 		s.authDefense.Middleware(http.HandlerFunc(s.handleWebLogout))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/login/begin",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginBegin))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/login/finish",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginFinish))).Methods("POST")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.

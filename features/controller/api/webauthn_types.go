@@ -3,19 +3,23 @@
 //
 // Issue #2782: WebAuthn passkey / FIDO2 registration — type definitions.
 // Issue #2784: presence-token types and constants.
+// Issue #2993: passkey login session types.
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+)
 
 // WebAuthnCredential is a stored WebAuthn passkey / FIDO2 credential record.
 // Only public-key material is persisted — the server never holds the private key.
 //
 // Storage decision (required explicit call by the issue): credentials are stored
-// in the web-account secrets-store metadata entry alongside the argon2id hash,
-// keeping one persistence path per account record. Rationale: WebAuthn credentials
-// are public keys — they do not need secret storage (ADR-021 Non-Goals). The
-// secrets-store seam is chosen for implementation simplicity (one record, one
-// persistence path) rather than because the keys require encryption.
+// in the web-account secrets-store metadata entry, keeping one persistence path per
+// account record. Rationale: WebAuthn credentials are public keys — they do not need
+// secret storage (ADR-021 Non-Goals). The secrets-store seam is chosen for
+// implementation simplicity (one record, one persistence path).
 type WebAuthnCredential struct {
 	ID             []byte    `json:"id"`
 	PublicKey      []byte    `json:"public_key"`
@@ -86,4 +90,37 @@ type WebAuthnPresenceFinishResponse struct {
 type StepUpElevateFinishResponse struct {
 	Assurance  string    `json:"assurance"`
 	ElevatedAt time.Time `json:"elevated_at"`
+}
+
+// cookiePasskeyCeremony is the short-lived HttpOnly ceremony-binding cookie set by
+// handlePasskeyLoginBegin. Its value is the ceremony ID that keys the pending session
+// in s.passkeyLoginSessions. SameSite=Strict means it is never sent cross-site,
+// providing CSRF protection on the finish endpoint without a separate CSRF check.
+const cookiePasskeyCeremony = "cfgms_passkey_ceremony"
+
+// passkeyLoginCeremonyMaxAge is the TTL for the ceremony cookie and the pending session.
+const passkeyLoginCeremonyMaxAge = 5 * 60 // 5 minutes in seconds
+
+// passkeyLoginSession holds state for an in-progress passkey login ceremony.
+// Stored in s.passkeyLoginSessions keyed by ceremonyID. Single-use: deleted via
+// LoadAndDelete at the start of handlePasskeyLoginFinish regardless of outcome.
+type passkeyLoginSession struct {
+	data         webauthn.SessionData
+	expires      time.Time
+	accountID    string // account username; empty for discoverable (usernameless) flow
+	discoverable bool
+}
+
+// PasskeyLoginBeginRequest is the optional POST /api/v1/web/passkey/login/begin body.
+// Username is optional — omitting it initiates a discoverable (usernameless) ceremony.
+type PasskeyLoginBeginRequest struct {
+	Username string `json:"username,omitempty"`
+}
+
+// PasskeyLoginFinishResponse is returned on successful passkey login. Contains the
+// tenant scope so the frontend can initialise TenantScopeProvider (Issue #2919).
+type PasskeyLoginFinishResponse struct {
+	OK        bool   `json:"ok"`
+	TenantID  string `json:"tenant_id"`
+	RootScope bool   `json:"root_scope"`
 }

@@ -1,31 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 //
-// Issue #2490: web-admin credential store with argon2id password verification.
-// Accounts back the browser credential login (ADR-018 addendum): the store holds
-// only argon2id PHC hashes (never cleartext), persisted durably through the central
-// pkg/secrets seam — the same seam API keys use (handlers_apikeys.go) — with the
-// in-memory map as cache only. Provisioning and reset are Tier-3 (admin mTLS only).
-// Lockout ENFORCEMENT is #2493's; this file owns the per-account lockout STATE.
+// Issue #2490: web-admin credential store.
+// Issue #2993: password removed — accounts are now passkey-only (ADR-021 Amendment 1).
+//
+// Accounts back the browser passkey login (ADR-018 addendum, ADR-021): the store holds
+// the account identity and registered WebAuthn credentials, persisted durably through the
+// central pkg/secrets seam — the same seam API keys use (handlers_apikeys.go) — with the
+// in-memory map as cache only. Provisioning is Tier-3 (admin mTLS only).
 package api
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"golang.org/x/crypto/argon2"
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -33,9 +29,8 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// ErrInvalidWebCredential is the uniform verification failure. Unknown-user,
-// wrong-password, and malformed-input all return exactly this error so nothing in
-// the error contract discloses whether a username exists (no enumeration).
+// ErrInvalidWebCredential is the uniform verification failure sentinel. Kept for
+// backward compatibility with any callers that check for this error type.
 var ErrInvalidWebCredential = errors.New("invalid credentials")
 
 const (
@@ -46,39 +41,6 @@ const (
 	// webAccountKeyPrefix namespaces web-account records in the secret store,
 	// mirroring how API-key records use their hash as the key.
 	webAccountKeyPrefix = "web-account-"
-
-	// Password length bounds in BYTES, validated before hashing (security A4.1).
-	webPasswordMinBytes = 8
-	webPasswordMaxBytes = 128
-
-	// Lockout state (security B4.1, state half — pinned mechanism shared verbatim
-	// with #2493): 5 consecutive verification failures lock the account for 15
-	// minutes; a successful verification resets the counter. In-memory only,
-	// resets on controller restart (consistent with the in-memory session store).
-	webAccountMaxConsecutiveFailures = 5
-	webAccountLockoutDuration        = 15 * time.Minute
-
-	// argon2id production cost parameters — OWASP-recommended settings (19 MiB memory,
-	// 2 iterations, 1 lane). Named *Default so tests can reference the intended
-	// production values even when the active vars are overridden to minimal values
-	// for CI speed (Issue #2591). TestWebAccounts_HashParametersEncodedInPHCString
-	// pins these to the OWASP values.
-	webArgon2TimeDefault    uint32 = 2
-	webArgon2MemoryDefault  uint32 = 19 * 1024 // KiB (19 MiB)
-	webArgon2ThreadsDefault uint8  = 1
-	webArgon2SaltLen               = 16
-	webArgon2KeyLen         uint32 = 32
-)
-
-// webArgon2Time/Memory/Threads are the active cost parameters used by hashWebPassword
-// and dummyWebAccountHash. Initialized to the OWASP production defaults; the test
-// suite's TestMain substitutes minimal values (t=1, 64 KiB) to avoid timeout panics
-// on 2-3 vCPU hosted macOS/Windows runners where OWASP-cost argon2id ops are
-// disproportionately slow under -race instrumentation (Issue #2591).
-var (
-	webArgon2Time    = webArgon2TimeDefault
-	webArgon2Memory  = webArgon2MemoryDefault
-	webArgon2Threads = webArgon2ThreadsDefault
 )
 
 // webUsernameRegex keeps usernames log- and path-safe (security A4.1): usernames
@@ -86,8 +48,7 @@ var (
 // 3..64 characters, starting alphanumeric; then alphanumerics, '.', '_', '-'.
 var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 
-// webAccount is a web-admin account record. Only the argon2id PHC hash of the
-// password is ever held — in memory and in the secret store — never the cleartext.
+// webAccount is a web-admin account record.
 // Accounts carry the same principal fields the session path builds (Principal):
 // they are RBAC-equivalent to API-key principals (ADR-014 §7 parity), NOT
 // implicit global admins.
@@ -98,22 +59,15 @@ var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 //
 // Credentials holds registered WebAuthn passkeys / FIDO2 credentials (Issue #2782).
 // These are public keys — they are stored in the same secrets-store record as the
-// argon2id hash (one persistence path per account). See WebAuthnCredential.
+// account identity (one persistence path per account). See WebAuthnCredential.
 type webAccount struct {
-	ID           string
-	Username     string
-	TenantID     string
-	RootScope    bool // true when TenantID == "" by explicit grant (Issue #2919)
-	Permissions  []string
-	PasswordHash string // argon2id PHC string
-	CreatedAt    time.Time
-	Credentials  []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
-}
-
-// webAccountLockout is the per-account lockout state owned by this store.
-type webAccountLockout struct {
-	ConsecutiveFailures int
-	LockedUntil         time.Time
+	ID          string
+	Username    string
+	TenantID    string
+	RootScope   bool // true when TenantID == "" by explicit grant (Issue #2919)
+	Permissions []string
+	CreatedAt   time.Time
+	Credentials []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
 }
 
 // WebAccountRequest is the POST /api/v1/web/accounts body. The same endpoint
@@ -126,14 +80,13 @@ type webAccountLockout struct {
 // the existing scope is retained.
 type WebAccountRequest struct {
 	Username    string   `json:"username"`
-	Password    string   `json:"password"`
 	TenantID    string   `json:"tenant_id,omitempty"`
 	RootScope   bool     `json:"root_scope,omitempty"` // Issue #2919: explicit root grant
 	Permissions []string `json:"permissions,omitempty"`
 }
 
 // WebAccountInfo is the response shape for account provisioning. It never carries
-// the password or the hash.
+// any secret material.
 type WebAccountInfo struct {
 	ID          string    `json:"id"`
 	Username    string    `json:"username"`
@@ -155,90 +108,6 @@ func webAccountStorageTenant(logicalTenantID string) string {
 	return logicalTenantID
 }
 
-// --- argon2id PHC hashing ---
-
-// hashWebPassword derives an argon2id hash of password under the current cost
-// parameters and encodes it as a PHC string with a fresh random salt.
-func hashWebPassword(password string) (string, error) {
-	salt := make([]byte, webArgon2SaltLen)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("failed to generate salt: %w", err)
-	}
-	return encodeArgon2idHash(password, salt, webArgon2Time, webArgon2Memory, webArgon2Threads), nil
-}
-
-// encodeArgon2idHash derives and PHC-encodes an argon2id hash under explicit
-// parameters. Split out from hashWebPassword so tests can pin legacy parameters.
-func encodeArgon2idHash(password string, salt []byte, timeCost, memoryKiB uint32, threads uint8) string {
-	key := argon2.IDKey([]byte(password), salt, timeCost, memoryKiB, threads, webArgon2KeyLen)
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, memoryKiB, timeCost, threads,
-		base64.RawStdEncoding.EncodeToString(salt),
-		base64.RawStdEncoding.EncodeToString(key))
-}
-
-// verifyWebPassword reports whether password matches the argon2id PHC hash. The
-// cost parameters are parsed from the hash string (not assumed), so hashes created
-// under older parameters keep verifying after the defaults are raised. The final
-// comparison is constant-time.
-func verifyWebPassword(password, phcHash string) (bool, error) {
-	parts := strings.Split(phcHash, "$")
-	// Expected: ["", "argon2id", "v=19", "m=...,t=...,p=...", salt, hash]
-	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
-		return false, fmt.Errorf("malformed argon2id hash")
-	}
-	var version int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
-		return false, fmt.Errorf("malformed argon2id version: %w", err)
-	}
-	if version != argon2.Version {
-		return false, fmt.Errorf("unsupported argon2 version %d", version)
-	}
-	var memoryKiB, timeCost uint32
-	var threads uint8
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memoryKiB, &timeCost, &threads); err != nil {
-		return false, fmt.Errorf("malformed argon2id parameters: %w", err)
-	}
-	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
-		return false, fmt.Errorf("malformed argon2id salt: %w", err)
-	}
-	expected, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
-		return false, fmt.Errorf("malformed argon2id hash value: %w", err)
-	}
-	derived := argon2.IDKey([]byte(password), salt, timeCost, memoryKiB, threads, uint32(len(expected))) // #nosec G115 — hash length is 32
-	return subtle.ConstantTimeCompare(derived, expected) == 1, nil
-}
-
-// dummyWebAccountHash returns a fixed argon2id hash of a random, never-disclosed
-// password. Unknown-user verification runs against this hash so the unknown-user
-// path performs the same key-derivation work as the wrong-password path (timing
-// uniformity, security A4.2). Computed once, lazily.
-var (
-	dummyWebAccountHashOnce  sync.Once
-	dummyWebAccountHashValue string
-)
-
-func dummyWebAccountHash() string {
-	dummyWebAccountHashOnce.Do(func() {
-		random := make([]byte, 32)
-		if _, err := rand.Read(random); err != nil {
-			// Fall back to a fixed input: the dummy hash is never a credential,
-			// it only equalizes timing, so a deterministic value is acceptable.
-			random = []byte("cfgms-dummy-web-account-password")
-		}
-		phc, err := hashWebPassword(base64.RawStdEncoding.EncodeToString(random))
-		if err != nil {
-			// hashWebPassword only fails if crypto/rand fails; reuse the fixed path.
-			phc = encodeArgon2idHash(string(random), []byte("cfgms-dummy-salt"),
-				webArgon2Time, webArgon2Memory, webArgon2Threads)
-		}
-		dummyWebAccountHashValue = phc
-	})
-	return dummyWebAccountHashValue
-}
-
 // --- input validation (security A4.1) ---
 
 func validateWebUsername(username string) error {
@@ -248,18 +117,10 @@ func validateWebUsername(username string) error {
 	return nil
 }
 
-func validateWebPassword(password string) error {
-	if len(password) < webPasswordMinBytes || len(password) > webPasswordMaxBytes {
-		return fmt.Errorf("password must be between %d and %d bytes", webPasswordMinBytes, webPasswordMaxBytes)
-	}
-	return nil
-}
-
 // --- account store: in-memory cache over the central secret store ---
 
 // webAccountStoreKey returns the secret-store lookup key for a web account.
-// The key is an identifier (prefix + username), never credential material —
-// the value stored under it is the argon2id hash.
+// The key is an identifier (prefix + username), never credential material.
 func webAccountStoreKey(username string) string {
 	return webAccountKeyPrefix + username
 }
@@ -287,9 +148,39 @@ func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccoun
 	return s.loadWebAccountFromStore(ctx, username)
 }
 
+// getWebAccountByID returns the account with the given ID, searching the cache
+// first then falling back to the secret store. Used in the discoverable passkey
+// login flow where the authenticator returns a userHandle (the account UUID).
+func (s *Server) getWebAccountByID(ctx context.Context, id string) (*webAccount, error) {
+	s.mu.RLock()
+	for _, acct := range s.webAccounts {
+		if acct.ID == id {
+			s.mu.RUnlock()
+			return acct, nil
+		}
+	}
+	s.mu.RUnlock()
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: webAccountSecretType,
+			"id":                            id,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list web accounts by id: %w", err)
+	}
+	if len(metas) == 0 {
+		return nil, nil
+	}
+	return s.loadWebAccountFromStore(ctx, metas[0].Metadata["username"])
+}
+
 // loadWebAccountFromStore reloads an account record from the central secret store
-// and re-caches it. The tenant is not known at lookup time (login sends only
-// username + password), so the record is located by metadata filter.
+// and re-caches it. The tenant is not known at lookup time, so the record is
+// located by metadata filter.
 func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (*webAccount, error) {
 	if s.secretStore == nil {
 		return nil, nil
@@ -311,12 +202,11 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 		return nil, fmt.Errorf("failed to load web account: %w", err)
 	}
 	acct := &webAccount{
-		ID:           secret.Metadata["id"],
-		Username:     secret.Metadata["username"],
-		TenantID:     secret.TenantID,
-		Permissions:  parsePermissions(secret.Metadata["permissions"]),
-		PasswordHash: secret.Value,
-		CreatedAt:    secret.CreatedAt,
+		ID:          secret.Metadata["id"],
+		Username:    secret.Metadata["username"],
+		TenantID:    secret.TenantID,
+		Permissions: parsePermissions(secret.Metadata["permissions"]),
+		CreatedAt:   secret.CreatedAt,
 	}
 	// Issue #2919: restore root-scoped accounts. They are stored under the
 	// "system" sentinel tenant; the metadata flag is the authoritative marker.
@@ -336,10 +226,8 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 }
 
 // persistWebAccount writes the account record through the central pkg/secrets seam
-// (same seam as API keys — handlers_apikeys.go): value is the argon2id PHC hash,
-// never the password. WebAuthn credentials (public keys) are serialized to JSON
-// in the metadata — they are not secret material so the secrets store's encryption
-// is incidental (the same record is used for simplicity).
+// (same seam as API keys — handlers_apikeys.go). WebAuthn credentials (public keys)
+// are serialized to JSON in the metadata.
 func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, createdBy string) error {
 	meta := map[string]string{
 		secretsif.MetadataKeySecretType: webAccountSecretType,
@@ -362,7 +250,7 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 	}
 	secretReq := &secretsif.SecretRequest{
 		Key:         webAccountStoreKey(acct.Username),
-		Value:       acct.PasswordHash,                      // argon2id PHC hash only — plaintext is never stored
+		Value:       "",                                     // no secret value — accounts are passkey-only (Issue #2993)
 		TenantID:    webAccountStorageTenant(acct.TenantID), // Issue #2919: sentinel for root-scope
 		CreatedBy:   createdBy,
 		Description: "web admin account",
@@ -370,91 +258,6 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 		Metadata:    meta,
 	}
 	return s.secretStore.StoreSecret(ctx, secretReq)
-}
-
-// --- lockout state (security B4.1, state half; enforcement is #2493's) ---
-
-// recordWebAccountFailure increments the consecutive-failure counter for username
-// and sets the 15-minute lockout when the threshold is reached.
-func (s *Server) recordWebAccountFailure(username string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.webAccountLockouts == nil {
-		s.webAccountLockouts = make(map[string]*webAccountLockout)
-	}
-	state := s.webAccountLockouts[username]
-	if state == nil {
-		state = &webAccountLockout{}
-		s.webAccountLockouts[username] = state
-	}
-	state.ConsecutiveFailures++
-	if state.ConsecutiveFailures >= webAccountMaxConsecutiveFailures {
-		state.LockedUntil = time.Now().Add(webAccountLockoutDuration)
-	}
-}
-
-// resetWebAccountLockout clears the failure counter and lockout for username
-// (called on successful verification).
-func (s *Server) resetWebAccountLockout(username string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.webAccountLockouts, username)
-}
-
-// webAccountLocked reports whether username is currently locked out and until
-// when. #2493 (login endpoint) consumes this for lockout ENFORCEMENT; verification
-// itself never branches on it, so a locked account's failure stays
-// indistinguishable from bad-password.
-func (s *Server) webAccountLocked(username string) (bool, time.Time) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	state := s.webAccountLockouts[username]
-	if state == nil || state.LockedUntil.IsZero() {
-		return false, time.Time{}
-	}
-	if time.Now().After(state.LockedUntil) {
-		return false, time.Time{}
-	}
-	return true, state.LockedUntil
-}
-
-// --- verification API (consumed by the #2493 login endpoint) ---
-
-// VerifyWebCredential verifies a username + password credential and returns the
-// account's principal identity (ID, tenant, permissions) on success. Every failure
-// — unknown user, wrong password, malformed input — returns the identical
-// ErrInvalidWebCredential with identical latency characteristics: unknown-user
-// verification runs against a dummy argon2id hash so its timing matches the
-// wrong-password path (no username enumeration). Web accounts are RBAC-equivalent
-// to API-key principals; success grants exactly the stored permission set.
-func (s *Server) VerifyWebCredential(ctx context.Context, username, password string) (principalID, tenantID string, permissions []string, err error) {
-	if validateWebUsername(username) != nil || validateWebPassword(password) != nil {
-		// Burn the same key-derivation work as a real verification.
-		_, _ = verifyWebPassword(password, dummyWebAccountHash())
-		return "", "", nil, ErrInvalidWebCredential
-	}
-
-	acct, lookupErr := s.getWebAccount(ctx, username)
-	if lookupErr != nil || acct == nil {
-		if lookupErr != nil {
-			s.logger.Warn("Web account lookup failed during verification",
-				"username", logging.SanitizeLogValue(username),
-				"error", logging.SanitizeLogValue(lookupErr.Error()))
-		}
-		// Unknown user: verify against the dummy hash so response timing matches
-		// the wrong-password path (security A4.2).
-		_, _ = verifyWebPassword(password, dummyWebAccountHash())
-		return "", "", nil, ErrInvalidWebCredential
-	}
-
-	ok, verr := verifyWebPassword(password, acct.PasswordHash)
-	if verr != nil || !ok {
-		s.recordWebAccountFailure(username)
-		return "", "", nil, ErrInvalidWebCredential
-	}
-
-	s.resetWebAccountLockout(username)
-	return acct.ID, acct.TenantID, append([]string(nil), acct.Permissions...), nil
 }
 
 // --- audit (founder condition 2) ---
@@ -488,9 +291,9 @@ func (s *Server) emitWebAccountAudit(ctx context.Context, action, tenantID, acti
 // --- handlers (Tier-3: admin mTLS only; wired in setupRouter) ---
 
 // handleCreateWebAccount handles POST /api/v1/web/accounts (Tier-3). It creates a
-// web-admin account, or resets an existing one (upsert): the password is replaced,
-// and omitted tenant_id/permissions are retained. The password value never appears
-// in any log or response; only its argon2id PHC hash is stored.
+// web-admin account, or resets an existing one (upsert): on reset, omitted
+// tenant_id/permissions are retained. Passkeys are registered separately via the
+// WebAuthn registration endpoints (Issue #2993).
 func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) {
 	var req WebAccountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -501,10 +304,6 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	if err := validateWebUsername(req.Username); err != nil {
 		// Error text describes the rule only — never echoes the submitted value.
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
-		return
-	}
-	if err := validateWebPassword(req.Password); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PASSWORD")
 		return
 	}
 	// root_scope and tenant_id are mutually exclusive (Issue #2919).
@@ -526,7 +325,6 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	// identifier fields at the source using strings.ReplaceAll — the form CodeQL's
 	// ReplaceSanitizer recognises. Runs after validateWebUsername (a mangled username
 	// cannot pass the regex); TenantID has no charset guard, so this is its guard.
-	// Severs the json.Decode→field→sink dataflow CodeQL tracks for alert #1205.
 	req.Username = strings.ReplaceAll(strings.ReplaceAll(req.Username, "\n", ""), "\r", "")
 	req.TenantID = strings.ReplaceAll(strings.ReplaceAll(req.TenantID, "\n", ""), "\r", "")
 
@@ -544,21 +342,13 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	phcHash, err := hashWebPassword(req.Password)
-	if err != nil {
-		s.logger.Error("Failed to hash web account password", "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create web account", "INTERNAL_ERROR")
-		return
-	}
-
 	acct := &webAccount{
-		ID:           uuid.New().String(),
-		Username:     req.Username,
-		TenantID:     req.TenantID,
-		RootScope:    req.RootScope,
-		Permissions:  req.Permissions,
-		PasswordHash: phcHash,
-		CreatedAt:    time.Now().UTC(),
+		ID:          uuid.New().String(),
+		Username:    req.Username,
+		TenantID:    req.TenantID,
+		RootScope:   req.RootScope,
+		Permissions: req.Permissions,
+		CreatedAt:   time.Now().UTC(),
 	}
 	action := "web_account.created"
 	status := http.StatusCreated
@@ -575,9 +365,9 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		if acct.Permissions == nil {
 			acct.Permissions = existing.Permissions
 		}
-		// Issue #2782: preserve registered WebAuthn credentials across password resets.
+		// Issue #2782: preserve registered WebAuthn credentials across account resets.
 		acct.Credentials = existing.Credentials
-		action = "web_account.password_reset"
+		action = "web_account.reset"
 		status = http.StatusOK
 	}
 	// Resolve final scope (Issue #2919):
@@ -633,7 +423,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 // handleListWebAccounts handles GET /api/v1/web/accounts (requirePermission only,
 // no Tier-3 wrapper — reads are categorically outside the Tier-3 surface; see
 // Implementation Notes in Issue #2733). The response uses WebAccountInfo: no
-// password hash or any other secret material is ever included.
+// secret material is ever included.
 func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
@@ -680,8 +470,7 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteWebAccount handles DELETE /api/v1/web/accounts/{username} (Tier-3).
-// It removes the account from the in-memory cache, the lockout state, and the
-// central secret store.
+// It removes the account from the in-memory cache and the central secret store.
 func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
 	if err := validateWebUsername(username); err != nil {
@@ -703,7 +492,6 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 
 	s.mu.Lock()
 	delete(s.webAccounts, username)
-	delete(s.webAccountLockouts, username)
 	s.mu.Unlock()
 
 	storeKey := fmt.Sprintf("%s/%s", webAccountStorageTenant(acct.TenantID), webAccountStoreKey(username))

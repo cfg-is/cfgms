@@ -59,7 +59,6 @@ func setupWebAuthnServer(t *testing.T, rpID string, rpOrigins []string) (*Server
 
 	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username: username,
-		Password: "not-used-in-webauthn-registration",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
 

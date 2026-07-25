@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,16 +56,13 @@ func dropWebAccountCache(server *Server) {
 	server.mu.Unlock()
 }
 
-// TestWebAccounts_CreateVerifySuccess covers create -> verify-success: a created
-// account verifies with the correct password and returns its principal identity
-// (ID, tenant, permissions) — RBAC-equivalent to an API-key principal, not an
-// implicit global admin.
-func TestWebAccounts_CreateVerifySuccess(t *testing.T) {
+// TestWebAccounts_CreateReturnsIdentity verifies that creating an account returns
+// the expected principal identity fields in the response.
+func TestWebAccounts_CreateReturnsIdentity(t *testing.T) {
 	server := setupTestServer(t)
 
 	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username:    "fleet-admin",
-		Password:    "correct-horse-battery",
 		TenantID:    "tenant-a",
 		Permissions: []string{"steward:list", "steward:read"},
 	})
@@ -79,85 +75,7 @@ func TestWebAccounts_CreateVerifySuccess(t *testing.T) {
 	assert.Equal(t, "fleet-admin", info["username"])
 	assert.Equal(t, "tenant-a", info["tenant_id"])
 	assert.NotEmpty(t, info["id"])
-
-	principalID, tenantID, permissions, err := server.VerifyWebCredential(
-		context.Background(), "fleet-admin", "correct-horse-battery")
-	require.NoError(t, err)
-	assert.Equal(t, info["id"], principalID)
-	assert.Equal(t, "tenant-a", tenantID)
-	assert.ElementsMatch(t, []string{"steward:list", "steward:read"}, permissions,
-		"web account carries exactly the granted permissions — no implicit admin grants")
-}
-
-// TestWebAccounts_VerifyFailureUniformity covers verify-wrong-password ->
-// verify-unknown-user uniformity: both fail with the identical sentinel error and
-// message so nothing in the error contract discloses whether the username exists.
-func TestWebAccounts_VerifyFailureUniformity(t *testing.T) {
-	server := setupTestServer(t)
-
-	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
-		Username: "uniform-user",
-		Password: "the-real-password",
-	})
-	require.Equal(t, http.StatusCreated, rec.Code)
-
-	_, _, _, wrongPwErr := server.VerifyWebCredential(
-		context.Background(), "uniform-user", "not-the-password")
-	require.Error(t, wrongPwErr)
-	assert.ErrorIs(t, wrongPwErr, ErrInvalidWebCredential)
-
-	_, _, _, unknownUserErr := server.VerifyWebCredential(
-		context.Background(), "no-such-user", "not-the-password")
-	require.Error(t, unknownUserErr)
-	assert.ErrorIs(t, unknownUserErr, ErrInvalidWebCredential)
-
-	assert.Equal(t, wrongPwErr.Error(), unknownUserErr.Error(),
-		"unknown-user and wrong-password must be indistinguishable in the error contract")
-
-	// The dummy hash used to equalize the unknown-user timing path must be a real
-	// argon2id PHC hash so both paths perform the same key derivation work.
-	dummy := dummyWebAccountHash()
-	assert.True(t, strings.HasPrefix(dummy, "$argon2id$"),
-		"dummy hash must be an argon2id PHC string, got %q", dummy)
-	ok, err := verifyWebPassword("not-the-password", dummy)
-	require.NoError(t, err)
-	assert.False(t, ok, "dummy hash must never verify a real password")
-}
-
-// TestWebAccounts_PasswordResetChangesAcceptedCredential covers reset via the same
-// POST endpoint (upsert): the old password stops verifying, the new one verifies,
-// and the principal ID remains stable across the reset.
-func TestWebAccounts_PasswordResetChangesAcceptedCredential(t *testing.T) {
-	server := setupTestServer(t)
-	admin := testAdminPrincipal()
-
-	rec := postWebAccount(t, server, admin, WebAccountRequest{
-		Username:    "reset-user",
-		Password:    "original-password",
-		TenantID:    "tenant-a",
-		Permissions: []string{"steward:list"},
-	})
-	require.Equal(t, http.StatusCreated, rec.Code)
-	var createResp APIResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
-	createdID := createResp.Data.(map[string]interface{})["id"]
-
-	rec = postWebAccount(t, server, admin, WebAccountRequest{
-		Username: "reset-user",
-		Password: "replacement-password",
-	})
-	require.Equal(t, http.StatusOK, rec.Code, "reset of an existing account returns 200, not 201")
-
-	_, _, _, err := server.VerifyWebCredential(context.Background(), "reset-user", "original-password")
-	assert.ErrorIs(t, err, ErrInvalidWebCredential, "old password must stop verifying after reset")
-
-	principalID, tenantID, permissions, err := server.VerifyWebCredential(
-		context.Background(), "reset-user", "replacement-password")
-	require.NoError(t, err)
-	assert.Equal(t, createdID, principalID, "principal ID must be stable across password reset")
-	assert.Equal(t, "tenant-a", tenantID, "tenant retained when reset omits tenant_id")
-	assert.ElementsMatch(t, []string{"steward:list"}, permissions,
-		"permissions retained when reset omits them")
+	assert.NotEmpty(t, info["created_at"])
 }
 
 // TestWebAccounts_AssuranceGateRejectsAPIKeyCaller verifies through the full router that an
@@ -168,7 +86,7 @@ func TestWebAccounts_AssuranceGateRejectsAPIKeyCaller(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"web-account:create", "web-account:delete"})
 
-	body, err := json.Marshal(WebAccountRequest{Username: "tier3-user", Password: "password-123"})
+	body, err := json.Marshal(WebAccountRequest{Username: "tier3-user"})
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
@@ -194,89 +112,9 @@ func TestWebAccounts_AssuranceGateRejectsAPIKeyCaller(t *testing.T) {
 	}
 }
 
-// TestWebAccounts_SecretStoreRoundTripAfterCacheDrop verifies durability through the
-// central pkg/secrets seam: after the in-memory cache is dropped, the account is
-// reloaded from the secret store and still verifies (simulates controller restart).
-func TestWebAccounts_SecretStoreRoundTripAfterCacheDrop(t *testing.T) {
-	server := setupTestServer(t)
-
-	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
-		Username:    "durable-user",
-		Password:    "survives-restart",
-		TenantID:    "tenant-b",
-		Permissions: []string{"steward:read"},
-	})
-	require.Equal(t, http.StatusCreated, rec.Code)
-
-	dropWebAccountCache(server)
-
-	principalID, tenantID, permissions, err := server.VerifyWebCredential(
-		context.Background(), "durable-user", "survives-restart")
-	require.NoError(t, err, "account must be reloaded from the secret store after cache drop")
-	assert.NotEmpty(t, principalID)
-	assert.Equal(t, "tenant-b", tenantID)
-	assert.ElementsMatch(t, []string{"steward:read"}, permissions)
-
-	// Wrong password still fails after reload.
-	_, _, _, err = server.VerifyWebCredential(context.Background(), "durable-user", "wrong-password")
-	assert.ErrorIs(t, err, ErrInvalidWebCredential)
-}
-
-// TestWebAccounts_LockoutState is the state-level lockout unit test (security B4.1,
-// state half — enforcement lives with the login endpoint in #2493): 5 consecutive
-// verification failures set a 15-minute lockout, a locked account's verification
-// failure is indistinguishable from bad-password, and success resets the state.
-func TestWebAccounts_LockoutState(t *testing.T) {
-	server := setupTestServer(t)
-
-	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
-		Username: "lockout-user",
-		Password: "lockout-password",
-	})
-	require.Equal(t, http.StatusCreated, rec.Code)
-
-	// Four consecutive failures: not locked yet.
-	for i := 0; i < 4; i++ {
-		_, _, _, err := server.VerifyWebCredential(context.Background(), "lockout-user", "bad-password")
-		require.ErrorIs(t, err, ErrInvalidWebCredential)
-	}
-	locked, _ := server.webAccountLocked("lockout-user")
-	assert.False(t, locked, "4 consecutive failures must not lock the account")
-
-	// Fifth consecutive failure: locked for 15 minutes.
-	before := time.Now()
-	_, _, _, err := server.VerifyWebCredential(context.Background(), "lockout-user", "bad-password")
-	require.ErrorIs(t, err, ErrInvalidWebCredential)
-	locked, until := server.webAccountLocked("lockout-user")
-	require.True(t, locked, "5 consecutive failures must set the lockout")
-	assert.WithinDuration(t, before.Add(webAccountLockoutDuration), until, time.Minute,
-		"lockout window must be 15 minutes")
-
-	// A locked account's verification failure is indistinguishable from bad-password.
-	_, _, _, lockedErr := server.VerifyWebCredential(context.Background(), "lockout-user", "bad-password")
-	require.Error(t, lockedErr)
-	assert.ErrorIs(t, lockedErr, ErrInvalidWebCredential)
-	_, _, _, plainBadPw := server.VerifyWebCredential(context.Background(), "no-such-lockout-user", "bad-password")
-	assert.Equal(t, plainBadPw.Error(), lockedErr.Error(),
-		"locked-account failure must be indistinguishable from bad-password")
-
-	// Successful verification resets the lockout state. (Lockout ENFORCEMENT — refusing
-	// a correct password while locked — is #2493's login-endpoint behavior, not state's.)
-	_, _, _, err = server.VerifyWebCredential(context.Background(), "lockout-user", "lockout-password")
-	require.NoError(t, err)
-	locked, _ = server.webAccountLocked("lockout-user")
-	assert.False(t, locked, "successful verification must reset the lockout state")
-
-	// Counter restarted: a single failure after reset does not lock.
-	_, _, _, err = server.VerifyWebCredential(context.Background(), "lockout-user", "bad-password")
-	require.ErrorIs(t, err, ErrInvalidWebCredential)
-	locked, _ = server.webAccountLocked("lockout-user")
-	assert.False(t, locked, "failure counter must restart after a successful verification")
-}
-
-// TestWebAccounts_InputValidationBounds covers the validation ACs: password length
-// bounded 8..128 bytes BEFORE hashing, username bounded and charset-restricted so it
-// stays path- and log-safe (usernames appear in DELETE URL paths).
+// TestWebAccounts_InputValidationBounds covers username validation: username bounded
+// and charset-restricted so it stays path- and log-safe (usernames appear in DELETE
+// URL paths). Password validation removed (Issue #2993).
 func TestWebAccounts_InputValidationBounds(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
@@ -284,37 +122,24 @@ func TestWebAccounts_InputValidationBounds(t *testing.T) {
 	tests := []struct {
 		name       string
 		username   string
-		password   string
 		wantStatus int
 	}{
-		{"password 7 bytes rejected", "valid-user", "1234567", http.StatusBadRequest},
-		{"password 129 bytes rejected", "valid-user", strings.Repeat("x", 129), http.StatusBadRequest},
-		{"password 8 bytes accepted", "min-pw-user", "12345678", http.StatusCreated},
-		{"password 128 bytes accepted", "max-pw-user", strings.Repeat("x", 128), http.StatusCreated},
-		{"username too short rejected", "ab", "valid-password", http.StatusBadRequest},
-		{"username too long rejected", strings.Repeat("a", 65), "valid-password", http.StatusBadRequest},
-		{"username path traversal rejected", "../../etc/passwd", "valid-password", http.StatusBadRequest},
-		{"username with slash rejected", "tenant/user", "valid-password", http.StatusBadRequest},
-		{"username with space rejected", "some user", "valid-password", http.StatusBadRequest},
-		{"username with newline rejected", "user\nname", "valid-password", http.StatusBadRequest},
-		{"username with charset ok", "User.name_01-x", "valid-password", http.StatusCreated},
+		{"username too short rejected", "ab", http.StatusBadRequest},
+		{"username too long rejected", strings.Repeat("a", 65), http.StatusBadRequest},
+		{"username path traversal rejected", "../../etc/passwd", http.StatusBadRequest},
+		{"username with slash rejected", "tenant/user", http.StatusBadRequest},
+		{"username with space rejected", "some user", http.StatusBadRequest},
+		{"username with newline rejected", "user\nname", http.StatusBadRequest},
+		{"username with charset ok", "User.name_01-x", http.StatusCreated},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := postWebAccount(t, server, admin, WebAccountRequest{
 				Username: tc.username,
-				Password: tc.password,
 			})
 			assert.Equal(t, tc.wantStatus, rec.Code, "body: %s", rec.Body.String())
 		})
 	}
-
-	// Multibyte passwords are bounded by BYTES, not runes: 43 three-byte runes = 129 bytes.
-	rec := postWebAccount(t, server, admin, WebAccountRequest{
-		Username: "utf8-user",
-		Password: strings.Repeat("€", 43),
-	})
-	assert.Equal(t, http.StatusBadRequest, rec.Code, "password length must be counted in bytes")
 }
 
 // TestWebAccounts_UnknownPermissionRejected verifies web accounts use the same
@@ -325,22 +150,19 @@ func TestWebAccounts_UnknownPermissionRejected(t *testing.T) {
 	for _, perm := range []string{"*", "not-a-real:permission"} {
 		rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 			Username:    "perm-user",
-			Password:    "valid-password",
 			Permissions: []string{perm},
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "permission %q must be rejected", perm)
 	}
 }
 
-// TestWebAccounts_StoredRecordContainsNoPlaintext asserts the persisted record holds
-// an argon2id PHC hash and never the password, in value, metadata, or description.
-func TestWebAccounts_StoredRecordContainsNoPlaintext(t *testing.T) {
+// TestWebAccounts_StoredRecordContainsNoSecretValue asserts the persisted record holds
+// no sensitive value — since passkey login is credential-only, the stored Value is empty.
+func TestWebAccounts_StoredRecordContainsNoSecretValue(t *testing.T) {
 	server := setupTestServer(t)
-	const password = "super-secret-plaintext"
 
 	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
-		Username: "no-plaintext-user",
-		Password: password,
+		Username: "no-secret-user",
 		TenantID: "tenant-a",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -348,7 +170,7 @@ func TestWebAccounts_StoredRecordContainsNoPlaintext(t *testing.T) {
 	metas, err := server.secretStore.ListSecrets(context.Background(), &secretsif.SecretFilter{
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: webAccountSecretType,
-			"username":                      "no-plaintext-user",
+			"username":                      "no-secret-user",
 		},
 	})
 	require.NoError(t, err)
@@ -358,14 +180,9 @@ func TestWebAccounts_StoredRecordContainsNoPlaintext(t *testing.T) {
 		metas[0].TenantID+"/"+metas[0].Key)
 	require.NoError(t, err)
 
-	assert.True(t, strings.HasPrefix(secret.Value, "$argon2id$"),
-		"stored value must be an argon2id PHC string, got %q", secret.Value)
-	assert.NotEqual(t, password, secret.Value)
-
-	raw, err := json.Marshal(secret)
-	require.NoError(t, err)
-	assert.NotContains(t, string(raw), password,
-		"password plaintext must not appear anywhere in the stored record")
+	assert.Empty(t, secret.Value, "stored value must be empty — accounts are passkey-only (Issue #2993)")
+	assert.NotContains(t, string(secret.Value), "$argon2id$",
+		"stored value must not contain any argon2id hash (passkey-only)")
 }
 
 // TestWebAccounts_DeleteRemovesCacheAndStore verifies DELETE removes the account from
@@ -376,22 +193,29 @@ func TestWebAccounts_DeleteRemovesCacheAndStore(t *testing.T) {
 
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username: "delete-user",
-		Password: "delete-password",
 		TenantID: "tenant-a",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
+	// Account exists in cache.
+	acct, err := server.getWebAccount(context.Background(), "delete-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct, "account must exist before delete")
+
 	rec = deleteWebAccount(t, server, admin, "delete-user")
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	// Gone from the verification path (cache).
-	_, _, _, err := server.VerifyWebCredential(context.Background(), "delete-user", "delete-password")
-	assert.ErrorIs(t, err, ErrInvalidWebCredential)
+	// Gone from the cache.
+	server.mu.RLock()
+	_, inCache := server.webAccounts["delete-user"]
+	server.mu.RUnlock()
+	assert.False(t, inCache, "account must be removed from cache on delete")
 
-	// Gone from the durable store — still gone after a cache drop.
+	// Gone from the durable store after a cache drop.
 	dropWebAccountCache(server)
-	_, _, _, err = server.VerifyWebCredential(context.Background(), "delete-user", "delete-password")
-	assert.ErrorIs(t, err, ErrInvalidWebCredential)
+	acct, err = server.getWebAccount(context.Background(), "delete-user")
+	require.NoError(t, err)
+	assert.Nil(t, acct, "account must be unreachable from the store after delete")
 
 	metas, err := server.secretStore.ListSecrets(context.Background(), &secretsif.SecretFilter{
 		Metadata: map[string]string{
@@ -407,21 +231,19 @@ func TestWebAccounts_DeleteRemovesCacheAndStore(t *testing.T) {
 }
 
 // TestWebAccounts_AuditEntriesEmitted is the [REQUIRED TEST] for founder condition 2:
-// create, password reset, and delete each write an audit entry carrying the sanitized
-// username and the acting admin principal.
+// create, reset, and delete each write an audit entry carrying the sanitized username
+// and the acting admin principal.
 func TestWebAccounts_AuditEntriesEmitted(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
 
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username: "audit-user",
-		Password: "first-password",
 		TenantID: "tenant-a",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 	rec = postWebAccount(t, server, admin, WebAccountRequest{
 		Username: "audit-user",
-		Password: "second-password",
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 	rec = deleteWebAccount(t, server, admin, "audit-user")
@@ -431,7 +253,7 @@ func TestWebAccounts_AuditEntriesEmitted(t *testing.T) {
 
 	for _, action := range []string{
 		"web_account.created",
-		"web_account.password_reset",
+		"web_account.reset",
 		"web_account.deleted",
 	} {
 		entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
@@ -445,83 +267,6 @@ func TestWebAccounts_AuditEntriesEmitted(t *testing.T) {
 		assert.Equal(t, "audit-user", e.ResourceID, "sanitized username is the resource ID")
 		assert.Equal(t, admin.ID, e.UserID, "acting admin principal must be recorded")
 		assert.Equal(t, business.AuditResultSuccess, e.Result)
-	}
-}
-
-// TestWebAccounts_NoPasswordInLogsOrErrors is the second [REQUIRED TEST] half of
-// founder condition 2: the password value never appears in any log line or error
-// response across create, reset, delete, verify-success, and verify-failure paths.
-func TestWebAccounts_NoPasswordInLogsOrErrors(t *testing.T) {
-	clog := &captureAllLogger{}
-	server := setupTestServerWithLogger(t, clog)
-	admin := testAdminPrincipal()
-
-	const password = "hyper-sensitive-password"
-	const newPassword = "rotated-sensitive-password"
-	var responses []string
-
-	rec := postWebAccount(t, server, admin, WebAccountRequest{
-		Username: "log-safety-user", Password: password, TenantID: "tenant-a",
-	})
-	require.Equal(t, http.StatusCreated, rec.Code)
-	responses = append(responses, rec.Body.String())
-
-	// Verify success + failure paths both log without the password.
-	_, _, _, err := server.VerifyWebCredential(context.Background(), "log-safety-user", password)
-	require.NoError(t, err)
-	_, _, _, err = server.VerifyWebCredential(context.Background(), "log-safety-user", "wrong-"+password)
-	require.ErrorIs(t, err, ErrInvalidWebCredential)
-	require.NotContains(t, err.Error(), password, "verification error must not echo the password")
-
-	rec = postWebAccount(t, server, admin, WebAccountRequest{
-		Username: "log-safety-user", Password: newPassword,
-	})
-	require.Equal(t, http.StatusOK, rec.Code)
-	responses = append(responses, rec.Body.String())
-
-	// Error paths must not echo the password either.
-	rec = postWebAccount(t, server, admin, WebAccountRequest{
-		Username: "bad/../username", Password: password,
-	})
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	responses = append(responses, rec.Body.String())
-	rec = postWebAccount(t, server, admin, WebAccountRequest{
-		Username: "short-pw-user", Password: "short",
-	})
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	responses = append(responses, rec.Body.String())
-
-	rec = deleteWebAccount(t, server, admin, "log-safety-user")
-	require.Equal(t, http.StatusOK, rec.Code)
-	responses = append(responses, rec.Body.String())
-
-	logged := clog.captured()
-	assert.NotContains(t, logged, password, "password must never appear in logs")
-	assert.NotContains(t, logged, newPassword, "reset password must never appear in logs")
-	assert.NotContains(t, logged, "short", "even an invalid password value must never appear in logs")
-	for i, body := range responses {
-		assert.NotContains(t, body, password, "response %d must not contain the password", i)
-		assert.NotContains(t, body, newPassword, "response %d must not contain the reset password", i)
-	}
-}
-
-// TestWebAccounts_VerifyRejectsMalformedInputsUniformly verifies that syntactically
-// invalid usernames/passwords fail verification with the same uniform error — the
-// verification API never discloses why a credential was rejected.
-func TestWebAccounts_VerifyRejectsMalformedInputsUniformly(t *testing.T) {
-	server := setupTestServer(t)
-
-	for _, tc := range []struct{ username, password string }{
-		{"../../traversal", "some-password"},
-		{"valid-user", ""},
-		{"", "some-password"},
-		{"valid-user", "short"},
-	} {
-		_, _, _, err := server.VerifyWebCredential(context.Background(), tc.username, tc.password)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrInvalidWebCredential,
-			"malformed input (%q, %d-byte password) must fail with the uniform error",
-			tc.username, len(tc.password))
 	}
 }
 
@@ -549,17 +294,14 @@ func parseWebAccountInfoList(t *testing.T, rec *httptest.ResponseRecorder) []Web
 }
 
 // TestWebAccounts_ListReturnsAccountsWithNoSecretMaterial is the [REQUIRED TEST]:
-// the list endpoint returns WebAccountInfo records and NEVER includes a password
-// hash, password plaintext, or any other secret material in the response body.
+// the list endpoint returns WebAccountInfo records and NEVER includes any secret
+// material in the response body.
 func TestWebAccounts_ListReturnsAccountsWithNoSecretMaterial(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
-	const password = "list-test-secret-password"
 
-	// Create two accounts.
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username:    "list-user-a",
-		Password:    password,
 		TenantID:    "tenant-a",
 		Permissions: []string{"steward:list"},
 	})
@@ -567,17 +309,14 @@ func TestWebAccounts_ListReturnsAccountsWithNoSecretMaterial(t *testing.T) {
 
 	rec = postWebAccount(t, server, admin, WebAccountRequest{
 		Username:    "list-user-b",
-		Password:    password,
 		TenantID:    "tenant-b",
 		Permissions: []string{"steward:read"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	// List returns 200 and the full response body.
 	listRec, accounts := listWebAccounts(t, server, admin)
 	require.Equal(t, http.StatusOK, listRec.Code, "body: %s", listRec.Body.String())
 
-	// Both accounts appear in the list.
 	usernames := make([]string, 0, len(accounts))
 	for _, a := range accounts {
 		usernames = append(usernames, a.Username)
@@ -585,17 +324,14 @@ func TestWebAccounts_ListReturnsAccountsWithNoSecretMaterial(t *testing.T) {
 	assert.Contains(t, usernames, "list-user-a")
 	assert.Contains(t, usernames, "list-user-b")
 
-	// Every account has non-empty identity fields.
 	for _, a := range accounts {
 		assert.NotEmpty(t, a.ID, "account %q must have an id", a.Username)
 		assert.NotEmpty(t, a.Username)
 		assert.False(t, a.CreatedAt.IsZero(), "account %q must have a created_at", a.Username)
 	}
 
-	// [REQUIRED] The raw response body must not contain any password hash or
-	// secret material — not the plaintext password, and not an argon2id prefix.
+	// [REQUIRED] The raw response body must not contain any argon2id hash prefix.
 	body := listRec.Body.String()
-	assert.NotContains(t, body, password, "list response must not contain the password plaintext")
 	assert.NotContains(t, body, "$argon2id$", "list response must not contain any argon2id hash prefix")
 }
 
@@ -607,7 +343,6 @@ func TestWebAccounts_ListReflectsDeletes(t *testing.T) {
 
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username: "delete-list-user",
-		Password: "some-valid-password",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
@@ -640,7 +375,6 @@ func TestWebAccounts_ListRequiresPermissionNotTier3(t *testing.T) {
 	// POST an account first (using the admin path so the store has content).
 	postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username: "tier-check-user",
-		Password: "valid-password-123",
 	})
 
 	// An API-key caller with web-account:list reaches GET /api/v1/web/accounts.
@@ -651,55 +385,20 @@ func TestWebAccounts_ListRequiresPermissionNotTier3(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code,
 		"API-key caller with web-account:list must reach the list endpoint (no Tier-3 gate)")
 
-	// Confirm no secret material in the response even for API-key callers.
 	body := rec.Body.String()
 	assert.NotContains(t, body, "$argon2id$", "list response must not contain any argon2id hash")
-}
-
-// TestWebAccounts_HashParametersEncodedInPHCString pins the argon2id OWASP cost
-// parameters and verifies that encodeArgon2idHash embeds them into the PHC string.
-// Uses the *Default constants directly (not the active webArgon2* vars) so the test
-// remains independent of the minimal-cost TestMain override (Issue #2591).
-func TestWebAccounts_HashParametersEncodedInPHCString(t *testing.T) {
-	// Derive with the production-default (OWASP) cost to verify the PHC prefix.
-	// encodeArgon2idHash takes an explicit salt so no crypto/rand import is needed.
-	phc := encodeArgon2idHash("parameter-check-password",
-		[]byte("cfgms-param-test"), // 16-byte deterministic test vector
-		webArgon2TimeDefault, webArgon2MemoryDefault, webArgon2ThreadsDefault)
-
-	assert.True(t, strings.HasPrefix(phc, "$argon2id$v=19$m=19456,t=2,p=1$"),
-		"OWASP production parameters must encode correctly in the PHC string, got %q", phc)
-
-	ok, err := verifyWebPassword("parameter-check-password", phc)
-	require.NoError(t, err)
-	assert.True(t, ok)
-
-	ok, err = verifyWebPassword("different-password", phc)
-	require.NoError(t, err)
-	assert.False(t, ok)
-
-	// A hash produced under legacy (different) parameters still verifies, because the
-	// parameters are read from the PHC string, not assumed.
-	legacy := encodeArgon2idHash("parameter-check-password",
-		[]byte("0123456789abcdef"), 3, 65536, 4)
-	ok, err = verifyWebPassword("parameter-check-password", legacy)
-	require.NoError(t, err)
-	assert.True(t, ok, "hashes created under older cost parameters must keep verifying")
 }
 
 // ---- Issue #2919: root-scope web account tests ----
 
 // TestWebAccounts_RootScope_NotDefaultedToDefault verifies that creating a web account
 // with root_scope:true results in an account with empty TenantID, not "default".
-// This is the primary AC for Issue #2919 defense-in-depth: an empty TenantID returned
-// by VerifyWebCredential is only possible via explicit RootScope grant.
 func TestWebAccounts_RootScope_NotDefaultedToDefault(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
 
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username:    "root-admin",
-		Password:    "secure-password-123",
 		RootScope:   true,
 		Permissions: []string{"steward:list"},
 	})
@@ -713,33 +412,32 @@ func TestWebAccounts_RootScope_NotDefaultedToDefault(t *testing.T) {
 	assert.Equal(t, true, info["root_scope"], "root_scope must be true in the response")
 	assert.Equal(t, "root-admin", info["username"])
 
-	// VerifyWebCredential must return empty tenantID for a root-scoped account.
-	principalID, tenantID, permissions, err := server.VerifyWebCredential(
-		context.Background(), "root-admin", "secure-password-123")
+	// Account must be loadable from store with correct scope.
+	acct, err := server.getWebAccount(context.Background(), "root-admin")
 	require.NoError(t, err)
-	assert.NotEmpty(t, principalID)
-	assert.Equal(t, "", tenantID,
-		"VerifyWebCredential must return empty tenantID for root-scoped account")
-	assert.ElementsMatch(t, []string{"steward:list"}, permissions)
+	require.NotNil(t, acct)
+	assert.True(t, acct.RootScope, "loaded account must have RootScope=true")
+	assert.Empty(t, acct.TenantID, "loaded account must have empty TenantID")
 }
 
 // TestWebAccounts_RootScope_DurableAfterCacheDrop verifies that a root-scoped
-// account survives a cache drop (store round-trip) and still verifies correctly.
+// account survives a cache drop (store round-trip) and retains root scope.
 func TestWebAccounts_RootScope_DurableAfterCacheDrop(t *testing.T) {
 	server := setupTestServer(t)
 
 	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username:  "root-durable",
-		Password:  "durable-password-123",
 		RootScope: true,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	dropWebAccountCache(server)
 
-	_, tenantID, _, err := server.VerifyWebCredential(context.Background(), "root-durable", "durable-password-123")
+	acct, err := server.getWebAccount(context.Background(), "root-durable")
 	require.NoError(t, err, "root-scoped account must be reloadable from the secret store")
-	assert.Equal(t, "", tenantID, "root scope must survive a cache drop + store reload")
+	require.NotNil(t, acct)
+	assert.True(t, acct.RootScope, "root scope must survive a cache drop + store reload")
+	assert.Empty(t, acct.TenantID, "tenant_id must be empty after reload")
 }
 
 // TestWebAccounts_RootScope_MutuallyExclusiveWithTenantID verifies that specifying
@@ -749,7 +447,6 @@ func TestWebAccounts_RootScope_MutuallyExclusiveWithTenantID(t *testing.T) {
 
 	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username:  "conflict-user",
-		Password:  "valid-password-123",
 		TenantID:  "tenant-a",
 		RootScope: true,
 	})
@@ -761,34 +458,30 @@ func TestWebAccounts_RootScope_MutuallyExclusiveWithTenantID(t *testing.T) {
 }
 
 // TestWebAccounts_RootScope_ResetRetainsScope verifies that resetting a root-scoped
-// account's password without specifying a new scope retains root scope.
+// account without specifying a new scope retains root scope.
 func TestWebAccounts_RootScope_ResetRetainsScope(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
 
-	// Create root-scoped account.
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username:  "root-reset-user",
-		Password:  "original-password-123",
 		RootScope: true,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Reset password without specifying scope — root scope must be retained.
+	// Reset without specifying scope — root scope must be retained.
 	rec = postWebAccount(t, server, admin, WebAccountRequest{
 		Username: "root-reset-user",
-		Password: "new-password-456",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "reset of existing account returns 200")
 
-	// Old password must no longer verify.
-	_, _, _, err := server.VerifyWebCredential(context.Background(), "root-reset-user", "original-password-123")
-	assert.ErrorIs(t, err, ErrInvalidWebCredential)
-
-	// New password must verify with empty tenantID (root scope retained).
-	_, tenantID, _, err := server.VerifyWebCredential(context.Background(), "root-reset-user", "new-password-456")
+	// Reload from store and verify scope retained.
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), "root-reset-user")
 	require.NoError(t, err)
-	assert.Equal(t, "", tenantID, "root scope must be retained across password reset")
+	require.NotNil(t, acct)
+	assert.True(t, acct.RootScope, "root scope must be retained across account reset")
+	assert.Empty(t, acct.TenantID, "tenant_id must remain empty after reset")
 }
 
 // TestWebAccounts_RootScope_AppearsInList verifies that a root-scoped account
@@ -799,7 +492,6 @@ func TestWebAccounts_RootScope_AppearsInList(t *testing.T) {
 
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username:  "root-list-user",
-		Password:  "list-password-123",
 		RootScope: true,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -818,28 +510,29 @@ func TestWebAccounts_RootScope_AppearsInList(t *testing.T) {
 }
 
 // TestWebAccounts_RootScope_DeleteWorks verifies that deleting a root-scoped
-// account succeeds and the account no longer verifies afterward.
+// account succeeds and the account is removed from the store.
 func TestWebAccounts_RootScope_DeleteWorks(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
 
 	rec := postWebAccount(t, server, admin, WebAccountRequest{
 		Username:  "root-delete-user",
-		Password:  "delete-password-123",
 		RootScope: true,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Verify account exists.
-	_, _, _, err := server.VerifyWebCredential(context.Background(), "root-delete-user", "delete-password-123")
+	// Verify account exists before delete.
+	acct, err := server.getWebAccount(context.Background(), "root-delete-user")
 	require.NoError(t, err)
+	require.NotNil(t, acct, "account must exist before delete")
 
 	// Delete it.
 	delRec := deleteWebAccount(t, server, admin, "root-delete-user")
 	require.Equal(t, http.StatusOK, delRec.Code)
 
-	// After deletion, verification must fail.
+	// After deletion (and cache drop), account must be gone.
 	dropWebAccountCache(server)
-	_, _, _, err = server.VerifyWebCredential(context.Background(), "root-delete-user", "delete-password-123")
-	assert.ErrorIs(t, err, ErrInvalidWebCredential)
+	acct, err = server.getWebAccount(context.Background(), "root-delete-user")
+	require.NoError(t, err)
+	assert.Nil(t, acct, "account must be unreachable from the store after delete")
 }
