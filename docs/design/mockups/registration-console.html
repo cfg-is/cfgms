@@ -1,0 +1,278 @@
+<style>
+  :root {
+    --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(60,45,30,.4); --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a;
+    --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
+  :root[data-theme="light"]{ --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(60,45,30,.4); }
+  :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+  *{box-sizing:border-box;}
+  body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+  .topbar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; background:var(--chrome);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+  .brand b{font-size:14px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+  .brand span{font-size:11px; color:var(--text-dim); letter-spacing:.04em;}
+  .seg{display:inline-flex; position:relative; background:var(--chrome-2); border:1px solid var(--border); border-radius:10px; padding:3px;}
+  .seg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-dim);
+    font:inherit; font-size:12.5px; font-weight:600; padding:6px 13px; border-radius:7px; cursor:pointer; transition:color .18s ease;}
+  .seg button[aria-pressed="true"]{color:var(--accent-ink);}
+  .seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+    transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .dims{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; color:var(--text-dim);
+    font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .stage{flex:1; display:flex; align-items:flex-start; justify-content:center; padding:22px 16px 30px; overflow:auto;}
+  .frame-wrap{position:relative; margin:0 auto; border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow);
+    border:1px solid var(--border); background:var(--chrome); transition:width .22s ease, height .22s ease;}
+  .frame{display:block; border:0; transform-origin:0 0; background:transparent;}
+  .hint{text-align:center; color:var(--text-dim); font-size:12.5px; line-height:1.6; padding:0 20px 30px; max-width:680px; margin:0 auto;}
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>registration console</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS registration console mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  <b>Registration</b> console (Epic #2931 · #2934/#2935/#2936) — one page, three tabs. The
+  <b>tab strip</b> switches Pending / Tokens / IP-Trust. Reads + <b>Deny</b> (Pending) ship now;
+  the <b>write controls</b> (Approve · Approve-all · Approve-by-CIDR · Mint/Rotate/Revoke · Add range)
+  are drawn in a <b>deferred "soon"</b> state — where they'll live once the step-up write epic lands.
+  Tenant-scoped. Both themes.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1320,h:840}, tablet:{w:900,h:980}, mobile:{w:390,h:900} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+      --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --ok:#507055; --ok-bg:#e8f0e9; --warn:#a05a35; --warn-bg:#f7e8db; --crit:#b56a5a; --crit-bg:#f2e5e3; --neutral:#7a6a5a; --neutral-bg:#e8e0d8;
+    }
+    :root[data-theme="dark"]{
+      --bg-primary:#1e1e1e; --bg-surface:#252526; --bg-elevated:#2d2d2d; --bg-sunk:#1a1a1a; --border:#3c3c3c;
+      --text-primary:#c4b4a4; --text-secondary:#a89888; --text-faint:#8a7a68;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --ok:#6d9472; --ok-bg:#1a2e1d; --warn:#d4864f; --warn-bg:#332518; --crit:#c97a6a; --crit-bg:#2d1f1c; --neutral:#a89888; --neutral-bg:#2a2520;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0; height:100%;}
+    body{background:var(--bg-primary); color:var(--text-primary); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; padding:26px 24px;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;}
+    .page{max-width:1000px; margin:0 auto;}
+
+    .page-head{margin-bottom:14px;}
+    .page-head h1{font-size:21px; font-weight:700; margin:0 0 4px;}
+    .page-head .sub{margin:0; font-size:13px; color:var(--text-secondary);}
+
+    .tabs{display:flex; gap:2px; border-bottom:1px solid var(--border); margin-bottom:0;}
+    .tabs button{appearance:none; border:0; background:transparent; font:inherit; font-size:13.5px; font-weight:600;
+      color:var(--text-faint); padding:11px 16px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; display:flex; align-items:center; gap:8px;}
+    .tabs .count{font-size:11px; font-weight:700; padding:1px 7px; border-radius:20px; background:var(--warn-bg); color:var(--warn);}
+
+    .toolbar{display:flex; align-items:center; gap:10px; padding:14px 0; }
+    .toolbar .grow{flex:1;}
+    .btn{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-primary);
+      font:inherit; font-size:12.5px; font-weight:600; padding:8px 13px; border-radius:8px; cursor:pointer; display:inline-flex; align-items:center; gap:7px;}
+    .btn.primary{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
+    /* deferred / "soon" controls — where the write epic will wire in.
+       Label carries readable contrast (--text-secondary); the "SOON" pill is the muted deferred marker. */
+    .deferred{cursor:not-allowed; color:var(--text-secondary)!important; background:var(--bg-elevated)!important; border-color:var(--border)!important;}
+    .soon{font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; padding:1px 6px; border-radius:20px;
+      background:var(--neutral-bg); color:var(--text-faint); border:1px solid var(--border);}
+
+    .panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow:var(--shadow);}
+    .grid{display:grid; align-items:center;}
+    .g-pending{grid-template-columns:1.4fr 1fr .9fr 1fr 150px;}
+    .g-tokens{grid-template-columns:1.1fr 1.2fr .9fr .9fr 110px 120px;}
+    .g-ip{grid-template-columns:1.1fr .9fr 1fr 1fr 96px;}
+    .thead{color:var(--text-faint); font-size:10px; letter-spacing:.09em; text-transform:uppercase; font-weight:600;
+      padding:11px 18px; border-bottom:1px solid var(--border); background:var(--bg-elevated);}
+    .thead .r{text-align:right;}
+    .row{padding:13px 18px; border-bottom:1px solid var(--border); font-size:13px;}
+    .row:last-child{border-bottom:0;}
+    .row .nm{font-weight:600;}
+    .row .sub2{font-size:11px; color:var(--text-faint);}
+    .cell{color:var(--text-secondary); font-family:'JetBrains Mono',Menlo,monospace; font-size:12.5px;}
+    .act{text-align:right; display:flex; gap:6px; justify-content:flex-end; align-items:center;}
+    .badge{display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border-radius:20px; font-size:11px; font-weight:600; border:1px solid transparent;}
+    .badge .dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+    .b-warn{background:var(--warn-bg); color:var(--warn);} .b-ok{background:var(--ok-bg); color:var(--ok);}
+    .b-crit{background:var(--crit-bg); color:var(--crit);} .b-neutral{background:var(--neutral-bg); color:var(--neutral);}
+    .b-plain{color:var(--text-faint); border-color:var(--border);}
+    .rbtn{appearance:none; padding:5px 10px; border-radius:7px; background:transparent; border:1px solid var(--border);
+      font:inherit; font-size:11.5px; font-weight:600; cursor:pointer;}
+    .rbtn.deny{color:var(--crit);} .rbtn.deny:hover{border-color:var(--crit); background:var(--crit-bg);}
+    .rbtn.mini{padding:5px 9px;}
+
+    /* only the active tab's panel shows */
+    .tabpanel{display:none;}
+    body[data-tab="pending"] #p-pending{display:block;}
+    body[data-tab="tokens"] #p-tokens{display:block;}
+    body[data-tab="iptrust"] #p-iptrust{display:block;}
+    body[data-tab="pending"] #tb-pending{color:var(--accent); border-bottom-color:var(--accent);}
+    body[data-tab="tokens"] #tb-tokens{color:var(--accent); border-bottom-color:var(--accent);}
+    body[data-tab="iptrust"] #tb-iptrust{color:var(--accent); border-bottom-color:var(--accent);}
+  `;
+
+  const CHK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  const PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
+  const NET = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4a3 3 0 0 1 3 3V14"/></svg>';
+
+  const MOCK_HTML = `
+    <div class="page">
+      <div class="page-head">
+        <h1>Registration</h1>
+        <p class="sub">Enrollments, tokens, and trusted networks for <b>root/msp-a</b> and below.</p>
+      </div>
+
+      <div class="tabs">
+        <button id="tb-pending" data-tab="pending">Pending <span class="count">3</span></button>
+        <button id="tb-tokens" data-tab="tokens">Tokens</button>
+        <button id="tb-iptrust" data-tab="iptrust">IP-Trust</button>
+      </div>
+
+      <!-- ============ PENDING ============ -->
+      <div class="tabpanel" id="p-pending">
+        <div class="toolbar">
+          <span class="grow"></span>
+          <button class="btn deferred">${CHK} Approve all <span class="soon">soon</span></button>
+          <button class="btn deferred">${NET} Approve by CIDR <span class="soon">soon</span></button>
+        </div>
+        <div class="panel">
+          <div class="thead grid g-pending"><span>Steward</span><span>Tenant</span><span>Source IP</span><span>Requested</span><span class="r">&nbsp;</span></div>
+          <div class="row grid g-pending">
+            <div><div class="nm">web-07.msp-a.lan</div><div class="sub2 mono">fpr sha256:9c4a…e1</div></div>
+            <span class="cell">root/msp-a/prod</span><span class="cell">10.2.4.19</span><span class="cell">2 min ago</span>
+            <div class="act"><button class="rbtn deferred">Approve <span class="soon">soon</span></button><button class="rbtn deny">Deny</button></div>
+          </div>
+          <div class="row grid g-pending">
+            <div><div class="nm">db-02.msp-a.lan</div><div class="sub2 mono">fpr sha256:2f70…ab</div></div>
+            <span class="cell">root/msp-a/prod</span><span class="cell">10.2.4.31</span><span class="cell">18 min ago</span>
+            <div class="act"><button class="rbtn deferred">Approve <span class="soon">soon</span></button><button class="rbtn deny">Deny</button></div>
+          </div>
+          <div class="row grid g-pending">
+            <div><div class="nm">kiosk-11.client-1.lan</div><div class="sub2 mono">fpr sha256:aa19…4c</div></div>
+            <span class="cell">root/msp-a/client-1</span><span class="cell">192.0.2.77</span><span class="cell">1 hr ago</span>
+            <div class="act"><button class="rbtn deferred">Approve <span class="soon">soon</span></button><button class="rbtn deny">Deny</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ TOKENS ============ -->
+      <div class="tabpanel" id="p-tokens">
+        <div class="toolbar">
+          <span class="grow"></span>
+          <button class="btn deferred">${PLUS} Mint token <span class="soon">soon</span></button>
+        </div>
+        <div class="panel">
+          <div class="thead grid g-tokens"><span>Token</span><span>Label</span><span>Created</span><span>Expires</span><span>Status</span><span class="r">&nbsp;</span></div>
+          <div class="row grid g-tokens">
+            <span class="cell">reg_a1b2c3…</span><span class="nm">prod bulk enroll</span><span class="cell">Jul 10, 2026</span><span class="cell">Aug 10, 2026</span>
+            <span><span class="badge b-ok"><span class="dot"></span>Active</span></span>
+            <div class="act"><button class="rbtn mini deferred">Rotate <span class="soon">soon</span></button><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+          <div class="row grid g-tokens">
+            <span class="cell">reg_9f8e7d…</span><span class="nm">client-1 onboarding</span><span class="cell">Jun 22, 2026</span><span class="cell">—</span>
+            <span><span class="badge b-ok"><span class="dot"></span>Active</span></span>
+            <div class="act"><button class="rbtn mini deferred">Rotate <span class="soon">soon</span></button><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+          <div class="row grid g-tokens">
+            <span class="cell">reg_4c5d6e…</span><span class="nm">lab (temporary)</span><span class="cell">May 30, 2026</span><span class="cell">Jun 30, 2026</span>
+            <span><span class="badge b-neutral"><span class="dot"></span>Expired</span></span>
+            <div class="act"><button class="rbtn mini deferred">Rotate <span class="soon">soon</span></button><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+          <div class="row grid g-tokens">
+            <span class="cell">reg_7a8b9c…</span><span class="nm">rotated 2026-07-01</span><span class="cell">Apr 12, 2026</span><span class="cell">—</span>
+            <span><span class="badge b-crit"><span class="dot"></span>Revoked</span></span>
+            <div class="act"><button class="rbtn mini deferred">Rotate <span class="soon">soon</span></button><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+        </div>
+        <p class="sub" style="margin:10px 2px 0; font-size:11.5px; color:var(--text-faint)">Only the token prefix is ever shown — the full secret is displayed once at mint and never again.</p>
+      </div>
+
+      <!-- ============ IP-TRUST ============ -->
+      <div class="tabpanel" id="p-iptrust">
+        <div class="toolbar">
+          <span class="grow"></span>
+          <button class="btn deferred">${PLUS} Add range <span class="soon">soon</span></button>
+        </div>
+        <div class="panel">
+          <div class="thead grid g-ip"><span>CIDR</span><span>Source</span><span>Trusted since</span><span>Last activity</span><span class="r">&nbsp;</span></div>
+          <div class="row grid g-ip">
+            <span class="cell">10.2.4.0/24</span><span><span class="badge b-plain">Pre-seeded</span></span><span class="cell">Jan 04, 2026</span><span class="cell">3 min ago</span>
+            <div class="act"><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+          <div class="row grid g-ip">
+            <span class="cell">192.0.2.0/24</span><span><span class="badge b-ok"><span class="dot"></span>Manual</span></span><span class="cell">Mar 18, 2026</span><span class="cell">1 hr ago</span>
+            <div class="act"><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+          <div class="row grid g-ip">
+            <span class="cell">198.51.100.0/24</span><span><span class="badge b-ok"><span class="dot"></span>Manual</span></span><span class="cell">Jun 02, 2026</span><span class="cell">Yesterday</span>
+            <div class="act"><button class="rbtn mini deferred">Revoke <span class="soon">soon</span></button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const MOCK_JS = `
+    var tb=[].slice.call(document.querySelectorAll('.tabs button'));
+    tb.forEach(function(b){b.addEventListener('click',function(){
+      document.body.dataset.tab=b.dataset.tab;});});
+    document.body.dataset.tab='pending';
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body data-tab="pending">'+
+    MOCK_HTML+'<script>'+MOCK_JS+'<\/script></body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>
