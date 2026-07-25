@@ -2,16 +2,17 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Audit view suite (Story #2727): filter-param round-tripping for every
- * query parameter handleListAuditEntries reads, the untrusted-value
- * rendering rule (security A9.1), and UI-state coverage (loading, error,
- * empty, table).
+ * Audit view suite (Story #2727, #2989): filter-param round-tripping for every
+ * query parameter handleListAuditEntries reads, the untrusted-value rendering
+ * rule (security A9.1), UI-state coverage (loading, error, empty, table),
+ * row expansion (details/changes), CSV export, and has_more pager behaviour.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
-import AuditView from './AuditView.tsx'
+import AuditView, { escapeCsvCell, buildAuditCSV } from './AuditView.tsx'
+import type { AuditEntry } from './useAuditEntries.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -48,9 +49,12 @@ function makeEntry(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
-function makeResponse(entries: object[], status = 200) {
+function makeResponse(entries: object[], status = 200, hasMore = false) {
   return new Response(
-    JSON.stringify({ data: entries, timestamp: new Date().toISOString() }),
+    JSON.stringify({
+      data: { entries, has_more: hasMore },
+      timestamp: new Date().toISOString(),
+    }),
     { status, headers: { 'Content-Type': 'application/json' } },
   )
 }
@@ -267,7 +271,7 @@ describe('AuditView — filter-param round-tripping', () => {
   it('resets to page 0 (offset=0) when a filter is applied', async () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve(
-        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` }))),
+        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` })), 200, true),
       ),
     )
     renderAuditView()
@@ -399,10 +403,10 @@ describe('AuditView — pagination', () => {
     expect(screen.queryByTestId('audit-pager')).toBeNull()
   })
 
-  it('shows Next when a full page is returned', async () => {
+  it('shows Next when the server signals has_more=true', async () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve(
-        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` }))),
+        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` })), 200, true),
       ),
     )
     renderAuditView()
@@ -413,10 +417,28 @@ describe('AuditView — pagination', () => {
     expect(screen.getByRole('button', { name: /previous page/i })).toBeDisabled()
   })
 
+  it('hides Next when the server signals has_more=false even on a full page', async () => {
+    // Exactly PAGE_SIZE entries but has_more=false — old heuristic would show Next incorrectly.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` })), 200, false),
+      ),
+    )
+    renderAuditView()
+    await waitFor(() =>
+      expect(screen.getByTestId('audit-table')).toBeInTheDocument(),
+    )
+    // Pager may or may not render (no prev either), but Next must be absent or disabled
+    const nextBtn = screen.queryByRole('button', { name: /next page/i })
+    if (nextBtn) {
+      expect(nextBtn).toBeDisabled()
+    }
+  })
+
   it('advances to the next page and sends offset in the request', async () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve(
-        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` }))),
+        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` })), 200, true),
       ),
     )
     renderAuditView()
@@ -429,7 +451,7 @@ describe('AuditView — pagination', () => {
   it('goes back to the previous page when Previous is clicked', async () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve(
-        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` }))),
+        makeResponse(Array.from({ length: 50 }, (_, i) => makeEntry({ id: `e${i}` })), 200, true),
       ),
     )
     renderAuditView()
@@ -440,5 +462,214 @@ describe('AuditView — pagination', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /previous page/i }))
     await waitFor(() => expect(lastFetchURL()).toContain('offset=0'))
+  })
+})
+
+describe('AuditView — row expansion', () => {
+  it('does not render a detail row before the row is clicked', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse([makeEntry({ id: 'e1', details: { key: 'val' } })]),
+    )
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-table')).toBeInTheDocument())
+    expect(screen.queryByTestId('audit-detail-e1')).toBeNull()
+  })
+
+  it('renders details payload when a row with details is clicked', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse([makeEntry({ id: 'e1', details: { host: 'srv-01', count: 3 } })]),
+    )
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-row-e1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('audit-row-e1'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('audit-detail-e1')).toBeInTheDocument(),
+    )
+    // Details content rendered as text
+    expect(screen.getByTestId('audit-detail-e1').textContent).toContain('srv-01')
+    expect(screen.getByTestId('audit-detail-e1').textContent).toContain('count')
+  })
+
+  it('renders changes payload when a row with changes is clicked', async () => {
+    const changes = { before: { name: 'old-name' }, after: { name: 'new-name' } }
+    fetchMock.mockResolvedValue(
+      makeResponse([makeEntry({ id: 'e2', changes })]),
+    )
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-row-e2')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('audit-row-e2'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('audit-detail-e2')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('audit-detail-e2').textContent).toContain('old-name')
+    expect(screen.getByTestId('audit-detail-e2').textContent).toContain('new-name')
+  })
+
+  it('collapses the detail row when the expanded row is clicked again', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse([makeEntry({ id: 'e1', details: { k: 'v' } })]),
+    )
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-row-e1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('audit-row-e1'))
+    await waitFor(() => expect(screen.getByTestId('audit-detail-e1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('audit-row-e1'))
+    await waitFor(() => expect(screen.queryByTestId('audit-detail-e1')).toBeNull())
+  })
+
+  it('renders details payload as text nodes, not as HTML (security A9.1)', async () => {
+    fetchMock.mockResolvedValue(
+      makeResponse([
+        makeEntry({ id: 'e1', details: { xss: '<img src=x onerror="window.__detailXss=1">' } }),
+      ]),
+    )
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-row-e1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('audit-row-e1'))
+    await waitFor(() => expect(screen.getByTestId('audit-detail-e1')).toBeInTheDocument())
+
+    expect((window as unknown as Record<string, unknown>).__detailXss).toBeUndefined()
+  })
+
+  it('does not expand a row that has no details or changes', async () => {
+    fetchMock.mockResolvedValue(makeResponse([makeEntry({ id: 'e1' })]))
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-row-e1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('audit-row-e1'))
+    expect(screen.queryByTestId('audit-detail-e1')).toBeNull()
+  })
+})
+
+describe('AuditView — CSV export utilities (unit)', () => {
+  it('prefixes cells starting with = to prevent formula injection', () => {
+    expect(escapeCsvCell('=SUM(A1:A10)')).toBe("'=SUM(A1:A10)")
+  })
+
+  it('prefixes cells starting with + to prevent formula injection', () => {
+    expect(escapeCsvCell('+1234')).toBe("'+1234")
+  })
+
+  it('prefixes cells starting with - to prevent formula injection', () => {
+    expect(escapeCsvCell('-1234')).toBe("'-1234")
+  })
+
+  it('prefixes cells starting with @ to prevent formula injection', () => {
+    expect(escapeCsvCell('@user')).toBe("'@user")
+  })
+
+  it('does not prefix safe values', () => {
+    expect(escapeCsvCell('hello')).toBe('hello')
+    expect(escapeCsvCell('')).toBe('')
+    expect(escapeCsvCell('normal text')).toBe('normal text')
+  })
+
+  it('wraps fields containing commas in double quotes', () => {
+    expect(escapeCsvCell('hello,world')).toBe('"hello,world"')
+  })
+
+  it('wraps fields containing newlines in double quotes', () => {
+    expect(escapeCsvCell('line1\nline2')).toBe('"line1\nline2"')
+  })
+
+  it('escapes embedded double-quotes by doubling them', () => {
+    expect(escapeCsvCell('"quoted"')).toBe('"""quoted"""')
+  })
+
+  it('applies injection prefix then quoting when both apply', () => {
+    // =hello,world → prefix → '=hello,world → contains comma → "'=hello,world"
+    expect(escapeCsvCell('=hello,world')).toBe("\"'=hello,world\"")
+  })
+
+  it('buildAuditCSV produces a header row as the first line', () => {
+    const csv = buildAuditCSV([])
+    const firstLine = csv.split('\n')[0]!
+    expect(firstLine).toContain('timestamp')
+    expect(firstLine).toContain('action')
+    expect(firstLine).toContain('user_id')
+    expect(firstLine).toContain('severity')
+  })
+
+  it('buildAuditCSV includes entry data in subsequent rows', () => {
+    const entry: AuditEntry = {
+      id: 'e1',
+      timestamp: '2026-01-15T10:30:00Z',
+      event_type: 'authentication',
+      action: 'login',
+      user_id: 'user-1',
+      user_type: 'human',
+      resource_type: 'session',
+      resource_id: 'sess-1',
+      resource_name: '',
+      result: 'success',
+      severity: 'low',
+      source: 'controller',
+      ip_address: '10.0.0.1',
+      method: 'POST',
+      path: '/api/v1/web/login',
+      error_code: '',
+      error_message: '',
+    }
+    const csv = buildAuditCSV([entry])
+    const lines = csv.split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain('login')
+    expect(lines[1]).toContain('user-1')
+    expect(lines[1]).toContain('2026-01-15T10:30:00Z')
+  })
+
+  it('buildAuditCSV escapes injection characters in cell values', () => {
+    const entry: AuditEntry = {
+      id: 'e1',
+      timestamp: '2026-01-15T10:30:00Z',
+      event_type: '',
+      action: '=cmd /c calc',
+      user_id: '+injected',
+      user_type: '',
+      resource_type: '',
+      resource_id: '',
+      resource_name: '',
+      result: '',
+      severity: '',
+      source: '',
+      ip_address: '',
+      method: '',
+      path: '',
+      error_code: '',
+      error_message: '',
+    }
+    const csv = buildAuditCSV([entry])
+    expect(csv).toContain("'=cmd /c calc")
+    expect(csv).toContain("'+injected")
+  })
+})
+
+describe('AuditView — CSV export button', () => {
+  it('shows Export CSV button when entries are loaded', async () => {
+    fetchMock.mockResolvedValue(makeResponse([makeEntry()]))
+    renderAuditView()
+    await waitFor(() =>
+      expect(screen.getByTestId('audit-export-btn')).toBeInTheDocument(),
+    )
+  })
+
+  it('hides Export CSV button when the entries list is empty', async () => {
+    fetchMock.mockResolvedValue(makeResponse([]))
+    renderAuditView()
+    await waitFor(() => expect(screen.getByTestId('audit-empty')).toBeInTheDocument())
+    expect(screen.queryByTestId('audit-export-btn')).toBeNull()
+  })
+
+  it('hides Export CSV button while loading', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAuditView()
+    expect(screen.queryByTestId('audit-export-btn')).toBeNull()
   })
 })
