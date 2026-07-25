@@ -132,6 +132,30 @@ early is still attributable. Directories are pruned by `cleanup-stale` after
 `CFGMS_AGENT_SESSIONS_RETENTION_DAYS` (default 30); retention bounds them, not
 the container lifecycle, because a transcript is meant to outlive its container.
 
+### Dev-agent telemetry needs an image rebuild
+
+The agent image bakes in `setup-env.sh` and `entrypoint.sh`
+(`.devcontainer/Dockerfile` lines 169-170), and `launch-generic` does **not**
+bind-mount either. So dev and fix agents only produce telemetry once the image
+is rebuilt:
+
+```bash
+docker build -t cfg-agent:latest -f .devcontainer/Dockerfile .
+```
+
+| container | scripts come from | rebuild needed |
+|---|---|---|
+| `launch-generic` (dev / fix agents) | the image | **yes** |
+| `review-pr` (acceptance reviewers) | bind-mounted from the repo | no |
+| host side (mount, `meta.json`, retention prune) | host script | no |
+
+Running against a stale image **degrades, it does not break**: the host still
+mounts `/agent-sessions`, but the old `setup-env.sh` never creates the symlink,
+so the transcript stays inside the container and dies with it — exactly the
+behaviour that predates this change. There is therefore no ordering hazard
+between merging this and rebuilding, but until the rebuild happens dev-agent
+spend stays invisible.
+
 **The mount lands at `/agent-sessions`, not directly on `~/.claude/projects`.**
 Docker creates a bind mount's missing parent as root and the image ships no
 `~/.claude`, so mounting inside it leaves `~/.claude` root-owned and breaks the
