@@ -1,12 +1,21 @@
 # Build-context exclusions for every image in this repo (all Dockerfiles use
-# `COPY . .` builders). Nothing here is read by any Dockerfile.
+# `COPY . .` builders). Nothing excluded here is read by any Dockerfile; a
+# Dockerfile that does name an excluded path must re-include exactly that path
+# with a `!` negation below, or its COPY fails the build.
 # NOTE: web/dist is NOT excluded — the controller embeds it (web/embed.go).
 
 # VCS metadata (~140MB) — builds never run git against the repo
 .git
 
-# Claude Code agent state, incl. worktree checkouts (~400MB+)
+# Claude Code agent state, incl. worktree checkouts (~400MB+).
+# Exception: the agent image bakes the token reporter into the harness so a
+# dispatched branch cannot disable its own accounting (.devcontainer/Dockerfile,
+# Issue #3041). Re-include exactly those two files — never `.claude` wholesale,
+# since every builder here does `COPY . .` and would bake session transcripts,
+# worktree checkouts and credential-adjacent state into an image layer.
 .claude
+!.claude/metrics/token_report.py
+!.claude/metrics/pricing.json
 
 # Frontend toolchain artifacts — images build Go only; node_modules exists
 # wherever the frontend CI lane or a local npm ci ran (~180MB, 14k files)
