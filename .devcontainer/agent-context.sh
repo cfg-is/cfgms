@@ -327,3 +327,97 @@ ac_post_no_op_comment() {
     gh pr comment "$pr_num" --repo "${owner}/${repo}" --body "$body" >/dev/null 2>&1 || return 1
     return 0
 }
+
+# ----------------------------------------------------------------------------
+# Per-segment model routing (Issue #3030)
+# ----------------------------------------------------------------------------
+
+# ac_resolve_agent_model <segment>
+# Resolves the model + effort to run a container's `claude` invocation on,
+# reading .claude/model-routing.yaml (defaults + per-segment overrides).
+# stdout: two lines, "<model>\n<effort>".
+#
+# CFGMS_MODEL_OVERRIDE (forwarded into the container by agent-dispatch.sh)
+# takes precedence over the file's model regardless of config state — this is
+# what the benchmark harness uses to run a fixture across models without
+# mutating committed config. It never affects the resolved effort.
+#
+# A missing or malformed config file falls back to the hardcoded values below
+# (today's prior hardcoded defaults) so a parse failure degrades to previous
+# behavior instead of breaking dispatch. The parser only understands the
+# fixed two-level `defaults:`/`segments:` shape declared in the config file's
+# own header comment — it is a keyed lookup, not a general YAML implementation.
+ac_resolve_agent_model() {
+    local segment="$1"
+    local routing_file="${CFGMS_MODEL_ROUTING_FILE:-/workspace/.claude/model-routing.yaml}"
+    local fallback_model="claude-sonnet-4-6"
+    local fallback_effort="high"
+    local model="$fallback_model"
+    local effort="$fallback_effort"
+
+    if [[ -f "$routing_file" ]]; then
+        local resolved
+        resolved=$(python3 - "$routing_file" "$segment" "$fallback_model" "$fallback_effort" <<'PYEOF'
+import sys
+
+path, segment, fallback_model, fallback_effort = sys.argv[1:5]
+model, effort = fallback_model, fallback_effort
+try:
+    defaults = {}
+    segments = {}
+    section = None
+    with open(path) as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if line == "defaults:":
+                section = "defaults"
+                continue
+            if line == "segments:":
+                section = "segments"
+                continue
+            if not line.startswith(" "):
+                section = None
+                continue
+            if section == "defaults":
+                key, sep, val = stripped.partition(":")
+                if sep:
+                    defaults[key.strip()] = val.strip()
+            elif section == "segments":
+                seg_name, sep, rest = stripped.partition(":")
+                if not sep:
+                    continue
+                rest = rest.strip()
+                fields = {}
+                if rest.startswith("{") and rest.endswith("}"):
+                    for pair in rest[1:-1].split(","):
+                        k, psep, v = pair.partition(":")
+                        if psep:
+                            fields[k.strip()] = v.strip()
+                segments[seg_name.strip()] = fields
+    seg_fields = segments.get(segment, {})
+    model = seg_fields.get("model") or defaults.get("model") or fallback_model
+    effort = seg_fields.get("effort") or defaults.get("effort") or fallback_effort
+except Exception:
+    model, effort = fallback_model, fallback_effort
+print(model)
+print(effort)
+PYEOF
+        ) || resolved=""
+        if [[ -n "$resolved" ]]; then
+            local resolved_model resolved_effort
+            resolved_model=$(sed -n '1p' <<< "$resolved")
+            resolved_effort=$(sed -n '2p' <<< "$resolved")
+            [[ -n "$resolved_model" ]] && model="$resolved_model"
+            [[ -n "$resolved_effort" ]] && effort="$resolved_effort"
+        fi
+    fi
+
+    if [[ -n "${CFGMS_MODEL_OVERRIDE:-}" ]]; then
+        model="$CFGMS_MODEL_OVERRIDE"
+    fi
+
+    printf '%s\n%s\n' "$model" "$effort"
+}

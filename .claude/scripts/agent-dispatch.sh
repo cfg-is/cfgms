@@ -942,6 +942,7 @@ case "$cmd" in
       -e "CFGMS_TENANT=agent-test/${num}" \
       -e "CFGMS_TIER1_URL=${tier1_url}" \
       -e "CFGMS_ADMIN_BUNDLE=" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
       "${num}" 2>&1); then
@@ -1015,6 +1016,7 @@ case "$cmd" in
       "${session_mount[@]}" \
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AUTONOMOUS=true" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
       "${lease_env[@]}" \
       --cap-add NET_ADMIN \
       cfg-agent:latest \
@@ -1918,6 +1920,7 @@ PROMPT_EOF
       -e "GH_TOKEN=${gh_token}" \
       -e "CFGMS_AGENT_MODE=true" \
       -e "CFGMS_LEASE_KEY=pr-${pr_num}" \
+      -e "CFGMS_MODEL_OVERRIDE=${CFGMS_MODEL_OVERRIDE:-}" \
       --cap-add NET_ADMIN \
       --entrypoint /usr/local/bin/review-entrypoint.sh \
       cfg-agent:latest 2>&1); then
