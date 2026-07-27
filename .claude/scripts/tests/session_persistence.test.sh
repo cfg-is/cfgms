@@ -159,7 +159,34 @@ for entry in "${SCRIPT_DIR}/../../../.devcontainer/entrypoint.sh" \
   check_contains "${name} copies the manifest to the mount" "$src" \
     'cp /tmp/agent-result.json "${CLAUDE_PROJECTS_DIR}/agent-result.json"'
   if bash -n "$entry" 2>/dev/null; then ok "${name} parses"; else bad "${name} parses" "bash -n failed"; fi
+
+  # Regression guard for #3041: the reporter must resolve from the harness,
+  # never from the PR checkout under /workspace -- a branch that lacks, edits,
+  # or deletes .claude/metrics must not be able to disable its own accounting.
+  if grep -qE 'TOKEN_REPORT="/workspace' "$entry"; then
+    bad "${name} reporter never resolved from /workspace" "found a /workspace-rooted TOKEN_REPORT assignment"
+  else
+    ok "${name} reporter never resolved from /workspace"
+  fi
+  check_contains "${name} reporter resolves from the harness path" "$src" \
+    'TOKEN_REPORT="/usr/local/share/cfgms-metrics/token_report.py"'
+
+  # A failure to record usage must be loud, never a silently-absent key.
+  check_contains "${name} records an explicit marker on accounting failure" "$src" '"usage_error"'
+  check_contains "${name} warns on stdout when the reporter is missing" "$src" \
+    'WARN: token reporter not found'
 done
+
+printf '\n== harness-baked reporter (image + Dockerfile) ==\n'
+
+dockerfile_src="$(cat "${SCRIPT_DIR}/../../../.devcontainer/Dockerfile")"
+check_contains "Dockerfile bakes token_report.py into the harness path" "$dockerfile_src" \
+  '/usr/local/share/cfgms-metrics/'
+check_contains "Dockerfile bakes pricing.json alongside it" "$dockerfile_src" \
+  '.claude/metrics/pricing.json'
+
+check_contains "review-pr dispatch bind-mounts .claude/metrics fresh from host" "$dispatch_src" \
+  '.claude/metrics:/usr/local/share/cfgms-metrics:ro'
 
 printf '\n%s\n' "-----------------------------------------"
 if [[ "$fail" -eq 0 ]]; then
