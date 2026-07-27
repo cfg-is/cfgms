@@ -16,8 +16,14 @@ ENTRYPOINT="${REPO_ROOT}/.devcontainer/entrypoint.sh"
 REVIEW_ENTRYPOINT="${REPO_ROOT}/.devcontainer/scripts/review-entrypoint.sh"
 DISPATCH="${REPO_ROOT}/.claude/scripts/agent-dispatch.sh"
 ROUTING_FILE="${REPO_ROOT}/.claude/model-routing.yaml"
+DOCKERFILE="${REPO_ROOT}/.devcontainer/Dockerfile"
+DOCKERIGNORE="${REPO_ROOT}/.dockerignore"
 
-for f in "$AGENT_CONTEXT" "$ENTRYPOINT" "$REVIEW_ENTRYPOINT" "$DISPATCH" "$ROUTING_FILE"; do
+# The one path the routing config may be read from inside a container. It is
+# harness-owned (baked + bind-mounted); /workspace is the branch under review.
+HARNESS_ROUTING_PATH="/usr/local/share/cfgms-agent/model-routing.yaml"
+
+for f in "$AGENT_CONTEXT" "$ENTRYPOINT" "$REVIEW_ENTRYPOINT" "$DISPATCH" "$ROUTING_FILE" "$DOCKERFILE" "$DOCKERIGNORE"; do
   [[ -f "$f" ]] || { printf 'FAIL: expected file not found: %s\n' "$f" >&2; exit 1; }
 done
 
@@ -167,6 +173,60 @@ if [[ "${#missing_override[@]}" -eq 0 ]]; then
 else
   bad "every accounting dispatch path forwards CFGMS_MODEL_OVERRIDE" \
       "docker run at line(s) ${missing_override[*]} does not forward it"
+fi
+
+printf '\n== routing config is harness-owned, never read from the branch ==\n'
+# A merge gate must not read its configuration from the artifact it gates.
+# /workspace is a checkout of the PR branch under review (agent-dispatch.sh
+# review-pr, -v "${real_path}:/workspace"), so a resolver defaulting there lets
+# a branch set `segments: acceptance-review: { model: <weak model> }` and choose
+# the model of the agent deciding whether that branch merges. Dev/fix agents
+# additionally run on untrusted issue and PR text. Same rule as the token
+# reporter (Issue #3041).
+resolver_body="$(awk '/^ac_resolve_agent_model\(\)/ { in_fn = 1 } in_fn { print } in_fn && /^}/ { exit }' "$AGENT_CONTEXT")"
+[[ -n "$resolver_body" ]] || { printf 'FAIL: could not extract ac_resolve_agent_model body\n' >&2; exit 1; }
+check_contains "resolver defaults to the harness routing path" "$resolver_body" \
+  "\${CFGMS_MODEL_ROUTING_FILE:-${HARNESS_ROUTING_PATH}}"
+check_not_contains "resolver never reads routing from /workspace" "$resolver_body" "/workspace"
+
+# Baking makes the control exist even with no mount; the mount is what keeps it
+# current without a ~10GB image rebuild.
+dockerfile_src="$(cat "$DOCKERFILE")"
+check_contains "Dockerfile bakes the routing config into the harness path" "$dockerfile_src" \
+  "COPY .claude/model-routing.yaml ${HARNESS_ROUTING_PATH}"
+# .dockerignore excludes .claude wholesale for every image in the repo; without
+# a per-file negation the COPY fails and cfg-agent:latest cannot be rebuilt.
+if grep -qxF -- '!.claude/model-routing.yaml' "$DOCKERIGNORE"; then
+  ok ".dockerignore re-includes the routing config into the build context"
+else
+  bad ".dockerignore re-includes the routing config into the build context" \
+      "COPY source is excluded by .dockerignore — the agent image cannot build"
+fi
+
+check_contains "dispatch mount targets the image's baked routing path" "$dispatch_src" \
+  "AGENT_MODEL_ROUTING_MOUNT=\"${HARNESS_ROUTING_PATH}\""
+check_contains "dispatch bind-mounts the routing config read-only from the harness checkout" "$dispatch_src" \
+  '-v "${REPO_ROOT}/.claude/model-routing.yaml:${AGENT_MODEL_ROUTING_MOUNT}:ro"'
+# An absent source must fall through to the baked copy: Docker would otherwise
+# create an empty host directory at that path and shadow the baked config,
+# silently dropping every dispatch to the hardcoded fallback.
+check_contains "mount is skipped when the harness copy is absent" "$dispatch_src" \
+  'if [ -f "${REPO_ROOT}/.claude/model-routing.yaml" ]; then'
+
+mapfile -t unrouted < <(awk '
+  /docker run -d/                 { in_block = 1; block = ""; start = NR }
+  in_block                        { block = block $0 "\n" }
+  in_block && /cfg-agent:latest/  {
+    in_block = 0
+    if (block ~ /--entrypoint \/bin\/bash/) next
+    if (block !~ /AGENT_MODEL_ROUTING_MOUNT_ARGS/) print start
+  }
+' "$DISPATCH")
+if [[ "${#unrouted[@]}" -eq 0 ]]; then
+  ok "every accounting dispatch path mounts the harness routing config"
+else
+  bad "every accounting dispatch path mounts the harness routing config" \
+      "docker run at line(s) ${unrouted[*]} would run on stale baked routing"
 fi
 
 printf '\n%s\n' "-----------------------------------------"

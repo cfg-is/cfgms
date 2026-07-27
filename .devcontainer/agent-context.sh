@@ -334,13 +334,29 @@ ac_post_no_op_comment() {
 
 # ac_resolve_agent_model <segment>
 # Resolves the model + effort to run a container's `claude` invocation on,
-# reading .claude/model-routing.yaml (defaults + per-segment overrides).
+# reading model-routing.yaml (defaults + per-segment overrides).
 # stdout: two lines, "<model>\n<effort>".
+#
+# The config is read from the HARNESS path only, never from /workspace. The
+# branch under dispatch or review must not select the model of the agent that
+# reviews it: /workspace is a checkout of the PR branch (agent-dispatch.sh
+# review-pr), so a branch could otherwise set
+# `segments: acceptance-review: { model: <weak model> }` and weaken the merge
+# gate judging it. Dev and fix agents consume untrusted issue/PR text, so branch
+# content is never a trusted input to harness configuration (same rule as the
+# token reporter, Issue #3041). The image bakes this file
+# (.devcontainer/Dockerfile) and every dispatch path bind-mounts the harness
+# checkout's copy over it read-only, so routing edits need no image rebuild.
+#
+# CFGMS_MODEL_ROUTING_FILE is the host operator's escape hatch (used by the
+# tests below and by benchmark tooling); it is set from host env, not from the
+# repo under review.
 #
 # CFGMS_MODEL_OVERRIDE (forwarded into the container by agent-dispatch.sh)
 # takes precedence over the file's model regardless of config state — this is
 # what the benchmark harness uses to run a fixture across models without
-# mutating committed config. It never affects the resolved effort.
+# mutating committed config. It originates from host operator env, not the
+# branch. It never affects the resolved effort.
 #
 # A missing or malformed config file falls back to the hardcoded values below
 # (today's prior hardcoded defaults) so a parse failure degrades to previous
@@ -349,7 +365,7 @@ ac_post_no_op_comment() {
 # own header comment — it is a keyed lookup, not a general YAML implementation.
 ac_resolve_agent_model() {
     local segment="$1"
-    local routing_file="${CFGMS_MODEL_ROUTING_FILE:-/workspace/.claude/model-routing.yaml}"
+    local routing_file="${CFGMS_MODEL_ROUTING_FILE:-/usr/local/share/cfgms-agent/model-routing.yaml}"
     local fallback_model="claude-sonnet-4-6"
     local fallback_effort="high"
     local model="$fallback_model"
