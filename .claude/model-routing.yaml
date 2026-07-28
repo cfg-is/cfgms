@@ -1,0 +1,29 @@
+# Per-segment agent model/effort routing (Issue #3030).
+#
+# Read by .devcontainer/agent-context.sh's ac_resolve_agent_model() from inside
+# agent containers, from the HARNESS path
+# /usr/local/share/cfgms-agent/model-routing.yaml only — baked into the image
+# (.devcontainer/Dockerfile) and bind-mounted read-only from the harness
+# checkout by agent-dispatch.sh. It is never read from /workspace: that is the
+# branch under dispatch/review, which must not be able to choose the model of
+# the acceptance reviewer that decides whether it merges. Editing this file in
+# the harness checkout takes effect on the next dispatch with no image rebuild;
+# editing it on a PR branch changes nothing for that branch's agents.
+#
+# A missing or malformed file falls back to the hardcoded defaults baked into
+# the resolver, so a parse failure degrades to prior behavior rather than
+# breaking dispatch. CFGMS_MODEL_OVERRIDE (forwarded by agent-dispatch.sh from
+# host operator env) takes precedence over this file's model — used by the
+# benchmark harness to run a fixture across models without mutating committed
+# config.
+#
+# Fixed two-level shape: do not add nesting beyond defaults:/segments: — the
+# resolver is a plain-stdlib parser, not a general YAML implementation.
+defaults:
+  model: claude-sonnet-4-6
+  effort: high
+segments:
+  dev-agent:          { model: claude-sonnet-4-6 }
+  fix-agent:          { model: claude-sonnet-4-6 }
+  pr-review:          { model: claude-sonnet-4-6 }
+  acceptance-review:  { model: claude-sonnet-4-6 }

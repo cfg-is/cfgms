@@ -8,14 +8,17 @@
 .git
 
 # Claude Code agent state, incl. worktree checkouts (~400MB+).
-# Exception: the agent image bakes the token reporter into the harness so a
-# dispatched branch cannot disable its own accounting (.devcontainer/Dockerfile,
-# Issue #3041). Re-include exactly those two files — never `.claude` wholesale,
-# since every builder here does `COPY . .` and would bake session transcripts,
-# worktree checkouts and credential-adjacent state into an image layer.
+# Exception: the agent image bakes harness-owned config into the image so a
+# dispatched branch can neither disable its own accounting (token reporter,
+# Issue #3041) nor choose the model its own reviewer runs on (model routing,
+# Issue #3030) — see .devcontainer/Dockerfile. Re-include exactly those files —
+# never `.claude` wholesale, since every builder here does `COPY . .` and would
+# bake session transcripts, worktree checkouts and credential-adjacent state
+# into an image layer.
 .claude
 !.claude/metrics/token_report.py
 !.claude/metrics/pricing.json
+!.claude/model-routing.yaml
 
 # Frontend toolchain artifacts — images build Go only; node_modules exists
 # wherever the frontend CI lane or a local npm ci ran (~180MB, 14k files)
