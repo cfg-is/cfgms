@@ -540,6 +540,95 @@ def collect(
 # --------------------------------------------------------------------------
 
 
+#: Tool calls that spawn a nested agent. ``Agent``/``Task`` carry the role in
+#: ``subagent_type``; a ``Skill`` call carries it in ``skill`` and only counts
+#: as a spawn when its result says the skill forked into its own agent.
+_SPAWN_TOOLS = ("Agent", "Task", "Skill")
+
+
+def extract_agent_spawns(path: Path) -> list[dict[str, Any]]:
+    """Nested agents a session spawned, with their roles, from its transcript.
+
+    A cron cycle's expensive work happens inside nested agents (Tech Lead, BA,
+    pin-refresh-runner, pipeline-sweep-runner, reviewers), and the orchestrator
+    is the only thing that knows it spawned them -- no helper script sees that
+    boundary. The transcript does record it, though, in two rows:
+
+        assistant  content[] tool_use {name: "Agent",
+                                       input: {subagent_type, description}}
+        user       toolUseResult {agentId, resolvedModel, ...}
+
+    ``subagent_type`` is the role verbatim, and ``agentId`` names the nested
+    transcript (``<session>/subagents/agent-<agentId>.jsonl``), which is how a
+    role gets its measured cost. Reading it here keeps the record measured
+    rather than narrated -- the same reason step cost is not self-reported.
+
+    Returns one dict per spawn: ts, role, description, agent_id, model, tool.
+    """
+    pending: dict[str, dict[str, Any]] = {}
+    spawns: list[dict[str, Any]] = []
+
+    with path.open("rb") as handle:
+        for raw in handle:
+            if b'"tool_use"' not in raw and b'"toolUseResult"' not in raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(row, dict):
+                continue
+
+            message = row.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") != "tool_use" or block.get("name") not in _SPAWN_TOOLS:
+                        continue
+                    tool_input = block.get("input")
+                    tool_input = tool_input if isinstance(tool_input, dict) else {}
+                    pending[str(block.get("id"))] = {
+                        "ts": row.get("timestamp"),
+                        "tool": block.get("name"),
+                        "role": tool_input.get("subagent_type") or tool_input.get("skill"),
+                        "description": tool_input.get("description") or tool_input.get("args"),
+                    }
+                # A tool_result row identifies WHICH pending spawn it answers.
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    spawn = pending.pop(str(block.get("tool_use_id")), None)
+                    if spawn is None:
+                        continue
+                    result = row.get("toolUseResult")
+                    result = result if isinstance(result, dict) else {}
+                    agent_id = result.get("agentId")
+                    if not agent_id:
+                        # A Skill that ran inline never became an agent.
+                        continue
+                    spawn["agent_id"] = agent_id
+                    spawn["model"] = result.get("resolvedModel")
+                    spawn["role"] = spawn["role"] or result.get("commandName")
+                    spawn["description"] = spawn["description"] or result.get("description")
+                    spawns.append(spawn)
+
+    return spawns
+
+
+def _find_session_transcript(session: str, roots: list[Path]) -> Path | None:
+    """The top-level transcript for a session id, across every project dir."""
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for project_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            candidate = project_dir / f"{session}.jsonl"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def correlate_cycle_manifest(
     manifest_path: Path, roots: list[Path], pricing: Pricing
 ) -> tuple[int, str]:
@@ -554,11 +643,12 @@ def correlate_cycle_manifest(
     not a substitute for this.
 
     Writes cycle_cost_usd, cycle_total_tokens, per-step cost_usd/total_tokens/
-    calls, and an "unattributed" bucket (calls before the first step boundary,
-    or with no timestamp) back into the same manifest file. Returns
-    (call_count, note) for the caller to log; never raises on a malformed or
-    half-written manifest -- a cycle that failed partway still has one to
-    read, and correlation failing must not destroy it.
+    calls, the nested agents spawned during the cycle with their roles and
+    their own measured cost, and an "unattributed" bucket (calls before the
+    first step boundary, or with no timestamp) back into the same manifest
+    file. Returns (call_count, note) for the caller to log; never raises on a
+    malformed or half-written manifest -- a cycle that failed partway still has
+    one to read, and correlation failing must not destroy it.
     """
     manifest = json.loads(manifest_path.read_text())
 
@@ -608,6 +698,45 @@ def correlate_cycle_manifest(
         step["total_tokens"] = step_total["total_tokens"]
         step["calls"] = step_total["calls"]
 
+    # Nested agents spawned with their roles. Bounded to the cycle window so a
+    # session that runs several cycles back to back attributes each spawn to
+    # the cycle that made it, and tagged with the step it was spawned under so
+    # "which agent ran in which role, in which step" is queryable.
+    by_transcript: dict[str, dict[str, Any]] = {}
+    for call in session_calls:
+        bucket = by_transcript.setdefault(
+            call.transcript, {"calls": 0, "cost_usd": 0.0, "total_tokens": 0}
+        )
+        bucket["calls"] += 1
+        bucket["cost_usd"] += call.cost_usd or 0.0
+        bucket["total_tokens"] += call.total_tokens
+
+    cycle_start = _parse_time(manifest.get("start"))
+    cycle_end = _parse_time(manifest.get("end"))
+    main_transcript = _find_session_transcript(session, roots)
+    agents: list[dict[str, Any]] = []
+    if main_transcript is not None:
+        for spawn in extract_agent_spawns(main_transcript):
+            when = _parse_time(spawn.get("ts"))
+            if cycle_start is not None and (when is None or when < cycle_start):
+                continue
+            if cycle_end is not None and when is not None and when > cycle_end:
+                continue
+            measured = by_transcript.get(f"agent-{spawn['agent_id']}")
+            agents.append({
+                "ts": spawn.get("ts"),
+                "role": spawn.get("role") or "unknown",
+                "description": spawn.get("description"),
+                "agent_id": spawn.get("agent_id"),
+                "model": spawn.get("model"),
+                "tool": spawn.get("tool"),
+                "step": bucket_for(when),
+                "calls": measured["calls"] if measured else 0,
+                "cost_usd": round(measured["cost_usd"], 4) if measured else 0.0,
+                "total_tokens": measured["total_tokens"] if measured else 0,
+            })
+    manifest["agents"] = agents
+
     manifest["cycle_cost_usd"] = round(cycle_cost, 4)
     manifest["cycle_total_tokens"] = cycle_tokens
     manifest["unattributed"] = {
@@ -617,7 +746,10 @@ def correlate_cycle_manifest(
     }
 
     manifest_path.write_text(json.dumps(manifest, indent=2))
-    return len(session_calls), f"${cycle_cost:.2f} across {len(steps)} steps"
+    return (
+        len(session_calls),
+        f"${cycle_cost:.2f} across {len(steps)} steps, {len(agents)} nested agents",
+    )
 
 
 # --------------------------------------------------------------------------

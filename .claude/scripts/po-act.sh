@@ -25,9 +25,11 @@
 #   preflight                       Run preflight (writes ~/.cache/cfgms-po/preflight.json, prints summary)
 #   state [jq_filter]               Read cached preflight and apply optional jq filter
 #   cycle-start [MODE]              Open a per-cycle manifest (Issue #3053); every other subcommand
-#                                   below auto-records a step into it until cycle-end closes it
+#                                   below auto-records a step into it -- with its work/no-op/error
+#                                   outcome -- until cycle-end closes it
 #   cycle-end                       Close the current cycle: correlate measured cost per step via
-#                                   token_report.py, fold in this cycle's dispatch-ledger launches
+#                                   token_report.py, record the nested agents spawned with their
+#                                   roles, fold in this cycle's dispatch-ledger launches
 #   cycle-report [N]                Average cost per cycle step across the last N completed cycles
 
 set -euo pipefail
@@ -125,12 +127,28 @@ _cycle_manifest_path() {
 # _cycle_append_step <subcommand> [args...]
 # Best-effort, lock-guarded read-modify-write onto the open cycle's manifest
 # steps[]. Silent no-op with no cycle open. Never blocks or fails the caller.
+#
+# The record opens with outcome="incomplete" -- the honest state for a step
+# whose process is killed before it can classify itself (AC4: a cycle that
+# fails partway still describes how far it got) -- and _cycle_finalize_step
+# below rewrites it to work / no-op / error once the subcommand returns.
+# Exports the manifest path and the record's index so the finalizer updates
+# THIS step rather than guessing at the last one (a concurrent po-act.sh call
+# from another shell can append in between).
+CYCLE_STEP_MANIFEST=""
+CYCLE_STEP_INDEX=""
+CYCLE_STEP_OUTFILE=""
+CYCLE_STEP_TEE_PID=""
 _cycle_append_step() {
   local subcommand="$1"; shift
-  local manifest
+  local manifest idx
   manifest=$(_cycle_manifest_path) || return 0
   [[ -n "$manifest" ]] && [[ -f "$manifest" ]] || return 0
-  (
+  idx=$(
+    # stderr first: a command substitution runs before any redirection on the
+    # assignment itself could suppress it, so this subshell must silence its
+    # own noise (best-effort recording never speaks over a subcommand).
+    exec 2>/dev/null 201>>"${manifest}.lock"
     flock -w 2 201 || exit 0
     python3 - "$manifest" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$subcommand" "$*" <<'PYEOF'
 import json, sys
@@ -140,11 +158,125 @@ try:
         manifest = json.load(f)
 except Exception:
     sys.exit(0)
-manifest.setdefault("steps", []).append({"ts": ts, "subcommand": subcommand, "args": args})
+steps = manifest.setdefault("steps", [])
+steps.append({
+    "ts": ts, "subcommand": subcommand, "args": args,
+    "outcome": "incomplete", "exit_code": None, "result": None,
+})
+with open(path, "w") as f:
+    json.dump(manifest, f, indent=2)
+print(len(steps) - 1)
+PYEOF
+  ) || idx=""
+  [[ "$idx" =~ ^[0-9]+$ ]] || return 0
+  CYCLE_STEP_MANIFEST="$manifest"
+  CYCLE_STEP_INDEX="$idx"
+}
+
+# _cycle_arm_step_outcome
+# Arms per-step work-or-no-op outcome recording (AC1) for the step
+# _cycle_append_step just opened. The invocation ARGS alone cannot answer "did
+# this step do work": a `dispatch` deferred on capacity, a lease found HELD, an
+# `enqueue` refused and a real launch are the same invocation shape and differ
+# only in the verdict the subcommand prints. Those verdicts are this script's
+# own marker convention (DISPATCHED:/DISPATCH_SKIPPED:/CLAIM_LOST:/ENQUEUED:
+# ...), so the outcome is classified from the subcommand's REAL stdout and exit
+# status -- measured the same way step cost is, never self-declared.
+#
+# stdout is tee'd rather than buffered, so the caller still sees output as it
+# is produced; the copy is what the finalizer classifies. fd 210 holds the real
+# stdout (kept well clear of the 201/202 lock fds and of any fd the sourced
+# agent-dispatch.sh uses).
+_cycle_arm_step_outcome() {
+  [[ -n "$CYCLE_STEP_INDEX" ]] && [[ -n "$CYCLE_STEP_MANIFEST" ]] || return 0
+  command -v tee >/dev/null 2>&1 || return 0
+  CYCLE_STEP_OUTFILE="${CYCLE_STEP_MANIFEST}.step-${CYCLE_STEP_INDEX}.$$.out"
+  : >"$CYCLE_STEP_OUTFILE" 2>/dev/null || { CYCLE_STEP_OUTFILE=""; return 0; }
+  exec 210>&1
+  exec 1> >(tee "$CYCLE_STEP_OUTFILE" >&210)
+  CYCLE_STEP_TEE_PID="$!"
+  trap '_cycle_finalize_step "$?"' EXIT
+}
+
+# _cycle_finalize_step <exit_code>
+# EXIT-trap half of the above: classifies the step's outcome and writes it back
+# onto the step record. Never changes the caller's exit status or output.
+_cycle_finalize_step() {
+  local rc="${1:-0}" i=0
+  trap - EXIT
+  if [[ -n "$CYCLE_STEP_TEE_PID" ]]; then
+    # Closing the tee pipe is what makes tee flush and exit, so restore the
+    # real stdout FIRST, then wait for it -- bounded (~1s) rather than `wait`
+    # so a subcommand that left a child holding the pipe can never hang a
+    # cron cycle. Whatever tee has written by then is what gets classified.
+    exec 1>&210 210>&-
+    while kill -0 "$CYCLE_STEP_TEE_PID" 2>/dev/null && [[ "$i" -lt 10 ]]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+  fi
+  (
+    exec 203>>"${CYCLE_STEP_MANIFEST}.lock" 2>/dev/null
+    flock -w 2 203 || exit 0
+    python3 - "$CYCLE_STEP_MANIFEST" "$CYCLE_STEP_INDEX" "$rc" "${CYCLE_STEP_OUTFILE:-}" <<'PYEOF'
+import json, re, sys
+path, idx_raw, rc_raw, out_path = sys.argv[1:5]
+
+# This script's status markers, by what they mean about the step's outcome.
+NOOP_HINTS = ("SKIP", "DEFER", "REFUS", "LOST", "ALREADY", "FULL")
+ERROR_HINTS = ("FAIL", "ERROR", "ROLLED_BACK")
+# Paths that report "nothing to do" without a marker-shaped line.
+NOOP_PLAIN = ("no_failing_jobs", "no_failing_runs", "No cycles recorded yet")
+MARKER_RE = re.compile(r"^[A-Z][A-Z0-9_]*(?::|$)")
+
+text = ""
+if out_path:
+    try:
+        with open(out_path, errors="replace") as f:
+            text = f.read()
+    except OSError:
+        text = ""
+
+lines = [line.strip() for line in text.splitlines() if line.strip()]
+# Last marker wins: each path's final marker is its verdict (e.g. dispatch
+# prints RESOLVED_ITEM: then CLAIMED: then DISPATCHED:).
+marker = ""
+for line in lines:
+    if MARKER_RE.match(line):
+        marker = line
+token = marker.split(":", 1)[0]
+
+try:
+    rc = int(rc_raw)
+except ValueError:
+    rc = 0
+
+if rc != 0:
+    outcome = "error"
+elif token and any(hint in token for hint in NOOP_HINTS):
+    outcome = "no-op"
+elif token and any(hint in token for hint in ERROR_HINTS):
+    outcome = "error"
+elif any(line.startswith(plain) for plain in NOOP_PLAIN for line in lines):
+    outcome = "no-op"
+else:
+    outcome = "work"
+
+try:
+    with open(path) as f:
+        manifest = json.load(f)
+    step = manifest["steps"][int(idx_raw)]
+except Exception:
+    sys.exit(0)
+step["outcome"] = outcome
+step["exit_code"] = rc
+step["result"] = marker[:200] or None
 with open(path, "w") as f:
     json.dump(manifest, f, indent=2)
 PYEOF
-  ) 201>>"${manifest}.lock" 2>/dev/null || true
+  ) >/dev/null 2>&1 || true
+  [[ -n "$CYCLE_STEP_OUTFILE" ]] && rm -f "$CYCLE_STEP_OUTFILE"
+  return 0
 }
 
 # _cycle_append_lease <action> <key> <result>
@@ -284,10 +416,13 @@ shift || true
 
 # Deterministic step boundary (Issue #3053): every subcommand except the
 # cycle bracket itself auto-records a step into the open cycle's manifest, if
-# any is open. Silent no-op outside a cycle (_cycle_append_step's own
-# contract) -- never changes what the subcommand below actually does.
+# any is open, and arms outcome classification for it so the step reads back as
+# work / no-op / error once it returns. Silent no-op outside a cycle
+# (_cycle_append_step's own contract) -- never changes what the subcommand
+# below actually does, and never changes its output or exit status.
 if [[ "$cmd" != "cycle-start" && "$cmd" != "cycle-end" ]]; then
   _cycle_append_step "$cmd" "$@"
+  _cycle_arm_step_outcome
 fi
 
 case "$cmd" in
@@ -816,6 +951,11 @@ path, cycle_id, mode, session, ts, host = sys.argv[1:7]
 manifest = {
     "cycle_id": cycle_id, "mode": mode, "session": session, "host": host,
     "start": ts, "end": None, "steps": [], "leases": [], "containers": [],
+    # Nested Agent/Skill spawns (Tech Lead, BA, pin-refresh-runner,
+    # pipeline-sweep-runner, reviewers ...) with their roles. Filled at
+    # cycle-end from the session's own transcript rows -- see the cycle-end
+    # case below for why the agent is not asked to declare them.
+    "agents": [],
     "cycle_cost_usd": None,
 }
 with open(path, "w") as f:
@@ -831,9 +971,20 @@ PYEOF
 
   cycle-end)
     # Closes the current cycle's manifest: sets the end timestamp, correlates
-    # MEASURED (never self-reported) cost per step via token_report.py, and
-    # folds in this cycle's #3052 dispatch-ledger launches/exits so "containers
-    # launched by mode with names" doesn't re-implement container tracking.
+    # MEASURED (never self-reported) cost per step via token_report.py, records
+    # the nested agents this cycle spawned with their roles, and folds in this
+    # cycle's #3052 dispatch-ledger launches/exits so "containers launched by
+    # mode with names" doesn't re-implement container tracking.
+    #
+    # Nested agents (Tech Lead, BA, pin-refresh-runner, pipeline-sweep-runner,
+    # reviewers) are spawned by the ORCHESTRATOR's Agent/Skill tool calls, not
+    # by this script, so there is no shell boundary to hook. They are read out
+    # of the session transcript instead (token_report.py's
+    # extract_agent_spawns): the Agent tool_use row carries the role verbatim
+    # as `subagent_type`, and its result row carries the agentId that names the
+    # nested transcript, which is how each role also gets its measured cost.
+    # Asking the agent to declare its own spawns would put the record back on
+    # self-reporting, which this story exists to stop.
     # Best-effort throughout -- a broken correlation still leaves the raw
     # step/lease record behind (AC4 applies here too: a cycle that fails
     # partway leaves a manifest describing how far it got).
@@ -888,13 +1039,17 @@ PYEOF
     fi
 
     cost=$(python3 -c "import json; print(json.load(open('${manifest}')).get('cycle_cost_usd'))" 2>/dev/null || echo "unknown")
+    # Scratch capture files from steps that were killed before their outcome
+    # could be classified (the step record itself stays, honestly "incomplete").
+    rm -f "${manifest}".step-*.out
     rm -f "$CYCLE_CURRENT_PTR"
     echo "CYCLE_ENDED:$(basename "$manifest" .json):cost=${cost}"
     ;;
 
   cycle-report)
     # Documented one-line command (Issue #3053 AC6): average cost per cycle
-    # step across the last N completed cycles.
+    # step across the last N completed cycles, with each step's work/no-op
+    # split and the nested agent roles those cycles spawned.
     #   ./.claude/scripts/po-act.sh cycle-report [N]
     n="${1:-10}"
     if [[ ! -d "$CYCLE_DIR" ]]; then
@@ -912,6 +1067,7 @@ manifests = sorted(
 )[:n]
 
 by_step = {}
+by_role = {}
 cycle_count = 0
 total_cost = 0.0
 incomplete = 0
@@ -929,15 +1085,33 @@ for path in manifests:
     total_cost += manifest.get("cycle_cost_usd") or 0.0
     for step in manifest.get("steps") or []:
         name = step.get("subcommand") or "unknown"
-        bucket = by_step.setdefault(name, {"runs": 0, "cost_usd": 0.0})
+        bucket = by_step.setdefault(name, {"runs": 0, "work": 0, "noop": 0, "cost_usd": 0.0})
         bucket["runs"] += 1
+        # Recorded per step by po-act.sh's own outcome classifier: a run that
+        # skipped/deferred/refused is not the same unit of work as one that
+        # dispatched, and averaging them together hides that.
+        outcome = step.get("outcome")
+        if outcome == "no-op":
+            bucket["noop"] += 1
+        elif outcome == "work":
+            bucket["work"] += 1
         bucket["cost_usd"] += step.get("cost_usd") or 0.0
+    for agent in manifest.get("agents") or []:
+        role = agent.get("role") or "unknown"
+        rb = by_role.setdefault(role, {"spawns": 0, "cost_usd": 0.0})
+        rb["spawns"] += 1
+        rb["cost_usd"] += agent.get("cost_usd") or 0.0
 
 print(f"Cycle report -- last {cycle_count} completed cycles (of {len(manifests)} found, {incomplete} incomplete)")
-print(f"{'step':<20} {'runs':>5} {'avg_cost_usd':>13} {'total_cost_usd':>15}")
+print(f"{'step':<20} {'runs':>5} {'work':>5} {'no-op':>6} {'avg_cost_usd':>13} {'total_cost_usd':>15}")
 for name, b in sorted(by_step.items(), key=lambda kv: -kv[1]["cost_usd"]):
     avg = b["cost_usd"] / b["runs"] if b["runs"] else 0.0
-    print(f"{name:<20} {b['runs']:>5} {avg:>13.4f} {b['cost_usd']:>15.2f}")
+    print(f"{name:<20} {b['runs']:>5} {b['work']:>5} {b['noop']:>6} {avg:>13.4f} {b['cost_usd']:>15.2f}")
+if by_role:
+    print(f"\n{'nested agent role':<28} {'spawns':>6} {'avg_cost_usd':>13} {'total_cost_usd':>15}")
+    for role, b in sorted(by_role.items(), key=lambda kv: -kv[1]["cost_usd"]):
+        avg = b["cost_usd"] / b["spawns"] if b["spawns"] else 0.0
+        print(f"{role:<28} {b['spawns']:>6} {avg:>13.4f} {b['cost_usd']:>15.2f}")
 avg_cycle = total_cost / cycle_count if cycle_count else 0.0
 print(f"\nAverage cost per cycle: ${avg_cycle:.2f}  (total across {cycle_count} cycles: ${total_cost:.2f})")
 PYEOF
