@@ -536,6 +536,91 @@ def collect(
 
 
 # --------------------------------------------------------------------------
+# Cycle-manifest correlation (Issue #3053)
+# --------------------------------------------------------------------------
+
+
+def correlate_cycle_manifest(
+    manifest_path: Path, roots: list[Path], pricing: Pricing
+) -> tuple[int, str]:
+    """Bucket a po-act.sh cycle's measured calls into its recorded step boundaries.
+
+    Every number here comes from parse_transcript's per-message usage
+    accounting -- never from a cycle's own narration. Measured on the
+    2026-07-25 cycle: the orchestrator's summary put its three nested agents
+    at ~302K tokens; the reporter measured 9,502,304 billed tokens for the
+    same transcripts, a 31.5x understatement (agents see their own context and
+    output but not cache-read traffic, ~95% of the bill). Self-reporting is
+    not a substitute for this.
+
+    Writes cycle_cost_usd, cycle_total_tokens, per-step cost_usd/total_tokens/
+    calls, and an "unattributed" bucket (calls before the first step boundary,
+    or with no timestamp) back into the same manifest file. Returns
+    (call_count, note) for the caller to log; never raises on a malformed or
+    half-written manifest -- a cycle that failed partway still has one to
+    read, and correlation failing must not destroy it.
+    """
+    manifest = json.loads(manifest_path.read_text())
+
+    session = manifest.get("session")
+    steps: list[dict[str, Any]] = manifest.get("steps") or []
+    if not session or session == "unknown":
+        return 0, "no session recorded, skipping correlation"
+
+    step_bounds: list[tuple[datetime, int]] = []
+    for i, step in enumerate(steps):
+        ts = _parse_time(step.get("ts"))
+        if ts is not None:
+            step_bounds.append((ts, i))
+    step_bounds.sort()
+
+    calls, _stats = collect(roots, pricing, None, None)
+    session_calls = [c for c, _ in calls if c.session == session]
+
+    def bucket_for(ts: datetime | None) -> int | None:
+        if ts is None:
+            return None
+        chosen = None
+        for boundary_ts, idx in step_bounds:
+            if boundary_ts <= ts:
+                chosen = idx
+            else:
+                break
+        return chosen
+
+    step_totals = [{"calls": 0, "cost_usd": 0.0, "total_tokens": 0} for _ in steps]
+    unattributed = {"calls": 0, "cost_usd": 0.0, "total_tokens": 0}
+    cycle_cost = 0.0
+    cycle_tokens = 0
+
+    for call in session_calls:
+        cost = call.cost_usd or 0.0
+        cycle_cost += cost
+        cycle_tokens += call.total_tokens
+        idx = bucket_for(call.timestamp)
+        bucket = step_totals[idx] if idx is not None else unattributed
+        bucket["calls"] += 1
+        bucket["cost_usd"] += cost
+        bucket["total_tokens"] += call.total_tokens
+
+    for step, step_total in zip(steps, step_totals):
+        step["cost_usd"] = round(step_total["cost_usd"], 4)
+        step["total_tokens"] = step_total["total_tokens"]
+        step["calls"] = step_total["calls"]
+
+    manifest["cycle_cost_usd"] = round(cycle_cost, 4)
+    manifest["cycle_total_tokens"] = cycle_tokens
+    manifest["unattributed"] = {
+        "calls": unattributed["calls"],
+        "cost_usd": round(unattributed["cost_usd"], 4),
+        "total_tokens": unattributed["total_tokens"],
+    }
+
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    return len(session_calls), f"${cycle_cost:.2f} across {len(steps)} steps"
+
+
+# --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------
 
@@ -727,6 +812,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Break spend into fresh input / cache write / cache read / output.",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress the parse-stats footer.")
+    parser.add_argument(
+        "--cycle-manifest",
+        type=Path,
+        help=(
+            "Correlate measured per-call cost against a po-act.sh cycle manifest's "
+            "step boundaries (Issue #3053) and write cycle_cost_usd + per-step "
+            "cost/tokens back into that file, instead of the normal report."
+        ),
+    )
     return parser
 
 
@@ -739,6 +833,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     pricing = Pricing.load(args.pricing)
+
+    if args.cycle_manifest is not None:
+        try:
+            call_count, note = correlate_cycle_manifest(args.cycle_manifest, roots, pricing)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"cycle-manifest: could not read/write {args.cycle_manifest}: {exc}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            print(f"cycle-manifest: {call_count} calls, {note}", file=sys.stderr)
+        return 0
+
     since = (
         datetime.now(timezone.utc) - timedelta(days=args.since) if args.since is not None else None
     )

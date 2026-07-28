@@ -27,6 +27,7 @@ from token_report import (  # noqa: E402
     TranscriptRef,
     collect,
     compute_cost,
+    correlate_cycle_manifest,
     parse_transcript,
     totals,
     split_cache_write,
@@ -375,6 +376,151 @@ class TestCollect(unittest.TestCase):
         calls, _ = collect([root], Pricing.load(), None, ["proj-a"])
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0].project, "proj-a")
+
+
+class TestCycleManifestCorrelation(unittest.TestCase):
+    """Bucketing a cycle's measured calls into its recorded step boundaries.
+
+    The core claim under test (Issue #3053): every dollar attributed to a step
+    comes from parse_transcript's per-message usage accounting, never from a
+    step's own self-reported count -- the story exists because self-reporting
+    understated real cost by 31.5x on a real cycle.
+    """
+
+    def _corpus(self, session: str = "cycle-session") -> Path:
+        # A session is identified by its transcript's FILE NAME (see
+        # TranscriptRef.classify), not by any `sessionId` field inside a row --
+        # so the "different session" fixture below must live in its own file.
+        root = Path(tempfile.mkdtemp())
+        project = root / "-workspace"
+        project.mkdir()
+        rows = "\n".join(
+            [
+                # Before any step boundary -> unattributed.
+                assistant_row("req_pre", timestamp="2026-07-28T10:00:00.000Z"),
+                # Falls in step 0 [10:01, 10:05).
+                assistant_row("req_s0a", timestamp="2026-07-28T10:01:00.000Z"),
+                assistant_row("req_s0b", timestamp="2026-07-28T10:03:00.000Z"),
+                # Falls in step 1 [10:05, end).
+                assistant_row("req_s1a", timestamp="2026-07-28T10:06:00.000Z"),
+            ]
+        )
+        (project / f"{session}.jsonl").write_text(rows + "\n", encoding="utf-8")
+        # A different session, in its own transcript file, inside the same
+        # project directory -- must never be counted for this cycle.
+        (project / "other-session.jsonl").write_text(
+            assistant_row("req_other", timestamp="2026-07-28T10:02:00.000Z") + "\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def _manifest(self, tmp_path: Path, session: str = "cycle-session") -> Path:
+        manifest = {
+            "cycle_id": "cycle-test",
+            "mode": "cron",
+            "session": session,
+            "host": "test-host",
+            "start": "2026-07-28T09:59:00Z",
+            "end": "2026-07-28T10:10:00Z",
+            "steps": [
+                {"ts": "2026-07-28T10:01:00Z", "subcommand": "dispatch", "args": "3060"},
+                {"ts": "2026-07-28T10:05:00Z", "subcommand": "enqueue", "args": "3061 3053"},
+            ],
+            "leases": [],
+            "containers": [],
+        }
+        path = tmp_path / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def test_calls_bucket_into_the_right_step(self):
+        root = self._corpus()
+        manifest_path = self._manifest(root)
+        correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        result = json.loads(manifest_path.read_text())
+        self.assertEqual(result["steps"][0]["calls"], 2)  # req_s0a, req_s0b
+        self.assertEqual(result["steps"][1]["calls"], 1)  # req_s1a
+
+    def test_calls_before_first_boundary_are_unattributed(self):
+        root = self._corpus()
+        manifest_path = self._manifest(root)
+        correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        result = json.loads(manifest_path.read_text())
+        self.assertEqual(result["unattributed"]["calls"], 1)  # req_pre
+
+    def test_other_sessions_never_counted(self):
+        root = self._corpus()
+        manifest_path = self._manifest(root)
+        correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        result = json.loads(manifest_path.read_text())
+        total_calls = (
+            result["steps"][0]["calls"] + result["steps"][1]["calls"] + result["unattributed"]["calls"]
+        )
+        self.assertEqual(total_calls, 4)  # req_pre + 2 in step0 + 1 in step1, never req_other/req_other2
+
+    def test_step_and_unattributed_cost_sums_to_cycle_cost(self):
+        root = self._corpus()
+        manifest_path = self._manifest(root)
+        correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        result = json.loads(manifest_path.read_text())
+        summed = (
+            result["steps"][0]["cost_usd"] + result["steps"][1]["cost_usd"] + result["unattributed"]["cost_usd"]
+        )
+        # Each bucket rounds independently, so the sum of rounded buckets can
+        # drift from the once-rounded cycle total by a unit in the last
+        # decimal place -- that's float rounding, not a mis-attributed call.
+        self.assertAlmostEqual(summed, result["cycle_cost_usd"], places=3)
+        self.assertGreater(result["cycle_cost_usd"], 0)
+
+    def test_cost_is_measured_not_self_reported(self):
+        # The whole point of this story: a step's cost_usd comes from real
+        # per-message usage accounting on the transcript, not from any field
+        # an agent wrote into the manifest itself. Assert the input manifest
+        # carried no cost data at all, and the output carries real numbers
+        # derived purely from the fixture transcript's usage tokens.
+        root = self._corpus()
+        manifest_path = self._manifest(root)
+        before = json.loads(manifest_path.read_text())
+        self.assertNotIn("cost_usd", before["steps"][0])
+        correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        after = json.loads(manifest_path.read_text())
+        self.assertIn("cost_usd", after["steps"][0])
+        self.assertIn("total_tokens", after["steps"][0])
+        self.assertGreater(after["steps"][0]["total_tokens"], 0)
+
+    def test_missing_session_skips_without_writing(self):
+        root = self._corpus()
+        manifest_path = self._manifest(root, session="")
+        # No "session" recorded (e.g. a cycle started outside Claude Code) --
+        # correlation must decline rather than guess, and must not touch the
+        # file (a human can still read the raw steps by hand).
+        manifest = json.loads(manifest_path.read_text())
+        manifest["session"] = None
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        before_mtime = manifest_path.stat().st_mtime_ns
+        call_count, note = correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        self.assertEqual(call_count, 0)
+        self.assertIn("no session", note)
+        self.assertEqual(manifest_path.stat().st_mtime_ns, before_mtime)
+
+    def test_malformed_manifest_raises_for_caller_to_handle(self):
+        root = self._corpus()
+        path = root / "bad-manifest.json"
+        path.write_text("{not valid json", encoding="utf-8")
+        with self.assertRaises(json.JSONDecodeError):
+            correlate_cycle_manifest(path, [root], Pricing.load())
+
+    def test_incomplete_cycle_manifest_still_correlates(self):
+        # AC4: a cycle that fails partway leaves a manifest describing how far
+        # it got. Correlation must not require "end" to be set.
+        root = self._corpus()
+        manifest_path = self._manifest(root)
+        manifest = json.loads(manifest_path.read_text())
+        manifest["end"] = None
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        correlate_cycle_manifest(manifest_path, [root], Pricing.load())
+        result = json.loads(manifest_path.read_text())
+        self.assertIsNotNone(result["cycle_cost_usd"])
 
 
 if __name__ == "__main__":

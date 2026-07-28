@@ -24,6 +24,11 @@
 #   sync                            Fast-forward local develop checkout (keeps cron scripts current)
 #   preflight                       Run preflight (writes ~/.cache/cfgms-po/preflight.json, prints summary)
 #   state [jq_filter]               Read cached preflight and apply optional jq filter
+#   cycle-start [MODE]              Open a per-cycle manifest (Issue #3053); every other subcommand
+#                                   below auto-records a step into it until cycle-end closes it
+#   cycle-end                       Close the current cycle: correlate measured cost per step via
+#                                   token_report.py, fold in this cycle's dispatch-ledger launches
+#   cycle-report [N]                Average cost per cycle step across the last N completed cycles
 
 set -euo pipefail
 
@@ -75,6 +80,100 @@ else
 fi
 CACHE_FILE="$CACHE_DIR/preflight.json"
 
+# ── Per-cycle step manifest (Issue #3053) ───────────────────────────────────
+# A cron cycle is one long-running agent session, so token_report.py attributes
+# its entire cost to a single segment -- what the Tech Lead pass costs versus
+# the pin sweep versus acceptance review is not derivable at any effort,
+# because nothing marks where one step ends and the next begins.
+#
+# Design decision (flagged in the issue as needing to be settled before
+# coding): who emits step boundaries. Not the agent -- self-reporting is not a
+# substitute (measured 2026-07-25: a cycle's own summary put its nested agents
+# at ~302K tokens; the reporter measured 9,502,304 billed tokens for the same
+# transcripts, a 31.5x understatement — agents see their own context and
+# output but not cache-read traffic, ~95% of the bill; the same failure mode
+# would make self-marked step boundaries unreliable). Instead this script
+# marks them deterministically: cycle-start opens a manifest, every other
+# subcommand below appends a step record to it as a side effect of running
+# (near the bottom of this file, right after argument parsing), and cycle-end
+# closes it and correlates MEASURED cost per step via token_report.py. A step
+# with no matching subcommand call (pure agent reasoning, e.g. "which of 5
+# eligible PRs to review first") has no boundary of its own and folds into
+# whichever step ran next -- imprecise but honest, and still strictly more
+# attributable than one undifferentiated whole-cycle bucket.
+#
+# Lives beside CACHE_DIR (durable, survives session-transcript retention —
+# distinct from AGENT_LEDGER_DIR/AGENT_SESSIONS_BASE, never pruned by either).
+CYCLE_DIR="${CFGMS_CYCLE_DIR:-${CACHE_DIR}/cycles}"
+CYCLE_CURRENT_PTR="${CYCLE_DIR}/current"
+
+# _cycle_manifest_path [cycle_id]
+# Prints the manifest path for the given (or currently open) cycle. Empty
+# output means no cycle is open -- callers must treat that as a silent no-op,
+# never an error: a human running a one-off `po-act.sh enqueue` outside a
+# cycle must not fail just because no cycle-start ever ran.
+_cycle_manifest_path() {
+  local cycle_id="${1:-}"
+  if [[ -z "$cycle_id" ]]; then
+    [[ -f "$CYCLE_CURRENT_PTR" ]] || return 0
+    cycle_id=$(cat "$CYCLE_CURRENT_PTR" 2>/dev/null) || return 0
+  fi
+  [[ -n "$cycle_id" ]] || return 0
+  echo "${CYCLE_DIR}/${cycle_id}.json"
+}
+
+# _cycle_append_step <subcommand> [args...]
+# Best-effort, lock-guarded read-modify-write onto the open cycle's manifest
+# steps[]. Silent no-op with no cycle open. Never blocks or fails the caller.
+_cycle_append_step() {
+  local subcommand="$1"; shift
+  local manifest
+  manifest=$(_cycle_manifest_path) || return 0
+  [[ -n "$manifest" ]] && [[ -f "$manifest" ]] || return 0
+  (
+    flock -w 2 201 || exit 0
+    python3 - "$manifest" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$subcommand" "$*" <<'PYEOF'
+import json, sys
+path, ts, subcommand, args = sys.argv[1:5]
+try:
+    with open(path) as f:
+        manifest = json.load(f)
+except Exception:
+    sys.exit(0)
+manifest.setdefault("steps", []).append({"ts": ts, "subcommand": subcommand, "args": args})
+with open(path, "w") as f:
+    json.dump(manifest, f, indent=2)
+PYEOF
+  ) 201>>"${manifest}.lock" 2>/dev/null || true
+}
+
+# _cycle_append_lease <action> <key> <result>
+# Same best-effort contract as _cycle_append_step, for AC1's "leases acquired
+# and released" -- hooked into _acquire_lease/_release_lease below rather than
+# every call site, since those two functions are the only path lease activity
+# takes in this script.
+_cycle_append_lease() {
+  local action="$1" key="$2" result="$3"
+  local manifest
+  manifest=$(_cycle_manifest_path) || return 0
+  [[ -n "$manifest" ]] && [[ -f "$manifest" ]] || return 0
+  (
+    flock -w 2 202 || exit 0
+    python3 - "$manifest" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$key" "$result" <<'PYEOF'
+import json, sys
+path, ts, action, key, result = sys.argv[1:6]
+try:
+    with open(path) as f:
+        manifest = json.load(f)
+except Exception:
+    sys.exit(0)
+manifest.setdefault("leases", []).append({"ts": ts, "action": action, "key": key, "result": result})
+with open(path, "w") as f:
+    json.dump(manifest, f, indent=2)
+PYEOF
+  ) 202>>"${manifest}.lock" 2>/dev/null || true
+}
+
 # ── Shared claim / routing helpers ──────────────────────────────────────────
 # The pipeline can run `/po cron` on MORE THAN ONE host concurrently, including
 # homogeneous (e.g. multiple Linux) hosts. Cross-host mutual exclusion is provided
@@ -93,9 +192,9 @@ _acquire_lease() {
   local key="$1" ttl="$2" label="$3" out
   out=$(bash "$PIPELINE_HELPER" lease-acquire "$key" "$ttl" 2>/dev/null || true)
   case "$out" in
-    ACQUIRED:*|RECLAIMED:*) LEASE_HELD="$key"; return 0 ;;
-    HELD:*)  echo "DISPATCH_SKIPPED:${label}:lease_held (${out})"; return 1 ;;
-    *)       echo "DISPATCH_SKIPPED:${label}:lease_error (${out:-no output})"; return 1 ;;
+    ACQUIRED:*|RECLAIMED:*) LEASE_HELD="$key"; _cycle_append_lease "acquire" "$key" "$out"; return 0 ;;
+    HELD:*)  echo "DISPATCH_SKIPPED:${label}:lease_held (${out})"; _cycle_append_lease "acquire" "$key" "$out"; return 1 ;;
+    *)       echo "DISPATCH_SKIPPED:${label}:lease_error (${out:-no output})"; _cycle_append_lease "acquire" "$key" "${out:-error}"; return 1 ;;
   esac
 }
 
@@ -108,6 +207,7 @@ _release_lease() {
   local key="${1:-$LEASE_HELD}"
   [ -n "$key" ] || return 0
   bash "$PIPELINE_HELPER" lease-release "$key" >/dev/null 2>&1 || true
+  _cycle_append_lease "release" "$key" "released"
 }
 
 # _capacity_ok
@@ -181,6 +281,14 @@ _host_serves_env() {
 
 cmd="${1:-}"
 shift || true
+
+# Deterministic step boundary (Issue #3053): every subcommand except the
+# cycle bracket itself auto-records a step into the open cycle's manifest, if
+# any is open. Silent no-op outside a cycle (_cycle_append_step's own
+# contract) -- never changes what the subcommand below actually does.
+if [[ "$cmd" != "cycle-start" && "$cmd" != "cycle-end" ]]; then
+  _cycle_append_step "$cmd" "$@"
+fi
 
 case "$cmd" in
   dispatch)
@@ -682,6 +790,157 @@ except Exception: print('')" 2>/dev/null || echo "")
       bash "$PROJECT_QUEUE" update-field "$arg" status "$new_status" >/dev/null 2>&1 || true
     fi
     echo "UNBLOCKED:$arg${mode:+ ($mode)}"
+    ;;
+
+  cycle-start)
+    # Opens a new per-cycle manifest (Issue #3053) so step attribution below
+    # has a boundary to bucket against. Bracketing only -- does not change
+    # cron orchestration; po.md's §4.0 Pre-Flight calls this as its first
+    # action, §4.1 Step 10 calls cycle-end as its last. Never fails the
+    # caller: measurement infra must not be able to block a cron cycle.
+    mode="${1:-cron}"
+    if ! mkdir -p "$CYCLE_DIR" 2>/dev/null; then
+      echo "CYCLE_START_FAILED:mkdir"
+      exit 0
+    fi
+    cycle_id="cycle-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    manifest="${CYCLE_DIR}/${cycle_id}.json"
+    # CLAUDE_CODE_SESSION_ID is set by the harness for every command the
+    # running agent invokes -- this is how the manifest knows which
+    # transcript is "this cycle" without the agent narrating its own identity.
+    session="${CLAUDE_CODE_SESSION_ID:-unknown}"
+    host="$(hostname 2>/dev/null || echo unknown)"
+    if ! python3 - "$manifest" "$cycle_id" "$mode" "$session" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$host" <<'PYEOF' 2>/dev/null
+import json, sys
+path, cycle_id, mode, session, ts, host = sys.argv[1:7]
+manifest = {
+    "cycle_id": cycle_id, "mode": mode, "session": session, "host": host,
+    "start": ts, "end": None, "steps": [], "leases": [], "containers": [],
+    "cycle_cost_usd": None,
+}
+with open(path, "w") as f:
+    json.dump(manifest, f, indent=2)
+PYEOF
+    then
+      echo "CYCLE_START_FAILED:write"
+      exit 0
+    fi
+    echo "$cycle_id" > "$CYCLE_CURRENT_PTR"
+    echo "CYCLE_STARTED:${cycle_id}"
+    ;;
+
+  cycle-end)
+    # Closes the current cycle's manifest: sets the end timestamp, correlates
+    # MEASURED (never self-reported) cost per step via token_report.py, and
+    # folds in this cycle's #3052 dispatch-ledger launches/exits so "containers
+    # launched by mode with names" doesn't re-implement container tracking.
+    # Best-effort throughout -- a broken correlation still leaves the raw
+    # step/lease record behind (AC4 applies here too: a cycle that fails
+    # partway leaves a manifest describing how far it got).
+    manifest=$(_cycle_manifest_path) || true
+    if [[ -z "${manifest:-}" ]] || [[ ! -f "$manifest" ]]; then
+      echo "CYCLE_END_SKIPPED:no_open_cycle"
+      exit 0
+    fi
+    end_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    python3 - "$manifest" "$end_ts" <<'PYEOF' 2>/dev/null || true
+import json, sys
+path, end_ts = sys.argv[1:3]
+with open(path) as f:
+    manifest = json.load(f)
+manifest["end"] = end_ts
+with open(path, "w") as f:
+    json.dump(manifest, f, indent=2)
+PYEOF
+
+    TOKEN_REPORT="${REPO_ROOT}/.claude/metrics/token_report.py"
+    if [[ -f "$TOKEN_REPORT" ]]; then
+      # CFGMS_TEST_TRANSCRIPTS_DIR lets a hermetic test point correlation at a
+      # fixture corpus instead of the real ~/.claude/projects.
+      projects_dir_args=()
+      [[ -n "${CFGMS_TEST_TRANSCRIPTS_DIR:-}" ]] && projects_dir_args=(--projects-dir "$CFGMS_TEST_TRANSCRIPTS_DIR")
+      python3 "$TOKEN_REPORT" --cycle-manifest "$manifest" "${projects_dir_args[@]}" --quiet 2>/dev/null || \
+        echo "WARN: cycle cost correlation failed — manifest still has raw steps"
+    fi
+
+    if [[ -n "${AGENT_LEDGER_FILE:-}" ]] && [[ -f "$AGENT_LEDGER_FILE" ]]; then
+      python3 - "$manifest" "$AGENT_LEDGER_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+manifest_path, ledger_path = sys.argv[1:3]
+with open(manifest_path) as f:
+    manifest = json.load(f)
+start, end = manifest.get("start"), manifest.get("end")
+containers = []
+if start and end:
+    with open(ledger_path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            ts = rec.get("ts")
+            if ts and start <= ts <= end:
+                containers.append(rec)
+manifest["containers"] = containers
+with open(manifest_path, "w") as f:
+    json.dump(manifest, f, indent=2)
+PYEOF
+    fi
+
+    cost=$(python3 -c "import json; print(json.load(open('${manifest}')).get('cycle_cost_usd'))" 2>/dev/null || echo "unknown")
+    rm -f "$CYCLE_CURRENT_PTR"
+    echo "CYCLE_ENDED:$(basename "$manifest" .json):cost=${cost}"
+    ;;
+
+  cycle-report)
+    # Documented one-line command (Issue #3053 AC6): average cost per cycle
+    # step across the last N completed cycles.
+    #   ./.claude/scripts/po-act.sh cycle-report [N]
+    n="${1:-10}"
+    if [[ ! -d "$CYCLE_DIR" ]]; then
+      echo "No cycles recorded yet at ${CYCLE_DIR}"
+      exit 0
+    fi
+    python3 - "$CYCLE_DIR" "$n" <<'PYEOF'
+import json, sys
+from pathlib import Path
+
+cycle_dir, n = Path(sys.argv[1]), int(sys.argv[2])
+manifests = sorted(
+    (p for p in cycle_dir.glob("cycle-*.json")),
+    key=lambda p: p.stat().st_mtime, reverse=True,
+)[:n]
+
+by_step = {}
+cycle_count = 0
+total_cost = 0.0
+incomplete = 0
+for path in manifests:
+    try:
+        manifest = json.loads(path.read_text())
+    except Exception:
+        continue
+    if manifest.get("end") is None:
+        # A cycle that failed partway is still on disk (AC4) but excluded
+        # from the average -- its cost was never correlated.
+        incomplete += 1
+        continue
+    cycle_count += 1
+    total_cost += manifest.get("cycle_cost_usd") or 0.0
+    for step in manifest.get("steps") or []:
+        name = step.get("subcommand") or "unknown"
+        bucket = by_step.setdefault(name, {"runs": 0, "cost_usd": 0.0})
+        bucket["runs"] += 1
+        bucket["cost_usd"] += step.get("cost_usd") or 0.0
+
+print(f"Cycle report -- last {cycle_count} completed cycles (of {len(manifests)} found, {incomplete} incomplete)")
+print(f"{'step':<20} {'runs':>5} {'avg_cost_usd':>13} {'total_cost_usd':>15}")
+for name, b in sorted(by_step.items(), key=lambda kv: -kv[1]["cost_usd"]):
+    avg = b["cost_usd"] / b["runs"] if b["runs"] else 0.0
+    print(f"{name:<20} {b['runs']:>5} {avg:>13.4f} {b['cost_usd']:>15.2f}")
+avg_cycle = total_cost / cycle_count if cycle_count else 0.0
+print(f"\nAverage cost per cycle: ${avg_cycle:.2f}  (total across {cycle_count} cycles: ${total_cost:.2f})")
+PYEOF
     ;;
 
   ""|-h|--help|help)
