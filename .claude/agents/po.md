@@ -319,14 +319,26 @@ separate call needed.
   - `merge-queue` — queue state as JSON
   - `block <ISSUE> <reason>` — set project status Blocked, post escalation comment
   - `release-story <ITEM_ID>` — release a §7 self-dispatch story lease after the PR is up
+  - `cycle-start [cron|cycle]` / `cycle-end` — bracket a cycle's per-step manifest (Issue #3053); see §4.0/§4.1 Step 11 below. Every other subcommand above auto-records a step into it — with the work/no-op/error outcome it actually produced, classified from its own status markers — while a cycle is open. Nested `Agent`/`Skill` spawns (Tech Lead, BA, pin-refresh-runner, pipeline-sweep-runner, reviewers) are read out of this session's transcript by `cycle-end` and land in the manifest's `agents[]` with their roles and measured cost. **Nothing else to call, and nothing to narrate:** never report step outcomes, spawned agents or token counts into the manifest by hand — self-reported numbers were measured 31.5x low, which is why the record is taken from transcripts instead.
+  - `cycle-report [N]` — average cost per cycle step (with its work/no-op split) and per nested agent role, across the last N completed cycles
 - `./scripts/pipeline-helper.sh lease-{acquire,release,status,list,gc}` — distributed-lease primitive (multi-host coordination, §4.-1). `lease-acquire <key> [ttl]` prints `ACQUIRED`/`RECLAIMED` (rc0), `HELD` (rc1), or `ACQUIRE_ERROR` (rc2). Used directly only for the inline-op leases below; container-op leases are managed by the dispatch helpers.
 - `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
 - `./.claude/scripts/agent-dispatch.sh` — lower-level primitives (called by `po-act.sh`)
 
 ### 4.0 Pre-Flight
 
-First fast-forward the local checkout so the cycle runs current pipeline
-scripts, then run preflight:
+Open this cycle's step manifest first (Issue #3053) — every `po-act.sh`
+subcommand from here through Step 11's `cycle-end` auto-records itself into
+it, so cost becomes attributable per step instead of only to the cycle as a
+whole. Pass `cron` for `/po cron`, `cycle` for `/po cycle`:
+
+```bash
+./.claude/scripts/po-act.sh cycle-start cron
+```
+
+Best-effort — a failed `cycle-start` never blocks the cycle, it just runs
+unmeasured (same as before this existed). Then fast-forward the local
+checkout so the cycle runs current pipeline scripts, and run preflight:
 
 ```bash
 ./.claude/scripts/po-act.sh sync
@@ -884,6 +896,19 @@ Post timestamped summary on each active epic. Skip if no actions taken.
 
 **Step 10 — (no reap needed):**
 Nested `Agent` spawns are now **synchronous** (§4): they complete and are consumed on the same turn, leaving no orphaned task-registry entries. There is nothing to `TaskStop`. Do **not** re-introduce a background-spawn + reap step — that was a workaround for the abandoned async-spawn model that caused the cron subagent to stall.
+
+**Step 11 — Close the cycle manifest (Issue #3053):**
+Always run this last, even if an earlier step failed or was skipped — a
+partial manifest describing how far the cycle got is the point, not a
+completed one:
+```bash
+./.claude/scripts/po-act.sh cycle-end
+```
+Correlates measured (never self-reported) cost per step, records the nested
+agents this cycle spawned with their roles — read from this session's own
+transcript rows (`Agent` tool calls carry `subagent_type`), not from anything
+you declare — and folds in this cycle's dispatch-ledger launches, then closes
+the manifest. Best-effort — never blocks the cycle from finishing.
 
 ### 4.2 Idempotency
 
