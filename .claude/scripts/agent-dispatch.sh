@@ -36,10 +36,9 @@ AGENT_CRED_BASE="${CFGMS_TEST_CRED_BASE:-/run/cfgms/agent-cred}"
 # Mounted at /agent-sessions, NOT directly at ~/.claude/projects. Docker
 # creates a bind mount's missing parent as root, and the image ships no
 # ~/.claude -- mounting inside it would leave ~/.claude root-owned and break
-# setup-env.sh's credential symlink, failing authentication for every agent.
-# setup-env.sh symlinks ~/.claude/projects -> /agent-sessions instead, which
-# needs no image rebuild. ~/.claude itself is never mounted: it holds
-# .credentials.json from the claude-creds volume and must stay off the host.
+# the bind-mounted ~/.claude/.credentials.json below, failing authentication
+# for every agent. setup-env.sh symlinks ~/.claude/projects -> /agent-sessions
+# instead, which needs no image rebuild.
 AGENT_SESSIONS_BASE="${CFGMS_AGENT_SESSIONS_BASE:-${HOME}/.cache/cfgms-agent-sessions}"
 AGENT_SESSIONS_RETENTION_DAYS="${CFGMS_AGENT_SESSIONS_RETENTION_DAYS:-30}"
 AGENT_SESSIONS_MOUNT="/agent-sessions"
