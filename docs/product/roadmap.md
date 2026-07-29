@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-07-21
+**Last Updated**: 2026-07-28
 
 ## Versioning Strategy
 
@@ -127,7 +127,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 ### v0.9.x Series — Production Stability & Foundation
 
-v0.9.0–v0.9.5 work has shipped to `develop` but no v0.9.x tags have been cut.
+v0.9.0–v0.9.6 work is tagged (`v0.9.6`, 2026-05-27). v0.9.7 merged to `main` 2026-06-16 (PR #2024) but was never tagged/released — see the release-process note below. v0.9.8 onward remains on `develop`, unreleased.
 
 #### v0.9.0 — Test & Architecture Foundation ✅ COMPLETED
 
@@ -229,7 +229,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Steward: implement Windows ACL support for file/directory modules (Issue #553) - Created, future work
 
 **Post-E2E infrastructure:**
-- [ ] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) - In progress: self-hosted Windows runner live for native Windows builds on non-fork PRs; Linux runners and broader CI migration pending
+- [x] Deploy self-hosted CI runners on Hyper-V managed by CFGMS (Issue #565) ✅ - Closed 2026-07-10 as a completed spike: App-token-minted self-hosted Linux+Windows runners proven end-to-end; measurements showed self-hosted Windows ~2x slower than hosted (retired, Windows CI is hosted) and unit-tests faster hosted under queue bursts (routed back to `ubuntu-latest`), while integration-tests stay self-hosted (2-3.5x faster). Ephemeral checkpoint-revert pool scoped out as a separate future epic if self-hosted footprint grows again
 - Issue #596 (GitHub Actions dispatch from label changes) - Closed not-planned 2026-06-19: the label-based queue it depended on was decommissioned (board Status is the only queue signal; dispatch is owned by the PO cron cycle)
 
 **Deferred to v0.10.0 (both since delivered):**
@@ -260,7 +260,7 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
 - [x] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
 
-#### Post-v0.9.5 epics on develop (untagged)
+#### Post-v0.9.5 epics — shipped in v0.9.6
 
 - [x] Epic #786 — CI: pre-merge validation runs against branch state
 - [x] Epic #1414 — mTLS admin authentication for controller REST API
@@ -299,13 +299,14 @@ Controller nodes managed by stewards — clean separation of node management fro
 
 #### Post-Phase-2 epics on develop (untagged, in flight)
 
-- [ ] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership
+- [x] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership. Closed 2026-07-10 (Layer 1 — convergence components proven in isolation)
 - [x] Epic #2657 — workflow-driven Hyper-V role promotion (standalone → FC-role): `cfg workflow promote-hv-role` writes `ha_role`, soaks for steward convergence, migrates the resource to cluster scope; live-validated on cfg-lab (`test/e2e/hyperv/promote_role_test.go`, runbook `docs/testing/hyperv-role-promotion-runbook.md`, #2671)
-- [ ] Epic #2359 — Operator-first CLI targeting: hostname & attribute selectors across `cfg steward` verbs
+- [x] Epic #2359 — Operator-first CLI targeting: hostname & attribute selectors across `cfg steward` verbs. Closed 2026-07-10
+- [x] Epic #2576 — idiomatic HA cluster management (Layer 2 of #2418): cascaded `ha_role` config through the InheritanceResolver, CNO-only convergence, declarative FC load-balancing/placement, live re-balance under load, idiomatic member leave. Closed 2026-07-21
 
-#### v0.9.12 — Ephemeral per-agent dev infrastructure (DRAFT)
+#### v0.9.12 — Ephemeral per-agent dev infrastructure — CLOSED (not planned)
 
-- [ ] Epic #1792 — each dispatched agent runs against its own ephemeral controller + steward VMs built from its branch
+- Epic #1792 — each dispatched agent runs against its own ephemeral controller + steward VMs built from its branch — closed not-planned 2026-07-19
 
 #### v0.9.13 — Beta deployment validation on real VMs
 
@@ -398,6 +399,16 @@ engineering gaps are narrower than this section originally assumed.
 - [ ] Enhance security testing documentation
 
 **Rationale**: After Web Interface Foundation (v0.10.0), we need to mature our security tooling and establish web-specific security practices before deploying web frontend to production. This ensures we maintain our excellent security posture (9/10) as the system grows in complexity.
+
+#### Post-v0.10.0 epics on develop (untagged, in flight)
+
+Opened after this document's 2026-07-21 pass; not yet placed in a named milestone.
+
+- [ ] Epic #2737 — Identity assurance levels and step-up authentication (ADR-021): replaces the single `IsAdmin` bit with graduated assurance levels maintained by silent cryptographic device proof, requiring a fresh human-presence gesture for fleet-wide-blast-radius actions
+- [ ] Epic #2931 — WebAuthn step-up (implements #2737 for the web session): gives a password-authenticated web operator a path to `AssuranceStrong` so privileged enrollment/fleet actions stop 401'ing with `WWW-Authenticate: CFGMS-StepUp`
+- [ ] Epic #2890 — Capability-driven observe DNA (ADR-024): decouples DNA observation from convergence so a steward reports rich state for everything it can see, not only what it's told to manage. `twin`
+- [ ] Epic #2911 — DNA clean-break: removes `commonpb.DNA.attributes` and retires the legacy flat `DNARecord` store once all consumers are re-homed onto the fragment model / entity graph — deferred tail of #2852. `twin`
+- [ ] Epic #2898 — Reboot windows: policy-declared device-scoped reboot gating with tenant inheritance and structured schedules, closing the silent-noop left by #2892 rejecting `maintenance.window` at validation. `cms`
 
 #### v0.11.0 - Outpost Foundation
 
@@ -613,8 +624,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.3
-- **Last Updated**: 2026-07-21
+- **Document Version**: 4.4
+- **Last Updated**: 2026-07-28
 
 ### Related Documentation
 
