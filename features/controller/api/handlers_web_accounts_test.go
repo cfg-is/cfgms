@@ -181,7 +181,7 @@ func TestWebAccounts_StoredRecordContainsNoSecretValue(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, secret.Value, "stored value must be empty — accounts are passkey-only (Issue #2993)")
-	assert.NotContains(t, string(secret.Value), "$argon2id$",
+	assert.NotContains(t, secret.Value, "$argon2id$",
 		"stored value must not contain any argon2id hash (passkey-only)")
 }
 

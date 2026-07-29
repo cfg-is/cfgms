@@ -147,7 +147,7 @@ type Server struct {
 	webAuthnElevateSessions        sync.Map                              // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
 	webAuthnElevateThrottle        sync.Map                              // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyLoginSessions           sync.Map                              // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
-	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-ceremony/per-IP failed login throttle; key="ceremony:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 }

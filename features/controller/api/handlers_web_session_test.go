@@ -61,6 +61,10 @@ func setupPasskeySessionServer(t *testing.T) (*Server, string) {
 // It injects a passkeyLoginSession directly (bypassing begin), then calls
 // handlePasskeyLoginFinish. Callers can pass an existingSession token to verify
 // session-fixation revocation.
+//
+// The injected session is always discoverable (UserID = nil, AllowedCredentialIDs = nil),
+// matching the always-discoverable begin flow (Issue #2993). The assertion includes
+// userHandle = acct.ID so that FinishDiscoverableLogin can resolve the account.
 func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -80,13 +84,12 @@ func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string)
 	require.NotNil(t, acct, "account %q must exist before passkey login", username)
 
 	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
+	// Discoverable session: UserID = nil (required by FinishDiscoverableLogin).
 	sd := webauthn.SessionData{
-		Challenge:            challenge,
-		RelyingPartyID:       svAuthRPID,
-		UserID:               []byte(acct.ID),
-		UserVerification:     protocol.VerificationPreferred,
-		AllowedCredentialIDs: [][]byte{credIDBytes},
-		Expires:              time.Now().Add(10 * time.Minute),
+		Challenge:        challenge,
+		RelyingPartyID:   svAuthRPID,
+		UserVerification: protocol.VerificationPreferred,
+		Expires:          time.Now().Add(10 * time.Minute),
 	}
 
 	ceremonyID, genErr := generateCeremonyID()
@@ -95,10 +98,11 @@ func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string)
 		data:         sd,
 		expires:      time.Now().Add(passkeyLoginCeremonyMaxAge * time.Second),
 		accountID:    username,
-		discoverable: false,
+		discoverable: true,
 	})
 
-	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
+	// Include userHandle so FinishDiscoverableLogin can resolve the account by UUID.
+	body := buildAssertionBodyWithUserHandle(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, []byte(acct.ID))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", body)
 	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
 	if existingSession != "" {
@@ -107,6 +111,40 @@ func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string)
 	rec := httptest.NewRecorder()
 	srv.handlePasskeyLoginFinish(rec, req)
 	return rec
+}
+
+// buildAssertionBodyWithUserHandle constructs a JSON PublicKeyCredential assertion response
+// that includes a userHandle field. Required for discoverable-login flows where
+// FinishDiscoverableLogin resolves the account from the authenticator-reported userHandle.
+func buildAssertionBodyWithUserHandle(t *testing.T, credID, authData, clientDataJSON, signature, userHandle []byte) *bytes.Reader {
+	t.Helper()
+	type assertionResponse struct {
+		AuthenticatorData string `json:"authenticatorData"`
+		ClientDataJSON    string `json:"clientDataJSON"`
+		Signature         string `json:"signature"`
+		UserHandle        string `json:"userHandle"`
+	}
+	type assertionCredential struct {
+		ID       string            `json:"id"`
+		RawID    string            `json:"rawId"`
+		Type     string            `json:"type"`
+		Response assertionResponse `json:"response"`
+	}
+	credIDBase64 := base64.RawURLEncoding.EncodeToString(credID)
+	body := assertionCredential{
+		ID:    credIDBase64,
+		RawID: credIDBase64,
+		Type:  "public-key",
+		Response: assertionResponse{
+			AuthenticatorData: base64.RawURLEncoding.EncodeToString(authData),
+			ClientDataJSON:    base64.RawURLEncoding.EncodeToString(clientDataJSON),
+			Signature:         base64.RawURLEncoding.EncodeToString(signature),
+			UserHandle:        base64.RawURLEncoding.EncodeToString(userHandle),
+		},
+	}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	return bytes.NewReader(b)
 }
 
 // doPasskeyLoginBegin calls handlePasskeyLoginBegin directly with the given pre-session
@@ -459,25 +497,53 @@ func TestPasskeyLogin_ExpiredCeremony_400(t *testing.T) {
 }
 
 // TestPasskeyLogin_Throttled_429 verifies that finish returns 429 when the
-// per-ceremony throttle has accumulated enough failures.
+// per-account throttle has accumulated enough failures.
 func TestPasskeyLogin_Throttled_429(t *testing.T) {
 	srv, username := setupPasskeySessionServer(t)
 
 	const ceremonyID = "throttle-ceremony-id"
-	// Accumulate enough failures to trigger the backoff.
+	// Accumulate enough failures on the account key to trigger backoff.
 	for i := 0; i < 4; i++ {
-		srv.recordPasskeyLoginFailure("ceremony:" + ceremonyID)
+		srv.recordPasskeyLoginFailure("account:" + username)
 	}
 
-	// Inject a fresh, non-expired session.
+	// Inject a fresh, non-expired session with accountID set so the per-account check fires.
 	srv.passkeyLoginSessions.Store(ceremonyID, &passkeyLoginSession{
 		data:         webauthn.SessionData{},
 		expires:      time.Now().Add(5 * time.Minute),
 		accountID:    username,
-		discoverable: false,
+		discoverable: true,
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", nil)
+	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
+	rec := httptest.NewRecorder()
+	srv.handlePasskeyLoginFinish(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, "THROTTLED", errCode(t, rec.Body.Bytes()))
+}
+
+// TestPasskeyLogin_IPThrottled_429 verifies that finish returns 429 when the per-IP
+// throttle has accumulated enough failures, even when no account throttle is set.
+func TestPasskeyLogin_IPThrottled_429(t *testing.T) {
+	srv, _ := setupPasskeySessionServer(t)
+
+	// Simulate failures from a specific IP.
+	const fakeIP = "10.0.0.42"
+	for i := 0; i < 4; i++ {
+		srv.recordPasskeyLoginFailure("ip:" + fakeIP)
+	}
+
+	const ceremonyID = "ip-throttle-ceremony-id"
+	srv.passkeyLoginSessions.Store(ceremonyID, &passkeyLoginSession{
+		data:         webauthn.SessionData{},
+		expires:      time.Now().Add(5 * time.Minute),
+		accountID:    "",
+		discoverable: true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", nil)
+	req.RemoteAddr = fakeIP + ":12345"
 	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
 	rec := httptest.NewRecorder()
 	srv.handlePasskeyLoginFinish(rec, req)
@@ -768,4 +834,202 @@ func TestPasskeyLogin_AuditEvents(t *testing.T) {
 		assert.Equal(t, business.AuditEventAuthentication, e.EventType)
 		assert.Equal(t, business.AuditResultSuccess, e.Result)
 	})
+
+	t.Run("failed assertion emits failure audit event", func(t *testing.T) {
+		// Inject a session and send an empty body, triggering FinishDiscoverableLogin failure.
+		const failCeremonyID = "audit-failure-ceremony"
+		srv.passkeyLoginSessions.Store(failCeremonyID, &passkeyLoginSession{
+			data:         webauthn.SessionData{},
+			expires:      time.Now().Add(5 * time.Minute),
+			accountID:    username,
+			discoverable: true,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", bytes.NewReader(nil))
+		req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: failCeremonyID})
+		rec := httptest.NewRecorder()
+		srv.handlePasskeyLoginFinish(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		require.NoError(t, srv.auditManager.Flush(context.Background()))
+
+		entries, err := srv.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+			Actions: []string{"web.passkey.login.failure"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, entries, "failed passkey login must emit a failure audit entry")
+		e := entries[0]
+		assert.Equal(t, business.AuditEventAuthentication, e.EventType)
+		assert.Equal(t, business.AuditResultFailure, e.Result)
+	})
+}
+
+// TestPasskeyLoginBegin_NamedFlow covers the named-username branch of handlePasskeyLoginBegin.
+// Since begin always returns a discoverable challenge regardless of account state, the
+// response shape is uniform for all callers (Issue #2993 AC: no account-enumeration oracle).
+func TestPasskeyLoginBegin_NamedFlow(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+
+	// verifyChallengeResponse asserts that the response is a well-formed WebAuthn
+	// assertion challenge (not an error body) with a ceremony cookie set.
+	verifyChallengeResponse := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "body must be valid JSON: %s", rec.Body.String())
+		require.NotNil(t, resp.Data, "challenge response must have a data field, not an error; body: %s", rec.Body.String())
+		opts, ok := resp.Data.(map[string]interface{})
+		require.True(t, ok, "response.data must be an object, not %T", resp.Data)
+		pk, ok := opts["publicKey"].(map[string]interface{})
+		require.True(t, ok, "response.data.publicKey must be present")
+		assert.NotEmpty(t, pk["challenge"], "begin must include a challenge")
+		// UV=required is a security-critical property for phishing resistance.
+		assert.Equal(t, "required", pk["userVerification"], "begin must enforce userVerification=required")
+		// Always discoverable: allowCredentials must be absent or empty (no enumeration).
+		if creds, ok := pk["allowCredentials"]; ok {
+			if slice, ok := creds.([]interface{}); ok {
+				assert.Empty(t, slice, "discoverable begin must not populate allowCredentials")
+			}
+		}
+
+		var found bool
+		for _, c := range readSetCookies(nil, rec) {
+			if c.Name == cookiePasskeyCeremony {
+				found = true
+				assert.True(t, c.HttpOnly)
+				assert.True(t, c.Secure)
+				assert.Equal(t, http.SameSiteStrictMode, c.SameSite)
+				assert.Equal(t, passkeyLoginCeremonyMaxAge, c.MaxAge)
+			}
+		}
+		assert.True(t, found, "begin must set the ceremony cookie")
+	}
+
+	t.Run("invalid username returns 400", func(t *testing.T) {
+		// "xy" fails the validateWebUsername regex (fewer than 3 characters).
+		// This is a format check and does not reveal account existence.
+		csrfToken := doCSRF(t, srv)
+		rec := doPasskeyLoginBegin(t, srv, csrfToken, "xy")
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "INVALID_USERNAME", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("non-existent account returns uniform challenge (no enumeration)", func(t *testing.T) {
+		// A well-formed username that was never created must return a challenge, not an error.
+		// This makes the response indistinguishable from a valid enrolled account.
+		csrfToken := doCSRF(t, srv)
+		rec := doPasskeyLoginBegin(t, srv, csrfToken, "no-such-user-xyz")
+		verifyChallengeResponse(t, rec)
+	})
+
+	t.Run("account with no credentials returns uniform challenge (no enumeration)", func(t *testing.T) {
+		// An account with no passkeys enrolled must also return a challenge, not an error.
+		const noCredUser = "no-cred-begin-user"
+		rec := postWebAccount(t, srv, testAdminPrincipal(), WebAccountRequest{Username: noCredUser})
+		require.Equal(t, http.StatusCreated, rec.Code, "account setup: %s", rec.Body.String())
+
+		csrfToken := doCSRF(t, srv)
+		beginRec := doPasskeyLoginBegin(t, srv, csrfToken, noCredUser)
+		verifyChallengeResponse(t, beginRec)
+	})
+
+	t.Run("enrolled account returns uniform challenge (no enumeration)", func(t *testing.T) {
+		// An enrolled account also returns the same discoverable challenge shape.
+		csrfToken := doCSRF(t, srv)
+		rec := doPasskeyLoginBegin(t, srv, csrfToken, username)
+		verifyChallengeResponse(t, rec)
+	})
+}
+
+// TestPasskeyLoginFinish_DiscoverableFlow_VerifyError covers the discoverable path
+// of handlePasskeyLoginFinish. An injected discoverable session with an invalid assertion
+// body triggers FinishDiscoverableLogin to fail, exercising the WEBAUTHN_VERIFY_ERROR path.
+func TestPasskeyLoginFinish_DiscoverableFlow_VerifyError(t *testing.T) {
+	srv, _ := setupPasskeySessionServer(t)
+
+	const ceremonyID = "discoverable-ceremony-id"
+	srv.passkeyLoginSessions.Store(ceremonyID, &passkeyLoginSession{
+		data:         webauthn.SessionData{},
+		expires:      time.Now().Add(5 * time.Minute),
+		accountID:    "",
+		discoverable: true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", bytes.NewReader(nil))
+	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
+	rec := httptest.NewRecorder()
+	srv.handlePasskeyLoginFinish(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
+		"invalid assertion body in discoverable flow must return WEBAUTHN_VERIFY_ERROR")
+}
+
+// TestPasskeyLoginFinish_SignCountClone_400 verifies that a passkey login finish
+// where the stored sign count exceeds the assertion response sign count is rejected.
+// Uses the NoneES256 spec vector (asserting sign count 0) with a stored sign count of 100
+// to trigger the authenticator-clone detection branch.
+//
+// The session is always discoverable (matching the always-discoverable begin). The assertion
+// includes userHandle so FinishDiscoverableLogin can resolve the account, and the sign count
+// check then fires after successful cryptographic verification.
+func TestPasskeyLoginFinish_SignCountClone_400(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+
+	credIDBytes, err := hex.DecodeString(svAuthCredentialIDHex)
+	require.NoError(t, err)
+	pubKeyBytes, err := hex.DecodeString(svAuthPublicKeyHex)
+	require.NoError(t, err)
+
+	// Overwrite the injected credential with SignCount=100.
+	// The spec vector's assertion returns SignCount=0, triggering clone detection.
+	acct, err := srv.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	acct.Credentials = nil
+	require.NoError(t, srv.persistWebAccount(context.Background(), acct, "test"))
+	injectCredentialWithPublicKey(t, srv, username, credIDBytes, pubKeyBytes, 100)
+
+	challengeBytes, err := hex.DecodeString(svAuthChallengeHex)
+	require.NoError(t, err)
+	authDataBytes, err := hex.DecodeString(svAuthAuthDataHex)
+	require.NoError(t, err)
+	clientDataJSONBytes, err := hex.DecodeString(svAuthClientDataJSONHex)
+	require.NoError(t, err)
+	sigBytes, err := hex.DecodeString(svAuthSignatureHex)
+	require.NoError(t, err)
+
+	reloaded, err := srv.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+
+	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
+	// Discoverable session: UserID = nil (required by FinishDiscoverableLogin).
+	sd := webauthn.SessionData{
+		Challenge:        challenge,
+		RelyingPartyID:   svAuthRPID,
+		UserVerification: protocol.VerificationPreferred,
+		Expires:          time.Now().Add(10 * time.Minute),
+	}
+
+	ceremonyID, genErr := generateCeremonyID()
+	require.NoError(t, genErr)
+	srv.passkeyLoginSessions.Store(ceremonyID, &passkeyLoginSession{
+		data:         sd,
+		expires:      time.Now().Add(passkeyLoginCeremonyMaxAge * time.Second),
+		accountID:    username,
+		discoverable: true,
+	})
+
+	// Include userHandle so FinishDiscoverableLogin can resolve the account.
+	// The sign count check fires after cryptographic verification passes.
+	body := buildAssertionBodyWithUserHandle(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, []byte(reloaded.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", body)
+	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
+	rec := httptest.NewRecorder()
+	srv.handlePasskeyLoginFinish(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
+		"non-advancing sign count must be rejected (authenticator clone detection)")
 }
