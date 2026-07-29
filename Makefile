@@ -885,7 +885,16 @@ test-fast:
 	@echo "💡 Optimized for CI/CD pipelines"
 	@echo ""
 	@echo "🧪 Running unit tests..."
-	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=5m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+#	-timeout is a HANG DETECTOR, not a performance budget — same rule as `make test`
+#	above (Issue #2887), and this target runs the same packages under -race, so it
+#	carries the same 10m value. At 5m this was a false ceiling: features/controller/api
+#	(926 tests) needs ~234s of real CPU under -race on its own, because every test
+#	builds a fresh SQLite business-store schema (79 DDL statements, ~7ms plain but
+#	~164ms under the race detector's ~22x amplification of modernc.org/sqlite). Add
+#	the 4-way package parallelism `go test` uses and that crosses 300s, whereupon Go
+#	dumps stacks mid-DDL — a runnable, never-scheduled goroutine, i.e. CPU starvation,
+#	not a deadlock. Do not tighten this to track how long the suite currently takes.
+	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=10m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
 	@echo ""
 	@echo "✅ Fast comprehensive tests complete"
 
