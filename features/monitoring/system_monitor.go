@@ -360,6 +360,12 @@ func (sm *SystemMonitor) Start(ctx context.Context) error {
 	go sm.metricsCollectionLoop(ctx)
 
 	if sm.config.EnableResourceMonitoring {
+		// Collect resource metrics synchronously before returning so that a
+		// snapshot read by GetResourceMetrics is populated as soon as Start
+		// returns. Deferring the first sample to the ticker (or to a goroutine)
+		// makes availability depend on scheduling and on ResourceInterval
+		// elapsing, which leaves consumers observing a zero-valued snapshot.
+		sm.collectResourceMetrics(ctx)
 		go sm.resourceMonitoringLoop(ctx)
 	}
 

@@ -151,17 +151,22 @@ func (sm *SystemMonitor) collectResourceMetrics(ctx context.Context) {
 		"memory_usage_percent", sm.resourceMetrics.MemoryUsagePercent,
 		"goroutines", sm.resourceMetrics.Goroutines)
 
+	// Snapshot the metrics under the lock so alert evaluation does not read the
+	// shared struct unsynchronized once the lock is released.
+	snapshot := *sm.resourceMetrics
+
 	// Release the lock before checking alerts to avoid deadlock with emitEvent.
 	sm.mu.Unlock()
 
 	// Check for resource alerts (this may call emitEvent which needs RLock).
-	sm.checkResourceAlerts(ctx)
+	sm.checkResourceAlerts(ctx, &snapshot)
 }
 
-// checkResourceAlerts checks if any resource thresholds are exceeded.
-func (sm *SystemMonitor) checkResourceAlerts(ctx context.Context) {
+// checkResourceAlerts checks if any resource thresholds are exceeded in the
+// supplied resource metrics snapshot.
+func (sm *SystemMonitor) checkResourceAlerts(ctx context.Context, metrics *ResourceMetrics) {
 	// Memory usage alert
-	if sm.resourceMetrics.MemoryUsagePercent > sm.config.MemoryAlertThreshold {
+	if metrics.MemoryUsagePercent > sm.config.MemoryAlertThreshold {
 		sm.emitEvent(SystemEvent{
 			ID:            telemetry.GenerateCorrelationID(),
 			Type:          EventResourceAlert,
@@ -172,16 +177,16 @@ func (sm *SystemMonitor) checkResourceAlerts(ctx context.Context) {
 			Severity:      SeverityWarning,
 			Data: map[string]interface{}{
 				"metric":      "memory_usage",
-				"value":       sm.resourceMetrics.MemoryUsagePercent,
+				"value":       metrics.MemoryUsagePercent,
 				"threshold":   sm.config.MemoryAlertThreshold,
-				"used_bytes":  sm.resourceMetrics.MemoryUsedBytes,
-				"total_bytes": sm.resourceMetrics.MemoryTotalBytes,
+				"used_bytes":  metrics.MemoryUsedBytes,
+				"total_bytes": metrics.MemoryTotalBytes,
 			},
 		})
 	}
 
 	// Goroutine count alert
-	if sm.resourceMetrics.Goroutines > sm.config.GoroutineAlertThreshold {
+	if metrics.Goroutines > sm.config.GoroutineAlertThreshold {
 		sm.emitEvent(SystemEvent{
 			ID:            telemetry.GenerateCorrelationID(),
 			Type:          EventResourceAlert,
@@ -192,7 +197,7 @@ func (sm *SystemMonitor) checkResourceAlerts(ctx context.Context) {
 			Severity:      SeverityWarning,
 			Data: map[string]interface{}{
 				"metric":    "goroutines",
-				"value":     sm.resourceMetrics.Goroutines,
+				"value":     metrics.Goroutines,
 				"threshold": sm.config.GoroutineAlertThreshold,
 			},
 		})
