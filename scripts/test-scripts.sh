@@ -2628,7 +2628,7 @@ FAILPQEOF
 }
 
 test_dispatch_creds_gate() {
-    log_test "Testing agent-dispatch.sh: launch/review-pr gate on CREDS_LOW/EXPIRED, emit DISPATCH_DEFERRED..."
+    log_test "Testing agent-dispatch.sh: launch/review-pr/launch-generic pass through CREDS_LOW/EXPIRED, still defer on CREDS_MISSING/ERROR..."
 
     local dispatch_script
     dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
@@ -2638,60 +2638,70 @@ test_dispatch_creds_gate() {
         return
     fi
 
-    # CREDS_LOW causes launch to exit non-zero with DISPATCH_DEFERRED token
+    # Agent containers bind-mount the host's live ~/.claude/.credentials.json and
+    # track token rotations in place, so CREDS_LOW/EXPIRED are advisory only —
+    # the gate must NOT defer on them. Downstream execution past the gate is
+    # environment-dependent (gh auth, worktree existence, network), so we only
+    # assert the gate itself did not defer, not what happens after it.
     local output exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:5" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate launch CREDS_LOW: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate launch CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate launch CREDS_LOW: expected non-zero exit, got 0: ${output}"
-    fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:5"; then
-        log_pass "dispatch_creds_gate launch CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:5"
-    else
-        log_fail "dispatch_creds_gate launch CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:5 in output: ${output}"
+        log_pass "dispatch_creds_gate launch CREDS_LOW: gate does not defer (advisory only)"
     fi
 
-    # CREDS_EXPIRED causes launch to exit non-zero with DISPATCH_DEFERRED token
     exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_EXPIRED:-3" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: expected non-zero exit, got 0: ${output}"
-    fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3"; then
-        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: emits DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3"
-    else
-        log_fail "dispatch_creds_gate launch CREDS_EXPIRED: expected DISPATCH_DEFERRED:creds_low:CREDS_EXPIRED:-3 in output: ${output}"
+        log_pass "dispatch_creds_gate launch CREDS_EXPIRED: gate does not defer (advisory only)"
     fi
 
-    # CREDS_LOW causes review-pr to exit non-zero with DISPATCH_DEFERRED token
     exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:2" bash "$dispatch_script" review-pr 1589 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate review-pr CREDS_LOW: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate review-pr CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate review-pr CREDS_LOW: expected non-zero exit, got 0: ${output}"
-    fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:2"; then
-        log_pass "dispatch_creds_gate review-pr CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:2"
-    else
-        log_fail "dispatch_creds_gate review-pr CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:2 in output: ${output}"
+        log_pass "dispatch_creds_gate review-pr CREDS_LOW: gate does not defer (advisory only)"
     fi
 
-    # CREDS_LOW causes launch-generic to exit non-zero with DISPATCH_DEFERRED token
     exit_code=0
     output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:8" bash "$dispatch_script" launch-generic "cfg-agent-test" "/tmp/nonexistent" 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: exits non-zero"
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
+        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
-        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: expected non-zero exit, got 0: ${output}"
+        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: gate does not defer (advisory only)"
     fi
-    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_low:CREDS_LOW:8"; then
-        log_pass "dispatch_creds_gate launch-generic CREDS_LOW: emits DISPATCH_DEFERRED:creds_low:CREDS_LOW:8"
+
+    # CREDS_MISSING/CREDS_ERROR are the only genuine launch blockers left — no
+    # usable credentials file at all. These still exit at the gate, hermetically,
+    # before any real work happens.
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_MISSING:no host credentials" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 10 ]]; then
+        log_pass "dispatch_creds_gate launch CREDS_MISSING: exits 10"
     else
-        log_fail "dispatch_creds_gate launch-generic CREDS_LOW: expected DISPATCH_DEFERRED:creds_low:CREDS_LOW:8 in output: ${output}"
+        log_fail "dispatch_creds_gate launch CREDS_MISSING: expected exit 10, got ${exit_code}: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:CREDS_MISSING:"; then
+        log_pass "dispatch_creds_gate launch CREDS_MISSING: emits DISPATCH_DEFERRED:creds_missing:CREDS_MISSING:"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_MISSING: expected DISPATCH_DEFERRED:creds_missing:CREDS_MISSING: in output: ${output}"
+    fi
+
+    exit_code=0
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_ERROR:docker unreachable" bash "$dispatch_script" launch 99 2>&1) || exit_code=$?
+    if [[ $exit_code -eq 10 ]]; then
+        log_pass "dispatch_creds_gate launch CREDS_ERROR: exits 10"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_ERROR: expected exit 10, got ${exit_code}: ${output}"
+    fi
+    if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:CREDS_ERROR:"; then
+        log_pass "dispatch_creds_gate launch CREDS_ERROR: emits DISPATCH_DEFERRED:creds_missing:CREDS_ERROR:"
+    else
+        log_fail "dispatch_creds_gate launch CREDS_ERROR: expected DISPATCH_DEFERRED:creds_missing:CREDS_ERROR: in output: ${output}"
     fi
 }
 
