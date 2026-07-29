@@ -114,10 +114,32 @@ For each pin with verdict BUMP or BUMP NOW:
    ```
 5. Capture the returned `item_id` for the report.
 
-If a draft for the same pin+version already exists (scan the project's Draft and
-Ready buckets via `project-queue.sh list-by-status` and match on title), update
-its body via `project-queue.sh` / `pipeline-helper.sh` rather than duplicating —
-do not create a public issue.
+**Before creating a story, check for an existing open one for the same pin.**
+Title text is not a reliable match key — story titles have drifted across
+sweeps (`deps: bump X ... (Issue #2675)` vs `ci: bump X ...`), so two stories
+for the identical pin+SHA bump can have completely different titles. Instead:
+
+1. List every open issue for the repo (`gh issue list --state open --json
+   number,title,body --limit 200`) plus `project-queue.sh list-by-status
+   Draft` and `list-by-status Ready` for undispatched drafts.
+2. Match on the pin's **canonical identifier** appearing in the body/scope —
+   e.g. the `uses:` action path (`actions/checkout`, `github/codeql-action`),
+   the binary/package name (`trufflehog`), or the pin's current SHA/version
+   string — not the free-text title.
+3. If a match is found: diff the two stories' "Files In Scope" lists against
+   the live discovery-script inventory. Keep whichever is a superset /
+   more accurate (a later sweep may have found locations, including
+   commented-out lines, that an earlier one missed); update that story's body
+   in place via `project-queue.sh` / `pipeline-helper.sh` rather than creating
+   a new one, and close the other as superseded if it's already a public
+   issue, or delete the draft if it never materialized.
+4. Only create a new story once you've confirmed no open issue already
+   targets this pin.
+
+Do not create a public issue for a pin that already has one open — this
+produces duplicate stories racing two dev agents onto the same workflow
+lines (observed 2026-07-29: 4 of 6 stories in a sweep duplicated already-open
+`Ready` stories from a prior sweep, undetected by title matching).
 
 ## Phase 5: Cooldown override audit (if any BUMP NOW)
 

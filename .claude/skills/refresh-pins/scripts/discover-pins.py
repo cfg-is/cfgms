@@ -316,7 +316,28 @@ def discover_mcp_pins(root: Path) -> list[dict]:
             for i, line in enumerate(raw_lines, 1)
             if git_ref.search(line)
         ]
-        pins.append({
+        # An MCP server's git ref can be pinned a second time, independently, in
+        # a Dockerfile that bakes it into the agent image (e.g. `uv tool install
+        # --from git+https://github.com/<owner>/<repo>@<tag> <name>`). setup-env.sh
+        # repoints .mcp.json at that baked binary at container startup, so a bump
+        # that only touches .mcp.json is a no-op — both locations must move
+        # together. Missing this cost story #3074 a manual scope correction.
+        drift_tag = None
+        for dockerfile in sorted(root.glob("**/Dockerfile*")):
+            if ".git" in dockerfile.parts:
+                continue
+            try:
+                docker_lines = dockerfile.read_text().splitlines()
+            except (UnicodeDecodeError, OSError):
+                continue
+            rel = str(dockerfile.relative_to(root))
+            for i, line in enumerate(docker_lines, 1):
+                dmatch = git_ref.search(line)
+                if dmatch and dmatch.group(1) == owner and dmatch.group(2) == repo:
+                    locations.append({"file": rel, "line": i, "match": line.strip()})
+                    if dmatch.group(3) != tag:
+                        drift_tag = dmatch.group(3)
+        pin = {
             "name": name,
             "kind": "mcp",
             "current": tag,
@@ -324,7 +345,13 @@ def discover_mcp_pins(root: Path) -> list[dict]:
             "ecosystem": None,  # git-installed; GHSA rarely resolves — Phase 2 falls back to release notes
             "package": None,
             "locations": locations,
-        })
+        }
+        if drift_tag:
+            # Two divergent pins of the same server — surface it like the
+            # actions/checkout "mixed pins" case so Phase 3's justification
+            # calls out unifying them, not just bumping .mcp.json's tag.
+            pin["drift_current"] = drift_tag
+        pins.append(pin)
     return pins
 
 
