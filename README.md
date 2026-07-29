@@ -1,180 +1,115 @@
-# CFGMS (Config Management System)
+# CFGMS
 
-CFGMS is a modern configuration management system designed with resilience, security, and clean architecture in mind.
+CFGMS is an open-source configuration, automation, and infrastructure management
+platform built for managed service providers and IT teams.
 
-**Key Features:**
-- Policy-as-code enforcement or drift detection
-- Powerful and easy workflow automation platform
-- Built for MSPs multi-tenancy requirements
-- Mutual TLS security with zero-trust RBAC
-- M365, Active Directory, and endpoint integrations
-- Cross-platform support (Windows, macOS, Linux)
+It is designed to manage large, multi-tenant fleets across Windows, Linux, and
+macOS from a single control plane, combining desired-state configuration, policy
+enforcement, drift detection, workflow automation, live endpoint telemetry, and a
+historical model of the systems it manages.
+
+CFGMS is being built to connect an affected device or application to its
+dependencies and recent changes, identify the likely cause, and safely remediate
+it—not merely report that something is wrong.
 
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![CodeQL](https://github.com/cfg-is/cfgms/workflows/CodeQL%20Security%20Analysis/badge.svg)](https://github.com/cfg-is/cfgms/security/code-scanning)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cfg-is/cfgms/badge)](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cfg-is/cfgms)](https://goreportcard.com/report/github.com/cfg-is/cfgms)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
-## Project Status
+## What CFGMS provides
 
-The project is in early development. Core architecture and structure have been implemented, but many components are still being developed.
+- Desired-state configuration and policy-as-code
+- Configuration drift detection and enforcement
+- Workflow and event-driven automation
+- Hierarchical multi-tenancy for MSPs and their clients
+- Endpoint inventory, live telemetry, and historical state
+- An entity graph for modeling systems and their relationships
+- Microsoft 365, Active Directory, endpoint, and infrastructure integrations
+- Mutual TLS, role-based access control, signed modules, and encrypted secrets
+- A `cfg` CLI and REST API; a controller-served web UI is in early development
 
-### Project Management
+Digital Employee Experience (DEX) capabilities — experience signals, fleet
+baselines, root-cause analysis, predictive insight, and remediation through the
+same configuration and workflow system — are planned on this foundation. See the
+[roadmap](docs/product/roadmap.md).
 
-Development progress is tracked through the [**CFGMS Development Roadmap** GitHub Project](https://github.com/orgs/cfg-is/projects/1).
+## Architecture
 
-This project board provides real-time visibility into:
+CFGMS uses three cooperating components:
 
-- Current development priorities and milestones
-- Issue tracking and feature requests
-- Sprint planning and task organization
-- Overall project completion status
+- **Controller** — the central control plane for configuration, orchestration,
+  workflows, fleet state, APIs, and multi-tenant administration.
+- **Steward** — the agent that observes and manages a Windows, Linux, or macOS
+  endpoint.
+- **Outpost** — a planned local proxy and discovery component for networks and
+  devices that cannot run a Steward.
 
-## License
+Internal control and data-plane communication uses gRPC over QUIC with mutual
+TLS. External integrations use HTTPS and the REST API.
 
-CFGMS is licensed under the **[GNU Affero General Public License v3.0](LICENSE)** (AGPL-3.0).
+## Project status
 
-- **Self-hosted use** (on-premises or private cloud) is fully permitted — no commercial license required.
-- **MSPs** managing client endpoints under a single CFGMS deployment require no commercial license.
-- **Commercial embedding** (compiling CFGMS source into a proprietary product) requires a private commercial license. Contact [licensing@cfg.is](mailto:licensing@cfg.is).
+CFGMS is in early development. Its core architecture and a growing set of
+components are implemented, but it should not yet be treated as a finished
+production product. Interfaces and deployment procedures may change.
 
-For complete licensing details and FAQ, see [LICENSING.md](LICENSING.md).
+Direction and progress are tracked in the [roadmap](docs/product/roadmap.md) and
+on the [project board](https://github.com/orgs/cfg-is/projects/1).
 
-## Enterprise Features
+## Build from source
 
-HA clustering is included in all builds. Web UI is planned for a future release.
-
-For hosted deployment or support contracts, contact [licensing@cfg.is](mailto:licensing@cfg.is). See [LICENSING.md](LICENSING.md) for complete details.
-
-## Platform Support
-
-CFGMS is designed for cross-platform deployment across diverse infrastructure environments:
-
-### Steward (Agent) Support
-
-- **Linux**: AMD64 & ARM64 - Full support across distributions
-- **Windows**: AMD64 & ARM64 - Windows 10, 11, Server 2019+
-- **macOS**: ARM64 (M series) - Apple Silicon Macs
-
-### Controller Support  
-
-- **Linux**: AMD64 - Primary target for production deployments
-- **Windows**: AMD64 - Development and testing environments
-
-For detailed platform information, installation instructions, and deployment architectures, see [docs/deployment/platform-support.md](docs/deployment/platform-support.md).
-
-## Development
-
-CFGMS follows the GitFlow branching model:
-
-- `main` branch contains production-ready code
-- `develop` branch is for integration of features
-- Feature development happens in `feature/*` branches
-- See [CONTRIBUTING.md](CONTRIBUTING.md) for complete workflow details
-
-## Next Steps
-
-For current development priorities and detailed roadmap information, please refer to:
-
-- **Roadmap**: See [docs/product/roadmap.md](docs/product/roadmap.md) for the complete development roadmap and version planning
-- **Project Management**: Visit the [CFGMS Development Roadmap](https://github.com/orgs/cfg-is/projects/1) GitHub Project for real-time progress tracking and task management
-
-The roadmap provides detailed milestone planning from v0.1.0 through v3.5.0+, including current development phases, feature priorities, and architectural concepts that guide the project's evolution.
-
-## Security
-
-CFGMS implements defense-in-depth security with:
-
-- **Mutual TLS**: All internal communication (gRPC-over-QUIC) uses certificate-based authentication
-- **Zero-Trust RBAC**: Just-in-time access, continuous authorization, audit logging
-- **Automated Scanning**: CodeQL, Trivy, gosec, and supply chain security validation
-- **Data Protection**: SOPS encryption, TLS 1.3, OS keychain integration
-
-View our security posture: [OpenSSF Scorecard](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
-
-**Report vulnerabilities** to [security@cfg.is](mailto:security@cfg.is). See [SECURITY.md](SECURITY.md) for complete policy.
-
-## REST API
-
-CFGMS provides a comprehensive REST API for external integration:
-
-- **Authentication**: API key-based
-- **Endpoints**: Steward management, configuration, certificates, RBAC
-- **Base URL**: `http://localhost:9080/api/v1` (configurable)
-
-See [docs/api/rest-api.md](docs/api/rest-api.md) for complete documentation and examples.
-
-## Project Structure
-
-The project follows a feature-based organization:
-
-- `cmd/` - Command-line applications
-  - `controller/` - Controller binary
-  - `steward/` - Steward binary
-  - `cfg/` - CLI for interacting with the system
-
-- `features/` - Core feature implementations
-  - `controller/` - Controller component
-  - `steward/` - Steward (agent) component
-
-- `pkg/` - Shared packages
-  - `logging/` - Logging utilities
-
-- `api/` - API definitions
-  - `proto/` - Protocol buffer definitions
-
-- `test/` - Integration and end-to-end tests
-
-## Quick Start
-
-**Prerequisites**: Go 1.25+, Git
+Prerequisites: Go and Git. See [`go.mod`](go.mod) for the required Go version.
 
 ```bash
-# Clone and build
 git clone https://github.com/cfg-is/cfgms.git
 cd cfgms
 make build
-
-# Run controller
-./bin/controller
-
-# Run steward (separate terminal)
-./bin/cfgms-steward
 ```
 
-For detailed setup and configuration, see [docs/deployment/](docs/deployment/).
+Binaries land in `bin/`. Both the controller and the steward need configuration
+before they will start: the controller initializes its CA and admin credential
+bundle with `--init --config`, and stewards join using a registration token it
+issues. The [single-controller walkthrough](docs/deployment/single-controller/walkthrough.md)
+is the shortest path to a working deployment; see
+[platform support](docs/deployment/platform-support.md) for supported
+architectures and [deployment docs](docs/deployment/) for other topologies.
 
-## Building from Source
+## Security
 
-```bash
-# Clone the repository
-git clone https://github.com/cfg-is/cfgms.git
-cd cfgms
+CFGMS is designed around the assumption that endpoints—and occasionally
+administrator accounts—may be compromised. Internal communication requires
+mutual TLS, secrets are encrypted, executable modules are signed, authorization
+is tenant-aware, and security-relevant activity is audited.
 
-# Build the controller
-go build -o bin/controller ./cmd/controller
+Do not report vulnerabilities through a public issue. See
+[SECURITY.md](SECURITY.md) or email
+[security@cfg.is](mailto:security@cfg.is).
 
-# Build the steward
-go build -o bin/cfgms-steward ./cmd/steward
-```
+## Open source and licensing
 
-## Documentation
+CFGMS is licensed under the
+[GNU Affero General Public License v3.0](LICENSE). It can be self-hosted and used
+by MSPs to manage client environments under the AGPL. A separate commercial
+license is available for incorporating CFGMS into proprietary products.
 
-For full documentation, visit [docs.cfg.is](https://docs.cfg.is)
+See [LICENSING.md](LICENSING.md) for the complete terms and FAQ. For commercial
+licensing, hosted deployments, or support, contact
+[licensing@cfg.is](mailto:licensing@cfg.is).
 
 ## Contributing
 
-We welcome contributions! Before submitting code:
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), which
+covers the development workflow. Contributors must sign the
+[Contributor License Agreement](docs/legal/CLA.md) and add themselves to
+[CONTRIBUTORS.md](CONTRIBUTORS.md).
 
-1. Sign the [Contributor License Agreement](docs/legal/CLA.md) and add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
-2. Follow the development workflow in [CONTRIBUTING.md](CONTRIBUTING.md)
+[Open an issue](https://github.com/cfg-is/cfgms/issues/new) for bugs and feature
+requests. Issues labelled `internal` are locked automated pipeline items, not
+closed to contribution — see
+[issue classes](CONTRIBUTING.md#issue-classes--why-some-issues-are-locked).
 
-## Community & Support
-
-- **Bug Reports & Feature Requests**: [open a GitHub Issue](https://github.com/cfg-is/cfgms/issues/new) — these become public **`community`** issues. (Issues labelled **`internal`** are locked automated pipeline items, not closed to contribution — see [CONTRIBUTING.md](CONTRIBUTING.md#issue-classes--why-some-issues-are-locked).)
-- **Security Advisories**: [GitHub Security](https://github.com/cfg-is/cfgms/security/advisories)
-- **Code Scanning Results**: [GitHub Security](https://github.com/cfg-is/cfgms/security/code-scanning)
-- **Project Roadmap**: [GitHub Project Board](https://github.com/orgs/cfg-is/projects/1)
-- **Email Contact**: [licensing@cfg.is](mailto:licensing@cfg.is)
+- [Documentation](docs/)
+- [Development setup](docs/development/)
+- [Architecture](docs/architecture/)

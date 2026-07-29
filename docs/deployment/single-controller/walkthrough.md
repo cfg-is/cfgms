@@ -38,7 +38,8 @@ Deploy one CFGMS controller and set up the controller-steward to keep the node i
 ## Prerequisites
 
 - **Linux VM**: Debian/Ubuntu (recommended) or RHEL/CentOS
-- **Go toolchain**: v1.25+ (on the build machine, can be the controller VM)
+- **Go toolchain**: see `go.mod` for the required version (on the build machine,
+  can be the controller VM)
 - **Git**: installed on the controller VM
 - **Network**: Ports 9080/TCP and 4433/UDP available on the controller
 
