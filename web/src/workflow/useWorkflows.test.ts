@@ -210,6 +210,39 @@ describe('parseTriggerItem', () => {
     expect(parseTriggerItem(null)).toBeNull()
     expect(parseTriggerItem({ name: 'no-id' })).toBeNull()
   })
+
+  it('parses schedule config when present', () => {
+    const t = parseTriggerItem(makeTrigger({ schedule: { cron_expression: '0 * * * *' } }))
+    expect(t).not.toBeNull()
+    expect(t!.schedule).toEqual({ cron_expression: '0 * * * *' })
+    expect(t!.webhook).toBeUndefined()
+  })
+
+  it('parses webhook config when present', () => {
+    const t = parseTriggerItem(
+      makeTrigger({ type: 'webhook', webhook: { path: '/hooks/deploy' } }),
+    )
+    expect(t).not.toBeNull()
+    expect(t!.webhook).toEqual({ path: '/hooks/deploy' })
+    expect(t!.schedule).toBeUndefined()
+  })
+
+  it('returns undefined schedule and webhook when absent', () => {
+    const t = parseTriggerItem(makeTrigger({ type: 'manual' }))
+    expect(t).not.toBeNull()
+    expect(t!.schedule).toBeUndefined()
+    expect(t!.webhook).toBeUndefined()
+  })
+
+  it('coerces non-string schedule cron_expression to empty string', () => {
+    const t = parseTriggerItem(makeTrigger({ schedule: { cron_expression: 42 } }))
+    expect(t!.schedule).toEqual({ cron_expression: '' })
+  })
+
+  it('coerces non-string webhook path to empty string', () => {
+    const t = parseTriggerItem(makeTrigger({ webhook: { path: null } }))
+    expect(t!.webhook).toEqual({ path: '' })
+  })
 })
 
 // ── parseTriggerList ──────────────────────────────────────────────────────────

@@ -2,8 +2,9 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * TriggerPanel test suite (Story #2731): trigger list rendering, data states,
- * create form, and delete confirm dialog.
+ * TriggerPanel test suite (Story #2731, Story #2986): trigger list rendering,
+ * data states, create form, delete confirm dialog, schedule/webhook config
+ * fields, edit form, and enable/disable toggle.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -161,6 +162,440 @@ describe('TriggerPanel — create form', () => {
     await waitFor(() =>
       expect(screen.queryByTestId('trigger-create-form')).toBeNull(),
     )
+  })
+
+  it('surfaces server error when create POST returns non-ok', async () => {
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+
+    fireEvent.change(screen.getByTestId('trigger-name-input'), {
+      target: { value: 'new-trigger' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-workflow-input'), {
+      target: { value: 'wf-1' },
+    })
+
+    // Server rejects the create with a 409 and an error body.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'trigger name already exists' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-create-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('trigger-create-error')).toHaveTextContent(
+      /trigger name already exists/i,
+    )
+    // The form stays open so the user can correct and retry.
+    expect(screen.getByTestId('trigger-create-form')).toBeInTheDocument()
+  })
+})
+
+describe('TriggerPanel — schedule/webhook fields', () => {
+  it('reveals cron expression input when type is schedule', async () => {
+    fetchMock.mockResolvedValue(makeTriggersResponse([]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+
+    // Default type is manual — no schedule input
+    expect(screen.queryByTestId('trigger-schedule-expression-input')).toBeNull()
+
+    // Switch to schedule type
+    fireEvent.change(screen.getByTestId('trigger-type-select'), {
+      target: { value: 'schedule' },
+    })
+
+    expect(screen.getByTestId('trigger-schedule-expression-input')).toBeInTheDocument()
+  })
+
+  it('reveals webhook path input when type is webhook', async () => {
+    fetchMock.mockResolvedValue(makeTriggersResponse([]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+
+    expect(screen.queryByTestId('trigger-webhook-path-input')).toBeNull()
+
+    fireEvent.change(screen.getByTestId('trigger-type-select'), {
+      target: { value: 'webhook' },
+    })
+
+    expect(screen.getByTestId('trigger-webhook-path-input')).toBeInTheDocument()
+  })
+
+  it('includes schedule cron expression in create POST body', async () => {
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+
+    fireEvent.change(screen.getByTestId('trigger-name-input'), {
+      target: { value: 'my-schedule' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-workflow-input'), {
+      target: { value: 'wf-1' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-type-select'), {
+      target: { value: 'schedule' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-schedule-expression-input'), {
+      target: { value: '0 * * * *' },
+    })
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(makeTrigger({ type: 'schedule' })), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([]))
+
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('trigger-create-form')).toBeNull(),
+    )
+
+    const postCall = fetchMock.mock.calls.find(
+      ([url, opts]) =>
+        typeof url === 'string' &&
+        url === '/api/v1/triggers' &&
+        (opts as RequestInit)?.method === 'POST',
+    )
+    expect(postCall).toBeDefined()
+    const body = JSON.parse((postCall![1] as RequestInit).body as string) as Record<string, unknown>
+    expect((body.schedule as Record<string, unknown>)?.cron_expression).toBe('0 * * * *')
+  })
+
+  it('includes webhook path in create POST body', async () => {
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-empty')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+
+    fireEvent.change(screen.getByTestId('trigger-name-input'), {
+      target: { value: 'my-webhook' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-workflow-input'), {
+      target: { value: 'wf-1' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-type-select'), {
+      target: { value: 'webhook' },
+    })
+    fireEvent.change(screen.getByTestId('trigger-webhook-path-input'), {
+      target: { value: '/hooks/deploy' },
+    })
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(makeTrigger({ type: 'webhook' })), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([]))
+
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('trigger-create-form')).toBeNull(),
+    )
+
+    const postCall = fetchMock.mock.calls.find(
+      ([url, opts]) =>
+        typeof url === 'string' &&
+        url === '/api/v1/triggers' &&
+        (opts as RequestInit)?.method === 'POST',
+    )
+    expect(postCall).toBeDefined()
+    const body = JSON.parse((postCall![1] as RequestInit).body as string) as Record<string, unknown>
+    expect((body.webhook as Record<string, unknown>)?.path).toBe('/hooks/deploy')
+  })
+})
+
+describe('TriggerPanel — edit', () => {
+  it('shows edit form pre-filled when edit button is clicked', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([
+        makeTrigger({ type: 'schedule', schedule: { cron_expression: '0 * * * *' } }),
+      ]),
+    )
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    // GET /triggers/trig-1 response (for edit pre-fill)
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makeTrigger({ type: 'schedule', schedule: { cron_expression: '0 * * * *' } }),
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-edit-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-create-form')).toBeInTheDocument(),
+    )
+
+    expect((screen.getByTestId('trigger-name-input') as HTMLInputElement).value).toBe(
+      'Daily sync',
+    )
+    expect(screen.getByTestId('trigger-schedule-expression-input')).toBeInTheDocument()
+    expect(
+      (screen.getByTestId('trigger-schedule-expression-input') as HTMLInputElement).value,
+    ).toBe('0 * * * *')
+  })
+
+  it('submits PUT and refreshes list when edit form is saved', async () => {
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([makeTrigger()]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    // GET for edit pre-fill
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(makeTrigger()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-edit-btn'))
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-create-form')).toBeInTheDocument(),
+    )
+
+    // PUT response + list refresh
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(makeTrigger()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([makeTrigger()]))
+
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('trigger-create-form')).toBeNull(),
+    )
+
+    const putCall = fetchMock.mock.calls.find(
+      ([url, opts]) =>
+        typeof url === 'string' &&
+        url.includes('/api/v1/triggers/') &&
+        (opts as RequestInit)?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+  })
+
+  it('surfaces server error when edit PUT returns non-ok', async () => {
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([makeTrigger()]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    // GET for edit pre-fill succeeds.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(makeTrigger()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-edit-btn'))
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-create-form')).toBeInTheDocument(),
+    )
+
+    // Server rejects the update with a 422 and an error body.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'invalid schedule expression' }), {
+        status: 422,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-create-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('trigger-create-error')).toHaveTextContent(
+      /invalid schedule expression/i,
+    )
+    // The edit form stays open so the user can correct and retry.
+    expect(screen.getByTestId('trigger-create-form')).toBeInTheDocument()
+  })
+
+  it('surfaces error when single-trigger GET fails on edit open', async () => {
+    fetchMock.mockResolvedValueOnce(makeTriggersResponse([makeTrigger()]))
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    // GET /triggers/trig-1 (for edit pre-fill) fails with a 404.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-edit-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-create-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('trigger-create-error')).toHaveTextContent(
+      /failed to load trigger/i,
+    )
+  })
+})
+
+describe('TriggerPanel — enable/disable toggle', () => {
+  it('calls /enable when trigger status is inactive', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'inactive' })]),
+    )
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ status: 'active', trigger_id: 'trig-1', message: 'Trigger enabled successfully' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'active' })]),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-toggle-btn'))
+
+    await waitFor(() => {
+      const enableCall = fetchMock.mock.calls.find(
+        ([url, opts]) =>
+          typeof url === 'string' &&
+          url.includes('/enable') &&
+          (opts as RequestInit)?.method === 'POST',
+      )
+      expect(enableCall).toBeDefined()
+    })
+  })
+
+  it('calls /disable when trigger status is active', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'active' })]),
+    )
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ status: 'inactive', trigger_id: 'trig-1', message: 'Trigger disabled successfully' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'inactive' })]),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-toggle-btn'))
+
+    await waitFor(() => {
+      const disableCall = fetchMock.mock.calls.find(
+        ([url, opts]) =>
+          typeof url === 'string' &&
+          url.includes('/disable') &&
+          (opts as RequestInit)?.method === 'POST',
+      )
+      expect(disableCall).toBeDefined()
+    })
+  })
+
+  it('toggle button is labelled Enable for inactive trigger', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'inactive' })]),
+    )
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('trigger-toggle-btn')).toHaveTextContent(/enable/i)
+  })
+
+  it('toggle button is labelled Disable for active trigger', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'active' })]),
+    )
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('trigger-toggle-btn')).toHaveTextContent(/disable/i)
+  })
+
+  it('surfaces toggle error when enable/disable POST returns non-ok', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTriggersResponse([makeTrigger({ status: 'active' })]),
+    )
+    renderTriggerPanel()
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-table')).toBeInTheDocument(),
+    )
+
+    // Server rejects the disable with a 500 and an error body.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'trigger is busy converging' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('trigger-toggle-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-toggle-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('trigger-toggle-error')).toHaveTextContent(
+      /trigger is busy converging/i,
+    )
+    // The trigger row remains since the toggle did not take effect.
+    expect(screen.getByTestId('trigger-table')).toBeInTheDocument()
   })
 })
 
