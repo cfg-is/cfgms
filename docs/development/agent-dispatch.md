@@ -32,7 +32,7 @@ Developer (architect)
 │     │     └── git worktree add -b feature/story-N-agent ../worktrees/story-N develop
 │     └── .claude/scripts/agent-dispatch.sh launch <N>
 │           └── docker run --detach cfg-agent:latest
-│                 ├── Mounts: worktree (rw), claude-creds (ro), gh-creds (ro)
+│                 ├── Mounts: worktree (rw), host ~/.claude/.credentials.json (rw), gh-creds (ro)
 │                 ├── Firewall: GitHub + Anthropic API + Go proxy only
 │                 ├── entrypoint: gh issue view N → agent prompt
 │                 ├── claude --dangerously-skip-permissions
@@ -65,16 +65,9 @@ Developer (architect)
 
 ## Credential Management
 
-### Refresh Claude OAuth Token
+### Claude OAuth Token
 
-Claude credentials expire periodically. If `/dispatch` reports `CREDS_EXPIRED`:
-
-```bash
-# Run in a real terminal (requires TTY — not in Claude session)
-./.claude/scripts/refresh-agent-creds.sh
-```
-
-Then verify: `/agent-setup creds`
+Agent containers bind-mount the host's live `~/.claude/.credentials.json` directly (the same file the host and `po-live` use), so they track host token rotations in place — a `LOW` or `EXPIRED` token is not a dispatch blocker; the agent's own entrypoint refreshes it exactly like an interactive session would. Only a genuinely missing or unparseable credentials file blocks a launch (`CREDS_MISSING`). If `/dispatch` reports `CREDS_MISSING`, run `claude` normally on the host to (re-)authenticate, then verify: `/agent-setup creds`.
 
 ### Rotate GitHub PAT
 
@@ -91,9 +84,9 @@ Then verify: `/agent-setup creds`
 ```bash
 ./.claude/scripts/agent-dispatch.sh check-creds
 # CREDS_OK:<minutes>     — valid, minutes until expiry
-# CREDS_LOW:<minutes>    — valid but expiring soon, refresh recommended
-# CREDS_EXPIRED:<N>      — run ./.claude/scripts/refresh-agent-creds.sh
-# CREDS_MISSING:*        — run /agent-setup
+# CREDS_LOW:<minutes>    — expiring soon, advisory only (agent refreshes the live file in place)
+# CREDS_EXPIRED:<N>      — advisory only; the host's own token rotation covers it
+# CREDS_MISSING:*        — run `claude` on the host to authenticate, then /agent-setup
 ```
 
 ## Writing Good Agent Stories
@@ -205,11 +198,6 @@ git push origin feature/story-N-agent
 
 **Cause**: Agent hit max fix iterations and created a draft PR, OR dispatch itself failed.
 **Fix**: `docker logs cfg-agent-story-N` — look for the draft PR URL or the failure reason.
-
-### Credential check passes but agent still fails auth mid-run
-
-**Cause**: Token valid at dispatch time but expired during the ~45 min run.
-**Fix**: Refresh credentials before dispatching long-running stories. Credentials with <60 min remaining trigger a `CREDS_LOW` warning.
 
 ## Relationship to Interactive Workflow
 

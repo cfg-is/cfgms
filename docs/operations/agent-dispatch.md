@@ -173,7 +173,9 @@ When `agent-dispatch.sh launch <N>` runs:
    | `CFGMS_TIER1_URL` | Tier 1 controller base URL |
 
    **The key value is never in a container env var.** `docker inspect` shows
-   only the file path. The key is never in the `claude-creds` volume.
+   only the file path. The key is never in the bind-mounted Claude credentials
+   file (`~/.claude/.credentials.json`) — the two credentials are injected
+   through entirely separate mounts.
 
 **Mint failure** — if the sub-tenant creation or key issuance fails, the
 dispatcher emits `CRED_MINT_FAILED:<reason>`, removes any partial cred dir,
@@ -204,7 +206,7 @@ The revoke sequence:
 ### Security properties
 
 - Key value never appears in `docker inspect` env output.
-- Key value never enters the `claude-creds` Docker volume.
+- Key value never enters the bind-mounted Claude credentials file.
 - Key value never appears in the image.
 - Credentials live in RAM only (Linux `/run` tmpfs) and are destroyed on host
   reboot even if cleanup is skipped.

@@ -20,11 +20,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    ```
    If either fails, provide specific fix instructions and stop.
 
-2. **If `$ARGUMENTS` is 'creds'**: Tell the user to run the refresh script directly in their terminal:
-   ```
-   ./.claude/scripts/refresh-agent-creds.sh
-   ```
-   This script handles Docker volume creation, OAuth login, workspace trust, and remote-control consent interactively. It requires a TTY and cannot be run via the Bash tool. After the user confirms completion, verify credentials with `./.claude/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
+2. **If `$ARGUMENTS` is 'creds'**: Agent containers bind-mount the host's live `~/.claude/.credentials.json` directly — there is no separate setup step. Tell the user: if `claude` is authenticated on this host (i.e. this session works), dispatch credentials are already in place. If missing, run `claude` normally on the host to log in. Verify with `./.claude/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
 
 3. **Health check** (runs when image already exists and `$ARGUMENTS` is NOT 'rebuild'):
    ```bash
@@ -48,16 +44,14 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
    While waiting, proceed with steps 6-8 (they're independent).
 
-6. **Set up Claude credentials and workspace trust**:
-   **IMPORTANT**: This step requires a real TTY. Do NOT attempt to run it via the Bash tool.
+6. **Verify Claude credentials**: Agent containers bind-mount the host's `~/.claude/.credentials.json` directly, so no separate container-side login is needed.
 
-   - Check if credentials already exist:
+   - Check if credentials already exist on the host:
      ```bash
-     docker run --rm -v claude-creds:/persist --entrypoint test cfg-agent:latest \
-       -f /persist/.credentials.json && echo "exists"
+     test -f "$HOME/.claude/.credentials.json" && echo "exists"
      ```
    - If credentials exist and `$ARGUMENTS` is not 'creds': skip
-   - If credentials missing: tell the user to run `./.claude/scripts/refresh-agent-creds.sh` in their terminal, then confirm when done.
+   - If credentials missing: tell the user to run `claude` normally on this host to log in, then confirm when done.
 
 7. **Create directories**:
    ```bash
@@ -102,5 +96,5 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 - **Docker not installed**: Provide install link, stop
 - **GitHub not authenticated**: Tell user to run `gh auth login`, stop
 - **Image build fails**: Show build output, suggest checking Dockerfile
-- **OAuth flow fails**: Tell user to retry with `./.claude/scripts/refresh-agent-creds.sh`
+- **OAuth flow fails**: Tell user to retry by running `claude` normally on the host to re-authenticate
 - **Network issues during build**: Suggest checking internet connection
