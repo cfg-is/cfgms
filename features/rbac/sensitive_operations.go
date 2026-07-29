@@ -147,7 +147,7 @@ func (m *Manager) AuditSensitiveOperation(ctx context.Context, opCtx *SensitiveO
 		Detail("operation_type", string(opCtx.OperationType)).
 		// M-AUTH-2: Mark as sensitive operation
 		Detail("security_classification", "sensitive_admin_operation").
-		Severity(business.AuditSeverityCritical)
+		Severity(business.AuditSeverityHigh)
 
 	// M-AUTH-2: Include any additional metadata
 	for key, value := range opCtx.Metadata {

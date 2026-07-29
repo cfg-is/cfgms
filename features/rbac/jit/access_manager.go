@@ -296,7 +296,10 @@ func (jam *JITAccessManager) recordJITAccessApproval(ctx context.Context, reques
 	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
 		request.TenantID, request.RequesterID, "jit_access", request.ID, "approve",
 		business.AuditResultSuccess,
-	).Detail("approver_id", approverID).Detail("grant_id", grant.ID)); err != nil {
+	).
+		// JIT approval is a sensitive admin action
+		Severity(business.AuditSeverityHigh).
+		Detail("approver_id", approverID).Detail("grant_id", grant.ID)); err != nil {
 		slog.Warn("failed to record jit access approval audit event", "error", err)
 	}
 }
@@ -322,7 +325,10 @@ func (jam *JITAccessManager) recordJITAccessExtension(ctx context.Context, grant
 	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
 		grant.TenantID, requesterID, "jit_access", grant.ID, "extend",
 		business.AuditResultSuccess,
-	).Detail("duration", duration.String()).Detail("reason", reason)); err != nil {
+	).
+		// JIT extension is a sensitive admin action
+		Severity(business.AuditSeverityHigh).
+		Detail("duration", duration.String()).Detail("reason", reason)); err != nil {
 		slog.Warn("failed to record jit access extension audit event", "error", err)
 	}
 }
@@ -335,7 +341,10 @@ func (jam *JITAccessManager) recordJITAccessRevocation(ctx context.Context, gran
 	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
 		grant.TenantID, revokerID, "jit_access", grant.ID, "revoke",
 		business.AuditResultSuccess,
-	).Detail("reason", reason)); err != nil {
+	).
+		// JIT revocation is a sensitive admin action
+		Severity(business.AuditSeverityHigh).
+		Detail("reason", reason)); err != nil {
 		slog.Warn("failed to record jit access revocation audit event", "error", err)
 	}
 }
@@ -1049,7 +1058,10 @@ func (jam *JITAccessManager) recordStageApproval(ctx context.Context, request *J
 	if err := jam.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
 		request.TenantID, request.RequesterID, "jit_access", request.ID, "stage_approved",
 		business.AuditResultSuccess,
-	).Detail("stage_id", stageID).Detail("approver_id", approverID)); err != nil {
+	).
+		// workflow stage approval is a sensitive admin action
+		Severity(business.AuditSeverityHigh).
+		Detail("stage_id", stageID).Detail("approver_id", approverID)); err != nil {
 		slog.Warn("failed to record jit stage approval audit event", "error", err)
 	}
 }
