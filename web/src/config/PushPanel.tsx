@@ -14,7 +14,8 @@
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import SelectorInput from '../shell/SelectorInput.tsx'
-import { usePushStatus, useConfigDeployments } from './useConfigs.ts'
+import { usePushStatus, useConfigDeployments, useConfigList } from './useConfigs.ts'
+import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 
 interface PushPanelProps {
   onClose: () => void
@@ -70,6 +71,9 @@ export default function PushPanel({ onClose }: PushPanelProps) {
   const [pushError, setPushError] = useState<string | null>(null)
   const [activePushId, setActivePushId] = useState<string | null>(null)
   const [deployConfigId, setDeployConfigId] = useState<string | null>(null)
+
+  const { configs } = useConfigList()
+  const { observedPaths } = useTenantScope()
 
   const { status: pushStatus } = usePushStatus(activePushId)
   const {
@@ -200,7 +204,13 @@ export default function PushPanel({ onClose }: PushPanelProps) {
               placeholder="steward-id"
               value={configId}
               onChange={(e) => setConfigId(e.target.value)}
+              list="push-config-id-options"
             />
+            <datalist id="push-config-id-options">
+              {configs.map((c) => (
+                <option key={c.steward_id} value={c.steward_id} />
+              ))}
+            </datalist>
           </div>
           <div className="cfg-push-field">
             <span className="cfg-push-label">Version</span>
@@ -220,7 +230,13 @@ export default function PushPanel({ onClose }: PushPanelProps) {
               placeholder="root"
               value={tenantId}
               onChange={(e) => setTenantId(e.target.value)}
+              list="push-tenant-id-options"
             />
+            <datalist id="push-tenant-id-options">
+              {observedPaths.map((path) => (
+                <option key={path} value={path} />
+              ))}
+            </datalist>
           </div>
         </div>
 

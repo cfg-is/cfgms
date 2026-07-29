@@ -9,6 +9,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
+import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 import ConfigListView from './ConfigListView.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -66,7 +67,9 @@ function renderConfigListView() {
   return render(
     <MemoryRouter>
       <AuthProvider>
-        <ConfigListView />
+        <TenantScopeProvider rootPath="root">
+          <ConfigListView />
+        </TenantScopeProvider>
       </AuthProvider>
     </MemoryRouter>,
   )
