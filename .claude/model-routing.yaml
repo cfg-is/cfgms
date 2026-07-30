@@ -20,10 +20,10 @@
 # Fixed two-level shape: do not add nesting beyond defaults:/segments: — the
 # resolver is a plain-stdlib parser, not a general YAML implementation.
 defaults:
-  model: claude-sonnet-4-6
+  model: sonnet
   effort: high
 segments:
-  dev-agent:          { model: claude-sonnet-4-6 }
-  fix-agent:          { model: claude-sonnet-4-6 }
-  pr-review:          { model: claude-sonnet-4-6 }
-  acceptance-review:  { model: claude-sonnet-4-6 }
+  dev-agent:          { model: sonnet }
+  fix-agent:          { model: sonnet }
+  pr-review:          { model: sonnet }
+  acceptance-review:  { model: sonnet }
