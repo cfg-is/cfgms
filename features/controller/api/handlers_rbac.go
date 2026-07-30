@@ -5,7 +5,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,12 +16,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
-
-// isWithinTenantScope reports whether resourceTenant is within callerTenant's subtree.
-// Returns true when callerTenant is empty (admin mTLS path carries no tenant restriction).
-func isWithinTenantScope(callerTenant, resourceTenant string) bool {
-	return resourceTenant == callerTenant || strings.HasPrefix(resourceTenant, callerTenant+"/")
-}
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
