@@ -39,9 +39,18 @@ go.sum      text eol=lf
 # automatically. The union driver keeps both sides of a conflicting hunk
 # (identical to the manual resolution performed for #3012/#3020/#3024/#3025),
 # eliminating the merge-queue serialization caused by simultaneous appends.
-# A genuine content conflict (two PRs editing the same row) still produces a
-# visible duplicate that surfaces in review; it does not silently corrupt the
-# table structure.
+# `union` is a low-level merge attribute compiled into git itself (not an
+# external driver requiring local git config), so it applies identically
+# regardless of what performs the merge/rebase.
+#
+# Trade-off: union cannot distinguish "two additive rows" from "two edits of
+# the same row" — both are add/add hunks to a line-based merge, and union
+# keeps both sides either way. A same-row conflict therefore does not stop
+# the merge; it lands as a duplicate row. `scripts/check-mockups-index.sh`
+# (wired into `scripts/test-scripts.sh`, run by `make test`) is the backstop:
+# it fails loudly the moment a duplicate row or header appears, so the
+# silent case above is caught mechanically instead of relying on a reviewer
+# to notice it.
 docs/design/mockups/README.md merge=union
 
 # Binary catch-all (Git auto-detects but explicit is clearer)
