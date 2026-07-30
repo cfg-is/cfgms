@@ -125,12 +125,14 @@ describe('RegistrationConsolePage — panel rendering', () => {
     expect(screen.queryByTestId('pending-loading')).toBeNull()
   })
 
-  it('renders the soon placeholder for IP Trust', () => {
+  it('mounts the real IPTrustTab on the IP Trust tab, not a soon placeholder', async () => {
     renderPage()
 
     fireEvent.click(tab(/^IP Trust/i))
 
-    expect(screen.getByText(/IP Trust is not yet available/i)).toBeInTheDocument()
+    expect(tab(/^IP Trust/i)).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('iptrust-loading')).toBeInTheDocument()
+    expect(screen.queryByText(/IP Trust is not yet available/i)).toBeNull()
   })
 
   it('restores the Pending panel after visiting the Tokens tab', () => {
@@ -176,14 +178,14 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
     expect(screen.getByTestId('pending-loading')).toBeInTheDocument()
   })
 
-  it('ArrowLeft wraps from Pending to IP Trust', () => {
+  it('ArrowLeft wraps from Pending to IP Trust', async () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
     fireEvent.keyDown(tablist, { key: 'ArrowLeft' })
 
     expect(tab(/^IP Trust/i)).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByText(/IP Trust is not yet available/i)).toBeInTheDocument()
+    expect(screen.getByTestId('iptrust-loading')).toBeInTheDocument()
   })
 
   it('ArrowLeft steps backwards one tab at a time', () => {
@@ -246,13 +248,13 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
 // ── Tab specification ─────────────────────────────────────────────────────────
 
 describe('TABS', () => {
-  it('declares Pending and Tokens with real panels; IP Trust as soon', () => {
+  it('declares Pending, Tokens, and IP Trust with real panels', () => {
     expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust'])
     expect(TABS[0]?.soon).toBe(false)
     expect(TABS[0]?.Panel).toBeDefined()
     expect(TABS[1]?.soon).toBe(false)
     expect(TABS[1]?.Panel).toBeDefined()
-    expect(TABS[2]?.soon).toBe(true)
-    expect(TABS[2]?.Panel).toBeUndefined()
+    expect(TABS[2]?.soon).toBe(false)
+    expect(TABS[2]?.Panel).toBeDefined()
   })
 })

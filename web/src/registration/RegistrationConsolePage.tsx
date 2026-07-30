@@ -2,20 +2,18 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Registration console tab shell (Story #2934, #2935).
+ * Registration console tab shell (Story #2934, #2935, #2971).
  * Renders the /registration route with a tab strip:
  *   Pending  — list + deny (Story #2934)
  *   Tokens   — read-only token lifecycle view (Story #2935)
- *   IP Trust — Story #2936 (soon placeholder)
+ *   IP Trust — add/revoke behind step-up (Story #2936 layout, #2971 actions)
  *
  * Tab pattern mirrors StewardAssetPage.tsx exactly: role="tablist", roving
  * tabindex, ArrowLeft/Right keyboard navigation, implicit aria-labelledby
  * association so inactive panels can be lazily rendered.
- *
- * No approve, approve-all, approve-by-CIDR, mint, rotate, revoke, or delete
- * control is present — those are Section 2's follow-on epic.
  */
 import { type ComponentType, useRef, useState } from 'react'
+import IPTrustTab from './IPTrustTab.tsx'
 import PendingQueueTab from './PendingQueueTab.tsx'
 import TokensTab from './TokensTab.tsx'
 
@@ -45,7 +43,7 @@ function PanelContent({ spec }: { spec: TabSpec }) {
 export const TABS: readonly TabSpec[] = [
   { key: 'pending', label: 'Pending', soon: false, Panel: PendingQueueTab },
   { key: 'tokens', label: 'Tokens', soon: false, Panel: TokensTab },
-  { key: 'ip-trust', label: 'IP Trust', soon: true },
+  { key: 'ip-trust', label: 'IP Trust', soon: false, Panel: IPTrustTab },
 ]
 
 export default function RegistrationConsolePage() {
