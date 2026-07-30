@@ -1076,6 +1076,214 @@ owns:
 	}
 }
 
+// TestParseModuleMetadata_ObserveWhen verifies observe_when parse success, parse
+// rejection for each malformed predicate shape, and backward-compatibility for
+// module.yaml files that carry no observe_when key.
+func TestParseModuleMetadata_ObserveWhen(t *testing.T) {
+	baseYAML := func(extra string) string {
+		return `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+` + extra
+	}
+
+	t.Run("no observe_when — backward compatible, nil slice", func(t *testing.T) {
+		reader := strings.NewReader(baseYAML(""))
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if metadata.ObserveWhen != nil {
+			t.Errorf("ObserveWhen = %v, want nil for module.yaml with no observe_when key", metadata.ObserveWhen)
+		}
+	})
+
+	t.Run("valid single predicate with contains", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: windows_feature
+    contains: hyperv
+`)
+		reader := strings.NewReader(yaml)
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(metadata.ObserveWhen) != 1 {
+			t.Fatalf("ObserveWhen length = %d, want 1", len(metadata.ObserveWhen))
+		}
+		p := metadata.ObserveWhen[0]
+		if p.Fact != "windows_feature" {
+			t.Errorf("ObserveWhen[0].Fact = %q, want %q", p.Fact, "windows_feature")
+		}
+		if p.Contains != "hyperv" {
+			t.Errorf("ObserveWhen[0].Contains = %q, want %q", p.Contains, "hyperv")
+		}
+		if p.Equals != "" {
+			t.Errorf("ObserveWhen[0].Equals = %q, want empty", p.Equals)
+		}
+	})
+
+	t.Run("valid single predicate with equals", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+`)
+		reader := strings.NewReader(yaml)
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(metadata.ObserveWhen) != 1 {
+			t.Fatalf("ObserveWhen length = %d, want 1", len(metadata.ObserveWhen))
+		}
+		p := metadata.ObserveWhen[0]
+		if p.Fact != "os" {
+			t.Errorf("ObserveWhen[0].Fact = %q, want %q", p.Fact, "os")
+		}
+		if p.Equals != "windows" {
+			t.Errorf("ObserveWhen[0].Equals = %q, want %q", p.Equals, "windows")
+		}
+		if p.Contains != "" {
+			t.Errorf("ObserveWhen[0].Contains = %q, want empty", p.Contains)
+		}
+	})
+
+	t.Run("valid multiple predicates OR'd", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+  - fact: windows_feature
+    contains: hyperv
+`)
+		reader := strings.NewReader(yaml)
+		metadata, err := ParseModuleMetadata(reader)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(metadata.ObserveWhen) != 2 {
+			t.Fatalf("ObserveWhen length = %d, want 2", len(metadata.ObserveWhen))
+		}
+	})
+
+	t.Run("error: empty fact", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: ""
+    equals: windows
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for predicate with empty fact, got nil")
+		}
+	})
+
+	t.Run("error: both equals and contains set", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+    contains: win
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for predicate with both equals and contains set, got nil")
+		}
+	})
+
+	t.Run("error: neither equals nor contains set", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for predicate with neither equals nor contains set, got nil")
+		}
+	})
+
+	t.Run("error: second predicate malformed — empty fact", func(t *testing.T) {
+		yaml := baseYAML(`observe_when:
+  - fact: os
+    equals: windows
+  - fact: ""
+    contains: hyperv
+`)
+		reader := strings.NewReader(yaml)
+		_, err := ParseModuleMetadata(reader)
+		if err == nil {
+			t.Error("expected error for second predicate with empty fact, got nil")
+		}
+	})
+}
+
+// TestParseModuleMetadata_ObserveWhenRoundTrip verifies that observe_when survives
+// a YAML round-trip through ToYAML + Unmarshal.
+func TestParseModuleMetadata_ObserveWhenRoundTrip(t *testing.T) {
+	input := `name: test-module
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+observe_when:
+  - fact: windows_feature
+    contains: hyperv
+`
+	reader := strings.NewReader(input)
+	metadata, err := ParseModuleMetadata(reader)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	yamlBytes, err := metadata.ToYAML()
+	if err != nil {
+		t.Fatalf("ToYAML() error: %v", err)
+	}
+
+	var reparsed ModuleMetadata
+	if err := yaml.Unmarshal(yamlBytes, &reparsed); err != nil {
+		t.Fatalf("failed to unmarshal round-tripped YAML: %v", err)
+	}
+
+	if len(reparsed.ObserveWhen) != 1 {
+		t.Fatalf("ObserveWhen after round-trip length = %d, want 1", len(reparsed.ObserveWhen))
+	}
+	if reparsed.ObserveWhen[0].Fact != "windows_feature" {
+		t.Errorf("ObserveWhen[0].Fact after round-trip = %q, want %q", reparsed.ObserveWhen[0].Fact, "windows_feature")
+	}
+	if reparsed.ObserveWhen[0].Contains != "hyperv" {
+		t.Errorf("ObserveWhen[0].Contains after round-trip = %q, want %q", reparsed.ObserveWhen[0].Contains, "hyperv")
+	}
+}
+
+// TestModuleMetadata_Clone_ObserveWhen verifies that Clone deep-copies ObserveWhen
+// so mutations to the clone do not affect the original.
+func TestModuleMetadata_Clone_ObserveWhen(t *testing.T) {
+	original := &ModuleMetadata{
+		Name:      "test",
+		Version:   "1.0.0",
+		Publisher: "cfgms",
+		Executors: []string{"steward"},
+		Kind:      "steward",
+		ObserveWhen: []ObservePredicate{
+			{Fact: "os", Equals: "windows"},
+			{Fact: "windows_feature", Contains: "hyperv"},
+		},
+	}
+
+	clone := original.Clone()
+
+	if len(clone.ObserveWhen) != len(original.ObserveWhen) {
+		t.Fatalf("Clone ObserveWhen length = %d, want %d", len(clone.ObserveWhen), len(original.ObserveWhen))
+	}
+
+	clone.ObserveWhen[0].Fact = "mutated"
+	if original.ObserveWhen[0].Fact == "mutated" {
+		t.Error("mutating clone ObserveWhen[0].Fact affected original")
+	}
+}
+
 // Benchmark tests
 func BenchmarkLoadModuleMetadata(b *testing.B) {
 	// Create temporary metadata file
