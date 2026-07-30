@@ -60,16 +60,19 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 		stopCh:    make(chan struct{}),
 	}
 
-	// Initialize recorder if recording is enabled
+	// Initialize recorder if recording is enabled. RecordSessions is a security
+	// control (session I/O is the audit trail for privileged interactive shells),
+	// so a recorder that fails to initialize — including the symlink/permission
+	// hijack cases ensureSecureRecordingDir rejects — must fail construction
+	// rather than silently fall back to running unrecorded.
 	if config.RecordSessions {
 		recorderConfig := DefaultRecorderConfig()
 		recorderConfig.StoragePath = config.RecordingStoragePath
 		recorder, err := NewSessionRecorder(recorderConfig, logger)
 		if err != nil {
-			logger.Warn("Failed to initialize session recorder, continuing without recording", "error", err)
-		} else {
-			manager.recorder = recorder
+			return nil, fmt.Errorf("failed to initialize session recorder: %w", err)
 		}
+		manager.recorder = recorder
 	}
 
 	// Start background cleanup routine
@@ -103,15 +106,17 @@ func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionR
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Set recorder if available
+	// Set recorder if available. When RecordSessions is enabled, a session must
+	// not be created — let alone served — without a working recording: that
+	// would leave a privileged interactive shell with no captured keystroke/output
+	// audit trail, silently defeating the reason recording is enabled.
 	if m.recorder != nil {
 		session.SetRecorder(m.recorder)
 
-		// Start recording session
 		metadata := session.GetMetadata()
 		if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
 			if err := recorder.StartRecording(session.ID, metadata); err != nil {
-				m.logger.Warn("Failed to start session recording", "session_id", logging.RedactedID(session.ID), "error", err)
+				return nil, fmt.Errorf("failed to start session recording: %w", err)
 			}
 		}
 	}
