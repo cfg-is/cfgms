@@ -813,6 +813,35 @@ func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
 		"AssuranceStrong+GlobalScope:false principal must be admitted by requirePermission on a Strong-gated route (body: %s)", rec.Body.String())
 }
 
+// TestAuthRunAccess_DoesNotConsultGlobalScope proves the empty-tenant admission gate in
+// authRunAccess (handlers_runs.go) keys off principal.Assurance, not principal.GlobalScope
+// (Issue #3143 acceptance follow-up). GlobalScope is hardcoded true on every session
+// principal by middleware.go, so gating admission on "!principal.GlobalScope" is a dead
+// check for session principals — it can never fire regardless of whether the caller is
+// genuinely entitled to operate with an empty tenant. Flip GlobalScope on both sides of
+// the table below: only Assurance should determine the outcome.
+func TestAuthRunAccess_DoesNotConsultGlobalScope(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	// GlobalScope=false (as a correctly-scoped session principal would be, absent the
+	// middleware bug) must still be ADMITTED when Assurance is not machine-level —
+	// admission for an empty-tenant caller depends on Assurance, not GlobalScope.
+	humanNoTenant := &Principal{ID: "session-acct", Assurance: session.AssuranceBasic, GlobalScope: false, TenantID: ""}
+	req := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/runs/whatever", nil), humanNoTenant)
+	rec := httptest.NewRecorder()
+	_, _, ok := server.authRunAccess(rec, req)
+	assert.True(t, ok, "Assurance-based admission must admit a non-machine empty-tenant principal even with GlobalScope=false; body: %s", rec.Body.String())
+
+	// GlobalScope=true (mirroring the middleware bug) must NOT rescue a machine
+	// (API-key-style) principal with no tenant — it must still be rejected.
+	machineNoTenant := &Principal{ID: "bugged-key", Assurance: session.AssuranceMachine, GlobalScope: true, TenantID: ""}
+	req2 := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/runs/whatever", nil), machineNoTenant)
+	rec2 := httptest.NewRecorder()
+	_, _, ok2 := server.authRunAccess(rec2, req2)
+	assert.False(t, ok2, "a machine-assurance empty-tenant principal must be rejected regardless of GlobalScope")
+	assert.Equal(t, http.StatusUnauthorized, rec2.Code)
+}
+
 // ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------
 
 // TestRunCommandSingle_RejectsBannedPattern_ControllerSide verifies that

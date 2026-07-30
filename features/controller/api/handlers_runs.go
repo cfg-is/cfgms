@@ -23,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -98,12 +99,20 @@ type postRunCommandRequest struct {
 }
 
 // authRunAccess authenticates a request to the ad-hoc run API and returns the
-// principal and its tenant scope. Admin mTLS principals carry global
+// principal and its tenant scope. Admin mTLS and session principals carry global
 // (cross-tenant) scope with an empty TenantID (middleware.go); the run path is
 // designed for that — an empty tenant yields an unscoped fleet search, the
 // dispatch RBAC check is skipped, and the audit uses the system-tenant sentinel.
-// Only a NON-admin principal with no tenant is a genuine auth failure. On failure
-// it writes the 401 and returns ok=false (Issue #1990).
+// Only a machine (API-key) principal with no tenant is a genuine auth failure.
+//
+// This deliberately checks principal.Assurance == session.AssuranceMachine rather
+// than !principal.GlobalScope: middleware.go hardcodes GlobalScope=true on every
+// session principal regardless of its actual tenant scope (Issue #3143), so gating
+// on GlobalScope here would be a dead check that can never fire for a session
+// caller. Assurance is the reliable, orthogonal signal that a principal is
+// machine-authenticated (API key) — see the Principal doc comment.
+//
+// On failure it writes the 401 and returns ok=false (Issue #1990).
 func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principal *Principal, tenantID string, ok bool) {
 	principal, hasPrincipal := r.Context().Value(principalContextKey).(*Principal)
 	if !hasPrincipal || principal == nil {
@@ -111,7 +120,7 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 		return nil, "", false
 	}
 	tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" && !principal.GlobalScope {
+	if tenantID == "" && principal.Assurance == session.AssuranceMachine {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
