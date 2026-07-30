@@ -5,8 +5,10 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/api/proto/common"
@@ -15,6 +17,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// isWithinTenantScope reports whether resourceTenant is within callerTenant's subtree.
+// Returns true when callerTenant is empty (admin mTLS path carries no tenant restriction).
+func isWithinTenantScope(callerTenant, resourceTenant string) bool {
+	return resourceTenant == callerTenant || strings.HasPrefix(resourceTenant, callerTenant+"/")
+}
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
@@ -157,9 +165,29 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate that the request body's TenantId is within the caller's subtree.
+	// 400 (not 404): there is no existing resource whose existence to conceal.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && !isWithinTenantScope(callerTenant, roleInfo.TenantID) {
+		s.logger.Info("Cross-tenant role create refused",
+			"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusBadRequest, "TenantId is outside caller's scope", "TENANT_SCOPE_VIOLATION")
+		return
+	}
+
+	// Role IDs are a global primary key with no tenant binding, so a client-chosen ID
+	// leaks and reserves state across tenant boundaries: a duplicate-ID rejection tells
+	// the caller that ID exists in *some* tenant (an existence oracle that defeats the
+	// 404-instead-of-403 concealment on the read/update/delete paths), and a caller can
+	// squat IDs inside another tenant's naming space to permanently deny them. The REST
+	// contract assigns IDs server-side, so any client-supplied "id" is ignored.
+	roleID := uuid.New().String()
+
 	// Create gRPC request
 	req := &controller.CreateRoleRequest{
 		Role: &common.Role{
+			Id:            roleID,
 			Name:          roleInfo.Name,
 			Description:   roleInfo.Description,
 			PermissionIds: roleInfo.Permissions, // Use permission_ids
@@ -218,7 +246,18 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.GetRole(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to get role", "role_id", roleID, "error", err)
+		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return
+	}
+
+	// Cross-tenant scope check: empty callerTenant means admin mTLS (no restriction).
+	// 404 instead of 403 to avoid disclosing role existence across tenant boundaries.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && !isWithinTenantScope(callerTenant, resp.Role.TenantId) {
+		s.logger.Info("Cross-tenant role get refused",
+			"role_tenant", logging.SanitizeLogValue(resp.Role.TenantId),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
 		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
 		return
 	}
@@ -262,6 +301,41 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	// Set the ID from URL
 	roleInfo.ID = roleID
 
+	// Fetch the existing role to get its actual stored tenant for the scope check.
+	// The check MUST use the stored tenant, not the request body's TenantId, to prevent
+	// a caller from bypassing the check by lying about the tenant in the update payload.
+	existing, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
+	if err != nil {
+		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return
+	}
+
+	// Cross-tenant scope check: empty callerTenant means admin mTLS (no restriction).
+	// 404 instead of 403 to avoid disclosing role existence across tenant boundaries.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && !isWithinTenantScope(callerTenant, existing.Role.TenantId) {
+		s.logger.Info("Cross-tenant role update refused",
+			"role_tenant", logging.SanitizeLogValue(existing.Role.TenantId),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return
+	}
+
+	// A role's tenant is immutable through update. Every layer below this handler
+	// (manager, memory store, SQLite upsert) overwrites the stored tenant with the
+	// request value, so honouring the body's TenantId would relocate the role — with
+	// caller-chosen permission IDs — into another tenant's namespace, and an omitted
+	// TenantId would blank it out of every ListRoles result. Reject an explicit
+	// relocation attempt; otherwise carry the stored tenant forward.
+	if roleInfo.TenantID != "" && roleInfo.TenantID != existing.Role.TenantId {
+		s.logger.Info("Role tenant relocation refused",
+			"role_tenant", logging.SanitizeLogValue(existing.Role.TenantId),
+			"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID))
+		s.writeErrorResponse(w, http.StatusBadRequest, "TenantId cannot be changed", "TENANT_IMMUTABLE")
+		return
+	}
+
 	// Create gRPC request
 	req := &controller.UpdateRoleRequest{
 		Role: &common.Role{
@@ -269,7 +343,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 			Name:          roleInfo.Name,
 			Description:   roleInfo.Description,
 			PermissionIds: roleInfo.Permissions, // Use permission_ids
-			TenantId:      roleInfo.TenantID,
+			TenantId:      existing.Role.TenantId,
 		},
 	}
 
@@ -282,7 +356,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.UpdateRole(ctx, req)
 	if err != nil {
-		s.logger.Error("Failed to update role", "role_id", roleID, "error", err)
+		s.logger.Error("Failed to update role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update role", "INTERNAL_ERROR")
 		return
 	}
@@ -316,6 +390,27 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch the role to obtain its tenant for the scope check. This fetch is always
+	// required regardless of whether an audit manager is present (authorization must
+	// not depend on an audit-log side effect being active).
+	existing, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
+	if err != nil {
+		s.logger.Error("Failed to get role for deletion", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return
+	}
+
+	// Cross-tenant scope check: empty callerTenant means admin mTLS (no restriction).
+	// 404 instead of 403 to avoid disclosing role existence across tenant boundaries.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && !isWithinTenantScope(callerTenant, existing.Role.TenantId) {
+		s.logger.Info("Cross-tenant role delete refused",
+			"role_tenant", logging.SanitizeLogValue(existing.Role.TenantId),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return
+	}
+
 	// Create gRPC request
 	req := &controller.DeleteRoleRequest{
 		RoleId: roleID,
@@ -327,16 +422,14 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		ctx = rbac.WithSensitiveOperationJustification(ctx, justification)
 	}
 
-	// Call gRPC service
-	resp, err := s.rbacService.DeleteRole(ctx, req)
-	if err != nil {
-		s.logger.Error("Failed to delete role", "role_id", roleID, "error", err)
+	// Call gRPC service. RBACService.DeleteRole signals failure exclusively through
+	// its error return; DeleteRoleResponse.Success is set to true on every non-error
+	// path (features/controller/service/rbac_service.go). A `!resp.Success` branch
+	// here would therefore be unreachable, so the error return is the only outcome
+	// this handler distinguishes.
+	if _, err := s.rbacService.DeleteRole(ctx, req); err != nil {
+		s.logger.Error("Failed to delete role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete role", "INTERNAL_ERROR")
-		return
-	}
-
-	if !resp.Success {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Failed to delete role", "DELETE_FAILED")
 		return
 	}
 
