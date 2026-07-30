@@ -4,41 +4,28 @@
 workflow:
   name: promote-hv-role
   description: >
-    Hyper-V VM promotion from standalone to Failover Cluster role.
+    Hyper-V VM promotion from standalone to Failover Cluster role: writes
+    ha_role into device-scope config [set_ha_role], soaks to register the
+    cluster VM role, then moves the VM resource to cluster-policies scope
+    [move_resource_to_cluster].
 
-    Writes the ha_role block into the target VM's device-scope config
-    (set_ha_role step), soaks for a fixed delay to allow the steward's
-    convergence loop to register the cluster VM role, then moves the VM
-    resource definition from device scope to cluster-policies scope
-    (move_resource_to_cluster step).
+    Soak delay is a fixed wait; SetConfiguration triggers immediate fanout
+    push so the steward does not poll before acting. Increase delay at
+    execute time for slow cluster registration; default 30s is intentionally
+    conservative.
 
-    The soak delay is a fixed wait, not an active convergence check.
-    ConfigurationServiceV2.SetConfiguration triggers an immediate fanout push
-    to the steward, so the delay window is tight; the steward does not need to
-    poll before acting. For slow cluster registration, increase the delay at
-    execute time by passing an updated workflow definition — this default (30s)
-    is intentionally conservative.
+    Halts [on_failure: stop] if set_ha_role fails; no cluster-scope write
+    occurs when device-scope config is incomplete.
 
-    The workflow halts (on_failure: stop) if set_ha_role fails, ensuring no
-    cluster-scope write is attempted when the device-scope config is incomplete.
+    Operator setup: 1. Supply vm_name, steward_id, cluster_name, tenant_id
+    via cfg workflow promote-hv-role or the REST API execute endpoint
+    [variables map]; do not edit placeholders. 2. Target steward must be
+    registered and manage the VM. 3. Soak delay [step 2, 30s] is fixed;
+    Epic 2520 tracks convergence-poll gaps.
 
-    Operator setup:
-      1. Supply vm_name, steward_id, cluster_name, and tenant_id at execute
-         time via "cfg workflow promote-hv-role" (S5) or directly via
-         POST .../execute {"variables": {...}}.  Do NOT edit the variable
-         placeholders in this file — they are intentionally empty strings;
-         real values are always injected at execute time, not templated here.
-      2. Ensure the target steward (steward_id) is registered, reachable, and
-         already manages the VM (vm_name) before executing this workflow.
-      3. The soak delay (step 2, default 30s) is a fixed wait, not an active
-         convergence check. Epic #2520 tracks convergence-poll gaps; this
-         workflow intentionally avoids unreliable DNA polling in v1.
-
-    Durability note (v1): this workflow runs on the in-memory engine. A
-    controller restart during execution loses progress; re-run the workflow.
-    Config writes that completed before the restart are durable (git-backed).
-
-  version: "1.0"
+    Durability: runs on the in-memory engine. Restart loses progress; re-run.
+    Config writes before restart are durable [git-backed].
+  version: "1.0.0"
   timeout: 10m
   on_failure: stop
 
