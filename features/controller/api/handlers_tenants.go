@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -57,6 +58,17 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+
+	// Cross-tenant scope check: reject requests from callers outside the tenant's subtree.
+	// 404 instead of 403 to avoid disclosing the tenant's existence across tenant boundaries.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if !isWithinTenantScope(callerTenant, td.ID) {
+		s.logger.Info("Cross-tenant tenant get refused",
+			"resource_tenant", logging.SanitizeLogValue(td.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 		return
 	}
 

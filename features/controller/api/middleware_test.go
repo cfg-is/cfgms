@@ -1782,3 +1782,36 @@ func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
 			"IP-change downgrade must be reflected in web session Principal Assurance")
 	})
 }
+
+// TestIsWithinTenantScope verifies the helper introduced by Issue #3147.
+func TestIsWithinTenantScope(t *testing.T) {
+	tests := []struct {
+		callerTenant   string
+		resourceTenant string
+		want           bool
+		desc           string
+	}{
+		{"", "any-tenant", true, "unscoped admin (empty caller) always allowed"},
+		{"", "", true, "unscoped admin with empty resource tenant"},
+		{"msp-a", "msp-a", true, "same-tenant match"},
+		{"msp-a", "msp-a/client-1", true, "direct descendant allowed"},
+		{"msp-a", "msp-a/client-1/server", true, "deep descendant allowed"},
+		{"msp-a", "msp-b", false, "sibling tenant denied"},
+		{"msp-a", "msp-alpha", false, "sibling with shared prefix denied (no slash separator)"},
+		{"msp-a", "root/msp-a", false, "ancestor not in subtree denied"},
+		{"root/msp-a", "root/msp-a", true, "hierarchical path same-tenant"},
+		{"root/msp-a", "root/msp-a/client-1", true, "hierarchical path descendant"},
+		{"root/msp-a", "root/msp-alpha", false, "hierarchical sibling-prefix denied"},
+		{"root/msp-a", "root/msp-b", false, "hierarchical sibling denied"},
+		{"client-1", "client-2", false, "flat sibling denied (required AC)"},
+		{"client-1", "client-10", false, "flat sibling-prefix denied"},
+		{"client-1", "client-1", true, "flat same-tenant"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got := isWithinTenantScope(tc.callerTenant, tc.resourceTenant)
+			assert.Equal(t, tc.want, got,
+				"isWithinTenantScope(%q, %q)", tc.callerTenant, tc.resourceTenant)
+		})
+	}
+}
