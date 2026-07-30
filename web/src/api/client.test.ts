@@ -3,11 +3,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   apiFetch,
-  loginRequest,
+  passkeyLoginBeginRequest,
+  passkeyLoginFinishRequest,
   logoutRequest,
   onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
+  type AssertionJSON,
 } from './client.ts'
 
 function clearCookies() {
@@ -341,8 +343,20 @@ describe('apiFetch', () => {
   })
 })
 
-describe('loginRequest', () => {
+// ── passkeyLoginBeginRequest / passkeyLoginFinishRequest (Issue #2993) ─────────
+
+describe('passkeyLoginBeginRequest', () => {
   const fetchMock = vi.fn<typeof fetch>()
+
+  const MOCK_BEGIN_OPTIONS = {
+    publicKey: {
+      challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+      timeout: 60000,
+      rpId: 'localhost',
+      allowCredentials: [],
+      userVerification: 'required',
+    },
+  }
 
   beforeEach(() => {
     clearCookies()
@@ -355,136 +369,192 @@ describe('loginRequest', () => {
     vi.unstubAllGlobals()
   })
 
-  it('fetches the pre-session token and echoes it on the login POST', async () => {
+  it('fetches the pre-session CSRF token and echoes it on the begin POST', async () => {
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
-        // The real controller sets the cookie via Set-Cookie; jsdom fetch
-        // stubs cannot, so simulate the cookie the response would set.
-        document.cookie = 'cfgms_csrf_pre=pre-tok-1; path=/'
+        document.cookie = 'cfgms_csrf_pre=pre-tok-begin; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      return Promise.resolve(jsonResponse(200))
+      return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
     })
 
-    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+    const result = await passkeyLoginBeginRequest('admin@msp-a')
 
     expect(result.ok).toBe(true)
     expect(String(fetchMock.mock.calls.at(0)?.[0])).toContain('/api/v1/web/csrf')
-    const loginCall = fetchMock.mock.calls.at(1)
-    if (!loginCall) throw new Error('login POST was never made')
-    expect(String(loginCall[0])).toContain('/api/v1/web/login')
-    expect(loginCall[1]?.method).toBe('POST')
-    const headers = new Headers(loginCall[1]?.headers)
-    expect(headers.get('X-CSRF-Token')).toBe('pre-tok-1')
-    const body = JSON.parse(String(loginCall[1]?.body))
-    expect(body).toEqual({ username: 'admin@msp-a', password: 'hunter2hunter2' })
+    const beginCall = fetchMock.mock.calls.at(1)
+    if (!beginCall) throw new Error('begin POST was never made')
+    expect(String(beginCall[0])).toContain('/api/v1/web/passkey/login/begin')
+    expect(beginCall[1]?.method).toBe('POST')
+    const headers = new Headers(beginCall[1]?.headers)
+    expect(headers.get('X-CSRF-Token')).toBe('pre-tok-begin')
+    const body = JSON.parse(String(beginCall[1]?.body))
+    expect(body).toEqual({ username: 'admin@msp-a' })
   })
 
-  it('reports invalid credentials on 401 without firing session-expired', async () => {
-    const expired = vi.fn()
-    onSessionExpired(expired)
+  it('sends an empty body when no username is provided (discoverable flow)', async () => {
     fetchMock.mockImplementation((input) => {
       if (String(input).endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok-2; path=/'
+        document.cookie = 'cfgms_csrf_pre=pre-tok-anon; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      return Promise.resolve(jsonResponse(401))
+      return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
     })
 
-    const result = await loginRequest('admin@msp-a', 'wrong')
-
-    expect(result.ok).toBe(false)
-    expect(expired).not.toHaveBeenCalled()
-  })
-
-  it('never exposes the credentials or token in the request URL', async () => {
-    fetchMock.mockImplementation((input) => {
-      if (String(input).endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok-3; path=/'
-        return Promise.resolve(jsonResponse(204))
-      }
-      return Promise.resolve(jsonResponse(200))
-    })
-    await loginRequest('admin@msp-a', 'hunter2hunter2')
-    for (const call of fetchMock.mock.calls) {
-      expect(String(call[0])).not.toContain('hunter2hunter2')
-      expect(String(call[0])).not.toContain('pre-tok-3')
-    }
-  })
-
-  // ── Login-response tenant scope parsing (Issue #2919) ─────────────────────
-  // result.tenantId is the sole input to setPrincipal({ tenantId }) in
-  // AuthContext, which drives TenantScopeProvider rootPath — the boundary that
-  // decides which tenant subtree a signed-in user may browse. These tests pin
-  // the body.data parsing branch and its best-effort catch fallback.
-
-  /** Mock: csrf preflight sets the pre-cookie, then the login POST returns `loginBody`. */
-  function mockLogin(loginResponse: Response) {
-    fetchMock.mockImplementation((input) => {
-      if (String(input).endsWith('/api/v1/web/csrf')) {
-        document.cookie = 'cfgms_csrf_pre=pre-tok-scope; path=/'
-        return Promise.resolve(jsonResponse(204))
-      }
-      return Promise.resolve(loginResponse)
-    })
-  }
-
-  it('parses tenant_id and root_scope from the login response body.data', async () => {
-    mockLogin(jsonResponse(200, { data: { tenant_id: 'msp-a', root_scope: false } }))
-
-    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+    const result = await passkeyLoginBeginRequest()
 
     expect(result.ok).toBe(true)
+    const beginCall = fetchMock.mock.calls.at(1)
+    const body = JSON.parse(String(beginCall?.[1]?.body))
+    expect(body).toEqual({})
+  })
+
+  it('returns ok:false when the csrf preflight fails', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(503))
+
+    const result = await passkeyLoginBeginRequest()
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(503)
+    expect(result.options).toBeUndefined()
+  })
+
+  it('returns ok:false when the begin POST fails', async () => {
+    fetchMock.mockImplementation((input) => {
+      if (String(input).endsWith('/api/v1/web/csrf')) {
+        return Promise.resolve(jsonResponse(204))
+      }
+      return Promise.resolve(jsonResponse(403))
+    })
+
+    const result = await passkeyLoginBeginRequest('admin@msp-a')
+
+    expect(result.ok).toBe(false)
+    expect(result.options).toBeUndefined()
+  })
+
+  it('returns challenge options on success', async () => {
+    fetchMock.mockImplementation((input) => {
+      if (String(input).endsWith('/api/v1/web/csrf')) {
+        return Promise.resolve(jsonResponse(204))
+      }
+      return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    })
+
+    const result = await passkeyLoginBeginRequest()
+
+    expect(result.ok).toBe(true)
+    expect(result.options?.publicKey.challenge).toBe('Y2hhbGxlbmdlLWJ5dGVz')
+  })
+})
+
+describe('passkeyLoginFinishRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  const MOCK_ASSERTION: AssertionJSON = {
+    id: 'Y3JlZGVudGlhbC1pZA',
+    rawId: 'Y3JlZGVudGlhbC1pZA',
+    response: {
+      authenticatorData: 'YXV0aERhdGE',
+      clientDataJSON: 'Y2xpZW50RGF0YQ',
+      signature: 'c2lnbmF0dXJl',
+      userHandle: null,
+    },
+    type: 'public-key',
+    clientExtensionResults: {},
+  }
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts the assertion JSON to the finish endpoint', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false } }),
+    )
+
+    await passkeyLoginFinishRequest(MOCK_ASSERTION)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const call = fetchMock.mock.calls[0]!
+    expect(String(call[0])).toContain('/api/v1/web/passkey/login/finish')
+    expect(call[1]?.method).toBe('POST')
+    const body = JSON.parse(String(call[1]?.body))
+    expect(body.type).toBe('public-key')
+    expect(body.id).toBe(MOCK_ASSERTION.id)
+  })
+
+  it('parses username, tenant_id, and root_scope from the finish response', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: { ok: true, username: 'admin@msp-a', tenant_id: 'msp-a', root_scope: false },
+      }),
+    )
+
+    const result = await passkeyLoginFinishRequest(MOCK_ASSERTION)
+
+    expect(result.ok).toBe(true)
+    expect(result.username).toBe('admin@msp-a')
     expect(result.tenantId).toBe('msp-a')
     expect(result.rootScope).toBe(false)
   })
 
-  it('parses an explicit root-scope grant (empty tenant_id, root_scope true)', async () => {
-    mockLogin(jsonResponse(200, { data: { tenant_id: '', root_scope: true } }))
+  it('parses a root-scoped account (empty tenant_id, root_scope true)', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: { ok: true, username: 'root-admin', tenant_id: '', root_scope: true },
+      }),
+    )
 
-    const result = await loginRequest('root-admin', 'hunter2hunter2')
+    const result = await passkeyLoginFinishRequest(MOCK_ASSERTION)
 
     expect(result.ok).toBe(true)
+    expect(result.username).toBe('root-admin')
     expect(result.tenantId).toBe('')
     expect(result.rootScope).toBe(true)
   })
 
-  it('defaults tenantId to "" and rootScope to false when the body has no data', async () => {
-    mockLogin(jsonResponse(200, {}))
+  it('returns ok:false on 400 (assertion verification failed)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(400))
 
-    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+    const result = await passkeyLoginFinishRequest(MOCK_ASSERTION)
+
+    expect(result.ok).toBe(false)
+    expect(result.username).toBe('')
+  })
+
+  it('defaults username/tenantId to "" when the body has no data', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, {}))
+
+    const result = await passkeyLoginFinishRequest(MOCK_ASSERTION)
 
     expect(result.ok).toBe(true)
+    expect(result.username).toBe('')
     expect(result.tenantId).toBe('')
     expect(result.rootScope).toBe(false)
   })
 
-  it('ignores a non-string tenant_id and non-boolean root_scope (falls back to root)', async () => {
-    mockLogin(jsonResponse(200, { data: { tenant_id: 42, root_scope: 'yes' } }))
-
-    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
-
-    expect(result.ok).toBe(true)
-    expect(result.tenantId).toBe('')
-    expect(result.rootScope).toBe(false)
-  })
-
-  it('falls back to root scope when the login body is not valid JSON (catch branch)', async () => {
-    // A 2xx with an unparseable body must not throw — tenant scoping degrades
-    // to root (the safest UI default), and the login still succeeds.
-    mockLogin(
+  it('falls back gracefully when the finish body is not valid JSON', async () => {
+    fetchMock.mockResolvedValue(
       new Response('not-json{', {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }),
     )
 
-    const result = await loginRequest('admin@msp-a', 'hunter2hunter2')
+    const result = await passkeyLoginFinishRequest(MOCK_ASSERTION)
 
     expect(result.ok).toBe(true)
+    expect(result.username).toBe('')
     expect(result.tenantId).toBe('')
-    expect(result.rootScope).toBe(false)
   })
 })
 

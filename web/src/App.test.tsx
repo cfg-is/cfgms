@@ -50,7 +50,33 @@ describe('App', () => {
 
   it('full flow: login lands on the app shell; sign-out returns to signin', async () => {
     // Initial probe calls return 401 so the login form appears; once the user
-    // logs in all subsequent calls return 200 (Story #2933 probe pattern).
+    // logs in (via passkey ceremony) all subsequent calls return 200 (Story #2933).
+    const MOCK_PASSKEY_BEGIN = {
+      publicKey: {
+        challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+        timeout: 60000,
+        rpId: 'localhost',
+        allowCredentials: [],
+        userVerification: 'required' as const,
+      },
+    }
+    const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+    const mockCred = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: toArrayBuffer('cred-id'),
+      response: {
+        clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+        authenticatorData: toArrayBuffer('auth-data'),
+        signature: toArrayBuffer('sig'),
+        userHandle: null,
+      } as AuthenticatorAssertionResponse,
+      getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    } as unknown as PublicKeyCredential
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(mockCred) } })
+
     let loggedIn = false
     fetchMock.mockImplementation((input) => {
       const url = String(input)
@@ -58,9 +84,16 @@ describe('App', () => {
         document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      if (url.endsWith('/api/v1/web/login')) {
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/finish')) {
         loggedIn = true
-        return Promise.resolve(jsonResponse(200))
+        return Promise.resolve(
+          jsonResponse(200, {
+            data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+          }),
+        )
       }
       if (url.endsWith('/api/v1/web/logout')) {
         return Promise.resolve(jsonResponse(204))
@@ -71,15 +104,12 @@ describe('App', () => {
     renderApp()
     // Probe resolves with 401 → signedOut → login form appears.
     await waitFor(() =>
-      expect(screen.getByLabelText(/username/i)).toBeInTheDocument(),
+      expect(screen.getByRole('textbox', { name: /username/i })).toBeInTheDocument(),
     )
-    fireEvent.change(screen.getByLabelText(/username/i), {
+    fireEvent.change(screen.getByRole('textbox', { name: /username/i }), {
       target: { value: 'admin@msp-a' },
     })
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: 'pw-pw-pw-pw' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
 
     await waitFor(() => expect(screen.getByRole('navigation')).toBeInTheDocument())
 
@@ -89,27 +119,58 @@ describe('App', () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: /sign in/i }),
+        screen.getByRole('button', { name: /sign in with a passkey/i }),
       ).toBeInTheDocument(),
     )
     // Back at the fresh signin state — no expired banner, no invalid error.
     expect(screen.queryByText(/session expired/i)).not.toBeInTheDocument()
-    expect(
-      screen.queryByText('Invalid username or password.'),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/no passkey matched/i)).not.toBeInTheDocument()
   })
 
   it('a 401 on the fleet data call drops to the expired login screen', async () => {
+    const MOCK_PASSKEY_BEGIN = {
+      publicKey: {
+        challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+        timeout: 60000,
+        rpId: 'localhost',
+        allowCredentials: [],
+        userVerification: 'required' as const,
+      },
+    }
+    const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+    const mockCred = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: toArrayBuffer('cred-id'),
+      response: {
+        clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+        authenticatorData: toArrayBuffer('auth-data'),
+        signature: toArrayBuffer('sig'),
+        userHandle: null,
+      } as AuthenticatorAssertionResponse,
+      getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    } as unknown as PublicKeyCredential
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(mockCred) } })
+
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
         document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      if (url.endsWith('/api/v1/web/login')) {
-        return Promise.resolve(jsonResponse(200))
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN))
       }
-      // All data calls return 401: probe resolves to signedOut, login form
+      if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+        return Promise.resolve(
+          jsonResponse(200, {
+            data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+          }),
+        )
+      }
+      // All other data calls return 401: probe resolves to signedOut, login form
       // appears; after explicit login the fleet call 401s again (mid-session
       // drop) and the guard shows the expired state (Story #2933, ADR-018 §4).
       return Promise.resolve(jsonResponse(401))
@@ -118,21 +179,15 @@ describe('App', () => {
     renderApp()
     // Probe resolves with 401 → signedOut → login form appears.
     await waitFor(() =>
-      expect(screen.getByLabelText(/username/i)).toBeInTheDocument(),
+      expect(screen.getByRole('textbox', { name: /username/i })).toBeInTheDocument(),
     )
-    fireEvent.change(screen.getByLabelText(/username/i), {
-      target: { value: 'admin@msp-a' },
-    })
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: 'pw-pw-pw-pw' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
 
     // The fleet data call fires on mount of the authenticated screen, 401s
     // mid-session, and the guard drops back to the login screen as expired.
     await waitFor(() =>
       expect(
-        screen.getByText(/session expired\. sign in again to continue\./i),
+        screen.getByText(/session expired\. sign in again with your passkey to continue\./i),
       ).toBeInTheDocument(),
     )
     const dataCall = fetchMock.mock.calls.find((c) =>

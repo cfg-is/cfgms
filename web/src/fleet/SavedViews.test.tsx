@@ -36,11 +36,42 @@ import type { Steward } from './columns.ts'
 
 const STORAGE_KEY = 'cfgms.fleet.views'
 
+const MOCK_PASSKEY_BEGIN_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required' as const,
+  },
+}
+
+function makePublicKeyCredential(): PublicKeyCredential {
+  const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id: 'cred-id',
+    type: 'public-key',
+    rawId: toArrayBuffer('cred-id'),
+    response: {
+      clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+      authenticatorData: toArrayBuffer('auth-data'),
+      signature: toArrayBuffer('sig'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('navigator', {
+    credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+  })
   localStorage.clear()
 })
 
@@ -72,14 +103,30 @@ const FLEET = [
 ]
 
 /** Serve login endpoints plus a steward page for the FleetOverview harness. */
-function mockBackend() {
-  fetchMock.mockImplementation((input, init) => {
+function mockBackend(user = 'alice') {
+  fetchMock.mockImplementation((input) => {
     const url = new URL(String(input), 'https://controller.test')
     if (url.pathname === '/api/v1/web/csrf') {
-      return Promise.resolve(new Response('{}', { status: 200 }))
+      document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+      return Promise.resolve(new Response(null, { status: 204 }))
     }
-    if (url.pathname === '/api/v1/web/login') {
-      return Promise.resolve(new Response('{}', { status: 200 }))
+    if (url.pathname === '/api/v1/web/passkey/login/begin') {
+      return Promise.resolve(
+        new Response(JSON.stringify(MOCK_PASSKEY_BEGIN_OPTIONS), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+    if (url.pathname === '/api/v1/web/passkey/login/finish') {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: { ok: true, username: user, tenant_id: '', root_scope: false },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
     }
     if (url.pathname.endsWith('/dna')) {
       const body = {
@@ -105,7 +152,6 @@ function mockBackend() {
       }
       return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
     }
-    void init
     return Promise.resolve(new Response('{}', { status: 404 }))
   })
 }
@@ -119,7 +165,7 @@ function mockBackend() {
 function Harness({ user }: { user: string }) {
   const { status, login } = useAuth()
   useEffect(() => {
-    if (status === 'signedOut') void login(user, 'pw')
+    if (status === 'signedOut') void login(user)
   }, [status, login, user])
   if (status !== 'signedIn') return null
   return (
@@ -154,7 +200,7 @@ function HarnessBody() {
 }
 
 function renderHarness(user = 'alice') {
-  mockBackend()
+  mockBackend(user)
   return render(
     <MemoryRouter initialEntries={['/']}>
       <AuthProvider>

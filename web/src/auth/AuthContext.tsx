@@ -16,6 +16,10 @@
  * AuthStatus stays 'signedIn' throughout — this is not a session expiry.
  * On successful assertion the original request is retried; on cancel/failure
  * the operator returns to the prior view still signed in.
+ *
+ * Passkey login (Story #2993, ADR-021 Amendment 1): the login() function
+ * performs the full WebAuthn discoverable-credential ceremony internally
+ * (begin → credentials.get → finish), establishing AssuranceStrong directly.
  */
 import {
   createContext,
@@ -28,15 +32,66 @@ import {
   type ReactNode,
 } from 'react'
 import {
-  loginRequest,
+  passkeyLoginBeginRequest,
+  passkeyLoginFinishRequest,
   logoutRequest,
   onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
+  type AssertionJSON,
+  type PasskeyLoginOptions,
   type StepUpRequest,
 } from '../api/client.ts'
 import Login from '../pages/Login.tsx'
 import StepUpModal from './StepUpModal.tsx'
+
+// ── base64url helpers (same as StepUpModal.tsx — both need WebAuthn conversions) ──
+
+function b64uToBytes(b64u: string): Uint8Array<ArrayBuffer> {
+  const padded = b64u + '='.repeat((4 - (b64u.length % 4)) % 4)
+  const base64 = padded.replace(/-/g, '+').replace(/_/g, '/')
+  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+}
+
+function bytesToB64u(buf: ArrayBuffer | ArrayBufferLike): string {
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  for (const b of bytes) binary += String.fromCharCode(b)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
+
+function toBrowserOptions(opts: PasskeyLoginOptions): PublicKeyCredentialRequestOptions {
+  const pk = opts.publicKey
+  return {
+    challenge: b64uToBytes(pk.challenge),
+    timeout: pk.timeout,
+    rpId: pk.rpId,
+    userVerification: pk.userVerification,
+    allowCredentials: pk.allowCredentials?.map((c) => ({
+      type: 'public-key' as const,
+      id: b64uToBytes(c.id),
+      transports: c.transports as AuthenticatorTransport[] | undefined,
+    })),
+  }
+}
+
+function toAssertionJSON(cred: PublicKeyCredential): AssertionJSON {
+  const resp = cred.response as AuthenticatorAssertionResponse
+  return {
+    id: cred.id,
+    rawId: bytesToB64u(cred.rawId),
+    response: {
+      authenticatorData: bytesToB64u(resp.authenticatorData),
+      clientDataJSON: bytesToB64u(resp.clientDataJSON),
+      signature: bytesToB64u(resp.signature),
+      userHandle: resp.userHandle !== null ? bytesToB64u(resp.userHandle) : null,
+    },
+    type: 'public-key',
+    clientExtensionResults: {},
+  }
+}
+
+// ── Auth context types ────────────────────────────────────────────────────────
 
 export interface Principal {
   username: string
@@ -45,7 +100,7 @@ export interface Principal {
 
 /**
  * signedOut — fresh visit (mockup "signin" state)
- * invalid   — last login attempt was rejected (mockup "invalid" state)
+ * invalid   — last login attempt was rejected (mockup "invalid"/"no passkey" state)
  * expired   — a plain 401 dropped the session (mockup "expired" state)
  * signedIn  — authenticated
  *
@@ -64,8 +119,13 @@ export interface AuthValue {
    * (Story #2933, #2495 no-dedicated-probe constraint).
    */
   probing: boolean
-  /** Attempt sign-in; resolves true on success. */
-  login: (username: string, password: string) => Promise<boolean>
+  /**
+   * Attempt passkey sign-in (Issue #2993, ADR-021 Amendment 1). Performs the
+   * full WebAuthn discoverable-credential ceremony: begin → credentials.get →
+   * finish. An optional username scopes to a specific account; omitting it
+   * starts a usernameless (discoverable) ceremony. Resolves true on success.
+   */
+  login: (username?: string) => Promise<boolean>
   logout: () => Promise<void>
 }
 
@@ -123,16 +183,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(async (username?: string) => {
     // Explicit login commits us out of the probe phase regardless of outcome.
     probingRef.current = false
     setProbing(false)
-    const result = await loginRequest(username, password)
+
+    // Step 1: obtain the WebAuthn challenge (pre-session CSRF checked by server).
+    const beginResult = await passkeyLoginBeginRequest(username)
+    if (!beginResult.ok || beginResult.options === undefined) {
+      setPrincipal(null)
+      setStatus('invalid')
+      return false
+    }
+
+    // Step 2: invoke the browser's WebAuthn assertion ceremony.
+    let rawCred: Credential | null = null
+    try {
+      rawCred = await navigator.credentials.get({
+        publicKey: toBrowserOptions(beginResult.options),
+      })
+    } catch {
+      // NotAllowedError (user cancelled) or any other authenticator error.
+      setPrincipal(null)
+      setStatus('invalid')
+      return false
+    }
+
+    // navigator.credentials.get({ publicKey }) should always return a
+    // PublicKeyCredential, but the return type is Credential | null.
+    if (rawCred === null || rawCred.type !== 'public-key') {
+      setPrincipal(null)
+      setStatus('invalid')
+      return false
+    }
+
+    // Step 3: send the assertion to the server; server issues a session at
+    // AssuranceStrong (ADR-021 Decision 3) and returns the resolved username.
+    const result = await passkeyLoginFinishRequest(toAssertionJSON(rawCred as PublicKeyCredential))
     if (result.ok) {
       sessionEstablishedRef.current = true
-      // Issue #2919: store tenantId from the login response so AppShell can
-      // initialise TenantScopeProvider with the account's actual root path.
-      setPrincipal({ username, tenantId: result.tenantId })
+      setPrincipal({ username: result.username, tenantId: result.tenantId })
       setStatus('signedIn')
       return true
     }

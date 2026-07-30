@@ -184,56 +184,115 @@ export async function apiFetch(
 export interface LoginResult {
   ok: boolean
   status: number
+  username: string  // authenticated principal from the server (Issue #2993)
   tenantId: string  // Issue #2919: empty string means root scope
   rootScope: boolean // Issue #2919: true when tenantId is "" by explicit grant
 }
 
 /**
- * Login pre-flight + POST (security A7.1 / #2493 contract): obtain the
- * pre-session CSRF token from GET /api/v1/web/csrf (delivered as the
- * `cfgms_csrf_pre` cookie), then echo it as `X-CSRF-Token` on the login
- * POST. Credentials travel only in the JSON body. A 401 here is invalid
- * credentials, never "session expired".
+ * WebAuthn assertion JSON sent to POST /api/v1/web/passkey/login/finish.
+ * go-webauthn/webauthn serialises challenge + credential IDs as raw base64url
+ * strings; the browser's PublicKeyCredential API uses ArrayBuffer — conversion
+ * is done in AuthContext before calling this.
  */
-export async function loginRequest(
-  username: string,
-  password: string,
-): Promise<LoginResult> {
+export interface AssertionJSON {
+  id: string
+  rawId: string
+  response: {
+    authenticatorData: string
+    clientDataJSON: string
+    signature: string
+    userHandle: string | null
+  }
+  type: 'public-key'
+  clientExtensionResults: Record<string, unknown>
+}
+
+/** Passkey challenge options returned by POST /api/v1/web/passkey/login/begin. */
+export interface PasskeyLoginOptions {
+  publicKey: {
+    challenge: string
+    timeout?: number
+    rpId?: string
+    allowCredentials?: Array<{
+      type: 'public-key'
+      id: string
+      transports?: string[]
+    }>
+    userVerification?: UserVerificationRequirement
+  }
+}
+
+export interface PasskeyBeginResult {
+  ok: boolean
+  status: number
+  options?: PasskeyLoginOptions
+}
+
+/**
+ * Passkey login begin pre-flight + POST (Issue #2993 / ADR-021 Amendment 1).
+ * Obtains the pre-session CSRF token from GET /api/v1/web/csrf (delivered as
+ * the `cfgms_csrf_pre` cookie), then echoes it as `X-CSRF-Token` on the begin
+ * POST. The optional username scopes to a specific account; omitting it starts
+ * a discoverable (usernameless) ceremony. A 401 here is a CSRF failure, not
+ * "session expired".
+ */
+export async function passkeyLoginBeginRequest(username?: string): Promise<PasskeyBeginResult> {
   const preflight = await fetch('/api/v1/web/csrf', {
     credentials: 'same-origin',
   })
   if (!preflight.ok) {
-    return { ok: false, status: preflight.status, tenantId: '', rootScope: false }
+    return { ok: false, status: preflight.status }
   }
   const headers = new Headers({ 'Content-Type': 'application/json' })
   const preCookieValue = readCookie(csrfCookiePre)
   if (preCookieValue !== null) {
     headers.set(csrfHeader, preCookieValue)
   }
-  const response = await fetch('/api/v1/web/login', {
+  const response = await fetch('/api/v1/web/passkey/login/begin', {
     method: 'POST',
     headers,
     credentials: 'same-origin',
-    body: JSON.stringify({ username, password }),
+    body: username ? JSON.stringify({ username }) : '{}',
   })
   if (!response.ok) {
-    return { ok: false, status: response.status, tenantId: '', rootScope: false }
+    return { ok: false, status: response.status }
   }
-  // Issue #2919: parse tenant_id and root_scope from the login response so the
-  // frontend can initialise TenantScopeProvider with the account's actual root path.
+  const options = (await response.json()) as PasskeyLoginOptions
+  return { ok: true, status: response.status, options }
+}
+
+/**
+ * Passkey login finish POST (Issue #2993). Sends the WebAuthn assertion to the
+ * server; the `cfgms_passkey_ceremony` cookie (SameSite=Strict) provides CSRF
+ * protection so no explicit CSRF header is required on this call.
+ * Returns the authenticated principal's username and tenant scope on success.
+ */
+export async function passkeyLoginFinishRequest(assertion: AssertionJSON): Promise<LoginResult> {
+  const response = await fetch('/api/v1/web/passkey/login/finish', {
+    method: 'POST',
+    headers: new Headers({ 'Content-Type': 'application/json' }),
+    credentials: 'same-origin',
+    body: JSON.stringify(assertion),
+  })
+  if (!response.ok) {
+    return { ok: false, status: response.status, username: '', tenantId: '', rootScope: false }
+  }
+  let username = ''
   let tenantId = ''
   let rootScope = false
   try {
     const body = (await response.json()) as Record<string, unknown>
     const data = body.data as Record<string, unknown> | undefined
     if (data !== undefined && data !== null) {
+      if (typeof data.username === 'string') username = data.username
       if (typeof data.tenant_id === 'string') tenantId = data.tenant_id
       if (typeof data.root_scope === 'boolean') rootScope = data.root_scope
     }
   } catch {
     // Body parse is best-effort; tenant scoping falls back to root (safest for UI).
   }
-  return { ok: true, status: response.status, tenantId, rootScope }
+  return { ok: true, status: response.status, username, tenantId, rootScope }
 }
 
 /**

@@ -27,6 +27,34 @@ afterEach(() => {
   localStorage.clear()
 })
 
+const MOCK_PASSKEY_BEGIN_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required' as const,
+  },
+}
+
+function makePublicKeyCredential(): PublicKeyCredential {
+  const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id: 'cred-id',
+    type: 'public-key',
+    rawId: toArrayBuffer('cred-id'),
+    response: {
+      clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+      authenticatorData: toArrayBuffer('auth-data'),
+      signature: toArrayBuffer('sig'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
 // Drives a real sign-in through AuthProvider.login() — UserMenu has no
 // login form of its own, so a principal only exists once something calls
 // the provider's login() (same mechanism App.tsx's Login screen uses).
@@ -34,7 +62,7 @@ function SignedInHarness({ username }: { username: string }) {
   const { login } = useAuth()
   return (
     <>
-      <button type="button" onClick={() => void login(username, 'pw-pw-pw-pw')}>
+      <button type="button" onClick={() => void login(username)}>
         drive-login
       </button>
       <UserMenu />
@@ -43,7 +71,27 @@ function SignedInHarness({ username }: { username: string }) {
 }
 
 async function signIn(username: string) {
-  fetchMock.mockResolvedValue(jsonResponse(200))
+  vi.stubGlobal('navigator', {
+    credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+  })
+  fetchMock.mockImplementation((input) => {
+    const url = String(input)
+    if (url.endsWith('/api/v1/web/csrf')) {
+      document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+      return Promise.resolve(jsonResponse(204))
+    }
+    if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+      return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+    }
+    if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+      return Promise.resolve(
+        jsonResponse(200, {
+          data: { ok: true, username, tenant_id: '', root_scope: false },
+        }),
+      )
+    }
+    return Promise.resolve(jsonResponse(200))
+  })
   render(
     <AuthProvider>
       <SignedInHarness username={username} />
@@ -52,7 +100,7 @@ async function signIn(username: string) {
   fireEvent.click(screen.getByRole('button', { name: 'drive-login' }))
   await waitFor(() =>
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/web/login',
+      '/api/v1/web/passkey/login/finish',
       expect.objectContaining({ method: 'POST' }),
     ),
   )

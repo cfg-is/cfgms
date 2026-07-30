@@ -110,39 +110,42 @@ For detailed information about our security decisions, see:
 - Rate limiting
 - Audit logging
 
-### Web-Admin Credentials (Browser Login)
+### Web-Admin Credentials (Browser Passkey Login)
 
 The controller holds a local web-admin account store that backs the browser
-credential login (ADR-018, Addendum 1):
+passkey login (ADR-018 addendum, ADR-021 Amendment 1, Issue #2993). Human
+web-account login is passkey-only — the password credential and its storage
+were retired end-to-end (no migration shim; pre-production clean break):
 
-- **Storage:** accounts hold only argon2id PHC hash strings — never the
-  cleartext password — persisted through the central `pkg/secrets` provider
-  (encrypted at rest, distinct `secret_type: web_account`), with an in-memory
-  map as cache only. Accounts survive controller restart. argon2id cost
-  parameters are encoded in each stored hash so they can be raised without
-  invalidating existing credentials.
+- **Storage:** accounts hold registered WebAuthn credential public keys only —
+  never a password or password hash — persisted through the central
+  `pkg/secrets` provider (encrypted at rest, distinct `secret_type:
+  web_account`), with an in-memory map as cache only. Accounts survive
+  controller restart.
 - **Provisioning:** AssuranceStrong only (ADR-021). `POST /api/v1/web/accounts` (create, and
-  admin-driven password reset via upsert) and
+  admin-driven reset via upsert) and
   `DELETE /api/v1/web/accounts/{username}` require an admin mTLS certificate;
   API-key callers receive `403 INSUFFICIENT_PERMISSIONS`; Basic-assurance session callers
   receive `401` with a `WWW-Authenticate: CFGMS-StepUp` challenge. Every
   create/reset/delete emits an audit event with the sanitized username and the
-  acting admin principal; the password value never appears in logs or error
-  responses.
+  acting admin principal. Passkeys are registered separately through the
+  existing WebAuthn enrollment ceremony (Issue #2782) and are never included
+  in logs or error responses.
 - **Scope:** web accounts carry a tenant scope and an allow-listed permission
   set — RBAC-equivalent to API-key principals, never implicit global admins.
-- **Verification hardening:** unknown-user and wrong-password failures are
-  indistinguishable (uniform error; unknown-user verification runs against a
-  dummy argon2id hash for timing uniformity). Passwords are bounded to 8–128
-  bytes before hashing; usernames are length- and charset-validated so they
-  stay path- and log-safe. Per-account lockout state: 5 consecutive
-  verification failures lock the account for 15 minutes (reset on success);
-  lockout is enforced at the login endpoint.
+- **Login-assertion hardening:** the login-begin endpoint always returns a
+  discoverable (usernameless) WebAuthn challenge regardless of whether the
+  optional username exists or has enrolled credentials, so unknown-account,
+  unenrolled-account, and enrolled-account requests are indistinguishable — no
+  account-enumeration oracle. Failed login assertions are throttled per-account
+  and per-source-IP with exponential backoff and no hard lockout (see
+  Web Login below).
 
 **Threat notes:** provisioning is bound to the admin mTLS credential bundle, so
-a stolen API key cannot mint or reset web credentials. A compromised admin
-session's account changes are fully audited. Hash-only storage bounds the value
-of a stolen secret store to offline argon2id cracking of individual passwords.
+a stolen API key cannot mint a web account or enroll a passkey for it. A
+compromised admin session's account changes are fully audited. Public-key-only
+storage means a stolen secret store yields no crackable credential material —
+there is no password hash to attack offline.
 
 ### Web Session Transport (Issue #2492, ADR-018 §1,2)
 
@@ -201,42 +204,58 @@ server-side via `POST /api/v1/web/logout`.
 `Access-Control-Allow-Credentials: true`. Web session cookies are same-origin only;
 credentialed cross-origin requests are not supported and must never be enabled.
 
-### Web Login / CSRF / Lockout / Logout (Issue #2493, ADR-018 §3,4)
+### Web Login / CSRF / Throttle / Logout (Issue #2993, ADR-018 §3,4, ADR-021 Amendment 1)
 
 #### Login flow
 
 ```
-GET  /api/v1/web/csrf   → Set-Cookie: cfgms_csrf_pre=<token>; Secure; SameSite=Strict; Max-Age=600
-POST /api/v1/web/login  (X-CSRF-Token: <token>)
+GET  /api/v1/web/csrf                        → Set-Cookie: cfgms_csrf_pre=<token>; Secure; SameSite=Strict; Max-Age=600
+POST /api/v1/web/passkey/login/begin  (X-CSRF-Token: <token>)
+     → Set-Cookie: cfgms_passkey_ceremony=...; HttpOnly; Secure; SameSite=Strict; Path=/
+     → { publicKey: <WebAuthn discoverable-assertion challenge> }
+POST /api/v1/web/passkey/login/finish (WebAuthn assertion body)
      → Set-Cookie: cfgms_session=...; HttpOnly; Secure; SameSite=Strict; Path=/
      → Set-Cookie: cfgms_csrf=...; Secure; SameSite=Strict; Path=/   (non-HttpOnly)
 ```
 
 1. **Pre-session CSRF gate (ADR-018 §3):** `GET /api/v1/web/csrf` issues a 32-byte
    `crypto/rand` token in `cfgms_csrf_pre` (Secure; SameSite=Strict; Max-Age=600s).
-   The browser echoes it as `X-CSRF-Token` on the login POST. The server compares
+   The browser echoes it as `X-CSRF-Token` on the login-begin POST. The server compares
    cookie value to header value with `subtle.ConstantTimeCompare`. Mismatch or
-   absence → 403 before any credential work.
+   absence → 403 before any WebAuthn work.
 
-2. **Session fixation defence:** any valid `cfgms_session` cookie presented with the
-   login request is revoked server-side before the new session is issued.
+2. **No account-enumeration oracle:** `begin` always calls `BeginDiscoverableLogin` and
+   returns the identical challenge shape whether the optional username field is absent,
+   unknown, or belongs to an enrolled account. The username, when supplied, is stored
+   only as a throttle/audit hint and never used to populate `allowCredentials`.
 
-3. **Per-account lockout (ADR-018 §3 / #2490):** 5 consecutive verification failures
-   lock the account for 15 minutes. Locked accounts receive the identical uniform 401
-   as wrong-password (timing-equalized via dummy argon2id hash). The counter resets on
-   a successful login.
+3. **Per-account and per-source-IP throttle, no hard lockout:** failed assertions
+   increment an exponential-backoff counter keyed by `account:<username>` (when a
+   username hint was supplied) and independently by `ip:<source-ip>`. Both axes reuse
+   the elevation throttle schedule (`elevateBackoff`/`elevateThrottleRecord`) — repeated
+   failures widen the delay, but the account is never locked outright.
 
-4. **Credential verification:** `VerifyWebCredential` — bad user, bad password, and
-   malformed input all return the same `ErrInvalidWebCredential` with equivalent latency.
+4. **Assertion verification:** `handlePasskeyLoginFinish` runs the real WebAuthn
+   `FinishDiscoverableLogin` verification against the authenticator's signature (no
+   password fallback), resolves the account from the authenticator-provided user
+   handle, and rejects a non-advancing signature counter as a possible cloned
+   authenticator.
 
-5. **Fresh session:** `webSessionManager.Issue` mints a new token (32 random bytes,
-   base64url). The raw token is set in `cfgms_session` (HttpOnly) and never logged.
+5. **Session fixation defence:** any valid `cfgms_session` cookie presented with the
+   finish request is revoked server-side before the new session is issued.
 
-6. **Session-bound CSRF token:** a second 32-byte `crypto/rand` value is generated,
+6. **Fresh session at Strong assurance (ADR-021 Decision 3):** `webSessionManager.Issue`
+   mints a new Basic session, then `Manager.Elevate` immediately raises it to
+   `AssuranceStrong` — a login-time passkey assertion is itself phishing-resistant, so it
+   earns Strong directly in one round trip. The raw token is set in `cfgms_session`
+   (HttpOnly) and never logged.
+
+7. **Session-bound CSRF token:** a second 32-byte `crypto/rand` value is generated,
    stored server-side keyed by session ID, and written to `cfgms_csrf` (non-HttpOnly
    so the SPA can read it and set `X-CSRF-Token` on subsequent mutations).
 
-7. **Response body:** always `{"ok": true}` — no token is ever included (security A5.5).
+8. **Response body:** the authenticated `username`, `tenant_id`, and `root_scope` —
+   no token is ever included (security A5.5).
 
 #### Session-bound CSRF middleware
 
@@ -251,7 +270,8 @@ pass through `csrfMiddleware` (applied after `authenticationMiddleware`):
 - Invariant: at any merge point no unsafe cookie-authenticated method is reachable
   without this protection.
 
-The three endpoints on the **base router** (`/api/v1/web/csrf`, `/api/v1/web/login`,
+The four endpoints on the **base router** (`/api/v1/web/csrf`,
+`/api/v1/web/passkey/login/begin`, `/api/v1/web/passkey/login/finish`,
 `/api/v1/web/logout`) are explicitly wrapped in `s.authDefense.Middleware` because the
 api subrouter middleware chain does not apply to base-router routes (security A5.4).
 
@@ -268,13 +288,12 @@ Every login attempt and logout emits a structured `AuditEventAuthentication` eve
 
 | Event | Action | Result |
 |-------|--------|--------|
-| Login success | `web.login.success` | `success` |
-| Login failure (bad credentials) | `web.login.failure` | `failure` |
-| Login blocked (account locked) | `web.login.lockout` | `denied` |
+| Passkey login success | `web.passkey.login.success` | `success` |
+| Passkey login failure (bad assertion, throttled, or expired ceremony) | `web.passkey.login.failure` | `failure` |
 | Logout | `web.logout` | `success` |
 
 Audit payloads carry sanitized username, tenant, outcome. Credential material
-(passwords, tokens, hashes) is never included. All log lines use
+(passkey signatures, tokens) is never included. All log lines use
 `logging.SanitizeLogValue` for any request-derived field.
 
 ### Role-Based Access Control (RBAC)

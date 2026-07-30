@@ -125,6 +125,12 @@
   font-size: var(--text-md);
   color: var(--text-primary);
   outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.login-field input::placeholder {
+  color: var(--text-faint);
 }
 
 .login-field input:focus-visible {
@@ -135,6 +141,107 @@
 .login-field input.is-invalid {
   border-color: var(--state-crit);
   background: var(--state-crit-bg);
+}
+
+/* "Remember Username" checkbox row */
+.login-remember {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-top: -6px;
+}
+
+.login-remember-cbx {
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunk);
+  display: grid;
+  place-items: center;
+  color: var(--accent-ink);
+  flex: none;
+}
+
+.login-remember--on .login-remember-cbx {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Visually hidden native checkbox; custom .login-remember-cbx provides the visual. */
+.login-remember-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Waiting state (ceremony in progress) */
+.login-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  text-align: center;
+  padding: 6px 0 8px;
+}
+
+.login-waiting-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+
+.login-waiting-heading {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.login-waiting-desc {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  max-width: 300px;
+}
+
+.login-waiting-cancel {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+.login-waiting-cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Helper text below the sign-in button */
+.login-helper {
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  margin: -8px 0 0;
+  line-height: 1.5;
 }
 
 .login-err {

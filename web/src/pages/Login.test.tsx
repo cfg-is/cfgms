@@ -12,22 +12,57 @@ function jsonResponse(status: number, body: unknown = {}): Response {
   })
 }
 
+// ── WebAuthn helpers ─────────────────────────────────────────────────────────
+
+const MOCK_PASSKEY_BEGIN_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required' as const,
+  },
+}
+
+function makePublicKeyCredential(id = 'cred-id'): PublicKeyCredential {
+  const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id,
+    type: 'public-key',
+    rawId: toArrayBuffer(id),
+    response: {
+      clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+      authenticatorData: toArrayBuffer('authenticator-data'),
+      signature: toArrayBuffer('signature'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
+// ── Fetch mock helpers ───────────────────────────────────────────────────────
+
 const fetchMock = vi.fn<typeof fetch>()
 
-function mockLoginEndpoints(loginStatus: number, delayMs = 0) {
+/**
+ * Wire up the three passkey login endpoints. The navigator.credentials stub
+ * must be set separately per test (or globally in beforeEach) because tests
+ * that test the "invalid" path need credentials.get to fail.
+ */
+function mockPasskeyEndpoints(finishStatus: number, finishBody: unknown = {}) {
   fetchMock.mockImplementation((input) => {
     const url = String(input)
     if (url.endsWith('/api/v1/web/csrf')) {
       document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
       return Promise.resolve(jsonResponse(204))
     }
-    if (url.endsWith('/api/v1/web/login')) {
-      if (delayMs > 0) {
-        return new Promise((resolve) =>
-          setTimeout(() => resolve(jsonResponse(loginStatus)), delayMs),
-        )
-      }
-      return Promise.resolve(jsonResponse(loginStatus))
+    if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+      return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+    }
+    if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+      return Promise.resolve(jsonResponse(finishStatus, finishBody))
     }
     return Promise.resolve(jsonResponse(200))
   })
@@ -36,6 +71,8 @@ function mockLoginEndpoints(loginStatus: number, delayMs = 0) {
 beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
+  window.localStorage.clear()
+  window.sessionStorage.clear()
 })
 
 afterEach(() => {
@@ -51,77 +88,94 @@ function renderLogin() {
 }
 
 describe('Login screen states (mockup: docs/design/mockups/login.html)', () => {
-  it('signin: renders wordmark, lead copy, fields, and the sign-in button', () => {
+  it('signin: renders wordmark, lead copy, username field, remember checkbox, and sign-in button', () => {
     renderLogin()
     expect(screen.getByText('CFGMS')).toBeInTheDocument()
     expect(screen.getByText('Sign in to the controller')).toBeInTheDocument()
-    expect(screen.getByLabelText(/username/i)).toBeInTheDocument()
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: /username/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /sign in with a passkey/i })).toBeInTheDocument()
+    // No password field.
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument()
     // No error/expired copy in the default state.
-    expect(
-      screen.queryByText('Invalid username or password.'),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/no passkey matched/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/session expired/i)).not.toBeInTheDocument()
   })
 
-  it('loading: disables the button while the login request is in flight', async () => {
-    mockLoginEndpoints(200, 50)
+  it('waiting: shows "Waiting for your passkey" while the ceremony is in progress', async () => {
+    // credentials.get never resolves → keeps the component in the waiting state.
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn(() => new Promise(() => undefined)) },
+    })
+    mockPasskeyEndpoints(200)
     renderLogin()
-    fireEvent.change(screen.getByLabelText(/username/i), {
-      target: { value: 'admin@msp-a' },
-    })
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: 'pw-pw-pw-pw' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
-    expect(screen.getByRole('button', { name: /sign in/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
     await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: /sign in/i }),
-      ).toBeEnabled(),
+      expect(screen.getByText(/waiting for your passkey/i)).toBeInTheDocument(),
+    )
+    // Sign-in button is replaced by the waiting state.
+    expect(screen.queryByRole('button', { name: /sign in with a passkey/i })).not.toBeInTheDocument()
+    // Cancel button is available.
+    expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
+  })
+
+  it('waiting: cancel returns to the sign-in form', async () => {
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn(() => new Promise(() => undefined)) },
+    })
+    mockPasskeyEndpoints(200)
+    renderLogin()
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() => screen.getByRole('button', { name: /cancel/i }))
+    act(() => screen.getByRole('button', { name: /cancel/i }).click())
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in with a passkey/i })).toBeInTheDocument(),
     )
   })
 
-  it('invalid: shows the mockup error copy and preserves the username field', async () => {
-    mockLoginEndpoints(401)
+  it('invalid: shows the no-passkey error copy when credentials.get() throws', async () => {
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
+    })
+    mockPasskeyEndpoints(200)
     renderLogin()
-    fireEvent.change(screen.getByLabelText(/username/i), {
-      target: { value: 'admin@msp-a' },
-    })
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: 'wrong-password' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
     await waitFor(() =>
-      expect(
-        screen.getByText('Invalid username or password.'),
-      ).toBeInTheDocument(),
+      expect(screen.getByText(/no passkey matched/i)).toBeInTheDocument(),
     )
-    expect(screen.getByLabelText(/username/i)).toHaveValue('admin@msp-a')
+    // Username field is still visible and preserved.
+    expect(screen.getByRole('textbox', { name: /username/i })).toBeInTheDocument()
+  })
+
+  it('invalid: shows error copy when the server rejects the assertion', async () => {
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+    })
+    mockPasskeyEndpoints(400)
+    renderLogin()
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() =>
+      expect(screen.getByText(/no passkey matched/i)).toBeInTheDocument(),
+    )
   })
 
   it('expired: shows the session-expired banner when auth state is expired', async () => {
-    // Sign in, then 401 a subsequent API call to simulate a mid-session drop.
-    mockLoginEndpoints(200)
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+    })
+    mockPasskeyEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     renderLogin()
-    fireEvent.change(screen.getByLabelText(/username/i), {
-      target: { value: 'admin@msp-a' },
-    })
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: 'pw-pw-pw-pw' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
 
-    // Wait for the login request to complete (button disabled → re-enabled)
-    // before triggering the mid-session 401. The onSessionExpired handler only
-    // transitions to 'expired' when status is 'signedIn' (Story #2933); firing
-    // apiFetch before login resolves would race against signedOut and not
-    // produce 'expired'.
+    // Wait for login to complete.
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /sign in/i })).not.toBeDisabled(),
+      expect(screen.queryByRole('button', { name: /sign in with a passkey/i })).not.toBeInTheDocument(),
     )
-
+    // After login, the login screen is swapped out by RequireAuth. Trigger a
+    // mid-session 401 to force the 'expired' state and re-render the login screen.
     fetchMock.mockResolvedValue(jsonResponse(401))
     const { apiFetch } = await import('../api/client.ts')
     await act(async () => {
@@ -130,26 +184,83 @@ describe('Login screen states (mockup: docs/design/mockups/login.html)', () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/session expired\. sign in again to continue\./i),
+        screen.getByText(/session expired\. sign in again with your passkey to continue\./i),
       ).toBeInTheDocument(),
     )
   })
 })
 
-describe('no auth data in web storage (security A7.2)', () => {
-  it('leaves localStorage and sessionStorage empty across a full login', async () => {
-    mockLoginEndpoints(200)
+describe('Remember Username (UI preference — not auth data)', () => {
+  it('remembers the username in localStorage when checkbox is checked', async () => {
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
+    })
+    mockPasskeyEndpoints(200)
     renderLogin()
-    fireEvent.change(screen.getByLabelText(/username/i), {
+    fireEvent.change(screen.getByRole('textbox', { name: /username/i }), {
       target: { value: 'admin@msp-a' },
     })
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: 'pw-pw-pw-pw' },
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() => screen.getByText(/no passkey matched/i))
+    expect(window.localStorage.getItem('cfgms.login.username')).toBe('admin@msp-a')
+  })
+
+  it('loads the remembered username from localStorage on mount', () => {
+    window.localStorage.setItem('cfgms.login.username', 'admin@msp-a')
+    renderLogin()
+    expect(screen.getByRole<HTMLInputElement>('textbox', { name: /username/i }).value).toBe('admin@msp-a')
+  })
+
+  it('clears localStorage for username when Remember Username is unchecked', async () => {
+    window.localStorage.setItem('cfgms.login.username', 'admin@msp-a')
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
     })
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
+    mockPasskeyEndpoints(200)
+    renderLogin()
+    // Uncheck "Remember Username".
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() => screen.getByText(/no passkey matched/i))
+    expect(window.localStorage.getItem('cfgms.login.username')).toBeNull()
+  })
+})
+
+describe('no auth data in web storage (security A7.2)', () => {
+  it('never stores auth/session data in sessionStorage', async () => {
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+    })
+    mockPasskeyEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
+    renderLogin()
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    expect(window.localStorage.length).toBe(0)
     expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('only the username display-preference key is written to localStorage (not auth data)', async () => {
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
+    })
+    mockPasskeyEndpoints(200)
+    renderLogin()
+    fireEvent.change(screen.getByRole('textbox', { name: /username/i }), {
+      target: { value: 'admin@msp-a' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+    await waitFor(() => screen.getByText(/no passkey matched/i))
+    // Only the username prefill key should be present — no session/auth keys.
+    expect(window.localStorage.length).toBe(1)
+    expect(window.localStorage.getItem('cfgms.login.username')).toBe('admin@msp-a')
+    expect(window.localStorage.getItem('cfgms_session')).toBeNull()
   })
 })
 
@@ -173,18 +284,18 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
   })
 
   // A7.2 forbids AUTH data in web storage, not the storage API itself — a
-  // non-auth UI preference (e.g. theme) may legitimately persist there.
-  // Rather than a keyword blocklist (bypassable by any key that doesn't
-  // happen to match a listed word), this is a closed allowlist: every
-  // localStorage/sessionStorage call site must use a literal string key
-  // that exactly matches an explicit (file, key) pair below. Adding a new
-  // entry is a deliberate, reviewable source change — nothing can add
-  // itself to this list. A call whose key isn't a plain string literal
-  // (e.g. computed or a variable) fails closed: it can't be checked
-  // against the allowlist, so it's a violation regardless of intent.
+  // non-auth UI preference (e.g. theme, remembered username) may legitimately
+  // persist there. Rather than a keyword blocklist (bypassable by any key that
+  // doesn't happen to match a listed word), this is a closed allowlist: every
+  // localStorage/sessionStorage call site must use a literal string key that
+  // exactly matches an explicit (file, key) pair below. Adding a new entry is a
+  // deliberate, reviewable source change — nothing can add itself to this list.
+  // A call whose key isn't a plain string literal (e.g. computed or a variable)
+  // fails closed: it can't be checked against the allowlist, so it's a violation
+  // regardless of intent.
   //
-  // NEVER add an auth/session/principal/credential key here — that data
-  // must stay in-memory only (React context), per A7.2.
+  // NEVER add an auth/session/principal/credential key here — that data must
+  // stay in-memory only (React context), per A7.2.
   const STORAGE_ALLOWLIST: ReadonlyArray<{ path: string; key: string }> = [
     // Theme preference (Story #2496) — a UI display preference, not auth
     // data; persists across reloads so the sidebar/topbar don't reset to
@@ -200,6 +311,12 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     // not auth data. Values read back are shape- and type-validated as
     // untrusted input (SavedViews.tsx, security A10.2).
     { path: 'fleet/SavedViews.tsx', key: 'cfgms.fleet.views' },
+    // Login username prefill (Story #2993) — the optional username field
+    // value for the "Remember Username" convenience feature. A username is
+    // a public identifier, not a secret or auth credential (A7.2). Path
+    // is relative to the test file (same directory), so the glob returns
+    // "./Login.tsx" which ends with just "Login.tsx".
+    { path: 'Login.tsx', key: 'cfgms.login.username' },
   ]
 
   it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {
@@ -251,6 +368,14 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     expect(check('shell/UserMenu.tsx', "localStorage.setItem('cfgms.session_hint', mode)")).toBe(
       'unauthorized',
     )
+    // The login username prefill is allowed on Login.tsx.
+    expect(
+      check('pages/Login.tsx', "localStorage.setItem('cfgms.login.username', username)"),
+    ).toBe('ok')
+    // The same key on a different file is not allowed.
+    expect(
+      check('shell/UserMenu.tsx', "localStorage.setItem('cfgms.login.username', username)"),
+    ).toBe('unauthorized')
     // A computed key is rejected even though it can't be inspected — fails
     // closed rather than trusting the call site.
     expect(check('shell/UserMenu.tsx', 'localStorage.setItem(dynamicKey, mode)')).toBe('non-literal')

@@ -2104,7 +2104,7 @@ file is a full controller compromise.
 
 ### Web Accounts
 
-Web accounts are browser-based admin principals backed by an argon2id password and (optionally) WebAuthn passkeys. They are RBAC-equivalent to API-key principals — they carry explicit `permissions` and a tenant scope, and are not implicit global admins.
+Web accounts are browser-based admin principals authenticated via WebAuthn passkeys (Issue #2993 / ADR-021 Amendment 1) — human web login has no password credential. They are RBAC-equivalent to API-key principals — they carry explicit `permissions` and a tenant scope, and are not implicit global admins.
 
 #### Tenant scope
 
@@ -2120,7 +2120,7 @@ Each web account has exactly one of:
 
 #### POST /api/v1/web/accounts
 
-Create a new web admin account, or reset an existing one (upsert: password replaced, omitted `tenant_id`/`permissions` retained from the existing record).
+Create a new web admin account, or reset an existing one (upsert: omitted `tenant_id`/`permissions` retained from the existing record). This endpoint provisions the account identity and scope only — there is no password. Passkey credentials are enrolled separately via the WebAuthn registration ceremony (Issue #2782).
 
 **Authentication:** Required  
 **Required permission:** `web-account:create`  
@@ -2131,7 +2131,6 @@ Create a new web admin account, or reset an existing one (upsert: password repla
 ```json
 {
   "username": "alice",
-  "password": "change-me-now",
   "root_scope": true,
   "permissions": ["steward:list", "steward:read"]
 }
@@ -2140,7 +2139,6 @@ Create a new web admin account, or reset an existing one (upsert: password repla
 | Field | Type | Description |
 |-------|------|-------------|
 | `username` | string | 3–64 chars, starting alphanumeric, then `[a-zA-Z0-9._-]` |
-| `password` | string | Plaintext — hashed server-side with argon2id; never stored or logged |
 | `root_scope` | bool | Grant cross-tenant root scope. Mutually exclusive with `tenant_id`. |
 | `tenant_id` | string | Scope account to this tenant subtree. Mutually exclusive with `root_scope`. |
 | `permissions` | array | Permission IDs (e.g. `"steward:list"`). Unknown IDs are rejected. |
@@ -2165,7 +2163,7 @@ Root-scoped accounts have `tenant_id: ""` and `root_scope: true` in the response
 
 #### GET /api/v1/web/accounts
 
-List all web admin accounts. Password hashes are never included.
+List all web admin accounts. No credential material (registered passkey public keys) is included.
 
 **Authentication:** Required  
 **Required permission:** `web-account:list`

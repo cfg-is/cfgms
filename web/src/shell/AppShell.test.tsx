@@ -133,17 +133,60 @@ describe('AppShell', () => {
   // is already populated when TenantScopeProvider initialises its scope from
   // rootPath. This harness mirrors that ordering: it logs in on mount and only
   // mounts AppShell once principal is set.
+  const MOCK_PASSKEY_BEGIN_OPTIONS = {
+    publicKey: {
+      challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+      timeout: 60000,
+      rpId: 'localhost',
+      allowCredentials: [],
+      userVerification: 'required' as const,
+    },
+  }
+
+  function makePublicKeyCredential(): PublicKeyCredential {
+    const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+    return {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: toArrayBuffer('cred-id'),
+      response: {
+        clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+        authenticatorData: toArrayBuffer('auth-data'),
+        signature: toArrayBuffer('sig'),
+        userHandle: null,
+      } as AuthenticatorAssertionResponse,
+      getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    } as unknown as PublicKeyCredential
+  }
+
   function loginScopeMock(tenantId: string) {
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+    })
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
         document.cookie = 'cfgms_csrf_pre=pre-tok-shell; path=/'
         return Promise.resolve(new Response(null, { status: 204 }))
       }
-      if (url.endsWith('/api/v1/web/login')) {
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(new Response(JSON.stringify(MOCK_PASSKEY_BEGIN_OPTIONS), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/finish')) {
         return Promise.resolve(
           new Response(
-            JSON.stringify({ data: { tenant_id: tenantId, root_scope: tenantId === '' } }),
+            JSON.stringify({
+              data: {
+                ok: true,
+                username: 'admin@msp-a',
+                tenant_id: tenantId,
+                root_scope: tenantId === '',
+              },
+            }),
             { status: 200, headers: { 'Content-Type': 'application/json' } },
           ),
         )
@@ -173,7 +216,7 @@ describe('AppShell', () => {
     useEffect(() => {
       if (started.current) return
       started.current = true
-      void login(username, 'hunter2hunter2')
+      void login(username)
     }, [login, username])
     if (principal === null) return <span>signing in…</span>
     return (
