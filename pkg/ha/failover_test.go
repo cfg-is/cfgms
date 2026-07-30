@@ -27,7 +27,7 @@ func TestFailoverManager_electNewLeader_DeferesToRaft(t *testing.T) {
 	cfg.Node.ID = "test-failover-raft-node"
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager)
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -55,7 +55,7 @@ func TestFailoverManager_executeFailover_NonClusterMode(t *testing.T) {
 	cfg.Mode = SingleServerMode
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager)
+	manager, err := NewManager(cfg, logger, storageManager, nil)
 	require.NoError(t, err)
 
 	fm, err := NewFailoverManager(cfg.Failover, logger, manager)

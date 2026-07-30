@@ -469,7 +469,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize HA manager
 	logger.Info("Initializing HA manager...")
-	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	haManager, err := initializeHAManager(cfg, logger, storageManager, certManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
@@ -2179,7 +2179,9 @@ func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (
 // from CFGMS_NODE_ID (env), never from YAML. Pre-loading env here populates
 // Node.ID first so the subsequent NewManager call does not fail Validate().
 // CFGMS_HA_MODE env overrides YAML (env > YAML precedence) via the re-run inside NewManager.
-func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
+// certManager is passed through to ha.NewManager and is required in ClusterMode for mTLS
+// peer transport; it may be nil when cluster mode is not in use.
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager) (*ha.Manager, error) {
 	haConfig := ha.DefaultConfig()
 
 	if cfg != nil && cfg.HA != nil && cfg.HA.Mode != "" {
@@ -2194,7 +2196,7 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
-	haManager, err := ha.NewManager(haConfig, logger, storageManager)
+	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
