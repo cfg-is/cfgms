@@ -412,7 +412,7 @@ The session token store (`pkg/session` + `pkg/storage/providers/sqlite`) provide
 - **SQLite configured** — `SQLiteSessionTokenStore` is opened at `cfg.Storage.SQLitePath` (a dedicated handle, separate from the shared business-store handle). Both the CLI session manager (ADR-014 defaults: idle 15m / absolute 8h / grace 30s) and the web session manager (idle 60m / absolute 12h / grace 30s) share this store. Sessions survive controller restarts and, with the multi-node store backend (separate story), cluster failovers.
 - **SQLite absent** — `session.NewMemStore()` is used. Sessions are operational but are lost when the controller process stops.
 
-Either way, `httpServer.SetDurableSessionStore(sessionStore)` is called on every startup path so `sessionManager` and `webSessionManager` are never nil, and `POST /api/v1/sessions` / `POST /api/v1/web/login` never return 503 SESSION_UNAVAILABLE.
+Either way, `httpServer.SetDurableSessionStore(sessionStore)` is called on every startup path so `sessionManager` and `webSessionManager` are never nil, and `POST /api/v1/sessions` / `POST /api/v1/web/passkey/login/begin` / `POST /api/v1/web/passkey/login/finish` never return 503 SESSION_UNAVAILABLE.
 
 The security invariant is unchanged by the backing store: `session.Manager` always passes `session.HashToken(token)` to `Store.Set`/`Get` — the raw token value is never stored or logged.
 
