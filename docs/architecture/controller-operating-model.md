@@ -1208,3 +1208,31 @@ cfg module approve <publisher>/<name>@<version>
 `cfg module approve` calls `POST /api/v1/modules/<publisher>/<name>/<version>/approve`, which invokes `ApprovalWorkflow.Approve()` server-side. Only bundles in `pending` state can be approved; an error is returned for bundles that are already approved or rejected.
 
 Admin mTLS authentication (via admin bundle file) is required for both commands, following the same auth pattern as `cfg registration approve`.
+
+## Observe-Resolution: DNA-driven Module Activation
+
+`ResolveObserveModules` (`features/controller/modules/resolution/observe.go`) computes the set of modules a steward should observe based on its baseline DNA attributes and the registered module manifests.
+
+### How it works
+
+Each module manifest may carry an `observe_when` list of predicates. `ResolveObserveModules` takes a DNA attribute map and a slice of manifests, and returns the names of modules that match:
+
+- A manifest with no `observe_when` (nil or empty) is **never** included. Absence means "never auto-pull for DNA" (ADR-024 §2).
+- Predicates within a single manifest use **OR semantics**: any one matching predicate activates that module.
+- `equals` requires an exact string match of the DNA attribute value.
+- `contains` requires `strings.Contains` on the DNA attribute value.
+
+### Relation to `ResolveCfgRequiredModules`
+
+These are two distinct resolution functions serving different triggers:
+
+| Function | File | Trigger | Input | Purpose |
+|---|---|---|---|---|
+| `ResolveCfgRequiredModules` | `resolution.go` | Cfg deployment | `required_modules:` list from cfg | Verify/fetch/approve modules before a cfg can deploy |
+| `ResolveObserveModules` | `observe.go` | Baseline DNA available | DNA attribute map + manifests | Determine which modules to auto-pull for read-only DNA observation |
+
+Do not conflate the two. `required_modules:` is a deployment-time cfg contract; `observe_when` is a baseline-fact-driven auto-pull signal. They use separate code paths intentionally.
+
+### Purity guarantee
+
+`ResolveObserveModules` is a pure function — no I/O, no RPC, no side effects. Wiring the result into a steward-facing RPC (the observation pull path) is the responsibility of the sibling steward observation loop story.
