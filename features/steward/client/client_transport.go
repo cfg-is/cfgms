@@ -31,6 +31,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/commands"
@@ -56,6 +57,71 @@ import (
 // inject a stub returning deterministic attribute maps without real I/O.
 type DNACollector interface {
 	CollectAttributes(ctx context.Context) (map[string]string, error)
+}
+
+// FragmentCollector is an optional extension of DNACollector. When the wired
+// collector also implements this interface, the client maintains
+// currentDNAFragments and currentDNAAggregateRoot for the partial-sync protocol
+// (ADR-017 §7). The S5 story wires the real multi-fragment collector here.
+type FragmentCollector interface {
+	CollectFragments(ctx context.Context) ([]*commonpb.Fragment, error)
+}
+
+// maxRequestedFragmentIDs bounds the fragment_ids list accepted from a SYNC_DNA
+// command. The controller only ever asks for IDs already in its stored manifest,
+// so a list this long indicates a malformed or hostile command.
+const maxRequestedFragmentIDs = 10000
+
+// parseFragmentIDs normalises the fragment_ids param of a SYNC_DNA command into a
+// []string.
+//
+// Command params cross the wire as map[string]string and are re-parsed on arrival:
+// pkg/controlplane/providers/grpc.stringMapToInterfaceMap JSON-decodes any value
+// that is valid JSON, so the JSON array the controller marshals arrives as
+// []interface{}, NOT as the string it was sent as. Both shapes (plus a native
+// []string from in-process transports) must therefore be accepted — asserting a
+// single shape silently disables partial sync on the real control plane.
+//
+// Non-string elements and empty IDs are rejected rather than coerced, so a
+// malformed command surfaces as an error instead of a silent no-op.
+func parseFragmentIDs(raw interface{}) ([]string, error) {
+	var ids []string
+
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if v == "" {
+			return nil, nil
+		}
+		if err := json.Unmarshal([]byte(v), &ids); err != nil {
+			return nil, fmt.Errorf("fragment_ids is not a JSON string array: %w", err)
+		}
+	case []string:
+		ids = v
+	case []interface{}:
+		ids = make([]string, 0, len(v))
+		for i, elem := range v {
+			s, isString := elem.(string)
+			if !isString {
+				return nil, fmt.Errorf("fragment_ids[%d] is %T, want string", i, elem)
+			}
+			ids = append(ids, s)
+		}
+	default:
+		return nil, fmt.Errorf("fragment_ids has unsupported type %T", raw)
+	}
+
+	if len(ids) > maxRequestedFragmentIDs {
+		return nil, fmt.Errorf("fragment_ids contains %d entries, limit is %d",
+			len(ids), maxRequestedFragmentIDs)
+	}
+	for i, id := range ids {
+		if id == "" {
+			return nil, fmt.Errorf("fragment_ids[%d] is empty", i)
+		}
+	}
+	return ids, nil
 }
 
 // TransportClient represents the steward client using gRPC-over-QUIC for both
@@ -169,11 +235,14 @@ type TransportClient struct {
 	secretStore secretsif.SecretStore
 
 	// DNA state for hash-based sync (Issue #418).
-	// dnaMu guards currentDNAHash, currentDNAAttrs, and lastPublishedDNA.
-	dnaMu            sync.RWMutex
-	currentDNAHash   string            // SHA-256 hash of most-recently collected DNA (Issue #2521)
-	currentDNAAttrs  map[string]string // full enriched snapshot of most-recently collected DNA (Issue #2521)
-	lastPublishedDNA map[string]string // full DNA from the last PublishDNAUpdate call
+	// dnaMu guards currentDNAHash, currentDNAAttrs, lastPublishedDNA,
+	// currentDNAFragments, and currentDNAAggregateRoot.
+	dnaMu                   sync.RWMutex
+	currentDNAHash          string               // SHA-256 hash of most-recently collected DNA (Issue #2521)
+	currentDNAAttrs         map[string]string    // full enriched snapshot of most-recently collected DNA (Issue #2521)
+	lastPublishedDNA        map[string]string    // full DNA from the last PublishDNAUpdate call
+	currentDNAFragments     []*commonpb.Fragment // fragments from last fragment-collection (Issue #2906)
+	currentDNAAggregateRoot string               // AggregateRoot of currentDNAFragments (Issue #2906)
 
 	// DNA refresh loop control (Issue #1915).
 	dnaRefreshInterval time.Duration
@@ -757,13 +826,16 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// controllerCARoots verifies operator-signed inline command certs chain to the
 	// controller CA — the same CA bundle used for mTLS. Left nil when no CA PEM is
 	// available, which the handler treats as "skip operator-cert CA verification".
+	// Pool construction goes through pkg/cert (the central certificate provider)
+	// rather than building an x509 pool locally.
 	var controllerCARoots *x509.CertPool
 	if caCertPEM != "" {
-		pool := x509.NewCertPool()
-		if pool.AppendCertsFromPEM([]byte(caCertPEM)) {
-			controllerCARoots = pool
+		pool, err := cert.CertPoolFromPEM([]byte(caCertPEM))
+		if err != nil {
+			c.logger.Warn("Failed to parse controller CA PEM for operator certificate verification",
+				"error", err)
 		} else {
-			c.logger.Warn("Failed to parse controller CA PEM for operator certificate verification")
+			controllerCARoots = pool
 		}
 	}
 
@@ -836,12 +908,14 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		return c.syncConfigNow(ctx, cmd.ID, modules)
 	})
 
-	// Register sync_dna handler — sends full DNA over the data plane.
-	// Triggered by the controller on initial registration or when it detects a
-	// hash mismatch from a heartbeat (i.e. deltas were missed).
+	// Register sync_dna handler — sends full DNA or a fragment delta over the
+	// data plane. Triggered by the controller on initial registration (full sync),
+	// hash mismatch (full sync), or aggregate-root mismatch (partial sync, ADR-017 §7).
+	//
+	// Branch on cmd.Params["fragment_ids"]:
+	//   - absent → existing full-snapshot path (unchanged)
+	//   - present → partial-sync: send only the requested fragments with Delta=true
 	handler.RegisterHandler(cpTypes.CommandSyncDNA, func(ctx context.Context, cmd *cpTypes.Command) error {
-		c.logger.Info("Received sync_dna command, initiating full DNA sync via data plane", "command_id", cmd.ID)
-
 		c.mu.RLock()
 		session := c.dataPlaneSession
 		sid := c.stewardID
@@ -851,6 +925,75 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		if session == nil || session.IsClosed() {
 			return fmt.Errorf("data plane session not available for DNA sync")
 		}
+
+		// Partial-sync branch: fragment_ids param carries the IDs the controller
+		// wants us to send (ADR-017 §7 step 2 response).
+		if rawIDs, present := cmd.Params["fragment_ids"]; present {
+			requestedIDs, parseErr := parseFragmentIDs(rawIDs)
+			if parseErr != nil {
+				return fmt.Errorf("failed to parse fragment_ids: %w", parseErr)
+			}
+			if len(requestedIDs) > 0 {
+				c.dnaMu.RLock()
+				currentFragments := make([]*commonpb.Fragment, len(c.currentDNAFragments))
+				copy(currentFragments, c.currentDNAFragments)
+				c.dnaMu.RUnlock()
+
+				if len(currentFragments) > 0 {
+					fragByID := make(map[string]*commonpb.Fragment, len(currentFragments))
+					for _, f := range currentFragments {
+						fragByID[f.GetFragmentId()] = f
+					}
+
+					selected := make([]*commonpb.Fragment, 0, len(requestedIDs))
+					allFound := true
+					for _, id := range requestedIDs {
+						f, exists := fragByID[id]
+						if !exists {
+							// id originates from controller-supplied command params;
+							// sanitize before logging (CLAUDE.md log-injection rule).
+							c.logger.Warn("requested fragment not in current DNA; falling back to full sync",
+								"fragment_id", logging.SanitizeLogValue(id),
+								"command_id", logging.SanitizeLogValue(cmd.ID))
+							allFound = false
+							break
+						}
+						selected = append(selected, f)
+					}
+
+					if allFound {
+						c.logger.Info("Received partial sync_dna command, sending fragment delta",
+							"command_id", logging.SanitizeLogValue(cmd.ID),
+							"fragment_count", len(selected))
+						deltaTransfer := &dpTypes.DNATransfer{
+							ID:        fmt.Sprintf("dna_delta_%d", time.Now().UnixNano()),
+							StewardID: sid,
+							TenantID:  tid,
+							Timestamp: time.Now(),
+							Delta:     true,
+							Fragments: selected,
+							Metadata: map[string]string{
+								"command_id":     cmd.ID,
+								"fragment_count": fmt.Sprintf("%d", len(selected)),
+							},
+						}
+						if err := session.SendDNA(ctx, deltaTransfer); err != nil {
+							return fmt.Errorf("failed to send partial DNA via data plane: %w", err)
+						}
+						c.logger.Info("Partial DNA sync completed via data plane",
+							"command_id", logging.SanitizeLogValue(cmd.ID),
+							"fragment_count", len(selected))
+						return nil
+					}
+				}
+				// Requested fragments not available — fall through to full sync.
+				c.logger.Info("Fragment state unavailable; falling back to full DNA sync",
+					"command_id", logging.SanitizeLogValue(cmd.ID))
+			}
+		}
+
+		// Full-snapshot path (existing, unchanged).
+		c.logger.Info("Received sync_dna command, initiating full DNA sync via data plane", "command_id", cmd.ID)
 
 		// Read the current DNA snapshot maintained by #2521 — the same source
 		// used for heartbeat DNA hashes, ensuring sync_dna ⇄ heartbeat hash
@@ -1232,6 +1375,7 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 
 	c.dnaMu.RLock()
 	currentDNAHash := c.currentDNAHash
+	currentDNAAggregateRoot := c.currentDNAAggregateRoot
 	c.dnaMu.RUnlock()
 
 	activeSessions := int32(0)
@@ -1242,15 +1386,16 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 	}
 
 	heartbeat := &cpTypes.Heartbeat{
-		StewardID:       stewardID,
-		TenantID:        tenantID,
-		Status:          cpTypes.HeartbeatStatus(status),
-		Timestamp:       time.Now(),
-		Metrics:         metricsMap,
-		DNAHash:         currentDNAHash,
-		ActiveSessions:  activeSessions,
-		ConnectionState: connectionState,
-		Version:         version.Short(),
+		StewardID:        stewardID,
+		TenantID:         tenantID,
+		Status:           cpTypes.HeartbeatStatus(status),
+		Timestamp:        time.Now(),
+		Metrics:          metricsMap,
+		DNAHash:          currentDNAHash,
+		DNAAggregateRoot: currentDNAAggregateRoot,
+		ActiveSessions:   activeSessions,
+		ConnectionState:  connectionState,
+		Version:          version.Short(),
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {
@@ -1622,6 +1767,9 @@ func (c *TransportClient) setCurrentDNAFromAttrs(attrs map[string]string) {
 // DNACollector and updates currentDNAHash so the next heartbeat carries a
 // truthful, non-empty hash. It does not publish a delta to the controller.
 //
+// If the collector also implements FragmentCollector, currentDNAFragments and
+// currentDNAAggregateRoot are updated for the partial-sync protocol (ADR-017 §7).
+//
 // This is called by the reconnect path (tryReconnectWithStoredIdentity) before
 // the first SendHeartbeat so the steward never reports an empty hash immediately
 // after a reconnect. (Issue #2521)
@@ -1642,7 +1790,38 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 		return nil
 	}
 	c.setCurrentDNAFromAttrs(attrs)
+
+	// Optional: if the collector supports fragments, update the partial-sync state.
+	if fc, ok := collector.(FragmentCollector); ok {
+		fragments, fragErr := fc.CollectFragments(ctx)
+		if fragErr != nil {
+			c.logger.Warn("fragment collection failed; partial-sync root not updated", "error", fragErr)
+		} else if len(fragments) > 0 {
+			c.setCurrentDNAFragments(fragments)
+		}
+	}
 	return nil
+}
+
+// setCurrentDNAFragments updates currentDNAFragments and currentDNAAggregateRoot
+// under dnaMu. Called when the wired collector implements FragmentCollector.
+func (c *TransportClient) setCurrentDNAFragments(fragments []*commonpb.Fragment) {
+	manifest := make([]*commonpb.ManifestEntry, 0, len(fragments))
+	for _, f := range fragments {
+		manifest = append(manifest, &commonpb.ManifestEntry{
+			FragmentId:   f.GetFragmentId(),
+			FragmentHash: f.GetFragmentHash(),
+		})
+	}
+	root, err := dna.AggregateRoot(manifest)
+	if err != nil {
+		c.logger.Warn("failed to compute aggregate root; partial-sync root not updated", "error", err)
+		return
+	}
+	c.dnaMu.Lock()
+	c.currentDNAFragments = fragments
+	c.currentDNAAggregateRoot = root
+	c.dnaMu.Unlock()
 }
 
 // PublishCurrentDNA collects the FULL composite DNA (hardware facts + module

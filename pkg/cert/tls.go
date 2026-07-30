@@ -18,6 +18,28 @@ func LoadTLSCertificate(certPEM, keyPEM []byte) (tls.Certificate, error) {
 	return cert, nil
 }
 
+// CertPoolFromPEM builds an x509 verification pool from one or more PEM-encoded
+// CA certificates. It is the central-provider entry point for callers that need a
+// verification pool on its own rather than as part of a tls.Config — for example
+// verifying that an operator signing certificate chains to the controller CA.
+// Callers outside pkg/cert must use this instead of constructing pools directly
+// (enforced by make check-architecture).
+//
+// Returns an error when caCertPEM is empty or contains no parseable certificate,
+// so callers can distinguish "no roots configured" from "roots were misconfigured".
+func CertPoolFromPEM(caCertPEM []byte) (*x509.CertPool, error) {
+	if len(caCertPEM) == 0 {
+		return nil, fmt.Errorf("no CA certificate PEM provided")
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate PEM")
+	}
+
+	return pool, nil
+}
+
 // CreateServerTLSConfig creates a TLS config for a server with mTLS support
 // Parameters:
 // - serverCertPEM: Server certificate in PEM format

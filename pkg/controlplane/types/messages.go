@@ -219,6 +219,13 @@ type Heartbeat struct {
 	// Empty for older stewards that do not support hash-based sync.
 	DNAHash string `json:"dna_hash,omitempty"`
 
+	// DNAAggregateRoot is the Merkle-style aggregate root over the steward's current
+	// fragment manifest (ADR-017 §6). Non-empty when the steward supports the
+	// partial-sync protocol. The controller compares this to its stored root and
+	// sends SYNC_DNA with fragment_ids on mismatch (ADR-017 §7).
+	// Empty for stewards without a fragment-capable collector.
+	DNAAggregateRoot string `json:"dna_aggregate_root,omitempty"`
+
 	// ActiveSessions is the number of active control-channel streams the steward holds.
 	// Value is 1 when connected, 0 otherwise.
 	ActiveSessions int32 `json:"active_sessions,omitempty"`

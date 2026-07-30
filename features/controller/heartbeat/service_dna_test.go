@@ -5,6 +5,7 @@ package heartbeat
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -354,4 +355,98 @@ func TestHeartbeatService_SetOnDNAHashMismatch_ReplacesConfigCallback(t *testing
 
 	assert.Equal(t, 0, configCalls, "Config-time callback must be replaced, not appended")
 	assert.Equal(t, 1, laterCalls, "late-wired callback must fire on mismatch")
+}
+
+// TestHeartbeatService_FragmentRootCallback_FiresOnNonEmptyRoot verifies that
+// onFragmentRoot fires with the correct steward ID and claimed root when a
+// heartbeat carries a non-empty DNAAggregateRoot (ADR-017 §7 step 1).
+//
+// The heartbeat's TenantID is set here and must NOT be observable through the
+// callback: the callback signature carries no tenant, so a steward-asserted tenant
+// claim cannot be laundered into the controller-issued SYNC_DNA command.
+func TestHeartbeatService_FragmentRootCallback_FiresOnNonEmptyRoot(t *testing.T) {
+	type call struct {
+		stewardID, root string
+	}
+	var mu sync.Mutex
+	var calls []call
+
+	_, cp := newTestService(t, func(cfg *Config) {
+		cfg.OnFragmentRoot = func(_ context.Context, stewardID, claimedRoot string) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, call{stewardID, claimedRoot})
+		}
+	})
+	ctx := context.Background()
+
+	// Heartbeat without DNAAggregateRoot — callback must NOT fire.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-root",
+		TenantID:  "tenant-root",
+		Status:    controlplaneTypes.StatusHealthy,
+		Timestamp: time.Now(),
+	}))
+	mu.Lock()
+	gotCalls := len(calls)
+	mu.Unlock()
+	assert.Equal(t, 0, gotCalls, "callback must not fire when DNAAggregateRoot is empty")
+
+	// Heartbeat with DNAAggregateRoot — callback must fire with correct args.
+	const claimedRoot = "sha256:abc123def456"
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID:        "steward-root",
+		TenantID:         "tenant-root",
+		Status:           controlplaneTypes.StatusHealthy,
+		Timestamp:        time.Now(),
+		DNAAggregateRoot: claimedRoot,
+	}))
+
+	mu.Lock()
+	allCalls := make([]call, len(calls))
+	copy(allCalls, calls)
+	mu.Unlock()
+
+	require.Len(t, allCalls, 1, "callback must fire exactly once for one heartbeat carrying a root")
+	assert.Equal(t, "steward-root", allCalls[0].stewardID)
+	assert.Equal(t, claimedRoot, allCalls[0].root)
+}
+
+// TestHeartbeatService_FragmentRootCallback_NilIsNoop verifies that no panic occurs
+// and no callback fires when OnFragmentRoot is nil (default).
+func TestHeartbeatService_FragmentRootCallback_NilIsNoop(t *testing.T) {
+	// No OnFragmentRoot in config — default nil.
+	_, cp := newTestService(t)
+
+	require.NoError(t, cp.sendHeartbeat(context.Background(), &controlplaneTypes.Heartbeat{
+		StewardID:        "steward-noop",
+		TenantID:         "tenant-noop",
+		Status:           controlplaneTypes.StatusHealthy,
+		Timestamp:        time.Now(),
+		DNAAggregateRoot: "some-root",
+	}))
+	// No assertion needed — the test passes by not panicking.
+}
+
+// TestHeartbeatService_SetOnFragmentRoot_WorksAfterConstruction verifies that
+// SetOnFragmentRoot can be called after construction and fires on subsequent
+// heartbeats carrying a non-empty DNAAggregateRoot.
+func TestHeartbeatService_SetOnFragmentRoot_WorksAfterConstruction(t *testing.T) {
+	svc, cp := newTestService(t)
+	ctx := context.Background()
+
+	var fired int
+	svc.SetOnFragmentRoot(func(_ context.Context, _, _ string) {
+		fired++
+	})
+
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID:        "steward-latewire",
+		TenantID:         "t1",
+		Status:           controlplaneTypes.StatusHealthy,
+		Timestamp:        time.Now(),
+		DNAAggregateRoot: "root-v1",
+	}))
+
+	assert.Equal(t, 1, fired, "late-wired callback must fire on heartbeat with aggregate root")
 }

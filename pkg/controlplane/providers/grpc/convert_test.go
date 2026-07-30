@@ -521,6 +521,89 @@ func TestHeartbeatNil(t *testing.T) {
 	assert.Nil(t, heartbeatFromProto(nil))
 }
 
+// TestHeartbeatDNAAggregateRootRoundTrip verifies that DNAAggregateRoot survives
+// the heartbeatToProto → heartbeatFromProto round-trip via the Metrics side-channel
+// (ADR-017 §7 / Issue #2906). The test also checks that:
+//   - Pre-existing Metrics keys survive alongside the aggregate root.
+//   - The dna_aggregate_root key is NOT visible in the returned Metrics map
+//     (it is stripped during decode and surfaced in the dedicated field only).
+func TestHeartbeatDNAAggregateRootRoundTrip(t *testing.T) {
+	now := time.Now().Truncate(time.Microsecond)
+
+	t.Run("aggregate root only", func(t *testing.T) {
+		hb := &types.Heartbeat{
+			StewardID:        "steward-root",
+			TenantID:         "tenant-root",
+			Status:           types.StatusHealthy,
+			Timestamp:        now,
+			DNAAggregateRoot: "sha256:abc123",
+		}
+
+		pb := heartbeatToProto(hb)
+		require.NotNil(t, pb)
+		// The root must be encoded in the proto Metrics map.
+		require.NotNil(t, pb.GetMetrics(), "proto Metrics must be non-nil when DNAAggregateRoot is set")
+		assert.Equal(t, "sha256:abc123", pb.GetMetrics()["dna_aggregate_root"])
+
+		result := heartbeatFromProto(pb)
+		require.NotNil(t, result)
+		assert.Equal(t, "sha256:abc123", result.DNAAggregateRoot,
+			"DNAAggregateRoot must survive the proto round-trip")
+		assert.Nil(t, result.Metrics,
+			"dna_aggregate_root side-channel key must be stripped from Metrics after decode")
+	})
+
+	t.Run("aggregate root alongside existing metrics", func(t *testing.T) {
+		// Use non-numeric string values; stringMapToInterfaceMap JSON-parses values
+		// so numeric strings become float64 after the round-trip.
+		hb := &types.Heartbeat{
+			StewardID: "steward-mixed",
+			Status:    types.StatusHealthy,
+			Timestamp: now,
+			Metrics: map[string]interface{}{
+				"region": "us-east",
+				"tier":   "standard",
+			},
+			DNAAggregateRoot: "sha256:def456",
+		}
+
+		pb := heartbeatToProto(hb)
+		require.NotNil(t, pb)
+		pbMetrics := pb.GetMetrics()
+		require.NotNil(t, pbMetrics)
+		assert.Equal(t, "sha256:def456", pbMetrics["dna_aggregate_root"])
+		assert.Equal(t, "us-east", pbMetrics["region"])
+		assert.Equal(t, "standard", pbMetrics["tier"])
+
+		result := heartbeatFromProto(pb)
+		require.NotNil(t, result)
+		assert.Equal(t, "sha256:def456", result.DNAAggregateRoot)
+		require.NotNil(t, result.Metrics, "user Metrics must survive alongside aggregate root")
+		assert.Equal(t, "us-east", result.Metrics["region"])
+		assert.Equal(t, "standard", result.Metrics["tier"])
+		_, hasKey := result.Metrics["dna_aggregate_root"]
+		assert.False(t, hasKey, "dna_aggregate_root must not appear in decoded Metrics")
+	})
+
+	t.Run("no aggregate root leaves metrics unaffected", func(t *testing.T) {
+		hb := &types.Heartbeat{
+			StewardID: "steward-noop",
+			Status:    types.StatusHealthy,
+			Timestamp: now,
+			Metrics: map[string]interface{}{
+				"env": "production",
+			},
+		}
+
+		pb := heartbeatToProto(hb)
+		result := heartbeatFromProto(pb)
+		require.NotNil(t, result)
+		assert.Empty(t, result.DNAAggregateRoot, "DNAAggregateRoot must be empty when not set")
+		require.NotNil(t, result.Metrics)
+		assert.Equal(t, "production", result.Metrics["env"])
+	})
+}
+
 func TestHeartbeatStatusRoundTrip(t *testing.T) {
 	allStatuses := []types.HeartbeatStatus{
 		types.StatusHealthy,
