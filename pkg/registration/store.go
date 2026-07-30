@@ -17,6 +17,9 @@ type Store interface {
 	// GetToken retrieves a token by its token string
 	GetToken(ctx context.Context, tokenStr string) (*Token, error)
 
+	// GetTokenByID retrieves a token by its stable UUID (Issue #2970).
+	GetTokenByID(ctx context.Context, id string) (*Token, error)
+
 	// ListTokens lists all tokens for a tenant
 	ListTokens(ctx context.Context, tenantID string) ([]*Token, error)
 
@@ -35,22 +38,40 @@ type Store interface {
 // memoryStore is an in-memory implementation of Store (for use within this package only).
 type memoryStore struct {
 	mu     sync.RWMutex
-	tokens map[string]*Token
+	tokens map[string]*Token // keyed by token string
+	byID   map[string]string // id → token string
 }
 
 // newMemoryStore creates a new in-memory token store.
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
 		tokens: make(map[string]*Token),
+		byID:   make(map[string]string),
 	}
 }
 
-// SaveToken saves a registration token.
+// SaveToken saves a registration token. Tokens saved without a stable ID receive a
+// generated one so that every stored token is addressable by ID (Issue #2970),
+// matching the durable store implementations.
 func (s *memoryStore) SaveToken(ctx context.Context, token *Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if token.ID == "" {
+		// Preserve the ID already assigned to this token string, if any.
+		if existing, ok := s.tokens[token.Token]; ok && existing.ID != "" {
+			token.ID = existing.ID
+		} else {
+			id, err := GenerateTokenID()
+			if err != nil {
+				return fmt.Errorf("failed to generate token ID: %w", err)
+			}
+			token.ID = id
+		}
+	}
+
 	s.tokens[token.Token] = token
+	s.byID[token.ID] = token.Token
 	return nil
 }
 
@@ -64,6 +85,22 @@ func (s *memoryStore) GetToken(ctx context.Context, tokenStr string) (*Token, er
 		return nil, fmt.Errorf("token not found")
 	}
 
+	return token, nil
+}
+
+// GetTokenByID retrieves a token by its stable UUID.
+func (s *memoryStore) GetTokenByID(ctx context.Context, id string) (*Token, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tokenStr, exists := s.byID[id]
+	if !exists {
+		return nil, fmt.Errorf("token not found")
+	}
+	token, exists := s.tokens[tokenStr]
+	if !exists {
+		return nil, fmt.Errorf("token not found")
+	}
 	return token, nil
 }
 
@@ -95,11 +132,14 @@ func (s *memoryStore) UpdateToken(ctx context.Context, token *Token) error {
 	return nil
 }
 
-// DeleteToken deletes a token.
+// DeleteToken deletes a token and its ID index entry.
 func (s *memoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if token, ok := s.tokens[tokenStr]; ok && token.ID != "" {
+		delete(s.byID, token.ID)
+	}
 	delete(s.tokens, tokenStr)
 	return nil
 }
@@ -127,10 +167,14 @@ func (s *memoryStore) RotateToken(ctx context.Context, tenantID, group string) (
 		return nil, fmt.Errorf("no active tokens found for tenant %q group %q", tenantID, group)
 	}
 
-	// Generate new token string.
+	// Generate new token string and stable ID.
 	tokenStr, err := GenerateToken()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate token: %w", err)
+	}
+	tokenID, err := GenerateTokenID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token ID: %w", err)
 	}
 
 	now := time.Now()
@@ -144,6 +188,7 @@ func (s *memoryStore) RotateToken(ctx context.Context, tenantID, group string) (
 	}
 
 	newToken := &Token{
+		ID:            tokenID,
 		Token:         tokenStr,
 		TenantID:      tenantID,
 		ControllerURL: controllerURL,
@@ -151,6 +196,7 @@ func (s *memoryStore) RotateToken(ctx context.Context, tenantID, group string) (
 		CreatedAt:     now,
 	}
 	s.tokens[tokenStr] = newToken
+	s.byID[tokenID] = tokenStr
 
 	return newToken, nil
 }

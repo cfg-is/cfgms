@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -115,6 +117,17 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	})
 
 	return server, tokenStore
+}
+
+// makeScopedTokenRequest builds a request for a tenant-scoped (web session) caller
+// addressing a registration token by path variable. Delete and revoke require
+// AssuranceStrong, which an API key can never hold, so scope-enforcement tests
+// invoke the handler directly with the tenant in context and the mux var set.
+func makeScopedTokenRequest(t *testing.T, method, path, tenantID, tokenVar string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	return mux.SetURLVars(req, map[string]string{"token": tokenVar})
 }
 
 func TestCreateRegistrationToken(t *testing.T) {
@@ -442,6 +455,33 @@ func TestDeleteRegistrationToken(t *testing.T) {
 		assert.Error(t, err)
 	})
 
+	// Issue #2970: the web UI never holds the secret, so it addresses a token by its
+	// stable UUID. The handler falls back to a GetTokenByID lookup for that caller.
+	t.Run("delete by token_id", func(t *testing.T) {
+		token, err := registration.CreateToken(&registration.TokenCreateRequest{
+			TenantID:      "test-tenant",
+			ControllerURL: "grpc://controller.example.com:7443",
+		})
+		require.NoError(t, err)
+		require.NoError(t, tokenStore.SaveToken(ctx, token))
+		require.NotEmpty(t, token.ID)
+		require.NotEqual(t, token.Token, token.ID)
+
+		req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/"+token.ID, nil)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+
+		// The row keyed by the secret must be gone — the handler must delete by
+		// token.Token, not by the UUID it was addressed with.
+		_, err = tokenStore.GetToken(ctx, token.Token)
+		assert.Error(t, err)
+		_, err = tokenStore.GetTokenByID(ctx, token.ID)
+		assert.Error(t, err)
+	})
+
 	t.Run("delete non-existent token returns 404", func(t *testing.T) {
 		req := makeAdminRequest(t, "DELETE", "/api/v1/registration/tokens/nonexistent-token", nil)
 		rec := httptest.NewRecorder()
@@ -449,6 +489,42 @@ func TestDeleteRegistrationToken(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("delete unknown token_id returns 404 not 500", func(t *testing.T) {
+		req := makeAdminRequest(t, "DELETE",
+			"/api/v1/registration/tokens/aaaaaaaa-0000-4000-8000-0000000000ff", nil)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"an unknown UUID must be a clean 404, never a store error surfaced as 500")
+	})
+
+	t.Run("scoped caller cannot delete another tenant's token by token_id", func(t *testing.T) {
+		token, err := registration.CreateToken(&registration.TokenCreateRequest{
+			TenantID:      "other-tenant",
+			ControllerURL: "grpc://controller.example.com:7443",
+		})
+		require.NoError(t, err)
+		require.NoError(t, tokenStore.SaveToken(ctx, token))
+
+		// Scoped (web session) caller: tenant scope comes from the request context.
+		// The handler is invoked directly because AssuranceStrong routes cannot be
+		// reached with an API key.
+		req := makeScopedTokenRequest(t, "DELETE",
+			"/api/v1/registration/tokens/"+token.ID, "scoped-tenant", token.ID)
+		rec := httptest.NewRecorder()
+
+		server.handleDeleteRegistrationToken(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"tenant-scope enforcement must apply to the token_id path too")
+
+		// The token must still exist.
+		_, err = tokenStore.GetTokenByID(ctx, token.ID)
+		require.NoError(t, err)
 	})
 
 	t.Run("unauthorized without API key", func(t *testing.T) {
@@ -494,6 +570,80 @@ func TestRevokeRegistrationToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, updated.Revoked)
 		assert.False(t, updated.IsValid())
+	})
+
+	// Issue #2970: the web UI revokes by stable UUID because it never holds the secret.
+	t.Run("revoke by token_id", func(t *testing.T) {
+		token, err := registration.CreateToken(&registration.TokenCreateRequest{
+			TenantID:      "test-tenant",
+			ControllerURL: "grpc://controller.example.com:7443",
+		})
+		require.NoError(t, err)
+		require.NoError(t, tokenStore.SaveToken(ctx, token))
+		require.NotEmpty(t, token.ID)
+		require.NotEqual(t, token.Token, token.ID)
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/"+token.ID+"/revoke", nil)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp TokenResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.True(t, resp.Revoked)
+		assert.NotNil(t, resp.RevokedAt)
+		assert.Equal(t, token.ID, resp.TokenID, "the response must echo the stable token_id")
+		assert.Empty(t, resp.Token, "revoke must never return the raw secret")
+		assert.Equal(t, token.Token[:6], resp.TokenPrefix)
+
+		// The stored row (keyed by the secret) must be the one that got revoked.
+		updated, err := tokenStore.GetToken(ctx, token.Token)
+		require.NoError(t, err)
+		assert.True(t, updated.Revoked)
+		assert.False(t, updated.IsValid())
+
+		// It must remain addressable by id after revocation (delete-after-revoke).
+		byID, err := tokenStore.GetTokenByID(ctx, token.ID)
+		require.NoError(t, err)
+		assert.True(t, byID.Revoked)
+	})
+
+	t.Run("revoke unknown token_id returns 404 not 500", func(t *testing.T) {
+		req := makeAdminRequest(t, "POST",
+			"/api/v1/registration/tokens/aaaaaaaa-0000-4000-8000-0000000000ff/revoke", nil)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"an unknown UUID must be a clean 404, never a store error surfaced as 500")
+	})
+
+	t.Run("scoped caller cannot revoke another tenant's token by token_id", func(t *testing.T) {
+		token, err := registration.CreateToken(&registration.TokenCreateRequest{
+			TenantID:      "other-tenant",
+			ControllerURL: "grpc://controller.example.com:7443",
+		})
+		require.NoError(t, err)
+		require.NoError(t, tokenStore.SaveToken(ctx, token))
+
+		// Scoped (web session) caller: tenant scope comes from the request context.
+		// The handler is invoked directly because AssuranceStrong routes cannot be
+		// reached with an API key.
+		req := makeScopedTokenRequest(t, "POST",
+			"/api/v1/registration/tokens/"+token.ID+"/revoke", "scoped-tenant", token.ID)
+		rec := httptest.NewRecorder()
+
+		server.handleRevokeRegistrationToken(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"tenant-scope enforcement must apply to the token_id path too")
+
+		still, err := tokenStore.GetTokenByID(ctx, token.ID)
+		require.NoError(t, err)
+		assert.False(t, still.Revoked, "the token must not be revoked by an out-of-scope caller")
 	})
 
 	t.Run("revoke non-existent token returns 404", func(t *testing.T) {
@@ -809,6 +959,8 @@ func TestCreateRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, resp.TokenID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, resp.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
@@ -837,6 +989,8 @@ func TestDeleteRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, token.ID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, token.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
@@ -865,6 +1019,8 @@ func TestRevokeRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, token.ID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, token.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
@@ -900,6 +1056,8 @@ func TestRotateRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the new token prefix")
+	assert.Equal(t, resp.TokenID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, resp.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }

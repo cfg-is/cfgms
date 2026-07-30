@@ -586,11 +586,14 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 
 // CreateRegistrationTokensTable creates the registration_tokens table for token persistence.
 // Migration note: single_use, used_at, and used_by columns were removed in Issue #1690
-// (perennial token model with immediate-invalidation rotation).
+// (perennial token model with immediate-invalidation rotation). The id column (stable,
+// non-secret UUID used by the web UI to address a token) was added in Issue #2970 —
+// BackfillRegistrationTokenIDs handles pre-existing deployments.
 func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_registration_tokens (
 			token VARCHAR(255) PRIMARY KEY,
+			id VARCHAR(36),
 			tenant_id VARCHAR(255) NOT NULL,
 			controller_url VARCHAR(1000) NOT NULL,
 			group_name VARCHAR(255) DEFAULT '',
@@ -605,6 +608,12 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		return fmt.Errorf("failed to create cfgms_registration_tokens table: %w", err)
 	}
 
+	// Migration for deployments created before Issue #2970: add the column and
+	// assign a UUID to every pre-existing row so the web UI can address them.
+	if err := s.BackfillRegistrationTokenIDs(ctx, db); err != nil {
+		return err
+	}
+
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_tenant_id ON cfgms_registration_tokens(tenant_id);",
@@ -612,6 +621,8 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_created_at ON cfgms_registration_tokens(created_at);",
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_expires_at ON cfgms_registration_tokens(expires_at);",
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_revoked ON cfgms_registration_tokens(revoked);",
+		// Unique lookup index for GetTokenByID (Issue #2970).
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_id ON cfgms_registration_tokens(id);",
 		// Composite index for filtering non-revoked tokens by tenant
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_reg_tokens_tenant_active ON cfgms_registration_tokens(tenant_id) WHERE revoked = FALSE;",
 	}
@@ -619,6 +630,54 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 	for _, indexQuery := range indexes {
 		if _, err := db.ExecContext(ctx, indexQuery); err != nil {
 			return fmt.Errorf("failed to create cfgms_registration_tokens index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// BackfillRegistrationTokenIDs adds the id column to a pre-existing
+// cfgms_registration_tokens table and assigns a UUID to every row that lacks one
+// (Issue #2970). Without the back-fill, legacy rows would report an empty token_id
+// and could never be revoked or deleted from the web UI — exactly the tokens most
+// likely to need revoking. Idempotent: ADD COLUMN IF NOT EXISTS is a no-op on an
+// up-to-date table and the UPDATE matches no rows once every row has an id.
+func (s DatabaseSchemas) BackfillRegistrationTokenIDs(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE cfgms_registration_tokens ADD COLUMN IF NOT EXISTS id VARCHAR(36)`); err != nil {
+		return fmt.Errorf("failed to add id column to cfgms_registration_tokens: %w", err)
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT token FROM cfgms_registration_tokens WHERE id IS NULL OR id = ''`)
+	if err != nil {
+		return fmt.Errorf("failed to select registration tokens missing an id: %w", err)
+	}
+	var tokensMissingID []string
+	for rows.Next() {
+		var tokenStr string
+		if err := rows.Scan(&tokenStr); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("failed to scan registration token missing an id: %w", err)
+		}
+		tokensMissingID = append(tokensMissingID, tokenStr)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("error iterating registration tokens missing an id: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("failed to close registration token back-fill rows: %w", err)
+	}
+
+	for _, tokenStr := range tokensMissingID {
+		id, err := generateTokenID()
+		if err != nil {
+			return fmt.Errorf("failed to generate registration token id for back-fill: %w", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE cfgms_registration_tokens SET id = $1 WHERE token = $2`, id, tokenStr); err != nil {
+			return fmt.Errorf("failed to back-fill registration token id: %w", err)
 		}
 	}
 

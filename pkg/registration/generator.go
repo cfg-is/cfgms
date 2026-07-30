@@ -31,6 +31,20 @@ func GenerateToken() (string, error) {
 	return token, nil
 }
 
+// GenerateTokenID generates a stable UUID v4 for use as a non-secret token identifier
+// (Issue #2970 — web UI can reference a token by ID without holding the secret).
+// No external dependency: produced directly from crypto/rand.
+func GenerateTokenID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate token ID bytes: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
 // ParseExpiration parses expiration duration string (e.g., "24h", "7d", "30d")
 func ParseExpiration(expiresIn string) (*time.Time, error) {
 	if expiresIn == "" {
@@ -70,10 +84,14 @@ func CreateToken(req *TokenCreateRequest) (*Token, error) {
 		return nil, fmt.Errorf("controller_url is required")
 	}
 
-	// Generate token string
+	// Generate token string and stable ID
 	tokenStr, err := GenerateToken()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate token: %w", err)
+	}
+	tokenID, err := GenerateTokenID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token ID: %w", err)
 	}
 
 	// Parse expiration
@@ -84,6 +102,7 @@ func CreateToken(req *TokenCreateRequest) (*Token, error) {
 
 	// Create token
 	token := &Token{
+		ID:            tokenID,
 		Token:         tokenStr,
 		TenantID:      req.TenantID,
 		ControllerURL: req.ControllerURL,

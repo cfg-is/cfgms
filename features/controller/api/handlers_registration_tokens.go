@@ -18,7 +18,9 @@ import (
 // TokenResponse represents a registration token in API responses.
 // Token (full secret) is only populated by create and rotate responses.
 // All other endpoints (list, get, revoke) set TokenPrefix only.
+// TokenID is a stable UUID, always set, safe to expose — it is NOT the secret.
 type TokenResponse struct {
+	TokenID       string  `json:"token_id,omitempty"`     // stable UUID — always set (Issue #2970)
 	Token         string  `json:"token,omitempty"`        // full secret — create/rotate only
 	TokenPrefix   string  `json:"token_prefix,omitempty"` // first 6 chars — always set
 	TenantID      string  `json:"tenant_id"`
@@ -115,7 +117,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		"token_prefix", token.Token[:min(len(token.Token), 6)],
 		"tenant_id", logging.SanitizeLogValue(token.TenantID))
 	s.emitTokenManagementAudit(r, "registration_token.created",
-		token.Token[:min(len(token.Token), 6)], token.TenantID)
+		token.Token[:min(len(token.Token), 6)], token.ID, token.TenantID)
 
 	// Return full token response — create is the one-time mint window where the secret is disclosed.
 	resp := tokenToResponse(token)
@@ -247,7 +249,11 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// Look up the token first for tenant scope enforcement and audit.
+	// Try exact match first (mTLS admin with full token), then UUID lookup (web UI).
 	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
+	if err != nil && strings.Contains(err.Error(), "not found") {
+		token, err = s.registrationTokenStore.GetTokenByID(r.Context(), tokenStr)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -268,8 +274,9 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Delete token from store
-	if err := s.registrationTokenStore.DeleteToken(r.Context(), tokenStr); err != nil {
+	// Delete token from store. Always use token.Token (the full secret string) as the
+	// store key, not tokenStr which may be a UUID from a web UI caller.
+	if err := s.registrationTokenStore.DeleteToken(r.Context(), token.Token); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
 			return
@@ -280,9 +287,10 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// SanitizeLogValue wraps strings.ReplaceAll so CodeQL's ReplaceSanitizer clears the taint.
-	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
+	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
-	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.TenantID)
+	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.ID, token.TenantID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -309,8 +317,12 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Get token from store
+	// Get token from store.
+	// Try exact match first (mTLS admin with full token), then UUID lookup (web UI).
 	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
+	if err != nil && strings.Contains(err.Error(), "not found") {
+		token, err = s.registrationTokenStore.GetTokenByID(r.Context(), tokenStr)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -342,9 +354,10 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// SanitizeLogValue wraps strings.ReplaceAll so CodeQL's ReplaceSanitizer clears the taint.
-	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
+	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
-	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.TenantID)
+	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.ID, token.TenantID)
 
 	// Return redacted response — revoke callers do not receive the raw secret.
 	resp := tokenToResponseRedacted(token)
@@ -406,7 +419,7 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	s.logger.Info("Rotated registration token",
 		"token_prefix", tokenPrefix,
 		"tenant_id", logging.SanitizeLogValue(tenantID))
-	s.emitTokenManagementAudit(r, "registration_token.rotated", tokenPrefix, tenantID)
+	s.emitTokenManagementAudit(r, "registration_token.rotated", tokenPrefix, newToken.ID, tenantID)
 
 	// Return full token response — rotate is a mint window where the new secret is disclosed once.
 	resp := tokenToResponse(newToken)
@@ -421,6 +434,7 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 // Use ONLY for create and rotate responses where the secret must be returned once.
 func tokenToResponse(token *registration.Token) TokenResponse {
 	resp := TokenResponse{
+		TokenID:       token.ID,
 		Token:         token.Token,
 		TokenPrefix:   token.Token[:min(len(token.Token), 6)],
 		TenantID:      token.TenantID,
@@ -454,7 +468,9 @@ func tokenToResponseRedacted(token *registration.Token) TokenResponse {
 
 // emitTokenManagementAudit records an audit event for a token management action
 // (create, rotate, revoke, delete). It is a no-op when auditManager is nil.
-func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tenantID string) {
+// tokenID is the stable UUID (registration.Token.ID) — never the secret — recorded
+// as the resource name so the audit trail can be correlated to a token by ID.
+func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tokenID, tenantID string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -472,7 +488,7 @@ func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, 
 		Type(business.AuditEventSystemAccess).
 		Action(action).
 		User(principalID, business.AuditUserTypeHuman).
-		Resource("registration_token", tokenPrefix, "").
+		Resource("registration_token", tokenPrefix, tokenID).
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {

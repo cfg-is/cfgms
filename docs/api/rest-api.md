@@ -977,30 +977,34 @@ Registration tokens authorise steward self-registration. The token encodes the t
 
 **Note:** The path is `/api/v1/registration/tokens` — NOT `/admin/registration-tokens`.
 
+**Show-once secret:** The full token secret is only ever returned in the response body of create and rotate — never on list, get, or revoke. Once that response is dismissed the secret cannot be re-fetched; only a 6-char `token_prefix` remains visible. The secret is never written to the audit trail or server logs — audit events for create/delete/revoke/rotate record `token_prefix` and the stable `token_id` (UUID) only.
+
+**Path parameter, two forms:** `{token}` in the paths below accepts either the full token secret (exact match — used by mTLS admin callers that hold the raw token) or the token's stable `token_id` UUID (used by the web UI, which never receives the raw secret outside the mint/rotate response). Lookup tries an exact match first, then falls back to UUID lookup.
+
 #### GET /api/v1/registration/tokens
 
-List registration tokens.
+List registration tokens. Each entry includes `token_id` (stable UUID, safe to expose) and `token_prefix`, never the secret.
 
 **Authentication:** Required  
 **Required permission:** `registration:list-tokens`
 
 #### POST /api/v1/registration/tokens
 
-Create a new registration token.
+Create a new registration token. The response includes the full secret (`token`) and the stable `token_id` — this is the only time the secret is returned.
 
 **Authentication:** Required  
 **Required permission:** `registration:create-token`
 
 #### GET /api/v1/registration/tokens/{token}
 
-Get a specific registration token's metadata.
+Get a specific registration token's metadata (redacted — no secret).
 
 **Authentication:** Required  
 **Required permission:** `registration:read-token`
 
 **Parameters:**
 
-- `token` (path): Registration token value
+- `token` (path): Registration token value or `token_id`
 
 #### DELETE /api/v1/registration/tokens/{token}
 
@@ -1011,18 +1015,30 @@ Delete a registration token.
 
 **Parameters:**
 
-- `token` (path): Registration token value
+- `token` (path): Registration token value or `token_id`
 
 #### POST /api/v1/registration/tokens/{token}/revoke
 
-Revoke a registration token without deleting it. A revoked token remains in the store but is rejected on use.
+Revoke a registration token without deleting it. A revoked token remains in the store but is rejected on use. Response is redacted (no secret).
 
 **Authentication:** Required  
 **Required permission:** `registration:revoke-token`
 
 **Parameters:**
 
-- `token` (path): Registration token value
+- `token` (path): Registration token value or `token_id`
+
+#### POST /api/v1/registration/tokens/{tenant_id}/rotate
+
+Atomically revoke the active token(s) for a tenant (optionally scoped to `group`) and mint a replacement. The response includes the full secret of the new token — this is a mint window like create.
+
+**Authentication:** Required  
+**Required permission:** `registration:rotate-token`
+
+**Parameters:**
+
+- `tenant_id` (path): Tenant to rotate tokens for
+- `group` (body, optional): Restrict rotation to tokens in this group
 
 ### Monitoring
 
