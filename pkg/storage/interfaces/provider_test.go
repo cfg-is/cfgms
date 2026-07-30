@@ -395,6 +395,9 @@ func (m *MockRegistrationTokenStore) SaveToken(_ context.Context, _ *business.Re
 func (m *MockRegistrationTokenStore) GetToken(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
 	return nil, fmt.Errorf("token not found")
 }
+func (m *MockRegistrationTokenStore) GetTokenByID(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
+	return nil, fmt.Errorf("registration token not found")
+}
 func (m *MockRegistrationTokenStore) UpdateToken(_ context.Context, _ *business.RegistrationTokenData) error {
 	return nil
 }

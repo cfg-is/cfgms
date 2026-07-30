@@ -24,6 +24,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -424,11 +425,19 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 // no Tier-3 wrapper — reads are categorically outside the Tier-3 surface; see
 // Implementation Notes in Issue #2733). The response uses WebAccountInfo: no
 // secret material is ever included.
+//
+// Issue #3137: results are scoped to the caller's tenant subtree. An unscoped
+// mTLS admin (callerTenant == "") sees all accounts. Any other caller sees only
+// accounts whose storage TenantID equals callerTenant or is a descendant of it
+// (i.e. starts with callerTenant + "/"), which covers the full subtree of child
+// tenants without requiring an exact-match-only TenantID filter.
 func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return
 	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
 	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
 		Metadata: map[string]string{
@@ -443,6 +452,14 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 
 	accounts := make([]WebAccountInfo, 0, len(metas))
 	for _, meta := range metas {
+		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
+		// caller's subtree. Unscoped admins (callerTenant == "") see everything.
+		if callerTenant != "" {
+			if meta.TenantID != callerTenant && !strings.HasPrefix(meta.TenantID, callerTenant+"/") {
+				continue
+			}
+		}
+
 		createdAt := meta.CreatedAt
 		if ts, ok := meta.Metadata["created_at"]; ok {
 			if t, parseErr := time.Parse(time.RFC3339, ts); parseErr == nil {

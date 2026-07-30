@@ -65,6 +65,13 @@ type StewardSettings struct {
 	// Accepts Go duration strings (e.g. "30m", "1h"). Default: 30m.
 	DNARefreshInterval string `yaml:"dna_refresh_interval,omitempty" json:"dna_refresh_interval,omitempty"`
 
+	// ObserveSweepN is the Tier-2 whole-domain observe sweep cadence: the sweep
+	// runs on every Nth convergence tick (Issue #3104, ADR-024 Amendment 1 §3).
+	// Unset (nil) applies DefaultObserveSweepN. 0 disables the sweep entirely;
+	// 1 runs it on every tick. The field is a pointer so an explicitly configured
+	// 0 (disable) is distinguishable from an absent key (use the default).
+	ObserveSweepN *int `yaml:"observe_sweep_n,omitempty" json:"observe_sweep_n,omitempty"`
+
 	// TenantDefaultTimezone is the IANA timezone name applied when a reboot_window
 	// does not declare an explicit timezone. A future story reuses this same field
 	// for the workflow-trigger scheduler's timezone default (ADR-026 decision 4).

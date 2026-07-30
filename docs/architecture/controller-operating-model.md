@@ -209,6 +209,10 @@ Non-healthy statuses surface as `health.Alert` entries (critical for missing/spl
 
 **No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
 
+**FC-cascade config invariant (Issue #3107):** every `hyperv.vm` resource that carries an `ha_role` block — making it a clustered failover-cluster VM role — and every `hyperv.cluster` resource MUST reside in `cluster-policies/<clusterName>`, never in device scope (`stewards/<stewardID>`). This is not a soft convention: `GetClusterDeclaredResources` (the sole source for `Reconcile`'s declared set) reads **only** from `cluster-policies/<clusterName>`. A clustered resource that remains in device scope is **silently absent** from `Reconcile`'s input — it is never classified as `declared-but-missing`, `orphan-dead-owner`, or `split-brain`; the reconciliation machinery simply cannot see it. This means device-scope clustered declarations are not flagged as errors — they are silently unreconciled.
+
+The `promote-hv-role` workflow (epics #2657/#2807, stories #2667–#2671) is the canonical and exclusive creation path for clustered `hyperv.vm` resources since those epics shipped. Every promotion terminates with the `move_resource_to_cluster` step, which atomically relocates the resource from `stewards/<stewardID>` to `cluster-policies/<clusterName>` with a cluster-first write order (the cluster doc is written before the device doc is updated, so a mid-flight crash leaves the resource in both docs rather than neither; re-running the step completes the device-side removal without re-writing the cluster doc). There are no backlog scattered declarations to migrate: the fleet has been greenfield on this invariant since the epics shipped. Operators authoring clustered resources directly (outside the workflow) must use `cfg config upload` targeting `cluster-policies/<clusterName>` from the start — never the device-scope `stewards/<id>` path.
+
 ### Role-Policies Namespace (Issues #2543, #2546)
 
 The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward's DNA + controller-stored tags, and merges the fragments into the effective config after cluster-policies and before device config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb.
@@ -1235,4 +1239,14 @@ Do not conflate the two. `required_modules:` is a deployment-time cfg contract; 
 
 ### Purity guarantee
 
-`ResolveObserveModules` is a pure function — no I/O, no RPC, no side effects. Wiring the result into a steward-facing RPC (the observation pull path) is the responsibility of the sibling steward observation loop story.
+`ResolveObserveModules` is a pure function — no I/O, no RPC, no side effects. Wiring the result into a steward-facing command is done by the server's `handleObserveSweepRequest` handler (see below).
+
+### Tier-2 observe RPC (Issue #3104, ADR-024 Amendment 1)
+
+The observe-resolution path is triggered by the steward's Tier-2 convergence cycle:
+
+1. **Steward → Controller:** On every Nth convergence tick (N = the steward's `steward.observe_sweep_n` config key, default 10), the steward publishes `EventObserveSweepRequest` carrying its current baseline DNA attribute map in `Details["baseline_dna"]`.
+2. **Controller:** `handleObserveSweepRequest` in `features/controller/server/` receives the event, calls `ResolveObserveModules(baselineDNA, manifests)`, and — if any modules matched — sends `CommandObserveModules` back to the originating steward. The command's `params["modules"]` field carries a JSON array of `{name, kind}` specs.
+3. **Steward:** `handleObserveModules` receives the command, loads each module via the signed/trust-verified pull path, runs `Get()` read-only, and merges the resulting fragments into the existing DNA fragment set via `setCurrentDNAFragments`.
+
+If no modules match (empty resolution result), no command is sent — the steward's DNA update is skipped for that Tier-2 cycle. If the manifest provider is unavailable, the handler returns without sending a command (non-fatal).

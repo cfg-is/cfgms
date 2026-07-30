@@ -49,6 +49,167 @@ func TestRegistrationStore_SaveAndGet(t *testing.T) {
 	assert.Nil(t, got.ExpiresAt)
 }
 
+func TestRegistrationStore_GetTokenByID(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		Token:         "tok-byid",
+		ID:            "aaaaaaaa-0000-4000-8000-000000000001",
+		TenantID:      "tenant-1",
+		ControllerURL: "https://controller.example.com",
+		Group:         "servers",
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	got, err := store.GetTokenByID(ctx, token.ID)
+	require.NoError(t, err)
+	assert.Equal(t, token.Token, got.Token)
+	assert.Equal(t, token.ID, got.ID)
+	assert.Equal(t, token.TenantID, got.TenantID)
+	assert.Equal(t, token.Group, got.Group)
+
+	// GetToken must return the same id — the web UI reads it from list/get responses.
+	byToken, err := store.GetToken(ctx, token.Token)
+	require.NoError(t, err)
+	assert.Equal(t, token.ID, byToken.ID)
+}
+
+func TestRegistrationStore_GetTokenByID_NotFound(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		Token:         "tok-byid-nf",
+		ID:            "aaaaaaaa-0000-4000-8000-000000000002",
+		TenantID:      "tenant-1",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	for name, id := range map[string]string{
+		"unknown id":   "aaaaaaaa-0000-4000-8000-0000000000ff",
+		"empty id":     "",
+		"secret value": token.Token,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.GetTokenByID(ctx, id)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "not found")
+		})
+	}
+}
+
+func TestRegistrationStore_SaveToken_AssignsIDWhenMissing(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		Token:         "tok-no-id",
+		TenantID:      "tenant-1",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+	require.NotEmpty(t, token.ID, "SaveToken must assign an id when the caller supplies none")
+	assignedID := token.ID
+
+	byID, err := store.GetTokenByID(ctx, assignedID)
+	require.NoError(t, err)
+	assert.Equal(t, "tok-no-id", byID.Token)
+
+	// Re-saving the same token (upsert) must not reassign the id.
+	resaved := &business.RegistrationTokenData{
+		Token:         "tok-no-id",
+		TenantID:      "tenant-1",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, resaved))
+	assert.Equal(t, assignedID, resaved.ID, "token id must be stable across saves")
+
+	got, err := store.GetToken(ctx, "tok-no-id")
+	require.NoError(t, err)
+	assert.Equal(t, assignedID, got.ID)
+}
+
+func TestRegistrationStore_UpdateToken_PreservesID(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		Token:         "tok-upd-id",
+		TenantID:      "tenant-1",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+	id := token.ID
+	require.NotEmpty(t, id)
+
+	token.Revoke()
+	require.NoError(t, store.UpdateToken(ctx, token))
+
+	// A revoked token must still be addressable by id (delete-after-revoke from the UI).
+	got, err := store.GetTokenByID(ctx, id)
+	require.NoError(t, err)
+	assert.True(t, got.Revoked)
+	assert.Equal(t, id, got.ID)
+}
+
+func TestRegistrationStore_ListTokens_ReturnsIDs(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	for _, tok := range []*business.RegistrationTokenData{
+		{Token: "id-l-1", TenantID: "t-ids", ControllerURL: "https://c.example.com"},
+		{Token: "id-l-2", TenantID: "t-ids", ControllerURL: "https://c.example.com"},
+	} {
+		require.NoError(t, store.SaveToken(ctx, tok))
+	}
+
+	listed, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "t-ids"})
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+
+	seen := make(map[string]struct{}, len(listed))
+	for _, tok := range listed {
+		require.NotEmpty(t, tok.ID, "every listed token must carry its id")
+		_, dup := seen[tok.ID]
+		require.False(t, dup, "listed token ids must be distinct")
+		seen[tok.ID] = struct{}{}
+
+		byID, err := store.GetTokenByID(ctx, tok.ID)
+		require.NoError(t, err)
+		assert.Equal(t, tok.Token, byID.Token)
+	}
+}
+
+func TestRegistrationStore_RotateToken_AssignsID(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	seed := &business.RegistrationTokenData{
+		Token:         "rotate-id-seed",
+		TenantID:      "tenant-rotate-id",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+	}
+	require.NoError(t, store.SaveToken(ctx, seed))
+
+	rotated, err := store.RotateToken(ctx, "tenant-rotate-id", "prod")
+	require.NoError(t, err)
+	require.NotEmpty(t, rotated.ID)
+	assert.NotEqual(t, seed.ID, rotated.ID, "rotation must mint a new id")
+
+	got, err := store.GetTokenByID(ctx, rotated.ID)
+	require.NoError(t, err)
+	assert.Equal(t, rotated.Token, got.Token)
+	assert.True(t, got.IsValid())
+
+	// The rotated-away token stays addressable by its own id.
+	old, err := store.GetTokenByID(ctx, seed.ID)
+	require.NoError(t, err)
+	assert.True(t, old.Revoked)
+}
+
 func TestRegistrationStore_GetNotFound(t *testing.T) {
 	store := newRegistrationStore(t)
 	ctx := context.Background()

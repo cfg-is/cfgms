@@ -5,6 +5,7 @@ package interfaces
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -691,6 +692,9 @@ func (s *mockRegistrationTokenStore) SaveToken(_ context.Context, _ *business.Re
 }
 func (s *mockRegistrationTokenStore) GetToken(_ context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	return &business.RegistrationTokenData{Token: tokenStr, TenantID: "test-tenant"}, nil
+}
+func (s *mockRegistrationTokenStore) GetTokenByID(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
+	return nil, fmt.Errorf("registration token not found")
 }
 func (s *mockRegistrationTokenStore) UpdateToken(_ context.Context, _ *business.RegistrationTokenData) error {
 	return nil
