@@ -12,8 +12,11 @@ import (
 	"strings"
 	"testing"
 
+	wfpkg "github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestWorkflowRunCmd_MissingFile(t *testing.T) {
@@ -1016,4 +1019,32 @@ func TestWorkflowPromoteHVRoleCmd_RequiresExactlyTwoArgs(t *testing.T) {
 
 	err = workflowPromoteHVRoleCmd.Args(workflowPromoteHVRoleCmd, []string{"vmname", "selector"})
 	require.NoError(t, err)
+}
+
+// ---- promote-hv-role template validation -------------------------------------
+
+// TestPromoteHVRoleTemplate_PassesProductionValidation verifies the embedded
+// promote-hv-role template satisfies the exact constraints enforced by
+// validateGenericRequest (validation_middleware.go): charset:safe_text and
+// max_length:1024 on description, and ParseSemanticVersion on version.
+// Uses the production validator — not a hand-rolled approximation — per AC.
+func TestPromoteHVRoleTemplate_PassesProductionValidation(t *testing.T) {
+	var wrapper workflowFileWrapper
+	require.NoError(t, yaml.Unmarshal(promoteHVRoleTemplateData, &wrapper),
+		"embedded template must parse as valid YAML")
+
+	desc := wrapper.Workflow.Description
+
+	validator := security.NewValidator()
+	result := &security.ValidationResult{Valid: true}
+	validator.ValidateString(result, "body.description", desc, "charset:safe_text", "max_length:1024")
+
+	assert.True(t, result.Valid,
+		"description must pass charset:safe_text + max_length:1024 (validateGenericRequest): %v", result.Errors)
+	assert.LessOrEqual(t, len(desc), 1024,
+		"description must be at most 1024 characters (validateGenericRequest body.description)")
+
+	_, err := wfpkg.ParseSemanticVersion(wrapper.Workflow.Version)
+	assert.NoError(t, err,
+		"version %q must parse as semantic version N.N.N (ParseSemanticVersion)", wrapper.Workflow.Version)
 }
