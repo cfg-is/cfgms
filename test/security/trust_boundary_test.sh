@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 # Trust boundary regression test suite (Issue #1481)
 #
-# Asserts that CFGMS prompt-assembly paths do not ingest content from public
-# issue comments. Covers all 4 agent entry points:
-#   1. compose_issue_prompt  (entrypoint.sh issue mode)
-#   2. compose_branch_prompt (entrypoint.sh branch mode)
-#   3. acceptance-reviewer dispatch (spec must not call comment-fetch functions)
-#   4. acceptance-checker dispatch  (spec must not call comment-fetch functions)
+# Asserts that CFGMS prompt-assembly paths do not ingest public comment content
+# beyond the bounds each mode intentionally accepts. Covers all 4 entry points:
+#   1. compose_issue_prompt            (entrypoint.sh issue mode — no comment ingestion)
+#   2. compose_branch_prompt           (entrypoint.sh branch mode — no comment ingestion)
+#   3. compose_pr_fix_prompt           (entrypoint.sh fix-pr mode — bounded comment ingestion)
+#   4. compose_resolve_conflict_prompt (entrypoint.sh resolve-conflict — no comment ingestion)
+# Plus: acceptance-reviewer / acceptance-checker specs (no comment-fetch); ADR-015 birth state.
 #
 # Two assertion types:
-#   - Structural: awk-scoped grep of function bodies returns 0 ac_render_issue_comments
-#                 calls; spec files do not reference comment-fetching functions
+#   - Structural: awk-scoped grep of function bodies for prohibited or required calls;
+#                 spec files do not reference comment-fetching functions
 #   - Behavioral: entrypoint.sh --dry-run with a mock gh that injects SENTINEL into
-#                 issue comment responses; assembled prompt must not contain SENTINEL
+#                 issue and api comment responses; modes that exclude comments must not
+#                 contain SENTINEL; fix-pr mode (bounded ingestion) MUST contain it
 #
-# The mock gh is the key to making the sentinel check non-trivial: if any code
-# path calls `gh issue view --json comments`, the SENTINEL propagates into the
-# assembled prompt and the assert_not_contains assertion fails. On the correctly-
-# closed trust boundary, gh issue view is never called in issue/branch mode, so
-# SENTINEL cannot appear.
+# The mock gh is the key to making the sentinel checks non-trivial:
+# - assert_not_contains: if issue/branch/resolve-conflict mode calls gh issue view
+#   or gh api repos/.../issues/.../comments, SENTINEL propagates and the test fails.
+# - assert_contains: if fix-pr mode loses its comment ingestion, SENTINEL is absent
+#   and the test fails — detecting that the agent lost important context.
 #
 # Run: bash test/security/trust_boundary_test.sh
 set -euo pipefail
@@ -31,11 +33,12 @@ TESTS_PASSED=0
 TESTS_SKIPPED=0
 FAILURES=()
 
-# SENTINEL: injected into mock gh's issue-comment response.
-# A correctly-closed trust boundary never calls `gh issue view --json comments`
-# in issue/branch mode, so the sentinel must be absent from every assembled prompt.
-# If ac_render_issue_comments is re-introduced, gh issue view would be called,
-# the mock would return this sentinel, and the assert_not_contains check would fail.
+# SENTINEL: injected into mock gh's issue-comment and api comment responses.
+# issue/branch/resolve-conflict modes must exclude it from their assembled prompts.
+# fix-pr mode (compose_pr_fix_prompt) ingests comment content by design and MUST
+# include it — the assert_contains check confirms bounded ingestion is working.
+# Any regression that fetches public comment content in issue/branch/resolve-conflict
+# mode will propagate the sentinel and fail the assert_not_contains check.
 SENTINEL="TRUST_BOUNDARY_SENTINEL_NONMEMBER_xK7qp9zR"
 ITEM_BODY="TRUSTED_PROJECT_ITEM_BODY_pL4mNq8wX"
 
@@ -117,27 +120,69 @@ CREDS
 STUB
     chmod +x "$STUB_DIR/setup-env.sh"
 
-    # gh stub: injects SENTINEL into `gh issue view --json` responses so that
-    # any code path calling `gh issue view --json comments` propagates the sentinel
-    # into the assembled prompt. For `gh pr list` (branch mode PR detection),
-    # returns empty string so compose_branch_prompt sees no existing PR.
-    # This makes the assert_not_contains sentinel check non-trivial: a regression
-    # that re-introduces `gh issue view --json comments` into compose_issue_prompt
-    # or compose_branch_prompt would cause SENTINEL to appear in the prompt.
+    # gh stub: injects SENTINEL into issue-comment and api conversation-comment
+    # responses. Modes that must not ingest comments (issue/branch/resolve-conflict)
+    # will fail assert_not_contains if they call any of these paths. fix-pr mode
+    # calls both paths by design (bounded ingestion); its behavioral test uses
+    # assert_contains to verify the sentinel IS present.
+    # pr view returns minimal PR metadata for fix-pr/resolve-conflict mode testing.
+    # repo view returns the owner or name string matching the --json flag requested.
+    # The api case injects SENTINEL for repos/.../issues/.../comments — closing the
+    # sentinel-free catch-all that previously let ac_fetch_pr_conversation_comments
+    # regressions pass undetected.
     cat > "$STUB_DIR/gh" <<GHSTUB
 #!/usr/bin/env bash
-case "\$1 \$2" in
-    "issue view")
-        printf '{"title":"Test Issue","body":"issue body","labels":[],"comments":[{"author":{"login":"evil-attacker"},"body":"${SENTINEL}","createdAt":"2026-01-01T00:00:00Z"}]}\n'
+case "\$1" in
+    "issue")
+        case "\$2" in
+            "view")
+                printf '{"title":"Test Issue","body":"issue body","labels":[],"comments":[{"author":{"login":"evil-attacker"},"body":"${SENTINEL}","createdAt":"2026-01-01T00:00:00Z"}]}\n'
+                exit 0
+                ;;
+            *) echo "[]"; exit 0 ;;
+        esac
+        ;;
+    "pr")
+        case "\$2" in
+            "view")
+                # PR body references issue #999 so fix-pr mode extracts ISSUE_NUM=999
+                # and calls ac_fetch_issue_with_comments, propagating SENTINEL.
+                printf '{"number":99,"title":"Test PR","body":"Fixes #999","headRefName":"feature/story-999-test","reviews":[],"statusCheckRollup":[]}\n'
+                exit 0
+                ;;
+            "list") echo ""; exit 0 ;;
+            *)      echo "[]"; exit 0 ;;
+        esac
+        ;;
+    "repo")
+        # Return owner or name based on --json flag so downstream jq extracts work.
+        if printf '%s ' "\$@" | grep -q -- '--json owner'; then
+            printf 'test-owner\n'
+        elif printf '%s ' "\$@" | grep -q -- '--json name'; then
+            printf 'test-repo\n'
+        else
+            printf '{"owner":{"login":"test-owner"},"name":"test-repo"}\n'
+        fi
         exit 0
         ;;
-    "pr list")
-        echo ""
-        exit 0
-        ;;
-    "repo view")
-        printf '{"owner":{"login":"test-owner"},"name":"test-repo"}\n'
-        exit 0
+    "api")
+        # Inject SENTINEL into issue conversation-comment responses.
+        # ac_fetch_pr_conversation_comments calls:
+        #   gh api "repos/{owner}/{repo}/issues/{num}/comments"
+        # A regression that calls this path in issue/branch/resolve-conflict mode
+        # propagates SENTINEL into the assembled prompt — assert_not_contains catches it.
+        # In fix-pr mode, this path is called by design; assert_contains verifies it.
+        case "\$2" in
+            */issues/*/comments)
+                printf '[{"user":{"login":"evil-attacker"},"body":"${SENTINEL}","created_at":"2026-01-01T00:00:00Z"}]\n'
+                exit 0
+                ;;
+            "graphql")
+                printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}\n'
+                exit 0
+                ;;
+            *) echo "[]"; exit 0 ;;
+        esac
         ;;
     *)
         echo "[]"
@@ -239,6 +284,69 @@ test_structural_compose_branch_prompt() {
 }
 
 # ===========================================================================
+# STRUCTURAL TEST 3: compose_pr_fix_prompt — bounded comment ingestion
+# Verifies the function retains its expected ac_fetch + ac_render shape.
+# A change in the ingestion pattern is visible here so a reviewer can assess scope.
+# ===========================================================================
+test_structural_compose_pr_fix_prompt() {
+    echo ""
+    echo "--- Structural: compose_pr_fix_prompt has bounded comment ingestion ---"
+
+    local body
+    body=$(awk '/^compose_pr_fix_prompt/,/^}/' "$ENTRYPOINT")
+    if [[ -z "$body" ]]; then
+        _fail "compose_pr_fix_prompt structural: awk range matched nothing — function may have been renamed"
+        return
+    fi
+
+    # compose_pr_fix_prompt calls ac_fetch_issue_with_comments to include the linked
+    # issue (including its comments) for context. The call must be present — any
+    # removal would silently change the scope of what the fix agent sees.
+    local fetch_count
+    fetch_count=$(printf '%s' "$body" | grep -c "ac_fetch_issue_with_comments" || true)
+    if [[ "$fetch_count" -gt 0 ]]; then
+        _pass "compose_pr_fix_prompt: calls ac_fetch_issue_with_comments (linked issue ingestion path confirmed)"
+    else
+        _fail "compose_pr_fix_prompt: no ac_fetch_issue_with_comments call — linked issue ingestion path may have changed"
+    fi
+
+    # Comment content must reach the prompt via ac_render_* functions, not raw printf.
+    # Render functions apply controlled formatting; a new raw-printf ingestion path
+    # is structurally distinct and should be visible in this check.
+    local render_count
+    render_count=$(printf '%s' "$body" | grep -c "ac_render_" || true)
+    if [[ "$render_count" -gt 0 ]]; then
+        _pass "compose_pr_fix_prompt: uses ac_render_* functions for comment rendering (bounded ingestion)"
+    else
+        _fail "compose_pr_fix_prompt: no ac_render_* calls — comment content may reach prompt outside controlled rendering"
+    fi
+}
+
+# ===========================================================================
+# STRUCTURAL TEST 4: compose_resolve_conflict_prompt — no comment ingestion
+# Conflict resolution needs only PR metadata (title, branch, conflict context).
+# Comment ingestion is out of scope and must stay absent.
+# ===========================================================================
+test_structural_compose_resolve_conflict_prompt() {
+    echo ""
+    echo "--- Structural: compose_resolve_conflict_prompt has no comment ingestion ---"
+
+    local body
+    body=$(awk '/^compose_resolve_conflict_prompt/,/^}/' "$ENTRYPOINT")
+    if [[ -z "$body" ]]; then
+        _fail "compose_resolve_conflict_prompt structural: awk range matched nothing — function may have been renamed"
+        return
+    fi
+
+    local count
+    count=$(printf '%s' "$body" | \
+        grep -cE "ac_fetch_issue_with_comments|ac_render_issue_comments|ac_fetch_pr_conversation_comments" \
+        || true)
+    assert_eq "$count" "0" \
+        "compose_resolve_conflict_prompt: no comment-fetch or issue-comment-render calls (conflict resolution needs no comment content)"
+}
+
+# ===========================================================================
 # REGRESSION TEST (AC2): structural check must fail when compose_issue_prompt is
 # renamed while its body still calls ac_render_issue_comments.
 #
@@ -327,6 +435,70 @@ test_structural_agent_specs() {
 }
 
 # ===========================================================================
+# STRUCTURAL TEST (AC 4): ADR-015 birth state — create-story produces locked
+# internal issues via the materialize (convert) path, never raw gh issue create.
+# The lock prevents public comment injection; the internal label keeps pipeline
+# work private. These controls must both be present at materialization.
+# ===========================================================================
+test_structural_adr015_birth_state() {
+    echo ""
+    echo "--- Structural: ADR-015 birth state — create-story produces locked internal issues (AC 4) ---"
+
+    local ph_script="$REPO_ROOT/scripts/pipeline-helper.sh"
+    if [[ ! -f "$ph_script" ]]; then
+        _fail "ADR-015: scripts/pipeline-helper.sh not found"
+        return
+    fi
+
+    # Extract the create-story case arm body up to its CREATED_ISSUE success echo.
+    local create_story_body
+    create_story_body=$(awk '/^  create-story\)$/,/CREATED_ISSUE/' "$ph_script" | head -80)
+    if [[ -z "$create_story_body" ]]; then
+        _fail "ADR-015: could not extract create-story body — awk range matched nothing (function renamed?)"
+        return
+    fi
+
+    # Structural check 1: create-story must invoke materialize-issue.
+    # The materialize path uses CONVERT so the issue is locked at creation (ADR-015).
+    # Positive assertion: if the CONVERT path is present, raw creation is absent.
+    local mat_count
+    mat_count=$(printf '%s' "$create_story_body" | grep -c "materialize-issue" || true)
+    if [[ "$mat_count" -gt 0 ]]; then
+        _pass "ADR-015: create-story invokes materialize-issue (stories born via convert path)"
+    else
+        _fail "ADR-015: create-story does not invoke materialize-issue — birth state controls (locked + internal) not applied"
+    fi
+
+    # Extract the materialize-issue case arm body up to its MATERIALIZED success echo.
+    local mat_body
+    mat_body=$(awk '/^  materialize-issue\)$/,/MATERIALIZED/' "$ph_script" | head -80)
+    if [[ -z "$mat_body" ]]; then
+        _fail "ADR-015: could not extract materialize-issue body — awk range matched nothing"
+        return
+    fi
+
+    # Structural check 2: materialize-issue calls project-queue.sh materialize.
+    # project-queue.sh materialize is the CONVERT step that locks the issue at creation.
+    local lock_step_count
+    lock_step_count=$(printf '%s' "$mat_body" | grep -cE 'PROJECT_QUEUE.*materialize|materialize.*item_id' || true)
+    if [[ "$lock_step_count" -gt 0 ]]; then
+        _pass "ADR-015: materialize-issue calls project-queue.sh materialize (the lock-at-creation step)"
+    else
+        _fail "ADR-015: materialize-issue does not call project-queue.sh materialize — locking step may be missing"
+    fi
+
+    # Structural check 3: materialize-issue must apply the 'internal' label.
+    # All pipeline issues must be born internal regardless of how they were deferred.
+    local internal_count
+    internal_count=$(printf '%s' "$mat_body" | grep -c '"internal' || true)
+    if [[ "$internal_count" -gt 0 ]]; then
+        _pass "ADR-015: materialize-issue applies 'internal' label (all pipeline issues born internal)"
+    else
+        _fail "ADR-015: materialize-issue does not apply 'internal' label — ADR-015 birth state not enforced"
+    fi
+}
+
+# ===========================================================================
 # BEHAVIORAL TEST 1: compose_issue_prompt
 # Mock gh injects SENTINEL into issue comment responses.
 # If ac_render_issue_comments were called, SENTINEL would appear in the prompt.
@@ -380,6 +552,57 @@ test_behavioral_branch_mode() {
 }
 
 # ===========================================================================
+# BEHAVIORAL TEST 3: compose_pr_fix_prompt (AC 1)
+# fix-pr mode ingests comment content by design. Mock gh injects SENTINEL into
+# both issue-comment (gh issue view) and api comment (repos/.../issues/.../comments)
+# responses. The prompt MUST contain SENTINEL — absence means the ingestion path
+# broke and the fix agent would lack review context.
+# ===========================================================================
+test_behavioral_fix_pr_mode() {
+    echo ""
+    echo "--- Behavioral: compose_pr_fix_prompt (fix-pr mode --dry-run) ---"
+
+    setup_stubs
+
+    local output exit_code=0
+    output=$(run_entrypoint_dry_run --fix-pr 99) || exit_code=$?
+
+    assert_eq "$exit_code" "0" \
+        "fix-pr mode: entrypoint.sh --dry-run exits 0"
+    # fix-pr mode ingests PR conversation comments and linked issue comments by design.
+    # SENTINEL appears via ac_render_conversation_comments and ac_render_linked_issue.
+    # Absence of SENTINEL would mean the ingestion path is broken.
+    assert_contains "$output" "$SENTINEL" \
+        "fix-pr mode: assembled prompt contains comment content (bounded ingestion confirmed — AC 1)"
+
+    teardown_stubs
+}
+
+# ===========================================================================
+# BEHAVIORAL TEST 4: compose_resolve_conflict_prompt (AC 1)
+# resolve-conflict mode needs only PR metadata to rebase — no comment ingestion.
+# SENTINEL must not appear in the assembled prompt.
+# ===========================================================================
+test_behavioral_resolve_conflict_mode() {
+    echo ""
+    echo "--- Behavioral: compose_resolve_conflict_prompt (resolve-conflict mode --dry-run) ---"
+
+    setup_stubs
+
+    local output exit_code=0
+    output=$(run_entrypoint_dry_run --resolve-conflict 99) || exit_code=$?
+
+    assert_eq "$exit_code" "0" \
+        "resolve-conflict mode: entrypoint.sh --dry-run exits 0"
+    # resolve-conflict fetches only PR metadata (title, branch). No comment content
+    # is ingested. SENTINEL must not appear.
+    assert_not_contains "$output" "$SENTINEL" \
+        "resolve-conflict mode: assembled prompt excludes comment sentinel (no comment ingestion — AC 1)"
+
+    teardown_stubs
+}
+
+# ===========================================================================
 # ERROR PATH TEST: project-queue.sh failure exits non-zero, no partial prompt
 # ===========================================================================
 test_error_path_project_queue_failure() {
@@ -422,6 +645,103 @@ test_regression_comment_render_absent_from_entrypoint() {
     count=$(grep -c "ac_render_issue_comments" "$ENTRYPOINT" || true)
     assert_eq "$count" "0" \
         "regression: ac_render_issue_comments has zero invocations in entrypoint.sh (AC 4)"
+}
+
+# ===========================================================================
+# REGRESSION TEST (AC 2): fetch-plus-printf path detected by behavioral SENTINEL guard
+#
+# The name-keyed structural guard (grep for ac_render_issue_comments) is a fast
+# supplement but decays on rename. This test proves the behavioural SENTINEL check
+# is the durable control: a regression that fetches comments via
+# ac_fetch_issue_with_comments and inlines them via printf (NOT ac_render_issue_comments)
+# is detected by SENTINEL propagating into the prompt, not by a function-name grep.
+# ===========================================================================
+test_regression_fetch_plus_printf_detected() {
+    echo ""
+    echo "--- Regression (AC 2): fetch-plus-printf path detected by behavioral SENTINEL guard ---"
+
+    local fixture
+    fixture=$(mktemp)
+    trap 'rm -f "$fixture"' RETURN
+
+    # Fixture: compose_issue_prompt fetches comment text via gh issue view --json comments
+    # and inlines it via printf — NOT via ac_render_issue_comments. The name-keyed
+    # structural guard (grep for ac_render_issue_comments) would not fire on this.
+    cat > "$fixture" <<'FIXTURE'
+#!/usr/bin/env bash
+ISSUE_NUM="999"
+result=$(gh issue view "$ISSUE_NUM" --json title,body,labels,comments 2>/dev/null || echo '{}')
+comment_text=$(printf '%s' "$result" | python3 -c \
+    'import json,sys; d=json.load(sys.stdin); c=d.get("comments",[]); print(c[0]["body"] if c else "")' \
+    2>/dev/null || true)
+printf '=== DRY RUN: Mode=issue ===\nProject item body\n%s\n' "$comment_text"
+FIXTURE
+    chmod +x "$fixture"
+
+    setup_stubs
+    local output
+    output=$(PATH="$STUB_DIR:$ORIGINAL_PATH" bash "$fixture" 2>&1 || true)
+    teardown_stubs
+
+    # The name-keyed guard misses this — the fixture never calls ac_render_issue_comments.
+    # The behavioural SENTINEL check must catch it: the stub injects SENTINEL into
+    # gh issue view responses, so the inline printf propagates it into the output.
+    if [[ "$output" == *"$SENTINEL"* ]]; then
+        _pass "regression AC2: fetch-plus-printf regression detected by behavioral SENTINEL guard"
+    else
+        _fail "regression AC2: fetch-plus-printf regression NOT detected — SENTINEL did not appear; behavioral guard is ineffective"
+    fi
+
+    # Confirm the name-keyed guard cannot catch this regression (validates the premise).
+    local renderer_count
+    renderer_count=$(grep -c "ac_render_issue_comments" "$fixture" || true)
+    if [[ "$renderer_count" -eq 0 ]]; then
+        _pass "regression AC2: fixture bypasses name-keyed guard (no ac_render_issue_comments — behavioral guard's unique value confirmed)"
+    else
+        _fail "regression AC2: fixture accidentally uses ac_render_issue_comments — not testing the fetch-plus-printf bypass"
+    fi
+}
+
+# ===========================================================================
+# REGRESSION TEST (AC 3): gh api conversation-comments path returns SENTINEL
+#
+# Previously the stub catch-all returned [] for any unrecognised gh subcommand,
+# including 'gh api repos/.../issues/.../comments'. A regression that called
+# ac_fetch_pr_conversation_comments in issue/branch mode would receive sentinel-
+# free JSON from the catch-all and the assert_not_contains test would pass — the
+# regression would be undetected. The fixed stub injects SENTINEL for this path.
+# ===========================================================================
+test_regression_api_catch_all_sentinel() {
+    echo ""
+    echo "--- Regression (AC 3): gh api conversation-comments path returns SENTINEL ---"
+
+    local fixture
+    fixture=$(mktemp)
+    trap 'rm -f "$fixture"' RETURN
+
+    # Fixture: simulates a regression where compose_issue_prompt calls
+    # ac_fetch_pr_conversation_comments (gh api repos/.../issues/.../comments)
+    # and inlines the result — the path the old sentinel-free catch-all would hide.
+    cat > "$fixture" <<'FIXTURE'
+#!/usr/bin/env bash
+result=$(gh api "repos/test-owner/test-repo/issues/999/comments" 2>/dev/null || echo '[]')
+comment_text=$(printf '%s' "$result" | python3 -c \
+    'import json,sys; d=json.load(sys.stdin); print(d[0]["body"] if d else "")' \
+    2>/dev/null || true)
+printf '=== DRY RUN: Mode=issue ===\nProject item body\n%s\n' "$comment_text"
+FIXTURE
+    chmod +x "$fixture"
+
+    setup_stubs
+    local output
+    output=$(PATH="$STUB_DIR:$ORIGINAL_PATH" bash "$fixture" 2>&1 || true)
+    teardown_stubs
+
+    if [[ "$output" == *"$SENTINEL"* ]]; then
+        _pass "regression AC3: gh api conversation-comments path returns SENTINEL — no longer sentinel-free catch-all (AC 3)"
+    else
+        _fail "regression AC3: gh api conversation-comments path returned sentinel-free response — catch-all still allows regression to pass undetected"
+    fi
 }
 
 # ===========================================================================
@@ -1077,12 +1397,19 @@ echo "Entrypoint: $ENTRYPOINT"
 
 test_structural_compose_issue_prompt
 test_structural_compose_branch_prompt
+test_structural_compose_pr_fix_prompt
+test_structural_compose_resolve_conflict_prompt
 test_structural_renamed_function_regression
 test_structural_agent_specs
+test_structural_adr015_birth_state
 test_behavioral_issue_mode
 test_behavioral_branch_mode
+test_behavioral_fix_pr_mode
+test_behavioral_resolve_conflict_mode
 test_error_path_project_queue_failure
 test_regression_comment_render_absent_from_entrypoint
+test_regression_fetch_plus_printf_detected
+test_regression_api_catch_all_sentinel
 test_project_queue_integration
 test_phase2_lifecycle
 test_phase2_trap_demotes_before_delete
