@@ -260,6 +260,85 @@ describe('apiFetch', () => {
     expect(result.status).toBe(401)
     expect(expired).not.toHaveBeenCalled()
   })
+
+  // ── Concurrent step-up dedup (Story #2967) ────────────────────────────────
+
+  it('concurrent CFGMS-StepUp 401s deduplicate: only one ceremony runs', async () => {
+    const stepUp = vi.fn(async () => jsonResponse(200, { ok: true }))
+    onStepUpRequired(stepUp)
+
+    const makeStepUp401 = () =>
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' },
+      })
+
+    // First two fetches (initial requests) return 401; the dedup retry returns 200.
+    fetchMock
+      .mockResolvedValueOnce(makeStepUp401())
+      .mockResolvedValueOnce(makeStepUp401())
+      .mockResolvedValue(jsonResponse(200, {}))
+
+    const [r1, r2] = await Promise.all([
+      apiFetch('/api/v1/stewards'),
+      apiFetch('/api/v1/fleet'),
+    ])
+
+    // The step-up listener must be called exactly once (not twice).
+    expect(stepUp).toHaveBeenCalledTimes(1)
+    // r1 gets the listener's response; r2 gets the dedup-retry response.
+    expect(r1.status).toBe(200)
+    expect(r2.status).toBe(200)
+  })
+
+  it('deduplicated concurrent request re-attaches CSRF on its retry', async () => {
+    document.cookie = 'cfgms_csrf=dedup-csrf-tok; path=/'
+
+    // Use a deferred promise so we can resolve the ceremony after both requests start.
+    let resolveCeremony!: (r: Response | null) => void
+    const ceremonyPromise = new Promise<Response | null>((r) => { resolveCeremony = r })
+    onStepUpRequired(() => ceremonyPromise)
+
+    const makeStepUp401 = () =>
+      new Response(JSON.stringify({}), {
+        status: 401,
+        headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' },
+      })
+
+    // Initial fetches return 401; the dedup retry for the second caller returns 200.
+    fetchMock
+      .mockResolvedValueOnce(makeStepUp401())
+      .mockResolvedValueOnce(makeStepUp401())
+      .mockResolvedValue(jsonResponse(200, {}))
+
+    // Start both concurrent requests.
+    const p1 = apiFetch('/api/v1/stewards', { method: 'POST' })
+    const p2 = apiFetch('/api/v1/fleet', { method: 'DELETE' })
+
+    // Yield so both initial fetches complete and r2 is waiting for the ceremony.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Resolve the ceremony (r1 receives this response).
+    resolveCeremony(jsonResponse(200, { ok: true }))
+
+    const [r1, r2] = await Promise.all([p1, p2])
+    expect(r1.status).toBe(200)
+    expect(r2.status).toBe(200)
+
+    // The dedup retry (for DELETE /api/v1/fleet) must carry CSRF.
+    const dedupeRetry = fetchMock.mock.calls.find(
+      ([url]) => String(url).includes('/api/v1/fleet') &&
+        new Headers(fetchMock.mock.calls.find(([u]) => String(u).includes('/api/v1/fleet'))?.[1]?.headers)
+          .get('X-CSRF-Token') !== null,
+    )
+    // More direct: the last fleet fetch call should carry CSRF.
+    const fleetCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/api/v1/fleet'))
+    expect(fleetCalls.length).toBeGreaterThanOrEqual(1)
+    const lastFleetHeaders = new Headers(fleetCalls.at(-1)?.[1]?.headers)
+    expect(lastFleetHeaders.get('X-CSRF-Token')).toBe('dedup-csrf-tok')
+    void dedupeRetry
+  })
 })
 
 describe('loginRequest', () => {

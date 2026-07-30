@@ -377,6 +377,221 @@ describe('StepUpModal — retry', () => {
   })
 })
 
+// ── Elevation path (presenceRequired: false) ──────────────────────────────────
+
+const elevationRequest: StepUpRequest = {
+  path: '/api/v1/web/accounts/admin/delete',
+  init: { method: 'DELETE' },
+  presenceRequired: false,
+}
+
+describe('StepUpModal — elevation path (presenceRequired: false)', () => {
+  it('calls elevate/begin (not presence/begin) when presenceRequired is false', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername="admin@msp-a"
+        onSuccess={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    const beginCalls = fetchMock.mock.calls.map(([u]) => String(u))
+    expect(beginCalls.some((u) => u.includes('elevate/begin'))).toBe(true)
+    expect(beginCalls.some((u) => u.includes('presence/begin'))).toBe(false)
+  })
+
+  it('calls elevate/finish (not presence/finish) and completes ceremony', async () => {
+    const mockCred = makePublicKeyCredential()
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(mockCred) },
+    })
+
+    const retryResponse = jsonResponse(200, { ok: true })
+    fetchMock.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/finish')) {
+        return Promise.resolve(
+          jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }),
+        )
+      }
+      return Promise.resolve(retryResponse)
+    })
+
+    const onSuccess = vi.fn()
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername="admin@msp-a"
+        onSuccess={onSuccess}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    act(() => screen.getByTestId('step-up-verify-btn').click())
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1))
+
+    const finishCalls = fetchMock.mock.calls.map(([u]) => String(u))
+    expect(finishCalls.some((u) => u.includes('elevate/finish'))).toBe(true)
+    expect(finishCalls.some((u) => u.includes('presence/finish'))).toBe(false)
+  })
+
+  it('does NOT attach X-Presence-Token on the retry for elevation path', async () => {
+    const mockCred = makePublicKeyCredential()
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(mockCred) },
+    })
+
+    fetchMock.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/finish')) {
+        return Promise.resolve(
+          jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }),
+        )
+      }
+      return Promise.resolve(jsonResponse(200, {}))
+    })
+
+    const onSuccess = vi.fn()
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername={null}
+        onSuccess={onSuccess}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    act(() => screen.getByTestId('step-up-verify-btn').click())
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1))
+
+    const retryCalls = fetchMock.mock.calls.filter(
+      ([u]) =>
+        !String(u).includes('elevate/begin') && !String(u).includes('elevate/finish'),
+    )
+    expect(retryCalls.length).toBe(1)
+    const retryHeaders = new Headers(retryCalls[0]?.[1]?.headers)
+    expect(retryHeaders.get('X-Presence-Token')).toBeNull()
+  })
+
+  it('re-attaches X-CSRF-Token on the elevation retry for unsafe methods', async () => {
+    // Set a CSRF cookie readable by the modal's readSessionCsrf().
+    document.cookie = 'cfgms_csrf=csrf-tok-elevate; path=/'
+
+    const mockCred = makePublicKeyCredential()
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(mockCred) },
+    })
+
+    fetchMock.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/finish')) {
+        return Promise.resolve(
+          jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }),
+        )
+      }
+      return Promise.resolve(jsonResponse(200, {}))
+    })
+
+    const onSuccess = vi.fn()
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername={null}
+        onSuccess={onSuccess}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    act(() => screen.getByTestId('step-up-verify-btn').click())
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1))
+
+    const retryCalls = fetchMock.mock.calls.filter(
+      ([u]) =>
+        !String(u).includes('elevate/begin') && !String(u).includes('elevate/finish'),
+    )
+    expect(retryCalls.length).toBe(1)
+    const retryHeaders = new Headers(retryCalls[0]?.[1]?.headers)
+    expect(retryHeaders.get('X-CSRF-Token')).toBe('csrf-tok-elevate')
+  })
+
+  it('shows error when elevate/begin fails', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(503, { error: 'WEBAUTHN_NOT_CONFIGURED' }))
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername={null}
+        onSuccess={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('step-up-error')).toBeInTheDocument())
+    expect(screen.getByTestId('step-up-retry-btn')).toBeInTheDocument()
+  })
+
+  it('shows error when elevate/finish fails', async () => {
+    const mockCred = makePublicKeyCredential()
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(mockCred) },
+    })
+
+    fetchMock.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/finish')) return Promise.resolve(jsonResponse(400, { error: 'WEBAUTHN_VERIFY_ERROR' }))
+      return Promise.resolve(jsonResponse(200, {}))
+    })
+
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername={null}
+        onSuccess={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    act(() => screen.getByTestId('step-up-verify-btn').click())
+
+    await waitFor(() =>
+      expect(screen.getByTestId('step-up-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('step-up-retry-btn')).toBeInTheDocument()
+  })
+
+  it('calls elevate/begin again on retry after elevate/begin failure', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(503, { error: 'WEBAUTHN_NOT_CONFIGURED' }))
+      .mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+
+    render(
+      <StepUpModal
+        request={elevationRequest}
+        principalUsername={null}
+        onSuccess={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => screen.getByTestId('step-up-retry-btn'))
+    act(() => screen.getByTestId('step-up-retry-btn').click())
+
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    const elevateCalls = fetchMock.mock.calls.filter(([u]) =>
+      String(u).includes('elevate/begin'),
+    )
+    expect(elevateCalls.length).toBe(2)
+  })
+})
+
 // ── Accessibility: no click-outside dismissal ─────────────────────────────────
 
 describe('StepUpModal — security constraints', () => {

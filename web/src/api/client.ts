@@ -92,7 +92,18 @@ let stepUpRequiredListener: StepUpRequiredListener | null = null
  */
 export function onStepUpRequired(listener: StepUpRequiredListener | null): void {
   stepUpRequiredListener = listener
+  if (listener === null) {
+    // Clear any dangling in-progress slot when the provider unmounts.
+    stepUpCeremonyDone = null
+  }
 }
+
+// Concurrent step-up deduplication (Story #2967, ADR-021 Decision 6).
+// If two requests from the same tab simultaneously receive a CFGMS-StepUp 401,
+// only the first starts the ceremony. Subsequent callers wait for it to finish,
+// then retry with a fresh CSRF header. Resolves once the ceremony completes
+// (regardless of success/failure) so waiters can attempt one more retry.
+let stepUpCeremonyDone: Promise<void> | null = null
 
 /**
  * Fetch wrapper for all cookie-authenticated API calls.
@@ -123,15 +134,39 @@ export async function apiFetch(
       // Step-up challenge: NEVER fire session-expired regardless of listener state.
       // A CFGMS-StepUp 401 means the operator's session is intact but needs a
       // higher assurance proof — the operator is NOT signed out (ADR-021 Decision 6).
+
+      // Concurrent dedup: a ceremony is already running from another simultaneous
+      // request in this tab. Wait for it to finish, then retry this request once
+      // with a fresh CSRF header. Cap: if the retry is STILL a 401, return it
+      // directly — never start a second ceremony for the same original request.
+      if (stepUpCeremonyDone !== null) {
+        await stepUpCeremonyDone
+        const dedupeHeaders = new Headers(headers)
+        if (UNSAFE_METHODS.has(method)) {
+          const freshCsrf = readCookie(csrfCookieSession)
+          if (freshCsrf !== null) dedupeHeaders.set(csrfHeader, freshCsrf)
+        }
+        return fetch(path, { ...init, headers: dedupeHeaders, credentials: 'same-origin' })
+      }
+
       if (stepUpRequiredListener !== null) {
-        const retryResponse = await stepUpRequiredListener({
-          path,
-          init,
-          presenceRequired: wwwAuth.includes('presence="required"'),
-        })
-        // Listener resolves with the retry response (success) or null (cancel/failure).
-        // On null: return the original 401 — caller sees the failure; session stays intact.
-        return retryResponse ?? response
+        // Claim the in-progress slot before awaiting so concurrent 401s see it.
+        let ceremonyDone!: () => void
+        stepUpCeremonyDone = new Promise<void>((r) => { ceremonyDone = r })
+        try {
+          const retryResponse = await stepUpRequiredListener({
+            path,
+            init,
+            presenceRequired: wwwAuth.includes('presence="required"'),
+          })
+          // Cap: return whatever the listener resolved (including a failed 401) —
+          // never re-enter the step-up handler for this apiFetch call.
+          return retryResponse ?? response
+        } finally {
+          // Signal waiters before clearing the slot so they see the resolved promise.
+          stepUpCeremonyDone = null
+          ceremonyDone()
+        }
       }
       // No listener registered: return the 401 without firing session-expired.
       return response
