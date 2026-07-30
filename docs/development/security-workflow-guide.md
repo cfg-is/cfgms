@@ -218,6 +218,57 @@ Populate this file after the first manual run reveals the alert baseline. Only s
 4. Confirmed false positives specific to CI surface → add an IGNORE entry in `.zap/rules.tsv` with a comment explaining why.
 5. Suppress nothing blindly — every entry in `rules.tsv` must have a justification comment.
 
+### 9. Snyk & SonarCloud — Tool Evaluation
+
+This section records the explicit keep/drop decision for Snyk and SonarCloud, evaluated against
+the security tooling stack already running in CI (§§1–8 above). The evaluation answers the
+acceptance criterion originally scoped in Issue #2930 and landed via Issue #3083.
+
+#### Snyk — Decision: DROP
+
+- **Purpose**: Developer-first SCA (Software Composition Analysis) platform combining CVE scanning
+  of dependencies (`snyk test`), container image scanning (`snyk container test`), and SAST
+  (`snyk code test`).
+- **Unique coverage over the existing stack**: Minimal.
+  - CVE / dependency scanning: Trivy (§1) already scans the filesystem for CRITICAL/HIGH CVEs and
+    is a blocking PR gate; Nancy (§2) specifically targets Go module vulnerabilities using OSV
+    data. Snyk's SCA surface is a subset of what Trivy + Nancy already cover.
+  - Container image scanning: Trivy (`--scanners vuln`) covers Docker images; the
+    `security-deployment-gate` already runs Trivy with `--exit-code 1` in `production-gates.yml`.
+  - SAST (`snyk code`): pattern-based; CodeQL (§5) provides deeper whole-program data-flow /
+    taint-tracking analysis for the same vulnerability classes (path-injection, log-injection,
+    clear-text logging). gosec (§3) covers Go-specific security anti-patterns. Snyk Code would be
+    a weaker, overlapping signal with no gap to fill.
+- **Operational cost**: new `SNYK_TOKEN` organization secret required; new CI job to maintain;
+  SaaS dependency; paid tier required for private repositories beyond the OSS free quota.
+- **Decision: DROP.** The existing Trivy + Nancy + gosec + CodeQL stack covers Snyk's entire scope
+  with a blocking gate (Trivy) and deeper semantic analysis (CodeQL). Adding Snyk would increase
+  operational surface and introduce a SaaS dependency without adding unique detection capability.
+
+#### SonarCloud — Decision: DROP
+
+- **Purpose**: Cloud-based code quality and security analysis platform offering quality rules,
+  security hotspot detection, and taint-flow analysis across Go and TypeScript in a unified
+  dashboard.
+- **Unique coverage over the existing stack**: Marginal.
+  - Go quality and security rules: staticcheck (§4) covers 47 categories of code quality and
+    correctness; gosec (§3) covers Go security anti-patterns. SonarCloud's Go ruleset is largely a
+    subset of what these two tools already report.
+  - TypeScript security analysis: CodeQL (§5) was extended to TypeScript during Issue #2930
+    (`language: ['go', 'typescript']`), providing deep data-flow analysis for the SPA. The lint
+    gate also runs `eslint-plugin-security` for pattern-based TypeScript security checks.
+  - Multi-language unified dashboard: provides a single-pane view, but all gate results are already
+    visible in the GitHub Security tab via SARIF (Trivy, gosec, CodeQL all upload SARIF). The
+    incremental value of a separate SonarCloud dashboard is low in the solo-dev model.
+- **Operational cost**: new `SONAR_TOKEN` organization secret required; new CI job to maintain;
+  paid tier required for private repositories (the free SonarCloud tier is OSS/public-repo only;
+  CFGMS is AGPL-3.0 but the repository is private); multi-language scan setup adds maintenance
+  complexity.
+- **Decision: DROP.** The existing staticcheck + gosec + CodeQL (Go + TypeScript) + eslint-plugin-security
+  stack covers SonarCloud's scope. The unified-dashboard benefit is not material given SARIF already
+  surfaces all findings in the GitHub Security tab. Operational cost (new secret, new CI job, paid
+  subscription for private repo) is not justified by the marginal incremental coverage.
+
 ## Local Development Workflow
 
 ### Prerequisites
