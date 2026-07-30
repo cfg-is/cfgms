@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -208,16 +207,6 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.writeSuccessResponse(w, certificates)
-}
-
-// isWithinTenantScope reports whether targetTenant falls within callerTenant's
-// subtree. Returns true when callerTenant is empty (unscoped admin), when both
-// are equal, or when targetTenant is a descendant (starts with callerTenant+"/").
-func isWithinTenantScope(callerTenant, targetTenant string) bool {
-	if callerTenant == "" {
-		return true
-	}
-	return targetTenant == callerTenant || strings.HasPrefix(targetTenant, callerTenant+"/")
 }
 
 // filterCertsByTenantScope keeps only the certificates a caller scoped to
