@@ -12,6 +12,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ObservePredicate is a single dumb fact-match predicate inside observe_when.
+// Exactly one of Equals or Contains must be set; both or neither is a parse error.
+// Multiple predicates in observe_when are OR'd: any one matching activates the module
+// for read-only DNA observation (ADR-024 Decision §2).
+type ObservePredicate struct {
+	// Fact is the baseline DNA fact key to match against (e.g. "windows_feature", "os").
+	Fact string `yaml:"fact" json:"fact"`
+	// Equals requires an exact string match of the fact value. Mutually exclusive with Contains.
+	Equals string `yaml:"equals,omitempty" json:"equals,omitempty"`
+	// Contains requires the fact value to contain this substring. Mutually exclusive with Equals.
+	Contains string `yaml:"contains,omitempty" json:"contains,omitempty"`
+}
+
 // OwnershipDeclaration records a single object-identity namespace that a module
 // authoritatively owns, per ADR-016 clause 5. When a module declares ownership
 // of a kind, it owns every object of that kind it manages — the entire DNA
@@ -73,6 +86,14 @@ type ModuleMetadata struct {
 	// this module declares no ownership — backward-compatible with all existing
 	// module.yaml files that predate this field.
 	Owns []OwnershipDeclaration `yaml:"owns,omitempty" json:"owns,omitempty"`
+
+	// ObserveWhen is a list of dumb fact-match predicates that activate this module
+	// for read-only DNA observation (ADR-024 Decision §2). Each predicate specifies
+	// a baseline DNA fact key and an equals/contains match value; predicates are OR'd
+	// so any one matching activates observation. Optional; nil means this module is
+	// never auto-pulled for DNA — backward-compatible with all existing module.yaml
+	// files that predate this field.
+	ObserveWhen []ObservePredicate `yaml:"observe_when,omitempty" json:"observe_when,omitempty"`
 }
 
 // BehavioralEnvelope documents the runtime behavior of a module for security auditing
@@ -172,6 +193,11 @@ func ParseModuleMetadata(reader io.Reader) (*ModuleMetadata, error) {
 		}
 	}
 
+	// Validate observe_when predicates
+	if err := validateObserveWhen(metadata.ObserveWhen); err != nil {
+		return nil, err
+	}
+
 	return &metadata, nil
 }
 
@@ -269,6 +295,28 @@ func (m *ModuleMetadata) Validate() error {
 		}
 	}
 
+	// Validate observe_when predicates
+	if err := validateObserveWhen(m.ObserveWhen); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateObserveWhen rejects malformed ObservePredicate entries: missing fact,
+// both equals+contains set, or neither set.
+func validateObserveWhen(predicates []ObservePredicate) error {
+	for i, p := range predicates {
+		if p.Fact == "" {
+			return fmt.Errorf("observe_when[%d]: fact is required", i)
+		}
+		if p.Equals != "" && p.Contains != "" {
+			return fmt.Errorf("observe_when[%d] (fact=%q): equals and contains are mutually exclusive; set exactly one", i, p.Fact)
+		}
+		if p.Equals == "" && p.Contains == "" {
+			return fmt.Errorf("observe_when[%d] (fact=%q): one of equals or contains is required", i, p.Fact)
+		}
+	}
 	return nil
 }
 
@@ -443,6 +491,12 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 				copy(clone.Owns[i].RequiredFields, o.RequiredFields)
 			}
 		}
+	}
+
+	// Deep copy observe_when predicates (each entry has only string fields — copy is safe)
+	if m.ObserveWhen != nil {
+		clone.ObserveWhen = make([]ObservePredicate, len(m.ObserveWhen))
+		copy(clone.ObserveWhen, m.ObserveWhen)
 	}
 
 	return clone

@@ -140,6 +140,16 @@ observe_when:
     contains: hyperv
 ```
 
+Each list entry is an `ObservePredicate` struct (`features/modules/metadata.go`). Fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fact` | string | **Required.** Baseline DNA fact key to match (e.g. `"windows_feature"`, `"os"`) |
+| `equals` | string | Exact match on the fact value. Mutually exclusive with `contains`. |
+| `contains` | string | Substring match on the fact value. Mutually exclusive with `equals`. |
+
+Exactly one of `equals` or `contains` must be set per predicate; neither or both is a parse error caught at module load time.
+
 **Semantics (full contract in [ADR-024](../decisions/024-module-observation-vs-convergence.md)):**
 
 - **Observation ≠ convergence.** A module reports everything it can observe across its whole `<module>.*` domain (best-effort, silently continuing on absence); it *converges* only the resource instances declared in config. `observe_when` governs observation; declarations govern convergence.
