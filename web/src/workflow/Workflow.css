@@ -547,3 +547,108 @@ table.tbl {
   flex-direction: column;
   gap: 10px;
 }
+
+/* ── Workspace (list + overlay drawer, no reflow) ──────────────── */
+.workspace {
+  position: relative;
+  margin: 0 24px 20px;
+}
+.workspace .panel {
+  margin: 0;
+}
+
+/* ── Asset overlay drawer ──────────────────────────────────────── */
+.drawer {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(430px, calc(100% - 16px));
+  z-index: 6;
+  animation: wfx-slidein 0.24s cubic-bezier(0.4, 0.9, 0.3, 1);
+}
+@keyframes wfx-slidein {
+  from {
+    transform: translateX(14px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .drawer {
+    animation: none;
+  }
+}
+
+.dhead {
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--border);
+}
+.dhead .top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.dhead h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dhead .acts {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.dhead .meta {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.dtabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+.dtabs button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 11px 12px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+.dtabs button.on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.dbody {
+  overflow: auto;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
