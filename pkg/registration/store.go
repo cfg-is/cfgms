@@ -50,15 +50,28 @@ func newMemoryStore() *memoryStore {
 	}
 }
 
-// SaveToken saves a registration token.
+// SaveToken saves a registration token. Tokens saved without a stable ID receive a
+// generated one so that every stored token is addressable by ID (Issue #2970),
+// matching the durable store implementations.
 func (s *memoryStore) SaveToken(ctx context.Context, token *Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.tokens[token.Token] = token
-	if token.ID != "" {
-		s.byID[token.ID] = token.Token
+	if token.ID == "" {
+		// Preserve the ID already assigned to this token string, if any.
+		if existing, ok := s.tokens[token.Token]; ok && existing.ID != "" {
+			token.ID = existing.ID
+		} else {
+			id, err := GenerateTokenID()
+			if err != nil {
+				return fmt.Errorf("failed to generate token ID: %w", err)
+			}
+			token.ID = id
+		}
 	}
+
+	s.tokens[token.Token] = token
+	s.byID[token.ID] = token.Token
 	return nil
 }
 
@@ -119,11 +132,14 @@ func (s *memoryStore) UpdateToken(ctx context.Context, token *Token) error {
 	return nil
 }
 
-// DeleteToken deletes a token.
+// DeleteToken deletes a token and its ID index entry.
 func (s *memoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if token, ok := s.tokens[tokenStr]; ok && token.ID != "" {
+		delete(s.byID, token.ID)
+	}
 	delete(s.tokens, tokenStr)
 	return nil
 }

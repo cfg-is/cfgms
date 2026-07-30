@@ -241,7 +241,7 @@ function MintForm({ tenantId, onMinted, onReload }: MintFormProps) {
       setControllerUrl('')
       setExpiresIn('')
       onReload()
-      if (secret !== '') onMinted(secret)
+      if (secret.length > 0) onMinted(secret)
     } catch (cause: unknown) {
       setError(cause instanceof Error && cause.message ? cause.message : 'Mint request failed')
     } finally {
@@ -350,6 +350,13 @@ function StatusBadge({ token }: { token: RegistrationToken }) {
 
 // ── TokenRow ──────────────────────────────────────────────────────────────────
 
+// rowKeyFor identifies a row in per-token UI state (pending/error maps, test ids).
+// token_id is the identity everywhere it exists; token_prefix is the fallback for
+// legacy rows that have no id yet, so their state never collides on the empty string.
+function rowKeyFor(token: RegistrationToken): string {
+  return token.token_id || token.token_prefix
+}
+
 interface TokenRowProps {
   token: RegistrationToken
   onAction: (action: 'rotate' | 'revoke' | 'delete', token: RegistrationToken) => void
@@ -358,6 +365,13 @@ interface TokenRowProps {
 }
 
 function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps) {
+  // Revoke and delete address the token by its stable UUID. A token without one
+  // (a row that predates the id column and has not been migrated) cannot be
+  // addressed at all — the action is disabled rather than issuing a request to a
+  // degenerate URL that would 404 with no explanation.
+  const rowKey = rowKeyFor(token)
+  const addressable = token.token_id.length > 0
+  const unaddressableTitle = 'Token has no identifier — restart the controller to migrate legacy tokens'
   return (
     <>
       <tr data-testid="token-row">
@@ -382,7 +396,7 @@ function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps
               className="wf-btn-sm"
               disabled={actionPending}
               onClick={() => onAction('rotate', token)}
-              data-testid={`rotate-btn-${token.token_id}`}
+              data-testid={`rotate-btn-${rowKey}`}
             >
               {actionPending ? '…' : 'Rotate'}
             </button>
@@ -391,9 +405,10 @@ function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps
             <button
               type="button"
               className="wf-btn-sm-danger"
-              disabled={actionPending}
+              disabled={actionPending || !addressable}
+              title={addressable ? undefined : unaddressableTitle}
               onClick={() => onAction('revoke', token)}
-              data-testid={`revoke-btn-${token.token_id}`}
+              data-testid={`revoke-btn-${rowKey}`}
             >
               {actionPending ? '…' : 'Revoke'}
             </button>
@@ -401,9 +416,10 @@ function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps
           <button
             type="button"
             className="wf-btn-sm-danger"
-            disabled={actionPending}
+            disabled={actionPending || !addressable}
+            title={addressable ? undefined : unaddressableTitle}
             onClick={() => onAction('delete', token)}
-            data-testid={`delete-btn-${token.token_id}`}
+            data-testid={`delete-btn-${rowKey}`}
           >
             {actionPending ? '…' : 'Delete'}
           </button>
@@ -415,7 +431,7 @@ function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps
             <span
               className="wf-form-error"
               role="alert"
-              data-testid={`action-error-${token.token_id}`}
+              data-testid={`action-error-${rowKey}`}
             >
               {actionError}
             </span>
@@ -489,8 +505,19 @@ export default function TokensTab() {
 
   async function handleTokenAction(action: 'rotate' | 'revoke' | 'delete', token: RegistrationToken) {
     const id = token.token_id
-    setActionErrors((prev) => { const m = new Map(prev); m.delete(id); return m })
-    setActionPending((prev) => new Set([...prev, id]))
+    const rowKey = rowKeyFor(token)
+    setActionErrors((prev) => { const m = new Map(prev); m.delete(rowKey); return m })
+
+    // Revoke and delete address the token by UUID; without one there is no URL to
+    // call. Report it instead of requesting `/tokens//revoke` or `/tokens/`.
+    if (action !== 'rotate' && id.length === 0) {
+      setActionErrors((prev) =>
+        new Map(prev).set(rowKey, `${action} unavailable — token has no identifier`),
+      )
+      return
+    }
+
+    setActionPending((prev) => new Set([...prev, rowKey]))
 
     try {
       let response: Response
@@ -511,28 +538,28 @@ export default function TokensTab() {
       }
 
       if (!response.ok) {
-        setActionErrors((prev) => new Map(prev).set(id, `${action} failed — ${response.status}`))
+        setActionErrors((prev) => new Map(prev).set(rowKey, `${action} failed — ${response.status}`))
         return
       }
 
       if (action === 'rotate') {
         const data = (await response.json()) as Record<string, unknown>
         const secret = typeof data.token === 'string' ? data.token : ''
-        if (secret !== '') handleRotated(secret)
+        if (secret.length > 0) handleRotated(secret)
       }
 
       setAttempt((n) => n + 1)
     } catch (cause: unknown) {
       setActionErrors((prev) =>
         new Map(prev).set(
-          id,
+          rowKey,
           cause instanceof Error && cause.message ? cause.message : `${action} request failed`,
         ),
       )
     } finally {
       setActionPending((prev) => {
         const next = new Set(prev)
-        next.delete(id)
+        next.delete(rowKey)
         return next
       })
     }
@@ -582,11 +609,11 @@ export default function TokensTab() {
             <tbody>
               {tokens.map((token) => (
                 <TokenRow
-                  key={token.token_id || token.token_prefix}
+                  key={rowKeyFor(token)}
                   token={token}
                   onAction={handleTokenAction}
-                  actionPending={actionPending.has(token.token_id)}
-                  actionError={actionErrors.get(token.token_id) ?? null}
+                  actionPending={actionPending.has(rowKeyFor(token))}
+                  actionError={actionErrors.get(rowKeyFor(token)) ?? null}
                 />
               ))}
             </tbody>

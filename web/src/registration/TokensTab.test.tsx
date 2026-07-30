@@ -507,6 +507,49 @@ describe('TokensTab — delete', () => {
   })
 })
 
+// ── Tokens without a stable id ────────────────────────────────────────────────
+
+describe('TokensTab — token without token_id', () => {
+  it('disables revoke and delete and never builds a degenerate URL', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTokensResponse([makeToken({ token_id: '', token_prefix: 'reg_leg' })]),
+    )
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    // Row state is keyed by token_prefix when there is no id.
+    expect(screen.getByTestId('revoke-btn-reg_leg')).toBeDisabled()
+    expect(screen.getByTestId('delete-btn-reg_leg')).toBeDisabled()
+    // Rotate addresses the tenant, not the token id — it stays available.
+    expect(screen.getByTestId('rotate-btn-reg_leg')).toBeEnabled()
+
+    fireEvent.click(screen.getByTestId('revoke-btn-reg_leg'))
+    fireEvent.click(screen.getByTestId('delete-btn-reg_leg'))
+
+    // Only the initial list GET was issued — no `/tokens//revoke` and no `/tokens/`.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/registration/tokens')
+  })
+
+  it('keeps per-row state separate for two tokens without an id', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeTokensResponse([
+          makeToken({ token_id: '', token_prefix: 'reg_one' }),
+          makeToken({ token_id: '', token_prefix: 'reg_two' }),
+        ]),
+      )
+      .mockResolvedValueOnce(new Response('err', { status: 409 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('rotate-btn-reg_one'))
+
+    await waitFor(() => expect(screen.getByTestId('action-error-reg_one')).toBeInTheDocument())
+    expect(screen.queryByTestId('action-error-reg_two')).toBeNull()
+  })
+})
+
 // ── SecretOnceModal ───────────────────────────────────────────────────────────
 
 describe('SecretOnceModal', () => {

@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -411,4 +413,180 @@ func TestBackfillSessionTokenRecords_AlterFailure(t *testing.T) {
 	err = backfillSessionTokenRecords(context.Background(), roDB)
 	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
 	assert.Contains(t, err.Error(), "back-fill", "error must identify the back-fill stage")
+}
+
+// legacyRegistrationTokensSchema is the registration_tokens DDL from before the id
+// column was added in Issue #2970.
+const legacyRegistrationTokensSchema = `CREATE TABLE IF NOT EXISTS registration_tokens (
+	token          TEXT PRIMARY KEY,
+	tenant_id      TEXT NOT NULL,
+	controller_url TEXT NOT NULL,
+	group_name     TEXT NOT NULL DEFAULT '',
+	created_at     TEXT NOT NULL,
+	expires_at     TEXT,
+	revoked        INTEGER NOT NULL DEFAULT 0,
+	revoked_at     TEXT
+)`
+
+// TestBackfillRegistrationTokenID_LegacyRowsGetUUIDs verifies that a pre-existing
+// registration_tokens table gains the id column AND that every legacy row is assigned
+// a UUID (Issue #2970). Without the row back-fill the oldest tokens — the ones most
+// likely to need revoking — would report an empty token_id forever and could never be
+// revoked or deleted from the web UI.
+func TestBackfillRegistrationTokenID_LegacyRowsGetUUIDs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-regtokens.db")
+	ctx := context.Background()
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, legacyRegistrationTokensSchema)
+	require.NoError(t, err)
+	require.False(t, hasColumn(t, setup, "registration_tokens", "id"), "legacy table has no id column")
+	for _, tok := range []string{"legacy-a", "legacy-b"} {
+		_, err = setup.ExecContext(ctx,
+			`INSERT INTO registration_tokens (token, tenant_id, controller_url, created_at)
+			 VALUES (?, 'tenant-legacy', 'grpc://controller:7443', '2026-01-01T00:00:00Z')`, tok)
+		require.NoError(t, err)
+	}
+	require.NoError(t, setup.Close())
+
+	// Re-open with migration.
+	db, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	require.True(t, hasColumn(t, db, "registration_tokens", "id"), "migration must add the id column")
+
+	store := &SQLiteRegistrationTokenStore{db: db}
+	ids := make(map[string]string, 2)
+	for _, tok := range []string{"legacy-a", "legacy-b"} {
+		got, err := store.GetToken(ctx, tok)
+		require.NoError(t, err)
+		require.NotEmpty(t, got.ID, "legacy row %q must be assigned a UUID", tok)
+		assert.Regexp(t,
+			`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+			got.ID, "backfilled id must be a UUID v4")
+
+		byID, err := store.GetTokenByID(ctx, got.ID)
+		require.NoError(t, err, "backfilled token must be addressable by id")
+		assert.Equal(t, tok, byID.Token)
+
+		ids[tok] = got.ID
+	}
+	assert.NotEqual(t, ids["legacy-a"], ids["legacy-b"], "each legacy row gets a distinct id")
+
+	// Re-running the migration must be idempotent — ids stay stable.
+	require.NoError(t, backfillRegistrationTokenID(ctx, db))
+	for tok, id := range ids {
+		got, err := store.GetToken(ctx, tok)
+		require.NoError(t, err)
+		assert.Equal(t, id, got.ID, "re-running the back-fill must not reassign %q", tok)
+	}
+}
+
+// TestBackfillRegistrationTokenID_NullIDRowsGetUUIDs covers a table that already has the
+// id column but holds rows written before ids were persisted (NULL id).
+func TestBackfillRegistrationTokenID_NullIDRowsGetUUIDs(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+	require.NoError(t, initializeSchema(ctx, db))
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO registration_tokens (token, id, tenant_id, controller_url, created_at)
+		 VALUES ('null-id-token', NULL, 'tenant-legacy', 'grpc://controller:7443', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+
+	require.NoError(t, backfillRegistrationTokenID(ctx, db))
+
+	store := &SQLiteRegistrationTokenStore{db: db}
+	got, err := store.GetToken(ctx, "null-id-token")
+	require.NoError(t, err)
+	require.NotEmpty(t, got.ID, "NULL-id row must be assigned a UUID")
+
+	byID, err := store.GetTokenByID(ctx, got.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "null-id-token", byID.Token)
+}
+
+// TestSaveToken_HealsEmptyStoredID covers a row whose stored id is the empty string rather
+// than NULL — the second half of the back-fill's "missing id" predicate. Such a row is
+// unaddressable by GetTokenByID, so a save that upserts onto it must heal the id instead
+// of preserving the empty value forever.
+func TestSaveToken_HealsEmptyStoredID(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+	require.NoError(t, initializeSchema(ctx, db))
+
+	store := &SQLiteRegistrationTokenStore{db: db}
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO registration_tokens (token, id, tenant_id, controller_url, created_at)
+		 VALUES ('empty-id-token', '', 'tenant-legacy', 'grpc://controller:7443', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+
+	stale, err := store.GetToken(ctx, "empty-id-token")
+	require.NoError(t, err)
+	require.Empty(t, stale.ID, "precondition: the row is unaddressable by id")
+
+	resaved := &business.RegistrationTokenData{
+		Token:         "empty-id-token",
+		TenantID:      "tenant-legacy",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, store.SaveToken(ctx, resaved))
+	require.NotEmpty(t, resaved.ID, "an empty stored id must be healed, not preserved")
+
+	byID, err := store.GetTokenByID(ctx, resaved.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "empty-id-token", byID.Token)
+}
+
+// TestBackfillRegistrationTokenID_FreshDB verifies a fresh database carries the id column
+// from the CREATE TABLE statement, so the back-fill is a no-op.
+func TestBackfillRegistrationTokenID_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+	assert.True(t, hasColumn(t, db, "registration_tokens", "id"), "id column present on fresh DB")
+	require.NoError(t, backfillRegistrationTokenID(ctx, db), "back-fill is a no-op on a fresh DB")
+}
+
+// TestBackfillRegistrationTokenID_ProbeFailure verifies that a tableExists failure
+// propagates rather than being silently ignored.
+func TestBackfillRegistrationTokenID_ProbeFailure(t *testing.T) {
+	db, err := openDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = backfillRegistrationTokenID(context.Background(), db)
+	require.Error(t, err, "closed DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill probe failed", "error must identify the probe stage")
+}
+
+// TestBackfillRegistrationTokenID_UpdateFailure verifies that a failure to write the
+// generated ids propagates instead of leaving rows silently unaddressable.
+func TestBackfillRegistrationTokenID_UpdateFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "readonly-regtokens.db")
+	ctx := context.Background()
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, legacyRegistrationTokensSchema)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, `ALTER TABLE registration_tokens ADD COLUMN id TEXT`)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx,
+		`INSERT INTO registration_tokens (token, tenant_id, controller_url, created_at)
+		 VALUES ('ro-token', 'tenant-legacy', 'grpc://controller:7443', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillRegistrationTokenID(ctx, roDB)
+	require.Error(t, err, "UPDATE on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill update failed", "error must identify the update stage")
 }

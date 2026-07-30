@@ -161,9 +161,11 @@ func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
 }
 
 // backfillRegistrationTokenID adds the `id` UUID column to a pre-existing
-// registration_tokens table (Issue #2970 — stable non-secret identifier for web UI).
-// Fresh databases (table absent) are skipped. The column is nullable so existing
-// rows remain valid; new rows always receive a generated UUID.
+// registration_tokens table and assigns a UUID to every row that lacks one
+// (Issue #2970 — stable non-secret identifier for web UI). Fresh databases
+// (table absent) are skipped. Without the row back-fill, legacy tokens would
+// report an empty token_id forever and could never be revoked or deleted from
+// the web UI — exactly the tokens most likely to need revoking.
 func backfillRegistrationTokenID(ctx context.Context, db *sql.DB) error {
 	exists, err := tableExists(ctx, db, "registration_tokens")
 	if err != nil {
@@ -176,11 +178,48 @@ func backfillRegistrationTokenID(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("sqlite: registration_tokens id-column probe failed: %w", err)
 	}
-	if present {
-		return nil
+	if !present {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE registration_tokens ADD COLUMN id TEXT`); err != nil {
+			return fmt.Errorf("sqlite: registration_tokens back-fill (id) failed: %w", err)
+		}
 	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE registration_tokens ADD COLUMN id TEXT`); err != nil {
-		return fmt.Errorf("sqlite: registration_tokens back-fill (id) failed: %w", err)
+	return assignMissingRegistrationTokenIDs(ctx, db)
+}
+
+// assignMissingRegistrationTokenIDs gives every registration_tokens row without an id
+// a freshly generated UUID. Idempotent: matches no rows once every row has an id.
+func assignMissingRegistrationTokenIDs(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx,
+		`SELECT token FROM registration_tokens WHERE id IS NULL OR id = ''`)
+	if err != nil {
+		return fmt.Errorf("sqlite: registration_tokens id back-fill query failed: %w", err)
+	}
+	var tokensMissingID []string
+	for rows.Next() {
+		var tokenStr string
+		if err := rows.Scan(&tokenStr); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("sqlite: registration_tokens id back-fill scan failed: %w", err)
+		}
+		tokensMissingID = append(tokensMissingID, tokenStr)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("sqlite: registration_tokens id back-fill iteration failed: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("sqlite: registration_tokens id back-fill close failed: %w", err)
+	}
+
+	for _, tokenStr := range tokensMissingID {
+		id, err := generateTokenID()
+		if err != nil {
+			return fmt.Errorf("sqlite: registration_tokens id generation failed: %w", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE registration_tokens SET id = ? WHERE token = ?`, id, tokenStr); err != nil {
+			return fmt.Errorf("sqlite: registration_tokens id back-fill update failed: %w", err)
+		}
 	}
 	return nil
 }

@@ -44,20 +44,36 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = nowUTC()
 	}
+	// Every persisted token carries a stable, non-secret UUID (Issue #2970) so the
+	// web UI can address it without holding the secret.
+	if token.ID == "" {
+		id, err := generateTokenID()
+		if err != nil {
+			return fmt.Errorf("failed to generate token id: %w", err)
+		}
+		token.ID = id
+	}
 
-	_, err := s.db.ExecContext(ctx, `
+	// The id is assigned once and never reassigned: on conflict the stored id wins and
+	// excluded.id only fills in a row that has none. NULLIF treats an empty stored id as
+	// absent — the same "missing" predicate the back-fill uses (id IS NULL OR id = '') —
+	// so a row that reaches this path unaddressable is healed rather than kept that way.
+	// RETURNING keeps the caller's in-memory ID identical to the persisted one.
+	var storedID sql.NullString
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO registration_tokens
 			(token, id, tenant_id, controller_url, group_name, created_at,
 			 expires_at, revoked, revoked_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(token) DO UPDATE SET
-			id = COALESCE(excluded.id, registration_tokens.id),
+			id = COALESCE(NULLIF(registration_tokens.id, ''), excluded.id),
 			tenant_id = excluded.tenant_id,
 			controller_url = excluded.controller_url,
 			group_name = excluded.group_name,
 			expires_at = excluded.expires_at,
 			revoked = excluded.revoked,
-			revoked_at = excluded.revoked_at`,
+			revoked_at = excluded.revoked_at
+		RETURNING id`,
 		token.Token,
 		nullableStr(token.ID),
 		token.TenantID,
@@ -67,10 +83,11 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 		nullTime(token.ExpiresAt),
 		boolToInt(token.Revoked),
 		nullTime(token.RevokedAt),
-	)
+	).Scan(&storedID)
 	if err != nil {
 		return fmt.Errorf("failed to save registration token: %w", err)
 	}
+	token.ID = storedID.String
 	return nil
 }
 
@@ -85,6 +102,9 @@ func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr st
 
 // GetTokenByID retrieves a registration token by its stable UUID (Issue #2970).
 func (s *SQLiteRegistrationTokenStore) GetTokenByID(ctx context.Context, id string) (*business.RegistrationTokenData, error) {
+	if id == "" {
+		return nil, fmt.Errorf("registration token not found")
+	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT token, id, tenant_id, controller_url, group_name, created_at,
 		       expires_at, revoked, revoked_at

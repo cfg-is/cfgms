@@ -101,21 +101,40 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *b
 		return fmt.Errorf("token string cannot be empty")
 	}
 
+	// Every persisted token carries a stable, non-secret UUID (Issue #2970) so the
+	// web UI can address it without holding the secret.
+	if token.ID == "" {
+		id, err := generateTokenID()
+		if err != nil {
+			return fmt.Errorf("failed to generate token id: %w", err)
+		}
+		token.ID = id
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	// The id is assigned once and never reassigned: on conflict the stored id wins and
+	// EXCLUDED.id only fills in a row that has none. NULLIF treats an empty stored id as
+	// absent — the same "missing" predicate the back-fill uses (id IS NULL OR id = '') —
+	// so a row that reaches this path unaddressable is healed rather than kept that way.
+	// RETURNING keeps the caller's in-memory ID identical to the persisted one.
+	var storedID string
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO cfgms_registration_tokens
-			(token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			(token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (token) DO UPDATE SET
+			id = COALESCE(NULLIF(cfgms_registration_tokens.id, ''), EXCLUDED.id),
 			tenant_id = EXCLUDED.tenant_id,
 			controller_url = EXCLUDED.controller_url,
 			group_name = EXCLUDED.group_name,
 			expires_at = EXCLUDED.expires_at,
 			revoked = EXCLUDED.revoked,
-			revoked_at = EXCLUDED.revoked_at`,
+			revoked_at = EXCLUDED.revoked_at
+		RETURNING id`,
 		token.Token,
+		token.ID,
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
@@ -123,10 +142,11 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *b
 		nullTimeOrNil(token.ExpiresAt),
 		token.Revoked,
 		nullTimeOrNil(token.RevokedAt),
-	)
+	).Scan(&storedID)
 	if err != nil {
 		return fmt.Errorf("failed to save token: %w", err)
 	}
+	token.ID = storedID
 	return nil
 }
 
@@ -141,13 +161,14 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 
 	var token business.RegistrationTokenData
 	var expiresAt, revokedAt sql.NullTime
-	var group sql.NullString
+	var group, id sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
 		WHERE token = $1`, tokenStr).Scan(
 		&token.Token,
+		&id,
 		&token.TenantID,
 		&token.ControllerURL,
 		&group,
@@ -163,6 +184,7 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
 
+	token.ID = id.String
 	token.Group = group.String
 	if expiresAt.Valid {
 		token.ExpiresAt = &expiresAt.Time
@@ -288,7 +310,7 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
 		WHERE 1=1`
 	args := []interface{}{}
@@ -325,10 +347,11 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	for rows.Next() {
 		var token business.RegistrationTokenData
 		var expiresAt, revokedAt sql.NullTime
-		var group sql.NullString
+		var group, id sql.NullString
 
 		if err := rows.Scan(
 			&token.Token,
+			&id,
 			&token.TenantID,
 			&token.ControllerURL,
 			&group,
@@ -340,6 +363,7 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 			return nil, fmt.Errorf("failed to scan token row: %w", err)
 		}
 
+		token.ID = id.String
 		token.Group = group.String
 		if expiresAt.Valid {
 			token.ExpiresAt = &expiresAt.Time
@@ -397,12 +421,17 @@ func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenant
 
 	now := time.Now().UTC()
 
+	newID, err := generateTokenID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token id: %w", err)
+	}
+
 	// Insert the new token.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cfgms_registration_tokens
-			(token, tenant_id, controller_url, group_name, created_at, revoked)
-		VALUES ($1, $2, $3, $4, $5, false)`,
-		newTokenStr, tenantID, controllerURL, group, now,
+			(token, id, tenant_id, controller_url, group_name, created_at, revoked)
+		VALUES ($1, $2, $3, $4, $5, $6, false)`,
+		newTokenStr, newID, tenantID, controllerURL, group, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert new token: %w", err)
@@ -425,6 +454,7 @@ func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenant
 	committed = true
 
 	return &business.RegistrationTokenData{
+		ID:            newID,
 		Token:         newTokenStr,
 		TenantID:      tenantID,
 		ControllerURL: controllerURL,
@@ -448,4 +478,17 @@ func generateTokenString() (string, error) {
 		return "", fmt.Errorf("failed to read random bytes: %w", err)
 	}
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)), nil
+}
+
+// generateTokenID produces a UUID v4 string used as a stable, non-secret token identifier
+// (Issue #2970). It is the value the web UI addresses a token by.
+func generateTokenID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to read random bytes for token ID: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

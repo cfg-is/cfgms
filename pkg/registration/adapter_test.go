@@ -129,6 +129,112 @@ func TestStorageAdapter_WithSQLiteStore(t *testing.T) {
 	})
 }
 
+func TestStorageAdapter_GetTokenByID(t *testing.T) {
+	tempDir := t.TempDir()
+
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+
+	adapter := NewStorageAdapter(store)
+
+	created, err := CreateToken(&TokenCreateRequest{
+		TenantID:      "tenant-byid",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "byid-group",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, created.ID)
+	require.NoError(t, adapter.SaveToken(ctx, created))
+
+	t.Run("round-trips the token by its stable ID", func(t *testing.T) {
+		got, err := adapter.GetTokenByID(ctx, created.ID)
+		require.NoError(t, err)
+		assert.Equal(t, created.ID, got.ID)
+		assert.Equal(t, created.Token, got.Token)
+		assert.Equal(t, "tenant-byid", got.TenantID)
+		assert.Equal(t, "byid-group", got.Group)
+		assert.Equal(t, "grpc://controller:7443", got.ControllerURL)
+		assert.False(t, got.Revoked)
+	})
+
+	t.Run("GetToken also returns the stable ID", func(t *testing.T) {
+		got, err := adapter.GetToken(ctx, created.Token)
+		require.NoError(t, err)
+		assert.Equal(t, created.ID, got.ID, "the ID must survive the storage round-trip")
+	})
+
+	t.Run("ListTokens returns the stable ID", func(t *testing.T) {
+		tokens, err := adapter.ListTokens(ctx, "tenant-byid")
+		require.NoError(t, err)
+		require.Len(t, tokens, 1)
+		assert.Equal(t, created.ID, tokens[0].ID)
+	})
+
+	t.Run("unknown ID returns a not-found error", func(t *testing.T) {
+		_, err := adapter.GetTokenByID(ctx, "aaaaaaaa-0000-4000-8000-00000000dead")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("the secret string does not resolve as an ID", func(t *testing.T) {
+		_, err := adapter.GetTokenByID(ctx, created.Token)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("rotated token is addressable by its new ID", func(t *testing.T) {
+		rotated, err := adapter.RotateToken(ctx, "tenant-byid", "byid-group")
+		require.NoError(t, err)
+		require.NotEmpty(t, rotated.ID)
+		assert.NotEqual(t, created.ID, rotated.ID)
+
+		got, err := adapter.GetTokenByID(ctx, rotated.ID)
+		require.NoError(t, err)
+		assert.Equal(t, rotated.Token, got.Token)
+		assert.False(t, got.Revoked)
+	})
+}
+
+func TestStorageAdapter_SaveToken_AssignsIDWhenMissing(t *testing.T) {
+	tempDir := t.TempDir()
+
+	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
+		"sqlite",
+		map[string]interface{}{"path": tempDir + "/tokens.db"},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, store.Initialize(ctx))
+
+	adapter := NewStorageAdapter(store)
+
+	token := &Token{
+		Token:         "adapter-token-without-id",
+		TenantID:      "tenant-noid",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     time.Now(),
+	}
+	require.NoError(t, adapter.SaveToken(ctx, token))
+	require.NotEmpty(t, token.ID, "SaveToken must write the assigned ID back onto the caller's token")
+
+	got, err := adapter.GetToken(ctx, token.Token)
+	require.NoError(t, err)
+	assert.Equal(t, token.ID, got.ID, "the persisted ID must match the one written back")
+
+	byID, err := adapter.GetTokenByID(ctx, got.ID)
+	require.NoError(t, err)
+	assert.Equal(t, token.Token, byID.Token)
+}
+
 func TestStorageAdapter_InterfaceCompliance(t *testing.T) {
 	tempDir := t.TempDir()
 
