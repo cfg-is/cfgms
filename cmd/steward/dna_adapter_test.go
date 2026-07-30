@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/execution"
@@ -56,7 +58,7 @@ func newModuleDNAExecutor(t *testing.T, logger logging.Logger, resourceID string
 steward:
   id: dna-test-steward
 resources:
-  - name: %s
+  - name: "%s"
     module: %s
     config:
       state: present
@@ -174,6 +176,64 @@ func TestDNACollectorAdapter_PreWiredVsPostWired(t *testing.T) {
 		assert.Equal(t, v, postAttrs[k],
 			"post-wired adapter must surface module attribute %s via CollectAttributes", k)
 	}
+}
+
+// ─── Issue #2908: adapter forwards ADR-017 fragments to the sync_dna path ─────
+
+// TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource is the REQUIRED
+// TEST for the #2908 production wiring: dnaCollectorAdapter.CollectFragments must
+// forward to the wired moduleDNASource so cluster:* fragments reach the sync_dna
+// DNATransfer. Without this forwarding the controller-side cluster registry
+// (clusterregistry.BuildRegistry) is always empty in production.
+//
+// The source is a real *execution.Executor driven by a real Monitor-capable
+// module and a real ChangeEvent — the same producer main.go wires in production.
+func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.T) {
+	logger := logging.NewLogger("debug")
+	ctx := context.Background()
+
+	// Nil source: no fragments, no panic (hardware-facts-only mode).
+	bare := newDNACollectorAdapter(logger, nil)
+	assert.Empty(t, bare.CollectFragments(ctx),
+		"an adapter with no module source must yield no fragments")
+
+	// Real executor producing a cluster:* resource snapshot → fragment.
+	src := newModuleDNAExecutor(t, logger, "cluster:cfg-lab", map[string]interface{}{
+		"name":           "cfg-lab",
+		"cno_owner_node": "CFG-70-02",
+		"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+		"resource_owner": map[string]string{"web-01": "CFG-70-02"},
+	})
+
+	adapter := newDNACollectorAdapter(logger, nil)
+	adapter.setModuleDNASource(src)
+
+	var frags []*commonpb.Fragment
+	require.Eventually(t, func() bool {
+		frags = adapter.CollectFragments(ctx)
+		return len(frags) > 0
+	}, 2*time.Second, 10*time.Millisecond,
+		"adapter.CollectFragments must surface the wired source's cluster fragment")
+
+	var got *commonpb.Fragment
+	for _, f := range frags {
+		if f.GetFragmentId() == "cluster:cfg-lab" {
+			got = f
+			break
+		}
+	}
+	require.NotNil(t, got, "cluster:cfg-lab fragment must be forwarded by the adapter")
+	assert.NotEmpty(t, got.GetCanonicalBytes(), "forwarded fragment must carry canonical bytes")
+	assert.NotEmpty(t, got.GetFragmentHash(), "forwarded fragment must carry its hash")
+
+	// The forwarded set must be exactly what the wired producer returns — the
+	// adapter is a pass-through, not a re-derivation.
+	assert.Equal(t, len(src.CollectModuleFragments(ctx)), len(frags),
+		"adapter must forward the producer's fragment set verbatim")
+
+	// Compile-time proof the adapter satisfies the client-side DNACollector
+	// surface that the sync_dna handler calls.
+	var _ client.DNACollector = adapter
 }
 
 // ─── Issue #2435 AC8: real end-to-end controller-mode monitor → DNA ───────────

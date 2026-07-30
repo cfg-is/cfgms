@@ -53,9 +53,16 @@ func DecodeCanonicalFragment(b []byte) (map[string]interface{}, error) {
 
 // MaxCanonicalFragmentSize bounds the canonical_bytes payload DecodeCanonicalFragment
 // will accept. It matches the gRPC maxRecvMsgSize in
-// pkg/dataplane/providers/grpc/limits.go so that a fragment which cannot arrive over
-// the wire also cannot be fed to the decoder by an in-process caller. Real fragments
-// are curated key subsets (see PartitionHostFacts) and are orders of magnitude smaller.
+// pkg/dataplane/providers/grpc/limits.go. Real fragments are curated key subsets
+// (see PartitionHostFacts) and are orders of magnitude smaller.
+//
+// This is a decoder-local backstop, NOT the wire bound. maxRecvMsgSize caps a single
+// gRPC message, and the sync_dna path reassembles many ≤64 KB DNAChunk messages into
+// one snapshot, so the wire itself does not bound a fragment. Ingest-side bounds on
+// fragment count and per-fragment size are enforced where the snapshot is
+// reassembled (features/controller/transport/dna_handler.go: maxDNATransferFragments,
+// maxReassembledDNABytes) — this constant must not be relied on as the only limit
+// standing between a hostile steward and the decoder.
 const MaxCanonicalFragmentSize = 8 * 1024 * 1024
 
 // maxCanonDecodeDepth bounds map/slice nesting during decode. decodeCanonValue and

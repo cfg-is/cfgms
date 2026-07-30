@@ -18,11 +18,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/service"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -103,6 +104,241 @@ func TestDNAHandler_PersistsReassembledDNA(t *testing.T) {
 	assert.Equal(t, "steward-persist", stored.GetId())
 	assert.Equal(t, attrs, stored.GetAttributes())
 	assert.Equal(t, int32(len(attrs)), stored.GetAttributeCount())
+}
+
+// dnaChunksForTransfer marshals an arbitrary DNATransfer and splits the JSON into
+// `parts` contiguous DNAChunks — the same send-side shape as dnaChunksFor, but
+// letting a test set fields beyond Attributes (e.g. Fragments).
+func dnaChunksForTransfer(t *testing.T, transfer *dptypes.DNATransfer, parts int) []*transportpb.DNAChunk {
+	t.Helper()
+	payload, err := json.Marshal(transfer)
+	require.NoError(t, err)
+	if parts < 1 {
+		parts = 1
+	}
+	size := (len(payload) + parts - 1) / parts
+	chunks := make([]*transportpb.DNAChunk, 0, parts)
+	for i := 0; i < parts; i++ {
+		start := i * size
+		end := start + size
+		if end > len(payload) {
+			end = len(payload)
+		}
+		if start > len(payload) {
+			start = len(payload)
+		}
+		chunks = append(chunks, &transportpb.DNAChunk{
+			StewardId: transfer.StewardID, TenantId: transfer.TenantID,
+			Data: payload[start:end], ChunkIndex: int32(i), TotalChunks: int32(parts),
+		})
+	}
+	return chunks
+}
+
+// TestDNAHandler_PersistsFragmentsFromTransfer (#2908): ADR-017 fragments carried
+// on the sync_dna DNATransfer are deserialized into common.DNA.Fragments. Without
+// this the controller-side cluster registry (clusterregistry.BuildRegistry) is
+// always empty because DNA.Fragments never leaves the receiver populated.
+func TestDNAHandler_PersistsFragmentsFromTransfer(t *testing.T) {
+	frag := &common.Fragment{
+		FragmentId:     "cluster:cfg-lab",
+		Authority:      "hyperv",
+		CanonicalBytes: []byte(`{"cno_owner_node":"CFG-70-02","member_nodes":"CFG-70-02,CFG-AB-02"}`),
+		FragmentHash:   "sha256:deadbeef",
+	}
+	fragBytes, err := proto.Marshal(frag)
+	require.NoError(t, err)
+
+	attrJSON, err := json.Marshal(map[string]string{"hostname": "cfg-70-02", "os": "windows"})
+	require.NoError(t, err)
+
+	transfer := &dptypes.DNATransfer{
+		StewardID:  "steward-frag",
+		TenantID:   "t1",
+		Attributes: attrJSON,
+		Fragments:  [][]byte{fragBytes},
+	}
+
+	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 2), "steward-frag")
+	require.NoError(t, err)
+
+	require.Len(t, dna.GetFragments(), 1, "the transfer's fragment must survive reassembly")
+	got := dna.GetFragments()[0]
+	assert.Equal(t, "cluster:cfg-lab", got.GetFragmentId())
+	assert.Equal(t, "hyperv", got.GetAuthority())
+	assert.Equal(t, frag.GetCanonicalBytes(), got.GetCanonicalBytes())
+	assert.Equal(t, "sha256:deadbeef", got.GetFragmentHash())
+
+	// Flat attributes are unaffected by the fragment path.
+	assert.Equal(t, "cfg-70-02", dna.GetAttributes()["hostname"])
+}
+
+// TestDNAHandler_MalformedFragmentSkipped (#2908): an undecodable fragment is
+// dropped rather than failing the whole snapshot — the flat attributes (steward
+// identity) must still reach the persister.
+func TestDNAHandler_MalformedFragmentSkipped(t *testing.T) {
+	good := &common.Fragment{FragmentId: "cluster:ok", CanonicalBytes: []byte(`{"a":"b"}`)}
+	goodBytes, err := proto.Marshal(good)
+	require.NoError(t, err)
+
+	attrJSON, err := json.Marshal(map[string]string{"hostname": "h", "os": "linux"})
+	require.NoError(t, err)
+
+	transfer := &dptypes.DNATransfer{
+		StewardID:  "steward-badfrag",
+		TenantID:   "t1",
+		Attributes: attrJSON,
+		// 0x08 starts field 1 as a varint but the value bytes are truncated.
+		Fragments: [][]byte{{0x08}, goodBytes},
+	}
+
+	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-badfrag")
+	require.NoError(t, err, "a malformed fragment must not fail the snapshot")
+	require.Len(t, dna.GetFragments(), 1, "only the well-formed fragment is kept")
+	assert.Equal(t, "cluster:ok", dna.GetFragments()[0].GetFragmentId())
+	assert.Equal(t, "h", dna.GetAttributes()["hostname"])
+}
+
+// ─── Ingest-side DoS bounds on the sync_dna snapshot ─────────────────────────
+//
+// A steward runs on a host that may be compromised, so it can stream any chunk
+// count, any total payload size, and any fragment count/size it likes. The gRPC
+// maxRecvMsgSize bounds a single DNAChunk message, never the reassembled snapshot,
+// so these bounds are the only thing between a hostile steward and unbounded
+// controller heap use — and, because BuildRegistry re-decodes every persisted
+// fragment on each cluster API read, unbounded *persisted* fragments are a
+// repeatable amplifier rather than a one-shot cost.
+
+// TestReassembleDNA_RejectsExcessiveFragmentCount: a snapshot declaring more than
+// maxDNATransferFragments fragments is rejected outright rather than decoded and
+// persisted.
+func TestReassembleDNA_RejectsExcessiveFragmentCount(t *testing.T) {
+	fragBytes, err := proto.Marshal(&common.Fragment{FragmentId: "cluster:x", CanonicalBytes: []byte{0, 0, 0, 0}})
+	require.NoError(t, err)
+
+	frags := make([][]byte, maxDNATransferFragments+1)
+	for i := range frags {
+		frags[i] = fragBytes
+	}
+	attrJSON, err := json.Marshal(map[string]string{"hostname": "h"})
+	require.NoError(t, err)
+
+	_, err = reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
+		StewardID: "steward-fragflood", TenantID: "t1", Attributes: attrJSON, Fragments: frags,
+	}, 1), "steward-fragflood")
+	require.Error(t, err, "an unbounded fragment count must be rejected, not persisted")
+	assert.Contains(t, err.Error(), "exceeds maximum")
+
+	// The boundary itself is still accepted — the cap must not reject legitimate load.
+	dna, err := reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
+		StewardID: "steward-fragmax", TenantID: "t1", Attributes: attrJSON,
+		Fragments: frags[:maxDNATransferFragments],
+	}, 1), "steward-fragmax")
+	require.NoError(t, err)
+	assert.Len(t, dna.GetFragments(), maxDNATransferFragments)
+}
+
+// TestReassembleDNA_RejectsOversizedFragment: a fragment larger than
+// maxDNAFragmentBytes is rejected before proto.Unmarshal, so the ~19x decoder
+// amplification factor can never be applied to an over-cap payload. The bound is
+// tighter than the decoder's own dna.MaxCanonicalFragmentSize backstop, which is
+// the point — see the maxDNAFragmentBytes doc comment.
+func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
+	require.LessOrEqual(t, maxDNAFragmentBytes, sdna.MaxCanonicalFragmentSize,
+		"the ingest bound must never be looser than the decoder backstop")
+
+	attrJSON, err := json.Marshal(map[string]string{"hostname": "h"})
+	require.NoError(t, err)
+
+	oversized := make([]byte, maxDNAFragmentBytes+1)
+	_, err = reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
+		StewardID: "s", TenantID: "t1", Attributes: attrJSON, Fragments: [][]byte{oversized},
+	}), "s"), "s")
+	require.Error(t, err, "an over-cap fragment must never reach the decoder")
+	assert.Contains(t, err.Error(), "exceeds maximum")
+
+	// A fragment exactly at the boundary is still accepted (well-formed or not), so
+	// the bound cannot silently truncate legitimate load.
+	atLimit, err := proto.Marshal(&common.Fragment{
+		FragmentId:     "cluster:big",
+		CanonicalBytes: make([]byte, maxDNAFragmentBytes-64),
+	})
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(atLimit), maxDNAFragmentBytes)
+
+	dna, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
+		StewardID: "s", TenantID: "t1", Attributes: attrJSON, Fragments: [][]byte{atLimit},
+	}), "s"), "s")
+	require.NoError(t, err, "a fragment at the boundary must be accepted")
+	require.Len(t, dna.GetFragments(), 1)
+	assert.Equal(t, "cluster:big", dna.GetFragments()[0].GetFragmentId())
+}
+
+// TestDNAHandler_RejectsChunkFlood: a stream of more than maxDNAChunks chunks is
+// refused with ResourceExhausted while it is still arriving, so the handler never
+// buffers the flood.
+func TestDNAHandler_RejectsChunkFlood(t *testing.T) {
+	ca := newTestCA(t)
+	persister := &stubPersister{}
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+
+	total := maxDNAChunks + 10
+	chunks := make([]*transportpb.DNAChunk, 0, total)
+	for i := 0; i < total; i++ {
+		chunks = append(chunks, &transportpb.DNAChunk{
+			StewardId: "steward-flood", TenantId: "t1", Data: []byte("x"),
+			ChunkIndex: int32(i), TotalChunks: int32(total),
+		})
+	}
+
+	stream := newTestDNAStream(peerContextWithCA(t, ca, "steward-flood"), chunks...)
+	err := h.HandleGRPC(stream)
+	require.Error(t, err)
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+	assert.Nil(t, persister.got, "a rejected flood must never reach the persister")
+	assert.Equal(t, maxDNAChunks+1, stream.pos,
+		"the flood must be cut off at the cap, not drained to EOF")
+}
+
+// TestDNAHandler_RejectsOversizedSnapshot: chunks whose concatenated payload
+// exceeds maxReassembledDNABytes are refused with ResourceExhausted, closing the
+// gap that maxRecvMsgSize (per-message only) leaves open.
+func TestDNAHandler_RejectsOversizedSnapshot(t *testing.T) {
+	ca := newTestCA(t)
+	persister := &stubPersister{}
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+
+	const chunkSize = 64 * 1024
+	total := (maxReassembledDNABytes / chunkSize) + 2 // just over the byte cap, under maxDNAChunks
+	require.Less(t, total, maxDNAChunks, "this test must exercise the byte cap, not the chunk cap")
+
+	chunks := make([]*transportpb.DNAChunk, 0, total)
+	for i := 0; i < total; i++ {
+		chunks = append(chunks, &transportpb.DNAChunk{
+			StewardId: "steward-big", TenantId: "t1", Data: make([]byte, chunkSize),
+			ChunkIndex: int32(i), TotalChunks: int32(total),
+		})
+	}
+
+	err := h.HandleGRPC(newTestDNAStream(peerContextWithCA(t, ca, "steward-big"), chunks...))
+	require.Error(t, err)
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+	assert.Nil(t, persister.got, "an over-cap snapshot must never reach the persister")
+}
+
+// mustJSON marshals v or fails the test.
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
+}
+
+// chunksFromPayload wraps an already-marshalled DNATransfer payload in a single chunk.
+func chunksFromPayload(payload []byte, stewardID string) []*transportpb.DNAChunk {
+	return []*transportpb.DNAChunk{{
+		StewardId: stewardID, TenantId: "t1", Data: payload, ChunkIndex: 0, TotalChunks: 1,
+	}}
 }
 
 // TestDNAHandler_MultiChunkReassembly (#2616): a snapshot split across multiple
@@ -556,7 +792,7 @@ func makeTestFragments(n int) []*common.Fragment {
 			FragmentId:     fmt.Sprintf("frag-%d", i),
 			Authority:      "test",
 			CanonicalBytes: canonical,
-			FragmentHash:   stewarddna.FragmentHash(canonical),
+			FragmentHash:   sdna.FragmentHash(canonical),
 		}
 	}
 	return frags
@@ -591,7 +827,7 @@ func TestDNAHandler_DeltaGRPC_ValidDelta_Accepted(t *testing.T) {
 	ca := newTestCA(t)
 	frags := makeTestFragments(3)
 	manifest := fragmentsToManifest(frags)
-	claimedRoot, err := stewarddna.AggregateRoot(manifest)
+	claimedRoot, err := sdna.AggregateRoot(manifest)
 	require.NoError(t, err)
 
 	store := NewInMemoryFragmentDeltaStore()
@@ -655,17 +891,17 @@ func TestDNAHandler_DeltaGRPC_WithholdingAttack_Detected(t *testing.T) {
 	fragA := &common.Fragment{
 		FragmentId: "A", Authority: "test",
 		CanonicalBytes: []byte(`{"v":"1"}`),
-		FragmentHash:   stewarddna.FragmentHash([]byte(`{"v":"1"}`)),
+		FragmentHash:   sdna.FragmentHash([]byte(`{"v":"1"}`)),
 	}
 	fragBOld := &common.Fragment{
 		FragmentId: "B", Authority: "test",
 		CanonicalBytes: []byte(`{"v":"old"}`),
-		FragmentHash:   stewarddna.FragmentHash([]byte(`{"v":"old"}`)),
+		FragmentHash:   sdna.FragmentHash([]byte(`{"v":"old"}`)),
 	}
 	fragBNew := &common.Fragment{
 		FragmentId: "B", Authority: "test",
 		CanonicalBytes: []byte(`{"v":"new"}`),
-		FragmentHash:   stewarddna.FragmentHash([]byte(`{"v":"new"}`)),
+		FragmentHash:   sdna.FragmentHash([]byte(`{"v":"new"}`)),
 	}
 
 	// Controller has stored state: [A:h1, B:h_old].
@@ -683,7 +919,7 @@ func TestDNAHandler_DeltaGRPC_WithholdingAttack_Detected(t *testing.T) {
 		{FragmentId: "A", FragmentHash: fragA.GetFragmentHash()},
 		{FragmentId: "B", FragmentHash: fragBNew.GetFragmentHash()},
 	}
-	claimedRoot, err := stewarddna.AggregateRoot(updatedManifest)
+	claimedRoot, err := sdna.AggregateRoot(updatedManifest)
 	require.NoError(t, err)
 	h.recordDeltaRequest("steward-withhold", claimedRoot, manifestIDs(storedManifest))
 
@@ -729,9 +965,9 @@ func TestAggregateRoot_Deterministic(t *testing.T) {
 	}
 	reversed := []*common.ManifestEntry{manifest[2], manifest[1], manifest[0]}
 
-	root1, err := stewarddna.AggregateRoot(manifest)
+	root1, err := sdna.AggregateRoot(manifest)
 	require.NoError(t, err)
-	root2, err := stewarddna.AggregateRoot(reversed)
+	root2, err := sdna.AggregateRoot(reversed)
 	require.NoError(t, err)
 
 	assert.Equal(t, root1, root2, "AggregateRoot must be order-independent")
@@ -755,18 +991,18 @@ func TestDNAHandler_DeltaGRPC_ForgedLeafHash_Rejected(t *testing.T) {
 	fragA := &common.Fragment{
 		FragmentId: "A", Authority: "test",
 		CanonicalBytes: []byte(`{"v":"1"}`),
-		FragmentHash:   stewarddna.FragmentHash([]byte(`{"v":"1"}`)),
+		FragmentHash:   sdna.FragmentHash([]byte(`{"v":"1"}`)),
 	}
 	// Forged: real (mutated) content, stale asserted hash.
 	forgedB := &common.Fragment{
 		FragmentId: "B", Authority: "test",
 		CanonicalBytes: newBytes,
-		FragmentHash:   stewarddna.FragmentHash(oldBytes),
+		FragmentHash:   sdna.FragmentHash(oldBytes),
 	}
 
 	storedManifest := []*common.ManifestEntry{
 		{FragmentId: "A", FragmentHash: fragA.GetFragmentHash()},
-		{FragmentId: "B", FragmentHash: stewarddna.FragmentHash(oldBytes)},
+		{FragmentId: "B", FragmentHash: sdna.FragmentHash(oldBytes)},
 	}
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest("steward-leafforge", storedManifest)
@@ -775,7 +1011,7 @@ func TestDNAHandler_DeltaGRPC_ForgedLeafHash_Rejected(t *testing.T) {
 
 	// The claimed root is consistent with the ASSERTED leaves, so the attack
 	// survives any check that trusts Fragment.FragmentHash.
-	claimedRoot, err := stewarddna.AggregateRoot(storedManifest)
+	claimedRoot, err := sdna.AggregateRoot(storedManifest)
 	require.NoError(t, err)
 	h.recordDeltaRequest("steward-leafforge", claimedRoot, manifestIDs(storedManifest))
 
@@ -794,7 +1030,7 @@ func TestDNAHandler_DeltaGRPC_ForgedLeafHash_Rejected(t *testing.T) {
 	require.NoError(t, mErr)
 	for _, e := range got {
 		if e.GetFragmentId() == "B" {
-			assert.Equal(t, stewarddna.FragmentHash(oldBytes), e.GetFragmentHash(),
+			assert.Equal(t, sdna.FragmentHash(oldBytes), e.GetFragmentHash(),
 				"the rejected delta must not have been applied")
 		}
 	}
@@ -811,7 +1047,7 @@ func TestDNAHandler_DeltaGRPC_MissingCanonicalBytes_Rejected(t *testing.T) {
 	store.SetManifest("steward-nobytes", manifest)
 
 	h := deltaReceiveHandler(store)
-	claimedRoot, err := stewarddna.AggregateRoot(manifest)
+	claimedRoot, err := sdna.AggregateRoot(manifest)
 	require.NoError(t, err)
 	h.recordDeltaRequest("steward-nobytes", claimedRoot, manifestIDs(manifest))
 
@@ -865,7 +1101,7 @@ func fragmentWithID(id string) *common.Fragment {
 		FragmentId:     id,
 		Authority:      "test",
 		CanonicalBytes: canonical,
-		FragmentHash:   stewarddna.FragmentHash(canonical),
+		FragmentHash:   sdna.FragmentHash(canonical),
 	}
 }
 
@@ -882,7 +1118,7 @@ func deltaBoundsFixture(t *testing.T, stewardID string, sent []*common.Fragment)
 
 	h := deltaReceiveHandler(store)
 
-	root, err := stewarddna.AggregateRoot(mergeManifest(manifest, sent))
+	root, err := sdna.AggregateRoot(mergeManifest(manifest, sent))
 	require.NoError(t, err)
 	h.recordDeltaRequest(stewardID, root, manifestIDs(manifest))
 	return h, store
@@ -1071,7 +1307,7 @@ func TestValidateDeltaFragments(t *testing.T) {
 			big = append(big, &common.Fragment{
 				FragmentId:     id,
 				CanonicalBytes: canonical,
-				FragmentHash:   stewarddna.FragmentHash(canonical),
+				FragmentHash:   sdna.FragmentHash(canonical),
 			})
 			allRequested[id] = struct{}{}
 		}
@@ -1082,9 +1318,9 @@ func TestValidateDeltaFragments(t *testing.T) {
 }
 
 // TestIsValidAggregateRoot verifies the aggregate-root format guard accepts exactly
-// what stewarddna.AggregateRoot produces and nothing else.
+// what sdna.AggregateRoot produces and nothing else.
 func TestIsValidAggregateRoot(t *testing.T) {
-	realRoot, err := stewarddna.AggregateRoot(fragmentsToManifest(makeTestFragments(3)))
+	realRoot, err := sdna.AggregateRoot(fragmentsToManifest(makeTestFragments(3)))
 	require.NoError(t, err)
 	assert.True(t, isValidAggregateRoot(realRoot),
 		"a root produced by AggregateRoot must validate")

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
@@ -1007,6 +1008,13 @@ type fakeModuleDNASource struct {
 
 func (f *fakeModuleDNASource) CollectModuleDNAAttributes(_ context.Context) map[string]string {
 	return f.attrs
+}
+
+// CollectModuleFragments satisfies the #2908 fragment surface. This fixture is
+// attribute-only; fragment forwarding is asserted against a real fragment
+// producer in dna_adapter_test.go.
+func (f *fakeModuleDNASource) CollectModuleFragments(_ context.Context) []*commonpb.Fragment {
+	return nil
 }
 
 // TestDNACollectorAdapter_MergesHardwareAndModuleAttributes is the REQUIRED

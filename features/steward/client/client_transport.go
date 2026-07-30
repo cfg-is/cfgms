@@ -57,6 +57,10 @@ import (
 // inject a stub returning deterministic attribute maps without real I/O.
 type DNACollector interface {
 	CollectAttributes(ctx context.Context) (map[string]string, error)
+
+	// CollectFragments returns ADR-017 fragments for cluster:* resources from the
+	// module monitor cache. Returns nil when no module source is wired.
+	CollectFragments(ctx context.Context) []*commonpb.Fragment
 }
 
 // FragmentCollector is an optional extension of DNACollector. When the wired
@@ -830,10 +834,10 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// rather than building an x509 pool locally.
 	var controllerCARoots *x509.CertPool
 	if caCertPEM != "" {
-		pool, err := cert.CertPoolFromPEM([]byte(caCertPEM))
-		if err != nil {
+		pool, poolErr := cert.NewCertPoolFromPEM([]byte(caCertPEM))
+		if poolErr != nil {
 			c.logger.Warn("Failed to parse controller CA PEM for operator certificate verification",
-				"error", err)
+				"error", poolErr)
 		} else {
 			controllerCARoots = pool
 		}
@@ -1029,17 +1033,38 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("failed to serialize DNA attributes: %w", err)
 		}
 
+		// Collect module fragments (cluster:* resources) for the full DNA sync.
+		// Without this the controller-side cluster registry (BuildRegistry) is
+		// always empty in production because DNA.Fragments is never populated.
+		c.mu.RLock()
+		collector := c.dnaCollector
+		c.mu.RUnlock()
+		var fragBytes [][]byte
+		if collector != nil {
+			for _, frag := range collector.CollectFragments(ctx) {
+				b, mErr := proto.Marshal(frag)
+				if mErr != nil {
+					c.logger.Warn("sync_dna: failed to marshal fragment, skipping",
+						"fragment_id", logging.SanitizeLogValue(frag.GetFragmentId()), "error", mErr)
+					continue
+				}
+				fragBytes = append(fragBytes, b)
+			}
+		}
+
 		transfer := &dpTypes.DNATransfer{
 			ID:         fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
 			StewardID:  sid,
 			TenantID:   tid,
 			Timestamp:  time.Now(),
 			Attributes: attrJSON,
+			Fragments:  fragBytes,
 			Delta:      false, // full snapshot
 			Metadata: map[string]string{
-				"command_id": cmd.ID,
-				"dna_hash":   dna.ComputeHash(currentDNA),
-				"attr_count": fmt.Sprintf("%d", len(currentDNA)),
+				"command_id":     cmd.ID,
+				"dna_hash":       dna.ComputeHash(currentDNA),
+				"attr_count":     fmt.Sprintf("%d", len(currentDNA)),
+				"fragment_count": fmt.Sprintf("%d", len(fragBytes)),
 			},
 		}
 
@@ -2076,6 +2101,22 @@ func (c *TransportClient) CollectModuleDNAAttributes(ctx context.Context) map[st
 		return nil
 	}
 	return executor.CollectModuleDNAAttributes(ctx)
+}
+
+// CollectModuleFragments delegates to the CURRENT config executor's ADR-017
+// fragment collector (cluster:* resources, #2908). It delegates through the
+// stable client for the same reason CollectModuleDNAAttributes does:
+// InitializeConfigExecutor replaces c.configExecutor on every connect/reconnect,
+// so a captured *Executor reference would go stale. Returns nil before the
+// executor exists.
+func (c *TransportClient) CollectModuleFragments(ctx context.Context) []*commonpb.Fragment {
+	c.mu.RLock()
+	executor := c.configExecutor
+	c.mu.RUnlock()
+	if executor == nil {
+		return nil
+	}
+	return executor.CollectModuleFragments(ctx)
 }
 
 // SetTenantID sets the tenant ID (used after HTTP registration).
