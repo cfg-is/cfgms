@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -23,6 +25,7 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/terminal"
+	termshell "github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/audit"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -230,7 +233,7 @@ func registerPendingRelay(t *testing.T, h *TerminalHandler, mgr terminal.Session
 		TenantID:  "t1",
 		StewardID: stewardID,
 		UserID:    "u1",
-		Shell:     "bash",
+		Shell:     termshell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 	})
@@ -497,6 +500,85 @@ func TestTerminalHandler_HandleGRPC_EmptySessionID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// [SECURITY] Browser disconnect tears the steward stream down
+// ---------------------------------------------------------------------------
+
+// TestTerminalHandler_HandleGRPC_ReturnsWhenBrowserDisconnects is the regression
+// test for the orphaned-shell finding (Issue #2761): on WebSocket close,
+// ServeWebSocket closes relay.done, and HandleGRPC must return. Returning is what
+// ends the server-side bidi stream, which makes the steward's terminal bridge see
+// EOF and close its PTY. Previously the handler stayed parked in stream.Recv()
+// forever, so a privileged interactive shell kept running on the managed endpoint
+// after the admin's browser went away — with its session already terminated, so
+// nothing it emitted was recorded.
+func TestTerminalHandler_HandleGRPC_ReturnsWhenBrowserDisconnects(t *testing.T) {
+	const stewardID = "steward-disconnect"
+
+	ca := newTestCA(t)
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+
+	relay, sess := registerPendingRelay(t, h, mgr, stewardID)
+
+	// Long-lived peer context: only the browser disconnect may end the handler.
+	peerCtx, cancel := context.WithTimeout(peerContextWithCA(t, ca, stewardID), 30*time.Second)
+	defer cancel()
+
+	// The steward stream stays open (recvCh is never closed) — exactly the
+	// production case where the endpoint's shell is idle but alive.
+	stream := newTestTerminalStream(peerCtx,
+		&transportpb.TerminalData{SessionId: sess.ID},
+	)
+	waitDone := startHandleGRPCTerminal(t, h, stream)
+
+	// Browser goes away: ServeWebSocket's deferred cleanup closes the relay and
+	// terminates the session.
+	relay.close()
+	require.NoError(t, mgr.TerminateSession(context.Background(), sess.ID))
+
+	// waitDone fails the test if HandleGRPC does not return within its deadline.
+	assert.NoError(t, waitDone(),
+		"HandleGRPC must return once the browser relay is closed, ending the steward stream")
+}
+
+// TestTerminalHandler_HandleGRPC_StopsRelayingWhenSessionClosed asserts that once
+// the session is closed, the handler ends the stream instead of logging a warning
+// for every subsequent steward frame. A high-volume command (`yes`) on a
+// disconnected session would otherwise turn into unbounded warn-level log flooding,
+// amplified across a 50k-steward fleet.
+func TestTerminalHandler_HandleGRPC_StopsRelayingWhenSessionClosed(t *testing.T) {
+	const stewardID = "steward-flood"
+
+	ca := newTestCA(t)
+	mgr := newTerminalSessionManager(t)
+	capturingLogger := logging.NewCapturingLogger()
+	h := NewTerminalHandler(capturingLogger, nil, mgr, nil, nil, nil)
+
+	_, sess := registerPendingRelay(t, h, mgr, stewardID)
+
+	peerCtx, cancel := context.WithTimeout(peerContextWithCA(t, ca, stewardID), 30*time.Second)
+	defer cancel()
+
+	stream := newTestTerminalStream(peerCtx,
+		&transportpb.TerminalData{SessionId: sess.ID},
+	)
+	waitDone := startHandleGRPCTerminal(t, h, stream)
+
+	// Session terminated (browser closed) while the steward keeps producing output.
+	require.NoError(t, mgr.TerminateSession(context.Background(), sess.ID))
+	for i := 0; i < 10; i++ {
+		stream.recvCh <- &transportpb.TerminalData{SessionId: sess.ID, Data: []byte("y\n")}
+	}
+
+	require.Error(t, waitDone(),
+		"HandleGRPC must end the stream when the session can no longer accept output")
+
+	assert.LessOrEqual(t, len(capturingLogger.WarnMessages), 1,
+		"a closed session must not produce a warn log per steward frame, got: %v",
+		capturingLogger.WarnMessages)
+}
+
+// ---------------------------------------------------------------------------
 // ServeWebSocket HTTP-level tests
 // ---------------------------------------------------------------------------
 
@@ -588,7 +670,8 @@ func TestTerminalHandler_ServeWebSocket_DispatchesOpenTerminalCommand(t *testing
 	pub, received := newRealTerminalCommandPublisher(t, stewardID)
 	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID+"?shell=bash&cols=120&rows=40", nil)
+	testShell := termshell.GetDefaultShell()
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID+"?shell="+testShell+"&cols=120&rows=40", nil)
 	req.Host = "localhost"
 	req.Header.Set("Origin", "http://localhost")
 	req = mux.SetURLVars(req, map[string]string{"steward_id": stewardID})
@@ -615,7 +698,7 @@ func TestTerminalHandler_ServeWebSocket_DispatchesOpenTerminalCommand(t *testing
 	// RawParams preserves the exact string-encoded params that crossed the wire.
 	require.NotNil(t, sc.RawParams)
 	assert.NotEmpty(t, sc.RawParams["session_id"])
-	assert.Equal(t, "bash", sc.RawParams["shell"])
+	assert.Equal(t, testShell, sc.RawParams["shell"])
 	assert.Equal(t, "120", sc.RawParams["cols"])
 	assert.Equal(t, "40", sc.RawParams["rows"])
 
@@ -656,7 +739,7 @@ func TestCreateBrowserSession_SucceedsWithoutClientCert(t *testing.T) {
 			UserID:    "admin-browser",
 			TenantID:  "tenant-1",
 			StewardID: "steward-abc",
-			Shell:     "bash",
+			Shell:     termshell.GetDefaultShell(),
 			Cols:      80,
 			Rows:      24,
 		},
@@ -696,7 +779,7 @@ func TestCreateBrowserSession_AuditFailureIsLogged(t *testing.T) {
 			TenantID:  "tenant-1",
 			UserID:    "admin-browser",
 			StewardID: "steward-abc",
-			Shell:     "bash",
+			Shell:     termshell.GetDefaultShell(),
 			Cols:      80,
 			Rows:      24,
 		},
@@ -729,7 +812,7 @@ func TestTerminalHandler_AuditAndRecordingBothProduced(t *testing.T) {
 		UserID:    "audit-test-user",
 		TenantID:  "tenant-audit",
 		StewardID: "steward-audit",
-		Shell:     "bash",
+		Shell:     termshell.GetDefaultShell(),
 		Cols:      80,
 		Rows:      24,
 		ClientIP:  "192.0.2.42",
@@ -780,6 +863,172 @@ func TestTerminalHandler_AuditAndRecordingBothProduced(t *testing.T) {
 	rec, recErr := mgr.GetSessionRecording(sess.ID)
 	require.NoError(t, recErr)
 	require.NotNil(t, rec, "session recording must exist (recorder wired by DefaultSessionManager with RecordSessions: true)")
+}
+
+// ---------------------------------------------------------------------------
+// [SECURITY] Browser input is recorded, fail-closed, before it reaches the shell
+// ---------------------------------------------------------------------------
+
+// browserTerminalFixture holds a live browser ↔ steward relay built over the real
+// production path: HTTP upgrade → CreateBrowserSession → steward stream
+// correlation → runWSRelay.
+type browserTerminalFixture struct {
+	conn     *websocket.Conn
+	sess     *terminal.Session
+	stream   *testTerminalStream
+	waitGRPC func() error
+	served   chan struct{} // closed when ServeWebSocket returns
+}
+
+// startBrowserTerminal serves h over a real HTTP server, connects a real
+// WebSocket client, and binds a steward gRPC stream to the session that
+// ServeWebSocket created, leaving the relay running in both directions.
+func startBrowserTerminal(t *testing.T, h *TerminalHandler, mgr terminal.SessionManager, stewardID string) *browserTerminalFixture {
+	t.Helper()
+
+	ca := newTestCA(t)
+
+	served := make(chan struct{})
+	router := mux.NewRouter()
+	router.HandleFunc("/terminal/{steward_id}", func(w http.ResponseWriter, r *http.Request) {
+		defer close(served)
+		ctx := context.WithValue(r.Context(), ctxkeys.UserIDKey, "admin-browser")
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
+		h.ServeWebSocket(w, r.WithContext(ctx))
+	})
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/terminal/" + stewardID
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	require.NoError(t, err, "WebSocket upgrade must succeed")
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// The session is created before the upgrade completes, so it exists by the
+	// time Dial returns — no polling needed.
+	sessions := mgr.GetActiveSessions()
+	require.Len(t, sessions, 1, "ServeWebSocket must create exactly one session")
+	sess := sessions[0]
+
+	peerCtx, cancel := context.WithTimeout(peerContextWithCA(t, ca, stewardID), 10*time.Second)
+	t.Cleanup(cancel)
+
+	stream := newTestTerminalStream(peerCtx, &transportpb.TerminalData{SessionId: sess.ID})
+	stream.sentCh = make(chan struct{}, 8)
+	waitGRPC := startHandleGRPCTerminal(t, h, stream)
+
+	return &browserTerminalFixture{conn: conn, sess: sess, stream: stream, waitGRPC: waitGRPC, served: served}
+}
+
+// waitStewardFrame blocks until the relay forwards one browser frame to the
+// steward stream.
+func waitStewardFrame(t *testing.T, stream *testTerminalStream) {
+	t.Helper()
+	select {
+	case <-stream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("browser frame was not forwarded to the steward stream within deadline")
+	}
+}
+
+// waitServed blocks until ServeWebSocket returns (relay torn down, session
+// terminated, recording finalized).
+func waitServed(t *testing.T, fx *browserTerminalFixture) {
+	t.Helper()
+	select {
+	case <-fx.served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeWebSocket did not return within deadline")
+	}
+}
+
+// TestServeWebSocket_RecordsBrowserInputAndResize is the regression test for the
+// one-sided audit trail (Issue #2761): browser→steward input used to be pushed
+// straight onto relay.inputCh, so the recording of a privileged interactive shell
+// contained only bytes the endpoint chose to return. A compromised steward — an
+// explicit CFGMS threat-model case — therefore controlled 100% of its own audit
+// trail, while the operator's keystrokes, the one thing the controller knows
+// first-hand, were discarded. Keystrokes and resizes must both be recorded.
+func TestServeWebSocket_RecordsBrowserInputAndResize(t *testing.T) {
+	const stewardID = "steward-input-audit"
+
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+
+	fx := startBrowserTerminal(t, h, mgr, stewardID)
+
+	keystrokes := []byte("whoami\n")
+	require.NoError(t, fx.conn.WriteJSON(terminal.TerminalMessage{
+		Type: terminal.MessageTypeData,
+		Data: keystrokes,
+	}))
+	waitStewardFrame(t, fx.stream)
+
+	require.NoError(t, fx.conn.WriteJSON(terminal.TerminalMessage{
+		Type: terminal.MessageTypeResize,
+		Data: []byte(`{"cols":120,"rows":40}`),
+	}))
+	waitStewardFrame(t, fx.stream)
+
+	// Browser leaves: the relay is torn down and the session terminated, which
+	// finalizes the recording on disk.
+	require.NoError(t, fx.conn.Close())
+	require.NoError(t, fx.waitGRPC())
+	waitServed(t, fx)
+
+	sent := fx.stream.getSent()
+	require.Len(t, sent, 2, "both browser frames must reach the steward")
+	assert.Equal(t, keystrokes, sent[0].GetData())
+	assert.True(t, sent[1].GetIsResize())
+	assert.Equal(t, int32(120), sent[1].GetCols())
+	assert.Equal(t, int32(40), sent[1].GetRows())
+
+	rec, err := mgr.GetSessionRecording(fx.sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Contains(t, string(rec.Data), "whoami\n",
+		"operator keystrokes must be captured in the session recording")
+	assert.Contains(t, string(rec.Data), "\x1b[8;40;120t",
+		"browser resize must be captured in the session recording")
+}
+
+// TestServeWebSocket_UnrecordableInputIsNotForwardedToSteward asserts the
+// fail-closed half of the contract: when a keystroke cannot be recorded, it is
+// not forwarded, and the relay is torn down so the endpoint's PTY ends instead of
+// executing input that lands in no audit trail.
+func TestServeWebSocket_UnrecordableInputIsNotForwardedToSteward(t *testing.T) {
+	const stewardID = "steward-input-failclosed"
+
+	mgr := newTerminalSessionManager(t)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
+
+	fx := startBrowserTerminal(t, h, mgr, stewardID)
+
+	// Terminate the session underneath the live relay: its recording is finalized,
+	// so no further keystroke can be captured.
+	require.NoError(t, mgr.TerminateSession(context.Background(), fx.sess.ID))
+
+	require.NoError(t, fx.conn.WriteJSON(terminal.TerminalMessage{
+		Type: terminal.MessageTypeData,
+		Data: []byte("SECRET-COMMAND\n"),
+	}))
+
+	// HandleGRPC returning proves the relay was torn down by the unrecordable
+	// keystroke; the steward stream ends and the PTY with it.
+	require.NoError(t, fx.waitGRPC())
+	waitServed(t, fx)
+
+	for _, f := range fx.stream.getSent() {
+		assert.NotContains(t, string(f.GetData()), "SECRET-COMMAND",
+			"input that could not be recorded must never reach the steward")
+	}
+
+	rec, err := mgr.GetSessionRecording(fx.sess.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, string(rec.Data), "SECRET-COMMAND")
 }
 
 // ---------------------------------------------------------------------------

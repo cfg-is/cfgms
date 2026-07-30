@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -325,6 +326,12 @@ func (r *DefaultSessionRecorder) RecordData(sessionID string, data []byte, direc
 	return nil
 }
 
+// ErrNoActiveRecording reports that EndRecording was asked to finalize a session
+// that has no in-flight recording — it was already finalized, or never started.
+// Session teardown paths use errors.Is to distinguish this benign case from a
+// genuine finalization failure.
+var ErrNoActiveRecording = errors.New("no active recording for session")
+
 // EndRecording ends recording for a session.
 func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 	r.mu.Lock()
@@ -332,7 +339,7 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 
 	writer, exists := r.activeWrites[sessionID]
 	if !exists {
-		return fmt.Errorf("no active recording for session: %s", sessionID)
+		return fmt.Errorf("%w: %s", ErrNoActiveRecording, sessionID)
 	}
 
 	if err := writer.close(); err != nil {

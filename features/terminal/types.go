@@ -148,7 +148,15 @@ type SessionManager interface {
 // Recorder interface defines session recording operations
 type Recorder interface {
 	RecordData(sessionID string, data []byte, direction DataDirection) error
+	// EndRecording finalizes the recording of exactly one session. Per-session
+	// teardown MUST use this and never Close: one recorder instance is shared by
+	// every session of a manager (CreateSession wires m.recorder into each
+	// Session), so Close on a session-teardown path would finalize the recordings
+	// of all other live privileged shells as well, truncating their audit trail.
+	EndRecording(sessionID string) error
 	GetRecording(sessionID string) (*SessionRecording, error)
+	// Close finalizes every active recording. It is a manager-shutdown operation
+	// only (SessionManager.Stop), never a per-session operation.
 	Close() error
 }
 

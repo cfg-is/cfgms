@@ -23,6 +23,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/terminal"
+	termshell "github.com/cfgis/cfgms/features/terminal/shell"
 	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -221,23 +222,64 @@ func (h *TerminalHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportpb
 		}
 	}()
 
-	// Recv loop: steward → browser relay via session output channel.
-	var finalErr error
-	for {
-		frame, err := stream.Recv()
-		if err != nil {
-			if err != io.EOF {
-				finalErr = err
+	// Recv pump: stream.Recv blocks until the steward sends or the stream breaks, so
+	// it runs on its own goroutine. The relay loop below can then react to
+	// relay.done (browser gone) and return, which ends the server-side stream and
+	// makes the steward's bridge see EOF and tear its PTY down. Without this the
+	// handler would stay parked in Recv after the browser disconnected, leaving an
+	// orphaned, unrecorded privileged shell on the endpoint.
+	recvCh := make(chan *transportpb.TerminalData)
+	recvErrCh := make(chan error, 1)
+	go func() {
+		for {
+			frame, recvErr := stream.Recv()
+			if recvErr != nil {
+				recvErrCh <- recvErr
+				return
 			}
-			break
+			select {
+			case recvCh <- frame:
+			case <-relay.done:
+				return
+			case <-ctx.Done():
+				return
+			}
 		}
-		if len(frame.GetData()) > 0 {
+	}()
+
+	// Relay loop: steward → browser via the session output channel.
+	var finalErr error
+relayLoop:
+	for {
+		select {
+		case frame := <-recvCh:
+			if len(frame.GetData()) == 0 {
+				continue
+			}
 			if outErr := relay.session.HandleOutput(ctx, frame.GetData()); outErr != nil {
+				// The session is gone (closed by the browser leaving) or its
+				// recording failed. Either way the shell must not keep running
+				// unrelayed and unrecorded: end the stream so the steward closes the
+				// PTY. Logging once here — rather than per frame — also keeps a
+				// high-volume command from flooding the controller log.
 				if h.logger != nil {
-					h.logger.Warn("terminal: HandleOutput failed",
+					h.logger.Warn("terminal: relaying steward output failed; ending stream",
 						"session_id", logging.RedactedID(sessionID), "error", outErr)
 				}
+				finalErr = fmt.Errorf("terminal: relay output: %w", outErr)
+				break relayLoop
 			}
+		case recvErr := <-recvErrCh:
+			if recvErr != io.EOF {
+				finalErr = recvErr
+			}
+			break relayLoop
+		case <-relay.done:
+			// Browser disconnected (ServeWebSocket closed the relay). Returning
+			// closes this stream, which is what terminates the steward's PTY.
+			break relayLoop
+		case <-ctx.Done():
+			break relayLoop
 		}
 	}
 
@@ -272,7 +314,10 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	q := r.URL.Query()
 	shell := q.Get("shell")
 	if shell == "" {
-		shell = "bash"
+		// Platform-appropriate default (e.g. "powershell" on a Windows controller,
+		// "bash" elsewhere) — a bare "bash" default fails shell.Factory validation
+		// on Windows.
+		shell = termshell.GetDefaultShell()
 	}
 	if !terminal.ValidateShell(shell) {
 		http.Error(w, "unsupported shell", http.StatusBadRequest)
@@ -407,6 +452,20 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 			}
 			switch msg.Type {
 			case terminal.MessageTypeData:
+				// Record the operator's keystrokes BEFORE they are queued for the
+				// steward. Input is the one leg of the session the controller
+				// witnesses first-hand; recording only steward output would leave a
+				// compromised endpoint (CFGMS threat model) in control of the entire
+				// audit trail of its own privileged shell. Fail closed: returning runs
+				// the deferred relay.close(), which ends the gRPC stream and therefore
+				// the endpoint's PTY, so unrecorded keystrokes are never executed.
+				if recErr := sess.RecordInput(ctx, msg.Data); recErr != nil {
+					if h.logger != nil {
+						h.logger.Warn("terminal: recording browser input failed; ending session",
+							"session_id", logging.RedactedID(relay.sessionID), "error", recErr)
+					}
+					return
+				}
 				select {
 				case relay.inputCh <- inputMsg{data: msg.Data}:
 				case <-relay.done:
@@ -420,6 +479,16 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 					}
 					if req.Rows > maxTerminalDim {
 						req.Rows = maxTerminalDim
+					}
+					// A resize is operator input too: it changes what the shell renders
+					// and what a replay of the recording shows. Record the clamped
+					// dimensions actually sent, fail-closed like data frames.
+					if recErr := sess.RecordResize(ctx, req.Cols, req.Rows); recErr != nil {
+						if h.logger != nil {
+							h.logger.Warn("terminal: recording browser resize failed; ending session",
+								"session_id", logging.RedactedID(relay.sessionID), "error", recErr)
+						}
+						return
 					}
 					select {
 					case relay.inputCh <- inputMsg{resize: true, rows: int32(req.Rows), cols: int32(req.Cols)}: // safe: bounded above

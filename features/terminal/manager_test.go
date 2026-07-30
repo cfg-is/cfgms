@@ -723,6 +723,67 @@ func TestSessionRecording(t *testing.T) {
 	assert.Contains(t, string(recording.Data), "hello world")
 }
 
+// TestTerminateSession_DoesNotTruncateOtherSessionsRecordings is the regression
+// test for the cross-session recording kill (Issue #2761): one SessionManager
+// serves every browser terminal on the controller and hands the SAME recorder to
+// every session, so a per-session teardown that closed the recorder finalized the
+// recordings of all other live privileged shells. Their later output then hit an
+// auto-start whose O_EXCL create failed, and they kept serving unrecorded.
+//
+// Terminating session A must leave session B recording, and B's post-A output must
+// appear in B's recording.
+func TestTerminateSession_DoesNotTruncateOtherSessionsRecordings(t *testing.T) {
+	manager, err := NewSessionManager(&Config{
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          10,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
+	}, logging.NewNoopLogger())
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
+
+	ctx := context.Background()
+	newReq := func(user string) *SessionRequest {
+		return &SessionRequest{
+			TenantID:  "test-tenant",
+			StewardID: "test-steward-001",
+			UserID:    user,
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+	}
+
+	sessionA, err := manager.CreateSession(ctx, newReq("admin-a"))
+	require.NoError(t, err)
+	sessionB, err := manager.CreateSession(ctx, newReq("admin-b"))
+	require.NoError(t, err)
+
+	require.NoError(t, sessionB.HandleOutput(ctx, []byte("before-A-close\n")))
+
+	// Admin A closes their terminal tab.
+	require.NoError(t, manager.TerminateSession(ctx, sessionA.ID))
+
+	// B is untouched and must keep capturing its audit trail.
+	assert.True(t, sessionB.IsActive(), "terminating another session must not close this one")
+	require.NoError(t, sessionB.HandleOutput(ctx, []byte("SECRET-AFTER-A-CLOSE\n")),
+		"a live session must keep recording after an unrelated session is terminated")
+
+	require.NoError(t, manager.TerminateSession(ctx, sessionB.ID))
+
+	recordingB, err := manager.GetSessionRecording(sessionB.ID)
+	require.NoError(t, err)
+	require.NotNil(t, recordingB)
+	assert.Contains(t, string(recordingB.Data), "before-A-close")
+	assert.Contains(t, string(recordingB.Data), "SECRET-AFTER-A-CLOSE",
+		"output produced after another session closed must still be in this session's recording")
+
+	// A's own recording is finalized independently.
+	recordingA, err := manager.GetSessionRecording(sessionA.ID)
+	require.NoError(t, err)
+	require.NotNil(t, recordingA)
+}
+
 func TestCreateSession_TenantIDRequired(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{

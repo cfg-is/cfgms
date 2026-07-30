@@ -156,18 +156,12 @@ func (m *DefaultSessionManager) TerminateSession(ctx context.Context, sessionID 
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Close the session
+	// Close the session. Session.Close finalizes this session's recording (and only
+	// this session's) via Recorder.EndRecording, so no manager-level end/close of the
+	// shared recorder happens here — that would take down the recordings of every
+	// other live session.
 	if err := session.Close(ctx); err != nil {
 		m.logger.Warn("Error closing session", "session_id", logging.RedactedID(sessionID), "error", err)
-	}
-
-	// End recording if recorder is available
-	if m.recorder != nil {
-		if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
-			if err := recorder.EndRecording(sessionID); err != nil {
-				m.logger.Warn("Failed to end session recording", "session_id", logging.RedactedID(sessionID), "error", err)
-			}
-		}
 	}
 
 	// Remove from active sessions
