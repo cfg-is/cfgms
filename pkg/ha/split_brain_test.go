@@ -29,7 +29,7 @@ func TestSplitBrainDetector_ResolutionStrategies_DeferToRaft(t *testing.T) {
 	cfg.Node.ID = "test-splitbrain-node"
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager)
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -72,7 +72,7 @@ func TestSplitBrainDetector_CheckSplitBrain_NonCluster(t *testing.T) {
 	cfg.Mode = SingleServerMode
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager)
+	manager, err := NewManager(cfg, logger, storageManager, nil)
 	require.NoError(t, err)
 
 	sbd, err := NewSplitBrainDetector(cfg.SplitBrain, logger, manager)

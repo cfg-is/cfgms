@@ -17,6 +17,7 @@ import (
 	"go.etcd.io/raft/v3"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cptypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -45,6 +46,11 @@ type Manager struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 
+	// certManager supplies the mTLS client certificate for outbound Raft peer
+	// transport. Required in ClusterMode; nil is accepted in SingleServerMode and
+	// BlueGreenMode where no peer transport is created.
+	certManager *cert.Manager
+
 	// Session registry for steward connect/disconnect replication
 	registry registry.Registry
 
@@ -64,8 +70,11 @@ type Manager struct {
 	healthStatus *HealthStatus
 }
 
-// NewManager creates a new HA manager
-func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*Manager, error) {
+// NewManager creates a new HA manager.
+// certManager is required in ClusterMode to mint the mTLS client certificate that
+// the outbound Raft peer transport presents on POST /raft/message. It may be nil in
+// SingleServerMode and BlueGreenMode, which never create a peer transport.
+func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager) (*Manager, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
@@ -118,6 +127,7 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		logger:         logger,
 		nodeInfo:       nodeInfo,
 		storageManager: storageManager,
+		certManager:    certManager,
 		clusterNodes:   make(map[string]*NodeInfo),
 		healthChecks:   make(map[string]HealthCheckFunc),
 		healthStatus: &HealthStatus{
@@ -659,8 +669,25 @@ func (m *Manager) initializeRaftConsensus() error {
 		}
 	}
 
+	// Mint a dedicated mTLS client certificate for this node's outbound Raft peer
+	// transport. The certificate CN must equal m.nodeInfo.ID so the receiving node's
+	// verifyPeerCN check can authenticate the sender against its allowedCNs list.
+	// cert.PurposeTransport uses CN "cfgms-internal" (not the node ID), so we generate
+	// a dedicated client cert here rather than reusing the transport purpose cert.
+	if m.certManager == nil {
+		return fmt.Errorf("cluster mode requires a cert manager for mTLS peer authentication: " +
+			"pass a non-nil *cert.Manager to NewManager")
+	}
+	peerCert, err := m.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   m.nodeInfo.ID,
+		ValidityDays: 365,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate HA peer client certificate: %w", err)
+	}
+
 	// Create and attach transport
-	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM, allowedCNs, m.logger)
+	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM, peerCert.CertificatePEM, peerCert.PrivateKeyPEM, allowedCNs, m.logger)
 	m.raftConsensus.SetTransport(transport)
 
 	// Add peer addresses to transport

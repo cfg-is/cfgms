@@ -50,14 +50,17 @@ type raftTransport struct {
 	logger logging.Logger
 }
 
-// newRaftTransport creates a new Raft transport
-func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, caCertPEM []byte, allowedCNs []string, logger logging.Logger) *raftTransport {
+// newRaftTransport creates a new Raft transport.
+// clientCertPEM and clientKeyPEM are presented to peer nodes during the TLS handshake
+// so that the receiving node's verifyPeerCN check can authenticate the sender.
+// Both must be non-nil for mTLS; in single-server mode (no peers) they may be nil.
+func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, caCertPEM, clientCertPEM, clientKeyPEM []byte, allowedCNs []string, logger logging.Logger) *raftTransport {
 	var tlsConfig *tls.Config
 	var err error
 
 	if len(caCertPEM) > 0 {
-		// Proper TLS validation with CA certificate
-		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, caCertPEM, "", tls.VersionTLS12)
+		// Full mTLS: validate server CA cert and present client cert for CN verification.
+		tlsConfig, err = cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS12)
 		if err != nil {
 			logger.Error("Failed to create TLS config with CA cert, using basic TLS", "error", err)
 			tlsConfig, _ = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)

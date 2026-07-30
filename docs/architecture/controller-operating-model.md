@@ -1062,7 +1062,7 @@ Stewards connect to any cluster node. If their node goes down, they reconnect to
 
 #### Raft Peer Authentication
 
-The `POST /raft/message` endpoint uses **mTLS peer certificate CN verification** as its sole authentication mechanism. The TLS listener in `ClusterMode` is configured with `ClientAuth = tls.RequestClientCert` (set in `setupManagedTLS`), so HA peers that present a client certificate have it recorded in `r.TLS.PeerCertificates` for application-layer inspection.
+The `POST /raft/message` endpoint uses **mTLS peer certificate CN verification** as its sole authentication mechanism. The TLS listener in `ClusterMode` is configured with `ClientAuth = tls.VerifyClientCertIfGiven` (set in `setupManagedTLS`), so HA peers that present a client certificate have it chain-verified and recorded in `r.TLS.PeerCertificates` for application-layer inspection. Clients without a certificate still complete the TLS handshake and fall through to API-key auth on other endpoints; `HandleMessage` explicitly rejects them with HTTP 403.
 
 `HandleMessage` extracts `r.TLS.PeerCertificates[0].Subject.CommonName` and rejects (HTTP 403) any request where:
 
@@ -1070,7 +1070,9 @@ The `POST /raft/message` endpoint uses **mTLS peer certificate CN verification**
 - No peer certificate was presented
 - The peer certificate CN does not match any entry in the node's `allowedCNs` list
 
-The `allowedCNs` list is built at startup from the `discovery.config.nodes` peer entries (each node's `id` field) plus the local node's own `id`. This means **operators must provision peer certificates whose CN matches the `node.id` value declared in the cluster node configuration**. There is no automatic peer-cert provisioning in the HA subsystem — certificate management is delegated to `pkg/cert` and is operator-controlled via `CFGMS_HA_CA_CERT_PATH`.
+The `allowedCNs` list is built at startup from the `discovery.config.nodes` peer entries (each node's `id` field) plus the local node's own `id`. This means **peer certificates must carry a CN that matches the `node.id` value declared in the cluster node configuration**.
+
+**Peer certificate provisioning** is automatic. During `ClusterMode` startup, `ha.NewManager` requires a non-nil `*cert.Manager` and calls `certManager.GenerateClientCertificate` with `CommonName = cfg.Node.ID` to mint a dedicated peer identity cert. This cert is loaded into the outbound `raftTransport` HTTP client as `tls.Config.Certificates`, so every `POST /raft/message` the transport makes automatically presents it. Passing a nil `*cert.Manager` to `NewManager` in `ClusterMode` returns an error immediately. `SingleServerMode` and `BlueGreenMode` do not require a cert manager (no peer transport is created).
 
 The `GET /api/v1/raft/status` endpoint is protected by RBAC (`ha:read-status` permission) via the standard API authentication middleware — it is not a peer endpoint and must not be accessed without a valid API key.
 

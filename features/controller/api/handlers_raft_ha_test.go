@@ -15,7 +15,8 @@ import (
 // is available. A real raftTransport is wired by newClusterModeHAManager so that
 // handleRaftStatus can delegate to transport.HandleStatus.
 func TestRaftStatus_AuthorizedRequest_Returns200(t *testing.T) {
-	haManager := newClusterModeHAManager(t, "")
+	certMgr := newTLSTestCertManager(t)
+	haManager := newClusterModeHAManager(t, "", certMgr)
 
 	// Set up a fully-wired test server and inject the commercial HA manager.
 	// The router and authentication middleware were registered during New(), so

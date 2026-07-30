@@ -17,6 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -24,6 +25,22 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// newTestCertManager creates a real cert.Manager for tests that exercise cluster mode,
+// which requires a cert manager to generate the mTLS peer transport certificate.
+func newTestCertManager(t *testing.T) *cert.Manager {
+	t.Helper()
+	mgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Server Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+	return mgr
+}
 
 // testNonClusterProvider implements interfaces.StorageProvider with ClusterCapable() == false.
 // All store factory methods return business.ErrNotSupported. Used to verify that
@@ -428,7 +445,7 @@ func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 		},
 	}
 
-	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm)
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t))
 	require.NoError(t, err, "initializeHAManager must succeed with ha.mode=cluster and CFGMS_NODE_ID set")
 	require.NotNil(t, haManager)
 	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
@@ -454,7 +471,7 @@ func TestInitializeHAManager_InvalidMode(t *testing.T) {
 		},
 	}
 
-	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm)
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, nil)
 	require.Error(t, err, "initializeHAManager must return error for invalid ha.mode")
 	assert.Contains(t, err.Error(), "invalid HA mode",
 		"error must identify the bad mode string")
